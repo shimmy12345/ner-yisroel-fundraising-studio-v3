@@ -1,0 +1,11 @@
+{
+  "name": "ner-yisroel-fundraising-studio-v2",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"build":"node build.mjs"},
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
+    "openai": "^5.10.1"
+  }
+}
