@@ -12,10 +12,19 @@ test('Netlify publishes the root app and maps API paths to functions', async () 
   await access(new URL('../netlify/functions/generate.mjs', import.meta.url));
   await access(new URL('../netlify/functions/process-document.mjs', import.meta.url));
   await access(new URL('../netlify/functions/knowledge-document.mjs', import.meta.url));
+  await access(new URL('../netlify/functions/import-donors.mjs', import.meta.url));
+});
+
+test('donor imports use only crm_donors and keep the service-role key server-side', async () => {
+  const importFunction = await readFile(new URL('../netlify/functions/import-donors.mjs', import.meta.url), 'utf8');
+  const authHelper = await readFile(new URL('../netlify/functions/_shared/auth.mjs', import.meta.url), 'utf8');
+  assert.match(importFunction, /\.from\('crm_donors'\)/);
+  assert.doesNotMatch(importFunction, /\.from\('donors'\)/);
+  assert.match(authHelper, /process\.env\.SUPABASE_SERVICE_ROLE_KEY/);
 });
 
 test('browser sources never reference the service-role key', async () => {
-  const files = ['../public/index.html', '../public/app.js', '../public/runtime-config.js', '../build.mjs'];
+  const files = ['../public/index.html', '../public/app.js', '../public/donor-import.js', '../public/runtime-config.js', '../build.mjs'];
   const browserSource = (await Promise.all(files.map(file => readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
   assert.doesNotMatch(browserSource, /SUPABASE_SERVICE_ROLE_KEY|service_role/i);
 });

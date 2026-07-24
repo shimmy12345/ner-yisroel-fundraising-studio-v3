@@ -15,6 +15,15 @@ export function userClient(token) {
   });
 }
 
+export function serviceClient() {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Server-side donor import variables are not configured.');
+  }
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+  });
+}
+
 export async function requireUser(event) {
   const token = bearerToken(event);
   if (!token) throw Object.assign(new Error('Sign in required.'), { status: 401 });

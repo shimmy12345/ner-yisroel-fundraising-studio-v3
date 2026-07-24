@@ -1,4 +1,11 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import {
+  DONOR_FIELDS,
+  automaticMappings,
+  mappingErrors,
+  rejectedRowsCsv,
+  validateDonorRows
+} from './donor-import.js';
 
 const cfg = window.RUNTIME_CONFIG || {};
 const $ = id => document.getElementById(id);
@@ -12,6 +19,7 @@ let currentGeneration;
 let modalType;
 let modalRecord;
 let knowledgeRows = [];
+let donorImport = {};
 
 function toast(message) {
   const element = $('toast');
@@ -355,6 +363,244 @@ async function loadDonors() {
 }
 
 $('newDonor').onclick = () => openDonor(null);
+
+$('importDonors').onclick = openDonorImport;
+$('closeDonorImport').onclick = closeDonorImport;
+$('browseDonorCsv').onclick = event => { event.stopPropagation(); $('donorCsvFile').click(); };
+$('donorCsvDrop').onclick = event => {
+  if (!event.target.closest('button') && !event.target.closest('input')) $('donorCsvFile').click();
+};
+$('donorCsvDrop').onkeydown = event => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    $('donorCsvFile').click();
+  }
+};
+['dragenter', 'dragover'].forEach(type => $('donorCsvDrop').addEventListener(type, event => {
+  event.preventDefault();
+  $('donorCsvDrop').classList.add('dragging');
+}));
+['dragleave', 'drop'].forEach(type => $('donorCsvDrop').addEventListener(type, event => {
+  event.preventDefault();
+  $('donorCsvDrop').classList.remove('dragging');
+}));
+$('donorCsvDrop').ondrop = event => selectDonorCsv(event.dataTransfer.files[0]);
+$('donorCsvFile').onchange = () => selectDonorCsv($('donorCsvFile').files[0]);
+$('donorImportBack').onclick = () => setDonorImportStep(Math.max(1, donorImport.step - 1));
+$('donorImportNext').onclick = advanceDonorImport;
+$('runDonorImport').onclick = runDonorImport;
+$('finishDonorImport').onclick = closeDonorImport;
+$('downloadRejectedDonors').onclick = downloadRejectedDonors;
+
+function openDonorImport() {
+  donorImport = {
+    step: 1,
+    file: null,
+    headers: [],
+    dataRows: [],
+    mappings: [],
+    validation: null,
+    rejectedRows: []
+  };
+  $('donorCsvFile').value = '';
+  $('donorCsvSelection').classList.add('hidden');
+  $('donorCsvSelection').textContent = '';
+  $('donorCsvMessage').textContent = '';
+  $('mappingMessage').textContent = '';
+  $('donorImportWizard').classList.remove('hidden');
+  setDonorImportStep(1);
+}
+
+function closeDonorImport() {
+  $('donorImportWizard').classList.add('hidden');
+}
+
+function setDonorImportStep(step) {
+  donorImport.step = step;
+  ['Select', 'Map', 'Preview', 'Results'].forEach((name, index) => {
+    $(`importStep${name}`).classList.toggle('hidden', index + 1 !== step);
+  });
+  $$('[data-import-step]').forEach(item => {
+    const itemStep = Number(item.dataset.importStep);
+    item.classList.toggle('active', itemStep === step);
+    item.classList.toggle('complete', itemStep < step);
+  });
+  $('donorImportBack').classList.toggle('hidden', step === 1 || step === 4);
+  $('donorImportNext').classList.toggle('hidden', step >= 3);
+  $('runDonorImport').classList.toggle('hidden', step !== 3);
+  $('finishDonorImport').classList.toggle('hidden', step !== 4);
+}
+
+async function selectDonorCsv(file) {
+  $('donorCsvMessage').textContent = '';
+  if (!file) return;
+  if (!/\.csv$/i.test(file.name)) {
+    $('donorCsvMessage').textContent = 'Choose a file with a .csv extension.';
+    return;
+  }
+  if (!window.Papa) {
+    $('donorCsvMessage').textContent = 'The CSV parser did not load. Reload the page and try again.';
+    return;
+  }
+  try {
+    const text = (await file.text()).replace(/^\uFEFF/, '');
+    const parsed = window.Papa.parse(text, { skipEmptyLines: 'greedy' });
+    const fatalErrors = parsed.errors.filter(error => error.code !== 'UndetectableDelimiter');
+    if (fatalErrors.length) throw new Error(`CSV parsing failed: ${fatalErrors[0].message}`);
+    if (parsed.data.length < 2) throw new Error('The CSV must contain a header row and at least one data row.');
+    const headers = parsed.data[0].map(value => String(value).replace(/^\uFEFF/, '').trim());
+    if (headers.some(header => !header)) throw new Error('Every CSV column must have a header.');
+    donorImport = {
+      ...donorImport,
+      file,
+      headers,
+      dataRows: parsed.data.slice(1),
+      mappings: automaticMappings(headers),
+      validation: null,
+      rejectedRows: []
+    };
+    $('donorCsvSelection').innerHTML = `<strong>${esc(file.name)}</strong><span>${donorImport.dataRows.length.toLocaleString()} rows · ${formatBytes(file.size)}</span>`;
+    $('donorCsvSelection').classList.remove('hidden');
+  } catch (error) {
+    donorImport.file = null;
+    $('donorCsvSelection').classList.add('hidden');
+    $('donorCsvMessage').textContent = error.message;
+  }
+}
+
+function advanceDonorImport() {
+  if (donorImport.step === 1) {
+    if (!donorImport.file) {
+      $('donorCsvMessage').textContent = 'Choose a valid CSV file to continue.';
+      return;
+    }
+    renderMappingRows();
+    setDonorImportStep(2);
+    return;
+  }
+  if (donorImport.step === 2) {
+    const errors = mappingErrors(donorImport.mappings);
+    $('mappingMessage').textContent = errors.join(' ');
+    if (errors.length) return;
+    donorImport.validation = validateDonorRows(donorImport.dataRows, donorImport.headers, donorImport.mappings);
+    renderDonorPreview();
+    setDonorImportStep(3);
+  }
+}
+
+function renderMappingRows() {
+  $('mappingRowCount').textContent = `${donorImport.dataRows.length.toLocaleString()} rows`;
+  const tbody = $('mappingRows');
+  tbody.innerHTML = '';
+  donorImport.headers.forEach((header, index) => {
+    const tr = document.createElement('tr');
+    const options = ['<option value="">Do not import</option>', ...DONOR_FIELDS.map(field =>
+      `<option value="${field.value}">${esc(field.label)}</option>`
+    )].join('');
+    tr.innerHTML = `<td><strong>${esc(header)}</strong></td><td><select aria-label="Map ${esc(header)}">${options}</select></td>`;
+    const select = tr.querySelector('select');
+    select.value = donorImport.mappings[index] || '';
+    select.onchange = () => {
+      donorImport.mappings[index] = select.value;
+      $('mappingMessage').textContent = '';
+      refreshMappingOptions();
+    };
+    tbody.appendChild(tr);
+  });
+  refreshMappingOptions();
+}
+
+function refreshMappingOptions() {
+  const selects = [...$('mappingRows').querySelectorAll('select')];
+  selects.forEach((select, selectIndex) => {
+    const selectedElsewhere = new Set(donorImport.mappings.filter((_value, index) => index !== selectIndex));
+    [...select.options].forEach(option => {
+      option.disabled = Boolean(option.value && selectedElsewhere.has(option.value));
+    });
+  });
+}
+
+function renderDonorPreview() {
+  const validation = donorImport.validation;
+  const valid = validation.validRows.length;
+  const rejected = validation.rejectedRows.length;
+  $('validationSummary').innerHTML = `
+    <div><strong>${validation.rows.length.toLocaleString()}</strong><span>Total rows</span></div>
+    <div class="success-stat"><strong>${valid.toLocaleString()}</strong><span>Ready to import</span></div>
+    <div class="${rejected ? 'error-stat' : ''}"><strong>${rejected.toLocaleString()}</strong><span>Rejected</span></div>`;
+  $('runDonorImport').disabled = valid === 0;
+  const table = $('donorPreviewTable');
+  table.innerHTML = `<thead><tr><th>Row</th>${donorImport.headers.map(header => `<th>${esc(header)}</th>`).join('')}<th>Validation</th></tr></thead><tbody></tbody>`;
+  const body = table.querySelector('tbody');
+  validation.preview.forEach(row => {
+    const tr = document.createElement('tr');
+    if (row.errors.length) tr.className = 'invalid-row';
+    tr.innerHTML = `<td>${row.rowNumber}</td>${row.sourceValues.map(value => `<td>${esc(value)}</td>`).join('')}<td class="validation-cell">${row.errors.length ? esc(row.errors.join(' ')) : 'Ready'}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function runDonorImport() {
+  const button = $('runDonorImport');
+  const validRows = donorImport.validation.validRows;
+  const rejectedRows = [...donorImport.validation.rejectedRows];
+  const totals = { total_received: donorImport.validation.rows.length, inserted: 0, updated: 0, rejected: rejectedRows.length };
+  const serverErrors = [];
+  button.disabled = true;
+  try {
+    const chunkSize = 1_000;
+    for (let index = 0; index < validRows.length; index += chunkSize) {
+      const chunk = validRows.slice(index, index + chunkSize);
+      button.textContent = `Importing ${Math.min(index + chunk.length, validRows.length).toLocaleString()} of ${validRows.length.toLocaleString()}…`;
+      try {
+        const result = await api('/api/import-donors', { method: 'POST', body: JSON.stringify({ rows: chunk }) });
+        totals.inserted += result.inserted;
+        totals.updated += result.updated;
+        totals.rejected += result.rejected;
+        serverErrors.push(...result.errors);
+      } catch (error) {
+        chunk.forEach(row => serverErrors.push({ row: row.row_number, error: error.message }));
+        totals.rejected += chunk.length;
+      }
+    }
+    for (const failure of serverErrors) {
+      const original = donorImport.validation.rows.find(row => row.rowNumber === failure.row);
+      if (original) rejectedRows.push({ ...original, errors: [failure.error] });
+    }
+    donorImport.rejectedRows = rejectedRows;
+    renderImportResults(totals, serverErrors);
+    setDonorImportStep(4);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Import valid rows';
+  }
+}
+
+function renderImportResults(totals, serverErrors) {
+  $('importResultSummary').innerHTML = `
+    <div><strong>${totals.total_received.toLocaleString()}</strong><span>Total processed</span></div>
+    <div class="success-stat"><strong>${totals.inserted.toLocaleString()}</strong><span>Inserted</span></div>
+    <div><strong>${totals.updated.toLocaleString()}</strong><span>Updated</span></div>
+    <div class="${totals.rejected ? 'error-stat' : ''}"><strong>${totals.rejected.toLocaleString()}</strong><span>Rejected</span></div>
+    <div class="${serverErrors.length ? 'error-stat' : ''}"><strong>${serverErrors.length.toLocaleString()}</strong><span>Errors</span></div>`;
+  $('downloadRejectedDonors').classList.toggle('hidden', donorImport.rejectedRows.length === 0);
+  const errorList = $('importErrorList');
+  errorList.classList.toggle('hidden', serverErrors.length === 0);
+  errorList.innerHTML = serverErrors.length
+    ? `<h4>Import errors</h4><ul>${serverErrors.slice(0, 100).map(error => `<li>Row ${error.row ?? 'unknown'}: ${esc(error.error)}</li>`).join('')}</ul>${serverErrors.length > 100 ? '<p>Download rejected rows for the complete list.</p>' : ''}`
+    : '';
+}
+
+function downloadRejectedDonors() {
+  const csv = rejectedRowsCsv(donorImport.headers, donorImport.rejectedRows, window.Papa.unparse);
+  const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `donor-import-rejected-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 function openDonor(row) {
   modalType = 'donor';
   modalRecord = row;

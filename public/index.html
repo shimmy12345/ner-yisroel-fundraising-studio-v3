@@ -7,6 +7,7 @@
   <link rel="icon" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <script src="runtime-config.js"></script>
+  <script src="vendor/papaparse.min.js"></script>
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -73,12 +74,50 @@
         <div id="knowledgeList" class="list"></div>
       </section>
 
-      <section id="donorsPanel" class="panel hidden"><div class="row between"><div><h2>Donor Profiles</h2><p class="muted">Keep useful relationship context tied to your account.</p></div><button id="newDonor" class="primary">New donor</button></div><div id="donorList" class="list"></div></section>
+      <section id="donorsPanel" class="panel hidden"><div class="row between"><div><h2>Donor Profiles</h2><p class="muted">Keep useful relationship context tied to your account.</p></div><div class="row donor-actions"><button id="importDonors" class="secondary">Import CSV</button><button id="newDonor" class="primary">New donor</button></div></div><div id="donorList" class="list"></div></section>
       <section id="historyPanel" class="panel hidden"><div><h2>Generation History</h2><p class="muted">Past reviews and drafts saved automatically.</p></div><div id="historyList" class="list"></div></section>
     </main>
   </div>
 
   <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><div class="row between"><h3 id="modalTitle">Edit</h3><button id="closeModal" class="icon" aria-label="Close">×</button></div><div id="modalBody"></div><div class="row end"><button id="deleteModal" class="danger hidden">Delete</button><button id="saveModal" class="primary">Save</button></div></div></div>
+  <div id="donorImportWizard" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="donorImportTitle">
+    <div class="modal-card import-modal">
+      <div class="row between"><div><p class="eyebrow">Donor records</p><h3 id="donorImportTitle">Import CSV</h3></div><button id="closeDonorImport" class="icon" aria-label="Close">×</button></div>
+      <ol class="import-steps" aria-label="Import progress">
+        <li data-import-step="1" class="active">1. Select</li><li data-import-step="2">2. Map</li><li data-import-step="3">3. Preview</li><li data-import-step="4">4. Results</li>
+      </ol>
+      <div id="importStepSelect" class="import-step">
+        <div id="donorCsvDrop" class="csv-drop" tabindex="0" role="button">
+          <input id="donorCsvFile" type="file" accept=".csv,text/csv">
+          <div class="upload-icon">⇧</div>
+          <h3>Drop a CSV file here</h3>
+          <p>or choose a file from your computer</p>
+          <button id="browseDonorCsv" class="primary">Choose CSV</button>
+        </div>
+        <div id="donorCsvSelection" class="file-selection hidden"></div>
+        <p id="donorCsvMessage" class="message" role="status"></p>
+      </div>
+      <div id="importStepMap" class="import-step hidden">
+        <div class="row between"><div><h4>Review column mapping</h4><p class="muted">Each destination field can be used once. Donor Code is required.</p></div><span id="mappingRowCount" class="count-pill"></span></div>
+        <div class="table-wrap"><table class="mapping-table"><thead><tr><th>CSV column</th><th>Import as</th></tr></thead><tbody id="mappingRows"></tbody></table></div>
+        <p id="mappingMessage" class="message error-text" role="alert"></p>
+      </div>
+      <div id="importStepPreview" class="import-step hidden">
+        <div id="validationSummary" class="import-summary"></div>
+        <p class="muted">Previewing the first 10 data rows. Invalid rows will be rejected; valid rows can still be imported.</p>
+        <div class="table-wrap preview-wrap"><table id="donorPreviewTable" class="preview-table"></table></div>
+      </div>
+      <div id="importStepResults" class="import-step hidden">
+        <div id="importResultSummary" class="result-summary"></div>
+        <div id="importErrorList" class="import-errors hidden"></div>
+        <button id="downloadRejectedDonors" class="secondary hidden">Download rejected rows</button>
+      </div>
+      <div class="row between import-footer">
+        <button id="donorImportBack" class="secondary">Back</button>
+        <div class="row"><button id="donorImportNext" class="primary">Continue</button><button id="runDonorImport" class="primary hidden">Import valid rows</button><button id="finishDonorImport" class="primary hidden">Done</button></div>
+      </div>
+    </div>
+  </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
