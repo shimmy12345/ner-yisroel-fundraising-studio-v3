@@ -7,7 +7,11 @@
 - [ ] Confirm Netlify uses `npm run build`, `public`, and `netlify/functions`.
 - [ ] Add `SUPABASE_URL` and `SUPABASE_ANON_KEY` to Builds and Functions.
 - [ ] Add `OPENAI_API_KEY` and optional `OPENAI_MODEL` to Functions only.
-- [ ] Confirm no `SUPABASE_SERVICE_ROLE_KEY` is configured or present in browser assets.
+- [ ] Add `SUPABASE_SERVICE_ROLE_KEY` to Functions only for authenticated `crm_donors` imports.
+- [ ] Confirm `SUPABASE_SERVICE_ROLE_KEY` is absent from Builds, browser assets, and `runtime-config.js`.
+- [ ] Confirm `crm_donors.donor_code` has a unique constraint or unique index required by upsert.
 - [ ] Run `npm test` and `npm run build`.
 - [ ] Test TXT, CSV, PDF, and DOCX uploads with two different user accounts.
 - [ ] Test search, preview, favorite, original download, delete, and AI Knowledge Base context.
+- [ ] Import a CSV containing one new and one existing donor code; confirm inserted/updated counts and blank-field preservation.
+- [ ] Download rejected rows and confirm the CSV contains `import_error`.

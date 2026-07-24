@@ -5,13 +5,13 @@ Private fundraising communications workspace deployed as a static Netlify site w
 ## Verified architecture
 
 - `public/`: browser application. It receives only `SUPABASE_URL` and `SUPABASE_ANON_KEY` through generated `public/runtime-config.js`.
-- `netlify/functions/`: authenticated server endpoints for AI generation, document extraction, signed original-file links, and deletion.
+- `netlify/functions/`: authenticated server endpoints for AI generation, document extraction, signed original-file links, deletion, and secure donor imports.
 - `supabase/schema.sql`: complete schema for a new Supabase project.
 - `supabase/migrations/20260722_knowledge_base_uploads.sql`: idempotent upgrade for an existing deployment.
-- `build.mjs`: writes the public Supabase URL and anon/publishable key at build time.
+- `build.mjs`: writes the public Supabase URL and anon/publishable key at build time and copies the local Papa Parse browser bundle.
 - `netlify.toml`: publishes `public`, bundles functions with esbuild, and maps `/api/*` to `/.netlify/functions/:splat`.
 
-The browser uploads directly to the private `knowledge-files` bucket using the signed-in user's access token. Storage policies require the first path segment to equal `auth.uid()`. Netlify Functions create a user-scoped Supabase client from the same token, so document rows and objects remain subject to Row Level Security. A service-role key is not used or required.
+The browser uploads directly to the private `knowledge-files` bucket using the signed-in user's access token. Storage policies require the first path segment to equal `auth.uid()`. Knowledge Base Functions create a user-scoped Supabase client from the same token, so document rows and objects remain subject to Row Level Security. Donor imports are different: the Function first verifies the bearer token, then uses the server-only service-role key to upsert into `crm_donors`. That key is never written to browser assets.
 
 ## Knowledge Base uploads
 
@@ -28,6 +28,21 @@ Extracted text is capped at 2,000,000 characters per document; the original char
 
 Google Drive integration is intentionally not included. A migration does not delete any legacy Google tables or rows; they can be removed separately after confirming they are no longer needed.
 
+## Donor CSV imports
+
+- Open **Donors** and choose **Import CSV**. The existing manual donor CRUD remains unchanged and continues to use the legacy `donors` table.
+- The importer accepts one `.csv` file, supports drag and drop, and uses Papa Parse for quoted fields, escaped quotes, CRLF, blank cells, and UTF-8 BOM.
+- Header aliases are matched after ignoring capitalization, whitespace, hyphens, and underscores. Every mapping can be reviewed and changed.
+- `donor_code` is required and remains text, including leading zeroes.
+- The preview validates dates and numeric values, rejects missing or duplicate donor codes, and allows valid rows to proceed when other rows fail.
+- Blank incoming values are sent as `null` and are omitted while merging with an existing record, so they do not erase stored values.
+- The authenticated Netlify Function queries and upserts only `crm_donors`, in bounded batches, with `donor_code` as the conflict key.
+- Results report processed, inserted, updated, rejected, and error counts. Rejected source rows can be downloaded with an `import_error` column.
+
+This feature does not include a Supabase schema migration. Before deployment, `crm_donors` must already contain the documented target columns and `donor_code` must have a unique constraint or unique index for `onConflict: 'donor_code'`.
+
+Accepted `crm_donors` columns are: `donor_code`, `household_name`, `first_name`, `last_name`, `email`, `address`, `city`, `state`, `zip`, `country`, `home_phone`, `mobile_phone`, `assigned_officer`, `stage`, `lifetime_giving`, `last_gift_amount`, `last_gift_date`, `last_contact_date`, `next_action`, `next_action_date`, and `notes`.
+
 ## Local setup
 
 Requirements: Node.js 22 and npm.
@@ -43,9 +58,10 @@ For a local build, set:
 ```text
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 SUPABASE_ANON_KEY=YOUR_ANON_OR_PUBLISHABLE_KEY
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVER_ONLY_SERVICE_ROLE_KEY
 ```
 
-Never put `SUPABASE_SERVICE_ROLE_KEY` or `OPENAI_API_KEY` in `public/`, `runtime-config.js`, or client-side code.
+Never put `SUPABASE_SERVICE_ROLE_KEY` or `OPENAI_API_KEY` in `public/`, `runtime-config.js`, or client-side code. The service-role key is needed only by the donor import Function.
 
 ## Supabase migration
 
@@ -68,7 +84,7 @@ The migration:
 
 ## Netlify deployment
 
-1. In Netlify, import `shimmy12345/ner-yisroel-fundraising-studio` and select `feature/knowledge-base-uploads` for review deploys.
+1. In Netlify, import `shimmy12345/ner-yisroel-fundraising-studio-v3` and select `feature/donor-csv-import-v2` for review deploys.
 2. Clear any previous nested **Base directory** setting. The base directory must be the repository root.
 3. Netlify reads `netlify.toml`; verify:
    - Build command: `npm run build`
@@ -78,10 +94,11 @@ The migration:
 4. Add these environment variables:
    - `SUPABASE_URL` — scopes: Builds and Functions
    - `SUPABASE_ANON_KEY` — scopes: Builds and Functions
+   - `SUPABASE_SERVICE_ROLE_KEY` — scope: Functions only
    - `OPENAI_API_KEY` — scope: Functions only
    - `OPENAI_MODEL` — optional, Functions only; defaults to `gpt-5-mini`
-5. Do **not** add `SUPABASE_SERVICE_ROLE_KEY`; this app deliberately uses the authenticated user's RLS-scoped client.
-6. Trigger a deploy after running the Supabase migration.
+5. Confirm `SUPABASE_SERVICE_ROLE_KEY` is not available to Builds and does not appear in generated `public/runtime-config.js`.
+6. Trigger a deploy after running the Knowledge Base migration and confirming the existing `crm_donors.donor_code` unique constraint.
 
 Expected function routes:
 
@@ -91,6 +108,7 @@ Expected function routes:
 | `POST /api/process-document` | `netlify/functions/process-document.mjs` |
 | `GET /api/knowledge-document?id=...` | `netlify/functions/knowledge-document.mjs` |
 | `DELETE /api/knowledge-document` | `netlify/functions/knowledge-document.mjs` |
+| `POST /api/import-donors` | `netlify/functions/import-donors.mjs` |
 
 ## Post-deploy verification
 
@@ -101,11 +119,14 @@ Expected function routes:
 5. Generate copy using a fact unique to an uploaded document and verify the response uses that fact without inventing details.
 6. Delete an uploaded document and confirm both its row and Storage object disappear.
 7. Sign in as user B and confirm user A's rows, previews, signed links, and Storage objects are inaccessible.
+8. Import a CSV with a quoted household name, a leading-zero donor code, a missing donor code, and a duplicate donor code.
+9. Confirm valid rows import, invalid rows appear in the rejected CSV, and re-importing a donor code updates rather than duplicates it.
+10. Confirm blank cells do not erase existing `crm_donors` values.
 
 ## Security notes
 
 - Supabase anon/publishable keys are designed for browser use; RLS is the security boundary.
-- The service-role key is absent from the application and browser bundle.
+- The service-role key is read only by the authenticated donor import Function and is absent from the browser bundle.
 - Original files remain private. Download links are signed for five minutes and only created after an authenticated, RLS-protected lookup.
 - OpenAI receives the selected Knowledge Base text only when the user runs generation. PDF/DOCX extraction is local to the Netlify Function.
 - This is not a compliance-certified CRM; perform a formal security review before storing highly sensitive financial or personal data.

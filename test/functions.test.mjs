@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { bearerToken } from '../netlify/functions/_shared/auth.mjs';
 import { handler as processDocument } from '../netlify/functions/process-document.mjs';
 import { handler as knowledgeDocument } from '../netlify/functions/knowledge-document.mjs';
+import { handler as importDonors } from '../netlify/functions/import-donors.mjs';
 
 test('parses only Bearer authorization tokens', () => {
   assert.equal(bearerToken({ headers: { authorization: 'Bearer abc123' } }), 'abc123');
@@ -20,4 +21,11 @@ test('critical document functions require authentication', async () => {
   const deleteResponse = await knowledgeDocument({ httpMethod: 'DELETE', headers: {}, body: '{}' });
   assert.equal(processResponse.statusCode, 401);
   assert.equal(deleteResponse.statusCode, 401);
+});
+
+test('donor import rejects unsupported methods and unauthenticated writes', async () => {
+  const methodResponse = await importDonors({ httpMethod: 'GET', headers: {} });
+  const authResponse = await importDonors({ httpMethod: 'POST', headers: {}, body: '{"rows":[]}' });
+  assert.equal(methodResponse.statusCode, 405);
+  assert.equal(authResponse.statusCode, 401);
 });
