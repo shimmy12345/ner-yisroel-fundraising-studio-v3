@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ner Yisroel Fundraising Studio</title>
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="styles.css">
+  <script src="runtime-config.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div id="authView" class="auth-wrap">
+    <div class="auth-card">
+      <div class="logo">נר</div>
+      <p class="eyebrow">Yeshivas Ner Yisroel</p>
+      <h1>Fundraising Studio</h1>
+      <p class="muted">Private communications, knowledge, and donor context.</p>
+      <div class="tabs"><button class="tab active" data-auth="signin">Sign in</button><button class="tab" data-auth="signup">Create account</button></div>
+      <label>Email<input id="authEmail" type="email" autocomplete="email"></label>
+      <label>Password<input id="authPassword" type="password" autocomplete="current-password"></label>
+      <button id="authSubmit" class="primary full">Sign in</button>
+      <p id="authMessage" class="message" role="status"></p>
+    </div>
+  </div>
+
+  <div id="appView" class="app hidden">
+    <aside>
+      <div class="brand"><div class="logo small">נר</div><div><strong>Ner Yisroel</strong><span>Fundraising Studio</span></div></div>
+      <nav aria-label="Workspace">
+        <button class="nav active" data-panel="studio">✦ AI Studio</button>
+        <button class="nav" data-panel="knowledge">▤ Knowledge Base</button>
+        <button class="nav" data-panel="donors">◎ Donors</button>
+        <button class="nav" data-panel="history">↺ History</button>
+      </nav>
+      <div class="aside-bottom"><span id="userEmail"></span><button id="signOut" class="secondary">Sign out</button></div>
+    </aside>
+
+    <main>
+      <header><div><p class="eyebrow">Private workspace</p><h1 id="pageTitle">AI Studio</h1></div><div class="status">● Connected</div></header>
+      <section id="studioPanel" class="panel">
+        <div class="hero"><div><p class="eyebrow light">Fundraising communications</p><h2>Write with greater clarity, donor focus, and Ner Yisroel authenticity.</h2></div></div>
+        <div class="grid two">
+          <div class="card">
+            <h3>Build your request</h3>
+            <div class="form-grid">
+              <label>Tool<select id="mode"><option value="review">Review a letter</option><option value="writer">Draft communication</option><option value="major">Major gift proposal</option><option value="whatsapp">WhatsApp message</option><option value="constant">Constant Contact email</option><option value="linkedin">LinkedIn post</option><option value="executive">Executive summary</option></select></label>
+              <label>Audience<input id="audience" placeholder="Alumni, parents, major donors..."></label>
+              <label>Tone<input id="tone" placeholder="Warm, direct, dignified..."></label>
+              <label>Desired outcome<input id="goal" placeholder="Make a gift, attend, respond..."></label>
+            </div>
+            <label>Instructions<textarea id="prompt" rows="4"></textarea></label>
+            <label>Source text or notes<textarea id="sourceText" rows="12"></textarea></label>
+            <label class="file-label">Attach one document for this request<input id="file" type="file" accept=".pdf,.doc,.docx,.txt,.md,.rtf"><span id="fileName">No file selected</span></label>
+            <button id="generate" class="primary full">Generate</button>
+          </div>
+          <div class="card result-card"><div class="row between"><h3>Result</h3><div><button id="copyOutput" class="secondary" disabled>Copy</button><button id="saveFavorite" class="secondary" disabled>Favorite</button></div></div><div id="resultEmpty" class="empty">Your result will appear here.</div><pre id="output" class="hidden"></pre></div>
+        </div>
+      </section>
+
+      <section id="knowledgePanel" class="panel hidden">
+        <div class="row between knowledge-heading"><div><h2>Knowledge Base</h2><p class="muted">Upload private source material. Extracted text is available to the AI Studio automatically.</p></div><button id="newKnowledge" class="secondary">Add text manually</button></div>
+        <div id="uploadZone" class="upload-zone" tabindex="0" role="button" aria-label="Upload Knowledge Base documents">
+          <input id="knowledgeFiles" type="file" multiple accept=".txt,.csv,.pdf,.docx">
+          <div class="upload-icon">⇧</div>
+          <h3>Drop documents here</h3>
+          <p>or choose files. Supports TXT, CSV, PDF, and DOCX up to 25 MB each.</p>
+          <label class="inline-field">Tags for these uploads<input id="uploadTags" placeholder="scholarship, campaign, Chicago"></label>
+          <button id="browseKnowledge" class="primary">Choose files</button>
+        </div>
+        <div id="uploadQueue" class="upload-queue hidden" aria-live="polite"></div>
+        <div class="knowledge-toolbar"><input id="knowledgeSearch" type="search" placeholder="Search titles, tags, or document text"><select id="knowledgeFilter"><option value="all">All documents</option><option value="favorites">Favorites</option><option value="uploads">Uploaded files</option><option value="manual">Manual notes</option></select><span id="knowledgeCount" class="muted"></span></div>
+        <div id="knowledgeList" class="list"></div>
+      </section>
+
+      <section id="donorsPanel" class="panel hidden"><div class="row between"><div><h2>Donor Profiles</h2><p class="muted">Keep useful relationship context tied to your account.</p></div><button id="newDonor" class="primary">New donor</button></div><div id="donorList" class="list"></div></section>
+      <section id="historyPanel" class="panel hidden"><div><h2>Generation History</h2><p class="muted">Past reviews and drafts saved automatically.</p></div><div id="historyList" class="list"></div></section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><div class="row between"><h3 id="modalTitle">Edit</h3><button id="closeModal" class="icon" aria-label="Close">×</button></div><div id="modalBody"></div><div class="row end"><button id="deleteModal" class="danger hidden">Delete</button><button id="saveModal" class="primary">Save</button></div></div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
