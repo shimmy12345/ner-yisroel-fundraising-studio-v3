@@ -29,6 +29,16 @@ import {
 import {
   donorProfileViewModel
 } from './donor-profile.js';
+import {
+  ACTIVITY_FIELDS,
+  ACTIVITY_PAGE_SIZE,
+  activityArchiveActionLabel,
+  activityTimelineEmptyState,
+  activityTimelineViewModel,
+  nextActionGuidance,
+  normalizeActivityPayload,
+  toDateTimeLocalValue
+} from './donor-activities.js';
 
 const cfg = window.RUNTIME_CONFIG || {};
 const $ = id => document.getElementById(id);
@@ -49,6 +59,14 @@ let crmDonorLoadError = null;
 let donorProfileRecord = null;
 let donorDashboardScrollPosition = 0;
 let donorProfileRequestId = 0;
+let donorActivities = [];
+let donorActivityView = 'active';
+let donorActivityHasMore = false;
+let donorActivityLoading = false;
+let donorActivityLoadError = false;
+let donorActivityRequestId = 0;
+let activityModalRecord = null;
+let activityModalReturnFocus = null;
 
 function toast(message) {
   const element = $('toast');
@@ -255,10 +273,27 @@ function renderDonorProfile(row) {
           ? '<p class="donor-profile-empty">No notes have been recorded for this donor.</p>'
           : `<p class="donor-profile-note-copy">${esc(profile.notes)}</p>`}
       </section>
+      <section class="donor-profile-section donor-activity-section" aria-labelledby="donorActivityTitle">
+        <div class="row between donor-activity-heading">
+          <div><h3 id="donorActivityTitle">Activity Timeline</h3><p>Recent relationship activity, newest first.</p></div>
+          <button id="addDonorActivity" class="primary">Add Activity</button>
+        </div>
+        <div class="activity-view-toggle" role="group" aria-label="Activity status">
+          <button id="showActiveActivities" class="activity-view-button" aria-pressed="${donorActivityView === 'active'}">Active</button>
+          <button id="showArchivedActivities" class="activity-view-button" aria-pressed="${donorActivityView === 'archived'}">Archived</button>
+        </div>
+        <div id="donorActivityState" class="activity-state" role="status" aria-live="polite"></div>
+        <div id="donorActivityList" class="activity-list"></div>
+        <button id="loadMoreActivities" class="secondary hidden">Load More</button>
+      </section>
     </div>`;
   $('backToDonors').onclick = returnToDonors;
   $('profileEditDonor').onclick = () => openDonor(donorProfileRecord);
   $('profileArchiveDonor').onclick = () => openDonorArchiveConfirmation(donorProfileRecord);
+  $('addDonorActivity').onclick = () => openActivityModal();
+  $('showActiveActivities').onclick = () => setDonorActivityView('active');
+  $('showArchivedActivities').onclick = () => setDonorActivityView('archived');
+  $('loadMoreActivities').onclick = () => loadDonorActivities();
 }
 
 async function loadDonorProfile(donorId, { showLoading = true } = {}) {
@@ -292,10 +327,13 @@ async function loadDonorProfile(donorId, { showLoading = true } = {}) {
   donorProfileRecord = data;
   syncDonorDashboardRow(data);
   renderDonorProfile(data);
+  await loadDonorActivities({ reset: true });
 }
 
 function openDonorProfile(donorId) {
   donorDashboardScrollPosition = window.scrollY;
+  donorActivityView = 'active';
+  donorActivities = [];
   $$('.panel').forEach(panel => panel.classList.add('hidden'));
   $('donorProfilePanel').classList.remove('hidden');
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
@@ -306,12 +344,241 @@ function openDonorProfile(donorId) {
 
 function returnToDonors() {
   donorProfileRequestId += 1;
+  donorActivityRequestId += 1;
   $('donorProfilePanel').classList.add('hidden');
   $('donorsPanel').classList.remove('hidden');
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
   $('pageTitle').textContent = 'Donors';
   requestAnimationFrame(() => window.scrollTo({ top: donorDashboardScrollPosition, behavior: 'auto' }));
 }
+
+function setDonorActivityView(view) {
+  if (!['active', 'archived'].includes(view) || donorActivityView === view) return;
+  donorActivityView = view;
+  $('showActiveActivities').setAttribute('aria-pressed', String(view === 'active'));
+  $('showArchivedActivities').setAttribute('aria-pressed', String(view === 'archived'));
+  loadDonorActivities({ reset: true });
+}
+
+function activityTimelineItem(activity) {
+  const view = activityTimelineViewModel(activity);
+  const article = document.createElement('article');
+  article.className = `activity-item${view.is_archived ? ' archived-activity' : ''}`;
+  article.innerHTML = `
+    <div class="activity-marker" aria-hidden="true">${esc(view.typeMarker)}</div>
+    <div class="activity-content">
+      <div class="row between activity-item-heading">
+        <div class="activity-meta">
+          <strong>${esc(view.typeLabel)}</strong>
+          <time datetime="${esc(view.occurred_at)}">${esc(view.occurredLabel)}</time>
+          ${view.is_archived ? '<span class="donor-flag archived">Archived</span>' : ''}
+        </div>
+        <button class="secondary edit-activity" aria-label="Edit activity: ${esc(view.subject)}">Edit</button>
+      </div>
+      <h4>${esc(view.subject)}</h4>
+      <p class="activity-notes">${esc(view.notes)}</p>
+      ${(view.outcome || view.next_action || view.next_action_date) ? `
+        <dl class="activity-details">
+          ${view.outcome ? `<div><dt>Outcome</dt><dd>${esc(view.outcome)}</dd></div>` : ''}
+          ${view.next_action ? `<div><dt>Next action</dt><dd>${esc(view.next_action)}</dd></div>` : ''}
+          ${view.next_action_date ? `<div><dt>Next action date</dt><dd>${esc(view.nextActionDateLabel || view.next_action_date)}</dd></div>` : ''}
+        </dl>` : ''}
+    </div>`;
+  article.querySelector('.edit-activity').onclick = () => openActivityModal(activity);
+  return article;
+}
+
+function renderDonorActivities() {
+  if (!$('donorActivityList')) return;
+  const state = $('donorActivityState');
+  const list = $('donorActivityList');
+  const loadMore = $('loadMoreActivities');
+  $('showActiveActivities').setAttribute('aria-pressed', String(donorActivityView === 'active'));
+  $('showArchivedActivities').setAttribute('aria-pressed', String(donorActivityView === 'archived'));
+  loadMore.classList.toggle('hidden', !donorActivityHasMore || donorActivityLoading);
+
+  if (donorActivityLoadError) {
+    state.innerHTML = '<div class="activity-empty error-state"><strong>Unable to load activities</strong><span>The activity timeline is unavailable. Ask an administrator to verify the migration and your access.</span><button id="retryActivities" class="secondary">Try again</button></div>';
+    list.innerHTML = '';
+    $('retryActivities').onclick = () => loadDonorActivities({ reset: true });
+    return;
+  }
+  if (donorActivityLoading && !donorActivities.length) {
+    state.innerHTML = '<div class="activity-empty"><strong>Loading activities…</strong><span>Retrieving this donor’s recent activity.</span></div>';
+    list.innerHTML = '';
+    return;
+  }
+  if (!donorActivities.length) {
+    const empty = activityTimelineEmptyState(donorActivityView === 'archived');
+    state.innerHTML = `<div class="activity-empty"><strong>${esc(empty.title)}</strong><span>${esc(empty.message)}</span></div>`;
+    list.innerHTML = '';
+    return;
+  }
+
+  state.innerHTML = donorActivityLoading ? '<p class="activity-loading-more">Loading more activities…</p>' : '';
+  list.innerHTML = '';
+  donorActivities.forEach(activity => list.appendChild(activityTimelineItem(activity)));
+}
+
+async function loadDonorActivities({ reset = false } = {}) {
+  if (!donorProfileRecord?.id || !$('donorActivityList')) return;
+  const requestId = ++donorActivityRequestId;
+  if (reset) {
+    donorActivities = [];
+    donorActivityHasMore = false;
+  }
+  donorActivityLoading = true;
+  donorActivityLoadError = false;
+  renderDonorActivities();
+  const from = donorActivities.length;
+  const { data, error } = await supabase
+    .from('donor_activities')
+    .select(ACTIVITY_FIELDS.join(','))
+    .eq('donor_id', donorProfileRecord.id)
+    .eq('is_archived', donorActivityView === 'archived')
+    .order('occurred_at', { ascending: false })
+    .range(from, from + ACTIVITY_PAGE_SIZE);
+  if (requestId !== donorActivityRequestId) return;
+  donorActivityLoading = false;
+  if (error) {
+    donorActivityLoadError = true;
+    renderDonorActivities();
+    return;
+  }
+  const rows = data || [];
+  donorActivityHasMore = rows.length > ACTIVITY_PAGE_SIZE;
+  donorActivities = reset
+    ? rows.slice(0, ACTIVITY_PAGE_SIZE)
+    : [...donorActivities, ...rows.slice(0, ACTIVITY_PAGE_SIZE)];
+  renderDonorActivities();
+}
+
+function updateActivityGuidance() {
+  $('activityNextActionGuidance').textContent = nextActionGuidance(
+    $('activityNextAction').value,
+    $('activityNextActionDate').value
+  );
+}
+
+function openActivityModal(activity = null) {
+  if (!donorProfileRecord) return;
+  activityModalRecord = activity;
+  activityModalReturnFocus = document.activeElement;
+  $('activityModalTitle').textContent = activity ? 'Edit Activity' : 'Add Activity';
+  $('activityModalArchived').classList.toggle('hidden', !activity?.is_archived);
+  $('activityType').value = activity?.activity_type || 'phone_call';
+  $('activityOccurredAt').value = toDateTimeLocalValue(activity?.occurred_at || new Date());
+  $('activitySubject').value = activity?.subject || '';
+  $('activityNotes').value = activity?.notes || '';
+  $('activityOutcome').value = activity?.outcome || '';
+  $('activityNextAction').value = activity?.next_action || '';
+  $('activityNextActionDate').value = activity?.next_action_date || '';
+  $('activityAdvanced').open = Boolean(activity?.outcome || activity?.next_action || activity?.next_action_date);
+  $('activityFormError').textContent = '';
+  updateActivityGuidance();
+  $('archiveActivity').classList.toggle('hidden', !activity);
+  $('archiveActivity').textContent = activity ? activityArchiveActionLabel(activity) : 'Archive Activity';
+  $('archiveActivity').classList.toggle('restore-action', Boolean(activity?.is_archived));
+  $('activityModal').classList.remove('hidden');
+  requestAnimationFrame(() => (activity ? $('activitySubject') : $('activityType')).focus());
+}
+
+function closeActivityModal({ restoreFocus = true } = {}) {
+  $('activityModal').classList.add('hidden');
+  if (restoreFocus && activityModalReturnFocus?.isConnected) activityModalReturnFocus.focus();
+  activityModalRecord = null;
+}
+
+async function refreshProfileAfterActivity() {
+  const donorId = donorProfileRecord?.id;
+  if (!donorId) return;
+  await loadDonorProfile(donorId, { showLoading: false });
+  requestAnimationFrame(() => $('addDonorActivity')?.focus());
+}
+
+$('closeActivityModal').onclick = () => closeActivityModal();
+$('cancelActivity').onclick = () => closeActivityModal();
+$('activityNextAction').oninput = updateActivityGuidance;
+$('activityNextActionDate').onchange = updateActivityGuidance;
+$('activityForm').onsubmit = async event => {
+  event.preventDefault();
+  const button = $('saveActivity');
+  button.disabled = true;
+  $('activityFormError').textContent = '';
+  try {
+    const editing = Boolean(activityModalRecord);
+    const payload = normalizeActivityPayload({
+      activity_type: $('activityType').value,
+      occurred_at: $('activityOccurredAt').value,
+      subject: $('activitySubject').value,
+      notes: $('activityNotes').value,
+      outcome: $('activityOutcome').value,
+      next_action: $('activityNextAction').value,
+      next_action_date: $('activityNextActionDate').value
+    }, donorProfileRecord.id);
+    const query = activityModalRecord
+      ? supabase
+          .from('donor_activities')
+          .update(payload)
+          .eq('id', activityModalRecord.id)
+          .eq('donor_id', donorProfileRecord.id)
+      : supabase.from('donor_activities').insert(payload);
+    const { error } = await query;
+    if (error) throw error;
+    if (!activityModalRecord) donorActivityView = 'active';
+    closeActivityModal({ restoreFocus: false });
+    await refreshProfileAfterActivity();
+    toast(editing ? 'Activity updated' : 'Activity added');
+  } catch (error) {
+    $('activityFormError').textContent = /required|valid|choose/i.test(error.message || '')
+      ? error.message
+      : 'The activity could not be saved. Check your access and try again.';
+  } finally {
+    button.disabled = false;
+  }
+};
+
+$('archiveActivity').onclick = () => {
+  if (!activityModalRecord) return;
+  const restoring = Boolean(activityModalRecord.is_archived);
+  $('activityArchiveConfirmTitle').textContent = restoring ? 'Restore activity?' : 'Archive activity?';
+  $('activityArchiveConfirmBody').textContent = restoring
+    ? 'This activity will return to the active donor timeline.'
+    : 'This activity will be removed from the active timeline but will remain in the database.';
+  $('confirmArchiveActivity').textContent = restoring ? 'Restore Activity' : 'Archive Activity';
+  $('confirmArchiveActivity').classList.toggle('restore-action', restoring);
+  $('activityArchiveConfirmModal').classList.remove('hidden');
+  $('confirmArchiveActivity').focus();
+};
+
+$('cancelArchiveActivity').onclick = () => {
+  $('activityArchiveConfirmModal').classList.add('hidden');
+  $('archiveActivity').focus();
+};
+
+$('confirmArchiveActivity').onclick = async () => {
+  if (!activityModalRecord || !donorProfileRecord) return;
+  const restoring = Boolean(activityModalRecord.is_archived);
+  const button = $('confirmArchiveActivity');
+  button.disabled = true;
+  try {
+    const { error } = await supabase
+      .from('donor_activities')
+      .update({ is_archived: !restoring })
+      .eq('id', activityModalRecord.id)
+      .eq('donor_id', donorProfileRecord.id);
+    if (error) throw error;
+    donorActivityView = 'active';
+    $('activityArchiveConfirmModal').classList.add('hidden');
+    closeActivityModal({ restoreFocus: false });
+    await refreshProfileAfterActivity();
+    toast(restoring ? 'Activity restored' : 'Activity archived');
+  } catch {
+    toast('The activity status could not be changed. Check your access and try again.');
+  } finally {
+    button.disabled = false;
+  }
+};
 
 $('file').onchange = () => { $('fileName').textContent = $('file').files[0]?.name || 'No file selected'; };
 const toBase64 = file => new Promise((resolve, reject) => {
