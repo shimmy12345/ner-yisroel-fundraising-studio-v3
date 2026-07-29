@@ -1,5 +1,10 @@
 import { json, requireUser, serviceClient } from './_shared/auth.mjs';
-import { DONOR_FIELDS, mergeForUpsert, normalizeImportRows } from './_shared/donor-import.mjs';
+import {
+  DONOR_FIELDS,
+  importRowsForOwner,
+  mergeForUpsert,
+  normalizeImportRows
+} from './_shared/donor-import.mjs';
 
 const MAX_ROWS = 5_000;
 const QUERY_BATCH_SIZE = 500;
@@ -14,7 +19,7 @@ function batches(values, size) {
 export async function handler(event) {
   if (event.httpMethod !== 'POST') return json(405, { error: 'Method not allowed.' });
   try {
-    await requireUser(event);
+    const { user } = await requireUser(event);
     let body;
     try { body = JSON.parse(event.body || '{}'); }
     catch { return json(400, { error: 'Request body must be valid JSON.' }); }
@@ -30,6 +35,7 @@ export async function handler(event) {
       const { data, error } = await client
         .from('crm_donors')
         .select(DONOR_FIELDS.join(','))
+        .eq('owner_user_id', user.id)
         .in('donor_code', codeBatch);
       if (error) throw error;
       existingRows.push(...(data || []));
@@ -42,9 +48,10 @@ export async function handler(event) {
     const existingCodes = new Set(existingRows.map(row => String(row.donor_code)));
 
     for (const itemBatch of batches(prepared.rows, UPSERT_BATCH_SIZE)) {
+      const ownedBatch = importRowsForOwner(itemBatch, user.id);
       const { error } = await client
         .from('crm_donors')
-        .upsert(itemBatch.map(item => item.data), { onConflict: 'donor_code' });
+        .upsert(ownedBatch.map(item => item.data), { onConflict: 'owner_user_id,donor_code' });
       if (error) {
         itemBatch.forEach(item => errors.push({
           row: item.rowNumber,
