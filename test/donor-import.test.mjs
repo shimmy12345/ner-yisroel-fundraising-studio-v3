@@ -96,6 +96,8 @@ test('calculates inserted versus updated counts from existing donor codes', () =
   ]);
   assert.equal(merged.inserted, 1);
   assert.equal(merged.updated, 1);
+  assert.equal(merged.rows.find(row => row.data.donor_code === 'NEW').data.is_archived, false);
+  assert.equal('is_archived' in merged.rows.find(row => row.data.donor_code === 'EXISTING').data, false);
 });
 
 test('server normalization rejects unsupported fields and impossible dates', () => {

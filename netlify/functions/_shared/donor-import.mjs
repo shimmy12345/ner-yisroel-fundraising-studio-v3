@@ -96,7 +96,7 @@ export function mergeForUpsert(importRows, existingRows = []) {
     const existing = existingByCode.get(item.data.donor_code);
     if (existing) updated += 1;
     else inserted += 1;
-    const merged = existing ? { ...existing } : {};
+    const merged = existing ? { ...existing } : { is_archived: false };
     for (const [field, value] of Object.entries(item.data)) {
       if (value !== null) merged[field] = value;
     }
