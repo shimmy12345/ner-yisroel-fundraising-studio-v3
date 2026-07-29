@@ -8,6 +8,7 @@ import {
   validateDonorRows
 } from '../public/donor-import.js';
 import {
+  importRowsForOwner,
   mergeForUpsert,
   normalizeImportRows
 } from '../netlify/functions/_shared/donor-import.mjs';
@@ -98,6 +99,18 @@ test('calculates inserted versus updated counts from existing donor codes', () =
   assert.equal(merged.updated, 1);
   assert.equal(merged.rows.find(row => row.data.donor_code === 'NEW').data.is_archived, false);
   assert.equal('is_archived' in merged.rows.find(row => row.data.donor_code === 'EXISTING').data, false);
+});
+
+test('adds the authenticated owner only after CSV normalization', () => {
+  const normalized = normalizeImportRows([
+    { row_number: 2, donor_code: 'SHARED-CODE', household_name: 'Current user donor' }
+  ]);
+  const owned = importRowsForOwner(normalized.rows, 'current-auth-user');
+  assert.deepEqual(owned[0].data, {
+    donor_code: 'SHARED-CODE',
+    household_name: 'Current user donor',
+    owner_user_id: 'current-auth-user'
+  });
 });
 
 test('server normalization rejects unsupported fields and impossible dates', () => {

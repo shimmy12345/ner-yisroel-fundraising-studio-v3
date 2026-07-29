@@ -74,7 +74,8 @@ test('donor profile introduces no URL routing or Netlify Function', async () => 
   assert.deepEqual(migrations.sort(), [
     '20260722_knowledge_base_uploads.sql',
     '20260729_crm_donor_archive.sql',
-    '20260729_donor_activity_timeline.sql'
+    '20260729_donor_activity_timeline.sql',
+    '20260729_per_user_data_isolation.sql'
   ]);
   assert.deepEqual(functions, [
     'generate.mjs',

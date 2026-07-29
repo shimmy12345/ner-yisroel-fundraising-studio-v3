@@ -9,9 +9,14 @@
 - [ ] Add `OPENAI_API_KEY` and optional `OPENAI_MODEL` to Functions only.
 - [ ] Add `SUPABASE_SERVICE_ROLE_KEY` to Functions only for authenticated `crm_donors` imports.
 - [ ] Confirm `SUPABASE_SERVICE_ROLE_KEY` is absent from Builds, browser assets, and `runtime-config.js`.
-- [ ] Confirm `crm_donors.donor_code` has a unique constraint or unique index required by upsert.
+- [ ] Before migration, identify the existing `crm_donors.donor_code` uniqueness rule that the isolation migration will replace.
+- [ ] Replace `YOUR_EXISTING_AUTH_USER_UUID` in `supabase/migrations/20260729_per_user_data_isolation.sql` with the intended production Auth user UUID.
+- [ ] Run the per-user isolation migration after the CRM archive and Activity Timeline migrations.
+- [ ] Confirm every donor and activity has an owner and no activity owner differs from its donor owner.
+- [ ] Confirm `crm_donors_owner_donor_code_key` uniquely covers `(owner_user_id, donor_code)` and no global donor-code uniqueness rule remains.
 - [ ] Run `npm test` and `npm run build`.
 - [ ] Test TXT, CSV, PDF, and DOCX uploads with two different user accounts.
 - [ ] Test search, preview, favorite, original download, delete, and AI Knowledge Base context.
 - [ ] Import a CSV containing one new and one existing donor code; confirm inserted/updated counts and blank-field preservation.
+- [ ] Test CRM isolation with two Auth users, including account switching in one browser and direct REST requests.
 - [ ] Download rejected rows and confirm the CSV contains `import_error`.

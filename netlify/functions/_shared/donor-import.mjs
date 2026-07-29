@@ -104,3 +104,15 @@ export function mergeForUpsert(importRows, existingRows = []) {
   });
   return { rows, inserted, updated };
 }
+
+export function importRowsForOwner(rows = [], ownerUserId) {
+  const owner = String(ownerUserId || '').trim();
+  if (!owner) throw new Error('An authenticated import owner is required.');
+  return rows.map(item => ({
+    ...item,
+    data: {
+      ...item.data,
+      owner_user_id: owner
+    }
+  }));
+}
