@@ -39,6 +39,10 @@ import {
   normalizeActivityPayload,
   toDateTimeLocalValue
 } from './donor-activities.js';
+import {
+  buildDashboardViewModel,
+  sampleDashboardViewModel
+} from './dashboard.js';
 
 const cfg = window.RUNTIME_CONFIG || {};
 const $ = id => document.getElementById(id);
@@ -90,6 +94,9 @@ let donorActivityRequestId = 0;
 let activityModalRecord = null;
 let activityModalReturnFocus = null;
 let userScopeVersion = 0;
+let dashboardRequestId = 0;
+let dashboardLoadedAt = 0;
+let dashboardLoadedForUser = null;
 
 function resetUserScopedState() {
   userScopeVersion += 1;
@@ -112,6 +119,9 @@ function resetUserScopedState() {
   donorActivityRequestId += 1;
   activityModalRecord = null;
   activityModalReturnFocus = null;
+  dashboardRequestId += 1;
+  dashboardLoadedAt = 0;
+  dashboardLoadedForUser = null;
 
   $('userEmail').textContent = '';
   $('userAvatar').textContent = '';
@@ -130,6 +140,8 @@ function resetUserScopedState() {
   $('donorProfileState').innerHTML = '';
   $('knowledgeList').innerHTML = '';
   $('historyList').innerHTML = '';
+  $('dashboardContent').classList.add('hidden');
+  $('dashboardStatus').classList.remove('hidden');
   $('output').textContent = '';
   $('output').classList.add('hidden');
   $('resultEmpty').classList.remove('hidden');
@@ -281,10 +293,160 @@ function showPanel(name) {
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === name));
   $('pageTitle').textContent = metadata.title;
   $('pageSubtitle').textContent = metadata.subtitle;
+  if (name === 'dashboard') loadDashboard();
   if (name === 'knowledge') loadKnowledge();
   if (name === 'donors') loadDonors();
   if (name === 'history') loadHistory();
 }
+
+function dashboardIcon(name) {
+  const icons = {
+    giving: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M17 6.2c-.9-1.2-2.4-2-4.2-2H10a3.5 3.5 0 0 0 0 7h4a3.5 3.5 0 0 1 0 7h-3c-1.9 0-3.5-.8-4.5-2.2"/></svg>',
+    donors: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 20v-2.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V20M16 5.5a3 3 0 0 1 0 5.8M17 14a4 4 0 0 1 3.5 4v2"/></svg>',
+    tasks: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="m8 9 1.5 1.5L12 8M14 9h3M8 15l1.5 1.5L12 14M14 15h3"/></svg>',
+    gift: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h18v12H3zM2 5h20v4H2zM12 5v16M12 5H8.5a2.5 2.5 0 1 1 2.2-3.7L12 5Zm0 0h3.5a2.5 2.5 0 1 0-2.2-3.7L12 5Z"/></svg>'
+  };
+  return icons[name] || icons.tasks;
+}
+
+function dashboardEmpty(title, message) {
+  return `<div class="dashboard-empty"><strong>${esc(title)}</strong><span>${esc(message)}</span></div>`;
+}
+
+function renderDashboard(viewModel, errors = []) {
+  $('dashboardStatus').classList.add('hidden');
+  $('dashboardContent').classList.remove('hidden');
+  const notice = $('dashboardNotice');
+  if (viewModel.isSample) {
+    notice.innerHTML = '<strong>Example view</strong><span>Live workspace data is temporarily unavailable. The items below are clearly marked examples.</span>';
+    notice.className = 'dashboard-notice sample';
+  } else if (errors.length) {
+    notice.innerHTML = `<strong>Some data could not be loaded</strong><span>${esc(errors.join(' '))} Available workspace information is shown below.</span>`;
+    notice.className = 'dashboard-notice warning';
+  } else {
+    notice.className = 'dashboard-notice hidden';
+    notice.innerHTML = '';
+  }
+
+  $('dashboardKpis').innerHTML = viewModel.kpis.map(kpi => `
+    <article class="dashboard-kpi">
+      <span class="dashboard-kpi-icon ${esc(kpi.tone)}">${dashboardIcon(kpi.icon)}</span>
+      <div class="dashboard-kpi-heading"><span>${esc(kpi.title)}</span>${viewModel.isSample ? '<em>Example</em>' : ''}</div>
+      <strong>${esc(kpi.value)}</strong>
+      <small class="${esc(kpi.tone)}">${esc(kpi.trend)}</small>
+    </article>`).join('');
+
+  $('dashboardPriorityCount').textContent = viewModel.priorities.length
+    ? `${viewModel.priorities.length} item${viewModel.priorities.length === 1 ? '' : 's'}`
+    : 'All clear';
+  $('dashboardPriorityList').innerHTML = viewModel.priorities.length
+    ? viewModel.priorities.map(item => `
+      <label class="dashboard-task ${esc(item.kind)}">
+        <input type="checkbox" aria-label="Mark ${esc(item.title)} complete">
+        <span class="dashboard-check" aria-hidden="true"></span>
+        <span class="dashboard-task-copy">
+          <strong>${esc(item.title)}</strong>
+          <small>${esc(item.donor)} · ${esc(item.detail)}</small>
+        </span>
+        <time>${esc(item.dueLabel)}</time>
+      </label>`).join('')
+    : dashboardEmpty('Nothing needs attention today', 'Your recorded follow-ups and donor actions are up to date.');
+
+  $$('#dashboardPriorityList .dashboard-task input').forEach(input => {
+    input.onchange = () => {
+      input.closest('.dashboard-task').classList.toggle('complete', input.checked);
+      if (input.checked) toast('Marked complete for this session');
+    };
+  });
+
+  $('dashboardUpcomingList').innerHTML = viewModel.upcoming.length
+    ? viewModel.upcoming.map(item => `
+      <article class="dashboard-upcoming-item">
+        <span class="dashboard-date">${esc(item.dueLabel)}</span>
+        <div><strong>${esc(item.title)}</strong><small>${esc(item.donor)} · ${esc(item.detail)}</small></div>
+      </article>`).join('')
+    : dashboardEmpty('No scheduled follow-ups', 'Future donor actions and meetings will appear here.');
+
+  $('dashboardActivityList').innerHTML = viewModel.recentActivity.length
+    ? viewModel.recentActivity.map(item => `
+      <article class="dashboard-timeline-item">
+        <span class="dashboard-timeline-marker ${esc(item.type)}" aria-hidden="true"></span>
+        <div><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></div>
+        <time datetime="${esc(item.occurredAt)}">${esc(formatDate(item.occurredAt))}</time>
+      </article>`).join('')
+    : dashboardEmpty('No recent activity', 'New donors, interactions, knowledge, and AI generations will appear here.');
+
+  const intelligenceLabel = document.querySelector('.dashboard-intelligence-label');
+  intelligenceLabel.textContent = viewModel.isSample ? 'Example data' : 'Calculated from live data';
+  $('dashboardInsightList').innerHTML = viewModel.insights.map(insight => `
+    <article class="dashboard-insight ${esc(insight.tone)}">
+      <strong>${esc(insight.value)}</strong>
+      <div><h4>${esc(insight.title)}</h4><p>${esc(insight.detail)}</p></div>
+    </article>`).join('');
+}
+
+async function loadDashboard({ force = false } = {}) {
+  const userId = session?.user?.id;
+  const scopeVersion = userScopeVersion;
+  if (!userId) return;
+  const hour = new Date().getHours();
+  $('dashboardGreeting').textContent = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const cacheIsFresh = dashboardLoadedForUser === userId && Date.now() - dashboardLoadedAt < 60_000;
+  if (!force && cacheIsFresh) return;
+
+  const requestId = ++dashboardRequestId;
+  $('dashboardStatus').classList.remove('hidden');
+  $('dashboardContent').classList.add('hidden');
+  $('dashboardStatus').innerHTML = '<span class="dashboard-loader" aria-hidden="true"></span><div><strong>Preparing your command center</strong><span>Loading current donor and workspace activity.</span></div>';
+
+  const [donorsResult, activitiesResult, knowledgeResult, generationsResult] = await Promise.all([
+    supabase.from('crm_donors').select(CRM_DONOR_FIELDS.join(',')).eq('owner_user_id', userId),
+    supabase.from('donor_activities').select(ACTIVITY_FIELDS.join(',')).eq('owner_user_id', userId).order('occurred_at', { ascending: false }).limit(100),
+    supabase.from('knowledge_documents').select('id,title,source_type,created_at,updated_at').eq('user_id', userId).order('updated_at', { ascending: false }).limit(50),
+    supabase.from('generations').select('id,title,mode,created_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(50)
+  ]);
+
+  if (requestId !== dashboardRequestId || scopeVersion !== userScopeVersion || session?.user?.id !== userId) return;
+  const results = [donorsResult, activitiesResult, knowledgeResult, generationsResult];
+  const labels = ['Donor data is unavailable.', 'Interaction data is unavailable.', 'Knowledge activity is unavailable.', 'AI history is unavailable.'];
+  const errors = results.map((result, index) => result.error ? labels[index] : '').filter(Boolean);
+  const allUnavailable = results.every(result => result.error);
+  const viewModel = allUnavailable
+    ? sampleDashboardViewModel()
+    : buildDashboardViewModel({
+        donors: donorsResult.data || [],
+        activities: activitiesResult.data || [],
+        knowledge: knowledgeResult.data || [],
+        generations: generationsResult.data || []
+      });
+
+  renderDashboard(viewModel, errors);
+  dashboardLoadedAt = Date.now();
+  dashboardLoadedForUser = userId;
+}
+
+$('refreshDashboard').onclick = () => loadDashboard({ force: true });
+$$('[data-dashboard-action]').forEach(button => {
+  button.onclick = () => {
+    const action = button.dataset.dashboardAction;
+    if (action === 'draft-email') {
+      showPanel('studio');
+      $('mode').value = 'writer';
+      $('prompt').focus();
+    } else if (action === 'add-donor') {
+      showPanel('donors');
+      openDonor(null);
+    } else if (action === 'log-interaction') {
+      showPanel('donors');
+      toast('Open a donor profile to log an interaction');
+    } else if (action === 'upload-knowledge') {
+      showPanel('knowledge');
+      $('knowledgeFiles').click();
+    } else if (action === 'open-studio') {
+      showPanel('studio');
+    }
+  };
+});
 
 function showDonorProfileState(title, message, action = '') {
   $('donorProfileContent').classList.add('hidden');
