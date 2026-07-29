@@ -10,7 +10,9 @@ import {
   CRM_DONOR_FIELDS,
   DONORS_PER_PAGE,
   UNASSIGNED_FILTER,
+  donorDisplayName,
   donorMetrics,
+  donorSecondaryHousehold,
   filterAndSortDonors,
   filterOptions,
   formatCrmDate,
@@ -436,12 +438,6 @@ function renderDonorMetrics() {
     <article><span>Not Contacted in 90+ Days</span><strong>${metrics.notContactedNinetyDays.toLocaleString()}</strong><small>${metrics.missingContactDates.toLocaleString()} without a contact date</small></article>`;
 }
 
-function donorDisplayName(row) {
-  return row.household_name?.trim()
-    || [row.first_name, row.last_name].filter(Boolean).join(' ').trim()
-    || 'Unnamed household';
-}
-
 function donorLoadErrorMessage(error) {
   const permissionError = error?.code === '42501' || /row.level|permission|policy|rls/i.test(error?.message || '');
   return permissionError
@@ -451,6 +447,8 @@ function donorLoadErrorMessage(error) {
 
 function donorCard(row) {
   const location = [row.city, row.state].filter(Boolean).join(', ') || 'Location not recorded';
+  const displayName = donorDisplayName(row);
+  const secondaryHousehold = donorSecondaryHousehold(row);
   const lifetimeGiving = formatCurrency(row.lifetime_giving);
   const lastGiftAmount = formatCurrency(row.last_gift_amount);
   const lastGiftDate = formatCrmDate(row.last_gift_date);
@@ -467,19 +465,32 @@ function donorCard(row) {
   const article = document.createElement('article');
   article.className = `donor-card${overdue ? ' has-overdue-action' : ''}${dueSoon ? ' has-due-soon-action' : ''}`;
   article.innerHTML = `
-    <div class="donor-card-heading">
-      <div><div class="row donor-title-row"><h3>${esc(donorDisplayName(row))}</h3><span class="stage-badge">${esc(row.stage?.trim() || 'No stage')}</span></div><p>${esc(row.donor_code || 'No donor code')} · ${esc(location)}</p></div>
-      <button class="secondary edit-donor" aria-label="Edit ${esc(donorDisplayName(row))}">Edit</button>
-    </div>
-    <div class="donor-flags">${statusFlags}</div>
-    <dl class="donor-details">
-      <div><dt>Assigned officer</dt><dd>${esc(row.assigned_officer?.trim() || 'Unassigned')}</dd></div>
-      <div><dt>Lifetime giving</dt><dd>${lifetimeGiving ? esc(lifetimeGiving) : 'No giving recorded'}</dd></div>
-      <div><dt>Last gift</dt><dd>${lastGiftAmount ? esc(lastGiftAmount) : 'No gift amount recorded'}${lastGiftDate ? ` · ${esc(lastGiftDate)}` : ''}</dd></div>
-      <div><dt>Last contact</dt><dd>${lastContactDate ? esc(lastContactDate) : 'No contact recorded'}</dd></div>
-      <div class="next-action-detail"><dt>Next action</dt><dd>${esc(row.next_action?.trim() || 'No next action')}${nextActionDate ? ` · ${esc(nextActionDate)}` : ''}</dd></div>
-    </dl>`;
-  article.querySelector('.edit-donor').onclick = () => openDonor(row);
+    <a class="donor-card-open" href="#" aria-label="Open ${esc(displayName)}">
+      <div class="donor-card-heading">
+        <div class="donor-identity">
+          <h3>${esc(displayName)}</h3>
+          ${secondaryHousehold ? `<p class="donor-household">${esc(secondaryHousehold)}</p>` : ''}
+          <p><strong>Donor Code</strong> ${esc(row.donor_code || 'No donor code')}</p>
+          <p>${esc(location)}</p>
+        </div>
+      </div>
+      <div class="donor-stage-row"><span class="stage-badge">${esc(row.stage?.trim() || 'No stage')}</span></div>
+      <div class="donor-flags">${statusFlags}</div>
+      <dl class="donor-details">
+        <div><dt>Assigned officer</dt><dd>${esc(row.assigned_officer?.trim() || 'Unassigned')}</dd></div>
+        <div><dt>Lifetime giving</dt><dd>${lifetimeGiving ? esc(lifetimeGiving) : 'No giving recorded'}</dd></div>
+        <div><dt>Last gift</dt><dd>${lastGiftAmount ? esc(lastGiftAmount) : 'No gift amount recorded'}${lastGiftDate ? ` · ${esc(lastGiftDate)}` : ''}</dd></div>
+        <div><dt>Last contact</dt><dd>${lastContactDate ? esc(lastContactDate) : 'No contact recorded'}</dd></div>
+        <div class="next-action-detail"><dt>Next action</dt><dd>${esc(row.next_action?.trim() || 'No next action')}${nextActionDate ? ` · ${esc(nextActionDate)}` : ''}</dd></div>
+      </dl>
+    </a>
+    <button class="edit-donor" aria-label="Edit ${esc(displayName)}" title="Edit donor"><span aria-hidden="true">✎</span></button>`;
+  article.onclick = () => openDonor(row);
+  article.querySelector('.donor-card-open').onclick = event => event.preventDefault();
+  article.querySelector('.edit-donor').onclick = event => {
+    event.stopPropagation();
+    openDonor(row);
+  };
   return article;
 }
 
