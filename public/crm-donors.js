@@ -145,6 +145,35 @@ function compareDateTime(left, right, direction = 'desc') {
   return direction === 'asc' ? a - b : b - a;
 }
 
+function compareFundraisingName(left, right) {
+  const leftLastName = text(left?.last_name);
+  const rightLastName = text(right?.last_name);
+  const leftPrimary = leftLastName || text(left?.household_name) || text(left?.donor_code);
+  const rightPrimary = rightLastName || text(right?.household_name) || text(right?.donor_code);
+  const primaryResult = compareText(leftPrimary, rightPrimary);
+  if (primaryResult) return primaryResult;
+  if (leftLastName && rightLastName) {
+    const firstNameResult = compareText(left?.first_name, right?.first_name);
+    if (firstNameResult) return firstNameResult;
+  }
+  return compareText(left?.household_name, right?.household_name)
+    || compareText(left?.donor_code, right?.donor_code);
+}
+
+export function donorDisplayName(row = {}) {
+  const lastName = text(row.last_name);
+  const firstName = text(row.first_name);
+  if (lastName && firstName) return `${lastName}, ${firstName}`;
+  return lastName || firstName || text(row.household_name) || 'Unnamed donor';
+}
+
+export function donorSecondaryHousehold(row = {}) {
+  const householdName = text(row.household_name);
+  return householdName && normalized(householdName) !== normalized(donorDisplayName(row))
+    ? householdName
+    : '';
+}
+
 export function formatCurrency(value) {
   if (value === null || value === undefined || value === '') return '';
   const number = Number(value);
@@ -194,7 +223,7 @@ export function filterAndSortDonors(rows = [], {
   search = '',
   stage = '',
   officer = '',
-  sort = 'household-asc'
+  sort = 'last-name-asc'
 } = {}) {
   const query = normalized(search);
   const filtered = rows.filter(row => {
@@ -211,7 +240,8 @@ export function filterAndSortDonors(rows = [], {
   const sorted = [...filtered];
   sorted.sort((left, right) => {
     let result;
-    if (sort === 'household-desc') result = compareTextDescending(left.household_name, right.household_name);
+    if (sort === 'last-name-asc') result = compareFundraisingName(left, right);
+    else if (sort === 'household-desc') result = compareTextDescending(left.household_name, right.household_name);
     else if (sort === 'lifetime-desc') result = compareNumber(left.lifetime_giving, right.lifetime_giving, 'desc');
     else if (sort === 'last-gift-newest') result = compareDate(left.last_gift_date, right.last_gift_date, 'desc');
     else if (sort === 'last-contact-oldest') result = compareDate(left.last_contact_date, right.last_contact_date, 'asc');

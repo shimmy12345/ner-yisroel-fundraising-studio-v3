@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   CRM_DONOR_FIELDS,
   UNASSIGNED_FILTER,
+  donorDisplayName,
   donorMetrics,
+  donorSecondaryHousehold,
   filterAndSortDonors,
   formatCrmDate,
   formatCurrency,
@@ -96,6 +98,28 @@ test('sorts donors with missing values last', () => {
   assert.deepEqual(filterAndSortDonors(donors, { sort: 'recently-updated' }).map(row => row.donor_code), ['0001', '0002', '0003']);
   const withMissingName = [...donors, { donor_code: '0004', household_name: null }];
   assert.equal(filterAndSortDonors(withMissingName, { sort: 'household-desc' }).at(-1).donor_code, '0004');
+});
+
+test('defaults to last name and falls back to household name then donor code', () => {
+  const rows = [
+    { donor_code: '0005', household_name: 'Smith Household', first_name: 'Zoe', last_name: 'Smith' },
+    { donor_code: '0004', household_name: 'Smith Family', first_name: 'Aaron', last_name: 'Smith' },
+    { donor_code: '0003', household_name: 'Brown Family', first_name: '', last_name: '' },
+    { donor_code: '0002', household_name: '', first_name: '', last_name: '' }
+  ];
+  assert.deepEqual(filterAndSortDonors(rows).map(row => row.donor_code), ['0002', '0003', '0004', '0005']);
+});
+
+test('formats compact donor names and preserves a distinct household line', () => {
+  assert.equal(donorDisplayName({ first_name: 'Ari', last_name: 'Cohen' }), 'Cohen, Ari');
+  assert.equal(donorDisplayName({ first_name: 'Ari' }), 'Ari');
+  assert.equal(donorDisplayName({ household_name: 'Cohen Family' }), 'Cohen Family');
+  assert.equal(donorSecondaryHousehold({
+    first_name: 'Ari',
+    last_name: 'Cohen',
+    household_name: 'Cohen Family'
+  }), 'Cohen Family');
+  assert.equal(donorSecondaryHousehold({ household_name: 'Cohen Family' }), '');
 });
 
 test('formats CRM currency and dates without inventing missing values', () => {

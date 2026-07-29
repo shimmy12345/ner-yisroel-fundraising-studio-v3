@@ -34,6 +34,7 @@ test('visible donor dashboard and CRUD use crm_donors without legacy donor queri
   assert.match(html, /id="donorSearch"/);
   assert.match(html, /id="donorStageFilter"/);
   assert.match(html, /id="donorOfficerFilter"/);
+  assert.match(html, /id="donorSort"[\s\S]*<option value="last-name-asc">Last Name \(A–Z\)<\/option>/);
   assert.match(app, /permanent deletion is intentionally disabled/);
 });
 
