@@ -45,6 +45,28 @@ const $ = id => document.getElementById(id);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const SUPPORTED_FILE = /\.(txt|csv|pdf|docx)$/i;
+const PANEL_META = {
+  dashboard: {
+    title: 'Dashboard',
+    subtitle: 'Fundraising Command Center'
+  },
+  studio: {
+    title: 'AI Studio',
+    subtitle: 'AI-Powered Fundraising Communications'
+  },
+  knowledge: {
+    title: 'Knowledge Base',
+    subtitle: 'Private Institutional Knowledge'
+  },
+  donors: {
+    title: 'Donors',
+    subtitle: 'Relationship Management'
+  },
+  history: {
+    title: 'History',
+    subtitle: 'Previous AI Conversations'
+  }
+};
 let supabase;
 let session;
 let authMode = 'signin';
@@ -92,6 +114,7 @@ function resetUserScopedState() {
   activityModalReturnFocus = null;
 
   $('userEmail').textContent = '';
+  $('userAvatar').textContent = '';
   $('donorSearch').value = '';
   $('donorStatusFilter').value = DONOR_STATUS.ACTIVE;
   $('donorStageFilter').innerHTML = '<option value="">All stages</option>';
@@ -211,8 +234,10 @@ function renderAuth() {
   $('authView').classList.toggle('hidden', signedIn);
   $('appView').classList.toggle('hidden', !signedIn);
   if (signedIn) {
-    $('userEmail').textContent = session.user.email;
-    showPanel('studio');
+    const email = session.user.email || '';
+    $('userEmail').textContent = email;
+    $('userAvatar').textContent = email.slice(0, 1).toUpperCase();
+    showPanel('dashboard');
   }
 }
 
@@ -249,10 +274,13 @@ $('signOut').onclick = () => supabase.auth.signOut();
 $$('.nav').forEach(button => { button.onclick = () => showPanel(button.dataset.panel); });
 
 function showPanel(name) {
+  const metadata = PANEL_META[name];
+  if (!metadata) return;
   $$('.panel').forEach(panel => panel.classList.add('hidden'));
   $(`${name}Panel`).classList.remove('hidden');
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === name));
-  $('pageTitle').textContent = { studio: 'AI Studio', knowledge: 'Knowledge Base', donors: 'Donors', history: 'History' }[name];
+  $('pageTitle').textContent = metadata.title;
+  $('pageSubtitle').textContent = metadata.subtitle;
   if (name === 'knowledge') loadKnowledge();
   if (name === 'donors') loadDonors();
   if (name === 'history') loadHistory();
@@ -394,6 +422,7 @@ function openDonorProfile(donorId) {
   $('donorProfilePanel').classList.remove('hidden');
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
   $('pageTitle').textContent = 'Donor Profile';
+  $('pageSubtitle').textContent = 'Relationship Management';
   window.scrollTo({ top: 0, behavior: 'auto' });
   loadDonorProfile(donorId);
 }
@@ -405,6 +434,7 @@ function returnToDonors() {
   $('donorsPanel').classList.remove('hidden');
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
   $('pageTitle').textContent = 'Donors';
+  $('pageSubtitle').textContent = PANEL_META.donors.subtitle;
   requestAnimationFrame(() => window.scrollTo({ top: donorDashboardScrollPosition, behavior: 'auto' }));
 }
 
