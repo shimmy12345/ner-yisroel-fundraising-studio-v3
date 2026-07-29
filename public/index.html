@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Ner Yisroel Fundraising Studio</title>
-  <link rel="icon" href="favicon.svg">
+  <link rel="icon" type="image/png" href="NIRC_logo.png">
   <link rel="stylesheet" href="styles.css">
   <script src="runtime-config.js"></script>
   <script src="vendor/papaparse.min.js"></script>
@@ -13,7 +13,7 @@
 <body>
   <div id="authView" class="auth-wrap">
     <div class="auth-card">
-      <div class="logo">נר</div>
+      <img class="auth-logo" src="NIRC_logo.png" alt="Ner Israel Rabbinical College">
       <p class="eyebrow">Yeshivas Ner Yisroel</p>
       <h1>Fundraising Studio</h1>
       <p class="muted">Private communications, knowledge, and donor context.</p>
@@ -26,20 +26,44 @@
   </div>
 
   <div id="appView" class="app hidden">
-    <aside>
-      <div class="brand"><div class="logo small">נר</div><div><strong>Ner Yisroel</strong><span>Fundraising Studio</span></div></div>
-      <nav aria-label="Workspace">
-        <button class="nav active" data-panel="studio">✦ AI Studio</button>
-        <button class="nav" data-panel="knowledge">▤ Knowledge Base</button>
-        <button class="nav" data-panel="donors">◎ Donors</button>
-        <button class="nav" data-panel="history">↺ History</button>
+    <aside class="app-sidebar">
+      <div class="brand">
+        <img class="sidebar-logo" src="NIRC_logo.png" alt="Ner Israel Rabbinical College">
+        <span>Fundraising Studio</span>
+      </div>
+      <nav class="workspace-nav" aria-label="Workspace">
+        <button class="nav active" data-panel="dashboard"><span class="nav-icon" aria-hidden="true">⌂</span><span>Dashboard</span></button>
+        <button class="nav" data-panel="studio"><span class="nav-icon" aria-hidden="true">✦</span><span>AI Studio</span></button>
+        <button class="nav" data-panel="knowledge"><span class="nav-icon" aria-hidden="true">▤</span><span>Knowledge Base</span></button>
+        <button class="nav" data-panel="donors"><span class="nav-icon" aria-hidden="true">◎</span><span>Donors</span></button>
+        <button class="nav" data-panel="history"><span class="nav-icon" aria-hidden="true">↺</span><span>History</span></button>
       </nav>
-      <div class="aside-bottom"><span id="userEmail"></span><button id="signOut" class="secondary">Sign out</button></div>
     </aside>
 
-    <main>
-      <header><div><p class="eyebrow">Private workspace</p><h1 id="pageTitle">AI Studio</h1></div><div class="status">● Connected</div></header>
-      <section id="studioPanel" class="panel">
+    <main class="workspace">
+      <header class="workspace-header">
+        <div class="page-heading">
+          <h1 id="pageTitle">Dashboard</h1>
+          <p id="pageSubtitle">Fundraising Command Center</p>
+        </div>
+        <div class="header-account">
+          <span class="status"><span aria-hidden="true">●</span> Connected</span>
+          <span id="userAvatar" class="user-avatar" aria-hidden="true"></span>
+          <span id="userEmail" class="user-email"></span>
+          <button id="signOut" class="account-sign-out">Sign out</button>
+        </div>
+      </header>
+
+      <section id="dashboardPanel" class="panel dashboard-panel">
+        <div class="dashboard-placeholder card">
+          <div class="dashboard-placeholder-icon" aria-hidden="true">⌂</div>
+          <p class="eyebrow">Phase 1</p>
+          <h2>Dashboard coming soon</h2>
+          <p>Fundraising insights and priorities will live here in the next phase.</p>
+        </div>
+      </section>
+
+      <section id="studioPanel" class="panel hidden">
         <div class="hero"><div><p class="eyebrow light">Fundraising communications</p><h2>Write with greater clarity, donor focus, and Ner Yisroel authenticity.</h2></div></div>
         <div class="grid two">
           <div class="card">
@@ -60,7 +84,7 @@
       </section>
 
       <section id="knowledgePanel" class="panel hidden">
-        <div class="row between knowledge-heading"><div><h2>Knowledge Base</h2><p class="muted">Upload private source material. Extracted text is available to the AI Studio automatically.</p></div><button id="newKnowledge" class="secondary">Add text manually</button></div>
+        <div class="row end panel-actions"><button id="newKnowledge" class="secondary">Add text manually</button></div>
         <div id="uploadZone" class="upload-zone" tabindex="0" role="button" aria-label="Upload Knowledge Base documents">
           <input id="knowledgeFiles" type="file" multiple accept=".txt,.csv,.pdf,.docx">
           <div class="upload-icon">⇧</div>
@@ -75,10 +99,7 @@
       </section>
 
       <section id="donorsPanel" class="panel hidden">
-        <div class="row between donor-heading">
-          <div><h2>Donor CRM</h2><p class="muted">Relationship context, giving history, and next actions in one workspace.</p></div>
-          <div class="row donor-actions"><button id="importDonors" class="secondary">Import CSV</button><button id="newDonor" class="primary">New donor</button></div>
-        </div>
+        <div class="row end panel-actions donor-actions"><button id="importDonors" class="secondary">Import CSV</button><button id="newDonor" class="primary">New donor</button></div>
         <div id="donorKpis" class="donor-kpis" aria-label="Donor summary"></div>
         <div class="donor-toolbar">
           <label>Status<select id="donorStatusFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label>
@@ -108,7 +129,7 @@
         <div id="donorProfileState" class="donor-profile-state" role="status" aria-live="polite"></div>
         <div id="donorProfileContent" class="hidden"></div>
       </section>
-      <section id="historyPanel" class="panel hidden"><div><h2>Generation History</h2><p class="muted">Past reviews and drafts saved automatically.</p></div><div id="historyList" class="list"></div></section>
+      <section id="historyPanel" class="panel hidden"><div id="historyList" class="list"></div></section>
     </main>
   </div>
 
