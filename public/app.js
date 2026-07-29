@@ -67,6 +67,57 @@ let donorActivityLoadError = false;
 let donorActivityRequestId = 0;
 let activityModalRecord = null;
 let activityModalReturnFocus = null;
+let userScopeVersion = 0;
+
+function resetUserScopedState() {
+  userScopeVersion += 1;
+  currentGeneration = null;
+  modalType = null;
+  modalRecord = null;
+  knowledgeRows = [];
+  donorImport = {};
+  crmDonorRows = [];
+  crmDonorPage = 1;
+  crmDonorLoadError = null;
+  donorProfileRecord = null;
+  donorDashboardScrollPosition = 0;
+  donorProfileRequestId += 1;
+  donorActivities = [];
+  donorActivityView = 'active';
+  donorActivityHasMore = false;
+  donorActivityLoading = false;
+  donorActivityLoadError = false;
+  donorActivityRequestId += 1;
+  activityModalRecord = null;
+  activityModalReturnFocus = null;
+
+  $('userEmail').textContent = '';
+  $('donorSearch').value = '';
+  $('donorStatusFilter').value = DONOR_STATUS.ACTIVE;
+  $('donorStageFilter').innerHTML = '<option value="">All stages</option>';
+  $('donorOfficerFilter').innerHTML = '<option value="">All officers</option>';
+  $('donorSort').value = 'last-name-asc';
+  $('donorList').innerHTML = '';
+  $('donorKpis').innerHTML = '';
+  $('donorCount').textContent = '';
+  $('donorStatus').innerHTML = '';
+  $('donorPagination').classList.add('hidden');
+  $('donorProfileContent').innerHTML = '';
+  $('donorProfileContent').classList.add('hidden');
+  $('donorProfileState').innerHTML = '';
+  $('knowledgeList').innerHTML = '';
+  $('historyList').innerHTML = '';
+  $('output').textContent = '';
+  $('output').classList.add('hidden');
+  $('resultEmpty').classList.remove('hidden');
+  $('copyOutput').disabled = true;
+  $('saveFavorite').disabled = true;
+  $('modal').classList.add('hidden');
+  $('archiveConfirmModal').classList.add('hidden');
+  $('activityModal').classList.add('hidden');
+  $('activityArchiveConfirmModal').classList.add('hidden');
+  $('donorImportWizard').classList.add('hidden');
+}
 
 function toast(message) {
   const element = $('toast');
@@ -146,6 +197,9 @@ async function boot() {
   const { data } = await supabase.auth.getSession();
   session = data.session;
   supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const previousUserId = session?.user?.id || null;
+    const nextUserId = nextSession?.user?.id || null;
+    if (previousUserId !== nextUserId) resetUserScopedState();
     session = nextSession;
     renderAuth();
   });
@@ -298,6 +352,7 @@ function renderDonorProfile(row) {
 
 async function loadDonorProfile(donorId, { showLoading = true } = {}) {
   const requestId = ++donorProfileRequestId;
+  const userId = session?.user?.id;
   if (!session) {
     showDonorProfileState('Sign in required', 'Sign in to view this donor.', 'Back to Donors');
     return;
@@ -306,9 +361,10 @@ async function loadDonorProfile(donorId, { showLoading = true } = {}) {
   const { data, error } = await supabase
     .from('crm_donors')
     .select(CRM_DONOR_FIELDS.join(','))
+    .eq('owner_user_id', userId)
     .eq('id', donorId)
     .maybeSingle();
-  if (requestId !== donorProfileRequestId) return;
+  if (requestId !== donorProfileRequestId || session?.user?.id !== userId) return;
   if (error) {
     const inaccessible = error.code === '42501' || /row.level|permission|policy|rls/i.test(error.message || '');
     showDonorProfileState(
@@ -423,6 +479,7 @@ function renderDonorActivities() {
 async function loadDonorActivities({ reset = false } = {}) {
   if (!donorProfileRecord?.id || !$('donorActivityList')) return;
   const requestId = ++donorActivityRequestId;
+  const userId = session?.user?.id;
   if (reset) {
     donorActivities = [];
     donorActivityHasMore = false;
@@ -434,11 +491,12 @@ async function loadDonorActivities({ reset = false } = {}) {
   const { data, error } = await supabase
     .from('donor_activities')
     .select(ACTIVITY_FIELDS.join(','))
+    .eq('owner_user_id', userId)
     .eq('donor_id', donorProfileRecord.id)
     .eq('is_archived', donorActivityView === 'archived')
     .order('occurred_at', { ascending: false })
     .range(from, from + ACTIVITY_PAGE_SIZE);
-  if (requestId !== donorActivityRequestId) return;
+  if (requestId !== donorActivityRequestId || session?.user?.id !== userId) return;
   donorActivityLoading = false;
   if (error) {
     donorActivityLoadError = true;
@@ -521,6 +579,7 @@ $('activityForm').onsubmit = async event => {
           .from('donor_activities')
           .update(payload)
           .eq('id', activityModalRecord.id)
+          .eq('owner_user_id', session.user.id)
           .eq('donor_id', donorProfileRecord.id)
       : supabase.from('donor_activities').insert(payload);
     const { error } = await query;
@@ -566,6 +625,7 @@ $('confirmArchiveActivity').onclick = async () => {
       .from('donor_activities')
       .update({ is_archived: !restoring })
       .eq('id', activityModalRecord.id)
+      .eq('owner_user_id', session.user.id)
       .eq('donor_id', donorProfileRecord.id);
     if (error) throw error;
     donorActivityView = 'active';
@@ -630,7 +690,11 @@ $('saveFavorite').onclick = async () => {
 };
 
 async function loadKnowledge() {
+  const userId = session?.user?.id;
+  const scopeVersion = userScopeVersion;
+  if (!userId) return;
   const { data, error } = await supabase.from('knowledge_documents').select('*').order('updated_at', { ascending: false });
+  if (scopeVersion !== userScopeVersion || session?.user?.id !== userId) return;
   if (error) return toast(error.message);
   knowledgeRows = data || [];
   renderKnowledge();
@@ -775,6 +839,9 @@ async function uploadKnowledgeFiles(files) {
 
 async function loadDonors({ background = false } = {}) {
   const list = $('donorList');
+  const userId = session?.user?.id;
+  const scopeVersion = userScopeVersion;
+  if (!userId) return;
   crmDonorLoadError = null;
   if (!background) {
     list.innerHTML = '<div class="donor-state"><strong>Loading donors…</strong><span>Retrieving the latest CRM records.</span></div>';
@@ -783,7 +850,9 @@ async function loadDonors({ background = false } = {}) {
   const { data, error } = await supabase
     .from('crm_donors')
     .select(CRM_DONOR_FIELDS.join(','))
+    .eq('owner_user_id', userId)
     .order('household_name', { ascending: true });
+  if (scopeVersion !== userScopeVersion || session?.user?.id !== userId) return;
   if (error) {
     crmDonorRows = [];
     crmDonorLoadError = error;
@@ -1132,6 +1201,9 @@ function renderDonorPreview() {
 
 async function runDonorImport() {
   const button = $('runDonorImport');
+  const importScopeVersion = userScopeVersion;
+  const importUserId = session?.user?.id;
+  if (!importUserId) return;
   const validRows = donorImport.validation.validRows;
   const rejectedRows = [...donorImport.validation.rejectedRows];
   const totals = { total_received: donorImport.validation.rows.length, inserted: 0, updated: 0, rejected: rejectedRows.length };
@@ -1144,6 +1216,7 @@ async function runDonorImport() {
       button.textContent = `Importing ${Math.min(index + chunk.length, validRows.length).toLocaleString()} of ${validRows.length.toLocaleString()}…`;
       try {
         const result = await api('/api/import-donors', { method: 'POST', body: JSON.stringify({ rows: chunk }) });
+        if (importScopeVersion !== userScopeVersion || session?.user?.id !== importUserId) return;
         totals.inserted += result.inserted;
         totals.updated += result.updated;
         totals.rejected += result.rejected;
@@ -1153,6 +1226,7 @@ async function runDonorImport() {
         totals.rejected += chunk.length;
       }
     }
+    if (importScopeVersion !== userScopeVersion || session?.user?.id !== importUserId) return;
     for (const failure of serverErrors) {
       const original = donorImport.validation.rows.find(row => row.rowNumber === failure.row);
       if (original) rejectedRows.push({ ...original, errors: [failure.error] });
@@ -1282,7 +1356,7 @@ $('saveModal').onclick = async () => {
         notes: $('dNotes').value,
       });
       const query = modalRecord
-        ? supabase.from('crm_donors').update(row).eq('id', modalRecord.id)
+        ? supabase.from('crm_donors').update(row).eq('id', modalRecord.id).eq('owner_user_id', session.user.id)
         : supabase.from('crm_donors').insert(row);
       const { error } = await query;
       if (error?.code === '23505' || /duplicate|unique.*donor_code/i.test(error?.message || '')) {
@@ -1343,7 +1417,8 @@ $('confirmArchiveDonor').onclick = async () => {
     const { error } = await supabase
       .from('crm_donors')
       .update(archiveDonorPayload(!restoring))
-      .eq('id', modalRecord.id);
+      .eq('id', modalRecord.id)
+      .eq('owner_user_id', session.user.id);
     if (error) throw error;
     $('archiveConfirmModal').classList.add('hidden');
     $('modal').classList.add('hidden');
@@ -1358,7 +1433,11 @@ $('confirmArchiveDonor').onclick = async () => {
 };
 
 async function loadHistory() {
+  const userId = session?.user?.id;
+  const scopeVersion = userScopeVersion;
+  if (!userId) return;
   const { data, error } = await supabase.from('generations').select('*').order('created_at', { ascending: false }).limit(100);
+  if (scopeVersion !== userScopeVersion || session?.user?.id !== userId) return;
   if (error) return toast(error.message);
   const list = $('historyList');
   list.innerHTML = data.length ? '' : '<div class="empty compact">No generations yet.</div>';
