@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  archiveDonorPayload,
   CRM_DONOR_FIELDS,
+  DONOR_STATUS,
   UNASSIGNED_FILTER,
   donorDisplayName,
   donorMetrics,
   donorSecondaryHousehold,
+  donorsForStatus,
   filterAndSortDonors,
   formatCrmDate,
   formatCurrency,
@@ -69,8 +72,60 @@ test('requests the complete CRM donor dashboard field set', () => {
     'home_phone', 'mobile_phone', 'address', 'city', 'state', 'zip', 'country',
     'assigned_officer', 'stage', 'lifetime_giving', 'last_gift_amount',
     'last_gift_date', 'last_contact_date', 'next_action', 'next_action_date',
-    'notes', 'created_at', 'updated_at'
+    'notes', 'is_archived', 'created_at', 'updated_at'
   ]);
+});
+
+test('defaults to active donors and supports archived and all status views', () => {
+  const rows = [
+    { donor_code: 'ACTIVE', household_name: 'Active Family', is_archived: false },
+    { donor_code: 'ARCHIVED', household_name: 'Archived Family', is_archived: true }
+  ];
+  assert.deepEqual(filterAndSortDonors(rows).map(row => row.donor_code), ['ACTIVE']);
+  assert.deepEqual(
+    filterAndSortDonors(rows, { status: DONOR_STATUS.ARCHIVED }).map(row => row.donor_code),
+    ['ARCHIVED']
+  );
+  assert.deepEqual(
+    filterAndSortDonors(rows, { status: DONOR_STATUS.ALL }).map(row => row.donor_code),
+    ['ACTIVE', 'ARCHIVED']
+  );
+});
+
+test('search remains scoped to the selected donor status', () => {
+  const rows = [
+    { donor_code: 'A-1', household_name: 'Goldstein Active', is_archived: false },
+    { donor_code: 'A-2', household_name: 'Goldstein Archived', is_archived: true }
+  ];
+  assert.deepEqual(filterAndSortDonors(rows, { search: 'Goldstein' }).map(row => row.donor_code), ['A-1']);
+  assert.deepEqual(
+    filterAndSortDonors(rows, { search: 'Goldstein', status: DONOR_STATUS.ARCHIVED }).map(row => row.donor_code),
+    ['A-2']
+  );
+  assert.equal(filterAndSortDonors(rows, { search: 'Goldstein', status: DONOR_STATUS.ALL }).length, 2);
+});
+
+test('archive and restore actions produce boolean-only update payloads', () => {
+  assert.deepEqual(archiveDonorPayload(true), { is_archived: true });
+  assert.deepEqual(archiveDonorPayload(false), { is_archived: false });
+});
+
+test('KPI donor counts and totals respect the selected status set', () => {
+  const rows = [
+    { donor_code: 'A', lifetime_giving: 100, is_archived: false },
+    { donor_code: 'B', lifetime_giving: 250, is_archived: true }
+  ];
+  const activeMetrics = donorMetrics(donorsForStatus(rows, DONOR_STATUS.ACTIVE));
+  const archivedMetrics = donorMetrics(donorsForStatus(rows, DONOR_STATUS.ARCHIVED));
+  const allMetrics = donorMetrics(donorsForStatus(rows, DONOR_STATUS.ALL));
+  assert.deepEqual(
+    [activeMetrics.totalDonors, archivedMetrics.totalDonors, allMetrics.totalDonors],
+    [1, 1, 2]
+  );
+  assert.deepEqual(
+    [activeMetrics.totalLifetimeGiving, archivedMetrics.totalLifetimeGiving, allMetrics.totalLifetimeGiving],
+    [100, 250, 350]
+  );
 });
 
 test('searches across CRM donor fields case-insensitively', () => {

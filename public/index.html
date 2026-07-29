@@ -81,6 +81,7 @@
         </div>
         <div id="donorKpis" class="donor-kpis" aria-label="Donor summary"></div>
         <div class="donor-toolbar">
+          <label>Status<select id="donorStatusFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label>
           <label class="donor-search">Search donors<input id="donorSearch" type="search" placeholder="Name, code, email, city, officer…" autocomplete="off"></label>
           <label>Stage<select id="donorStageFilter"><option value="">All stages</option></select></label>
           <label>Assigned officer<select id="donorOfficerFilter"><option value="">All officers</option></select></label>
@@ -108,6 +109,13 @@
   </div>
 
   <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><div class="row between"><h3 id="modalTitle">Edit</h3><button id="closeModal" class="icon" aria-label="Close">×</button></div><div id="modalBody"></div><div class="row end"><button id="deleteModal" class="danger hidden">Delete</button><button id="saveModal" class="primary">Save</button></div></div></div>
+  <div id="archiveConfirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="archiveConfirmTitle">
+    <div class="modal-card confirmation-card">
+      <h3 id="archiveConfirmTitle">Archive donor?</h3>
+      <div id="archiveConfirmBody" class="confirmation-copy"></div>
+      <div class="row end"><button id="cancelArchiveDonor" class="secondary">Cancel</button><button id="confirmArchiveDonor" class="danger">Archive Donor</button></div>
+    </div>
+  </div>
   <div id="donorImportWizard" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="donorImportTitle">
     <div class="modal-card import-modal">
       <div class="row between"><div><p class="eyebrow">Donor records</p><h3 id="donorImportTitle">Import CSV</h3></div><button id="closeDonorImport" class="icon" aria-label="Close">×</button></div>

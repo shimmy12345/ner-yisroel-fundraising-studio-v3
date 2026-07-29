@@ -21,12 +21,18 @@ export const CRM_DONOR_FIELDS = [
   'next_action',
   'next_action_date',
   'notes',
+  'is_archived',
   'created_at',
   'updated_at'
 ];
 
 export const UNASSIGNED_FILTER = '__unassigned__';
 export const DONORS_PER_PAGE = 50;
+export const DONOR_STATUS = Object.freeze({
+  ACTIVE: 'active',
+  ARCHIVED: 'archived',
+  ALL: 'all'
+});
 
 const SEARCH_FIELDS = [
   'household_name',
@@ -219,14 +225,25 @@ export function donorMetrics(rows = [], today = new Date()) {
   };
 }
 
+export function donorsForStatus(rows = [], status = DONOR_STATUS.ACTIVE) {
+  if (status === DONOR_STATUS.ALL) return [...rows];
+  const archived = status === DONOR_STATUS.ARCHIVED;
+  return rows.filter(row => Boolean(row.is_archived) === archived);
+}
+
+export function archiveDonorPayload(isArchived) {
+  return { is_archived: Boolean(isArchived) };
+}
+
 export function filterAndSortDonors(rows = [], {
   search = '',
   stage = '',
   officer = '',
-  sort = 'last-name-asc'
+  sort = 'last-name-asc',
+  status = DONOR_STATUS.ACTIVE
 } = {}) {
   const query = normalized(search);
-  const filtered = rows.filter(row => {
+  const filtered = donorsForStatus(rows, status).filter(row => {
     const matchesSearch = !query || SEARCH_FIELDS.some(field => normalized(row[field]).includes(query));
     const stageValue = text(row.stage);
     const officerValue = text(row.assigned_officer);
