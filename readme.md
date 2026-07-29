@@ -84,6 +84,22 @@ The migration:
 - creates/updates the private 25 MB `knowledge-files` bucket with the four supported MIME groups; and
 - recreates authenticated row and Storage policies based on `auth.uid()`.
 
+## Donor Activity Timeline migration
+
+Run `supabase/migrations/20260729_donor_activity_timeline.sql` in the Supabase SQL Editor after the existing `crm_donors` table and archive migration are present.
+
+The migration creates `public.donor_activities`, its indexes, authenticated RLS policies, audit trigger, and the contact-date trigger. Activity access follows the existing `crm_donors` visibility model: a signed-in user can select, insert, or update an activity only when the related donor is visible through the current donor policies. No DELETE policy or DELETE grant is created.
+
+Phase 1 contact-date behavior is intentionally forward-only:
+
+- Phone calls, meetings, emails, text messages, letters, and events may advance `crm_donors.last_contact_date`.
+- The trigger uses the UTC calendar date of the newest non-archived contact activity.
+- Internal notes and Other activities never trigger a contact-date update.
+- Archiving, changing, or backdating an activity never clears or moves `last_contact_date` backward.
+- Restoring or editing a contact activity can advance the field when it produces a newer date.
+
+This protects manually entered contact dates because Phase 1 does not track whether a value was entered manually or derived from activity history.
+
 ## Netlify deployment
 
 1. In Netlify, import `shimmy12345/ner-yisroel-fundraising-studio-v3` and select `feature/donor-csv-import-v2` for review deploys.

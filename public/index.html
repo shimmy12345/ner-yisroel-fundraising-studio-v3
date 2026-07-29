@@ -120,6 +120,48 @@
       <div class="row end"><button id="cancelArchiveDonor" class="secondary">Cancel</button><button id="confirmArchiveDonor" class="danger">Archive Donor</button></div>
     </div>
   </div>
+  <div id="activityModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="activityModalTitle">
+    <div class="modal-card activity-modal-card">
+      <div class="row between"><div><p class="eyebrow">Donor activity</p><div class="row activity-modal-title"><h3 id="activityModalTitle">Add Activity</h3><span id="activityModalArchived" class="donor-flag archived hidden">Archived</span></div></div><button id="closeActivityModal" class="icon" aria-label="Close activity form">×</button></div>
+      <form id="activityForm" novalidate>
+        <p id="activityFormError" class="message error-text" role="alert"></p>
+        <div class="form-grid">
+          <label>Activity Type<select id="activityType" required>
+            <option value="phone_call">Phone Call</option>
+            <option value="meeting">Meeting</option>
+            <option value="email">Email</option>
+            <option value="text_message">Text Message</option>
+            <option value="letter">Letter</option>
+            <option value="event">Event</option>
+            <option value="note">Internal Note</option>
+            <option value="other">Other</option>
+          </select></label>
+          <label>Date and Time<input id="activityOccurredAt" type="datetime-local" required></label>
+        </div>
+        <label>Subject<input id="activitySubject" required maxlength="250"></label>
+        <label>Notes<textarea id="activityNotes" rows="5" required></textarea></label>
+        <details id="activityAdvanced" class="activity-advanced">
+          <summary>Advanced fields</summary>
+          <label>Outcome<textarea id="activityOutcome" rows="3"></textarea></label>
+          <label>Next Action<textarea id="activityNextAction" rows="3"></textarea></label>
+          <label>Next Action Date<input id="activityNextActionDate" type="date"></label>
+          <p id="activityNextActionGuidance" class="message" role="status"></p>
+        </details>
+        <div class="row end activity-form-actions">
+          <button id="archiveActivity" type="button" class="danger hidden">Archive Activity</button>
+          <button id="cancelActivity" type="button" class="secondary">Cancel</button>
+          <button id="saveActivity" type="submit" class="primary">Save Activity</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div id="activityArchiveConfirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="activityArchiveConfirmTitle">
+    <div class="modal-card confirmation-card">
+      <h3 id="activityArchiveConfirmTitle">Archive activity?</h3>
+      <p id="activityArchiveConfirmBody" class="confirmation-copy">This activity will be removed from the active timeline but will remain in the database.</p>
+      <div class="row end"><button id="cancelArchiveActivity" class="secondary">Cancel</button><button id="confirmArchiveActivity" class="danger">Archive Activity</button></div>
+    </div>
+  </div>
   <div id="donorImportWizard" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="donorImportTitle">
     <div class="modal-card import-modal">
       <div class="row between"><div><p class="eyebrow">Donor records</p><h3 id="donorImportTitle">Import CSV</h3></div><button id="closeDonorImport" class="icon" aria-label="Close">×</button></div>
