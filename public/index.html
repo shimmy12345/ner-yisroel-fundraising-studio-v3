@@ -55,11 +55,86 @@
       </header>
 
       <section id="dashboardPanel" class="panel dashboard-panel">
-        <div class="dashboard-placeholder card">
-          <div class="dashboard-placeholder-icon" aria-hidden="true">⌂</div>
-          <p class="eyebrow">Phase 1</p>
-          <h2>Dashboard coming soon</h2>
-          <p>Fundraising insights and priorities will live here in the next phase.</p>
+        <div class="dashboard-welcome">
+          <div>
+            <p class="eyebrow">Your workspace today</p>
+            <h2 id="dashboardGreeting">Good morning</h2>
+            <p>Focus on the relationships and actions that will move fundraising forward.</p>
+          </div>
+          <button id="refreshDashboard" class="secondary dashboard-refresh" type="button">
+            <span aria-hidden="true">↻</span> Refresh
+          </button>
+        </div>
+
+        <div id="dashboardStatus" class="dashboard-status card" role="status" aria-live="polite">
+          <span class="dashboard-loader" aria-hidden="true"></span>
+          <div><strong>Preparing your command center</strong><span>Loading current donor and workspace activity.</span></div>
+        </div>
+
+        <div id="dashboardContent" class="dashboard-content hidden">
+          <div id="dashboardNotice" class="dashboard-notice hidden" role="status"></div>
+          <section id="dashboardKpis" class="dashboard-kpis" aria-label="Fundraising overview"></section>
+
+          <div class="dashboard-grid">
+            <section class="dashboard-card dashboard-priorities" aria-labelledby="dashboardPrioritiesTitle">
+              <div class="dashboard-card-heading">
+                <div>
+                  <p class="eyebrow">Act now</p>
+                  <h3 id="dashboardPrioritiesTitle">Today's Priorities</h3>
+                </div>
+                <span id="dashboardPriorityCount" class="dashboard-count"></span>
+              </div>
+              <div id="dashboardPriorityList" class="dashboard-task-list"></div>
+            </section>
+
+            <section class="dashboard-card dashboard-upcoming" aria-labelledby="dashboardUpcomingTitle">
+              <div class="dashboard-card-heading">
+                <div>
+                  <p class="eyebrow">Plan ahead</p>
+                  <h3 id="dashboardUpcomingTitle">Upcoming</h3>
+                </div>
+              </div>
+              <div id="dashboardUpcomingList" class="dashboard-upcoming-list"></div>
+            </section>
+
+            <section class="dashboard-card dashboard-activity" aria-labelledby="dashboardActivityTitle">
+              <div class="dashboard-card-heading">
+                <div>
+                  <p class="eyebrow">Latest changes</p>
+                  <h3 id="dashboardActivityTitle">Recent Activity</h3>
+                </div>
+              </div>
+              <div id="dashboardActivityList" class="dashboard-timeline"></div>
+            </section>
+
+            <section class="dashboard-card dashboard-insights" aria-labelledby="dashboardInsightsTitle">
+              <div class="dashboard-card-heading">
+                <div>
+                  <p class="eyebrow">Relationship signals</p>
+                  <h3 id="dashboardInsightsTitle">AI Insights</h3>
+                </div>
+                <span class="dashboard-intelligence-label">Calculated from live data</span>
+              </div>
+              <p class="dashboard-card-intro">A practical summary of where your attention can have the greatest impact. No new AI processing is used.</p>
+              <div id="dashboardInsightList" class="dashboard-insight-list"></div>
+            </section>
+
+            <section class="dashboard-card dashboard-quick-actions" aria-labelledby="dashboardQuickActionsTitle">
+              <div class="dashboard-card-heading">
+                <div>
+                  <p class="eyebrow">Move work forward</p>
+                  <h3 id="dashboardQuickActionsTitle">Quick Actions</h3>
+                </div>
+              </div>
+              <div class="dashboard-action-grid">
+                <button type="button" class="dashboard-action" data-dashboard-action="draft-email"><span class="dashboard-action-icon" aria-hidden="true">✉</span><span><strong>Draft Donor Email</strong><small>Start a tailored message</small></span></button>
+                <button type="button" class="dashboard-action" data-dashboard-action="add-donor"><span class="dashboard-action-icon" aria-hidden="true">+</span><span><strong>Add Donor</strong><small>Create a CRM record</small></span></button>
+                <button type="button" class="dashboard-action" data-dashboard-action="log-interaction"><span class="dashboard-action-icon" aria-hidden="true">✓</span><span><strong>Log Interaction</strong><small>Choose a donor to begin</small></span></button>
+                <button type="button" class="dashboard-action" data-dashboard-action="upload-knowledge"><span class="dashboard-action-icon" aria-hidden="true">↑</span><span><strong>Upload Knowledge</strong><small>Add institutional context</small></span></button>
+                <button type="button" class="dashboard-action featured" data-dashboard-action="open-studio"><span class="dashboard-action-icon" aria-hidden="true">✦</span><span><strong>Open AI Studio</strong><small>Build a fundraising communication</small></span></button>
+              </div>
+            </section>
+          </div>
         </div>
       </section>
 
