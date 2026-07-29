@@ -23,8 +23,27 @@ test('donor imports use only crm_donors and keep the service-role key server-sid
   assert.match(authHelper, /process\.env\.SUPABASE_SERVICE_ROLE_KEY/);
 });
 
+test('visible donor dashboard and CRUD use crm_donors without legacy donor queries', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(app, /\.from\('donors'\)/);
+  assert.match(app, /\.from\('crm_donors'\)[\s\S]*\.select\(CRM_DONOR_FIELDS\.join\(','\)\)/);
+  assert.match(app, /supabase\.from\('crm_donors'\)\.update\(row\)/);
+  assert.match(app, /supabase\.from\('crm_donors'\)\.insert\(row\)/);
+  assert.doesNotMatch(app, /relationship_type|dRelationship|dInterests/);
+  assert.match(html, /id="donorSearch"/);
+  assert.match(html, /id="donorStageFilter"/);
+  assert.match(html, /id="donorOfficerFilter"/);
+  assert.match(app, /permanent deletion is intentionally disabled/);
+});
+
+test('successful donor imports refresh the CRM dashboard in the background', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /if \(totals\.inserted \+ totals\.updated > 0\) \{[\s\S]*await loadDonors\(\{ background: true \}\)/);
+});
+
 test('browser sources never reference the service-role key', async () => {
-  const files = ['../public/index.html', '../public/app.js', '../public/donor-import.js', '../public/runtime-config.js', '../build.mjs'];
+  const files = ['../public/index.html', '../public/app.js', '../public/donor-import.js', '../public/crm-donors.js', '../public/runtime-config.js', '../build.mjs'];
   const browserSource = (await Promise.all(files.map(file => readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
   assert.doesNotMatch(browserSource, /SUPABASE_SERVICE_ROLE_KEY|service_role/i);
 });

@@ -6,6 +6,21 @@ import {
   rejectedRowsCsv,
   validateDonorRows
 } from './donor-import.js';
+import {
+  CRM_DONOR_FIELDS,
+  DONORS_PER_PAGE,
+  UNASSIGNED_FILTER,
+  donorMetrics,
+  filterAndSortDonors,
+  filterOptions,
+  formatCrmDate,
+  formatCurrency,
+  isDueWithinSevenDays,
+  isNotContactedInNinetyDays,
+  isOverdueNextAction,
+  normalizeCrmDonorPayload,
+  paginateDonors
+} from './crm-donors.js';
 
 const cfg = window.RUNTIME_CONFIG || {};
 const $ = id => document.getElementById(id);
@@ -20,6 +35,9 @@ let modalType;
 let modalRecord;
 let knowledgeRows = [];
 let donorImport = {};
+let crmDonorRows = [];
+let crmDonorPage = 1;
+let crmDonorLoadError = null;
 
 function toast(message) {
   const element = $('toast');
@@ -348,21 +366,161 @@ async function uploadKnowledgeFiles(files) {
   toast(`${successes} uploaded${failures ? `; ${failures} failed` : ''}.`);
 }
 
-async function loadDonors() {
-  const { data, error } = await supabase.from('donors').select('*').order('name');
-  if (error) return toast(error.message);
+async function loadDonors({ background = false } = {}) {
   const list = $('donorList');
-  list.innerHTML = data.length ? '' : '<div class="empty compact">No donor profiles yet.</div>';
-  data.forEach(row => {
-    const div = document.createElement('div');
-    div.className = 'list-item';
-    div.innerHTML = `<div><h4>${esc(row.name)}</h4><p>${esc(row.relationship_type || '')} ${row.city ? `· ${esc(row.city)}` : ''}</p><p>${esc(row.next_action || row.notes || 'No notes')}</p></div><button class="secondary">Edit</button>`;
-    div.querySelector('button').onclick = () => openDonor(row);
-    list.appendChild(div);
-  });
+  crmDonorLoadError = null;
+  if (!background) {
+    list.innerHTML = '<div class="donor-state"><strong>Loading donors…</strong><span>Retrieving the latest CRM records.</span></div>';
+    $('donorStatus').innerHTML = '';
+  }
+  const { data, error } = await supabase
+    .from('crm_donors')
+    .select(CRM_DONOR_FIELDS.join(','))
+    .order('household_name', { ascending: true });
+  if (error) {
+    crmDonorRows = [];
+    crmDonorLoadError = error;
+    renderDonorFilters();
+    renderDonorDashboard();
+    return;
+  }
+  crmDonorRows = data || [];
+  crmDonorPage = 1;
+  renderDonorFilters();
+  renderDonorDashboard();
 }
 
 $('newDonor').onclick = () => openDonor(null);
+$('refreshDonors').onclick = () => loadDonors();
+$('donorSearch').oninput = resetAndRenderDonors;
+$('donorStageFilter').onchange = resetAndRenderDonors;
+$('donorOfficerFilter').onchange = resetAndRenderDonors;
+$('donorSort').onchange = resetAndRenderDonors;
+$('previousDonorPage').onclick = () => {
+  crmDonorPage -= 1;
+  renderDonorDashboard();
+  $('donorCount').scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+$('nextDonorPage').onclick = () => {
+  crmDonorPage += 1;
+  renderDonorDashboard();
+  $('donorCount').scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+function resetAndRenderDonors() {
+  crmDonorPage = 1;
+  renderDonorDashboard();
+}
+
+function updateFilterOptions(select, options, allLabel) {
+  const selected = select.value;
+  const values = [`<option value="">${allLabel}</option>`];
+  if (options.hasUnassigned) values.push(`<option value="${UNASSIGNED_FILTER}">Unassigned</option>`);
+  values.push(...options.values.map(value => `<option value="${esc(value)}">${esc(value)}</option>`));
+  select.innerHTML = values.join('');
+  select.value = [...select.options].some(option => option.value === selected) ? selected : '';
+}
+
+function renderDonorFilters() {
+  updateFilterOptions($('donorStageFilter'), filterOptions(crmDonorRows, 'stage'), 'All stages');
+  updateFilterOptions($('donorOfficerFilter'), filterOptions(crmDonorRows, 'assigned_officer'), 'All officers');
+}
+
+function renderDonorMetrics() {
+  const metrics = donorMetrics(crmDonorRows);
+  $('donorKpis').innerHTML = `
+    <article><span>Total Donors</span><strong>${metrics.totalDonors.toLocaleString()}</strong></article>
+    <article><span>Total Lifetime Giving</span><strong>${metrics.hasLifetimeGiving ? esc(formatCurrency(metrics.totalLifetimeGiving)) : 'No giving data'}</strong><small>${metrics.missingLifetimeGiving.toLocaleString()} without giving data</small></article>
+    <article><span>Donors With Next Actions</span><strong>${metrics.withNextActions.toLocaleString()}</strong></article>
+    <article><span>Overdue Next Actions</span><strong>${metrics.overdueNextActions.toLocaleString()}</strong></article>
+    <article><span>Not Contacted in 90+ Days</span><strong>${metrics.notContactedNinetyDays.toLocaleString()}</strong><small>${metrics.missingContactDates.toLocaleString()} without a contact date</small></article>`;
+}
+
+function donorDisplayName(row) {
+  return row.household_name?.trim()
+    || [row.first_name, row.last_name].filter(Boolean).join(' ').trim()
+    || 'Unnamed household';
+}
+
+function donorLoadErrorMessage(error) {
+  const permissionError = error?.code === '42501' || /row.level|permission|policy|rls/i.test(error?.message || '');
+  return permissionError
+    ? 'Your account does not have permission to read CRM donor records. Ask an administrator to verify Supabase access.'
+    : 'Donor records could not be loaded. Check the connection and try again.';
+}
+
+function donorCard(row) {
+  const location = [row.city, row.state].filter(Boolean).join(', ') || 'Location not recorded';
+  const lifetimeGiving = formatCurrency(row.lifetime_giving);
+  const lastGiftAmount = formatCurrency(row.last_gift_amount);
+  const lastGiftDate = formatCrmDate(row.last_gift_date);
+  const lastContactDate = formatCrmDate(row.last_contact_date);
+  const nextActionDate = formatCrmDate(row.next_action_date);
+  const overdue = isOverdueNextAction(row);
+  const dueSoon = !overdue && isDueWithinSevenDays(row);
+  const staleContact = isNotContactedInNinetyDays(row);
+  const statusFlags = [
+    overdue ? '<span class="donor-flag overdue">Overdue next action</span>' : '',
+    dueSoon ? '<span class="donor-flag due-soon">Due within 7 days</span>' : '',
+    staleContact ? '<span class="donor-flag stale-contact">90+ days since contact</span>' : ''
+  ].filter(Boolean).join('');
+  const article = document.createElement('article');
+  article.className = `donor-card${overdue ? ' has-overdue-action' : ''}${dueSoon ? ' has-due-soon-action' : ''}`;
+  article.innerHTML = `
+    <div class="donor-card-heading">
+      <div><div class="row donor-title-row"><h3>${esc(donorDisplayName(row))}</h3><span class="stage-badge">${esc(row.stage?.trim() || 'No stage')}</span></div><p>${esc(row.donor_code || 'No donor code')} · ${esc(location)}</p></div>
+      <button class="secondary edit-donor" aria-label="Edit ${esc(donorDisplayName(row))}">Edit</button>
+    </div>
+    <div class="donor-flags">${statusFlags}</div>
+    <dl class="donor-details">
+      <div><dt>Assigned officer</dt><dd>${esc(row.assigned_officer?.trim() || 'Unassigned')}</dd></div>
+      <div><dt>Lifetime giving</dt><dd>${lifetimeGiving ? esc(lifetimeGiving) : 'No giving recorded'}</dd></div>
+      <div><dt>Last gift</dt><dd>${lastGiftAmount ? esc(lastGiftAmount) : 'No gift amount recorded'}${lastGiftDate ? ` · ${esc(lastGiftDate)}` : ''}</dd></div>
+      <div><dt>Last contact</dt><dd>${lastContactDate ? esc(lastContactDate) : 'No contact recorded'}</dd></div>
+      <div class="next-action-detail"><dt>Next action</dt><dd>${esc(row.next_action?.trim() || 'No next action')}${nextActionDate ? ` · ${esc(nextActionDate)}` : ''}</dd></div>
+    </dl>`;
+  article.querySelector('.edit-donor').onclick = () => openDonor(row);
+  return article;
+}
+
+function renderDonorDashboard() {
+  renderDonorMetrics();
+  const status = $('donorStatus');
+  const list = $('donorList');
+  const pagination = $('donorPagination');
+  if (crmDonorLoadError) {
+    $('donorCount').textContent = '0 matching donors';
+    status.innerHTML = `<div class="donor-state error-state"><strong>Unable to load donors</strong><span>${esc(donorLoadErrorMessage(crmDonorLoadError))}</span><button id="retryDonors" class="secondary">Try again</button></div>`;
+    list.innerHTML = '';
+    pagination.classList.add('hidden');
+    $('retryDonors').onclick = () => loadDonors();
+    return;
+  }
+  status.innerHTML = '';
+  const rows = filterAndSortDonors(crmDonorRows, {
+    search: $('donorSearch').value,
+    stage: $('donorStageFilter').value,
+    officer: $('donorOfficerFilter').value,
+    sort: $('donorSort').value
+  });
+  const page = paginateDonors(rows, crmDonorPage, DONORS_PER_PAGE);
+  crmDonorPage = page.page;
+  $('donorCount').textContent = rows.length
+    ? `Showing ${page.start + 1}–${page.end} of ${rows.length.toLocaleString()} matching donors · ${crmDonorRows.length.toLocaleString()} total`
+    : `0 matching donors · ${crmDonorRows.length.toLocaleString()} total`;
+  list.innerHTML = '';
+  if (!crmDonorRows.length) {
+    list.innerHTML = '<div class="donor-state"><strong>No donors yet</strong><span>Create a donor or import a CSV to get started.</span></div>';
+  } else if (!rows.length) {
+    list.innerHTML = '<div class="donor-state"><strong>No matching donors</strong><span>Try changing the search or filters.</span></div>';
+  } else {
+    page.rows.forEach(row => list.appendChild(donorCard(row)));
+  }
+  pagination.classList.toggle('hidden', rows.length <= DONORS_PER_PAGE);
+  $('donorPageStatus').textContent = `Page ${page.page} of ${page.totalPages}`;
+  $('previousDonorPage').disabled = page.page <= 1;
+  $('nextDonorPage').disabled = page.page >= page.totalPages;
+}
 
 $('importDonors').onclick = openDonorImport;
 $('closeDonorImport').onclick = closeDonorImport;
@@ -570,6 +728,12 @@ async function runDonorImport() {
     donorImport.rejectedRows = rejectedRows;
     renderImportResults(totals, serverErrors);
     setDonorImportStep(4);
+    if (totals.inserted + totals.updated > 0) {
+      $('donorSearch').value = '';
+      $('donorStageFilter').value = '';
+      $('donorOfficerFilter').value = '';
+      await loadDonors({ background: true });
+    }
   } finally {
     button.disabled = false;
     button.textContent = 'Import valid rows';
@@ -605,8 +769,34 @@ function openDonor(row) {
   modalType = 'donor';
   modalRecord = row;
   $('modalTitle').textContent = row ? 'Edit donor' : 'New donor';
-  $('modalBody').innerHTML = `<div class="form-grid"><label>Name<input id="dName" value="${esc(row?.name || '')}"></label><label>Relationship<input id="dRelationship" value="${esc(row?.relationship_type || '')}"></label><label>Email<input id="dEmail" value="${esc(row?.email || '')}"></label><label>Phone<input id="dPhone" value="${esc(row?.phone || '')}"></label><label>City<input id="dCity" value="${esc(row?.city || '')}"></label><label>Lifetime giving<input id="dLifetime" type="number" value="${row?.lifetime_giving ?? ''}"></label><label>Last gift amount<input id="dLastAmount" type="number" value="${row?.last_gift_amount ?? ''}"></label><label>Last gift date<input id="dLastDate" type="date" value="${row?.last_gift_date || ''}"></label></div><label>Interests<textarea id="dInterests" rows="3">${esc(row?.interests || '')}</textarea></label><label>Notes<textarea id="dNotes" rows="5">${esc(row?.notes || '')}</textarea></label><label>Next action<textarea id="dNext" rows="3">${esc(row?.next_action || '')}</textarea></label><label>Next action date<input id="dNextDate" type="date" value="${row?.next_action_date || ''}"></label>`;
-  $('deleteModal').classList.toggle('hidden', !row);
+  $('modalBody').innerHTML = `<div class="crm-donor-form">
+    <p id="dFormError" class="message error-text" role="alert"></p>
+    <div class="form-grid">
+      <label>Donor Code<input id="dDonorCode" required value="${esc(row?.donor_code || '')}" autocomplete="off"></label>
+      <label>Household Name<input id="dHouseholdName" required value="${esc(row?.household_name || '')}" autocomplete="organization"></label>
+      <label>First Name<input id="dFirstName" value="${esc(row?.first_name || '')}" autocomplete="given-name"></label>
+      <label>Last Name<input id="dLastName" value="${esc(row?.last_name || '')}" autocomplete="family-name"></label>
+      <label>Email<input id="dEmail" type="email" value="${esc(row?.email || '')}" autocomplete="email"></label>
+      <label>Home Phone<input id="dHomePhone" type="tel" value="${esc(row?.home_phone || '')}" autocomplete="tel"></label>
+      <label>Mobile Phone<input id="dMobilePhone" type="tel" value="${esc(row?.mobile_phone || '')}" autocomplete="tel"></label>
+      <label>Assigned Officer<input id="dAssignedOfficer" value="${esc(row?.assigned_officer || '')}"></label>
+      <label>Address<input id="dAddress" value="${esc(row?.address || '')}" autocomplete="street-address"></label>
+      <label>City<input id="dCity" value="${esc(row?.city || '')}" autocomplete="address-level2"></label>
+      <label>State<input id="dState" value="${esc(row?.state || '')}" autocomplete="address-level1"></label>
+      <label>ZIP<input id="dZip" value="${esc(row?.zip || '')}" autocomplete="postal-code"></label>
+      <label>Country<input id="dCountry" value="${esc(row?.country || '')}" autocomplete="country-name"></label>
+      <label>Stage<input id="dStage" value="${esc(row?.stage || '')}"></label>
+      <label>Lifetime Giving<input id="dLifetimeGiving" type="number" step="0.01" value="${row?.lifetime_giving ?? ''}"></label>
+      <label>Last Gift Amount<input id="dLastGiftAmount" type="number" step="0.01" value="${row?.last_gift_amount ?? ''}"></label>
+      <label>Last Gift Date<input id="dLastGiftDate" type="date" value="${esc(row?.last_gift_date || '')}"></label>
+      <label>Last Contact Date<input id="dLastContactDate" type="date" value="${esc(row?.last_contact_date || '')}"></label>
+      <label>Next Action Date<input id="dNextActionDate" type="date" value="${esc(row?.next_action_date || '')}"></label>
+    </div>
+    <label>Next Action<textarea id="dNextAction" rows="3">${esc(row?.next_action || '')}</textarea></label>
+    <label>Notes<textarea id="dNotes" rows="5">${esc(row?.notes || '')}</textarea></label>
+  </div>`;
+  // CRM records should eventually support archiving; permanent deletion is intentionally disabled.
+  $('deleteModal').classList.add('hidden');
   $('saveModal').classList.remove('hidden');
   $('modal').classList.remove('hidden');
 }
@@ -630,45 +820,53 @@ $('saveModal').onclick = async () => {
       if (error) throw error;
       await loadKnowledge();
     } else if (modalType === 'donor') {
-      const row = {
-        user_id: session.user.id,
-        name: $('dName').value.trim(),
-        relationship_type: $('dRelationship').value,
+      const row = normalizeCrmDonorPayload({
+        donor_code: $('dDonorCode').value,
+        household_name: $('dHouseholdName').value,
+        first_name: $('dFirstName').value,
+        last_name: $('dLastName').value,
         email: $('dEmail').value,
-        phone: $('dPhone').value,
+        home_phone: $('dHomePhone').value,
+        mobile_phone: $('dMobilePhone').value,
+        address: $('dAddress').value,
         city: $('dCity').value,
-        lifetime_giving: $('dLifetime').value || null,
-        last_gift_amount: $('dLastAmount').value || null,
-        last_gift_date: $('dLastDate').value || null,
-        interests: $('dInterests').value,
+        state: $('dState').value,
+        zip: $('dZip').value,
+        country: $('dCountry').value,
+        assigned_officer: $('dAssignedOfficer').value,
+        stage: $('dStage').value,
+        lifetime_giving: $('dLifetimeGiving').value,
+        last_gift_amount: $('dLastGiftAmount').value,
+        last_gift_date: $('dLastGiftDate').value,
+        last_contact_date: $('dLastContactDate').value,
+        next_action: $('dNextAction').value,
+        next_action_date: $('dNextActionDate').value,
         notes: $('dNotes').value,
-        next_action: $('dNext').value,
-        next_action_date: $('dNextDate').value || null
-      };
-      if (!row.name) throw new Error('Name is required.');
-      const query = modalRecord ? supabase.from('donors').update(row).eq('id', modalRecord.id) : supabase.from('donors').insert(row);
+      });
+      const query = modalRecord
+        ? supabase.from('crm_donors').update(row).eq('id', modalRecord.id)
+        : supabase.from('crm_donors').insert(row);
       const { error } = await query;
+      if (error?.code === '23505' || /duplicate|unique.*donor_code/i.test(error?.message || '')) {
+        throw new Error('A donor with this Donor Code already exists.');
+      }
       if (error) throw error;
       await loadDonors();
     }
     $('modal').classList.add('hidden');
     toast('Saved');
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    if (modalType === 'donor' && $('dFormError')) $('dFormError').textContent = error.message;
+    else toast(error.message);
+  }
 };
 
 $('deleteModal').onclick = async () => {
-  if (!modalRecord || !confirm('Delete this record?')) return;
+  if (!modalRecord || modalType !== 'knowledge' || !confirm('Delete this record?')) return;
   try {
-    if (modalType === 'knowledge') {
-      const result = await api('/api/knowledge-document', { method: 'DELETE', body: JSON.stringify({ id: modalRecord.id }) });
-      await loadKnowledge();
-      toast(result.warning || 'Deleted');
-    } else {
-      const { error } = await supabase.from('donors').delete().eq('id', modalRecord.id);
-      if (error) throw error;
-      await loadDonors();
-      toast('Deleted');
-    }
+    const result = await api('/api/knowledge-document', { method: 'DELETE', body: JSON.stringify({ id: modalRecord.id }) });
+    await loadKnowledge();
+    toast(result.warning || 'Deleted');
     $('modal').classList.add('hidden');
   } catch (error) { toast(error.message); }
 };
