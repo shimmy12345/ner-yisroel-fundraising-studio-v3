@@ -7,12 +7,15 @@ import {
   validateDonorRows
 } from './donor-import.js';
 import {
+  archiveDonorPayload,
   CRM_DONOR_FIELDS,
   DONORS_PER_PAGE,
+  DONOR_STATUS,
   UNASSIGNED_FILTER,
   donorDisplayName,
   donorMetrics,
   donorSecondaryHousehold,
+  donorsForStatus,
   filterAndSortDonors,
   filterOptions,
   formatCrmDate,
@@ -286,6 +289,8 @@ function openKnowledge(row) {
   modalRecord = row;
   $('modalTitle').textContent = row ? 'Edit knowledge' : 'New knowledge';
   $('modalBody').innerHTML = `<label>Title<input id="mTitle" value="${esc(row?.title || '')}"></label><label>Tags<input id="mTags" value="${esc((row?.tags || []).join(', '))}" placeholder="campaign, scholarship, event"></label><label>Content<textarea id="mContent" rows="18">${esc(row?.content || '')}</textarea></label>`;
+  $('deleteModal').textContent = 'Delete';
+  $('deleteModal').classList.remove('restore-action');
   $('deleteModal').classList.toggle('hidden', !row);
   $('saveModal').classList.remove('hidden');
   $('modal').classList.remove('hidden');
@@ -395,6 +400,11 @@ async function loadDonors({ background = false } = {}) {
 $('newDonor').onclick = () => openDonor(null);
 $('refreshDonors').onclick = () => loadDonors();
 $('donorSearch').oninput = resetAndRenderDonors;
+$('donorStatusFilter').onchange = () => {
+  crmDonorPage = 1;
+  renderDonorFilters();
+  renderDonorDashboard();
+};
 $('donorStageFilter').onchange = resetAndRenderDonors;
 $('donorOfficerFilter').onchange = resetAndRenderDonors;
 $('donorSort').onchange = resetAndRenderDonors;
@@ -424,12 +434,13 @@ function updateFilterOptions(select, options, allLabel) {
 }
 
 function renderDonorFilters() {
-  updateFilterOptions($('donorStageFilter'), filterOptions(crmDonorRows, 'stage'), 'All stages');
-  updateFilterOptions($('donorOfficerFilter'), filterOptions(crmDonorRows, 'assigned_officer'), 'All officers');
+  const statusRows = donorsForStatus(crmDonorRows, $('donorStatusFilter').value);
+  updateFilterOptions($('donorStageFilter'), filterOptions(statusRows, 'stage'), 'All stages');
+  updateFilterOptions($('donorOfficerFilter'), filterOptions(statusRows, 'assigned_officer'), 'All officers');
 }
 
 function renderDonorMetrics() {
-  const metrics = donorMetrics(crmDonorRows);
+  const metrics = donorMetrics(donorsForStatus(crmDonorRows, $('donorStatusFilter').value));
   $('donorKpis').innerHTML = `
     <article><span>Total Donors</span><strong>${metrics.totalDonors.toLocaleString()}</strong></article>
     <article><span>Total Lifetime Giving</span><strong>${metrics.hasLifetimeGiving ? esc(formatCurrency(metrics.totalLifetimeGiving)) : 'No giving data'}</strong><small>${metrics.missingLifetimeGiving.toLocaleString()} without giving data</small></article>
@@ -458,6 +469,7 @@ function donorCard(row) {
   const dueSoon = !overdue && isDueWithinSevenDays(row);
   const staleContact = isNotContactedInNinetyDays(row);
   const statusFlags = [
+    row.is_archived ? '<span class="donor-flag archived">Archived</span>' : '',
     overdue ? '<span class="donor-flag overdue">Overdue next action</span>' : '',
     dueSoon ? '<span class="donor-flag due-soon">Due within 7 days</span>' : '',
     staleContact ? '<span class="donor-flag stale-contact">90+ days since contact</span>' : ''
@@ -512,16 +524,21 @@ function renderDonorDashboard() {
     search: $('donorSearch').value,
     stage: $('donorStageFilter').value,
     officer: $('donorOfficerFilter').value,
-    sort: $('donorSort').value
+    sort: $('donorSort').value,
+    status: $('donorStatusFilter').value
   });
+  const statusRows = donorsForStatus(crmDonorRows, $('donorStatusFilter').value);
+  const statusLabel = $('donorStatusFilter').selectedOptions[0].textContent.toLocaleLowerCase('en-US');
   const page = paginateDonors(rows, crmDonorPage, DONORS_PER_PAGE);
   crmDonorPage = page.page;
   $('donorCount').textContent = rows.length
-    ? `Showing ${page.start + 1}–${page.end} of ${rows.length.toLocaleString()} matching donors · ${crmDonorRows.length.toLocaleString()} total`
-    : `0 matching donors · ${crmDonorRows.length.toLocaleString()} total`;
+    ? `Showing ${page.start + 1}–${page.end} of ${rows.length.toLocaleString()} matching donors · ${statusRows.length.toLocaleString()} ${statusLabel} donors`
+    : `0 matching donors · ${statusRows.length.toLocaleString()} ${statusLabel} donors`;
   list.innerHTML = '';
-  if (!crmDonorRows.length) {
-    list.innerHTML = '<div class="donor-state"><strong>No donors yet</strong><span>Create a donor or import a CSV to get started.</span></div>';
+  if (!statusRows.length) {
+    const emptyTitle = $('donorStatusFilter').value === DONOR_STATUS.ACTIVE ? 'No active donors' : `No ${statusLabel} donors`;
+    const emptyCopy = crmDonorRows.length ? 'Choose another status to view other donor records.' : 'Create a donor or import a CSV to get started.';
+    list.innerHTML = `<div class="donor-state"><strong>${emptyTitle}</strong><span>${emptyCopy}</span></div>`;
   } else if (!rows.length) {
     list.innerHTML = '<div class="donor-state"><strong>No matching donors</strong><span>Try changing the search or filters.</span></div>';
   } else {
@@ -806,8 +823,11 @@ function openDonor(row) {
     <label>Next Action<textarea id="dNextAction" rows="3">${esc(row?.next_action || '')}</textarea></label>
     <label>Notes<textarea id="dNotes" rows="5">${esc(row?.notes || '')}</textarea></label>
   </div>`;
-  // CRM records should eventually support archiving; permanent deletion is intentionally disabled.
-  $('deleteModal').classList.add('hidden');
+  $('deleteModal').classList.toggle('hidden', !row);
+  if (row) {
+    $('deleteModal').textContent = row.is_archived ? 'Restore Donor' : 'Archive Donor';
+    $('deleteModal').classList.toggle('restore-action', Boolean(row.is_archived));
+  }
   $('saveModal').classList.remove('hidden');
   $('modal').classList.remove('hidden');
 }
@@ -873,13 +893,49 @@ $('saveModal').onclick = async () => {
 };
 
 $('deleteModal').onclick = async () => {
-  if (!modalRecord || modalType !== 'knowledge' || !confirm('Delete this record?')) return;
+  if (!modalRecord) return;
+  if (modalType === 'donor') {
+    const restoring = Boolean(modalRecord.is_archived);
+    $('archiveConfirmTitle').textContent = restoring ? 'Restore donor?' : 'Archive donor?';
+    $('archiveConfirmBody').innerHTML = restoring
+      ? '<p>This donor will return to the active donor list.</p>'
+      : '<p>This donor will be removed from the active donor list but will remain in the database.</p><p>You can restore this donor at any time.</p>';
+    $('confirmArchiveDonor').textContent = restoring ? 'Restore Donor' : 'Archive Donor';
+    $('confirmArchiveDonor').classList.toggle('restore-action', restoring);
+    $('archiveConfirmModal').classList.remove('hidden');
+    $('confirmArchiveDonor').focus();
+    return;
+  }
+  if (modalType !== 'knowledge' || !confirm('Delete this record?')) return;
   try {
     const result = await api('/api/knowledge-document', { method: 'DELETE', body: JSON.stringify({ id: modalRecord.id }) });
     await loadKnowledge();
     toast(result.warning || 'Deleted');
     $('modal').classList.add('hidden');
   } catch (error) { toast(error.message); }
+};
+
+$('cancelArchiveDonor').onclick = () => $('archiveConfirmModal').classList.add('hidden');
+$('confirmArchiveDonor').onclick = async () => {
+  if (!modalRecord || modalType !== 'donor') return;
+  const restoring = Boolean(modalRecord.is_archived);
+  const button = $('confirmArchiveDonor');
+  button.disabled = true;
+  try {
+    const { error } = await supabase
+      .from('crm_donors')
+      .update(archiveDonorPayload(!restoring))
+      .eq('id', modalRecord.id);
+    if (error) throw error;
+    $('archiveConfirmModal').classList.add('hidden');
+    $('modal').classList.add('hidden');
+    await loadDonors();
+    toast(restoring ? 'Donor restored' : 'Donor archived');
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
 };
 
 async function loadHistory() {
