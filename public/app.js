@@ -26,6 +26,9 @@ import {
   normalizeCrmDonorPayload,
   paginateDonors
 } from './crm-donors.js';
+import {
+  donorProfileViewModel
+} from './donor-profile.js';
 
 const cfg = window.RUNTIME_CONFIG || {};
 const $ = id => document.getElementById(id);
@@ -43,6 +46,9 @@ let donorImport = {};
 let crmDonorRows = [];
 let crmDonorPage = 1;
 let crmDonorLoadError = null;
+let donorProfileRecord = null;
+let donorDashboardScrollPosition = 0;
+let donorProfileRequestId = 0;
 
 function toast(message) {
   const element = $('toast');
@@ -178,6 +184,133 @@ function showPanel(name) {
   if (name === 'knowledge') loadKnowledge();
   if (name === 'donors') loadDonors();
   if (name === 'history') loadHistory();
+}
+
+function showDonorProfileState(title, message, action = '') {
+  $('donorProfileContent').classList.add('hidden');
+  $('donorProfileState').classList.remove('hidden');
+  $('donorProfileState').innerHTML = `
+    <strong>${esc(title)}</strong>
+    <span>${esc(message)}</span>
+    ${action ? `<button id="donorProfileStateAction" class="secondary">${esc(action)}</button>` : ''}`;
+  if (action) $('donorProfileStateAction').onclick = returnToDonors;
+}
+
+function syncDonorDashboardRow(row) {
+  const index = crmDonorRows.findIndex(donor => donor.id === row.id);
+  if (index >= 0) crmDonorRows[index] = row;
+  else crmDonorRows.push(row);
+  renderDonorFilters();
+  renderDonorDashboard();
+}
+
+function renderDonorProfile(row) {
+  const profile = donorProfileViewModel(row);
+  $('donorProfileState').classList.add('hidden');
+  $('donorProfileContent').classList.remove('hidden');
+  $('donorProfileContent').innerHTML = `
+    <div class="donor-profile-header">
+      <button id="backToDonors" class="donor-profile-back">← Back to Donors</button>
+      <div class="donor-profile-heading">
+        <div>
+          <div class="row donor-profile-title-row">
+            <h2 id="donorProfileTitle">${esc(profile.displayName)}</h2>
+            ${profile.isArchived ? '<span class="donor-flag archived">Archived</span>' : ''}
+          </div>
+          ${profile.householdName ? `<p class="donor-profile-household">${esc(profile.householdName)}</p>` : ''}
+          <p class="donor-profile-code"><strong>Donor Code</strong> ${esc(profile.donorCode)}</p>
+        </div>
+        <div class="row donor-profile-actions">
+          <button id="profileArchiveDonor" class="${profile.isArchived ? 'secondary restore-action' : 'danger'}">${esc(profile.archiveActionLabel)}</button>
+          <button id="profileEditDonor" class="primary">Edit Donor</button>
+        </div>
+      </div>
+    </div>
+    <div class="donor-profile-grid">
+      <section class="donor-profile-section donor-profile-relationship" aria-labelledby="relationshipSnapshotTitle">
+        <h3 id="relationshipSnapshotTitle">Relationship Snapshot</h3>
+        <dl class="donor-profile-summary">
+          <div><dt>Stage</dt><dd><span class="stage-badge">${esc(profile.stage)}</span></dd></div>
+          <div><dt>Assigned officer</dt><dd>${esc(profile.assignedOfficer)}</dd></div>
+          <div><dt>Lifetime giving</dt><dd>${esc(profile.lifetimeGiving)}</dd></div>
+          <div><dt>Last gift amount</dt><dd>${esc(profile.lastGiftAmount)}</dd></div>
+          <div><dt>Last gift date</dt><dd>${esc(profile.lastGiftDate)}</dd></div>
+          <div><dt>Last contact date</dt><dd>${esc(profile.lastContactDate)}</dd></div>
+          <div class="profile-next-action"><dt>Next action</dt><dd>${esc(profile.nextAction)}</dd></div>
+          <div><dt>Next action date</dt><dd>${esc(profile.nextActionDate)}</dd></div>
+        </dl>
+      </section>
+      <section class="donor-profile-section" aria-labelledby="contactInformationTitle">
+        <h3 id="contactInformationTitle">Contact Information</h3>
+        <dl class="donor-profile-contact">
+          <div><dt>Primary email</dt><dd>${esc(profile.primaryEmail)}</dd></div>
+          <div><dt>Primary phone</dt><dd>${esc(profile.primaryPhone)}</dd></div>
+          ${profile.secondaryPhone ? `<div><dt>Secondary phone</dt><dd>${esc(profile.secondaryPhone)}</dd></div>` : ''}
+          <div class="profile-address-block"><dt>Mailing address</dt><dd>${esc(profile.address)}</dd></div>
+        </dl>
+      </section>
+      <section class="donor-profile-section donor-profile-notes" aria-labelledby="donorNotesTitle">
+        <h3 id="donorNotesTitle">Notes</h3>
+        ${profile.notesEmpty
+          ? '<p class="donor-profile-empty">No notes have been recorded for this donor.</p>'
+          : `<p class="donor-profile-note-copy">${esc(profile.notes)}</p>`}
+      </section>
+    </div>`;
+  $('backToDonors').onclick = returnToDonors;
+  $('profileEditDonor').onclick = () => openDonor(donorProfileRecord);
+  $('profileArchiveDonor').onclick = () => openDonorArchiveConfirmation(donorProfileRecord);
+}
+
+async function loadDonorProfile(donorId, { showLoading = true } = {}) {
+  const requestId = ++donorProfileRequestId;
+  if (!session) {
+    showDonorProfileState('Sign in required', 'Sign in to view this donor.', 'Back to Donors');
+    return;
+  }
+  if (showLoading) showDonorProfileState('Loading donor…', 'Retrieving the latest donor information.');
+  const { data, error } = await supabase
+    .from('crm_donors')
+    .select(CRM_DONOR_FIELDS.join(','))
+    .eq('id', donorId)
+    .maybeSingle();
+  if (requestId !== donorProfileRequestId) return;
+  if (error) {
+    const inaccessible = error.code === '42501' || /row.level|permission|policy|rls/i.test(error.message || '');
+    showDonorProfileState(
+      inaccessible ? 'Donor unavailable' : 'Unable to load donor',
+      inaccessible
+        ? 'This donor is unavailable or your account does not have access.'
+        : 'The donor could not be loaded. Return to the dashboard and try again.',
+      'Back to Donors'
+    );
+    return;
+  }
+  if (!data) {
+    showDonorProfileState('Donor not found', 'This donor may no longer be available.', 'Back to Donors');
+    return;
+  }
+  donorProfileRecord = data;
+  syncDonorDashboardRow(data);
+  renderDonorProfile(data);
+}
+
+function openDonorProfile(donorId) {
+  donorDashboardScrollPosition = window.scrollY;
+  $$('.panel').forEach(panel => panel.classList.add('hidden'));
+  $('donorProfilePanel').classList.remove('hidden');
+  $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
+  $('pageTitle').textContent = 'Donor Profile';
+  window.scrollTo({ top: 0, behavior: 'auto' });
+  loadDonorProfile(donorId);
+}
+
+function returnToDonors() {
+  donorProfileRequestId += 1;
+  $('donorProfilePanel').classList.add('hidden');
+  $('donorsPanel').classList.remove('hidden');
+  $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
+  $('pageTitle').textContent = 'Donors';
+  requestAnimationFrame(() => window.scrollTo({ top: donorDashboardScrollPosition, behavior: 'auto' }));
 }
 
 $('file').onchange = () => { $('fileName').textContent = $('file').files[0]?.name || 'No file selected'; };
@@ -497,8 +630,12 @@ function donorCard(row) {
       </dl>
     </a>
     <button class="edit-donor" aria-label="Edit ${esc(displayName)}" title="Edit donor"><span aria-hidden="true">✎</span></button>`;
-  article.onclick = () => openDonor(row);
-  article.querySelector('.donor-card-open').onclick = event => event.preventDefault();
+  article.onclick = () => openDonorProfile(row.id);
+  article.querySelector('.donor-card-open').onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openDonorProfile(row.id);
+  };
   article.querySelector('.edit-donor').onclick = event => {
     event.stopPropagation();
     openDonor(row);
@@ -851,6 +988,9 @@ $('saveModal').onclick = async () => {
       if (error) throw error;
       await loadKnowledge();
     } else if (modalType === 'donor') {
+      const editingFromProfile = !($('donorProfilePanel').classList.contains('hidden'))
+        && Boolean(modalRecord?.id)
+        && donorProfileRecord?.id === modalRecord.id;
       const row = normalizeCrmDonorPayload({
         donor_code: $('dDonorCode').value,
         household_name: $('dHouseholdName').value,
@@ -882,7 +1022,8 @@ $('saveModal').onclick = async () => {
         throw new Error('A donor with this Donor Code already exists.');
       }
       if (error) throw error;
-      await loadDonors();
+      if (editingFromProfile) await loadDonorProfile(modalRecord.id, { showLoading: false });
+      else await loadDonors();
     }
     $('modal').classList.add('hidden');
     toast('Saved');
@@ -892,18 +1033,25 @@ $('saveModal').onclick = async () => {
   }
 };
 
+function openDonorArchiveConfirmation(row) {
+  if (!row) return;
+  modalType = 'donor';
+  modalRecord = row;
+  const restoring = Boolean(row.is_archived);
+  $('archiveConfirmTitle').textContent = restoring ? 'Restore donor?' : 'Archive donor?';
+  $('archiveConfirmBody').innerHTML = restoring
+    ? '<p>This donor will return to the active donor list.</p>'
+    : '<p>This donor will be removed from the active donor list but will remain in the database.</p><p>You can restore this donor at any time.</p>';
+  $('confirmArchiveDonor').textContent = restoring ? 'Restore Donor' : 'Archive Donor';
+  $('confirmArchiveDonor').classList.toggle('restore-action', restoring);
+  $('archiveConfirmModal').classList.remove('hidden');
+  $('confirmArchiveDonor').focus();
+}
+
 $('deleteModal').onclick = async () => {
   if (!modalRecord) return;
   if (modalType === 'donor') {
-    const restoring = Boolean(modalRecord.is_archived);
-    $('archiveConfirmTitle').textContent = restoring ? 'Restore donor?' : 'Archive donor?';
-    $('archiveConfirmBody').innerHTML = restoring
-      ? '<p>This donor will return to the active donor list.</p>'
-      : '<p>This donor will be removed from the active donor list but will remain in the database.</p><p>You can restore this donor at any time.</p>';
-    $('confirmArchiveDonor').textContent = restoring ? 'Restore Donor' : 'Archive Donor';
-    $('confirmArchiveDonor').classList.toggle('restore-action', restoring);
-    $('archiveConfirmModal').classList.remove('hidden');
-    $('confirmArchiveDonor').focus();
+    openDonorArchiveConfirmation(modalRecord);
     return;
   }
   if (modalType !== 'knowledge' || !confirm('Delete this record?')) return;
@@ -919,6 +1067,9 @@ $('cancelArchiveDonor').onclick = () => $('archiveConfirmModal').classList.add('
 $('confirmArchiveDonor').onclick = async () => {
   if (!modalRecord || modalType !== 'donor') return;
   const restoring = Boolean(modalRecord.is_archived);
+  const donorId = modalRecord.id;
+  const updatingFromProfile = !($('donorProfilePanel').classList.contains('hidden'))
+    && donorProfileRecord?.id === donorId;
   const button = $('confirmArchiveDonor');
   button.disabled = true;
   try {
@@ -929,7 +1080,8 @@ $('confirmArchiveDonor').onclick = async () => {
     if (error) throw error;
     $('archiveConfirmModal').classList.add('hidden');
     $('modal').classList.add('hidden');
-    await loadDonors();
+    if (updatingFromProfile) await loadDonorProfile(donorId, { showLoading: false });
+    else await loadDonors();
     toast(restoring ? 'Donor restored' : 'Donor archived');
   } catch (error) {
     toast(error.message);

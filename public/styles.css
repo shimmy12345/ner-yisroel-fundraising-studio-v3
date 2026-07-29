@@ -40,3 +40,36 @@ button:disabled{cursor:not-allowed;opacity:.55}.donor-actions{justify-content:fl
 .restore-action{background:#e9f7f0;color:#247453}
 @media(max-width:1100px){.donor-toolbar{grid-template-columns:repeat(2,1fr)}.donor-search{grid-column:1/-1}}
 @media(max-width:650px){.donor-toolbar{grid-template-columns:1fr}.donor-search{grid-column:auto}}
+
+/* Donor profile uses the existing panel model and keeps dashboard state in place. */
+.donor-profile-state{min-height:360px;display:grid;place-content:center;justify-items:center;gap:8px;padding:28px;text-align:center;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:14px}
+.donor-profile-state strong{font-family:Georgia,serif;color:var(--ink);font-size:1.2rem}
+.donor-profile-state span{max-width:520px;line-height:1.5}
+.donor-profile-state .secondary{margin-top:8px}
+.donor-profile-header{margin-bottom:14px}
+.donor-profile-back{border:0;background:transparent;color:#405675;padding:5px 0;margin-bottom:12px;font-weight:800;cursor:pointer}
+.donor-profile-back:hover{text-decoration:underline}
+.donor-profile-back:focus-visible{outline:3px solid rgba(183,140,61,.35);outline-offset:4px;border-radius:4px}
+.donor-profile-heading{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:0 7px 22px rgba(16,36,63,.05)}
+.donor-profile-title-row{align-items:center;flex-wrap:wrap}
+.donor-profile-title-row h2{margin:0;font-size:1.65rem;line-height:1.15}
+.donor-profile-household{margin:5px 0 0;color:#506079}
+.donor-profile-code{margin:7px 0 0;color:var(--muted);font-size:.78rem}
+.donor-profile-code strong{color:var(--ink);text-transform:uppercase;letter-spacing:.04em;font-size:.68rem}
+.donor-profile-actions{flex-shrink:0}
+.donor-profile-actions .danger{margin-right:0}
+.donor-profile-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(280px,.75fr);gap:14px;align-items:start}
+.donor-profile-section{min-width:0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:0 7px 22px rgba(16,36,63,.045)}
+.donor-profile-section h3{font-size:1rem;margin:0 0 14px}
+.donor-profile-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px 18px;margin:0}
+.donor-profile-summary div,.donor-profile-contact div{min-width:0}
+.donor-profile-summary dt,.donor-profile-contact dt{color:var(--muted);font-size:.66rem;font-weight:800;text-transform:uppercase;letter-spacing:.045em}
+.donor-profile-summary dd,.donor-profile-contact dd{margin:4px 0 0;font-size:.86rem;line-height:1.4;overflow-wrap:anywhere}
+.donor-profile-summary .profile-next-action{grid-column:1/-1}
+.donor-profile-contact{display:grid;gap:13px;margin:0}
+.donor-profile-contact .profile-address-block dd{white-space:pre-line}
+.donor-profile-notes{grid-column:1/-1}
+.donor-profile-note-copy{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;margin:0;font-size:.88rem}
+.donor-profile-empty{margin:0;color:var(--muted);font-style:italic}
+@media(max-width:800px){.donor-profile-grid{grid-template-columns:1fr}.donor-profile-notes{grid-column:auto}.donor-profile-heading{align-items:flex-start}.donor-profile-actions{flex-direction:column;align-items:stretch}.donor-profile-actions button{width:100%}}
+@media(max-width:520px){.donor-profile-heading{display:block;padding:16px}.donor-profile-title-row h2{font-size:1.35rem}.donor-profile-actions{display:grid;margin-top:16px}.donor-profile-section{padding:16px}.donor-profile-summary{grid-template-columns:1fr}.donor-profile-summary .profile-next-action{grid-column:auto}}
