@@ -34,8 +34,19 @@ test('visible donor dashboard and CRUD use crm_donors without legacy donor queri
   assert.match(html, /id="donorSearch"/);
   assert.match(html, /id="donorStageFilter"/);
   assert.match(html, /id="donorOfficerFilter"/);
+  assert.match(html, /id="donorStatusFilter"[\s\S]*value="active"[\s\S]*value="archived"[\s\S]*value="all"/);
   assert.match(html, /id="donorSort"[\s\S]*<option value="last-name-asc">Last Name \(A–Z\)<\/option>/);
-  assert.match(app, /permanent deletion is intentionally disabled/);
+  assert.doesNotMatch(app, /\.from\('crm_donors'\)\.delete\(/);
+  assert.match(app, /\.from\('crm_donors'\)[\s\S]*\.update\(archiveDonorPayload\(!restoring\)\)/);
+});
+
+test('CRM donor archive migration preserves rows and prohibits permanent deletion', async () => {
+  const migration = await readFile(new URL('../supabase/migrations/20260729_crm_donor_archive.sql', import.meta.url), 'utf8');
+  assert.match(migration, /add column if not exists is_archived boolean/i);
+  assert.match(migration, /set is_archived = false[\s\S]*where is_archived is null/i);
+  assert.match(migration, /alter column is_archived set default false/i);
+  assert.match(migration, /alter column is_archived set not null/i);
+  assert.doesNotMatch(migration, /\bdelete\b/i);
 });
 
 test('successful donor imports refresh the CRM dashboard in the background', async () => {
