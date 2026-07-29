@@ -30,7 +30,7 @@ Google Drive integration is intentionally not included. A migration does not del
 
 ## Donor CSV imports
 
-- Open **Donors** and choose **Import CSV**. The existing manual donor CRUD remains unchanged and continues to use the legacy `donors` table.
+- Open **Donors** and choose **Import CSV**. The visible dashboard, manual create/edit flow, and importer all use `crm_donors`; the legacy `donors` table is left untouched.
 - The importer accepts one `.csv` file, supports drag and drop, and uses Papa Parse for quoted fields, escaped quotes, CRLF, blank cells, and UTF-8 BOM.
 - Header aliases are matched after ignoring capitalization, whitespace, hyphens, and underscores. Every mapping can be reviewed and changed.
 - `donor_code` is required and remains text, including leading zeroes.
@@ -42,6 +42,8 @@ Google Drive integration is intentionally not included. A migration does not del
 This feature does not include a Supabase schema migration. Before deployment, `crm_donors` must already contain the documented target columns and `donor_code` must have a unique constraint or unique index for `onConflict: 'donor_code'`.
 
 Accepted `crm_donors` columns are: `donor_code`, `household_name`, `first_name`, `last_name`, `email`, `address`, `city`, `state`, `zip`, `country`, `home_phone`, `mobile_phone`, `assigned_officer`, `stage`, `lifetime_giving`, `last_gift_amount`, `last_gift_date`, `last_contact_date`, `next_action`, `next_action_date`, and `notes`.
+
+The Donors dashboard supports search, dynamic stage/officer filters, sorting, summary metrics, due-date and contact-status flags, and 50-record client-side pagination. CRM records can be created and edited, but permanent deletion is intentionally disabled until an archive workflow is designed.
 
 ## Local setup
 

@@ -74,7 +74,35 @@
         <div id="knowledgeList" class="list"></div>
       </section>
 
-      <section id="donorsPanel" class="panel hidden"><div class="row between"><div><h2>Donor Profiles</h2><p class="muted">Keep useful relationship context tied to your account.</p></div><div class="row donor-actions"><button id="importDonors" class="secondary">Import CSV</button><button id="newDonor" class="primary">New donor</button></div></div><div id="donorList" class="list"></div></section>
+      <section id="donorsPanel" class="panel hidden">
+        <div class="row between donor-heading">
+          <div><h2>Donor CRM</h2><p class="muted">Relationship context, giving history, and next actions in one workspace.</p></div>
+          <div class="row donor-actions"><button id="importDonors" class="secondary">Import CSV</button><button id="newDonor" class="primary">New donor</button></div>
+        </div>
+        <div id="donorKpis" class="donor-kpis" aria-label="Donor summary"></div>
+        <div class="donor-toolbar">
+          <label class="donor-search">Search donors<input id="donorSearch" type="search" placeholder="Name, code, email, city, officer…" autocomplete="off"></label>
+          <label>Stage<select id="donorStageFilter"><option value="">All stages</option></select></label>
+          <label>Assigned officer<select id="donorOfficerFilter"><option value="">All officers</option></select></label>
+          <label>Sort<select id="donorSort">
+            <option value="household-asc">Household Name A–Z</option>
+            <option value="household-desc">Household Name Z–A</option>
+            <option value="lifetime-desc">Lifetime Giving: High to Low</option>
+            <option value="last-gift-newest">Last Gift: Newest</option>
+            <option value="last-contact-oldest">Last Contact: Oldest First</option>
+            <option value="next-action-soonest">Next Action: Soonest</option>
+            <option value="recently-updated">Recently Updated</option>
+          </select></label>
+        </div>
+        <div class="row between donor-results-bar"><span id="donorCount" class="muted" aria-live="polite"></span><button id="refreshDonors" class="secondary">Refresh donors</button></div>
+        <div id="donorStatus" role="status" aria-live="polite"></div>
+        <div id="donorList" class="donor-list"></div>
+        <nav id="donorPagination" class="donor-pagination hidden" aria-label="Donor pages">
+          <button id="previousDonorPage" class="secondary">Previous page</button>
+          <span id="donorPageStatus"></span>
+          <button id="nextDonorPage" class="secondary">Next page</button>
+        </nav>
+      </section>
       <section id="historyPanel" class="panel hidden"><div><h2>Generation History</h2><p class="muted">Past reviews and drafts saved automatically.</p></div><div id="historyList" class="list"></div></section>
     </main>
   </div>
