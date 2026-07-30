@@ -130,12 +130,12 @@ test('Donor 360 UI displays donor code and wires quick actions to existing flows
   const app = await readFile(appUrl, 'utf8');
   assert.match(app, /Donor Overview/);
   assert.match(app, /Donor code/);
-  assert.match(app, /profileAddGift'\)\.onclick = openGiftQuickAction/);
-  assert.match(app, /Gift Entry will be available in a future update\./);
-  assert.doesNotMatch(app, /function openGiftQuickAction\(\) \{[\s\S]*openDonor\(donorProfileRecord\)/);
+  assert.match(app, /profileAddGift'\)\.onclick = \(\) => openGiftModal\(null, donorProfileRecord\.id\)/);
+  assert.doesNotMatch(app, /function openGiftQuickAction\(\)/);
   assert.match(app, /profileAddActivity'\)\.onclick = \(\) => openActivityModal\(\)/);
   assert.match(app, /profileAddNote'\)\.onclick = \(\) => openActivityModalWithDefaults\(\{ activity_type: 'note'/);
   assert.match(app, /profileScheduleFollowUp'\)\.onclick = \(\) => openActivityModalWithDefaults\(\{ activity_type: 'other'/);
+  assert.match(app, /scope: 'donor_profile'/);
 });
 
 test('Donor 360 omits unsupported fundraising snapshot rows instead of showing placeholders', async () => {

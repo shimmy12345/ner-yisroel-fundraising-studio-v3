@@ -48,6 +48,23 @@ import {
   buildDashboardViewModel,
   sampleDashboardViewModel
 } from './dashboard.js';
+import {
+  GIFT_PAGE_SIZE,
+  GIFT_TYPES,
+  filterAndSortGifts,
+  fiscalYearLabel,
+  formatGiftCurrency,
+  formatGiftDate,
+  giftCampaignOptions,
+  normalizeGiftPayload,
+  softDeleteGiftPayload
+} from './gifts.js';
+import {
+  MEDIA_PAGE_SIZE,
+  filterMediaAssets,
+  normalizeMediaMetadata,
+  validateMediaFile
+} from './media.js';
 
 const cfg = window.RUNTIME_CONFIG || {};
 const $ = id => document.getElementById(id);
@@ -106,6 +123,15 @@ let userScopeVersion = 0;
 let dashboardRequestId = 0;
 let dashboardLoadedAt = 0;
 let dashboardLoadedForUser = null;
+let dashboardViewModel = null;
+let donorGiftPage = 1;
+let donorGiftHasMore = false;
+let donorGiftRecord = null;
+let mediaRows = [];
+let mediaPendingFiles = [];
+let mediaPage = 0;
+let mediaHasMore = false;
+let mediaRecord = null;
 
 function resetUserScopedState() {
   userScopeVersion += 1;
@@ -135,6 +161,16 @@ function resetUserScopedState() {
   dashboardRequestId += 1;
   dashboardLoadedAt = 0;
   dashboardLoadedForUser = null;
+  dashboardViewModel = null;
+  donorGifts = [];
+  donorGiftPage = 1;
+  donorGiftHasMore = false;
+  donorGiftRecord = null;
+  mediaRows = [];
+  mediaPendingFiles = [];
+  mediaPage = 0;
+  mediaHasMore = false;
+  mediaRecord = null;
 
   $('userEmail').textContent = '';
   $('userAvatar').textContent = '';
@@ -165,6 +201,12 @@ function resetUserScopedState() {
   $('activityModal').classList.add('hidden');
   $('activityArchiveConfirmModal').classList.add('hidden');
   $('donorImportWizard').classList.add('hidden');
+  $('giftModal').classList.add('hidden');
+  $('giftDeleteConfirmModal').classList.add('hidden');
+  $('exportModal').classList.add('hidden');
+  $('mediaModal').classList.add('hidden');
+  $('mediaLibraryGrid').innerHTML = '';
+  $('mediaPendingList').innerHTML = '';
 }
 
 function toast(message) {
@@ -213,11 +255,11 @@ function safeFileName(name) {
   return name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(-180);
 }
 
-function uploadStorageObject(file, storagePath, onProgress) {
+function uploadPrivateStorageObject(bucket, file, storagePath, onProgress) {
   return new Promise((resolve, reject) => {
     const encodedPath = storagePath.split('/').map(encodeURIComponent).join('/');
     const request = new XMLHttpRequest();
-    request.open('POST', `${cfg.supabaseUrl}/storage/v1/object/knowledge-files/${encodedPath}`);
+    request.open('POST', `${cfg.supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${encodedPath}`);
     request.setRequestHeader('authorization', `Bearer ${session.access_token}`);
     request.setRequestHeader('apikey', cfg.supabaseAnonKey);
     request.setRequestHeader('content-type', file.type || 'application/octet-stream');
@@ -307,6 +349,7 @@ function showPanel(name) {
   $('pageTitle').textContent = metadata.title;
   $('pageSubtitle').textContent = metadata.subtitle;
   if (name === 'dashboard') loadDashboard();
+  if (name === 'studio') loadMediaAssets({ reset: true });
   if (name === 'knowledge') loadKnowledge();
   if (name === 'donors') loadDonors();
   if (name === 'history') loadHistory();
@@ -349,28 +392,63 @@ function renderDashboard(viewModel, errors = []) {
       <small class="${esc(kpi.tone)}">${esc(kpi.trend)}</small>
     </article>`).join('');
 
+  const brief = viewModel.morningBrief;
+  $('dashboardBriefStatus').textContent = viewModel.isSample ? 'Example data' : 'Live workspace data';
+  $('dashboardBriefSummary').textContent = brief.summary;
+  $('dashboardBriefMetrics').innerHTML = [
+    ['Due today', brief.dueToday],
+    ['Overdue', brief.overdue],
+    ['Upcoming meetings', brief.meetings],
+    ['Recent gifts', brief.recentGifts],
+    ['Need follow-up', brief.needsFollowUp]
+  ].map(([label, value]) => `<div><strong>${esc(value)}</strong><span>${esc(label)}</span></div>`).join('');
+
   $('dashboardPriorityCount').textContent = viewModel.priorities.length
     ? `${viewModel.priorities.length} item${viewModel.priorities.length === 1 ? '' : 's'}`
     : 'All clear';
   $('dashboardPriorityList').innerHTML = viewModel.priorities.length
     ? viewModel.priorities.map(item => `
-      <label class="dashboard-task ${esc(item.kind)}">
+      <label class="dashboard-task ${esc(item.kind)}" data-source-type="${esc(item.sourceType || '')}" data-source-id="${esc(item.sourceId || '')}">
         <input type="checkbox" aria-label="Mark ${esc(item.title)} complete">
         <span class="dashboard-check" aria-hidden="true"></span>
         <span class="dashboard-task-copy">
           <strong>${esc(item.title)}</strong>
-          <small>${esc(item.donor)} · ${esc(item.detail)}</small>
+          <small>${esc(item.donor)} · ${esc(item.reason || item.detail)}</small>
         </span>
         <time>${esc(item.dueLabel)}</time>
       </label>`).join('')
     : dashboardEmpty('Nothing needs attention today', 'Your recorded follow-ups and donor actions are up to date.');
 
   $$('#dashboardPriorityList .dashboard-task input').forEach(input => {
-    input.onchange = () => {
-      input.closest('.dashboard-task').classList.toggle('complete', input.checked);
-      if (input.checked) toast('Marked complete for this session');
+    input.onchange = async () => {
+      const task = input.closest('.dashboard-task');
+      if (!input.checked || viewModel.isSample) {
+        input.checked = false;
+        return;
+      }
+      input.disabled = true;
+      task.classList.add('complete');
+      try {
+        await completeDashboardPriority(task.dataset.sourceType, task.dataset.sourceId);
+        task.remove();
+        toast('Priority completed');
+        await loadDashboard({ force: true });
+      } catch (error) {
+        input.checked = false;
+        input.disabled = false;
+        task.classList.remove('complete');
+        toast(error.message);
+      }
     };
   });
+
+  $('dashboardCompletedList').innerHTML = viewModel.completed?.length
+    ? viewModel.completed.map(item => `
+      <article class="dashboard-completed-item">
+        <span aria-hidden="true">✓</span>
+        <div><strong>${esc(item.title)}</strong><small>${esc(item.donor)} · ${esc(formatDate(item.completedAt))}</small></div>
+      </article>`).join('')
+    : dashboardEmpty('No completed priorities yet', 'Completed follow-ups will remain visible here.');
 
   $('dashboardUpcomingList').innerHTML = viewModel.upcoming.length
     ? viewModel.upcoming.map(item => `
@@ -398,6 +476,23 @@ function renderDashboard(viewModel, errors = []) {
     </article>`).join('');
 }
 
+async function completeDashboardPriority(sourceType, sourceId) {
+  if (!sourceId || !['donor', 'activity', 'meeting'].includes(sourceType)) {
+    throw new Error('This priority cannot be completed.');
+  }
+  const table = sourceType === 'donor' ? 'crm_donors' : 'donor_activities';
+  const completedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from(table)
+    .update({
+      next_action_completed_at: completedAt,
+      next_action_completed_by: session.user.id
+    })
+    .eq('id', sourceId)
+    .eq('owner_user_id', session.user.id);
+  if (error) throw error;
+}
+
 async function loadDashboard({ force = false } = {}) {
   const userId = session?.user?.id;
   const scopeVersion = userScopeVersion;
@@ -412,16 +507,18 @@ async function loadDashboard({ force = false } = {}) {
   $('dashboardContent').classList.add('hidden');
   $('dashboardStatus').innerHTML = '<span class="dashboard-loader" aria-hidden="true"></span><div><strong>Preparing your command center</strong><span>Loading current donor and workspace activity.</span></div>';
 
-  const [donorsResult, activitiesResult, knowledgeResult, generationsResult] = await Promise.all([
-    supabase.from('crm_donors').select(CRM_DONOR_FIELDS.join(',')).eq('owner_user_id', userId),
-    supabase.from('donor_activities').select(ACTIVITY_FIELDS.join(',')).eq('owner_user_id', userId).order('occurred_at', { ascending: false }).limit(100),
+  const [totalsResult, donorsResult, activitiesResult, giftsResult, knowledgeResult, generationsResult] = await Promise.all([
+    supabase.rpc('fundraising_dashboard_totals'),
+    supabase.from('crm_donors').select(CRM_DONOR_FIELDS.join(',')).eq('owner_user_id', userId).not('next_action', 'is', null).order('next_action_date', { ascending: true, nullsFirst: false }).limit(250),
+    supabase.from('donor_activities').select(ACTIVITY_FIELDS.join(',')).eq('owner_user_id', userId).order('occurred_at', { ascending: false }).limit(150),
+    supabase.from('donor_gifts').select('id,donor_id,gift_date,amount,campaign,is_deleted,created_at').eq('owner_user_id', userId).eq('is_deleted', false).order('gift_date', { ascending: false }).limit(100),
     supabase.from('knowledge_documents').select('id,title,source_type,created_at,updated_at').eq('user_id', userId).order('updated_at', { ascending: false }).limit(50),
     supabase.from('generations').select('id,title,mode,created_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(50)
   ]);
 
   if (requestId !== dashboardRequestId || scopeVersion !== userScopeVersion || session?.user?.id !== userId) return;
-  const results = [donorsResult, activitiesResult, knowledgeResult, generationsResult];
-  const labels = ['Donor data is unavailable.', 'Interaction data is unavailable.', 'Knowledge activity is unavailable.', 'AI history is unavailable.'];
+  const results = [totalsResult, donorsResult, activitiesResult, giftsResult, knowledgeResult, generationsResult];
+  const labels = ['Dashboard totals are unavailable.', 'Donor priorities are unavailable.', 'Interaction data is unavailable.', 'Gift activity is unavailable.', 'Knowledge activity is unavailable.', 'AI history is unavailable.'];
   const errors = results.map((result, index) => result.error ? labels[index] : '').filter(Boolean);
   const allUnavailable = results.every(result => result.error);
   const viewModel = allUnavailable
@@ -429,10 +526,13 @@ async function loadDashboard({ force = false } = {}) {
     : buildDashboardViewModel({
         donors: donorsResult.data || [],
         activities: activitiesResult.data || [],
+        gifts: giftsResult.data || [],
         knowledge: knowledgeResult.data || [],
-        generations: generationsResult.data || []
+        generations: generationsResult.data || [],
+        totals: totalsResult.data || {}
       });
 
+  dashboardViewModel = viewModel;
   renderDashboard(viewModel, errors);
   dashboardLoadedAt = Date.now();
   dashboardLoadedForUser = userId;
@@ -449,9 +549,16 @@ $$('[data-dashboard-action]').forEach(button => {
     } else if (action === 'add-donor') {
       showPanel('donors');
       openDonor(null);
+    } else if (action === 'add-gift') {
+      openGiftModal();
     } else if (action === 'log-interaction') {
       showPanel('donors');
       toast('Open a donor profile to log an interaction');
+    } else if (action === 'add-follow-up') {
+      showPanel('donors');
+      toast('Open a donor profile and add an activity with a next action');
+    } else if (action === 'export-data') {
+      openExportModal();
     } else if (action === 'upload-knowledge') {
       showPanel('knowledge');
       $('knowledgeFiles').click();
@@ -605,6 +712,12 @@ function renderDonorProfile(row) {
       <div id="donorUnifiedTimelineState" class="activity-state" role="status" aria-live="polite"></div>
       <div id="donorUnifiedTimelineList" class="unified-timeline-list"></div>
     </section>
+    <section class="donor-giving-overview" aria-labelledby="donorGivingOverviewTitle">
+      <div class="row between donor-giving-overview-heading"><div><p class="eyebrow">Giving dossier</p><h3 id="donorGivingOverviewTitle">Giving Summary</h3></div><span id="donorGivingMomentum" class="giving-momentum">Insufficient Data</span></div>
+      <div id="donorGivingSummary" class="donor-giving-summary"></div>
+      <div id="donorGivingInsights" class="donor-giving-insights"></div>
+      <div id="donorGivingChart" class="donor-giving-chart" role="img" aria-label="Annual giving by fiscal year"></div>
+    </section>
     <div class="donor-profile-grid">
       <section class="donor-profile-section donor-profile-relationship" aria-labelledby="relationshipSnapshotTitle">
         <h3 id="relationshipSnapshotTitle">Relationship Snapshot</h3>
@@ -647,11 +760,28 @@ function renderDonorProfile(row) {
         <div id="donorActivityList" class="activity-list"></div>
         <button id="loadMoreActivities" class="secondary hidden">Load More</button>
       </section>
+      <section class="donor-profile-section donor-gift-history" aria-labelledby="donorGiftHistoryTitle">
+        <div class="row between donor-gift-heading">
+          <div><h3 id="donorGiftHistoryTitle">Donation History</h3><p>Live gifts, newest first.</p></div>
+          <div class="row"><button id="exportDonorGifts" class="secondary">Export CSV</button><button id="addDonorGift" class="primary">Add Gift</button></div>
+        </div>
+        <div class="gift-history-toolbar">
+          <label>Search<input id="giftHistorySearch" type="search" placeholder="Campaign, fund, solicitor, notes"></label>
+          <label>From<input id="giftHistoryFrom" type="date"></label>
+          <label>To<input id="giftHistoryTo" type="date"></label>
+          <label>Campaign<select id="giftHistoryCampaign"><option value="">All campaigns</option></select></label>
+          <label>Gift Type<select id="giftHistoryType"><option value="">All gift types</option>${Object.entries(GIFT_TYPES).map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join('')}</select></label>
+          <label>Sort<select id="giftHistorySort"><option value="date-desc">Newest date</option><option value="date-asc">Oldest date</option><option value="amount-desc">Highest amount</option><option value="amount-asc">Lowest amount</option></select></label>
+        </div>
+        <div id="giftHistoryState" class="activity-state" role="status" aria-live="polite"></div>
+        <div class="table-wrap"><table class="gift-history-table"><thead><tr><th>Date</th><th>Amount</th><th>Campaign / Fund</th><th>Type</th><th>Payment / Solicitor</th><th>Status</th><th></th></tr></thead><tbody id="giftHistoryRows"></tbody></table></div>
+        <button id="loadMoreGifts" class="secondary hidden">Load More Gifts</button>
+      </section>
     </div>`;
   $('backToDonors').onclick = returnToDonors;
   $('profileEditDonor').onclick = () => openDonor(donorProfileRecord);
   $('profileArchiveDonor').onclick = () => openDonorArchiveConfirmation(donorProfileRecord);
-  $('profileAddGift').onclick = openGiftQuickAction;
+  $('profileAddGift').onclick = () => openGiftModal(null, donorProfileRecord.id);
   $('profileAddActivity').onclick = () => openActivityModal();
   $('profileAddNote').onclick = () => openActivityModalWithDefaults({ activity_type: 'note', subject: 'Donor note' });
   $('profileScheduleFollowUp').onclick = () => openActivityModalWithDefaults({ activity_type: 'other', subject: 'Scheduled follow-up', next_action: donorProfileRecord?.next_action || '', next_action_date: donorProfileRecord?.next_action_date || '', advanced: true });
@@ -667,40 +797,19 @@ function renderDonorProfile(row) {
     };
   });
   renderDonor360Dynamic();
-}
-
-function openGiftQuickAction() {
-  toast('Gift Entry will be available in a future update.');
-}
-
-function csvValue(value) {
-  return `"${String(value ?? '').replaceAll('"', '""')}"`;
+  $('addDonorGift').onclick = () => openGiftModal(null, donorProfileRecord.id);
+  $('exportDonorGifts').onclick = exportCurrentDonorGifts;
+  $('loadMoreGifts').onclick = () => loadDonorGifts();
+  ['giftHistorySearch', 'giftHistoryFrom', 'giftHistoryTo', 'giftHistoryCampaign', 'giftHistoryType', 'giftHistorySort']
+    .forEach(id => $(id).oninput = renderDonorGifts);
 }
 
 function exportDonor360Csv() {
-  if (!donorProfileRecord) return;
-  const profile = donorProfileViewModel(donorProfileRecord);
-  const timeline = donorUnifiedTimeline({ donor: donorProfileRecord, gifts: donorGifts, activities: donorActivities });
-  const rows = [
-    ['section', 'date', 'type', 'description', 'amount'],
-    ['overview', '', 'donor', profile.displayName, ''],
-    ['overview', '', 'donor_code', profile.donorCode, ''],
-    ...timeline.map(item => [
-      'timeline',
-      item.date || '',
-      item.type,
-      item.description,
-      item.amount ?? ''
-    ])
-  ];
-  const blob = new Blob([rows.map(row => row.map(csvValue).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = `donor-360-${safeFileName(profile.donorCode || donorProfileRecord.id)}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(link.href), 2_000);
+  openExportModal({
+    scope: 'donor_profile',
+    donorId: donorProfileRecord?.id,
+    format: 'csv'
+  });
 }
 
 async function loadDonorProfile(donorId, { showLoading = true } = {}) {
@@ -873,33 +982,6 @@ async function loadDonorActivities({ reset = false } = {}) {
   renderDonor360Dynamic();
 }
 
-async function loadDonorGifts({ reset = false } = {}) {
-  if (!donorProfileRecord?.id) return;
-  const userId = session?.user?.id;
-  if (reset) {
-    donorGifts = [];
-    donorGiftLoadError = false;
-  }
-  const { data, error } = await supabase
-    .from('donor_gifts')
-    .select('*')
-    .eq('owner_user_id', userId)
-    .eq('donor_id', donorProfileRecord.id)
-    .eq('is_deleted', false)
-    .order('gift_date', { ascending: false })
-    .limit(500);
-  if (session?.user?.id !== userId) return;
-  if (error) {
-    donorGiftLoadError = true;
-    donorGifts = [];
-    renderDonor360Dynamic();
-    return;
-  }
-  donorGifts = data || [];
-  donorGiftLoadError = false;
-  renderDonor360Dynamic();
-}
-
 function updateActivityGuidance() {
   $('activityNextActionGuidance').textContent = nextActionGuidance(
     $('activityNextAction').value,
@@ -1036,6 +1118,393 @@ $('confirmArchiveActivity').onclick = async () => {
   }
 };
 
+async function ensureDonorsForSelection() {
+  if (crmDonorRows.length) return crmDonorRows;
+  const { data, error } = await supabase
+    .from('crm_donors')
+    .select(CRM_DONOR_FIELDS.join(','))
+    .eq('owner_user_id', session.user.id)
+    .eq('is_archived', false)
+    .order('last_name', { ascending: true })
+    .limit(1000);
+  if (error) throw error;
+  crmDonorRows = data || [];
+  return crmDonorRows;
+}
+
+function donorOptionLabel(row) {
+  const name = donorProfileViewModel(row).displayName;
+  return `${name} (${row.donor_code || 'no code'})`;
+}
+
+async function populateDonorSelect(select, selected = '', includeBlank = true) {
+  const donors = await ensureDonorsForSelection();
+  select.innerHTML = `${includeBlank ? '<option value="">Choose a donor</option>' : ''}${donors
+    .filter(row => !row.is_archived || row.id === selected)
+    .map(row => `<option value="${esc(row.id)}">${esc(donorOptionLabel(row))}</option>`)
+    .join('')}`;
+  select.value = selected || '';
+}
+
+async function openGiftModal(gift = null, donorId = '') {
+  donorGiftRecord = gift;
+  $('giftModalTitle').textContent = gift ? 'Edit Gift' : 'Add Gift';
+  $('giftFormError').textContent = '';
+  $('giftForm').reset();
+  try {
+    await populateDonorSelect($('giftDonor'), donorId || gift?.donor_id, false);
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  $('giftDonor').disabled = Boolean(gift || donorId);
+  $('giftDate').value = gift?.gift_date || new Date().toISOString().slice(0, 10);
+  $('giftAmount').value = gift?.amount ?? '';
+  $('giftType').value = gift?.gift_type || 'direct_gift';
+  $('giftCampaign').value = gift?.campaign || '';
+  $('giftDesignation').value = gift?.designation || '';
+  $('giftPaymentMethod').value = gift?.payment_method || '';
+  $('giftSolicitor').value = gift?.solicitor || '';
+  $('giftSharedCreditAmount').value = gift?.shared_credit_amount ?? '';
+  $('giftSharedCreditInformation').value = gift?.shared_credit_information || '';
+  $('giftReferenceNumber').value = gift?.reference_number || '';
+  $('giftTributeInformation').value = gift?.tribute_information || '';
+  $('giftNotes').value = gift?.notes || '';
+  $('giftReceiptStatus').value = gift?.receipt_status || 'not_required';
+  $('giftThankYouStatus').value = gift?.thank_you_status || 'pending';
+  $('giftAnonymous').checked = Boolean(gift?.is_anonymous);
+  $('deleteGift').classList.toggle('hidden', !gift);
+  $('giftModal').classList.remove('hidden');
+  $('giftAmount').focus();
+}
+
+function closeGiftModal() {
+  $('giftModal').classList.add('hidden');
+  donorGiftRecord = null;
+}
+
+$('closeGiftModal').onclick = closeGiftModal;
+$('cancelGift').onclick = closeGiftModal;
+$('giftForm').onsubmit = async event => {
+  event.preventDefault();
+  const button = $('saveGift');
+  button.disabled = true;
+  $('giftFormError').textContent = '';
+  try {
+    const payload = normalizeGiftPayload({
+      gift_date: $('giftDate').value,
+      amount: $('giftAmount').value,
+      gift_type: $('giftType').value,
+      campaign: $('giftCampaign').value,
+      designation: $('giftDesignation').value,
+      payment_method: $('giftPaymentMethod').value,
+      solicitor: $('giftSolicitor').value,
+      shared_credit_amount: $('giftSharedCreditAmount').value,
+      shared_credit_information: $('giftSharedCreditInformation').value,
+      reference_number: $('giftReferenceNumber').value,
+      tribute_information: $('giftTributeInformation').value,
+      notes: $('giftNotes').value,
+      receipt_status: $('giftReceiptStatus').value,
+      thank_you_status: $('giftThankYouStatus').value,
+      is_anonymous: $('giftAnonymous').checked
+    }, $('giftDonor').value);
+    const editingGift = Boolean(donorGiftRecord);
+    const query = donorGiftRecord
+      ? supabase.from('donor_gifts').update(payload).eq('id', donorGiftRecord.id).eq('owner_user_id', session.user.id)
+      : supabase.from('donor_gifts').insert(payload);
+    const { error } = await query;
+    if (error) throw error;
+    closeGiftModal();
+    dashboardLoadedAt = 0;
+    toast(editingGift ? 'Gift updated' : 'Gift recorded');
+    if (donorProfileRecord?.id === payload.donor_id) await refreshProfileAfterGift();
+    else await loadDashboard({ force: true });
+  } catch (error) {
+    $('giftFormError').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
+
+$('deleteGift').onclick = () => {
+  if (!donorGiftRecord) return;
+  const donor = crmDonorRows.find(row => row.id === donorGiftRecord.donor_id) || donorProfileRecord;
+  $('giftDeleteConfirmBody').textContent = `${formatGiftCurrency(donorGiftRecord.amount)} on ${formatGiftDate(donorGiftRecord.gift_date)} for ${donorOptionLabel(donor)}.`;
+  $('giftDeleteConfirmModal').classList.remove('hidden');
+  $('confirmDeleteGift').focus();
+};
+$('cancelDeleteGift').onclick = () => $('giftDeleteConfirmModal').classList.add('hidden');
+$('confirmDeleteGift').onclick = async () => {
+  if (!donorGiftRecord) return;
+  const button = $('confirmDeleteGift');
+  button.disabled = true;
+  try {
+    const donorId = donorGiftRecord.donor_id;
+    const { error } = await supabase
+      .from('donor_gifts')
+      .update(softDeleteGiftPayload())
+      .eq('id', donorGiftRecord.id)
+      .eq('owner_user_id', session.user.id);
+    if (error) throw error;
+    $('giftDeleteConfirmModal').classList.add('hidden');
+    closeGiftModal();
+    dashboardLoadedAt = 0;
+    toast('Gift deleted');
+    if (donorProfileRecord?.id === donorId) await refreshProfileAfterGift();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+};
+
+async function refreshProfileAfterGift() {
+  if (!donorProfileRecord) return;
+  const { data, error } = await supabase
+    .from('crm_donors')
+    .select(CRM_DONOR_FIELDS.join(','))
+    .eq('owner_user_id', session.user.id)
+    .eq('id', donorProfileRecord.id)
+    .single();
+  if (error) throw error;
+  donorProfileRecord = data;
+  syncDonorDashboardRow(data);
+  await Promise.all([
+    loadDonorGifts({ reset: true }),
+    loadDonorActivities({ reset: true })
+  ]);
+  loadDashboard({ force: true });
+}
+
+function giftHistoryFilters() {
+  return {
+    search: $('giftHistorySearch')?.value || '',
+    campaign: $('giftHistoryCampaign')?.value || '',
+    giftType: $('giftHistoryType')?.value || '',
+    dateFrom: $('giftHistoryFrom')?.value || '',
+    dateTo: $('giftHistoryTo')?.value || '',
+    sort: $('giftHistorySort')?.value || 'date-desc'
+  };
+}
+
+function renderGivingDossier(dossier = {}) {
+  const hasGifts = Number(dossier.gift_count) > 0;
+  const currentFiscalYear = new Date().getUTCMonth() >= 6
+    ? new Date().getUTCFullYear() + 1
+    : new Date().getUTCFullYear();
+  const current = Number(dossier.current_fiscal_year_giving || 0);
+  const previous = Number(dossier.previous_fiscal_year_giving || 0);
+  const momentum = !hasGifts ? 'Insufficient Data'
+    : !previous ? 'Increasing'
+      : (current - previous) / previous > 0.1 ? 'Increasing'
+        : (current - previous) / previous < -0.1 ? 'Declining'
+          : 'Stable';
+  $('donorGivingMomentum').textContent = momentum;
+  $('donorGivingMomentum').dataset.momentum = momentum.toLowerCase().replaceAll(' ', '-');
+  const cards = [
+    ['Lifetime Giving', hasGifts ? formatGiftCurrency(dossier.lifetime_giving) : 'Not recorded'],
+    [`${fiscalYearLabel(currentFiscalYear)} Giving`, hasGifts ? formatGiftCurrency(current) : 'Not recorded'],
+    [`${fiscalYearLabel(currentFiscalYear - 1)} Giving`, hasGifts ? formatGiftCurrency(previous) : 'Not recorded'],
+    ['Last Gift', dossier.last_gift ? `${formatGiftCurrency(dossier.last_gift.amount)} · ${formatGiftDate(dossier.last_gift.gift_date)}` : 'Not recorded'],
+    ['Largest Gift', dossier.largest_gift ? formatGiftCurrency(dossier.largest_gift) : 'Not recorded'],
+    ['Average Gift', dossier.average_gift ? formatGiftCurrency(dossier.average_gift) : 'Not recorded'],
+    ['Number of Gifts', hasGifts ? String(dossier.gift_count) : 'Not recorded'],
+    ['First Gift Date', dossier.first_gift_date ? formatGiftDate(dossier.first_gift_date) : 'Not recorded']
+  ];
+  $('donorGivingSummary').innerHTML = cards.map(([label, value]) => `<article><span>${esc(label)}</span><strong>${esc(value)}</strong></article>`).join('');
+
+  const annual = dossier.annual_giving || [];
+  const years = new Set(annual.map(row => Number(row.fiscalYear)));
+  let consecutive = 0;
+  if (years.size) {
+    let year = Math.max(...years);
+    while (years.has(year)) {
+      consecutive += 1;
+      year -= 1;
+    }
+  }
+  const months = (dossier.typical_giving_months || []).map(month => new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' })
+    .format(new Date(Date.UTC(2024, Number(month) - 1, 1))));
+  const averageAnnual = annual.length
+    ? annual.reduce((sum, row) => sum + Number(row.amount), 0) / annual.length
+    : null;
+  $('donorGivingInsights').innerHTML = [
+    ['Consecutive years', consecutive || 'Not enough data'],
+    ['Preferred campaigns', (dossier.preferred_campaigns || []).join(', ') || 'Not enough data'],
+    ['Typical giving months', months.join(', ') || 'Not enough data'],
+    ['Average annual giving', averageAnnual === null ? 'Not enough data' : formatGiftCurrency(averageAnnual)]
+  ].map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+
+  if (!annual.length) {
+    $('donorGivingChart').innerHTML = '<div class="dashboard-empty"><strong>No giving trend yet</strong><span>Annual giving will appear after gifts are recorded.</span></div>';
+    $('donorGivingChart').setAttribute('aria-label', 'No annual giving data recorded.');
+    return;
+  }
+  const maximum = Math.max(...annual.map(row => Number(row.amount)), 1);
+  $('donorGivingChart').setAttribute('aria-label', annual.map(row => `${fiscalYearLabel(row.fiscalYear)}: ${formatGiftCurrency(row.amount)}`).join('; '));
+  $('donorGivingChart').innerHTML = annual.map(row => `
+    <div class="giving-bar-column">
+      <span>${esc(formatGiftCurrency(row.amount))}</span>
+      <div class="giving-bar-track"><div class="giving-bar" style="height:${Math.max(4, (Number(row.amount) / maximum) * 100)}%"></div></div>
+      <strong>${esc(fiscalYearLabel(row.fiscalYear))}</strong>
+      <small>${esc(row.giftCount)} gift${Number(row.giftCount) === 1 ? '' : 's'}</small>
+    </div>`).join('');
+}
+
+function renderDonorGifts() {
+  if (!$('giftHistoryRows')) return;
+  const rows = filterAndSortGifts(donorGifts, giftHistoryFilters());
+  $('giftHistoryRows').innerHTML = rows.map(gift => `
+    <tr>
+      <td>${esc(formatGiftDate(gift.gift_date))}</td>
+      <td><strong>${esc(formatGiftCurrency(gift.amount))}</strong>${gift.is_anonymous ? '<small>Anonymous</small>' : ''}</td>
+      <td>${esc(gift.campaign || 'Not recorded')}<small>${esc(gift.designation || '')}</small></td>
+      <td>${esc(GIFT_TYPES[gift.gift_type] || 'Other')}<small>${esc(gift.reference_number || '')}</small></td>
+      <td>${esc(gift.payment_method || 'Not recorded')}<small>${esc(gift.solicitor || gift.shared_credit_information || '')}</small></td>
+      <td>${esc(gift.receipt_status.replaceAll('_', ' '))}<small>Thanks: ${esc(gift.thank_you_status.replaceAll('_', ' '))}</small></td>
+      <td><button type="button" class="secondary edit-gift" data-gift-id="${esc(gift.id)}">Edit</button></td>
+    </tr>`).join('');
+  $('giftHistoryState').textContent = rows.length
+    ? `${rows.length} visible gift${rows.length === 1 ? '' : 's'}${donorGiftHasMore ? ' · more available' : ''}`
+    : 'No gifts match these filters.';
+  $$('.edit-gift').forEach(button => button.onclick = () => openGiftModal(donorGifts.find(gift => gift.id === button.dataset.giftId)));
+}
+
+async function loadDonorGifts({ reset = false } = {}) {
+  if (!donorProfileRecord || !$('giftHistoryRows')) return;
+  if (reset) {
+    donorGifts = [];
+    donorGiftPage = 0;
+    donorGiftHasMore = false;
+    donorGiftLoadError = false;
+    $('giftHistoryState').textContent = 'Loading donation history…';
+  }
+  const page = donorGiftPage;
+  const from = page * GIFT_PAGE_SIZE;
+  const [historyResult, dossierResult] = await Promise.all([
+    supabase
+      .from('donor_gifts')
+      .select('*')
+      .eq('owner_user_id', session.user.id)
+      .eq('donor_id', donorProfileRecord.id)
+      .eq('is_deleted', false)
+      .order('gift_date', { ascending: false })
+      .range(from, from + GIFT_PAGE_SIZE),
+    reset ? supabase.rpc('donor_giving_dossier', { target_donor_id: donorProfileRecord.id }) : Promise.resolve({ data: null, error: null })
+  ]);
+  if (historyResult.error) {
+    donorGiftLoadError = true;
+    $('giftHistoryState').textContent = historyResult.error.message;
+    renderDonor360Dynamic();
+    return;
+  }
+  donorGiftLoadError = false;
+  const batch = historyResult.data || [];
+  donorGifts.push(...batch.slice(0, GIFT_PAGE_SIZE));
+  donorGiftHasMore = batch.length > GIFT_PAGE_SIZE;
+  donorGiftPage += 1;
+  $('loadMoreGifts').classList.toggle('hidden', !donorGiftHasMore);
+  const campaigns = giftCampaignOptions(donorGifts);
+  const selectedCampaign = $('giftHistoryCampaign').value;
+  $('giftHistoryCampaign').innerHTML = `<option value="">All campaigns</option>${campaigns.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('')}`;
+  $('giftHistoryCampaign').value = selectedCampaign;
+  if (dossierResult.error) $('giftHistoryState').textContent = 'Giving summary is unavailable until the Version 2.1 migration is applied.';
+  else if (dossierResult.data) renderGivingDossier(dossierResult.data);
+  renderDonorGifts();
+  renderDonor360Dynamic();
+}
+
+function exportCurrentDonorGifts() {
+  openExportModal({
+    scope: 'donor_gifts',
+    donorId: donorProfileRecord?.id,
+    format: 'csv'
+  });
+}
+
+function uploadStorageObject(file, storagePath, onProgress) {
+  return uploadPrivateStorageObject('knowledge-files', file, storagePath, onProgress);
+}
+
+async function openExportModal({ scope = 'all', donorId = '', format = 'csv' } = {}) {
+  $('exportForm').reset();
+  $('exportScope').value = scope;
+  $('exportFormat').value = format;
+  $('exportMessage').textContent = '';
+  try {
+    await populateDonorSelect($('exportDonor'), donorId, true);
+    await populateDonorSelect($('exportSelectedDonors'), '', false);
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  $('exportDonor').value = donorId || '';
+  $('exportModal').classList.remove('hidden');
+  $('exportScope').focus();
+}
+
+function closeExportModal() {
+  $('exportModal').classList.add('hidden');
+}
+
+function downloadBase64File(base64, contentType, filename) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2_000);
+}
+
+async function requestExportFile({ scope = 'all', format = 'csv', filters = {} } = {}) {
+  return api('/api/export-data', {
+    method: 'POST',
+    body: JSON.stringify({ scope, format, filters })
+  });
+}
+
+function openDonorDashboardExport() {
+  openExportModal({
+    scope: 'donors',
+    format: 'csv'
+  });
+}
+
+$('closeExportModal').onclick = closeExportModal;
+$('cancelExport').onclick = closeExportModal;
+$('exportForm').onsubmit = async event => {
+  event.preventDefault();
+  const button = $('runExport');
+  button.disabled = true;
+  $('exportMessage').textContent = 'Preparing authorized records…';
+  try {
+    const data = await requestExportFile({
+      scope: $('exportScope').value,
+      format: $('exportFormat').value,
+      filters: {
+        donor_id: $('exportDonor').value,
+        donor_ids: [...$('exportSelectedDonors').selectedOptions].map(option => option.value),
+        campaign: $('exportCampaign').value.trim(),
+        date_from: $('exportDateFrom').value,
+        date_to: $('exportDateTo').value,
+        assigned_officer: $('exportOfficer').value.trim()
+      }
+    });
+    $('exportMessage').textContent = `Downloading ${data.record_count.toLocaleString()} authorized records.`;
+    downloadBase64File(data.base64, data.content_type, data.filename);
+    setTimeout(closeExportModal, 500);
+  } catch (error) {
+    $('exportMessage').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
+
 $('file').onchange = () => { $('fileName').textContent = $('file').files[0]?.name || 'No file selected'; };
 const toBase64 = file => new Promise((resolve, reject) => {
   const reader = new FileReader();
@@ -1083,6 +1552,238 @@ $('saveFavorite').onclick = async () => {
   if (!currentGeneration) return;
   const { error } = await supabase.from('generations').update({ favorite: true }).eq('id', currentGeneration.id);
   toast(error ? error.message : 'Added to favorites');
+};
+
+const mediaDropZone = $('mediaDropZone');
+$('chooseMediaFiles').onclick = () => $('mediaFiles').click();
+mediaDropZone.onclick = event => {
+  if (event.target !== $('mediaFiles')) $('mediaFiles').click();
+};
+mediaDropZone.onkeydown = event => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    $('mediaFiles').click();
+  }
+};
+['dragenter', 'dragover'].forEach(type => mediaDropZone.addEventListener(type, event => {
+  event.preventDefault();
+  mediaDropZone.classList.add('dragging');
+}));
+['dragleave', 'drop'].forEach(type => mediaDropZone.addEventListener(type, event => {
+  event.preventDefault();
+  mediaDropZone.classList.remove('dragging');
+}));
+mediaDropZone.ondrop = event => queueMediaFiles([...event.dataTransfer.files]);
+$('mediaFiles').onchange = () => queueMediaFiles([...$('mediaFiles').files]);
+
+function queueMediaFiles(files) {
+  files.forEach(file => {
+    try {
+      validateMediaFile(file);
+      if (!mediaPendingFiles.some(item => item.file.name === file.name && item.file.size === file.size)) {
+        mediaPendingFiles.push({ id: crypto.randomUUID(), file, status: 'Ready', progress: 0 });
+      }
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+  $('mediaFiles').value = '';
+  renderPendingMedia();
+}
+
+function renderPendingMedia() {
+  const container = $('mediaPendingList');
+  container.classList.toggle('hidden', !mediaPendingFiles.length);
+  container.innerHTML = mediaPendingFiles.length ? `
+    ${mediaPendingFiles.map(item => `
+      <article class="media-pending-item" data-pending-id="${esc(item.id)}">
+        <div><strong>${esc(item.file.name)}</strong><span>${esc(formatBytes(item.file.size))}</span><progress max="100" value="${esc(item.progress)}"></progress></div>
+        <span>${esc(item.status)}</span>
+        <button type="button" class="icon remove-pending-media" aria-label="Remove ${esc(item.file.name)}" ${item.status === 'Uploading' ? 'disabled' : ''}>×</button>
+      </article>`).join('')}
+    <button id="uploadPendingMedia" type="button" class="primary">Upload ${mediaPendingFiles.length} file${mediaPendingFiles.length === 1 ? '' : 's'}</button>`
+    : '';
+  $$('.remove-pending-media').forEach(button => button.onclick = () => {
+    const id = button.closest('[data-pending-id]').dataset.pendingId;
+    mediaPendingFiles = mediaPendingFiles.filter(item => item.id !== id);
+    renderPendingMedia();
+  });
+  if ($('uploadPendingMedia')) $('uploadPendingMedia').onclick = uploadPendingMedia;
+}
+
+async function uploadPendingMedia() {
+  const queue = [...mediaPendingFiles];
+  let successes = 0;
+  for (const item of queue) {
+    const pending = mediaPendingFiles.find(row => row.id === item.id);
+    if (!pending) continue;
+    let storagePath;
+    try {
+      const metadata = normalizeMediaMetadata({}, item.file);
+      storagePath = `${session.user.id}/${crypto.randomUUID()}/${safeFileName(item.file.name)}`;
+      pending.status = 'Uploading';
+      renderPendingMedia();
+      await uploadPrivateStorageObject('media-assets', item.file, storagePath, progress => {
+        pending.progress = progress;
+        const progressBar = document.querySelector(`[data-pending-id="${pending.id}"] progress`);
+        if (progressBar) progressBar.value = progress;
+      });
+      pending.status = 'Saving metadata';
+      renderPendingMedia();
+      const { error } = await supabase.from('media_assets').insert({ ...metadata, storage_path: storagePath });
+      if (error) throw error;
+      mediaPendingFiles = mediaPendingFiles.filter(row => row.id !== pending.id);
+      successes += 1;
+    } catch (error) {
+      pending.status = error.message;
+      pending.progress = 0;
+      if (storagePath) await supabase.storage.from('media-assets').remove([storagePath]);
+    }
+    renderPendingMedia();
+  }
+  if (successes) {
+    toast(`${successes} media file${successes === 1 ? '' : 's'} uploaded`);
+    await loadMediaAssets({ reset: true });
+  }
+}
+
+function mediaIcon(kind) {
+  return kind === 'image' ? 'IMG' : kind === 'video' ? 'VID' : 'DOC';
+}
+
+function renderMediaAssets() {
+  const rows = filterMediaAssets(mediaRows, {
+    search: $('mediaSearch').value,
+    kind: $('mediaKindFilter').value,
+    sort: $('mediaSort').value
+  });
+  $('mediaLibraryGrid').innerHTML = rows.map(row => `
+    <button type="button" class="media-card" data-media-id="${esc(row.id)}">
+      <span class="media-card-preview ${esc(row.media_kind)}" data-media-thumb="${esc(row.id)}">${esc(mediaIcon(row.media_kind))}</span>
+      <span><strong>${esc(row.title || row.original_filename)}</strong><small>${esc(row.original_filename)} · ${esc(formatBytes(row.file_size))}</small></span>
+      <em>${esc(row.processing_status)}</em>
+    </button>`).join('');
+  $('mediaLibraryState').textContent = rows.length
+    ? `${rows.length} visible item${rows.length === 1 ? '' : 's'}${mediaHasMore ? ' · more available' : ''}`
+    : 'No media matches these filters.';
+  $$('.media-card').forEach(button => button.onclick = () => openMediaAsset(mediaRows.find(row => row.id === button.dataset.mediaId)));
+  hydrateMediaThumbnails(rows);
+}
+
+async function hydrateMediaThumbnails(rows) {
+  await Promise.allSettled(rows.filter(row => row.media_kind === 'image').slice(0, 12).map(async row => {
+    const target = document.querySelector(`[data-media-thumb="${row.id}"]`);
+    if (!target) return;
+    const data = await api(`/api/media-asset?id=${encodeURIComponent(row.id)}`, { method: 'GET' });
+    target.innerHTML = `<img src="${esc(data.url)}" alt="">`;
+  }));
+}
+
+async function loadMediaAssets({ reset = false } = {}) {
+  if (!session || !$('mediaLibraryGrid')) return;
+  if (reset) {
+    mediaRows = [];
+    mediaPage = 0;
+    mediaHasMore = false;
+    $('mediaLibraryState').textContent = 'Loading Media Library…';
+  }
+  const from = mediaPage * MEDIA_PAGE_SIZE;
+  const { data, error } = await supabase
+    .from('media_assets')
+    .select('*')
+    .eq('owner_user_id', session.user.id)
+    .eq('is_deleted', false)
+    .order('uploaded_at', { ascending: false })
+    .range(from, from + MEDIA_PAGE_SIZE);
+  if (error) {
+    $('mediaLibraryState').textContent = error.message.includes('media_assets')
+      ? 'Apply the Version 2.1 migration to enable the Media Library.'
+      : error.message;
+    return;
+  }
+  const batch = data || [];
+  mediaRows.push(...batch.slice(0, MEDIA_PAGE_SIZE));
+  mediaHasMore = batch.length > MEDIA_PAGE_SIZE;
+  mediaPage += 1;
+  $('loadMoreMedia').classList.toggle('hidden', !mediaHasMore);
+  renderMediaAssets();
+}
+
+$('refreshMedia').onclick = () => loadMediaAssets({ reset: true });
+$('loadMoreMedia').onclick = () => loadMediaAssets();
+['mediaSearch', 'mediaKindFilter', 'mediaSort'].forEach(id => $(id).oninput = renderMediaAssets);
+
+async function openMediaAsset(row) {
+  if (!row) return;
+  mediaRecord = row;
+  $('mediaModalTitle').textContent = row.title || row.original_filename;
+  $('mediaTitle').value = row.title || '';
+  $('mediaDescription').value = row.description || '';
+  $('mediaTags').value = (row.tags || []).join(', ');
+  $('mediaCampaign').value = row.related_campaign || '';
+  $('mediaModalMessage').textContent = row.media_kind === 'video'
+    ? 'Video transcription and analysis are not configured. The original remains available for preview and download.'
+    : '';
+  try {
+    await populateDonorSelect($('mediaDonor'), row.related_donor_id, true);
+    $('mediaDonor').value = row.related_donor_id || '';
+    const data = await api(`/api/media-asset?id=${encodeURIComponent(row.id)}`, { method: 'GET' });
+    if (row.media_kind === 'image') $('mediaPreview').innerHTML = `<img src="${esc(data.url)}" alt="${esc(row.title || row.original_filename)}">`;
+    else if (row.media_kind === 'video') $('mediaPreview').innerHTML = `<video src="${esc(data.url)}" controls preload="metadata"></video>`;
+    else $('mediaPreview').innerHTML = `<div class="media-document-preview">${esc(mediaIcon(row.media_kind))}<span>${esc(row.original_filename)}</span></div>`;
+  } catch (error) {
+    $('mediaPreview').innerHTML = `<div class="dashboard-empty"><strong>Preview unavailable</strong><span>${esc(error.message)}</span></div>`;
+  }
+  $('mediaModal').classList.remove('hidden');
+}
+
+function closeMediaModal() {
+  $('mediaModal').classList.add('hidden');
+  $('mediaPreview').innerHTML = '';
+  mediaRecord = null;
+}
+
+$('closeMediaModal').onclick = closeMediaModal;
+$('mediaMetadataForm').onsubmit = async event => {
+  event.preventDefault();
+  if (!mediaRecord) return;
+  const payload = {
+    title: $('mediaTitle').value.trim() || null,
+    description: $('mediaDescription').value.trim() || null,
+    tags: [...new Set($('mediaTags').value.split(',').map(tag => tag.trim()).filter(Boolean))].slice(0, 20),
+    related_donor_id: $('mediaDonor').value || null,
+    related_campaign: $('mediaCampaign').value.trim() || null
+  };
+  const { error } = await supabase
+    .from('media_assets')
+    .update(payload)
+    .eq('id', mediaRecord.id)
+    .eq('owner_user_id', session.user.id);
+  if (error) return $('mediaModalMessage').textContent = error.message;
+  Object.assign(mediaRecord, payload);
+  $('mediaModalMessage').textContent = 'Metadata saved.';
+  renderMediaAssets();
+};
+$('downloadMedia').onclick = async () => {
+  if (!mediaRecord) return;
+  try {
+    const data = await api(`/api/media-asset?id=${encodeURIComponent(mediaRecord.id)}&download=true`, { method: 'GET' });
+    window.location.assign(data.url);
+  } catch (error) {
+    $('mediaModalMessage').textContent = error.message;
+  }
+};
+$('deleteMedia').onclick = async () => {
+  if (!mediaRecord || !window.confirm(`Delete ${mediaRecord.original_filename}? The private original file will be removed.`)) return;
+  try {
+    await api('/api/media-asset', { method: 'DELETE', body: JSON.stringify({ id: mediaRecord.id }) });
+    mediaRows = mediaRows.filter(row => row.id !== mediaRecord.id);
+    closeMediaModal();
+    renderMediaAssets();
+    toast('Media deleted');
+  } catch (error) {
+    $('mediaModalMessage').textContent = error.message;
+  }
 };
 
 async function loadKnowledge() {
@@ -1263,6 +1964,7 @@ async function loadDonors({ background = false } = {}) {
 }
 
 $('newDonor').onclick = () => openDonor(null);
+$('exportDonorsCsv').onclick = openDonorDashboardExport;
 $('refreshDonors').onclick = () => loadDonors();
 $('donorSearch').oninput = resetAndRenderDonors;
 $('donorStatusFilter').onchange = () => {
