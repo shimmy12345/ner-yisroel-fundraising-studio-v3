@@ -27,7 +27,12 @@ import {
   paginateDonors
 } from './crm-donors.js';
 import {
-  donorProfileViewModel
+  TIMELINE_FILTERS,
+  donorFundraisingSnapshot,
+  donorGivingSummary,
+  donorProfileViewModel,
+  donorUnifiedTimeline,
+  filterUnifiedTimeline
 } from './donor-profile.js';
 import {
   ACTIVITY_FIELDS,
@@ -91,8 +96,12 @@ let donorActivityHasMore = false;
 let donorActivityLoading = false;
 let donorActivityLoadError = false;
 let donorActivityRequestId = 0;
+let donorGifts = [];
+let donorGiftLoadError = false;
+let donorTimelineFilter = 'all';
 let activityModalRecord = null;
 let activityModalReturnFocus = null;
+let activityModalDefaults = {};
 let userScopeVersion = 0;
 let dashboardRequestId = 0;
 let dashboardLoadedAt = 0;
@@ -117,8 +126,12 @@ function resetUserScopedState() {
   donorActivityLoading = false;
   donorActivityLoadError = false;
   donorActivityRequestId += 1;
+  donorGifts = [];
+  donorGiftLoadError = false;
+  donorTimelineFilter = 'all';
   activityModalRecord = null;
   activityModalReturnFocus = null;
+  activityModalDefaults = {};
   dashboardRequestId += 1;
   dashboardLoadedAt = 0;
   dashboardLoadedForUser = null;
@@ -466,6 +479,69 @@ function syncDonorDashboardRow(row) {
   renderDonorDashboard();
 }
 
+function profileMetric(label, value) {
+  return `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
+}
+
+function timelineTypeLabel(type) {
+  return { all: 'All', gift: 'Gifts', activity: 'Activities', note: 'Notes', campaign: 'Campaigns' }[type] || type;
+}
+
+function renderDonor360Dynamic() {
+  if (!donorProfileRecord || !$('donorGivingMetrics')) return;
+  const giving = donorGivingSummary(donorProfileRecord, donorGifts);
+  const snapshot = donorFundraisingSnapshot(donorProfileRecord, donorActivities, donorGifts);
+  const timeline = filterUnifiedTimeline(
+    donorUnifiedTimeline({ donor: donorProfileRecord, gifts: donorGifts, activities: donorActivities }),
+    donorTimelineFilter
+  );
+
+  $('donorGivingMetrics').innerHTML = [
+    profileMetric('Lifetime giving', giving.lifetimeGiving),
+    profileMetric('Current FY giving', giving.currentFiscalYearGiving),
+    profileMetric('Previous FY giving', giving.previousFiscalYearGiving),
+    profileMetric('Most recent gift', giving.mostRecentGift),
+    profileMetric('Largest gift', giving.largestGift),
+    profileMetric('Average gift', giving.averageGift),
+    profileMetric('Number of gifts', giving.numberOfGifts)
+  ].join('');
+  $('donorGivingStatus').textContent = donorGiftLoadError
+    ? 'Gift ledger details are unavailable; showing donor record giving fields where possible.'
+    : giving.hasGiftLedger ? 'Calculated from gift ledger records.' : 'Calculated from donor record fields where gift ledger records are unavailable.';
+
+  $('donorSnapshotMetrics').innerHTML = [
+    snapshot.currentAskAmount ? profileMetric('Current ask amount', snapshot.currentAskAmount) : '',
+    snapshot.currentCampaign ? profileMetric('Campaign or opportunity', snapshot.currentCampaign) : '',
+    profileMetric('Last meaningful interaction', snapshot.lastMeaningfulInteraction),
+    profileMetric('Next scheduled action', snapshot.nextScheduledAction),
+    profileMetric('Open activities', String(snapshot.openActivities))
+  ].filter(Boolean).join('');
+  $('donorFollowUpWarning').classList.toggle('hidden', !snapshot.overdueFollowUp);
+
+  $$('.timeline-filter-button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.timelineFilter === donorTimelineFilter));
+  });
+  const list = $('donorUnifiedTimelineList');
+  if (!timeline.length) {
+    $('donorUnifiedTimelineState').innerHTML = '<div class="activity-empty"><strong>No timeline items</strong><span>Gifts, activities, notes, and campaign participation will appear here.</span></div>';
+    list.innerHTML = '';
+    return;
+  }
+  $('donorUnifiedTimelineState').textContent = `${timeline.length} ${timelineTypeLabel(donorTimelineFilter).toLowerCase()} item${timeline.length === 1 ? '' : 's'}`;
+  list.innerHTML = timeline.map(item => `
+    <article class="unified-timeline-item ${esc(item.type)}">
+      <span class="unified-timeline-type">${esc(timelineTypeLabel(item.type))}</span>
+      <div>
+        <div class="row between unified-timeline-heading">
+          <strong>${esc(item.title)}</strong>
+          <time datetime="${esc(item.date || '')}">${esc(formatCrmDate(item.date) || 'Date not recorded')}</time>
+        </div>
+        <p>${esc(item.description)}</p>
+        <small>${item.amount !== null && item.amount !== undefined ? `Amount: ${esc(formatCurrency(item.amount))}` : ''}${item.user ? `${item.amount !== null && item.amount !== undefined ? ' · ' : ''}User: ${esc(item.user)}` : ''}</small>
+      </div>
+    </article>`).join('');
+}
+
 function renderDonorProfile(row) {
   const profile = donorProfileViewModel(row);
   $('donorProfileState').classList.add('hidden');
@@ -483,11 +559,52 @@ function renderDonorProfile(row) {
           <p class="donor-profile-code"><strong>Donor Code</strong> ${esc(profile.donorCode)}</p>
         </div>
         <div class="row donor-profile-actions">
+          <button id="profileAddGift" class="secondary">Add Gift</button>
+          <button id="profileAddActivity" class="secondary">Add Activity</button>
+          <button id="profileAddNote" class="secondary">Add Note</button>
+          <button id="profileScheduleFollowUp" class="secondary">Schedule Follow-up</button>
+          <button id="profileExport" class="secondary">Export</button>
           <button id="profileArchiveDonor" class="${profile.isArchived ? 'secondary restore-action' : 'danger'}">${esc(profile.archiveActionLabel)}</button>
           <button id="profileEditDonor" class="primary">Edit Donor</button>
         </div>
       </div>
     </div>
+    <section class="donor-profile-section donor-overview-section" aria-labelledby="donorOverviewTitle">
+      <h3 id="donorOverviewTitle">Donor Overview</h3>
+      <dl class="donor-profile-summary donor-overview-grid">
+        ${profileMetric('Name', profile.displayName)}
+        ${profileMetric('Donor code', profile.donorCode)}
+        ${profileMetric('Email', profile.primaryEmail)}
+        ${profileMetric('Primary phone', profile.primaryPhone)}
+        ${profile.secondaryPhone ? profileMetric('Secondary phone', profile.secondaryPhone) : ''}
+        ${profileMetric('Address', profile.address)}
+        ${profileMetric('Current status/tier', profile.stage)}
+        ${profileMetric('Assigned fundraiser', profile.assignedOfficer)}
+        ${profileMetric('Last contact date', profile.lastContactDate)}
+        ${profileMetric('Next follow-up date', profile.nextActionDate)}
+      </dl>
+    </section>
+    <div class="donor-profile-360-grid">
+      <section class="donor-profile-section" aria-labelledby="donorGivingTitle">
+        <div class="row between donor-profile-section-heading"><h3 id="donorGivingTitle">Giving Summary</h3><span id="donorGivingStatus" class="profile-section-note"></span></div>
+        <dl id="donorGivingMetrics" class="donor-profile-summary"></dl>
+      </section>
+      <section class="donor-profile-section" aria-labelledby="fundraisingSnapshotTitle">
+        <h3 id="fundraisingSnapshotTitle">Fundraising Snapshot</h3>
+        <p id="donorFollowUpWarning" class="follow-up-warning hidden">Overdue follow-up needs attention.</p>
+        <dl id="donorSnapshotMetrics" class="donor-profile-summary"></dl>
+      </section>
+    </div>
+    <section class="donor-profile-section donor-unified-timeline-section" aria-labelledby="unifiedTimelineTitle">
+      <div class="row between donor-profile-section-heading">
+        <div><h3 id="unifiedTimelineTitle">Unified Timeline</h3><p>Gifts, activities, notes, and campaign participation, newest first.</p></div>
+        <div class="timeline-filter" role="group" aria-label="Timeline type">
+          ${TIMELINE_FILTERS.map(filter => `<button type="button" class="timeline-filter-button" data-timeline-filter="${esc(filter)}" aria-pressed="${filter === donorTimelineFilter}">${esc(timelineTypeLabel(filter))}</button>`).join('')}
+        </div>
+      </div>
+      <div id="donorUnifiedTimelineState" class="activity-state" role="status" aria-live="polite"></div>
+      <div id="donorUnifiedTimelineList" class="unified-timeline-list"></div>
+    </section>
     <div class="donor-profile-grid">
       <section class="donor-profile-section donor-profile-relationship" aria-labelledby="relationshipSnapshotTitle">
         <h3 id="relationshipSnapshotTitle">Relationship Snapshot</h3>
@@ -519,7 +636,7 @@ function renderDonorProfile(row) {
       </section>
       <section class="donor-profile-section donor-activity-section" aria-labelledby="donorActivityTitle">
         <div class="row between donor-activity-heading">
-          <div><h3 id="donorActivityTitle">Activity Timeline</h3><p>Recent relationship activity, newest first.</p></div>
+          <div><h3 id="donorActivityTitle">Activity Management</h3><p>Edit, archive, and load donor activities.</p></div>
           <button id="addDonorActivity" class="primary">Add Activity</button>
         </div>
         <div class="activity-view-toggle" role="group" aria-label="Activity status">
@@ -534,10 +651,56 @@ function renderDonorProfile(row) {
   $('backToDonors').onclick = returnToDonors;
   $('profileEditDonor').onclick = () => openDonor(donorProfileRecord);
   $('profileArchiveDonor').onclick = () => openDonorArchiveConfirmation(donorProfileRecord);
+  $('profileAddGift').onclick = openGiftQuickAction;
+  $('profileAddActivity').onclick = () => openActivityModal();
+  $('profileAddNote').onclick = () => openActivityModalWithDefaults({ activity_type: 'note', subject: 'Donor note' });
+  $('profileScheduleFollowUp').onclick = () => openActivityModalWithDefaults({ activity_type: 'other', subject: 'Scheduled follow-up', next_action: donorProfileRecord?.next_action || '', next_action_date: donorProfileRecord?.next_action_date || '', advanced: true });
+  $('profileExport').onclick = exportDonor360Csv;
   $('addDonorActivity').onclick = () => openActivityModal();
   $('showActiveActivities').onclick = () => setDonorActivityView('active');
   $('showArchivedActivities').onclick = () => setDonorActivityView('archived');
   $('loadMoreActivities').onclick = () => loadDonorActivities();
+  $$('.timeline-filter-button').forEach(button => {
+    button.onclick = () => {
+      donorTimelineFilter = button.dataset.timelineFilter;
+      renderDonor360Dynamic();
+    };
+  });
+  renderDonor360Dynamic();
+}
+
+function openGiftQuickAction() {
+  toast('Gift Entry will be available in a future update.');
+}
+
+function csvValue(value) {
+  return `"${String(value ?? '').replaceAll('"', '""')}"`;
+}
+
+function exportDonor360Csv() {
+  if (!donorProfileRecord) return;
+  const profile = donorProfileViewModel(donorProfileRecord);
+  const timeline = donorUnifiedTimeline({ donor: donorProfileRecord, gifts: donorGifts, activities: donorActivities });
+  const rows = [
+    ['section', 'date', 'type', 'description', 'amount'],
+    ['overview', '', 'donor', profile.displayName, ''],
+    ['overview', '', 'donor_code', profile.donorCode, ''],
+    ...timeline.map(item => [
+      'timeline',
+      item.date || '',
+      item.type,
+      item.description,
+      item.amount ?? ''
+    ])
+  ];
+  const blob = new Blob([rows.map(row => row.map(csvValue).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `donor-360-${safeFileName(profile.donorCode || donorProfileRecord.id)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 2_000);
 }
 
 async function loadDonorProfile(donorId, { showLoading = true } = {}) {
@@ -573,13 +736,19 @@ async function loadDonorProfile(donorId, { showLoading = true } = {}) {
   donorProfileRecord = data;
   syncDonorDashboardRow(data);
   renderDonorProfile(data);
-  await loadDonorActivities({ reset: true });
+  await Promise.all([
+    loadDonorActivities({ reset: true }),
+    loadDonorGifts({ reset: true })
+  ]);
 }
 
 function openDonorProfile(donorId) {
   donorDashboardScrollPosition = window.scrollY;
   donorActivityView = 'active';
   donorActivities = [];
+  donorGifts = [];
+  donorGiftLoadError = false;
+  donorTimelineFilter = 'all';
   $$('.panel').forEach(panel => panel.classList.add('hidden'));
   $('donorProfilePanel').classList.remove('hidden');
   $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.panel === 'donors'));
@@ -701,6 +870,34 @@ async function loadDonorActivities({ reset = false } = {}) {
     ? rows.slice(0, ACTIVITY_PAGE_SIZE)
     : [...donorActivities, ...rows.slice(0, ACTIVITY_PAGE_SIZE)];
   renderDonorActivities();
+  renderDonor360Dynamic();
+}
+
+async function loadDonorGifts({ reset = false } = {}) {
+  if (!donorProfileRecord?.id) return;
+  const userId = session?.user?.id;
+  if (reset) {
+    donorGifts = [];
+    donorGiftLoadError = false;
+  }
+  const { data, error } = await supabase
+    .from('donor_gifts')
+    .select('*')
+    .eq('owner_user_id', userId)
+    .eq('donor_id', donorProfileRecord.id)
+    .eq('is_deleted', false)
+    .order('gift_date', { ascending: false })
+    .limit(500);
+  if (session?.user?.id !== userId) return;
+  if (error) {
+    donorGiftLoadError = true;
+    donorGifts = [];
+    renderDonor360Dynamic();
+    return;
+  }
+  donorGifts = data || [];
+  donorGiftLoadError = false;
+  renderDonor360Dynamic();
 }
 
 function updateActivityGuidance() {
@@ -710,20 +907,27 @@ function updateActivityGuidance() {
   );
 }
 
+function openActivityModalWithDefaults(defaults = {}) {
+  activityModalDefaults = defaults;
+  openActivityModal();
+}
+
 function openActivityModal(activity = null) {
   if (!donorProfileRecord) return;
+  const defaults = activity ? {} : activityModalDefaults;
+  activityModalDefaults = {};
   activityModalRecord = activity;
   activityModalReturnFocus = document.activeElement;
   $('activityModalTitle').textContent = activity ? 'Edit Activity' : 'Add Activity';
   $('activityModalArchived').classList.toggle('hidden', !activity?.is_archived);
-  $('activityType').value = activity?.activity_type || 'phone_call';
+  $('activityType').value = activity?.activity_type || defaults.activity_type || 'phone_call';
   $('activityOccurredAt').value = toDateTimeLocalValue(activity?.occurred_at || new Date());
-  $('activitySubject').value = activity?.subject || '';
-  $('activityNotes').value = activity?.notes || '';
-  $('activityOutcome').value = activity?.outcome || '';
-  $('activityNextAction').value = activity?.next_action || '';
-  $('activityNextActionDate').value = activity?.next_action_date || '';
-  $('activityAdvanced').open = Boolean(activity?.outcome || activity?.next_action || activity?.next_action_date);
+  $('activitySubject').value = activity?.subject || defaults.subject || '';
+  $('activityNotes').value = activity?.notes || defaults.notes || '';
+  $('activityOutcome').value = activity?.outcome || defaults.outcome || '';
+  $('activityNextAction').value = activity?.next_action || defaults.next_action || '';
+  $('activityNextActionDate').value = activity?.next_action_date || defaults.next_action_date || '';
+  $('activityAdvanced').open = Boolean(defaults.advanced || activity?.outcome || activity?.next_action || activity?.next_action_date);
   $('activityFormError').textContent = '';
   updateActivityGuidance();
   $('archiveActivity').classList.toggle('hidden', !activity);

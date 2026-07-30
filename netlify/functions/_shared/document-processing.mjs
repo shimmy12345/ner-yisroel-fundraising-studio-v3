@@ -66,7 +66,7 @@ async function extractPdf(buffer) {
     const result = await extractText(document, { mergePages: true });
     return result.text || '';
   } finally {
-    await document.destroy();
+    if (typeof document.destroy === 'function') await document.destroy();
   }
 }
 
