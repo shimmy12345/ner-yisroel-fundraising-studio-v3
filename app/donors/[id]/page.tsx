@@ -29,7 +29,7 @@ export default function DonorPage() {
           </div>
         </div>
         <div className="header-actions">
-          <button>＋ Log interaction</button>
+          <a href="/capture">＋ Log interaction</a>
           <a href="/assistant">✦ Draft outreach</a>
           <a className="primary" href="/assistant">Prepare for meeting <span>→</span></a>
         </div>
@@ -130,7 +130,7 @@ export default function DonorPage() {
           <section className="detail-card quick-actions-card">
             <p className="eyebrow">QUICK ACTIONS</p>
             <a className="rail-primary-action" href="/assistant"><span>✦</span><div><strong>Prepare for meeting</strong><small>Brief, talking points, questions</small></div><b>→</b></a>
-            <button><span>＋</span><div><strong>Log interaction</strong><small>Capture a note in under 20 seconds</small></div><b>→</b></button>
+            <a href="/capture"><span>＋</span><div><strong>Log interaction</strong><small>Capture a note in under 20 seconds</small></div><b>→</b></a>
             <a href={`mailto:${donor.email}`}><span>✉</span><div><strong>Send an email</strong><small>Draft with full relationship context</small></div><b>→</b></a>
             <a href="/assistant"><span>✎</span><div><strong>Draft thank-you</strong><small>Personalized to their impact</small></div><b>→</b></a>
           </section>

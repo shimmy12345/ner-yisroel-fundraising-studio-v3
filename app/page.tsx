@@ -118,7 +118,7 @@ export default function TodayPage() {
               <div><span className="rail-icon">↗</span><h2>Quick actions</h2></div>
             </div>
             <div className="quick-grid">
-              <button><span>＋</span>Log interaction</button>
+              <a href="/capture"><span>＋</span>Log interaction</a>
               <a href="/assistant"><span>✦</span>Ask Assistant</a>
               <button><span>⌕</span>Find donor</button>
               <button><span>✎</span>Draft a note</button>
