@@ -27,7 +27,7 @@ test('dashboard is the first navigation item and the default signed-in panel', a
   const dashboardNav = html.indexOf('data-panel="dashboard"');
   const studioNav = html.indexOf('data-panel="studio"');
   assert.ok(dashboardNav >= 0 && dashboardNav < studioNav);
-  assert.match(html, /id="dashboardPanel"[\s\S]*Today's Priorities[\s\S]*Recent Activity[\s\S]*AI Insights[\s\S]*Quick Actions/);
+  assert.match(html, /id="dashboardPanel"[\s\S]*Morning Brief[\s\S]*Quick Actions[\s\S]*Today's Priorities[\s\S]*Recent Activity[\s\S]*AI Insights/);
   assert.doesNotMatch(html, /Dashboard coming soon/);
   assert.match(app, /showPanel\('dashboard'\)/);
   assert.match(app, /if \(name === 'dashboard'\) loadDashboard\(\)/);

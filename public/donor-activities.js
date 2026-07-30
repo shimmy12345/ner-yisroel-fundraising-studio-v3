@@ -12,6 +12,8 @@ export const ACTIVITY_FIELDS = [
   'outcome',
   'next_action',
   'next_action_date',
+  'next_action_completed_at',
+  'next_action_completed_by',
   'is_archived',
   'created_by',
   'created_at',

@@ -72,6 +72,7 @@ test('requests the complete CRM donor dashboard field set', () => {
     'home_phone', 'mobile_phone', 'address', 'city', 'state', 'zip', 'country',
     'assigned_officer', 'stage', 'lifetime_giving', 'last_gift_amount',
     'last_gift_date', 'last_contact_date', 'next_action', 'next_action_date',
+    'next_action_completed_at', 'next_action_completed_by',
     'notes', 'is_archived', 'created_at', 'updated_at'
   ]);
 });

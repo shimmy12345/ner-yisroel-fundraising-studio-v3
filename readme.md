@@ -5,13 +5,30 @@ Private fundraising communications workspace deployed as a static Netlify site w
 ## Verified architecture
 
 - `public/`: browser application. It receives only `SUPABASE_URL` and `SUPABASE_ANON_KEY` through generated `public/runtime-config.js`.
-- `netlify/functions/`: authenticated server endpoints for AI generation, document extraction, signed original-file links, deletion, and secure donor imports.
-- `supabase/schema.sql`: complete schema for a new Supabase project.
+- `netlify/functions/`: authenticated server endpoints for AI generation, document extraction, signed private-file links, secure donor imports, tenant-scoped exports, and media operations.
+- `supabase/schema.sql`: original Knowledge Base, generation-history, and legacy-donor bootstrap schema. It does not provision the newer `crm_donors` workspace by itself.
 - `supabase/migrations/20260722_knowledge_base_uploads.sql`: idempotent upgrade for an existing deployment.
 - `build.mjs`: writes the public Supabase URL and anon/publishable key at build time and copies the local Papa Parse browser bundle.
 - `netlify.toml`: publishes `public`, bundles functions with esbuild, and maps `/api/*` to `/.netlify/functions/:splat`.
 
 The browser uploads directly to the private `knowledge-files` bucket using the signed-in user's access token. Storage policies require the first path segment to equal `auth.uid()`. Knowledge Base Functions create a user-scoped Supabase client from the same token, so document rows and objects remain subject to Row Level Security. Donor imports are different: the Function first verifies the bearer token, then uses the server-only service-role key to upsert into `crm_donors`. That key is never written to browser assets.
+
+## Version 2.1 fundraising workspace
+
+Version 2.1 keeps the existing dashboard design and adds live, owner-isolated fundraising workflows:
+
+- The Morning Brief summarizes due and overdue follow-ups, upcoming meetings, recent gifts, and unresolved relationship signals.
+- Dashboard priorities have a visible deterministic score and reason. Overdue days, due-today status, giving level, stale contact, and upcoming meetings contribute to ranking only when the underlying data exists.
+- Completing a priority writes `next_action_completed_at` and `next_action_completed_by` to its donor or activity. Changing that record's next action or date clears the old completion so a genuinely new follow-up can appear.
+- Quick Actions near the top open Add Donor, Add Gift, donor activity/follow-up workflows, exports, and AI Studio.
+- `donor_gifts` is an auditable, soft-delete ledger. Database triggers keep each donor's lifetime giving, last gift amount, and last gift date current and log material gift changes in the existing donor activity timeline.
+- Donor profiles include giving summary cards, annual fiscal-year giving, deterministic Giving Momentum, donation-history filters/sorting/incremental loading, gift mutations, and donor-specific CSV export.
+- Authenticated exports are generated in a Netlify Function as CSV, multi-sheet Excel, or structured JSON. Queries use the caller's Supabase token and RLS; no service-role key is involved.
+- AI Studio includes a private Media Library for documents, images, and videos with multi-file drag and drop, progress, metadata, filters, signed previews/downloads, and deletion confirmation.
+
+The fiscal year begins July 1 and is labeled by its ending year. Giving Momentum compares the current fiscal year's total with the previous fiscal year: a change greater than 10% is Increasing or Declining, a change within 10% is Stable, and fewer than two fiscal years is Insufficient Data.
+
+Gift edits and soft deletion recalculate donor totals in PostgreSQL before the browser refreshes the profile, dashboard, donation history, chart, and activity timeline. Media processing is intentionally honest: image analysis, OCR, and video transcription are not configured in Version 2.1. Uploaded originals remain reusable, but processing is not reported as complete.
 
 ## Knowledge Base uploads
 
@@ -75,7 +92,7 @@ For an existing project:
 4. Open **Storage** and verify `knowledge-files` exists and is marked private.
 5. In **Database → Policies**, verify `knowledge_documents` has `knowledge own rows` and `storage.objects` has the three `knowledge files ... own folder` policies.
 
-For a brand-new project, run `supabase/schema.sql` instead. Do not run both scripts on a fresh project.
+For a brand-new project, `supabase/schema.sql` provisions the original application tables and makes the Knowledge Base upload migration unnecessary. The current repository does not contain a standalone baseline migration that creates `crm_donors`; provision that existing CRM baseline before applying the archive, activity, isolation, and Version 2.1 migrations. Do not treat `schema.sql` as a complete Version 2.1 database bootstrap.
 
 The migration:
 
@@ -172,6 +189,35 @@ select
 
 The mismatch query must return zero rows, and both null-owner counts must be zero.
 
+## Version 2.1 migration and private media storage
+
+After all four earlier migrations have succeeded, run:
+
+```text
+supabase/migrations/20260730_version_2_1_fundraising_workspace.sql
+```
+
+Run the complete file in Supabase SQL Editor as one transaction. It adds persistent follow-up completion fields and indexes, creates `donor_gifts`, creates aggregate/dossier RPCs, creates `media_assets`, and creates or updates the private `media-assets` Storage bucket and owner-folder policies.
+
+Verify:
+
+- `donor_gifts` and `media_assets` have RLS enabled with owner-only SELECT, INSERT, and UPDATE policies.
+- Neither table grants DELETE to authenticated or public roles; gift and media rows use audit-friendly soft deletion.
+- `media-assets` is private, limited to 100 MB per object, and has owner-folder INSERT, SELECT, and DELETE policies.
+- `fundraising_dashboard_totals()` and `donor_giving_dossier(uuid)` execute as the authenticated caller and therefore retain RLS.
+
+Media support:
+
+- Documents: PDF, DOC/DOCX, TXT, CSV, XLS/XLSX, up to 25 MB.
+- Images: JPG/JPEG, PNG, HEIC/HEIF, WebP, up to 25 MB.
+- Video: MP4, MOV, M4V, WebM, up to 100 MB.
+
+Some browsers do not preview HEIC/HEIF or MOV inline; the signed original download remains available. A file whose browser supplies an unsupported or incorrect MIME type may be rejected by the Storage bucket even when its extension is recognized.
+
+Exports are generated server-side in pages of 1,000 records, with a 25,000-row limit per dataset. A multi-dataset CSV export downloads as a ZIP containing one readable CSV per dataset. Excel uses separate worksheets, and JSON includes an export version, timestamp, scope, filters, and stable record IDs. JSON restore/import is intentionally deferred. Netlify response-size limits still apply, so very large workspaces should be exported in narrower scopes or date ranges.
+
+Pledge and relationship tables do not exist in the current schema. Their export sheets are present but empty rather than inferred from unrelated data. Campaign participation is derived from gift campaign values. Campaign totals therefore update automatically with gift changes; a dedicated campaign entity/workflow is deferred.
+
 ### Two-account manual verification
 
 Use two Supabase Auth accounts after deploying the migration:
@@ -192,7 +238,7 @@ No demo account or data is created by this migration. A future operator can crea
 
 ## Netlify deployment
 
-1. In Netlify, import `shimmy12345/ner-yisroel-fundraising-studio-v3` and select `feature/per-user-data-isolation-v1` for this review deploy.
+1. In Netlify, import `shimmy12345/ner-yisroel-fundraising-studio-v3` and select `feature/dashboard-intelligence` for this review deploy.
 2. Clear any previous nested **Base directory** setting. The base directory must be the repository root.
 3. Netlify reads `netlify.toml`; verify:
    - Build command: `npm run build`
@@ -206,7 +252,7 @@ No demo account or data is created by this migration. A future operator can crea
    - `OPENAI_API_KEY` — scope: Functions only
    - `OPENAI_MODEL` — optional, Functions only; defaults to `gpt-5-mini`
 5. Confirm `SUPABASE_SERVICE_ROLE_KEY` is not available to Builds and does not appear in generated `public/runtime-config.js`.
-6. Run the Knowledge Base, CRM archive, Activity Timeline, and per-user isolation migrations in order.
+6. Run the Knowledge Base, CRM archive, Activity Timeline, per-user isolation, and Version 2.1 migrations in order.
 7. Trigger a deploy only after the per-user migration succeeds and its ownership verification queries return no nulls or mismatches.
 
 Expected function routes:
@@ -218,6 +264,9 @@ Expected function routes:
 | `GET /api/knowledge-document?id=...` | `netlify/functions/knowledge-document.mjs` |
 | `DELETE /api/knowledge-document` | `netlify/functions/knowledge-document.mjs` |
 | `POST /api/import-donors` | `netlify/functions/import-donors.mjs` |
+| `POST /api/export-data` | `netlify/functions/export-data.mjs` |
+| `GET /api/media-asset?id=...` | `netlify/functions/media-asset.mjs` |
+| `DELETE /api/media-asset` | `netlify/functions/media-asset.mjs` |
 
 ## Post-deploy verification
 
@@ -231,11 +280,16 @@ Expected function routes:
 8. Import a CSV with a quoted household name, a leading-zero donor code, a missing donor code, and a duplicate donor code.
 9. Confirm valid rows import, invalid rows appear in the rejected CSV, and re-importing a donor code updates rather than duplicates it.
 10. Confirm blank cells do not erase existing `crm_donors` values.
+11. Complete a dashboard priority, refresh and sign in again, and confirm it remains in Completed rather than returning to the active list.
+12. Add, edit, and soft-delete a gift; confirm the donor dossier, dashboard totals, annual chart, history, and activity timeline refresh.
+13. Export one scope in CSV, Excel, and JSON; confirm IDs, numeric amounts, ISO dates, worksheet names, and tenant isolation.
+14. Upload a document, image, and short video to Media Library; edit metadata, search/filter, preview, download, and delete each.
 
 ## Security notes
 
 - Supabase anon/publishable keys are designed for browser use; RLS is the security boundary.
 - The service-role key is read only by the authenticated donor import Function and is absent from the browser bundle.
 - Original files remain private. Download links are signed for five minutes and only created after an authenticated, RLS-protected lookup.
+- Export and media Functions create user-scoped clients from the caller's access token; they do not read the service-role key.
 - OpenAI receives the selected Knowledge Base text only when the user runs generation. PDF/DOCX extraction is local to the Netlify Function.
 - This is not a compliance-certified CRM; perform a formal security review before storing highly sensitive financial or personal data.

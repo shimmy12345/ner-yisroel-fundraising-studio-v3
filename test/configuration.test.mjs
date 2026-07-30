@@ -61,7 +61,7 @@ test('profile navigation preserves dashboard state and refreshes donor mutations
   assert.doesNotMatch(returnBody, /loadDonors\(/);
 });
 
-test('donor profile introduces no URL routing or Netlify Function', async () => {
+test('donor profile keeps in-app navigation while Version 2.1 adds only scoped functions and migrations', async () => {
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   const config = await readFile(new URL('../netlify.toml', import.meta.url), 'utf8');
   const migrations = await readdir(new URL('../supabase/migrations/', import.meta.url));
@@ -75,12 +75,15 @@ test('donor profile introduces no URL routing or Netlify Function', async () => 
     '20260722_knowledge_base_uploads.sql',
     '20260729_crm_donor_archive.sql',
     '20260729_donor_activity_timeline.sql',
-    '20260729_per_user_data_isolation.sql'
+    '20260729_per_user_data_isolation.sql',
+    '20260730_version_2_1_fundraising_workspace.sql'
   ]);
   assert.deepEqual(functions, [
+    'export-data.mjs',
     'generate.mjs',
     'import-donors.mjs',
     'knowledge-document.mjs',
+    'media-asset.mjs',
     'process-document.mjs'
   ]);
 });
