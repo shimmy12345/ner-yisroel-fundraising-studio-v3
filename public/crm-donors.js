@@ -20,6 +20,8 @@ export const CRM_DONOR_FIELDS = [
   'last_contact_date',
   'next_action',
   'next_action_date',
+  'next_action_completed_at',
+  'next_action_completed_by',
   'notes',
   'is_archived',
   'created_at',

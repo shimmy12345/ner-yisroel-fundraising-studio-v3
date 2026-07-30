@@ -14,9 +14,20 @@
 - [ ] Run the per-user isolation migration after the CRM archive and Activity Timeline migrations.
 - [ ] Confirm every donor and activity has an owner and no activity owner differs from its donor owner.
 - [ ] Confirm `crm_donors_owner_donor_code_key` uniquely covers `(owner_user_id, donor_code)` and no global donor-code uniqueness rule remains.
+- [ ] Run `supabase/migrations/20260730_version_2_1_fundraising_workspace.sql` after all earlier CRM migrations.
+- [ ] Confirm `donor_gifts` and `media_assets` have owner-only RLS and no authenticated DELETE grant.
+- [ ] Confirm the private `media-assets` bucket exists, has a 100 MB object limit, and has owner-folder INSERT, SELECT, and DELETE policies.
+- [ ] Confirm `/api/export-data` and `/api/media-asset` resolve through the existing `/api/*` redirect.
 - [ ] Run `npm test` and `npm run build`.
 - [ ] Test TXT, CSV, PDF, and DOCX uploads with two different user accounts.
 - [ ] Test search, preview, favorite, original download, delete, and AI Knowledge Base context.
 - [ ] Import a CSV containing one new and one existing donor code; confirm inserted/updated counts and blank-field preservation.
 - [ ] Test CRM isolation with two Auth users, including account switching in one browser and direct REST requests.
 - [ ] Download rejected rows and confirm the CSV contains `import_error`.
+- [ ] Complete a priority and verify completion persists after refresh, logout/login, and another device.
+- [ ] Change the underlying next action and verify the genuinely new follow-up becomes active.
+- [ ] Add, edit, and soft-delete a gift; verify donor totals, last gift, dashboard KPIs, annual chart, history, and gift activity notes update.
+- [ ] Export CSV, Excel, and JSON and verify stable IDs, numeric amounts, ISO dates, separate worksheets, and tenant isolation.
+- [ ] Upload supported documents, images, and videos; verify progress, metadata editing, private previews/downloads, search/filtering, pagination, and confirmed deletion.
+- [ ] Confirm unsupported files, oversized files, cross-user media IDs, and cross-user exports are rejected.
+- [ ] Note that no new environment variables are required for Version 2.1.

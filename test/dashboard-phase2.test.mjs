@@ -82,7 +82,7 @@ test('dashboard calculates actionable KPIs from active live donor data', () => {
   const dashboard = buildDashboardViewModel(liveRows(), now);
   assert.equal(dashboard.isSample, false);
   assert.deepEqual(dashboard.kpis.map(kpi => kpi.value), ['$1,500', '2', '2', '2']);
-  assert.match(dashboard.kpis[0].trend, /2 recorded latest gifts/);
+  assert.match(dashboard.kpis[0].trend, /2 recorded gifts/);
   assert.equal(dashboard.priorities.length, 2);
   assert.ok(dashboard.priorities.every(item => item.kind === 'today'));
 });
@@ -115,7 +115,7 @@ test('sample dashboard content is explicitly labeled', () => {
   assert.match(dashboard.priorities[0].detail, /Example/);
 });
 
-test('dashboard reads existing tables without adding backend or schema behavior', async () => {
+test('dashboard preserves existing data sources and exposes the Version 2.1 quick actions', async () => {
   const [app, html] = await Promise.all([
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
     readFile(new URL('../public/index.html', import.meta.url), 'utf8')
@@ -125,9 +125,10 @@ test('dashboard reads existing tables without adding backend or schema behavior'
     assert.match(app, new RegExp(`\\.from\\('${table}'\\)`));
   }
   assert.match(app, /Promise\.all\(\[/);
-  assert.match(html, /data-dashboard-action="draft-email"/);
   assert.match(html, /data-dashboard-action="add-donor"/);
+  assert.match(html, /data-dashboard-action="add-gift"/);
   assert.match(html, /data-dashboard-action="log-interaction"/);
-  assert.match(html, /data-dashboard-action="upload-knowledge"/);
+  assert.match(html, /data-dashboard-action="add-follow-up"/);
+  assert.match(html, /data-dashboard-action="export-data"/);
   assert.match(html, /data-dashboard-action="open-studio"/);
 });

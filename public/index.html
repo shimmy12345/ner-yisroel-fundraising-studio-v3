@@ -75,6 +75,29 @@
           <div id="dashboardNotice" class="dashboard-notice hidden" role="status"></div>
           <section id="dashboardKpis" class="dashboard-kpis" aria-label="Fundraising overview"></section>
 
+          <section class="dashboard-card dashboard-morning-brief" aria-labelledby="dashboardMorningBriefTitle">
+            <div class="dashboard-card-heading">
+              <div><p class="eyebrow">Daily focus</p><h3 id="dashboardMorningBriefTitle">Morning Brief</h3></div>
+              <span id="dashboardBriefStatus" class="dashboard-intelligence-label">Live workspace data</span>
+            </div>
+            <p id="dashboardBriefSummary" class="dashboard-brief-summary"></p>
+            <div id="dashboardBriefMetrics" class="dashboard-brief-metrics"></div>
+          </section>
+
+          <section class="dashboard-card dashboard-quick-actions dashboard-quick-actions-top" aria-labelledby="dashboardTopQuickActionsTitle">
+            <div class="dashboard-card-heading">
+              <div><p class="eyebrow">Move work forward</p><h3 id="dashboardTopQuickActionsTitle">Quick Actions</h3></div>
+            </div>
+            <div class="dashboard-action-grid">
+              <button type="button" class="dashboard-action" data-dashboard-action="add-donor"><span class="dashboard-action-icon" aria-hidden="true">+</span><span><strong>Add Donor</strong><small>Create a CRM record</small></span></button>
+              <button type="button" class="dashboard-action" data-dashboard-action="add-gift"><span class="dashboard-action-icon" aria-hidden="true">$</span><span><strong>Add Gift</strong><small>Record a contribution</small></span></button>
+              <button type="button" class="dashboard-action" data-dashboard-action="log-interaction"><span class="dashboard-action-icon" aria-hidden="true">✓</span><span><strong>Log Activity</strong><small>Add donor contact</small></span></button>
+              <button type="button" class="dashboard-action" data-dashboard-action="add-follow-up"><span class="dashboard-action-icon" aria-hidden="true">→</span><span><strong>Add Follow-Up</strong><small>Schedule next action</small></span></button>
+              <button type="button" class="dashboard-action" data-dashboard-action="export-data"><span class="dashboard-action-icon" aria-hidden="true">↓</span><span><strong>Export Data</strong><small>CSV, Excel, or JSON</small></span></button>
+              <button type="button" class="dashboard-action featured" data-dashboard-action="open-studio"><span class="dashboard-action-icon" aria-hidden="true">✦</span><span><strong>Open AI Studio</strong><small>Build a communication</small></span></button>
+            </div>
+          </section>
+
           <div class="dashboard-grid">
             <section class="dashboard-card dashboard-priorities" aria-labelledby="dashboardPrioritiesTitle">
               <div class="dashboard-card-heading">
@@ -95,6 +118,13 @@
                 </div>
               </div>
               <div id="dashboardUpcomingList" class="dashboard-upcoming-list"></div>
+            </section>
+
+            <section class="dashboard-card dashboard-completed" aria-labelledby="dashboardCompletedTitle">
+              <div class="dashboard-card-heading">
+                <div><p class="eyebrow">Recently resolved</p><h3 id="dashboardCompletedTitle">Completed Priorities</h3></div>
+              </div>
+              <div id="dashboardCompletedList" class="dashboard-completed-list"></div>
             </section>
 
             <section class="dashboard-card dashboard-activity" aria-labelledby="dashboardActivityTitle">
@@ -119,21 +149,6 @@
               <div id="dashboardInsightList" class="dashboard-insight-list"></div>
             </section>
 
-            <section class="dashboard-card dashboard-quick-actions" aria-labelledby="dashboardQuickActionsTitle">
-              <div class="dashboard-card-heading">
-                <div>
-                  <p class="eyebrow">Move work forward</p>
-                  <h3 id="dashboardQuickActionsTitle">Quick Actions</h3>
-                </div>
-              </div>
-              <div class="dashboard-action-grid">
-                <button type="button" class="dashboard-action" data-dashboard-action="draft-email"><span class="dashboard-action-icon" aria-hidden="true">✉</span><span><strong>Draft Donor Email</strong><small>Start a tailored message</small></span></button>
-                <button type="button" class="dashboard-action" data-dashboard-action="add-donor"><span class="dashboard-action-icon" aria-hidden="true">+</span><span><strong>Add Donor</strong><small>Create a CRM record</small></span></button>
-                <button type="button" class="dashboard-action" data-dashboard-action="log-interaction"><span class="dashboard-action-icon" aria-hidden="true">✓</span><span><strong>Log Interaction</strong><small>Choose a donor to begin</small></span></button>
-                <button type="button" class="dashboard-action" data-dashboard-action="upload-knowledge"><span class="dashboard-action-icon" aria-hidden="true">↑</span><span><strong>Upload Knowledge</strong><small>Add institutional context</small></span></button>
-                <button type="button" class="dashboard-action featured" data-dashboard-action="open-studio"><span class="dashboard-action-icon" aria-hidden="true">✦</span><span><strong>Open AI Studio</strong><small>Build a fundraising communication</small></span></button>
-              </div>
-            </section>
           </div>
         </div>
       </section>
@@ -156,6 +171,27 @@
           </div>
           <div class="card result-card"><div class="row between"><h3>Result</h3><div><button id="copyOutput" class="secondary" disabled>Copy</button><button id="saveFavorite" class="secondary" disabled>Favorite</button></div></div><div id="resultEmpty" class="empty">Your result will appear here.</div><pre id="output" class="hidden"></pre></div>
         </div>
+        <section class="card media-workspace" aria-labelledby="mediaLibraryTitle">
+          <div class="row between media-library-heading">
+            <div><p class="eyebrow">Secure workspace files</p><h3 id="mediaLibraryTitle">Media Library</h3><p class="muted">Documents, images, and videos remain private in Supabase Storage.</p></div>
+            <button id="chooseMediaFiles" class="primary" type="button">Upload Media</button>
+          </div>
+          <div id="mediaDropZone" class="media-drop-zone" tabindex="0" role="button" aria-label="Upload documents, images, or videos">
+            <input id="mediaFiles" type="file" multiple accept=".pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.jpg,.jpeg,.png,.heic,.heif,.webp,.mp4,.mov,.m4v,.webm,image/*,video/*">
+            <strong>Drop files here or choose from this device</strong>
+            <span>Documents and images up to 25 MB; videos up to 100 MB.</span>
+          </div>
+          <div id="mediaPendingList" class="media-pending-list hidden" aria-live="polite"></div>
+          <div class="media-toolbar">
+            <input id="mediaSearch" type="search" placeholder="Search filename, title, description, or tags">
+            <select id="mediaKindFilter" aria-label="Filter media type"><option value="">All file types</option><option value="document">Documents</option><option value="image">Images</option><option value="video">Videos</option></select>
+            <select id="mediaSort" aria-label="Sort media"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select>
+            <button id="refreshMedia" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="mediaLibraryState" class="media-library-state" role="status" aria-live="polite"></div>
+          <div id="mediaLibraryGrid" class="media-library-grid"></div>
+          <button id="loadMoreMedia" class="secondary hidden" type="button">Load more</button>
+        </section>
       </section>
 
       <section id="knowledgePanel" class="panel hidden">
@@ -256,6 +292,81 @@
       <h3 id="activityArchiveConfirmTitle">Archive activity?</h3>
       <p id="activityArchiveConfirmBody" class="confirmation-copy">This activity will be removed from the active timeline but will remain in the database.</p>
       <div class="row end"><button id="cancelArchiveActivity" class="secondary">Cancel</button><button id="confirmArchiveActivity" class="danger">Archive Activity</button></div>
+    </div>
+  </div>
+  <div id="giftModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="giftModalTitle">
+    <div class="modal-card gift-modal-card">
+      <div class="row between"><div><p class="eyebrow">Gift management</p><h3 id="giftModalTitle">Add Gift</h3></div><button id="closeGiftModal" class="icon" aria-label="Close gift form">×</button></div>
+      <form id="giftForm" novalidate>
+        <p id="giftFormError" class="message error-text" role="alert"></p>
+        <div class="form-grid">
+          <label>Donor<select id="giftDonor" required></select></label>
+          <label>Gift Date<input id="giftDate" type="date" required></label>
+          <label>Amount<input id="giftAmount" type="number" min="0.01" step="0.01" inputmode="decimal" required></label>
+          <label>Gift Type<select id="giftType"><option value="direct_gift">Direct Gift</option><option value="daf">DAF</option><option value="foundation">Foundation</option><option value="stock">Stock</option><option value="matching_gift">Matching Gift</option><option value="pledge_payment">Pledge Payment</option><option value="other">Other</option></select></label>
+          <label>Campaign<input id="giftCampaign" maxlength="150"></label>
+          <label>Fund or Designation<input id="giftDesignation" maxlength="150"></label>
+          <label>Payment Method<input id="giftPaymentMethod" maxlength="100"></label>
+          <label>Solicitor<input id="giftSolicitor" maxlength="150"></label>
+          <label>Shared-Credit Amount<input id="giftSharedCreditAmount" type="number" min="0" step="0.01" inputmode="decimal"></label>
+          <label>Check or Reference Number<input id="giftReferenceNumber" maxlength="150"></label>
+          <label>Receipt Status<select id="giftReceiptStatus"><option value="not_required">Not Required</option><option value="pending">Pending</option><option value="sent">Sent</option></select></label>
+          <label>Thank-You Status<select id="giftThankYouStatus"><option value="pending">Pending</option><option value="sent">Sent</option><option value="not_required">Not Required</option></select></label>
+        </div>
+        <label>Shared-Credit Information<textarea id="giftSharedCreditInformation" rows="2"></textarea></label>
+        <label>Tribute or Memorial Information<textarea id="giftTributeInformation" rows="2"></textarea></label>
+        <label>Notes<textarea id="giftNotes" rows="3"></textarea></label>
+        <label class="checkbox-label"><input id="giftAnonymous" type="checkbox"> Anonymous gift</label>
+        <div class="row end gift-form-actions">
+          <button id="deleteGift" type="button" class="danger hidden">Delete Gift</button>
+          <button id="cancelGift" type="button" class="secondary">Cancel</button>
+          <button id="saveGift" type="submit" class="primary">Save Gift</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div id="giftDeleteConfirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="giftDeleteConfirmTitle">
+    <div class="modal-card confirmation-card">
+      <h3 id="giftDeleteConfirmTitle">Delete gift?</h3>
+      <p id="giftDeleteConfirmBody" class="confirmation-copy"></p>
+      <p class="muted">The gift will be archived for audit purposes and removed from fundraising totals.</p>
+      <div class="row end"><button id="cancelDeleteGift" class="secondary">Cancel</button><button id="confirmDeleteGift" class="danger">Delete Gift</button></div>
+    </div>
+  </div>
+  <div id="exportModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="exportModalTitle">
+    <div class="modal-card export-modal-card">
+      <div class="row between"><div><p class="eyebrow">Authorized data</p><h3 id="exportModalTitle">Export Data</h3></div><button id="closeExportModal" class="icon" aria-label="Close export dialog">×</button></div>
+      <form id="exportForm">
+        <div class="form-grid">
+          <label>Export Scope<select id="exportScope"><option value="all">Complete workspace</option><option value="donors">All donor data</option><option value="selected_donors">Selected donors</option><option value="gifts">Gifts</option><option value="activities">Activities and follow-ups</option><option value="pledges">Pledges</option><option value="relationships">Relationships</option><option value="campaigns">Campaign participation</option><option value="donor_profile">Single donor full profile</option><option value="donor_gifts">Single donor donation history</option></select></label>
+          <label>Format<select id="exportFormat"><option value="csv">CSV</option><option value="xlsx">Excel workbook</option><option value="json">JSON backup</option></select></label>
+          <label>Donor<select id="exportDonor"><option value="">All authorized donors</option></select></label>
+          <label>Selected Donors<select id="exportSelectedDonors" multiple size="5" aria-describedby="exportSelectedHelp"></select><small id="exportSelectedHelp">Hold Ctrl or Command to choose more than one.</small></label>
+          <label>Campaign<input id="exportCampaign"></label>
+          <label>Date From<input id="exportDateFrom" type="date"></label>
+          <label>Date To<input id="exportDateTo" type="date"></label>
+          <label>Assigned Fundraiser<input id="exportOfficer"></label>
+        </div>
+        <p id="exportMessage" class="message" role="status"></p>
+        <div class="row end"><button id="cancelExport" type="button" class="secondary">Cancel</button><button id="runExport" type="submit" class="primary">Generate Export</button></div>
+      </form>
+    </div>
+  </div>
+  <div id="mediaModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mediaModalTitle">
+    <div class="modal-card media-modal-card">
+      <div class="row between"><div><p class="eyebrow">Media Library</p><h3 id="mediaModalTitle">Media Details</h3></div><button id="closeMediaModal" class="icon" aria-label="Close media details">×</button></div>
+      <div id="mediaPreview" class="media-preview"></div>
+      <form id="mediaMetadataForm">
+        <div class="form-grid">
+          <label>Title<input id="mediaTitle"></label>
+          <label>Tags<input id="mediaTags" placeholder="campaign, event, alumni"></label>
+          <label>Related Donor<select id="mediaDonor"><option value="">No donor</option></select></label>
+          <label>Related Campaign<input id="mediaCampaign"></label>
+        </div>
+        <label>Description<textarea id="mediaDescription" rows="3"></textarea></label>
+        <p id="mediaModalMessage" class="message" role="status"></p>
+        <div class="row end"><button id="deleteMedia" type="button" class="danger">Delete</button><button id="downloadMedia" type="button" class="secondary">Download Original</button><button id="saveMedia" type="submit" class="primary">Save Metadata</button></div>
+      </form>
     </div>
   </div>
   <div id="donorImportWizard" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="donorImportTitle">
