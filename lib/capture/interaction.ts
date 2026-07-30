@@ -1,0 +1,93 @@
+export type InteractionKind = "call" | "email" | "meeting" | "note" | "personal";
+export type ReminderChoice = "none" | "tomorrow" | "next-week" | "custom";
+
+export type InteractionExtraction = {
+  type: InteractionKind;
+  subject: string;
+  summary: string;
+  sentiment: "warm" | "neutral";
+  memory: string;
+  relationshipSummary: string;
+  nextAction: string;
+  commitments: string[];
+};
+
+const KIND_LABELS: Record<InteractionKind, string> = {
+  call: "Call",
+  email: "Email",
+  meeting: "Meeting",
+  note: "Note",
+  personal: "Personal interaction",
+};
+
+export function interactionKindLabel(kind: InteractionKind): string {
+  return KIND_LABELS[kind];
+}
+
+export function inferInteractionKind(note: string): InteractionKind {
+  const lower = note.toLowerCase();
+  if (/\b(called|phone|spoke by phone|voicemail)\b/.test(lower)) return "call";
+  if (/\b(emailed|email|wrote to|replied)\b/.test(lower)) return "email";
+  if (/\b(coffee|lunch|dinner|met|meeting|visit)\b/.test(lower)) return "meeting";
+  if (/\b(birthday|anniversary|family|personal)\b/.test(lower)) return "personal";
+  return "note";
+}
+
+export function inferSubject(note: string, kind: InteractionKind): string {
+  const lower = note.toLowerCase();
+  if (lower.includes("maya") && lower.includes("visit")) return "Maya’s progress and fall campus visit";
+  if (lower.includes("scholarship") && lower.includes("outcome")) return "Scholarship outcomes follow-up";
+  const firstSentence = note.trim().split(/[.!?]\s|[\r\n]/, 1)[0]?.trim();
+  if (firstSentence) {
+    const concise = firstSentence.replace(/^(called|emailed|met with|coffee with)\s+/i, "");
+    return concise.length > 72 ? `${concise.slice(0, 69).trim()}…` : concise;
+  }
+  return `${interactionKindLabel(kind)} with donor`;
+}
+
+export function reminderDueAt(
+  choice: ReminderChoice,
+  customDate: string | undefined,
+  now: Date,
+): Date | null {
+  if (choice === "none") return null;
+  const due = new Date(now);
+  due.setHours(9, 0, 0, 0);
+  if (choice === "tomorrow") due.setDate(due.getDate() + 1);
+  if (choice === "next-week") due.setDate(due.getDate() + 7);
+  if (choice === "custom") {
+    if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) return null;
+    const [year, month, day] = customDate.split("-").map(Number);
+    due.setFullYear(year, month - 1, day);
+  }
+  return due;
+}
+
+export function extractInteraction(
+  note: string,
+  requestedKind?: InteractionKind,
+  requestedSubject?: string,
+): InteractionExtraction {
+  const type = requestedKind ?? inferInteractionKind(note);
+  const subject = requestedSubject?.trim() || inferSubject(note, type);
+  const lower = note.toLowerCase();
+  const commitments = [
+    ...(lower.includes("send") ? ["Send scholarship outcomes"] : []),
+    ...(/follow up|follow-up/.test(lower) ? ["Follow up with Elena and David"] : []),
+  ];
+  return {
+    type,
+    subject,
+    summary: note.trim(),
+    sentiment: /loved|excited|interested|warm|glad/.test(lower) ? "warm" : "neutral",
+    memory: lower.includes("david")
+      ? "David wants scholarship outcomes before scheduling a fall campus visit."
+      : `New context from ${subject.toLowerCase()}.`,
+    relationshipSummary:
+      "Elena and David’s interest is expanding toward direct student engagement and a possible fall campus visit. Their recent response indicates warm momentum, with David seeking outcomes before the next step.",
+    nextAction: lower.includes("send")
+      ? "Send the scholarship outcomes brief, then follow up about fall visit dates."
+      : `Follow up on ${subject.toLowerCase()}.`,
+    commitments,
+  };
+}

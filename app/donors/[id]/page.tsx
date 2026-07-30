@@ -1,10 +1,31 @@
 import type { Metadata } from "next";
 import { AppShell } from "../../components/AppShell";
 import { donor } from "../../data";
+import { getRelationshipUpdates } from "../../../lib/relationships/read";
+import { interactionKindLabel } from "../../../lib/capture/interaction";
 
 export const metadata: Metadata = { title: donor.name };
+export const dynamic = "force-dynamic";
 
-export default function DonorPage() {
+export default async function DonorPage() {
+  const updates = await getRelationshipUpdates("elena-chen");
+  const summary = updates.summary ?? donor.summary;
+  const nextAction = updates.nextAction ?? donor.nextAction;
+  const memory = updates.memory
+    ? [{ icon: "✦", label: "Latest captured context", body: updates.memory, source: "From the most recent logged interaction" }, ...donor.memory]
+    : donor.memory;
+  const timeline = updates.interaction
+    ? [{
+        date: updates.interaction.occurredAt.toLocaleDateString("en-US", { month: "short", day: "2-digit" }).toUpperCase(),
+        year: updates.interaction.occurredAt.getFullYear().toString(),
+        icon: updates.interaction.kind === "call" ? "☎" : updates.interaction.kind === "email" ? "✉" : updates.interaction.kind === "personal" ? "♡" : "○",
+        type: updates.interaction.kind,
+        label: interactionKindLabel(updates.interaction.kind).toUpperCase(),
+        title: updates.interaction.subject,
+        body: updates.interaction.note,
+        insight: "Captured once and applied to the relationship automatically.",
+      }, ...donor.timeline]
+    : donor.timeline;
   return (
     <AppShell active="donors">
       <div className="donor-breadcrumb">
@@ -66,9 +87,9 @@ export default function DonorPage() {
                 <p className="eyebrow">✦ AI RELATIONSHIP BRIEF</p>
                 <h2>Longstanding scholarship partners with growing readiness</h2>
               </div>
-              <span className="updated"><i /> Updated today, 8:12 AM</span>
+              <span className="updated"><i /> {updates.interaction ? "Updated from latest interaction" : "Updated today, 8:12 AM"}</span>
             </div>
-            <p className="summary">{donor.summary}</p>
+            <p className="summary">{summary}</p>
             <div className="brief-signals">
               <article><span className="signal-icon heart">♡</span><div><label>What matters</label><p>First-generation access and direct student impact.</p></div></article>
               <article><span className="signal-icon momentum">↗</span><div><label>Why now</label><p>Three recent engagement signals before today’s meeting.</p></div></article>
@@ -79,7 +100,7 @@ export default function DonorPage() {
               <div>
                 <p className="eyebrow">RECOMMENDED NEXT ACTION</p>
                 <h3>Make today’s meeting about Maya’s progress</h3>
-                <p>{donor.nextAction}</p>
+                <p>{nextAction}</p>
                 <div className="recommendation-why">
                   <span>Why this recommendation</span>
                   <p>Elena revisited Maya’s story in the latest update, and both Chens spent time with her at the June reception.</p>
@@ -95,7 +116,7 @@ export default function DonorPage() {
               <button className="quiet-button">＋ Add memory</button>
             </div>
             <div className="memory-grid">
-              {donor.memory.map((memory) => (
+              {memory.map((memory) => (
                 <article key={memory.label}>
                   <span className="memory-icon">{memory.icon}</span>
                   <div><label>{memory.label}</label><p>{memory.body}</p><small>{memory.source}</small></div>
@@ -110,7 +131,7 @@ export default function DonorPage() {
               <button className="quiet-button">All activity ⌄</button>
             </div>
             <div className="timeline-list">
-              {donor.timeline.map((item) => (
+              {timeline.map((item) => (
                 <article className="timeline-item" key={item.date + item.title}>
                   <time><strong>{item.date}</strong><span>{item.year}</span></time>
                   <span className={`timeline-dot ${item.type}`} aria-hidden="true">{item.icon}</span>
