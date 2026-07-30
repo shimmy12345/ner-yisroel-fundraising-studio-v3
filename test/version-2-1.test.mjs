@@ -17,9 +17,18 @@ import {
 } from '../public/media.js';
 import { buildDashboardViewModel } from '../public/dashboard.js';
 import {
+  activityExportRow,
   createExportFile,
-  csvForRows
+  csvForRows,
+  donorExportRow,
+  exportedDonorName,
+  giftExportRow
 } from '../netlify/functions/_shared/export-data.mjs';
+import {
+  buildGenerationText,
+  classifyGenerationAttachment as classifyAiStudioAttachment,
+  friendlyGenerationError
+} from '../netlify/functions/generate.mjs';
 
 const migrationUrl = new URL('../supabase/migrations/20260730_version_2_1_fundraising_workspace.sql', import.meta.url);
 const appUrl = new URL('../public/app.js', import.meta.url);
@@ -176,6 +185,44 @@ test('media metadata is normalized and storage access remains owner isolated', a
   assert.doesNotMatch(mediaFunction, /serviceClient|SUPABASE_SERVICE_ROLE_KEY/);
 });
 
+test('AI Studio routes images separately from document context stuffing', async () => {
+  const source = await readFile(new URL('../netlify/functions/generate.mjs', import.meta.url), 'utf8');
+  assert.equal(classifyAiStudioAttachment({ name: 'pledge-card.jpg', type: 'image/jpeg' }), 'image');
+  assert.equal(classifyAiStudioAttachment({ name: 'campus.PNG', type: 'image/png' }), 'image');
+  assert.equal(classifyAiStudioAttachment({ name: 'brief.pdf', type: 'application/pdf' }), 'document');
+  assert.equal(classifyAiStudioAttachment({ name: 'recording.mp4', type: 'video/mp4' }), 'video');
+  assert.equal(classifyAiStudioAttachment({ name: 'archive.zip', type: 'application/zip' }), null);
+  assert.match(source, /type:'input_image'/);
+  assert.match(source, /image_url:`data:\$\{mime\};base64,\$\{body\.file\.base64\}`/);
+  assert.match(source, /type:'input_file'/);
+});
+
+test('AI Studio generation text keeps instructions and source notes with image requests', () => {
+  const text = buildGenerationText({
+    audience: 'Parents',
+    tone: 'Warm',
+    goal: 'Create a message based on this image.',
+    prompt: 'Write an appeal from the attached photo.',
+    sourceText: 'Mention the scholarship dinner.'
+  }, 'Campaign facts', 'writer');
+  assert.match(text, /Audience: Parents/);
+  assert.match(text, /Tone: Warm/);
+  assert.match(text, /Desired outcome: Create a message based on this image\./);
+  assert.match(text, /Instructions:\nWrite an appeal from the attached photo\./);
+  assert.match(text, /Source material and notes:\nMention the scholarship dinner\./);
+});
+
+test('AI Studio returns friendly messages for image capability and video limitations', () => {
+  assert.match(
+    friendlyGenerationError(new Error('Invalid input: model does not support input_image')),
+    /cannot analyze that attachment format/
+  );
+  assert.match(
+    friendlyGenerationError(new Error('video/mp4 is not supported')),
+    /Video analysis is not configured/
+  );
+});
+
 test('exports use authenticated RLS queries, stable IDs, and bounded pagination', async () => {
   const source = await readFile(exportFunctionUrl, 'utf8');
   assert.match(source, /requireUser\(event\)/);
@@ -185,6 +232,40 @@ test('exports use authenticated RLS queries, stable IDs, and bounded pagination'
   assert.match(source, /gift_id: gift\.id/);
   assert.match(source, /donor_id: gift\.donor_id/);
   assert.doesNotMatch(source, /serviceClient|SUPABASE_SERVICE_ROLE_KEY/);
+});
+
+test('donor export rows use crm_donors primary key and readable names', () => {
+  const row = donorExportRow({
+    id: 'crm-donor-uuid',
+    owner_user_id: 'owner-user-id',
+    donor_code: '001',
+    first_name: 'Ari',
+    last_name: 'Cohen',
+    preferred_name: 'Aryeh',
+    household_name: 'Rabbi Ari Cohen Household'
+  });
+  assert.equal(row.donor_id, 'crm-donor-uuid');
+  assert.equal(row.full_name, 'Cohen, Aryeh');
+  assert.equal(row.household_name, 'Rabbi Ari Cohen Household');
+  assert.equal(Object.hasOwn(row, 'owner_user_id'), false);
+  assert.equal(exportedDonorName({ first_name: '', last_name: '', household_name: 'Goldstein Family' }), 'Goldstein Family');
+});
+
+test('gift and activity exports join stable donor IDs to readable donor names', () => {
+  const donorsById = new Map([['donor-uuid-1', {
+    id: 'donor-uuid-1',
+    first_name: 'Ari',
+    last_name: 'Cohen',
+    household_name: 'Cohen Household'
+  }]]);
+  const gift = giftExportRow({ id: 'gift-uuid-1', donor_id: 'donor-uuid-1', amount: 180 }, donorsById);
+  const activity = activityExportRow({ id: 'activity-uuid-1', donor_id: 'donor-uuid-1', subject: 'Call' }, donorsById);
+  assert.equal(gift.gift_id, 'gift-uuid-1');
+  assert.equal(gift.donor_id, 'donor-uuid-1');
+  assert.equal(gift.donor_name, 'Cohen, Ari');
+  assert.equal(activity.activity_id, 'activity-uuid-1');
+  assert.equal(activity.donor_id, 'donor-uuid-1');
+  assert.equal(activity.donor_name, 'Cohen, Ari');
 });
 
 test('CSV exports use readable headers, stable values, escaping, and numeric amounts', () => {

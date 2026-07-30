@@ -166,7 +166,7 @@
             </div>
             <label>Instructions<textarea id="prompt" rows="4"></textarea></label>
             <label>Source text or notes<textarea id="sourceText" rows="12"></textarea></label>
-            <label class="file-label">Attach one document for this request<input id="file" type="file" accept=".pdf,.doc,.docx,.txt,.md,.rtf"><span id="fileName">No file selected</span></label>
+            <label class="file-label">Attach one document or image for this request<input id="file" type="file" accept=".pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.md,.rtf,.jpg,.jpeg,.png,.webp,.heic,.heif,image/*"><span id="fileName">No file selected</span></label>
             <button id="generate" class="primary full">Generate</button>
           </div>
           <div class="card result-card"><div class="row between"><h3>Result</h3><div><button id="copyOutput" class="secondary" disabled>Copy</button><button id="saveFavorite" class="secondary" disabled>Favorite</button></div></div><div id="resultEmpty" class="empty">Your result will appear here.</div><pre id="output" class="hidden"></pre></div>

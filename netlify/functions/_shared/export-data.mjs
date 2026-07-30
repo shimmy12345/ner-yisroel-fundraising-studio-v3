@@ -41,8 +41,8 @@ function excelColumnName(index) {
   return result;
 }
 
-function worksheetXml(rows = []) {
-  const keys = [...new Set(rows.flatMap(row => Object.keys(row || {})))];
+function worksheetXml(rows = [], columns = []) {
+  const keys = columns.length ? [...columns] : [...new Set(rows.flatMap(row => Object.keys(row || {})))];
   if (!keys.length) keys.push('status');
   const allRows = [
     Object.fromEntries(keys.map(key => [key, readableHeader(key)])),
@@ -88,8 +88,166 @@ ${sheets.map(sheet => `<Override PartName="/xl/worksheets/sheet${sheet.sheetId}.
   zip.folder('xl').folder('_rels').file('workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map(sheet => `<Relationship Id="rId${sheet.sheetId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheet.sheetId}.xml"/>`).join('')}</Relationships>`);
   const worksheetFolder = zip.folder('xl').folder('worksheets');
-  sheets.forEach(sheet => worksheetFolder.file(`sheet${sheet.sheetId}.xml`, worksheetXml(sheet.rows)));
+  sheets.forEach(sheet => worksheetFolder.file(`sheet${sheet.sheetId}.xml`, worksheetXml(sheet.rows, sheet.columns || [])));
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
+function clean(value) {
+  return String(value ?? '').trim();
+}
+
+export function exportedDonorName(row = {}) {
+  const preferredName = clean(row.preferred_name);
+  const firstName = clean(row.first_name);
+  const lastName = clean(row.last_name);
+  const householdName = clean(row.household_name);
+  const displayName = clean(row.display_name) || clean(row.full_name);
+  if (displayName) return displayName;
+  if (lastName && (preferredName || firstName)) return `${lastName}, ${preferredName || firstName}`;
+  return lastName || preferredName || firstName || householdName || clean(row.donor_code) || '';
+}
+
+export const DONOR_EXPORT_COLUMNS = [
+  'donor_id',
+  'donor_code',
+  'first_name',
+  'last_name',
+  'preferred_name',
+  'full_name',
+  'household_name',
+  'email',
+  'home_phone',
+  'mobile_phone',
+  'address',
+  'city',
+  'state',
+  'zip',
+  'country',
+  'assigned_officer',
+  'stage',
+  'lifetime_giving',
+  'last_gift_amount',
+  'last_gift_date',
+  'last_contact_date',
+  'next_action',
+  'next_action_date',
+  'is_archived',
+  'created_at',
+  'updated_at'
+];
+
+export const GIFT_EXPORT_COLUMNS = [
+  'gift_id',
+  'donor_id',
+  'donor_name',
+  'gift_date',
+  'amount',
+  'gift_type',
+  'campaign',
+  'pledge_id',
+  'appeal',
+  'payment_method',
+  'check_number',
+  'transaction_id',
+  'recognition_name',
+  'soft_credit_name',
+  'shared_credit_amount',
+  'notes',
+  'created_at',
+  'updated_at'
+];
+
+export const ACTIVITY_EXPORT_COLUMNS = [
+  'activity_id',
+  'donor_id',
+  'donor_name',
+  'activity_type',
+  'occurred_at',
+  'subject',
+  'summary',
+  'next_action',
+  'next_action_date',
+  'next_action_completed_at',
+  'is_archived',
+  'created_at',
+  'updated_at'
+];
+
+export const CAMPAIGN_EXPORT_COLUMNS = ['gift_id', 'donor_id', 'donor_name', 'campaign', 'gift_date', 'amount'];
+
+export function donorExportRow(row = {}) {
+  const fullName = exportedDonorName(row);
+  return {
+    donor_id: row.id,
+    donor_code: row.donor_code,
+    first_name: row.first_name,
+    last_name: row.last_name,
+    preferred_name: row.preferred_name,
+    full_name: fullName,
+    household_name: row.household_name,
+    email: row.email,
+    home_phone: row.home_phone,
+    mobile_phone: row.mobile_phone,
+    address: row.address,
+    city: row.city,
+    state: row.state,
+    zip: row.zip,
+    country: row.country,
+    assigned_officer: row.assigned_officer,
+    stage: row.stage,
+    lifetime_giving: row.lifetime_giving,
+    last_gift_amount: row.last_gift_amount,
+    last_gift_date: row.last_gift_date,
+    last_contact_date: row.last_contact_date,
+    next_action: row.next_action,
+    next_action_date: row.next_action_date,
+    is_archived: row.is_archived,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+export function giftExportRow(row = {}, donorsById = new Map()) {
+  const donor = donorsById.get(row.donor_id) || {};
+  return {
+    gift_id: row.id,
+    donor_id: row.donor_id,
+    donor_name: exportedDonorName(donor),
+    gift_date: row.gift_date,
+    amount: row.amount,
+    gift_type: row.gift_type,
+    campaign: row.campaign,
+    pledge_id: row.pledge_id,
+    appeal: row.appeal,
+    payment_method: row.payment_method,
+    check_number: row.check_number,
+    transaction_id: row.transaction_id,
+    recognition_name: row.recognition_name,
+    soft_credit_name: row.soft_credit_name,
+    shared_credit_amount: row.shared_credit_amount,
+    notes: row.notes,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+export function activityExportRow(row = {}, donorsById = new Map()) {
+  const donor = donorsById.get(row.donor_id) || {};
+  return {
+    activity_id: row.id,
+    donor_id: row.donor_id,
+    donor_name: exportedDonorName(donor),
+    activity_type: row.activity_type,
+    occurred_at: row.occurred_at,
+    subject: row.subject,
+    summary: row.summary,
+    next_action: row.next_action,
+    next_action_date: row.next_action_date,
+    next_action_completed_at: row.next_action_completed_at,
+    is_archived: row.is_archived,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
 }
 
 export async function createExportFile(datasets, format, metadata = {}) {

@@ -1,5 +1,15 @@
 import { json, requireUser } from './_shared/auth.mjs';
-import { createExportFile } from './_shared/export-data.mjs';
+import {
+  ACTIVITY_EXPORT_COLUMNS,
+  CAMPAIGN_EXPORT_COLUMNS,
+  DONOR_EXPORT_COLUMNS,
+  GIFT_EXPORT_COLUMNS,
+  activityExportRow,
+  createExportFile,
+  donorExportRow,
+  exportedDonorName,
+  giftExportRow
+} from './_shared/export-data.mjs';
 
 const PAGE_SIZE = 1_000;
 const MAX_ROWS_PER_DATASET = 25_000;
@@ -77,13 +87,18 @@ export async function handler(event) {
     const wantGifts = ['all', 'gifts', 'donor_profile', 'donor_gifts', 'campaigns'].includes(scope);
     const wantActivities = ['all', 'activities', 'donor_profile'].includes(scope);
     const datasets = [];
-
-    if (wantDonors) {
-      const donors = await collect(() => applyDonorFilters(
+    let donorRows = [];
+    const needsDonorLookup = wantDonors || wantGifts || wantActivities || ['pledges', 'relationships'].includes(scope);
+    if (needsDonorLookup) {
+      donorRows = await collect(() => applyDonorFilters(
         supabase.from('crm_donors').select('*').eq('owner_user_id', user.id).order('id'),
         filters
       ));
-      datasets.push({ key: 'donors', name: 'Donors', rows: donors });
+    }
+    const donorsById = new Map(donorRows.map(row => [row.id, row]));
+
+    if (wantDonors) {
+      datasets.push({ key: 'donors', name: 'Donors', columns: DONOR_EXPORT_COLUMNS, rows: donorRows.map(donorExportRow) });
     }
     let gifts = [];
     if (wantGifts) {
@@ -91,7 +106,14 @@ export async function handler(event) {
         supabase.from('donor_gifts').select('*').eq('owner_user_id', user.id).eq('is_deleted', false).order('gift_date', { ascending: false }),
         filters
       ));
-      if (scope !== 'campaigns') datasets.push({ key: 'gifts', name: 'Gifts', rows: gifts });
+      if (scope !== 'campaigns') {
+        datasets.push({
+          key: 'gifts',
+          name: 'Gifts',
+          columns: GIFT_EXPORT_COLUMNS,
+          rows: gifts.map(gift => giftExportRow(gift, donorsById))
+        });
+      }
     }
     if (wantActivities) {
       const activities = await collect(() => {
@@ -102,17 +124,24 @@ export async function handler(event) {
         if (filters.dateTo) query = query.lte('occurred_at', `${filters.dateTo}T23:59:59Z`);
         return query;
       });
-      datasets.push({ key: 'activities', name: 'Activities', rows: activities });
+      datasets.push({
+        key: 'activities',
+        name: 'Activities',
+        columns: ACTIVITY_EXPORT_COLUMNS,
+        rows: activities.map(activity => activityExportRow(activity, donorsById))
+      });
     }
-    if (['all', 'pledges'].includes(scope)) datasets.push({ key: 'pledges', name: 'Pledges', rows: [] });
-    if (['all', 'relationships'].includes(scope)) datasets.push({ key: 'relationships', name: 'Relationships', rows: [] });
+    if (['all', 'pledges'].includes(scope)) datasets.push({ key: 'pledges', name: 'Pledges', columns: ['pledge_id', 'donor_id', 'donor_name'], rows: [] });
+    if (['all', 'relationships'].includes(scope)) datasets.push({ key: 'relationships', name: 'Relationships', columns: ['relationship_id', 'donor_id', 'donor_name', 'related_donor_id', 'related_donor_name'], rows: [] });
     if (['all', 'campaigns'].includes(scope)) {
       datasets.push({
         key: 'campaign_participation',
         name: 'Campaign Participation',
+        columns: CAMPAIGN_EXPORT_COLUMNS,
         rows: gifts.filter(gift => gift.campaign).map(gift => ({
           gift_id: gift.id,
           donor_id: gift.donor_id,
+          donor_name: exportedDonorName(donorsById.get(gift.donor_id)),
           campaign: gift.campaign,
           gift_date: gift.gift_date,
           amount: gift.amount
