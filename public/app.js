@@ -1311,6 +1311,27 @@ function downloadBase64File(base64, contentType, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 2_000);
 }
 
+async function requestExportFile({ scope = 'all', format = 'csv', filters = {} } = {}) {
+  return api('/api/export-data', {
+    method: 'POST',
+    body: JSON.stringify({ scope, format, filters })
+  });
+}
+
+async function exportDonorsCsv() {
+  const button = $('exportDonorsCsv');
+  button.disabled = true;
+  try {
+    const data = await requestExportFile({ scope: 'donors', format: 'csv', filters: {} });
+    downloadBase64File(data.base64, data.content_type, data.filename);
+    toast(`Downloading ${data.record_count.toLocaleString()} authorized donor records.`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 $('closeExportModal').onclick = closeExportModal;
 $('cancelExport').onclick = closeExportModal;
 $('exportForm').onsubmit = async event => {
@@ -1319,20 +1340,17 @@ $('exportForm').onsubmit = async event => {
   button.disabled = true;
   $('exportMessage').textContent = 'Preparing authorized records…';
   try {
-    const data = await api('/api/export-data', {
-      method: 'POST',
-      body: JSON.stringify({
-        scope: $('exportScope').value,
-        format: $('exportFormat').value,
-        filters: {
-          donor_id: $('exportDonor').value,
-          donor_ids: [...$('exportSelectedDonors').selectedOptions].map(option => option.value),
-          campaign: $('exportCampaign').value.trim(),
-          date_from: $('exportDateFrom').value,
-          date_to: $('exportDateTo').value,
-          assigned_officer: $('exportOfficer').value.trim()
-        }
-      })
+    const data = await requestExportFile({
+      scope: $('exportScope').value,
+      format: $('exportFormat').value,
+      filters: {
+        donor_id: $('exportDonor').value,
+        donor_ids: [...$('exportSelectedDonors').selectedOptions].map(option => option.value),
+        campaign: $('exportCampaign').value.trim(),
+        date_from: $('exportDateFrom').value,
+        date_to: $('exportDateTo').value,
+        assigned_officer: $('exportOfficer').value.trim()
+      }
     });
     $('exportMessage').textContent = `Downloading ${data.record_count.toLocaleString()} authorized records.`;
     downloadBase64File(data.base64, data.content_type, data.filename);
@@ -1803,6 +1821,7 @@ async function loadDonors({ background = false } = {}) {
 }
 
 $('newDonor').onclick = () => openDonor(null);
+$('exportDonorsCsv').onclick = exportDonorsCsv;
 $('refreshDonors').onclick = () => loadDonors();
 $('donorSearch').oninput = resetAndRenderDonors;
 $('donorStatusFilter').onchange = () => {

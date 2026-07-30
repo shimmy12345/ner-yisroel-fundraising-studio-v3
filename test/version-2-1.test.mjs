@@ -18,6 +18,7 @@ import {
 import { buildDashboardViewModel } from '../public/dashboard.js';
 import {
   activityExportRow,
+  campaignParticipationExportRow,
   createExportFile,
   csvForRows,
   donorExportRow,
@@ -32,6 +33,7 @@ import {
 
 const migrationUrl = new URL('../supabase/migrations/20260730_version_2_1_fundraising_workspace.sql', import.meta.url);
 const appUrl = new URL('../public/app.js', import.meta.url);
+const htmlUrl = new URL('../public/index.html', import.meta.url);
 const exportFunctionUrl = new URL('../netlify/functions/export-data.mjs', import.meta.url);
 const mediaFunctionUrl = new URL('../netlify/functions/media-asset.mjs', import.meta.url);
 
@@ -224,13 +226,18 @@ test('AI Studio returns friendly messages for image capability and video limitat
 });
 
 test('exports use authenticated RLS queries, stable IDs, and bounded pagination', async () => {
-  const source = await readFile(exportFunctionUrl, 'utf8');
+  const [source, sharedSource] = await Promise.all([
+    readFile(exportFunctionUrl, 'utf8'),
+    readFile(new URL('../netlify/functions/_shared/export-data.mjs', import.meta.url), 'utf8')
+  ]);
   assert.match(source, /requireUser\(event\)/);
   assert.match(source, /PAGE_SIZE = 1_000/);
   assert.match(source, /MAX_ROWS_PER_DATASET = 25_000/);
   assert.match(source, /\.eq\('owner_user_id', user\.id\)/);
-  assert.match(source, /gift_id: gift\.id/);
-  assert.match(source, /donor_id: gift\.donor_id/);
+  assert.match(source, /giftExportRow\(gift, donorsById\)/);
+  assert.match(sharedSource, /gift_id: row\.id/);
+  assert.match(sharedSource, /donor_id: row\.donor_id/);
+  assert.match(sharedSource, /donor_code: donor\.donor_code \|\| ''/);
   assert.doesNotMatch(source, /serviceClient|SUPABASE_SERVICE_ROLE_KEY/);
 });
 
@@ -245,62 +252,86 @@ test('donor export rows use crm_donors primary key and readable names', () => {
     household_name: 'Rabbi Ari Cohen Household'
   });
   assert.equal(row.donor_id, 'crm-donor-uuid');
+  assert.equal(row.donor_code, '001');
   assert.equal(row.full_name, 'Cohen, Aryeh');
   assert.equal(row.household_name, 'Rabbi Ari Cohen Household');
   assert.equal(Object.hasOwn(row, 'owner_user_id'), false);
   assert.equal(exportedDonorName({ first_name: '', last_name: '', household_name: 'Goldstein Family' }), 'Goldstein Family');
 });
 
-test('gift and activity exports join stable donor IDs to readable donor names', () => {
+test('gift, activity, and campaign exports join stable donor IDs, donor codes, and readable names', () => {
   const donorsById = new Map([['donor-uuid-1', {
     id: 'donor-uuid-1',
+    donor_code: '00042',
     first_name: 'Ari',
     last_name: 'Cohen',
     household_name: 'Cohen Household'
   }]]);
-  const gift = giftExportRow({ id: 'gift-uuid-1', donor_id: 'donor-uuid-1', amount: 180 }, donorsById);
+  const gift = giftExportRow({ id: 'gift-uuid-1', donor_id: 'donor-uuid-1', amount: 180, campaign: 'Annual' }, donorsById);
   const activity = activityExportRow({ id: 'activity-uuid-1', donor_id: 'donor-uuid-1', subject: 'Call' }, donorsById);
+  const campaign = campaignParticipationExportRow({ id: 'gift-uuid-1', donor_id: 'donor-uuid-1', amount: 180, campaign: 'Annual' }, donorsById);
   assert.equal(gift.gift_id, 'gift-uuid-1');
   assert.equal(gift.donor_id, 'donor-uuid-1');
+  assert.equal(gift.donor_code, '00042');
   assert.equal(gift.donor_name, 'Cohen, Ari');
   assert.equal(activity.activity_id, 'activity-uuid-1');
   assert.equal(activity.donor_id, 'donor-uuid-1');
+  assert.equal(activity.donor_code, '00042');
   assert.equal(activity.donor_name, 'Cohen, Ari');
+  assert.equal(campaign.gift_id, 'gift-uuid-1');
+  assert.equal(campaign.donor_id, 'donor-uuid-1');
+  assert.equal(campaign.donor_code, '00042');
+  assert.equal(campaign.donor_name, 'Cohen, Ari');
+  assert.equal(giftExportRow({ id: 'gift-uuid-2', donor_id: 'missing-donor' }, donorsById).donor_code, '');
 });
 
-test('CSV exports use readable headers, stable values, escaping, and numeric amounts', () => {
+test('CSV exports use readable headers, stable donor code values, escaping, and numeric amounts', () => {
   const csv = csvForRows([{
     donor_id: 'donor-1',
+    donor_code: '00042',
     donor_name: 'Cohen, Ari',
     amount: 2500.5,
     notes: 'Said "thank you"'
-  }], ['donor_id', 'donor_name', 'amount', 'notes']);
+  }], ['donor_id', 'donor_code', 'donor_name', 'amount', 'notes']);
   assert.equal(
     csv,
-    '"Donor Id","Donor Name","Amount","Notes"\r\n"donor-1","Cohen, Ari","2500.5","Said ""thank you"""'
+    '"Donor Id","Donor Code","Donor Name","Amount","Notes"\r\n"donor-1","00042","Cohen, Ari","2500.5","Said ""thank you"""'
   );
 });
 
-test('Excel exports generate separate valid worksheet parts', async () => {
+test('Excel exports generate separate valid worksheet parts with donor code columns', async () => {
   const file = await createExportFile([
-    { key: 'donors', name: 'Donors', rows: [{ donor_id: 'donor-1', name: 'Ari Cohen' }] },
-    { key: 'gifts', name: 'Gifts', rows: [{ gift_id: 'gift-1', amount: 100 }] }
+    { key: 'donors', name: 'Donors', columns: ['donor_id', 'donor_code', 'full_name'], rows: [{ donor_id: 'donor-1', donor_code: '00042', full_name: 'Ari Cohen' }] },
+    { key: 'gifts', name: 'Gifts', columns: ['gift_id', 'donor_id', 'donor_code', 'amount'], rows: [{ gift_id: 'gift-1', donor_id: 'donor-1', donor_code: '00042', amount: 100 }] }
   ], 'xlsx');
   assert.equal(file.extension, 'xlsx');
   const workbook = await JSZip.loadAsync(file.buffer);
   assert.ok(workbook.file('xl/worksheets/sheet1.xml'));
   assert.ok(workbook.file('xl/worksheets/sheet2.xml'));
   assert.match(await workbook.file('xl/workbook.xml').async('string'), /name="Donors"[\s\S]*name="Gifts"/);
+  assert.match(await workbook.file('xl/worksheets/sheet1.xml').async('string'), /Donor Code[\s\S]*00042/);
+  assert.match(await workbook.file('xl/worksheets/sheet2.xml').async('string'), /Donor Code[\s\S]*00042/);
 });
 
-test('JSON backup exports retain metadata, stable IDs, and separate datasets', async () => {
+test('JSON backup exports retain metadata, stable IDs, donor codes, and separate datasets', async () => {
   const file = await createExportFile([
-    { key: 'donors', name: 'Donors', rows: [{ donor_id: 'donor-1' }] },
-    { key: 'gifts', name: 'Gifts', rows: [{ gift_id: 'gift-1', donor_id: 'donor-1' }] }
+    { key: 'donors', name: 'Donors', rows: [{ donor_id: 'donor-1', donor_code: '00042' }] },
+    { key: 'gifts', name: 'Gifts', rows: [{ gift_id: 'gift-1', donor_id: 'donor-1', donor_code: '00042' }] }
   ], 'json', { scope: 'all' });
   const parsed = JSON.parse(file.buffer.toString('utf8'));
   assert.equal(parsed.export_version, '2.1');
   assert.equal(parsed.scope, 'all');
   assert.equal(parsed.data.donors[0].donor_id, 'donor-1');
+  assert.equal(parsed.data.donors[0].donor_code, '00042');
   assert.equal(parsed.data.gifts[0].gift_id, 'gift-1');
+  assert.equal(parsed.data.gifts[0].donor_code, '00042');
+});
+
+test('Donors screen exposes a one-click CSV export using the shared export API', async () => {
+  const [html, app] = await Promise.all([readFile(htmlUrl, 'utf8'), readFile(appUrl, 'utf8')]);
+  assert.match(html, /id="exportDonorsCsv" class="secondary">Export CSV/);
+  assert.match(html, /id="exportDonorsCsv"[\s\S]*id="importDonors"[\s\S]*id="newDonor"/);
+  assert.match(app, /\$\('exportDonorsCsv'\)\.onclick = exportDonorsCsv/);
+  assert.match(app, /requestExportFile\(\{ scope: 'donors', format: 'csv', filters: \{\} \}\)/);
+  assert.match(app, /api\('\/api\/export-data'/);
 });

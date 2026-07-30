@@ -5,9 +5,9 @@ import {
   DONOR_EXPORT_COLUMNS,
   GIFT_EXPORT_COLUMNS,
   activityExportRow,
+  campaignParticipationExportRow,
   createExportFile,
   donorExportRow,
-  exportedDonorName,
   giftExportRow
 } from './_shared/export-data.mjs';
 
@@ -131,21 +131,14 @@ export async function handler(event) {
         rows: activities.map(activity => activityExportRow(activity, donorsById))
       });
     }
-    if (['all', 'pledges'].includes(scope)) datasets.push({ key: 'pledges', name: 'Pledges', columns: ['pledge_id', 'donor_id', 'donor_name'], rows: [] });
-    if (['all', 'relationships'].includes(scope)) datasets.push({ key: 'relationships', name: 'Relationships', columns: ['relationship_id', 'donor_id', 'donor_name', 'related_donor_id', 'related_donor_name'], rows: [] });
+    if (['all', 'pledges'].includes(scope)) datasets.push({ key: 'pledges', name: 'Pledges', columns: ['pledge_id', 'donor_id', 'donor_code', 'donor_name'], rows: [] });
+    if (['all', 'relationships'].includes(scope)) datasets.push({ key: 'relationships', name: 'Relationships', columns: ['relationship_id', 'donor_id', 'donor_code', 'donor_name', 'related_donor_id', 'related_donor_code', 'related_donor_name'], rows: [] });
     if (['all', 'campaigns'].includes(scope)) {
       datasets.push({
         key: 'campaign_participation',
         name: 'Campaign Participation',
         columns: CAMPAIGN_EXPORT_COLUMNS,
-        rows: gifts.filter(gift => gift.campaign).map(gift => ({
-          gift_id: gift.id,
-          donor_id: gift.donor_id,
-          donor_name: exportedDonorName(donorsById.get(gift.donor_id)),
-          campaign: gift.campaign,
-          gift_date: gift.gift_date,
-          amount: gift.amount
-        }))
+        rows: gifts.filter(gift => gift.campaign).map(gift => campaignParticipationExportRow(gift, donorsById))
       });
     }
 

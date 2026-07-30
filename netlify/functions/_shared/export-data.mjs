@@ -139,6 +139,7 @@ export const DONOR_EXPORT_COLUMNS = [
 export const GIFT_EXPORT_COLUMNS = [
   'gift_id',
   'donor_id',
+  'donor_code',
   'donor_name',
   'gift_date',
   'amount',
@@ -160,6 +161,7 @@ export const GIFT_EXPORT_COLUMNS = [
 export const ACTIVITY_EXPORT_COLUMNS = [
   'activity_id',
   'donor_id',
+  'donor_code',
   'donor_name',
   'activity_type',
   'occurred_at',
@@ -173,7 +175,7 @@ export const ACTIVITY_EXPORT_COLUMNS = [
   'updated_at'
 ];
 
-export const CAMPAIGN_EXPORT_COLUMNS = ['gift_id', 'donor_id', 'donor_name', 'campaign', 'gift_date', 'amount'];
+export const CAMPAIGN_EXPORT_COLUMNS = ['gift_id', 'donor_id', 'donor_code', 'donor_name', 'campaign', 'gift_date', 'amount'];
 
 export function donorExportRow(row = {}) {
   const fullName = exportedDonorName(row);
@@ -212,6 +214,7 @@ export function giftExportRow(row = {}, donorsById = new Map()) {
   return {
     gift_id: row.id,
     donor_id: row.donor_id,
+    donor_code: donor.donor_code || '',
     donor_name: exportedDonorName(donor),
     gift_date: row.gift_date,
     amount: row.amount,
@@ -236,6 +239,7 @@ export function activityExportRow(row = {}, donorsById = new Map()) {
   return {
     activity_id: row.id,
     donor_id: row.donor_id,
+    donor_code: donor.donor_code || '',
     donor_name: exportedDonorName(donor),
     activity_type: row.activity_type,
     occurred_at: row.occurred_at,
@@ -247,6 +251,19 @@ export function activityExportRow(row = {}, donorsById = new Map()) {
     is_archived: row.is_archived,
     created_at: row.created_at,
     updated_at: row.updated_at
+  };
+}
+
+export function campaignParticipationExportRow(row = {}, donorsById = new Map()) {
+  const donor = donorsById.get(row.donor_id) || {};
+  return {
+    gift_id: row.id,
+    donor_id: row.donor_id,
+    donor_code: donor.donor_code || '',
+    donor_name: exportedDonorName(donor),
+    campaign: row.campaign,
+    gift_date: row.gift_date,
+    amount: row.amount
   };
 }
 
