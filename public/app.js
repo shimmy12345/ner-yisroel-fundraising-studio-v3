@@ -1318,18 +1318,11 @@ async function requestExportFile({ scope = 'all', format = 'csv', filters = {} }
   });
 }
 
-async function exportDonorsCsv() {
-  const button = $('exportDonorsCsv');
-  button.disabled = true;
-  try {
-    const data = await requestExportFile({ scope: 'donors', format: 'csv', filters: {} });
-    downloadBase64File(data.base64, data.content_type, data.filename);
-    toast(`Downloading ${data.record_count.toLocaleString()} authorized donor records.`);
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = false;
-  }
+function openDonorDashboardExport() {
+  openExportModal({
+    scope: 'donors',
+    format: 'csv'
+  });
 }
 
 $('closeExportModal').onclick = closeExportModal;
@@ -1821,7 +1814,7 @@ async function loadDonors({ background = false } = {}) {
 }
 
 $('newDonor').onclick = () => openDonor(null);
-$('exportDonorsCsv').onclick = exportDonorsCsv;
+$('exportDonorsCsv').onclick = openDonorDashboardExport;
 $('refreshDonors').onclick = () => loadDonors();
 $('donorSearch').oninput = resetAndRenderDonors;
 $('donorStatusFilter').onchange = () => {

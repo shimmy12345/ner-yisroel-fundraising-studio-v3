@@ -327,11 +327,30 @@ test('JSON backup exports retain metadata, stable IDs, donor codes, and separate
   assert.equal(parsed.data.gifts[0].donor_code, '00042');
 });
 
-test('Donors screen exposes a one-click CSV export using the shared export API', async () => {
+test('Donors screen Export CSV opens the shared export dialog without immediate download', async () => {
   const [html, app] = await Promise.all([readFile(htmlUrl, 'utf8'), readFile(appUrl, 'utf8')]);
   assert.match(html, /id="exportDonorsCsv" class="secondary">Export CSV/);
   assert.match(html, /id="exportDonorsCsv"[\s\S]*id="importDonors"[\s\S]*id="newDonor"/);
-  assert.match(app, /\$\('exportDonorsCsv'\)\.onclick = exportDonorsCsv/);
-  assert.match(app, /requestExportFile\(\{ scope: 'donors', format: 'csv', filters: \{\} \}\)/);
+  assert.match(app, /\$\('exportDonorsCsv'\)\.onclick = openDonorDashboardExport/);
+  assert.match(app, /function openDonorDashboardExport\(\) \{[\s\S]*openExportModal\(\{[\s\S]*scope: 'donors'[\s\S]*format: 'csv'/);
+  const opener = app.match(/function openDonorDashboardExport\(\) \{[\s\S]*?\n\}/)?.[0] || '';
+  assert.doesNotMatch(opener, /requestExportFile|api\('\/api\/export-data'|downloadBase64File/);
+});
+
+test('confirming export dialog sends the chosen scope and filters through the shared API', async () => {
+  const app = await readFile(appUrl, 'utf8');
+  assert.match(app, /const data = await requestExportFile\(\{[\s\S]*scope: \$\('exportScope'\)\.value/);
+  assert.match(app, /format: \$\('exportFormat'\)\.value/);
+  assert.match(app, /donor_id: \$\('exportDonor'\)\.value/);
+  assert.match(app, /donor_ids: \[\.\.\.\$\('exportSelectedDonors'\)\.selectedOptions\]\.map\(option => option\.value\)/);
+  assert.match(app, /campaign: \$\('exportCampaign'\)\.value\.trim\(\)/);
+  assert.match(app, /date_from: \$\('exportDateFrom'\)\.value/);
+  assert.match(app, /assigned_officer: \$\('exportOfficer'\)\.value\.trim\(\)/);
   assert.match(app, /api\('\/api\/export-data'/);
+});
+
+test('individual donor gift export still opens the same dialog scoped to the current donor', async () => {
+  const app = await readFile(appUrl, 'utf8');
+  assert.match(app, /\$\('exportDonorGifts'\)\.onclick = exportCurrentDonorGifts/);
+  assert.match(app, /function exportCurrentDonorGifts\(\) \{[\s\S]*openExportModal\(\{[\s\S]*scope: 'donor_gifts'[\s\S]*donorId: donorProfileRecord\?\.id[\s\S]*format: 'csv'/);
 });
