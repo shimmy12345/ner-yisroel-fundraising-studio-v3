@@ -2,6 +2,8 @@ import { AppShell } from "./components/AppShell";
 import { BriefExperience } from "./components/BriefExperience";
 import { LocalDate } from "./components/LocalDate";
 import { todayData } from "./data";
+import { WelcomeExperience } from "./onboarding/WelcomeExperience";
+import { shouldShowOnboarding } from "../lib/onboarding/status";
 
 function PriorityCard({
   priority,
@@ -35,7 +37,9 @@ function PriorityCard({
   );
 }
 
-export default function TodayPage() {
+export default async function TodayPage() {
+  if (await shouldShowOnboarding()) return <WelcomeExperience />;
+
   return (
     <AppShell active="today">
       <header className="page-header">

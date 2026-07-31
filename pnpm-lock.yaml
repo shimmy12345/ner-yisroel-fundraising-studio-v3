@@ -11,6 +11,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2
+      fflate:
+        specifier: 0.7.5
+        version: 0.7.5
       next:
         specifier: 16.2.6
         version: 16.2.6(@babel/core@7.29.7)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)

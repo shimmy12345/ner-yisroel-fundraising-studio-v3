@@ -3,11 +3,29 @@ import { AppShell } from "../../components/AppShell";
 import { donor } from "../../data";
 import { getRelationshipUpdates } from "../../../lib/relationships/read";
 import { interactionKindLabel } from "../../../lib/capture/interaction";
+import { env } from "cloudflare:workers";
 
 export const metadata: Metadata = { title: donor.name };
 export const dynamic = "force-dynamic";
 
-export default async function DonorPage() {
+type ImportedDonor = { id: string; display_name: string; email: string | null; phone: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null; primary_first_name: string | null; spouse_first_name: string | null; primary_title: string | null; spouse_title: string | null; external_id: string | null };
+
+function ImportedRelationship({ household }: { household: ImportedDonor }) {
+  const people = [household.primary_first_name && `${household.primary_title ? `${household.primary_title} ` : ""}${household.primary_first_name}`, household.spouse_first_name && `${household.spouse_title ? `${household.spouse_title} ` : ""}${household.spouse_first_name}`].filter(Boolean).join(" & ");
+  const address = [household.address_line_1, [household.city, household.state, household.postal_code].filter(Boolean).join(" "), household.country].filter(Boolean);
+  return <AppShell active="donors"><div className="donor-breadcrumb"><a href="/">Today</a><span>/</span><strong>Household relationship</strong></div>
+    <header className="donor-header"><div className="donor-identity"><div className="avatar donor-avatar">{household.display_name.slice(0, 2).toUpperCase()}</div><div><div className="identity-line"><h1>{household.display_name}</h1></div>{people && <p>{people}</p>}<div className="contact-row">{household.email && <a href={`mailto:${household.email}`}>✉ {household.email}</a>}{household.phone && <a href={`tel:${household.phone.replace(/\D/g, "")}`}>☎ {household.phone}</a>}</div></div></div><div className="header-actions"><a href="/capture">＋ Log interaction</a></div></header>
+    <div className="relationship-grid"><main className="relationship-main"><section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP BRIEF</p><h2>Start building this household relationship</h2></div></div><p className="summary">No relationship summary is available yet. Log an interaction to begin building useful context.</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">NEXT ACTION</p><h3>No next action set</h3><p>Add a reminder when the next step becomes clear.</p></div></div></section><section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>No institutional memory recorded yet</h2></div></div></section><section className="story-card timeline"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP HISTORY</p><h2>No interactions recorded yet</h2></div></div></section></main>
+      <aside className="relationship-rail"><section className="detail-card"><div className="detail-heading"><h2>Household</h2></div><dl className="at-a-glance"><div><dt>Household members</dt><dd>{people || "Not supplied"}</dd></div><div><dt>Giving history</dt><dd>No giving history imported yet</dd></div>{household.external_id && <div><dt>JL reference</dt><dd>{household.external_id}</dd></div>}</dl></section><section className="detail-card"><div className="detail-heading"><h2>Contact</h2></div><div className="facts contact-facts">{household.email && <div className="fact"><label>Email</label><a href={`mailto:${household.email}`}>{household.email}</a></div>}{household.phone && <div className="fact"><label>Main mobile</label><a href={`tel:${household.phone.replace(/\D/g, "")}`}>{household.phone}</a></div>}{household.home_phone && <div className="fact"><label>Home phone</label><a href={`tel:${household.home_phone.replace(/\D/g, "")}`}>{household.home_phone}</a></div>}{address.length > 0 && <div className="fact"><label>Mailing address</label>{address.map((line) => <p key={line}>{line}</p>)}</div>}</div></section></aside></div>
+  </AppShell>;
+}
+
+export default async function DonorPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  if (id !== "elena-chen") {
+    const household = await env.DB.prepare("SELECT id, display_name, email, phone, home_phone, address_line_1, city, state, postal_code, country, primary_first_name, spouse_first_name, primary_title, spouse_title, external_id FROM donors WHERE id = ? LIMIT 1").bind(id).first<ImportedDonor>();
+    if (household) return <ImportedRelationship household={household} />;
+  }
   const updates = await getRelationshipUpdates("elena-chen");
   const summary = updates.summary ?? donor.summary;
   const nextAction = updates.nextAction ?? donor.nextAction;
