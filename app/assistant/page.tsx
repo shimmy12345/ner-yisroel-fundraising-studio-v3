@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { AppShell } from "../components/AppShell";
+import { AssistantBrief } from "../components/AssistantBrief";
 
 export const metadata: Metadata = { title: "Assistant" };
 
@@ -12,6 +13,7 @@ export default function AssistantPage() {
           <h1>What can I help with?</h1>
           <p>I understand your relationships, calendar, and recent activity.</p>
         </header>
+        <AssistantBrief />
         <section className="suggestions" aria-label="Suggested prompts">
           <button><span>☼</span>Prepare me for today’s meeting with the Chens</button>
           <button><span>✎</span>Draft a personal thank-you for Marcus Williams</button>
