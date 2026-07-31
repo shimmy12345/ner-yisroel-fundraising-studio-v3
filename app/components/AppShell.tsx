@@ -17,7 +17,7 @@ export async function AppShell({ children, active }: { children: ReactNode; acti
       <div className="sidebar-bottom">
         <Link className={`secondary-link ${active === "help" ? "active" : ""}`} href="/help"><span>?</span>Help & resources</Link>
         <Link className={`secondary-link ${active === "settings" ? "active" : ""}`} href="/settings"><span>⚙</span>Settings</Link>
-        {profile && <Link className="profile" href="/settings"><div className="profile-avatar">{initials(profile.fullName)}</div><div><strong>{profile.fullName}</strong><span>{profile.jobTitle || profile.organizationName || profile.email}</span></div><span aria-hidden="true">→</span></Link>}
+        {profile && <Link className="profile" href="/settings"><div className="profile-avatar">{profile.avatarUrl ? <img src={profile.avatarUrl} alt="" /> : initials(profile.fullName)}</div><div><strong>{profile.fullName}</strong><span>{profile.jobTitle || profile.organizationName || profile.email}</span></div><span aria-hidden="true">→</span></Link>}
       </div>
     </aside>
     <div className="content">{children}</div>
