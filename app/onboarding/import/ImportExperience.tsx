@@ -305,7 +305,7 @@ export function ImportExperience() {
               <button type="button" onClick={downloadErrorReport} disabled={!report.rejectedRows.length}>Download error report{report.rejectedRows.length ? ` (${report.rejectedRows.length})` : ""}</button>
             </div>
             {report.firstRelationshipId && <a className="onboarding-secondary" href={`/donors/${encodeURIComponent(report.firstRelationshipId)}`}>Open first imported relationship</a>}
-            <a className="onboarding-primary" href="/">Open Fundraising OS</a>
+            <a className="onboarding-primary" href="/donors">View all imported relationships</a>
           </section>
         )}
       </div>

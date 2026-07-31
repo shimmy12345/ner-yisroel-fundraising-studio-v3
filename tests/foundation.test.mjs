@@ -7,6 +7,13 @@ async function run() {
   assert.match(shell, /Donors/);
   assert.match(shell, /Assistant/);
   assert.doesNotMatch(shell, />Campaigns</);
+  assert.match(shell, /href="\/donors"/);
+
+  const donorDirectory = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
+  assert.match(donorDirectory, /FROM donors/);
+  assert.match(donorDirectory, /Your donor households/);
+  assert.match(donorDirectory, /Import or refresh data/);
+  assert.match(donorDirectory, /\/donors\/\$\{encodeURIComponent\(relationship\.id\)\}/);
 
   const data = await readFile(new URL("../app/data.ts", import.meta.url), "utf8");
   assert.match(data, /why:/);
