@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { decodeCsv, parseCsv, rowsToRecords } from "../lib/import/file-parsers.ts";
 import { buildJlDonationPreview, calculateGivingSnapshot, classifyJlDonation, isJlDonationExport, JL_DONATION_COLUMNS } from "../lib/import/jl-donations.ts";
 import { matchJlDonationActivities } from "../lib/import/jl-donation-match.ts";
+import { chunkJsonRows, D1_JSON_CHUNK_BYTES } from "../lib/import/d1-json-chunks.ts";
 
 const base = { Code: "JL-900", Name: "Fictional Family", "Total Due": "100", "Item Num": "GIFT", Desc: "Education support", Campaign: "ANNUAL", "Due Date": "2025-06-15", Amount: "100.00", Paid: "100.00", "Balance Due": "0", Company: "" };
 
@@ -41,19 +42,43 @@ async function run() {
   const csv = rowsToRecords(parseCsv(`${JL_DONATION_COLUMNS.join(",")}\nJL-1,Example,100,GIFT,Scholarship,ANNUAL,2025-01-01,100,100,0,\n`));
   assert.equal(isJlDonationExport(csv.columns), true);
 
+  const productionShape = Array.from({ length: 6275 }, (_, index) => ({
+    id: `jl-giving-${"a".repeat(64)}`, donorId: `imported-code-jl-${index % 248}`, externalHouseholdId: `JL-${index % 248}`,
+    fingerprint: "a".repeat(64), activityDate: 1750000000, committedCents: 10000, paidCents: 10000, balanceCents: 0,
+    itemType: "GIFT", description: "Annual education support", sourceCampaign: "ANNUAL", category: "completed_gift",
+    sourceSnapshot: JSON.stringify(base), now: 1750000000,
+  }));
+  assert.ok(new TextEncoder().encode(JSON.stringify(productionShape)).byteLength > 2_000_000, "the original single binding exceeds D1's 2 MB string limit for the JL export size");
+  const chunks = chunkJsonRows(productionShape);
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks.flatMap((chunk) => JSON.parse(chunk)).length, productionShape.length);
+  assert.ok(chunks.every((chunk) => new TextEncoder().encode(chunk).byteLength <= D1_JSON_CHUNK_BYTES));
+
   const previewRoute = await readFile(new URL("../app/api/import/preview/route.ts", import.meta.url), "utf8");
   const importRoute = await readFile(new URL("../app/api/import/route.ts", import.meta.url), "utf8");
   const rollbackRoute = await readFile(new URL("../app/api/import/rollback/route.ts", import.meta.url), "utf8");
   const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+  const importExperience = await readFile(new URL("../app/onboarding/import/ImportExperience.tsx", import.meta.url), "utf8");
   assert.match(previewRoute, /getChatGPTUser\(\)/);
   assert.match(importRoute, /getChatGPTUser\(\)/);
   assert.match(rollbackRoute, /getChatGPTUser\(\)/);
   assert.match(importRoute, /await env\.DB\.batch\(statements\)/);
+  assert.match(importRoute, /chunkJsonRows\(activityRows\)/);
   assert.match(rollbackRoute, /await env\.DB\.batch\(statements\)/);
   assert.match(importRoute, /ON CONFLICT\(external_source, source_fingerprint\) DO UPDATE/);
+  assert.match(importRoute, /rollbackCauses/);
+  assert.match(importRoute, /passedRows/);
+  assert.match(importRoute, /failedRows/);
+  assert.match(importRoute, /transaction_database_errors/);
+  assert.match(importRoute, /unexpected_exceptions/);
   assert.doesNotMatch(importRoute, /relationship_summary\s*=|institutional_memory\s*=|DELETE FROM interactions/i);
   assert.match(donorPage, /Lifetime paid/);
   assert.match(donorPage, /Open commitments/);
+  assert.match(importExperience, /No changes were made to the database\./);
+  assert.match(importExperience, /Download rejected rows CSV/);
+  assert.match(importExperience, /Download validation report/);
+  assert.match(importExperience, /households matched/);
+  assert.match(importExperience, /elapsed import time/);
   process.stdout.write("JL donation import checks passed.\n");
 }
 

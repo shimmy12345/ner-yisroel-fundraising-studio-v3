@@ -4,6 +4,7 @@ export const JL_DONATION_COLUMNS = ["Code", "Name", "Total Due", "Item Num", "De
 
 export type GivingCategory = "completed_gift" | "open_pledge" | "partially_paid_pledge" | "event_or_ad" | "nonfinancial_entry" | "needs_review";
 export type GivingActivity = {
+  rowNumber: number;
   fingerprint: string;
   externalHouseholdId: string;
   sourceName: string;
@@ -53,7 +54,7 @@ function complimentary(item: string, description: string) {
   return /included|complimentary|no\s*charge|free\b/i.test(`${item} ${description}`);
 }
 
-export function classifyJlDonation(row: ImportRow, now = new Date()): Omit<GivingActivity, "fingerprint" | "sourceValues"> {
+export function classifyJlDonation(row: ImportRow, now = new Date()): Omit<GivingActivity, "rowNumber" | "fingerprint" | "sourceValues"> {
   const code = row.Code?.trim() ?? "";
   const committedCents = currency(row.Amount ?? "");
   const paidCents = currency(row.Paid ?? "");
@@ -99,7 +100,7 @@ export async function buildJlDonationPreview(rows: ImportRow[], now = new Date()
     const fingerprint = await sha256(canonicalFingerprint(row));
     if (seen.has(fingerprint)) { duplicateRows.push({ row: index + 2, fingerprint }); continue; }
     seen.add(fingerprint);
-    activities.push({ fingerprint, ...classifyJlDonation(row, now), sourceValues: Object.fromEntries(JL_DONATION_COLUMNS.map((column) => [column, row[column]?.trim() ?? ""])) });
+    activities.push({ rowNumber: index + 2, fingerprint, ...classifyJlDonation(row, now), sourceValues: Object.fromEntries(JL_DONATION_COLUMNS.map((column) => [column, row[column]?.trim() ?? ""])) });
   }
   const categories = { completed_gift: 0, open_pledge: 0, partially_paid_pledge: 0, event_or_ad: 0, nonfinancial_entry: 0, needs_review: 0 };
   activities.forEach((activity) => { categories[activity.category] += 1; });

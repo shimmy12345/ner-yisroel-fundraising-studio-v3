@@ -115,7 +115,7 @@ async function run() {
   assert.match(route, /This file has already been imported/);
   assert.match(route, /updateExisting/);
   assert.match(migration, /data_imports_file_hash_unique/);
-  assert.match(experience, /Download error report/);
+  assert.match(experience, /Download rejected rows/);
   assert.match(experience, /Download backup/);
   assert.match(experience, /Nothing has been written/);
   assert.match(experience, /JL Solutions household export detected/);

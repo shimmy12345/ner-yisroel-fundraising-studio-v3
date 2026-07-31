@@ -7,23 +7,42 @@ import { decodeCsv, parseCsv, parseXlsx, rowsToRecords } from "../../../lib/impo
 import { isJlSolutionsExport, JL_MAPPING } from "../../../lib/import/jl-solutions";
 import { isJlDonationExport, JL_DONATION_COLUMNS } from "../../../lib/import/jl-donations";
 
-type Step = "upload" | "recognition" | "preview" | "importing" | "complete";
+type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
+type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
+type RowFailure = { row: number; category?: FailureCategory; reason: string; values?: ImportRow };
+type ValidationSummary = { totalRows: number; passedRows: number; failedRows: number; duplicateRows: number; nonfinancialRows: number; firstErrors: RowFailure[] };
+type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
+type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; rollbackCauses: FailureCategory[]; validation: ValidationSummary; rejectedRows: RowFailure[]; results: ResultSummary };
 type ImportReport = {
   importId: string;
   fileName: string;
   completedAt: string;
   updateExisting: boolean;
   imported: { donors: number; gifts: number; interactions: number; reminders: number };
-  rejectedRows: ImportPreview["rejectedRows"];
+  rejectedRows: RowFailure[];
   warnings: string[];
   firstRelationshipId?: string | null;
   profile?: string;
   donation?: { newActivities: number; updatedPledges: number; unchanged: number; unknownHousehold: number; needsReview: number; nonfinancialExcluded: number; duplicateSourceRows: number };
+  validation?: ValidationSummary;
+  results?: ResultSummary;
+  databaseChangesMade?: boolean;
+  fatalError?: string | null;
 };
 type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }> };
 type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number };
 
 const DONATION_LABELS: Record<string, string> = { Code: "JL household code", Name: "Source household name", "Total Due": "Validation context only", "Item Num": "Item type", Desc: "Description", Campaign: "Supporting source context", "Due Date": "Activity date", Amount: "Committed amount", Paid: "Paid amount", "Balance Due": "Outstanding balance", Company: "Validation context only" };
+const FAILURE_LABELS: Record<FailureCategory, string> = {
+  unmatched_jl_codes: "Unmatched JL Codes",
+  duplicate_records: "Duplicate records",
+  invalid_dates: "Invalid dates",
+  invalid_amounts: "Invalid amounts",
+  missing_required_fields: "Missing required fields",
+  nonfinancial_entries: "Zero-dollar or nonfinancial entries",
+  transaction_database_errors: "Transaction or database error",
+  unexpected_exceptions: "Unexpected exception",
+};
 
 const fields = Object.entries(FIELD_LABELS) as Array<[ImportField, string]>;
 
@@ -61,6 +80,7 @@ export function ImportExperience() {
   const [statusMessage, setStatusMessage] = useState("");
   const [error, setError] = useState("");
   const [report, setReport] = useState<ImportReport | null>(null);
+  const [failureReport, setFailureReport] = useState<ImportFailure | null>(null);
   const [jlDetected, setJlDetected] = useState(false);
   const [jlPreview, setJlPreview] = useState<JlPreview | null>(null);
   const [mode, setMode] = useState<"first" | "refresh">("first");
@@ -144,14 +164,37 @@ export function ImportExperience() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode }),
       });
-      const payload = await response.json() as ImportReport | { error?: string };
-      if (!response.ok) throw new Error("error" in payload ? payload.error : "Import failed");
+      const payload = await response.json() as ImportReport | ImportFailure | { error?: string };
+      if (!response.ok) {
+        if ("validation" in payload && "rollbackCauses" in payload) {
+          setFailureReport(payload as ImportFailure);
+          setStep("failed");
+          return;
+        }
+        const message = "error" in payload && payload.error ? payload.error : "The import request could not be completed.";
+        setFailureReport(unexpectedFailure(message));
+        setStep("failed");
+        return;
+      }
       setReport(payload as ImportReport);
       setStep("complete");
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "Nothing was imported. Try again.");
-      setStep("preview");
+      setFailureReport(unexpectedFailure(importError instanceof Error ? importError.message : "The import request could not be completed."));
+      setStep("failed");
     }
+  }
+
+  function unexpectedFailure(reason: string): ImportFailure {
+    return {
+      error: reason,
+      fatalError: reason,
+      databaseChangesMade: false,
+      noChangesMade: true,
+      rollbackCauses: ["unexpected_exceptions"],
+      validation: { totalRows: rows.length, passedRows: 0, failedRows: rows.length, duplicateRows: 0, nonfinancialRows: 0, firstErrors: [{ row: 0, category: "unexpected_exceptions", reason }] },
+      rejectedRows: rows.map((_, index) => ({ row: index + 2, category: "unexpected_exceptions", reason: "Row was not written because the import request failed." })),
+      results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: rows.length, rejectedRows: rows.length, unmatchedJlCodes: 0, elapsedMs: 0 },
+    };
   }
 
   function cancelImport() {
@@ -166,15 +209,24 @@ export function ImportExperience() {
     setJlPreview(null);
     setDonationDetected(false);
     setDonationPreview(null);
+    setFailureReport(null);
+    setReport(null);
     setError("");
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  function downloadErrorReport() {
-    if (!report) return;
-    const header = "row,reason,values";
-    const lines = report.rejectedRows.map((item) => [item.row, item.reason, JSON.stringify(item.values)].map(csvValue).join(","));
-    download(`fundraising-os-errors-${report.importId}.csv`, [header, ...lines].join("\n"), "text/csv");
+  function sourceValues(item: RowFailure) {
+    return item.values ?? rows[item.row - 2] ?? {};
+  }
+
+  function downloadRejectedRows(items: RowFailure[], suffix: string) {
+    const sourceColumns = Object.keys(rows[0] ?? {});
+    const header = ["row", "category", "reason", ...sourceColumns].map(csvValue).join(",");
+    const lines = items.map((item) => {
+      const values = sourceValues(item);
+      return [item.row, item.category ?? "validation", item.reason, ...sourceColumns.map((column) => values[column] ?? "")].map(csvValue).join(",");
+    });
+    download(`fundraising-os-rejected-rows-${suffix}.csv`, [header, ...lines].join("\n"), "text/csv");
   }
 
   const stepNumber = step === "upload" ? 2 : step === "recognition" ? 3 : step === "preview" ? 4 : 5;
@@ -313,15 +365,72 @@ export function ImportExperience() {
           </section>
         )}
 
+        {step === "failed" && failureReport && (
+          <section className="import-card import-failed" aria-labelledby="import-failed-title">
+            <div className="import-failure-mark" aria-hidden="true">!</div>
+            <p className="eyebrow">IMPORT NOT COMPLETED</p>
+            <h1 id="import-failed-title">We couldn&apos;t import this file.</h1>
+            <p className="import-lede">{failureReport.error}</p>
+            <div className="import-rollback-assurance" role="status">
+              <strong>No changes were made to the database.</strong>
+              <span>The donation transaction was rolled back as one unit, so no partial data was kept.</span>
+            </div>
+            <div className="import-result-counts">
+              <article><strong>{failureReport.results.validRows.toLocaleString()}</strong><span>valid rows</span></article>
+              <article><strong>{failureReport.results.giftsImported.toLocaleString()}</strong><span>imported rows</span></article>
+              <article><strong>{failureReport.results.giftsUpdated.toLocaleString()}</strong><span>updated rows</span></article>
+              <article><strong>{failureReport.results.duplicateRowsSkipped.toLocaleString()}</strong><span>duplicates skipped</span></article>
+              <article><strong>{failureReport.results.rowsRequiringReview.toLocaleString()}</strong><span>review rows</span></article>
+              <article><strong>{failureReport.results.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article>
+              <article><strong>{failureReport.results.unmatchedJlCodes.toLocaleString()}</strong><span>unmatched JL Codes</span></article>
+            </div>
+            {failureReport.fatalError && <div className="import-fatal-error" role="alert"><strong>Fatal error</strong><span>{failureReport.fatalError}</span></div>}
+            <section className="import-failure-section">
+              <h2>Why the import stopped</h2>
+              <ul className="import-failure-causes">
+                {failureReport.rollbackCauses.map((cause) => <li key={cause}>{FAILURE_LABELS[cause]}</li>)}
+              </ul>
+            </section>
+            <section className="import-failure-section">
+              <h2>First errors</h2>
+              <ol className="import-failure-errors">
+                {failureReport.validation.firstErrors.slice(0, 8).map((item, index) => (
+                  <li key={`${item.row}-${item.category}-${index}`}><strong>{item.row > 0 ? `Row ${item.row}` : "Import"}</strong><span>{item.reason}</span></li>
+                ))}
+              </ol>
+            </section>
+            <div className="import-report-actions">
+              <button type="button" onClick={() => downloadRejectedRows(failureReport.rejectedRows, failureReport.importId ?? "validation")} disabled={!failureReport.rejectedRows.length}>Download rejected rows CSV</button>
+              <button type="button" onClick={() => download(`fundraising-os-validation-${failureReport.importId ?? "report"}.json`, JSON.stringify({ fileName, generatedAt: new Date().toISOString(), ...failureReport }, null, 2))}>Download validation report</button>
+            </div>
+            <div className="import-footer-actions">
+              <button type="button" onClick={cancelImport}>Choose another file</button>
+              <button className="onboarding-primary" type="button" onClick={() => { setFailureReport(null); setStep("preview"); }}>Back to preview</button>
+            </div>
+          </section>
+        )}
+
         {step === "complete" && report && (
           <section className="import-card import-complete">
             <div className="import-success-mark">✓</div>
             <p className="eyebrow">IMPORT COMPLETE</p>
             <h1>Your workspace is ready.</h1>
             <p className="import-lede">{report.profile === "JL Solutions Donations" ? `${report.donation?.newActivities ?? 0} new giving activities and ${report.donation?.updatedPledges ?? 0} pledge updates were processed.` : `${report.imported.donors} donors, ${report.imported.gifts} gifts, ${report.imported.interactions} interactions, and ${report.imported.reminders} reminders were processed.`}</p>
+            {report.results && <div className="import-result-counts import-success-counts">
+              <article><strong>{report.results.validRows.toLocaleString()}</strong><span>valid rows</span></article>
+              <article><strong>{report.results.householdsMatched.toLocaleString()}</strong><span>households matched</span></article>
+              <article><strong>{report.results.newHouseholds.toLocaleString()}</strong><span>new households</span></article>
+              <article><strong>{report.results.giftsImported.toLocaleString()}</strong><span>gifts imported</span></article>
+              <article><strong>{report.results.giftsUpdated.toLocaleString()}</strong><span>gifts updated</span></article>
+              <article><strong>{report.results.duplicateRowsSkipped.toLocaleString()}</strong><span>duplicate rows skipped</span></article>
+              <article><strong>{report.results.rowsRequiringReview.toLocaleString()}</strong><span>rows requiring review</span></article>
+              <article><strong>{report.results.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article>
+              <article><strong>{report.results.unmatchedJlCodes.toLocaleString()}</strong><span>unmatched JL Codes</span></article>
+              <article><strong>{(report.results.elapsedMs / 1000).toFixed(1)}s</strong><span>elapsed import time</span></article>
+            </div>}
             <div className="import-report-actions">
               <button type="button" onClick={() => download(`fundraising-os-import-${report.importId}.json`, JSON.stringify(report, null, 2))}>Download import report</button>
-              <button type="button" onClick={downloadErrorReport} disabled={!report.rejectedRows.length}>Download error report{report.rejectedRows.length ? ` (${report.rejectedRows.length})` : ""}</button>
+              <button type="button" onClick={() => downloadRejectedRows(report.rejectedRows, report.importId)} disabled={!report.rejectedRows.length}>Download rejected rows{report.rejectedRows.length ? ` (${report.rejectedRows.length})` : ""}</button>
             </div>
             {report.firstRelationshipId && <a className="onboarding-secondary" href={`/donors/${encodeURIComponent(report.firstRelationshipId)}`}>Open first imported relationship</a>}
             <a className="onboarding-primary" href="/donors">View all imported relationships</a>
