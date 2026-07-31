@@ -39,9 +39,13 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
       WHERE ${demo ? "" : "ga.owner_user_id = ? AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
-    env.DB.prepare(`SELECT d.id, d.display_name, MAX(i.occurred_at) AS last_contact, MAX(COALESCE(i.occurred_at, ga.activity_date, d.updated_at)) AS recent_activity
-      FROM donors d LEFT JOIN interactions i ON i.donor_id = d.id ${demo ? "" : "AND i.user_id = ?"} LEFT JOIN giving_activities ga ON ga.donor_id = d.id ${demo ? "" : "AND ga.owner_user_id = ?"}
-      WHERE ${donorScope} GROUP BY d.id, d.display_name ORDER BY last_contact LIMIT 500`).bind(...(demo ? [] : [userId, userId, userId])).all<ContactRow>(),
+    env.DB.prepare(`SELECT d.id, d.display_name,
+      (SELECT MAX(i.occurred_at) FROM interactions i WHERE i.donor_id = d.id ${demo ? "" : "AND i.user_id = ?"}) AS last_contact,
+      MAX(d.updated_at,
+        COALESCE((SELECT MAX(i2.occurred_at) FROM interactions i2 WHERE i2.donor_id = d.id ${demo ? "" : "AND i2.user_id = ?"}), 0),
+        COALESCE((SELECT MAX(ga.activity_date) FROM giving_activities ga WHERE ga.donor_id = d.id ${demo ? "" : "AND ga.owner_user_id = ?"}), 0)
+      ) AS recent_activity
+      FROM donors d WHERE ${donorScope} ORDER BY last_contact LIMIT 500`).bind(...(demo ? [] : [userId, userId, userId, userId])).all<ContactRow>(),
   ]);
 
   const priorities: WorkspacePriority[] = [];
