@@ -14,7 +14,7 @@ const snapshot = {
     summary: "Requested scholarship outcomes before discussing a fall visit.",
     occurredAt: "2026-07-30T14:00:00.000Z",
   },
-  recommendations: [{ id: "recommendation-1", action: "Send scholarship outcomes", reason: "Open commitment" }],
+  recommendations: [{ id: "recommendation-1", action: "Send scholarship outcomes", reason: "Open commitment", dueAt: "2026-08-01T13:00:00.000Z" }],
   priorities: [
     { name: "Elena & David Chen", label: "High momentum", reason: "Meeting today at 2:00 PM", why: "Recent engagement", action: "Prepare" },
     { name: "Priya & Arun Mehta", label: "Re-engage", reason: "No contact in 94 days", why: "Program begins next week", action: "Reach out" },
@@ -75,6 +75,7 @@ async function run() {
   const meeting = await request("meeting-brief");
   assert.equal(meeting.mode, "rule-based");
   assert.match(meeting.content, /scholarship outcomes/i);
+  assert.match(meeting.content, /Due August 1/);
   const thankYou = await request("draft");
   assert.match(thankYou.content, /\$10,000/);
   assert.match(thankYou.content, /Dear Marcus/);

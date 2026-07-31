@@ -13,7 +13,7 @@ type RequestBody = {
 type DonorRow = { id: string; display_name: string; relationship_summary: string | null; institutional_memory: string | null };
 type InteractionRow = { id: string; summary: string; occurred_at: number };
 type GiftRow = { id: string; amount_cents: number; fund: string; received_at: number };
-type RecommendationRow = { id: string; action: string; reason: string };
+type RecommendationRow = { id: string; action: string; reason: string; due_at: number | null };
 
 const supportedTasks = new Set<AssistantTask | "custom">([
   "custom",
@@ -54,7 +54,7 @@ export async function POST(request: Request) {
         .bind("elena-chen").all<InteractionRow>(),
       env.DB.prepare("SELECT id, amount_cents, fund, received_at FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 5")
         .bind("elena-chen").all<GiftRow>(),
-      env.DB.prepare("SELECT id, action, reason FROM recommendations WHERE donor_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 5")
+      env.DB.prepare("SELECT id, action, reason, due_at FROM recommendations WHERE donor_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 5")
         .bind("elena-chen").all<RecommendationRow>(),
     ]);
 
@@ -83,7 +83,12 @@ export async function POST(request: Request) {
         summary: latestInteraction.summary.replace("\n", ": "),
         occurredAt: new Date(latestInteraction.occurred_at * 1000).toISOString(),
       } : null,
-      recommendations: recommendationResult.results,
+      recommendations: recommendationResult.results.map((item) => ({
+        id: item.id,
+        action: item.action,
+        reason: item.reason,
+        dueAt: item.due_at ? new Date(item.due_at * 1000).toISOString() : null,
+      })),
       priorities: todayData.priorities.map(({ name, label, reason, why, action }) => ({ name, label, reason, why, action })),
       meetings: todayData.meetings.map(({ time, period, title, detail }) => ({ time, period, title, detail })),
       gifts: [...todayGifts, ...databaseGifts.filter((gift) => !todayGifts.some((item) => item.name === gift.name && item.amount === gift.amount))],

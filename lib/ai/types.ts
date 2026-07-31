@@ -18,7 +18,7 @@ export type AssistantContextSnapshot = {
     summary: string;
     occurredAt: string;
   } | null;
-  recommendations: Array<{ id: string; action: string; reason: string }>;
+  recommendations: Array<{ id: string; action: string; reason: string; dueAt: string | null }>;
   priorities: Array<{ name: string; label: string; reason: string; why: string; action: string }>;
   meetings: Array<{ time: string; period: string; title: string; detail: string }>;
   gifts: Array<{ id: string; name: string; amount: string; detail: string }>;

@@ -41,7 +41,11 @@ export class RuleBasedAIService implements AIService {
 
     if (request.task === "meeting-brief") {
       const meeting = snapshot.meetings.find((item) => /chen/i.test(item.title));
-      const nextAction = snapshot.recommendations[0]?.action ?? snapshot.priorities[0]?.action;
+      const recommendation = snapshot.recommendations[0];
+      const nextAction = recommendation?.action ?? snapshot.priorities[0]?.action;
+      const dueDate = recommendation?.dueAt
+        ? new Date(recommendation.dueAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })
+        : null;
       return result(
         "Meeting preparation: Elena & David Chen",
         [
@@ -50,7 +54,7 @@ export class RuleBasedAIService implements AIService {
           `Institutional memory: ${snapshot.donor.memory}`,
           snapshot.latestInteraction ? `Latest interaction: ${snapshot.latestInteraction.summary}` : "No recent interaction is available in staging.",
           `Recommended approach: Lead with Maya Rodriguez’s progress, give David the outcomes he requested, and ask how the Chens want to stay connected before discussing another gift.`,
-          `Next action on record: ${nextAction ?? "Confirm the follow-up owner and date after the meeting."}`,
+          `Next action on record: ${nextAction ?? "Confirm the follow-up owner and date after the meeting."}${dueDate ? ` Due ${dueDate}.` : ""}`,
         ].join("\n\n"),
         ["Current relationship summary", "Latest interaction and institutional memory", "Today’s scheduled meeting"],
         sourceIds(snapshot, ["today:meeting:chen"]),
@@ -98,6 +102,7 @@ export class RuleBasedAIService implements AIService {
           `${snapshot.priorities.length} active priorities are in view. The strongest immediate opportunity is ${snapshot.priorities[0]?.name ?? snapshot.donor.name}.`,
           `${snapshot.meetings.length} meetings are scheduled today, including ${snapshot.meetings.map((item) => item.title).join(", ")}.`,
           `${snapshot.gifts.length} current gift items are available: ${snapshot.gifts.map((gift) => `${gift.name} (${gift.amount})`).join(", ")}.`,
+          `${snapshot.recommendations.length} open reminder or next-action record${snapshot.recommendations.length === 1 ? " is" : "s are"} available from staging.`,
           `Relationship momentum: ${snapshot.donor.summary}`,
           `Recommended leadership attention: protect the Chen meeting preparation window and complete time-sensitive stewardship for Marcus Williams.`,
         ].join("\n\n"),
@@ -113,7 +118,7 @@ export class RuleBasedAIService implements AIService {
           snapshot.donor.summary,
           `Institutional memory: ${snapshot.donor.memory}`,
           snapshot.latestInteraction ? `Latest interaction: ${snapshot.latestInteraction.summary}` : "No recent interaction is available in staging.",
-          snapshot.recommendations[0] ? `Open next action: ${snapshot.recommendations[0].action}. ${snapshot.recommendations[0].reason}` : "No open recommendation is available.",
+          snapshot.recommendations[0] ? `Open next action: ${snapshot.recommendations[0].action}. ${snapshot.recommendations[0].reason}${snapshot.recommendations[0].dueAt ? ` Due ${new Date(snapshot.recommendations[0].dueAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })}.` : ""}` : "No open recommendation is available.",
         ].join("\n\n"),
         ["Current donor record", "Latest interaction", "Open recommendation"],
         sourceIds(snapshot),
