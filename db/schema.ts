@@ -87,6 +87,7 @@ export const givingActivities = sqliteTable("giving_activities", {
   itemType: text("item_type"),
   description: text("description"),
   sourceCampaign: text("source_campaign"),
+  recordOrigin: text("record_origin", { enum: ["live", "verification", "sample"] }).notNull().default("live"),
   category: text("category").notNull(),
   sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<Record<string, string>>().notNull(),
   ...timestamps,

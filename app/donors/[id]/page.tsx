@@ -5,6 +5,7 @@ import { AppShell } from "../../components/AppShell";
 import { requireChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { getDataMode } from "../../../lib/workspace/mode";
+import { DONOR_GIVING_SQL } from "../../../lib/relationships/giving";
 
 export const metadata: Metadata = { title: "Donor relationship" };
 export const dynamic = "force-dynamic";
@@ -24,7 +25,7 @@ export default async function DonorPage({ params }: { params: Promise<{ id: stri
   const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, email, phone, home_phone, address_line_1, city, state, postal_code, country, primary_first_name, spouse_first_name, primary_title, spouse_title, external_id, relationship_summary, institutional_memory FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"} LIMIT 1`).bind(...(mode === "demo" ? [id] : [id, profile.id])).first<Donor>();
   if (!donor) notFound();
   const [activityResult, giftResult, interactionResult, recommendationResult] = await Promise.all([
-    env.DB.prepare(`SELECT id, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, category FROM giving_activities WHERE donor_id = ? ${mode === "demo" ? "" : "AND owner_user_id = ?"} AND category NOT IN ('needs_review','nonfinancial_entry') ORDER BY activity_date DESC LIMIT 500`).bind(...(mode === "demo" ? [id] : [id, profile.id])).all<Activity>(),
+    (mode === "demo" ? env.DB.prepare("SELECT id, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, category FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' AND category NOT IN ('needs_review','nonfinancial_entry') ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>(),
     env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>(),
     env.DB.prepare(`SELECT id, type, occurred_at, summary, source FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} ORDER BY occurred_at DESC LIMIT 200`).bind(...(mode === "demo" ? [id] : [id, profile.id])).all<Interaction>(),
     env.DB.prepare(`SELECT id, action, reason, due_at FROM recommendations WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND status = 'open' ORDER BY due_at LIMIT 20`).bind(...(mode === "demo" ? [id] : [id, profile.id])).all<Recommendation>(),

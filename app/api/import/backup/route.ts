@@ -25,11 +25,11 @@ export async function GET() {
       interactions: interactions.results,
       remindersAndNextActions: recommendations.results,
     }, null, 2);
-    const date = new Date().toISOString().slice(0, 10);
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     return new Response(payload, {
       headers: {
         "content-type": "application/json; charset=utf-8",
-        "content-disposition": `attachment; filename="fundraising-os-backup-${date}.json"`,
+        "content-disposition": `attachment; filename="fundraising-os-backup-${stamp}.json"`,
         "cache-control": "no-store",
       },
     });

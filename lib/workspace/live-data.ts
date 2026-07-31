@@ -39,11 +39,11 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       ORDER BY CASE WHEN r.due_at IS NULL THEN 1 ELSE 0 END, r.due_at, r.score DESC LIMIT 50`).bind(...(demo ? [] : [userId, userId])).all<PriorityRow>(),
     env.DB.prepare(`SELECT ga.id, ga.donor_id, d.display_name, ga.paid_cents, ga.balance_cents, ga.activity_date, ga.description, ga.item_type
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
-      WHERE ${demo ? "" : "ga.owner_user_id = ? AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
+      WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
     env.DB.prepare(`SELECT d.id, d.display_name, d.updated_at FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE user_id = ?"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
-    env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ?"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
+    env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE record_origin = 'sample' AND donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ? AND record_origin = 'live'"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
   ]);
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
   const activityByDonor = new Map(lastActivities.results.map((item) => [item.donor_id, item.value]));
