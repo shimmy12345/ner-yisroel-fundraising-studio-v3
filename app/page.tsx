@@ -1,4 +1,5 @@
 import { AppShell } from "./components/AppShell";
+import { BriefExperience } from "./components/BriefExperience";
 import { LocalDate } from "./components/LocalDate";
 import { todayData } from "./data";
 
@@ -43,25 +44,8 @@ export default function TodayPage() {
           <h1>Good morning, Sarah.</h1>
           <p className="subhead">Here’s where your attention will matter most today.</p>
         </div>
-        <button className="brief-button">
-          <span className="brief-icon">☼</span>
-          Listen to morning brief
-          <span className="duration">2 min</span>
-        </button>
       </header>
-
-      <section className="morning-brief" aria-labelledby="brief-title">
-        <div className="ai-orb">✦</div>
-        <div>
-          <p className="eyebrow" id="brief-title">YOUR MORNING BRIEF</p>
-          <p>
-            You have a strong opening with the Chen family today. Their recent
-            engagement and upcoming anniversary make this a natural moment to
-            reconnect. Two thank-yous are also approaching the 48-hour mark.
-          </p>
-        </div>
-        <button className="text-button">View full brief <span>→</span></button>
-      </section>
+      <BriefExperience surface="today" />
 
       <div className="dashboard-grid">
         <main>
