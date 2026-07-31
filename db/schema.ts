@@ -66,6 +66,24 @@ export const gifts = sqliteTable("gifts", {
   ...timestamps,
 }, (table) => [index("gifts_donor_date_idx").on(table.donorId, table.receivedAt)]);
 
+export const givingActivities = sqliteTable("giving_activities", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  externalSource: text("external_source").notNull(),
+  externalHouseholdId: text("external_household_id").notNull(),
+  sourceFingerprint: text("source_fingerprint").notNull(),
+  activityDate: integer("activity_date", { mode: "timestamp" }),
+  committedCents: integer("committed_cents"),
+  paidCents: integer("paid_cents"),
+  balanceCents: integer("balance_cents"),
+  itemType: text("item_type"),
+  description: text("description"),
+  sourceCampaign: text("source_campaign"),
+  category: text("category").notNull(),
+  sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<Record<string, string>>().notNull(),
+  ...timestamps,
+}, (table) => [index("giving_activities_donor_date_idx").on(table.donorId, table.activityDate)]);
+
 export const recommendations = sqliteTable("recommendations", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),

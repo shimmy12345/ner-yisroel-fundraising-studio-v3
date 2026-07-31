@@ -4,6 +4,8 @@ import { buildImportPreview, FIELD_LABELS, type ColumnMapping, type ImportField,
 import { buildJlPreview, isJlSolutionsExport } from "../../../lib/import/jl-solutions";
 import { matchJlDonors, sourceSnapshot, type ExistingJlDonor } from "../../../lib/import/jl-match";
 import { logger } from "../../../lib/logger";
+import { buildJlDonationPreview, isJlDonationExport } from "../../../lib/import/jl-donations";
+import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
 
 type ImportRequest = {
   fileName?: string;
@@ -41,6 +43,37 @@ export async function POST(request: Request) {
   const userId = `user_${user.email.toLowerCase()}`;
   const existing = await env.DB.prepare("SELECT id FROM data_imports WHERE file_hash = ? LIMIT 1").bind(fileHash).first<{ id: string }>();
   if (existing) return Response.json({ error: "This file has already been imported", importId: existing.id }, { status: 409 });
+
+  if (isJlDonationExport(Object.keys(rows[0] ?? {}))) {
+    const donationPreview = await buildJlDonationPreview(rows);
+    const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
+    const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
+    const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
+    const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
+    const match = matchJlDonationActivities(donationPreview, households.results, prior.results);
+    const now = Math.floor(Date.now() / 1000);
+    const importId = crypto.randomUUID();
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", mode: prior.results.length ? "refresh" : "first", firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, rejectedRows: [], warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const activityRows = match.matched.map((activity) => ({ id: `jl-giving-${activity.fingerprint}`, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
+    const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
+    const changeRows = [...match.newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: null, now })), ...match.proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now }))];
+    const statements = [
+      env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(userId, user.email, user.displayName, now, now),
+      env.DB.prepare(`INSERT INTO giving_activities (id, donor_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, source_snapshot, created_at, updated_at)
+        SELECT json_extract(value,'$.id'), json_extract(value,'$.donorId'), 'JL Solutions', json_extract(value,'$.externalHouseholdId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.activityDate'), json_extract(value,'$.committedCents'), json_extract(value,'$.paidCents'), json_extract(value,'$.balanceCents'), json_extract(value,'$.itemType'), json_extract(value,'$.description'), json_extract(value,'$.sourceCampaign'), json_extract(value,'$.category'), json_extract(value,'$.sourceSnapshot'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?) WHERE true
+        ON CONFLICT(external_source, source_fingerprint) DO UPDATE SET paid_cents=excluded.paid_cents, balance_cents=excluded.balance_cents, category=excluded.category, source_snapshot=excluded.source_snapshot, updated_at=excluded.updated_at`).bind(JSON.stringify(activityRows)),
+      env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?, ?)").bind(importId, userId, fileName, fileHash, JSON.stringify(report), now, now),
+      env.DB.prepare(`INSERT INTO giving_activity_import_changes (import_id, source_fingerprint, change_type, previous_json, created_at) SELECT json_extract(value,'$.importId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.changeType'), json_extract(value,'$.previousJson'), json_extract(value,'$.now') FROM json_each(?)`).bind(JSON.stringify(changeRows)),
+    ];
+    try {
+      await env.DB.batch(statements);
+      logger.info("jl_donation_import_completed", { importId, userId, rows: rows.length, matched: match.matched.length, review: match.needsReview });
+      return Response.json(report, { status: 201 });
+    } catch {
+      logger.error("jl_donation_import_failed", new Error("Database transaction failed"), { importId, userId });
+      return Response.json({ error: "Nothing was imported. The donation transaction was rolled back." }, { status: 500 });
+    }
+  }
 
   const jlDetected = isJlSolutionsExport(Object.keys(rows[0] ?? {}));
   const preview = jlDetected ? buildJlPreview(rows, fileHash) : buildImportPreview(rows, mapping, fileHash);

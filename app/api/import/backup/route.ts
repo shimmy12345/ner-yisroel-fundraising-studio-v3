@@ -7,9 +7,10 @@ export async function GET() {
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
 
   try {
-    const [donors, gifts, interactions, recommendations] = await Promise.all([
+    const [donors, gifts, givingActivities, interactions, recommendations] = await Promise.all([
       env.DB.prepare("SELECT * FROM donors ORDER BY id").all(),
       env.DB.prepare("SELECT * FROM gifts ORDER BY received_at, id").all(),
+      env.DB.prepare("SELECT * FROM giving_activities ORDER BY activity_date, id").all(),
       env.DB.prepare("SELECT * FROM interactions ORDER BY occurred_at, id").all(),
       env.DB.prepare("SELECT * FROM recommendations ORDER BY created_at, id").all(),
     ]);
@@ -18,6 +19,7 @@ export async function GET() {
       format: "fundraising-os-d1-backup-v1",
       donors: donors.results,
       gifts: gifts.results,
+      givingActivities: givingActivities.results,
       interactions: interactions.results,
       remindersAndNextActions: recommendations.results,
     }, null, 2);

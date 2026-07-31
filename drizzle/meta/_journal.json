@@ -22,6 +22,13 @@
       "when": 1785531600000,
       "tag": "0002_onboarding_import",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785513600000,
+      "tag": "0003_jl_donation_import",
+      "breakpoints": true
     }
   ]
 }
