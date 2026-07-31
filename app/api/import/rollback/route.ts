@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { logger } from "../../../../lib/logger";
+import { ensureUserProfile } from "../../../../lib/auth/profile";
 
 type Change = { source_fingerprint: string; change_type: "insert" | "update"; previous_json: string | null };
 
@@ -10,7 +11,7 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({})) as { importId?: string };
   const importId = body.importId?.trim() ?? "";
   if (!importId) return Response.json({ error: "Import ID is required" }, { status: 422 });
-  const userId = `user_${user.email.toLowerCase()}`;
+  const userId = (await ensureUserProfile(user)).id;
   const dataImport = await env.DB.prepare("SELECT id, status, report_json FROM data_imports WHERE id = ? AND user_id = ? LIMIT 1").bind(importId, userId).first<{ id: string; status: string; report_json: string }>();
   if (!dataImport) return Response.json({ error: "Import not found" }, { status: 404 });
   if (dataImport.status !== "completed") return Response.json({ error: "This import cannot be rolled back" }, { status: 409 });
@@ -22,8 +23,8 @@ export async function POST(request: Request) {
   const updated = changes.results.filter((change) => change.change_type === "update" && change.previous_json).map((change) => ({ fingerprint: change.source_fingerprint, ...JSON.parse(change.previous_json!) }));
   const now = Math.floor(Date.now() / 1000);
   const statements = [
-    env.DB.prepare("DELETE FROM giving_activities WHERE external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))").bind(JSON.stringify(inserted)),
-    env.DB.prepare(`UPDATE giving_activities SET paid_cents=(SELECT json_extract(value,'$.paid_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), balance_cents=(SELECT json_extract(value,'$.balance_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), category=(SELECT json_extract(value,'$.category') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), source_snapshot=(SELECT json_extract(value,'$.source_snapshot') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), updated_at=? WHERE source_fingerprint IN (SELECT json_extract(value,'$.fingerprint') FROM json_each(?))`).bind(JSON.stringify(updated), JSON.stringify(updated), JSON.stringify(updated), JSON.stringify(updated), now, JSON.stringify(updated)),
+    env.DB.prepare("DELETE FROM giving_activities WHERE owner_user_id = ? AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))").bind(userId, JSON.stringify(inserted)),
+    env.DB.prepare(`UPDATE giving_activities SET paid_cents=(SELECT json_extract(value,'$.paid_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), balance_cents=(SELECT json_extract(value,'$.balance_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), category=(SELECT json_extract(value,'$.category') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), source_snapshot=(SELECT json_extract(value,'$.source_snapshot') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), updated_at=? WHERE owner_user_id = ? AND source_fingerprint IN (SELECT json_extract(value,'$.fingerprint') FROM json_each(?))`).bind(JSON.stringify(updated), JSON.stringify(updated), JSON.stringify(updated), JSON.stringify(updated), now, userId, JSON.stringify(updated)),
     env.DB.prepare("UPDATE data_imports SET status = 'rolled_back' WHERE id = ? AND user_id = ?").bind(importId, userId),
   ];
   try {

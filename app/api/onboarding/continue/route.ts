@@ -12,7 +12,7 @@ export async function POST() {
     await env.DB.batch([
       env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
         .bind(userId, user.email, user.displayName, now, now),
-      env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, updated_at) VALUES (?, 1, ?) ON CONFLICT(user_id) DO UPDATE SET sample_data_acknowledged = 1, updated_at = excluded.updated_at")
+      env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'demo', ?) ON CONFLICT(user_id) DO UPDATE SET sample_data_acknowledged = 1, data_mode = 'demo', updated_at = excluded.updated_at")
         .bind(userId, now),
     ]);
     return Response.json({ ok: true });

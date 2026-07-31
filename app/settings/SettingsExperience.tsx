@@ -1,0 +1,21 @@
+"use client";
+import { useState } from "react";
+import type { UserProfile } from "../../lib/auth/profile";
+
+export function SettingsExperience({ initialProfile }: { initialProfile: UserProfile }) {
+  const [profile, setProfile] = useState(initialProfile);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const [cleanup, setCleanup] = useState<{ donors: number; gifts: number; interactions: number; recommendations: number } | null>(null);
+  const [confirmation, setConfirmation] = useState("");
+  const [backedUp, setBackedUp] = useState(false);
+  async function save(event: React.FormEvent) { event.preventDefault(); setStatus("saving"); const response = await fetch("/api/profile", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(profile) }); const body = await response.json(); if (!response.ok) { setMessage(body.error || "Profile could not be saved"); setStatus("error"); } else { setProfile(body); setMessage("Profile saved."); setStatus("saved"); } }
+  async function previewCleanup() { const response = await fetch("/api/sample-data"); const body = await response.json(); if (!response.ok) { setMessage(body.error); setStatus("error"); } else setCleanup(body); }
+  async function removeSamples() { const response = await fetch("/api/sample-data", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation, backupConfirmed: backedUp }) }); const body = await response.json(); if (!response.ok) { setMessage(body.error); setStatus("error"); } else { setCleanup({ donors: 0, gifts: 0, interactions: 0, recommendations: 0 }); setMessage(`Sample cleanup completed. Audit ${body.auditId}.`); setStatus("saved"); } }
+  const field = (key: keyof UserProfile, label: string, required = false, type = "text") => <label>{label}<input type={type} required={required} value={profile[key]} onChange={(event) => setProfile({ ...profile, [key]: event.target.value })} /></label>;
+  return <>
+    <section className="support-card"><h2>Your profile</h2><p>Fundraising OS uses this identity for greetings, dates, briefs, and your private workspace.</p><form className="profile-form" onSubmit={save}>{field("fullName", "Full name", true)}{field("preferredFirstName", "Preferred first name", true)}{field("organizationName", "Organization name", true)}{field("jobTitle", "Job title (optional)")}<label>Email<input value={profile.email} disabled /></label><label>Timezone<select value={profile.timezone} onChange={(event) => setProfile({ ...profile, timezone: event.target.value })}><option>America/New_York</option><option>America/Chicago</option><option>America/Denver</option><option>America/Los_Angeles</option><option>America/Phoenix</option><option>Europe/London</option><option>Asia/Jerusalem</option></select></label>{field("avatarUrl", "Profile photo HTTPS URL (optional)", false, "url")}<button type="submit" disabled={status === "saving"}>{status === "saving" ? "Saving…" : "Save profile"}</button></form></section>
+    <section className="support-card"><h2>Sample data cleanup</h2><p>Live workspace mode already excludes sample records. This optional owner-only action permanently removes sample records after a preview and backup.</p>{!cleanup ? <button onClick={previewCleanup}>Preview sample cleanup</button> : <div><p><strong>{cleanup.donors}</strong> sample donors, <strong>{cleanup.gifts}</strong> gifts, <strong>{cleanup.interactions}</strong> interactions, and <strong>{cleanup.recommendations}</strong> reminders would be removed.</p>{cleanup.donors > 0 && <><a href="/api/import/backup" onClick={() => setBackedUp(true)}>Download backup first</a><label className="cleanup-confirm"><input type="checkbox" checked={backedUp} onChange={(event) => setBackedUp(event.target.checked)} /> I downloaded the backup</label><label>Type REMOVE SAMPLE DATA<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label><button className="danger-button" onClick={removeSamples} disabled={!backedUp || confirmation !== "REMOVE SAMPLE DATA"}>Remove sample records</button></>}</div>}</section>
+    {message && <p className={status === "error" ? "capture-error" : "capture-assurance"} role={status === "error" ? "alert" : "status"}>{message}</p>}
+  </>;
+}

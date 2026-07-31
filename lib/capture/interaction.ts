@@ -35,8 +35,6 @@ export function inferInteractionKind(note: string): InteractionKind {
 
 export function inferSubject(note: string, kind: InteractionKind): string {
   const lower = note.toLowerCase();
-  if (lower.includes("maya") && lower.includes("visit")) return "Maya’s progress and fall campus visit";
-  if (lower.includes("scholarship") && lower.includes("outcome")) return "Scholarship outcomes follow-up";
   const firstSentence = note.trim().split(/[.!?]\s|[\r\n]/, 1)[0]?.trim();
   if (firstSentence) {
     const concise = firstSentence.replace(/^(called|emailed|met with|coffee with)\s+/i, "");
@@ -72,22 +70,18 @@ export function extractInteraction(
   const subject = requestedSubject?.trim() || inferSubject(note, type);
   const lower = note.toLowerCase();
   const commitments = [
-    ...(lower.includes("send") ? ["Send scholarship outcomes"] : []),
-    ...(/follow up|follow-up/.test(lower) ? ["Follow up with Elena and David"] : []),
+    ...(lower.includes("send") ? [`Send the material referenced in “${subject}”`] : []),
+    ...(/follow up|follow-up/.test(lower) ? [`Follow up on “${subject}”`] : []),
   ];
+  const warm = /loved|excited|interested|warm|glad|grateful|enthusiastic/.test(lower);
   return {
     type,
     subject,
     summary: note.trim(),
-    sentiment: /loved|excited|interested|warm|glad/.test(lower) ? "warm" : "neutral",
-    memory: lower.includes("david")
-      ? "David wants scholarship outcomes before scheduling a fall campus visit."
-      : `New context from ${subject.toLowerCase()}.`,
-    relationshipSummary:
-      "Elena and David’s interest is expanding toward direct student engagement and a possible fall campus visit. Their recent response indicates warm momentum, with David seeking outcomes before the next step.",
-    nextAction: lower.includes("send")
-      ? "Send the scholarship outcomes brief, then follow up about fall visit dates."
-      : `Follow up on ${subject.toLowerCase()}.`,
+    sentiment: warm ? "warm" : "neutral",
+    memory: `Captured from ${interactionKindLabel(type).toLowerCase()}: ${note.trim()}`,
+    relationshipSummary: `Latest ${interactionKindLabel(type).toLowerCase()}: ${subject}. ${warm ? "The interaction showed positive engagement." : "No positive or negative sentiment was inferred."}`,
+    nextAction: commitments[0] ?? `Follow up on ${subject.toLowerCase()}.`,
     commitments,
   };
 }

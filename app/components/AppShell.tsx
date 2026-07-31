@@ -1,7 +1,11 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { getChatGPTUser } from "../chatgpt-auth";
+import { ensureUserProfile, initials } from "../../lib/auth/profile";
 
-export function AppShell({ children, active }: { children: ReactNode; active: "today" | "donors" | "assistant" | "help" | "settings" }) {
+export async function AppShell({ children, active }: { children: ReactNode; active: "today" | "donors" | "assistant" | "help" | "settings" }) {
+  const identity = await getChatGPTUser();
+  const profile = identity ? await ensureUserProfile(identity) : null;
   return <div className="app-shell">
     <aside className="sidebar">
       <Link className="brand" href="/"><span className="brand-mark">F</span><span>Fundraising OS</span></Link>
@@ -13,7 +17,7 @@ export function AppShell({ children, active }: { children: ReactNode; active: "t
       <div className="sidebar-bottom">
         <Link className={`secondary-link ${active === "help" ? "active" : ""}`} href="/help"><span>?</span>Help & resources</Link>
         <Link className={`secondary-link ${active === "settings" ? "active" : ""}`} href="/settings"><span>⚙</span>Settings</Link>
-        <div className="profile"><div className="profile-avatar">SM</div><div><strong>Sarah Mitchell</strong><span>Development Director</span></div><button aria-label="Open profile menu">•••</button></div>
+        {profile && <Link className="profile" href="/settings"><div className="profile-avatar">{initials(profile.fullName)}</div><div><strong>{profile.fullName}</strong><span>{profile.jobTitle || profile.organizationName || profile.email}</span></div><span aria-hidden="true">→</span></Link>}
       </div>
     </aside>
     <div className="content">{children}</div>

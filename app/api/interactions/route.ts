@@ -7,6 +7,7 @@ import {
   type InteractionKind,
   type ReminderChoice,
 } from "../../../lib/capture/interaction";
+import { ensureUserProfile } from "../../../lib/auth/profile";
 
 type RequestBody = {
   donorId?: string;
@@ -43,17 +44,16 @@ export async function POST(request: Request) {
   const extracted = extractInteraction(note, body.type, body.subject);
   const now = Math.floor(occurredAt.getTime() / 1000);
   const interactionId = crypto.randomUUID();
-  const userId = `user_${user.email.toLowerCase()}`;
+  const profile = await ensureUserProfile(user);
+  const userId = profile.id;
+  const ownedDonor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live'").bind(donorId, userId).first<{ id: string }>();
+  if (!ownedDonor) return Response.json({ error: "Donor not found" }, { status: 404 });
   const storedType = extracted.type === "personal" ? "note" : extracted.type;
   const statements = [
-    env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(userId, user.email, user.displayName, now, now),
-    env.DB.prepare("INSERT OR IGNORE INTO donors (id, display_name, relationship_summary, institutional_memory, relationship_health, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(donorId, "Elena & David Chen", extracted.relationshipSummary, extracted.memory, 82, now, now),
     env.DB.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(interactionId, donorId, userId, storedType, now, `${extracted.subject}\n${extracted.summary}`, `capture:${extracted.type}`, now, now),
-    env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ?")
-      .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId),
+    env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
+      .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId, userId),
   ];
 
   if (dueAt || extracted.commitments.length > 0) {

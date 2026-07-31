@@ -1,18 +1,20 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { logger } from "../../../../lib/logger";
+import { ensureUserProfile } from "../../../../lib/auth/profile";
 
 export async function GET() {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  const profile = await ensureUserProfile(user);
 
   try {
     const [donors, gifts, givingActivities, interactions, recommendations] = await Promise.all([
-      env.DB.prepare("SELECT * FROM donors ORDER BY id").all(),
-      env.DB.prepare("SELECT * FROM gifts ORDER BY received_at, id").all(),
-      env.DB.prepare("SELECT * FROM giving_activities ORDER BY activity_date, id").all(),
-      env.DB.prepare("SELECT * FROM interactions ORDER BY occurred_at, id").all(),
-      env.DB.prepare("SELECT * FROM recommendations ORDER BY created_at, id").all(),
+      env.DB.prepare("SELECT * FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample' ORDER BY id").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM gifts WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY received_at, id").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM giving_activities WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY activity_date, id").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM interactions WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY occurred_at, id").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM recommendations WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY created_at, id").bind(profile.id).all(),
     ]);
     const payload = JSON.stringify({
       exportedAt: new Date().toISOString(),
@@ -32,7 +34,7 @@ export async function GET() {
       },
     });
   } catch (error) {
-    logger.error("import_backup_failed", error, { userId: `user_${user.email.toLowerCase()}` });
+    logger.error("import_backup_failed", error, { userId: profile.id });
     return Response.json({ error: "Backup could not be created" }, { status: 500 });
   }
 }

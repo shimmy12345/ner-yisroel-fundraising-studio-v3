@@ -2,135 +2,35 @@ import type { AIRequest, AIResult, AIService, AssistantContextSnapshot, Assistan
 
 export function classifyAssistantPrompt(prompt: string): AssistantTask {
   const value = prompt.toLowerCase();
-  if (/thank|marcus|acknowledge/.test(value)) return "draft";
-  if (/meeting|prepare|chen|talking point/.test(value)) return "meeting-brief";
+  if (/thank|acknowledge|gratitude/.test(value)) return "draft";
+  if (/meeting|prepare|talking point/.test(value)) return "meeting-brief";
   if (/haven.t|recent|lapsed|re-?engage|spoken/.test(value)) return "lapsed-relationships";
-  if (/president|executive|month|report|summary/.test(value)) return "executive-summary";
-  if (/relationship|donor|elena|history/.test(value)) return "relationship-summary";
+  if (/president|executive|month|report/.test(value)) return "executive-summary";
+  if (/relationship|donor|history|summary/.test(value)) return "relationship-summary";
   return "next-action";
 }
-
-function sourceIds(snapshot: AssistantContextSnapshot, extras: string[] = []) {
-  return [
-    ...snapshot.latestInteraction ? [snapshot.latestInteraction.id] : [],
-    ...snapshot.recommendations.map((item) => item.id),
-    ...snapshot.gifts.map((gift) => gift.id),
-    ...extras,
-  ];
-}
-
-function result(
-  title: string,
-  content: string,
-  rationale: string[],
-  sources: string[],
-): AIResult {
-  return {
-    mode: "rule-based",
-    title,
-    content,
-    rationale,
-    confidence: 1,
-    sourceIds: [...new Set(sources)],
-  };
-}
+const sources = (snapshot: AssistantContextSnapshot) => [...new Set([...(snapshot.latestInteraction ? [snapshot.latestInteraction.id] : []), ...snapshot.recommendations.map((item) => item.id), ...snapshot.gifts.map((item) => item.id)])];
+const result = (title: string, content: string, rationale: string[], sourceIds: string[]): AIResult => ({ mode: "rule-based", title, content, rationale, confidence: 1, sourceIds });
 
 export class RuleBasedAIService implements AIService {
   async complete(request: AIRequest): Promise<AIResult> {
-    const { snapshot } = request.context;
-
+    const s = request.context.snapshot;
     if (request.task === "meeting-brief") {
-      const meeting = snapshot.meetings.find((item) => /chen/i.test(item.title));
-      const recommendation = snapshot.recommendations[0];
-      const nextAction = recommendation?.action ?? snapshot.priorities[0]?.action;
-      const dueDate = recommendation?.dueAt
-        ? new Date(recommendation.dueAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })
-        : null;
-      return result(
-        "Meeting preparation: Elena & David Chen",
-        [
-          `${meeting ? `${meeting.time} ${meeting.period} · ${meeting.detail}` : "Today’s Chen meeting"}`,
-          `Relationship context: ${snapshot.donor.summary}`,
-          `Institutional memory: ${snapshot.donor.memory}`,
-          snapshot.latestInteraction ? `Latest interaction: ${snapshot.latestInteraction.summary}` : "No recent interaction is available in staging.",
-          `Recommended approach: Lead with Maya Rodriguez’s progress, give David the outcomes he requested, and ask how the Chens want to stay connected before discussing another gift.`,
-          `Next action on record: ${nextAction ?? "Confirm the follow-up owner and date after the meeting."}${dueDate ? ` Due ${dueDate}.` : ""}`,
-        ].join("\n\n"),
-        ["Current relationship summary", "Latest interaction and institutional memory", "Today’s scheduled meeting"],
-        sourceIds(snapshot, ["today:meeting:chen"]),
-      );
+      const meeting = s.meetings[0];
+      if (!meeting) return result("No upcoming donor meeting", "No upcoming donor meeting is recorded in your live workspace. Add a dated meeting reminder to make preparation available here.", ["Checked upcoming live reminders"], sources(s));
+      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.recommendations[0] ? `Next action: ${s.recommendations[0].action}. ${s.recommendations[0].reason}` : "No open next action is recorded."].join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
     }
-
     if (request.task === "draft") {
-      const gift = snapshot.gifts.find((item) => /marcus/i.test(item.name));
-      const amount = gift?.amount ?? "recent";
-      const detail = gift?.detail ?? "gift shown in today’s queue";
-      return result(
-        "Draft thank-you for Marcus Williams",
-        [
-          "Subject: Thank you for your generous support",
-          "Dear Marcus,",
-          `Thank you for your ${amount} gift. Your ${detail.toLowerCase()} strengthens the work our community makes possible, and I’m grateful that you chose to support it.`,
-          "I would welcome the chance to share what your generosity is helping advance and to thank you personally.",
-          "With appreciation,\nSarah",
-          "Context note: Staging currently has gift details for Marcus but no full relationship record, so review the tone before sending.",
-        ].join("\n\n"),
-        ["Gift amount and fund shown in today’s queue", "No unsupported personal details added"],
-        sourceIds(snapshot, [gift?.id ?? "today:gift:marcus"]),
-      );
+      const gift = s.gifts[0];
+      if (!gift) return result("No recent gift to acknowledge", "No recent gift is available in your live workspace. Import giving history or choose a specific donor after a gift is recorded.", ["Checked live gifts from the last 30 days"], sources(s));
+      return result(`Thank-you draft for ${gift.name}`, `Subject: Thank you for your generous support\n\nDear ${gift.name},\n\nThank you for your ${gift.amount} gift. Your support means a great deal to our organization, and I’m grateful for your partnership.\n\nI would welcome the chance to share more about the impact of your generosity.\n\nWith appreciation,`, ["Used the most recent live gift", "Added no unsupported personal details"], sources(s));
     }
-
     if (request.task === "lapsed-relationships") {
-      const candidates = snapshot.priorities.filter((item) =>
-        /re-engage|follow up/i.test(item.label) || /no contact|follow-up/i.test(item.reason),
-      );
-      const content = candidates.length
-        ? candidates.map((item, index) => `${index + 1}. ${item.name} — ${item.reason}. ${item.why} Next step: ${item.action}.`).join("\n")
-        : "No re-engagement candidates are present in the current staging priorities.";
-      return result(
-        "Relationships needing follow-up",
-        content,
-        ["Filtered current priorities for elapsed contact and open follow-up signals"],
-        sourceIds(snapshot, ["today:priorities"]),
-      );
+      const items = s.priorities.filter((item) => /contact|lapsed|days since/i.test(`${item.label} ${item.reason}`));
+      return result("Relationships needing contact", items.length ? items.map((item, i) => `${i + 1}. ${item.name} — ${item.reason}. ${item.why}`).join("\n") : "No lapsed relationship appears in the current live priorities.", ["Filtered owner-scoped priorities for contact gaps"], sources(s));
     }
-
-    if (request.task === "executive-summary") {
-      return result(
-        "Executive fundraising summary",
-        [
-          `${snapshot.priorities.length} active priorities are in view. The strongest immediate opportunity is ${snapshot.priorities[0]?.name ?? snapshot.donor.name}.`,
-          `${snapshot.meetings.length} meetings are scheduled today, including ${snapshot.meetings.map((item) => item.title).join(", ")}.`,
-          `${snapshot.gifts.length} current gift items are available: ${snapshot.gifts.map((gift) => `${gift.name} (${gift.amount})`).join(", ")}.`,
-          `${snapshot.recommendations.length} open reminder or next-action record${snapshot.recommendations.length === 1 ? " is" : "s are"} available from staging.`,
-          `Relationship momentum: ${snapshot.donor.summary}`,
-          `Recommended leadership attention: protect the Chen meeting preparation window and complete time-sensitive stewardship for Marcus Williams.`,
-        ].join("\n\n"),
-        ["Today’s ranked priorities", "Current meetings and gifts", "Staging relationship record"],
-        sourceIds(snapshot, ["today:priorities", "today:meetings"]),
-      );
-    }
-
-    if (request.task === "relationship-summary") {
-      return result(
-        `Relationship summary: ${snapshot.donor.name}`,
-        [
-          snapshot.donor.summary,
-          `Institutional memory: ${snapshot.donor.memory}`,
-          snapshot.latestInteraction ? `Latest interaction: ${snapshot.latestInteraction.summary}` : "No recent interaction is available in staging.",
-          snapshot.recommendations[0] ? `Open next action: ${snapshot.recommendations[0].action}. ${snapshot.recommendations[0].reason}${snapshot.recommendations[0].dueAt ? ` Due ${new Date(snapshot.recommendations[0].dueAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })}.` : ""}` : "No open recommendation is available.",
-        ].join("\n\n"),
-        ["Current donor record", "Latest interaction", "Open recommendation"],
-        sourceIds(snapshot),
-      );
-    }
-
-    const ranked = snapshot.priorities.slice(0, 3);
-    return result(
-      "Recommended next actions",
-      ranked.map((item, index) => `${index + 1}. ${item.action} for ${item.name} — ${item.reason}. ${item.why}`).join("\n"),
-      ["Ranked from current timing, momentum, and follow-up signals"],
-      sourceIds(snapshot, ["today:priorities"]),
-    );
+    if (request.task === "executive-summary") return result("Executive fundraising summary", `${s.priorities.length} current priorities, ${s.meetings.length} upcoming meetings, ${s.gifts.length} recent gifts, and ${s.recommendations.length} open next actions are visible in the live workspace.${s.priorities[0] ? ` The first recommended focus is ${s.priorities[0].name}: ${s.priorities[0].reason}.` : " No immediate action is currently ranked."}`, ["Live priorities, reminders, meetings, and gifts"], sources(s));
+    if (request.task === "relationship-summary") return result(`Relationship summary: ${s.donor.name}`, `${s.donor.summary}\n\nInstitutional memory: ${s.donor.memory}\n\n${s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No interaction is recorded."}`, ["Owner-scoped donor and interaction records"], sources(s));
+    return result("Recommended next actions", s.priorities.length ? s.priorities.slice(0, 3).map((item, i) => `${i + 1}. ${item.action} for ${item.name} — ${item.reason}. ${item.why}`).join("\n") : "No next action can be recommended from the current live workspace.", ["Ranked live reminders, pledges, gifts, and contact gaps"], sources(s));
   }
 }

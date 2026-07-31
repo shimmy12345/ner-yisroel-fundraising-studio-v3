@@ -4,17 +4,18 @@ import { useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { BriefExperience } from "../components/BriefExperience";
 import type { AIResult, AssistantTask } from "../../lib/ai/types";
+import type { WorkspaceBrief } from "../../lib/workspace/live-data";
 
 type SubmissionState = "idle" | "loading" | "success" | "empty" | "error";
 
 const tools: Array<{ task: AssistantTask; icon: string; label: string }> = [
-  { task: "meeting-brief", icon: "☼", label: "Prepare me for today’s meeting with the Chens" },
-  { task: "draft", icon: "✎", label: "Draft a personal thank-you for Marcus Williams" },
+  { task: "meeting-brief", icon: "☼", label: "Prepare me for my next donor meeting" },
+  { task: "draft", icon: "✎", label: "Draft a thank-you for a recent gift" },
   { task: "lapsed-relationships", icon: "◌", label: "Who haven’t I spoken with recently?" },
   { task: "executive-summary", icon: "↗", label: "Summarize this month for the president" },
 ];
 
-export function AssistantExperience() {
+export function AssistantExperience({ brief }: { brief: WorkspaceBrief }) {
   const [prompt, setPrompt] = useState("");
   const [state, setState] = useState<SubmissionState>("idle");
   const [result, setResult] = useState<AIResult | null>(null);
@@ -81,7 +82,7 @@ export function AssistantExperience() {
 
   return (
     <div className="assistant-experience">
-      <BriefExperience surface="assistant" />
+      <BriefExperience surface="assistant" data={brief} />
 
       <section className="suggestions" aria-label="Suggested prompts">
         {tools.map((tool) => (
@@ -143,13 +144,13 @@ export function AssistantExperience() {
             onKeyDown={handlePromptKeyDown}
           />
           <div className="composer-row">
-            <span className="context-chip">Rule-based · Current staging context</span>
+            <span className="context-chip">Rule-based · Live workspace data</span>
             <button className="send-button" type="submit" aria-label="Send message" disabled={loading} aria-busy={loading}>
               {loading ? "…" : "↑"}
             </button>
           </div>
         </form>
-        <p className="assistant-note">Responses are rule-based from current staging data. Review drafts before sending.</p>
+        <p className="assistant-note">Responses are rule-based from your current live workspace. Review drafts before sending.</p>
       </div>
     </div>
   );

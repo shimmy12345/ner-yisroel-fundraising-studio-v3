@@ -9,13 +9,13 @@ import {
 const note = "Coffee with Elena. She loved Maya’s update and wants to visit campus this fall. I promised to send the outcomes brief.";
 
 assert.equal(inferInteractionKind(note), "meeting");
-assert.equal(inferSubject(note, "meeting"), "Maya’s progress and fall campus visit");
+assert.equal(inferSubject(note, "meeting"), "Elena");
 
 const extracted = extractInteraction(note);
 assert.equal(extracted.type, "meeting");
-assert.equal(extracted.subject, "Maya’s progress and fall campus visit");
+assert.equal(extracted.subject, "Elena");
 assert.equal(extracted.sentiment, "warm");
-assert.deepEqual(extracted.commitments, ["Send scholarship outcomes"]);
+assert.deepEqual(extracted.commitments, ['Send the material referenced in “Elena”']);
 
 const now = new Date("2026-07-30T16:00:00-04:00");
 assert.equal(reminderDueAt("none", undefined, now), null);

@@ -1,5 +1,8 @@
 import { env } from "cloudflare:workers";
 import { AppShell } from "../components/AppShell";
+import { requireChatGPTUser } from "../chatgpt-auth";
+import { ensureUserProfile } from "../../lib/auth/profile";
+import { getDataMode } from "../../lib/workspace/mode";
 
 export const dynamic = "force-dynamic";
 
@@ -20,14 +23,19 @@ function initials(name: string) {
 }
 
 export default async function DonorsPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
+  const identity = await requireChatGPTUser("/donors");
+  const profile = await ensureUserProfile(identity);
+  const mode = await getDataMode(profile.id);
+  const scope = mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'";
+  const scopeBinds = mode === "demo" ? [] : [profile.id];
   const query = (await searchParams).q?.trim().slice(0, 80) ?? "";
   const result = query
-    ? await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, email, phone, city, state, external_source FROM donors WHERE display_name LIKE ? OR primary_first_name LIKE ? OR spouse_first_name LIKE ? OR email LIKE ? ORDER BY display_name COLLATE NOCASE LIMIT 500`).bind(...Array(4).fill(`%${query}%`)).all<Relationship>()
-    : await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, email, phone, city, state, external_source FROM donors ORDER BY display_name COLLATE NOCASE LIMIT 500`).all<Relationship>();
+    ? await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, email, phone, city, state, external_source FROM donors WHERE ${scope} AND (display_name LIKE ? OR primary_first_name LIKE ? OR spouse_first_name LIKE ? OR email LIKE ?) ORDER BY display_name COLLATE NOCASE LIMIT 500`).bind(...scopeBinds, ...Array(4).fill(`%${query}%`)).all<Relationship>()
+    : await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, email, phone, city, state, external_source FROM donors WHERE ${scope} ORDER BY display_name COLLATE NOCASE LIMIT 500`).bind(...scopeBinds).all<Relationship>();
   const relationships = result.results;
 
   return <AppShell active="donors"><main className="donor-directory">
-    <header className="directory-heading"><div><p className="eyebrow">RELATIONSHIPS</p><h1>Your donor households</h1><p>{query ? `${relationships.length} matching relationship${relationships.length === 1 ? "" : "s"}` : `${relationships.length} relationship${relationships.length === 1 ? "" : "s"} in your workspace`}</p></div><a href="/onboarding/import">Import or refresh data</a></header>
+    <header className="directory-heading"><div><p className="eyebrow">RELATIONSHIPS · {mode === "demo" ? "DEMO MODE" : "LIVE WORKSPACE"}</p><h1>Your donor households</h1><p>{query ? `${relationships.length} matching relationship${relationships.length === 1 ? "" : "s"}` : `${relationships.length} relationship${relationships.length === 1 ? "" : "s"} in your workspace`}</p></div><a href="/onboarding/import">Import or refresh data</a></header>
     <form className="directory-search" action="/donors" method="get"><label htmlFor="donor-search">Find a household</label><div><input id="donor-search" name="q" type="search" defaultValue={query} placeholder="Search by household, person, or email"/><button type="submit">Search</button>{query && <a href="/donors">Clear</a>}</div></form>
     {relationships.length ? <section className="directory-list" aria-label="Donor relationships">{relationships.map((relationship) => {
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");

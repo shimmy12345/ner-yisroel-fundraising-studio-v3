@@ -24,7 +24,7 @@ type SaveResult = {
   extracted: ReturnType<typeof extractInteraction>;
 };
 
-export function CaptureExperience() {
+export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ id: string; name: string }>; initialDonorId: string }) {
   const [note, setNote] = useState("");
   const [subject, setSubject] = useState("");
   const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(null);
@@ -32,6 +32,8 @@ export function CaptureExperience() {
   const [customDate, setCustomDate] = useState("");
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [result, setResult] = useState<SaveResult | null>(null);
+  const [donorId, setDonorId] = useState(initialDonorId);
+  const activeDonor = donors.find((item) => item.id === donorId);
 
   const inferredKind = useMemo(() => inferInteractionKind(note), [note]);
   const activeKind = selectedKind ?? inferredKind;
@@ -39,7 +41,7 @@ export function CaptureExperience() {
     () => extractInteraction(note, activeKind, subject),
     [activeKind, note, subject],
   );
-  const ready = note.trim().length >= 4 && (reminder !== "custom" || Boolean(customDate));
+  const ready = Boolean(donorId) && note.trim().length >= 4 && (reminder !== "custom" || Boolean(customDate));
   const nowLabel = useMemo(
     () => new Intl.DateTimeFormat("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date()),
     [],
@@ -53,7 +55,7 @@ export function CaptureExperience() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          donorId: "elena-chen",
+          donorId,
           note,
           type: activeKind,
           subject: subject.trim() || undefined,
@@ -98,7 +100,7 @@ export function CaptureExperience() {
           )}
         </section>
         <div className="success-actions">
-          <a className="capture-primary" href="/donors/elena-chen">View updated relationship <span>→</span></a>
+          <a className="capture-primary" href={`/donors/${encodeURIComponent(donorId)}`}>View updated relationship <span>→</span></a>
           <button onClick={reset}>Log another</button>
         </div>
       </main>
@@ -113,15 +115,15 @@ export function CaptureExperience() {
           <h1>What happened?</h1>
           <p className="capture-lede">A few natural words are enough. Everything else is inferred.</p>
         </div>
-        <a href="/donors/elena-chen" aria-label="Close interaction capture">×</a>
+        <a href={donorId ? `/donors/${encodeURIComponent(donorId)}` : "/donors"} aria-label="Close interaction capture">×</a>
       </header>
 
       <div className="capture-layout">
         <section className="capture-composer-card">
           <div className="capture-context">
             <div className="mini-avatar" style={{ background: "#d9e8df" }}>EC</div>
-            <div><strong>Elena & David Chen</strong><span>{nowLabel} · defaults to now</span></div>
-            <button aria-label="Change donor">Change</button>
+            <div><strong>{activeDonor?.name || "Choose a donor"}</strong><span>{nowLabel} · defaults to now</span></div>
+            <select aria-label="Change donor" value={donorId} onChange={(event) => setDonorId(event.target.value)}><option value="">Choose a donor</option>{donors.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
           </div>
 
           <div className="interaction-kind-picker" aria-label="Interaction type">

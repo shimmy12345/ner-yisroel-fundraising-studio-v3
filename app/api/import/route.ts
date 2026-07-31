@@ -7,6 +7,7 @@ import { logger } from "../../../lib/logger";
 import { buildJlDonationPreview, isJlDonationExport } from "../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
+import { ensureUserProfile } from "../../../lib/auth/profile";
 
 type ImportRequest = {
   fileName?: string;
@@ -61,8 +62,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "The column mapping contains an unsupported field" }, { status: 422 });
   }
 
-  const userId = `user_${user.email.toLowerCase()}`;
-  const existing = await env.DB.prepare("SELECT id FROM data_imports WHERE file_hash = ? LIMIT 1").bind(fileHash).first<{ id: string }>();
+  const profile = await ensureUserProfile(user);
+  const userId = profile.id;
+  const existing = await env.DB.prepare("SELECT id FROM data_imports WHERE user_id = ? AND file_hash = ? LIMIT 1").bind(userId, fileHash).first<{ id: string }>();
   if (existing) {
     if (isJlDonationExport(Object.keys(rows[0] ?? {}))) return Response.json({ error: "This exact donation file has already been imported.", fatalError: null, importId: existing.id, databaseChangesMade: false, noChangesMade: true, rollbackCauses: ["duplicate_records"], validation: { totalRows: rows.length, passedRows: rows.length, failedRows: 0, duplicateRows: rows.length, nonfinancialRows: 0, firstErrors: [{ row: 0, category: "duplicate_records", reason: "The file fingerprint matches a completed import" }] }, rejectedRows: rows.map((_, index) => ({ row: index + 2, category: "duplicate_records", reason: "Skipped because this exact file was already imported" })), results: { validRows: rows.length, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: rows.length, rowsRequiringReview: 0, rejectedRows: rows.length, unmatchedJlCodes: 0, elapsedMs: 0 } }, { status: 409 });
     return Response.json({ error: "This file has already been imported", importId: existing.id }, { status: 409 });
@@ -74,8 +76,8 @@ export async function POST(request: Request) {
     const donationPreview = await buildJlDonationPreview(rows);
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
     const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
-    const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
-    const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
+    const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
+    const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
     const match = matchJlDonationActivities(donationPreview, households.results, prior.results);
     const rowFailures: RowFailure[] = [
       ...donationPreview.duplicateRows.map((duplicate) => ({ row: duplicate.row, category: "duplicate_records" as const, reason: "Duplicate source row" })),
@@ -90,21 +92,26 @@ export async function POST(request: Request) {
     }
     const now = Math.floor(Date.now() / 1000);
     const importId = crypto.randomUUID();
+    const liveHouseholds = await env.DB.prepare("SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live'").bind(userId).all<{ id: string }>();
+    const householdsWithGiving = await env.DB.prepare("SELECT DISTINCT donor_id AS id FROM giving_activities WHERE owner_user_id = ? AND category NOT IN ('needs_review','nonfinancial_entry')").bind(userId).all<{ id: string }>();
+    const givingDonorIds = new Set([...householdsWithGiving.results.map((item) => item.id), ...match.matched.map((item) => item.donorId)]);
+    const householdsWithoutGivingHistory = liveHouseholds.results.filter((item) => !givingDonorIds.has(item.id)).length;
     const results = { validRows: match.matched.length, householdsMatched: new Set(match.matched.map((activity) => activity.donorId)).size, newHouseholds: 0, giftsImported: match.newActivities.length, giftsUpdated: match.proposedUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + match.alreadyImported, rowsRequiringReview: match.needsReview, rejectedRows: rowFailures.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, results, validation, rejectedRows: rowFailures, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
-    const activityRows = match.matched.map((activity) => ({ id: `jl-giving-${activity.fingerprint}`, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length, unmatchedJlCodes: match.unknownHousehold, householdsWithoutGivingHistory, donationRowsRequiringReview: match.needsReview, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, rejectedRows: rowFailures, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const activityRows = match.matched.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
     const changeRows = [...match.newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: null, now })), ...match.proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now }))];
     const activityStatements = chunkJsonRows(activityRows).map((chunk) =>
-      env.DB.prepare(`INSERT INTO giving_activities (id, donor_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, source_snapshot, created_at, updated_at)
-        SELECT json_extract(value,'$.id'), json_extract(value,'$.donorId'), 'JL Solutions', json_extract(value,'$.externalHouseholdId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.activityDate'), json_extract(value,'$.committedCents'), json_extract(value,'$.paidCents'), json_extract(value,'$.balanceCents'), json_extract(value,'$.itemType'), json_extract(value,'$.description'), json_extract(value,'$.sourceCampaign'), json_extract(value,'$.category'), json_extract(value,'$.sourceSnapshot'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?) WHERE true
-        ON CONFLICT(external_source, source_fingerprint) DO UPDATE SET paid_cents=excluded.paid_cents, balance_cents=excluded.balance_cents, category=excluded.category, source_snapshot=excluded.source_snapshot, updated_at=excluded.updated_at`).bind(chunk));
+      env.DB.prepare(`INSERT INTO giving_activities (id, owner_user_id, donor_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, source_snapshot, created_at, updated_at)
+        SELECT json_extract(value,'$.id'), json_extract(value,'$.ownerUserId'), json_extract(value,'$.donorId'), 'JL Solutions', json_extract(value,'$.externalHouseholdId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.activityDate'), json_extract(value,'$.committedCents'), json_extract(value,'$.paidCents'), json_extract(value,'$.balanceCents'), json_extract(value,'$.itemType'), json_extract(value,'$.description'), json_extract(value,'$.sourceCampaign'), json_extract(value,'$.category'), json_extract(value,'$.sourceSnapshot'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?) WHERE true
+        ON CONFLICT(owner_user_id, external_source, source_fingerprint) DO UPDATE SET paid_cents=excluded.paid_cents, balance_cents=excluded.balance_cents, category=excluded.category, source_snapshot=excluded.source_snapshot, updated_at=excluded.updated_at`).bind(chunk));
     const changeStatements = chunkJsonRows(changeRows).map((chunk) =>
       env.DB.prepare(`INSERT INTO giving_activity_import_changes (import_id, source_fingerprint, change_type, previous_json, created_at) SELECT json_extract(value,'$.importId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.changeType'), json_extract(value,'$.previousJson'), json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
     const statements = [
       env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(userId, user.email, user.displayName, now, now),
       ...activityStatements,
       env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?, ?)").bind(importId, userId, fileName, fileHash, JSON.stringify(report), now, now),
+      env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
       ...changeStatements,
     ];
     try {
@@ -145,20 +152,22 @@ export async function POST(request: Request) {
       interactions: preview.interactions.length,
       reminders: preview.reminders.length,
     },
+    reconciliation: { giftsMatchedByInternalDonorId: preview.gifts.length, unmatchedJlCodes: 0, householdsWithoutGivingHistory: Math.max(0, preview.donors.length - new Set(preview.gifts.map((gift) => gift.donorId)).size), donationRowsRequiringReview: preview.rejectedRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true },
     rejectedRows: preview.rejectedRows,
     warnings: preview.warnings,
   };
 
-  const donorRows = preview.donors.map((donor) => ({ ...donor, now }));
-  const giftRows = preview.gifts.map((gift) => ({ ...gift, now }));
-  const interactionRows = preview.interactions.map((interaction) => ({ ...interaction, now, userId, source: `import:${importId}` }));
-  const reminderRows = preview.reminders.map((reminder) => ({ ...reminder, now, userId }));
+  const ownedIds = new Map(preview.donors.map((donor) => [donor.id, crypto.randomUUID()]));
+  const donorRows = preview.donors.map((donor) => ({ ...donor, id: ownedIds.get(donor.id), ownerUserId: userId, now }));
+  const giftRows = preview.gifts.map((gift) => ({ ...gift, donorId: ownedIds.get(gift.donorId), now }));
+  const interactionRows = preview.interactions.map((interaction) => ({ ...interaction, donorId: ownedIds.get(interaction.donorId), now, userId, source: `import:${importId}` }));
+  const reminderRows = preview.reminders.map((reminder) => ({ ...reminder, donorId: ownedIds.get(reminder.donorId), now, userId }));
   const donorSql = body.updateExisting
-    ? `INSERT INTO donors (id, donor_code, display_name, spouse, email, phone, address, created_at, updated_at)
-       SELECT json_extract(value, '$.id'), json_extract(value, '$.donorCode'), json_extract(value, '$.name'), json_extract(value, '$.spouse'), json_extract(value, '$.email'), json_extract(value, '$.phone'), json_extract(value, '$.address'), json_extract(value, '$.now'), json_extract(value, '$.now') FROM json_each(?) WHERE true
-       ON CONFLICT(id) DO UPDATE SET donor_code = excluded.donor_code, display_name = excluded.display_name, spouse = excluded.spouse, email = excluded.email, phone = excluded.phone, address = excluded.address, updated_at = excluded.updated_at`
-    : `INSERT OR IGNORE INTO donors (id, donor_code, display_name, spouse, email, phone, address, created_at, updated_at)
-       SELECT json_extract(value, '$.id'), json_extract(value, '$.donorCode'), json_extract(value, '$.name'), json_extract(value, '$.spouse'), json_extract(value, '$.email'), json_extract(value, '$.phone'), json_extract(value, '$.address'), json_extract(value, '$.now'), json_extract(value, '$.now') FROM json_each(?)`;
+    ? `INSERT INTO donors (id, owner_user_id, data_source, donor_code, display_name, spouse, email, phone, address, created_at, updated_at)
+       SELECT json_extract(value, '$.id'), json_extract(value, '$.ownerUserId'), 'live', json_extract(value, '$.donorCode'), json_extract(value, '$.name'), json_extract(value, '$.spouse'), json_extract(value, '$.email'), json_extract(value, '$.phone'), json_extract(value, '$.address'), json_extract(value, '$.now'), json_extract(value, '$.now') FROM json_each(?) WHERE true
+       ON CONFLICT(owner_user_id, donor_code) DO UPDATE SET display_name = excluded.display_name, spouse = excluded.spouse, email = excluded.email, phone = excluded.phone, address = excluded.address, updated_at = excluded.updated_at`
+    : `INSERT OR IGNORE INTO donors (id, owner_user_id, data_source, donor_code, display_name, spouse, email, phone, address, created_at, updated_at)
+       SELECT json_extract(value, '$.id'), json_extract(value, '$.ownerUserId'), 'live', json_extract(value, '$.donorCode'), json_extract(value, '$.name'), json_extract(value, '$.spouse'), json_extract(value, '$.email'), json_extract(value, '$.phone'), json_extract(value, '$.address'), json_extract(value, '$.now'), json_extract(value, '$.now') FROM json_each(?)`;
 
   const statements = [
     env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
@@ -168,27 +177,31 @@ export async function POST(request: Request) {
   if (jlDetected) {
     const codes = preview.donors.map((donor) => donor.donorCode?.toLowerCase()).filter(Boolean);
     const existing = codes.length
-      ? await env.DB.prepare(`SELECT id, external_id, display_name, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot FROM donors WHERE external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(codes)).all<ExistingJlDonor>()
+      ? await env.DB.prepare(`SELECT id, external_id, display_name, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<ExistingJlDonor>()
       : { results: [] as ExistingJlDonor[] };
     const matches = matchJlDonors(preview.donors, existing.results);
     for (const match of matches) {
       const donor = match.donor;
       const contact = donor.contact!;
       if (!match.existing) {
-        statements.push(env.DB.prepare(`INSERT INTO donors (id, donor_code, external_source, external_id, display_name, spouse, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot, created_at, updated_at)
-          VALUES (?, ?, 'JL Solutions', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .bind(donor.id, donor.donorCode, donor.donorCode, donor.name, contact.spouseFirstName, donor.email, donor.phone, donor.address, contact.lastName, contact.primaryFirstName, contact.spouseFirstName, contact.primaryTitle, contact.spouseTitle, contact.alternateMobilePhone, contact.homePhone, contact.addressLine1, contact.city, contact.state, contact.postalCode, contact.country, JSON.stringify(sourceSnapshot(donor)), now, now));
+        const donorId = crypto.randomUUID();
+        ownedIds.set(donor.id, donorId);
+        statements.push(env.DB.prepare(`INSERT INTO donors (id, owner_user_id, data_source, donor_code, external_source, external_id, display_name, spouse, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot, created_at, updated_at)
+          VALUES (?, ?, 'live', ?, 'JL Solutions', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .bind(donorId, userId, donor.donorCode, donor.donorCode, donor.name, contact.spouseFirstName, donor.email, donor.phone, donor.address, contact.lastName, contact.primaryFirstName, contact.spouseFirstName, contact.primaryTitle, contact.spouseTitle, contact.alternateMobilePhone, contact.homePhone, contact.addressLine1, contact.city, contact.state, contact.postalCode, contact.country, JSON.stringify(sourceSnapshot(donor)), now, now));
       } else if (body.mode === "refresh") {
         const updates = Object.entries(match.safeUpdates);
         const assignments = updates.map(([field]) => `${field} = ?`);
         assignments.push("source_snapshot = ?", "updated_at = ?");
-        statements.push(env.DB.prepare(`UPDATE donors SET ${assignments.join(", ")} WHERE id = ?`)
-          .bind(...updates.map(([, value]) => value), JSON.stringify(sourceSnapshot(donor)), now, match.existing.id));
+        ownedIds.set(donor.id, match.existing.id);
+        statements.push(env.DB.prepare(`UPDATE donors SET ${assignments.join(", ")} WHERE id = ? AND owner_user_id = ? AND data_source = 'live'`)
+          .bind(...updates.map(([, value]) => value), JSON.stringify(sourceSnapshot(donor)), now, match.existing.id, userId));
       }
     }
   } else {
     statements.push(env.DB.prepare(donorSql).bind(JSON.stringify(donorRows)));
   }
+  report.firstRelationshipId = ownedIds.get(preview.donors[0]?.id ?? "") ?? report.firstRelationshipId;
 
   statements.push(
     env.DB.prepare(`INSERT OR IGNORE INTO gifts (id, donor_id, amount_cents, fund, received_at, note, created_at, updated_at)
@@ -202,6 +215,7 @@ export async function POST(request: Request) {
       .bind(JSON.stringify(reminderRows)),
     env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)")
       .bind(importId, userId, fileName, fileHash, body.updateExisting ? 1 : 0, JSON.stringify(report), now, now),
+    env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
   );
 
   try {

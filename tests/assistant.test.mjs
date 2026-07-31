@@ -38,15 +38,15 @@ async function run() {
   const speech = await readFile(new URL("../app/components/useBriefSpeech.ts", import.meta.url), "utf8");
   const today = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /<AssistantExperience \/>/);
-  assert.match(today, /<BriefExperience surface="today" \/>/);
-  assert.match(assistant, /<BriefExperience surface="assistant" \/>/);
+  assert.match(page, /<AssistantExperience brief=\{brief\} \/>/);
+  assert.match(today, /<BriefExperience surface="today" data=\{data\} \/>/);
+  assert.match(assistant, /<BriefExperience surface="assistant" data=\{brief\} \/>/);
   assert.match(brief, /Read full brief/);
   assert.match(brief, /Collapse full brief/);
   assert.match(brief, /aria-expanded=\{isExpanded\}/);
   assert.match(brief, /Top priorities/);
-  assert.match(brief, /Today’s meetings/);
-  assert.match(brief, /New gifts/);
+  assert.match(brief, /Upcoming meetings/);
+  assert.match(brief, /Recent gifts/);
   assert.match(brief, /Recommended focus/);
 
   assert.match(speech, /speechSynthesis\.speak/);
@@ -74,15 +74,15 @@ async function run() {
 
   const meeting = await request("meeting-brief");
   assert.equal(meeting.mode, "rule-based");
-  assert.match(meeting.content, /scholarship outcomes/i);
-  assert.match(meeting.content, /Due August 1/);
+  assert.match(meeting.content, /Garden Room/i);
+  assert.match(meeting.content, /Next action/i);
   const thankYou = await request("draft");
   assert.match(thankYou.content, /\$10,000/);
   assert.match(thankYou.content, /Dear Marcus/);
   const lapsed = await request("lapsed-relationships");
   assert.match(lapsed.content, /94 days/);
   const executive = await request("executive-summary");
-  assert.match(executive.content, /active priorities/);
+  assert.match(executive.content, /current priorities/);
 
   process.stdout.write("Assistant and shared brief checks passed.\n");
 }

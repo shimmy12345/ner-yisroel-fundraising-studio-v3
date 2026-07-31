@@ -2,46 +2,28 @@
 
 import { useEffect, useState } from "react";
 
-const displayDate = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-  month: "long",
-  day: "numeric",
-});
-
-const machineDate = new Intl.DateTimeFormat("en-CA", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function millisecondsUntilTomorrow(now: Date): number {
-  const tomorrow = new Date(now);
-  tomorrow.setHours(24, 0, 0, 0);
-  return tomorrow.getTime() - now.getTime();
-}
-
-export function LocalDate() {
+export function LocalDate({ timezone }: { timezone: string }) {
   const [currentDate, setCurrentDate] = useState<Date | null>(null);
 
   useEffect(() => {
-    let midnightTimer: ReturnType<typeof setTimeout>;
+    let refreshTimer: ReturnType<typeof setTimeout>;
 
     const refreshDate = () => {
       const now = new Date();
       setCurrentDate(now);
-      midnightTimer = setTimeout(refreshDate, millisecondsUntilTomorrow(now) + 1000);
+      refreshTimer = setTimeout(refreshDate, 60 * 60 * 1000);
     };
 
     refreshDate();
-    return () => clearTimeout(midnightTimer);
+    return () => clearTimeout(refreshTimer);
   }, []);
 
   return (
     <time
-      dateTime={currentDate ? machineDate.format(currentDate) : undefined}
+      dateTime={currentDate ? new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(currentDate) : undefined}
       suppressHydrationWarning
     >
-      {currentDate ? displayDate.format(currentDate).toUpperCase() : "\u00a0"}
+      {currentDate ? new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "long", month: "long", day: "numeric" }).format(currentDate).toUpperCase() : "\u00a0"}
     </time>
   );
 }

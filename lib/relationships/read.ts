@@ -18,15 +18,15 @@ type DonorRow = { relationship_summary: string | null; institutional_memory: str
 type InteractionRow = { id: string; summary: string; source: string; occurred_at: number };
 type RecommendationRow = { action: string };
 
-export async function getRelationshipUpdates(donorId: string): Promise<RelationshipUpdates> {
+export async function getRelationshipUpdates(donorId: string, userId: string): Promise<RelationshipUpdates> {
   try {
     const [donor, interaction, recommendation] = await Promise.all([
-      env.DB.prepare("SELECT relationship_summary, institutional_memory FROM donors WHERE id = ?")
-        .bind(donorId).first<DonorRow>(),
-      env.DB.prepare("SELECT id, summary, source, occurred_at FROM interactions WHERE donor_id = ? ORDER BY occurred_at DESC LIMIT 1")
-        .bind(donorId).first<InteractionRow>(),
-      env.DB.prepare("SELECT action FROM recommendations WHERE donor_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1")
-        .bind(donorId).first<RecommendationRow>(),
+      env.DB.prepare("SELECT relationship_summary, institutional_memory FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
+        .bind(donorId, userId).first<DonorRow>(),
+      env.DB.prepare("SELECT id, summary, source, occurred_at FROM interactions WHERE donor_id = ? AND user_id = ? ORDER BY occurred_at DESC LIMIT 1")
+        .bind(donorId, userId).first<InteractionRow>(),
+      env.DB.prepare("SELECT action FROM recommendations WHERE donor_id = ? AND user_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1")
+        .bind(donorId, userId).first<RecommendationRow>(),
     ]);
 
     const [subject = "Interaction", ...noteParts] = interaction?.summary.split("\n") ?? [];

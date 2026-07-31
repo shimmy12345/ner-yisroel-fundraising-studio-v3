@@ -29,6 +29,13 @@
       "when": 1785513600000,
       "tag": "0003_jl_donation_import",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785600000000,
+      "tag": "0004_personalization_live_data",
+      "breakpoints": true
     }
   ]
 }

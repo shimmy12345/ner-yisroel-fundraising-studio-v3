@@ -65,7 +65,7 @@ async function run() {
   assert.match(importRoute, /await env\.DB\.batch\(statements\)/);
   assert.match(importRoute, /chunkJsonRows\(activityRows\)/);
   assert.match(rollbackRoute, /await env\.DB\.batch\(statements\)/);
-  assert.match(importRoute, /ON CONFLICT\(external_source, source_fingerprint\) DO UPDATE/);
+  assert.match(importRoute, /ON CONFLICT\(owner_user_id, external_source, source_fingerprint\) DO UPDATE/);
   assert.match(importRoute, /rollbackCauses/);
   assert.match(importRoute, /passedRows/);
   assert.match(importRoute, /failedRows/);

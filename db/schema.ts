@@ -9,11 +9,18 @@ export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   email: text("email").notNull().unique(),
   name: text("name"),
+  preferredFirstName: text("preferred_first_name"),
+  organizationName: text("organization_name"),
+  jobTitle: text("job_title"),
+  timezone: text("timezone").notNull().default("America/New_York"),
+  avatarUrl: text("avatar_url"),
   ...timestamps,
 });
 
 export const donors = sqliteTable("donors", {
   id: text("id").primaryKey(),
+  ownerUserId: text("owner_user_id").references(() => users.id),
+  dataSource: text("data_source", { enum: ["live", "sample"] }).notNull().default("live"),
   displayName: text("display_name").notNull(),
   email: text("email"),
   phone: text("phone"),
@@ -69,6 +76,7 @@ export const gifts = sqliteTable("gifts", {
 export const givingActivities = sqliteTable("giving_activities", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
+  ownerUserId: text("owner_user_id").references(() => users.id),
   externalSource: text("external_source").notNull(),
   externalHouseholdId: text("external_household_id").notNull(),
   sourceFingerprint: text("source_fingerprint").notNull(),
@@ -83,6 +91,17 @@ export const givingActivities = sqliteTable("giving_activities", {
   sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<Record<string, string>>().notNull(),
   ...timestamps,
 }, (table) => [index("giving_activities_donor_date_idx").on(table.donorId, table.activityDate)]);
+
+export const sampleCleanupAudits = sqliteTable("sample_cleanup_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  backupConfirmed: integer("backup_confirmed", { mode: "boolean" }).notNull(),
+  removedDonors: integer("removed_donors").notNull(),
+  removedGifts: integer("removed_gifts").notNull(),
+  removedInteractions: integer("removed_interactions").notNull(),
+  removedRecommendations: integer("removed_recommendations").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
 
 export const recommendations = sqliteTable("recommendations", {
   id: text("id").primaryKey(),
