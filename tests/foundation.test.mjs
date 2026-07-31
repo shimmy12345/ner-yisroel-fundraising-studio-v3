@@ -21,6 +21,13 @@ async function run() {
   assert.match(stagingSeed, /fictional/i);
   assert.doesNotMatch(stagingSeed, /DELETE|DROP TABLE|UPDATE `donors`/i);
 
+  const todayPage = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const localDate = await readFile(new URL("../app/components/LocalDate.tsx", import.meta.url), "utf8");
+  assert.match(todayPage, /<LocalDate \/>/);
+  assert.doesNotMatch(todayPage, /THURSDAY, JULY 30/);
+  assert.match(localDate, /Intl\.DateTimeFormat/);
+  assert.match(localDate, /setTimeout\(refreshDate/);
+
   process.stdout.write("Foundation checks passed.\n");
 }
 

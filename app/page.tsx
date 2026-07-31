@@ -1,4 +1,5 @@
 import { AppShell } from "./components/AppShell";
+import { LocalDate } from "./components/LocalDate";
 import { todayData } from "./data";
 
 function PriorityCard({
@@ -38,7 +39,7 @@ export default function TodayPage() {
     <AppShell active="today">
       <header className="page-header">
         <div>
-          <p className="eyebrow">THURSDAY, JULY 30</p>
+          <p className="eyebrow today-date"><LocalDate /></p>
           <h1>Good morning, Sarah.</h1>
           <p className="subhead">Here’s where your attention will matter most today.</p>
         </div>
