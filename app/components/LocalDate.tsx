@@ -37,7 +37,10 @@ export function LocalDate() {
   }, []);
 
   return (
-    <time dateTime={currentDate ? machineDate.format(currentDate) : undefined}>
+    <time
+      dateTime={currentDate ? machineDate.format(currentDate) : undefined}
+      suppressHydrationWarning
+    >
       {currentDate ? displayDate.format(currentDate).toUpperCase() : "\u00a0"}
     </time>
   );
