@@ -15,6 +15,12 @@ async function run() {
   const hosting = JSON.parse(await readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"));
   assert.equal(hosting.d1, "DB");
 
+  const stagingSeed = await readFile(new URL("../drizzle/0001_staging_sample_data.sql", import.meta.url), "utf8");
+  assert.match(stagingSeed, /INSERT OR IGNORE INTO `donors`/);
+  assert.match(stagingSeed, /elena\.chen@example\.org/);
+  assert.match(stagingSeed, /fictional/i);
+  assert.doesNotMatch(stagingSeed, /DELETE|DROP TABLE|UPDATE `donors`/i);
+
   process.stdout.write("Foundation checks passed.\n");
 }
 
