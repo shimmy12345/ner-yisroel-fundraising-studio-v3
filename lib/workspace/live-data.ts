@@ -4,6 +4,8 @@ import type { DataMode } from "./mode";
 type PriorityRow = { id: string; display_name: string; action: string; reason: string; score: number; due_at: number | null };
 type GivingRow = { id: string; donor_id: string; display_name: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null };
 type ContactRow = { id: string; display_name: string; last_contact: number | null; recent_activity: number | null };
+type DonorRow = { id: string; display_name: string; updated_at: number };
+type DonorDateRow = { donor_id: string; value: number | null };
 
 export type WorkspacePriority = { donorId: string; name: string; initials: string; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; detail: string };
@@ -30,7 +32,7 @@ function timeParts(epoch: number, timezone: string) {
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000)): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live'";
-  const [reminders, giving, contacts] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, lastActivities] = await Promise.all([
     env.DB.prepare(`SELECT r.donor_id AS id, d.display_name, r.action, r.reason, r.score, r.due_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -39,14 +41,13 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
       WHERE ${demo ? "" : "ga.owner_user_id = ? AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
-    env.DB.prepare(`SELECT d.id, d.display_name,
-      (SELECT MAX(i.occurred_at) FROM interactions i WHERE i.donor_id = d.id ${demo ? "" : "AND i.user_id = ?"}) AS last_contact,
-      MAX(d.updated_at,
-        COALESCE((SELECT MAX(i2.occurred_at) FROM interactions i2 WHERE i2.donor_id = d.id ${demo ? "" : "AND i2.user_id = ?"}), 0),
-        COALESCE((SELECT MAX(ga.activity_date) FROM giving_activities ga WHERE ga.donor_id = d.id ${demo ? "" : "AND ga.owner_user_id = ?"}), 0)
-      ) AS recent_activity
-      FROM donors d WHERE ${donorScope} ORDER BY last_contact LIMIT 500`).bind(...(demo ? [] : [userId, userId, userId, userId])).all<ContactRow>(),
+    env.DB.prepare(`SELECT d.id, d.display_name, d.updated_at FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
+    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE user_id = ?"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
+    env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ?"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
   ]);
+  const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
+  const activityByDonor = new Map(lastActivities.results.map((item) => [item.donor_id, item.value]));
+  const contacts: ContactRow[] = donors.results.map((item) => ({ id: item.id, display_name: item.display_name, last_contact: contactByDonor.get(item.id) ?? null, recent_activity: Math.max(item.updated_at, contactByDonor.get(item.id) ?? 0, activityByDonor.get(item.id) ?? 0) }));
 
   const priorities: WorkspacePriority[] = [];
   for (const item of reminders.results) {
@@ -57,7 +58,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const openByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openByDonor.has(item.donor_id)) openByDonor.set(item.donor_id, item);
   for (const item of openByDonor.values()) priorities.push({ donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Open pledge", signal: "warm", reason: `${money(item.balance_cents ?? 0)} remains open`, why: `${item.description || item.item_type || "Commitment"}${item.activity_date ? ` from ${dateLabel(item.activity_date, timezone)}` : ""}.`, action: "Review", href: `/donors/${encodeURIComponent(item.donor_id)}` });
-  for (const item of contacts.results) {
+  for (const item of contacts) {
     const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null;
     if (days == null || days >= 90) priorities.push({ donorId: item.id, name: item.display_name, initials: initials(item.display_name), label: "Needs contact", signal: "cool", reason: days == null ? "No meaningful contact recorded" : `${days} days since meaningful contact`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}` });
   }
