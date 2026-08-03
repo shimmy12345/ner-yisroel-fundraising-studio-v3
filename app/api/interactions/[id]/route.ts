@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { extractInteraction, reminderDueAt, type InteractionKind, type ReminderChoice } from "../../../../lib/capture/interaction";
-import { isScheduledActivity } from "../../../../lib/workspace/scheduled-activity";
+import { completedPlannedAt, isCompletedActivity, isNoResponseActivity, isScheduledActivity } from "../../../../lib/workspace/scheduled-activity";
 import { logger } from "../../../../lib/logger";
 
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
@@ -27,8 +27,8 @@ async function ownedInteraction(id: string, userId: string) {
 async function latestOther(donorId: string, userId: string, excludeId: string) {
   return env.DB.prepare(`SELECT id, donor_id, type, occurred_at, summary, source, created_at FROM interactions
     WHERE donor_id = ? AND user_id = ? AND id != ?
-      AND source NOT LIKE 'archived:%' AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'capture-scheduled:%'
-      AND occurred_at <= created_at
+      AND source NOT LIKE 'archived:%' AND source NOT LIKE 'cancelled:%'
+      AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))
     ORDER BY occurred_at DESC LIMIT 1`).bind(donorId, userId, excludeId).first<InteractionRow>();
 }
 
@@ -59,14 +59,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!Number.isFinite(occurredAt.getTime())) return Response.json({ error: "Choose a valid activity date and time" }, { status: 422 });
   const nowDate = new Date();
   const now = Math.floor(nowDate.getTime() / 1000);
-  const scheduled = occurredAt.getTime() > nowDate.getTime();
+  const wasCompleted = isCompletedActivity(existing.source);
+  const scheduled = !wasCompleted && occurredAt.getTime() > nowDate.getTime();
   const reminder = reminders.has(body.reminder ?? "none") ? body.reminder ?? "none" : "none";
   const dueAt = reminderDueAt(reminder, body.customDate, nowDate);
   if (reminder === "custom" && !dueAt) return Response.json({ error: "Choose a custom reminder date" }, { status: 422 });
   const next = extractInteraction(note, body.type, body.subject);
   const old = extraction(existing);
   const occurredAtEpoch = Math.floor(occurredAt.getTime() / 1000);
-  const source = `${scheduled ? "capture-scheduled" : "capture"}:${next.type}`;
+  const plannedAt = completedPlannedAt(existing.source);
+  const source = wasCompleted && plannedAt
+    ? `capture-completed:${plannedAt}:${isNoResponseActivity(existing.source) ? "no-response" : "completed"}:capture:${next.type}`
+    : `${scheduled ? "capture-scheduled" : "capture"}:${next.type}`;
   const reminderId = `activity-${id}`;
   const statements = [
     env.DB.prepare("UPDATE interactions SET donor_id = ?, type = ?, occurred_at = ?, summary = ?, source = ?, updated_at = ? WHERE id = ? AND user_id = ?")

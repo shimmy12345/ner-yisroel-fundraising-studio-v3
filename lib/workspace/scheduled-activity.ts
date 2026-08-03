@@ -4,11 +4,18 @@ export type ScheduleBucket = "today" | "upcoming" | "past";
 export type ScheduledContextActivity = { type: string; summary: string; source: string; occurredAt: number; createdAt: number };
 
 export function isScheduledActivity(source: string, occurredAt: number, createdAt: number) {
+  if (isCancelledActivity(source) || isArchivedActivity(source) || isCompletedActivity(source)) return false;
   return source.startsWith("capture-scheduled:") || occurredAt > createdAt;
 }
 
 export function isCancelledActivity(source: string) { return source.startsWith("cancelled:"); }
 export function isArchivedActivity(source: string) { return source.startsWith("archived:"); }
+export function isCompletedActivity(source: string) { return source.startsWith("capture-completed:"); }
+export function completedPlannedAt(source: string) {
+  const match = /^capture-completed:(\d+):/.exec(source);
+  return match ? Number(match[1]) : null;
+}
+export function isNoResponseActivity(source: string) { return /^capture-completed:\d+:no-response:/.test(source); }
 
 function localDay(epoch: number, timezone: string) {
   return new Intl.DateTimeFormat("en-US", {

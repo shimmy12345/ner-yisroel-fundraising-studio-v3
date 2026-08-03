@@ -44,6 +44,7 @@ assert.match(capturePage, /requestedParams\.returnTo === "\/"/);
 assert.match(capture, /window\.location\.assign\(returnTo\)/);
 assert.match(donorPage, /Scheduled and completed interactions/);
 assert.match(donorPage, /isScheduledActivity\(item\.source, item\.occurred_at, item\.created_at\)/);
-assert.match(relationshipRead, /source NOT LIKE 'capture-scheduled:%'.*source NOT LIKE 'cancelled:%'.*source NOT LIKE 'archived:%'.*occurred_at <= created_at/);
+assert.match(relationshipRead, /source LIKE 'capture-completed:%'/);
+assert.match(relationshipRead, /source NOT LIKE 'capture-scheduled:%'.*occurred_at <= created_at/);
 
 process.stdout.write("Today 2.0 checks passed.\n");

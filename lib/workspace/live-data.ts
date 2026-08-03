@@ -42,7 +42,6 @@ function activityTypeLabel(type: string) {
 
 function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: number): WorkspaceScheduledActivity {
   const [subject = activityTypeLabel(item.type), ...noteParts] = item.summary.split("\n");
-  const outcomeKind = ["call", "email", "meeting", "visit", "personal"].includes(item.type) ? item.type : null;
   return {
     id: item.id,
     donorId: item.donor_id,
@@ -56,7 +55,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
     prepareHref: item.type === "meeting" ? `/donors/${encodeURIComponent(item.donor_id)}/meeting-brief` : null,
     openHref: `/donors/${encodeURIComponent(item.donor_id)}`,
     editHref: `/interactions/${encodeURIComponent(item.id)}/edit?returnTo=%2F`,
-    logOutcomeHref: outcomeKind ? `/capture?donorId=${encodeURIComponent(item.donor_id)}&type=${outcomeKind}&returnTo=%2F` : null,
+    logOutcomeHref: `/interactions/${encodeURIComponent(item.id)}/outcome`,
     canCancel: item.occurred_at > now,
   };
 }
@@ -74,13 +73,14 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
     env.DB.prepare(`SELECT d.id, d.display_name, d.updated_at FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
-    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND occurred_at <= created_at" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND occurred_at <= created_at"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
+    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE record_origin = 'sample' AND donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ? AND record_origin = 'live'"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, i.type, i.occurred_at, i.summary, i.source, i.created_at
       FROM interactions i JOIN donors d ON d.id = i.donor_id
       WHERE ${demo ? "d.data_source = 'sample'" : "i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'"}
         AND (i.source LIKE 'capture-scheduled:%' OR i.occurred_at > i.created_at)
         AND i.source NOT LIKE 'cancelled:%' AND i.source NOT LIKE 'archived:%'
+        AND i.source NOT LIKE 'capture-completed:%'
         AND i.occurred_at >= ?
       ORDER BY i.occurred_at LIMIT 500`).bind(...(demo ? [now - 86400] : [userId, userId, now - 86400])).all<ScheduledActivityRow>(),
   ]);
