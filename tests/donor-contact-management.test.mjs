@@ -45,7 +45,7 @@ test("JL refresh previews local conflicts and never auto-merges manual donors", 
   const experience = read("app/onboarding/import/ImportExperience.tsx");
   assert.match(preview, /findLikelyManualDonorMatches/);
   assert.match(preview, /external_source = 'Manual'/);
-  assert.match(experience, /Fundraising OS will never merge a donor automatically/);
+  assert.match(experience, /Fundraising OS will never merge or add a likely duplicate without your decision/);
   assert.match(experience, /Merge and preserve history/);
   assert.match(importer, /decision\?\.action === "merge"/);
   assert.match(importer, /ownedIds\.set\(donor\.id, manualDonor\.id\)/);

@@ -36,9 +36,9 @@ export default async function DonorsPage({ searchParams }: { searchParams: Promi
   const scope = mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'";
   const scopeBinds = mode === "demo" ? [] : [profile.id];
   const query = (await searchParams).q?.trim().slice(0, 80) ?? "";
-  const result = query
-    ? await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope} AND (display_name LIKE ? OR last_name LIKE ? OR primary_first_name LIKE ? OR spouse_first_name LIKE ? OR spouse LIKE ? OR donor_code LIKE ? OR external_id LIKE ? OR email LIKE ? OR phone LIKE ? OR home_phone LIKE ? OR alternate_mobile_phone LIKE ?) ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`).bind(...scopeBinds, ...Array(11).fill(`%${query}%`)).all<Relationship>()
-    : await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope} ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`).bind(...scopeBinds).all<Relationship>();
+  const searchFilter = query ? " AND (display_name LIKE ? OR last_name LIKE ? OR primary_first_name LIKE ? OR spouse_first_name LIKE ? OR spouse LIKE ? OR donor_code LIKE ? OR external_id LIKE ? OR email LIKE ? OR phone LIKE ? OR home_phone LIKE ? OR alternate_mobile_phone LIKE ?)" : "";
+  const directorySql = `SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope}${searchFilter} ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE`;
+  const result = await env.DB.prepare(directorySql).bind(...scopeBinds, ...(query ? Array(11).fill(`%${query}%`) : [])).all<Relationship>();
   const relationships = result.results;
 
   return <AppShell active="donors"><main className="donor-directory">

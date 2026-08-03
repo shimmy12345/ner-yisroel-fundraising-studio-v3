@@ -71,11 +71,11 @@ export async function POST(request: Request) {
     : { results: [] as ExistingJlDonor[] };
   const matches = matchJlDonors(preview.donors, existing.results);
   const conflicts = matches.flatMap((match) => match.conflicts);
-  const unmatchedDonors = matches.filter((match) => !match.existing).map((match) => match.donor);
-  const manual = unmatchedDonors.length
-    ? await env.DB.prepare(`SELECT id, display_name, email, phone, home_phone, address_line_1, city, state, postal_code FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'Manual'`).bind(profile.id).all<ManualDonorMatchRow>()
+  const candidateDonors = matches.map((match) => match.donor);
+  const manual = candidateDonors.length
+    ? await env.DB.prepare(`SELECT id, display_name, email, phone, home_phone, address_line_1, city, state, postal_code, last_name, primary_first_name, spouse, spouse_first_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'Manual'`).bind(profile.id).all<ManualDonorMatchRow>()
     : { results: [] as ManualDonorMatchRow[] };
-  const mergeCandidates = findLikelyManualDonorMatches(unmatchedDonors, manual.results);
+  const mergeCandidates = findLikelyManualDonorMatches(candidateDonors, manual.results);
   return Response.json({
     profile: "jl-solutions",
     preview,

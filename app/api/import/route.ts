@@ -21,7 +21,7 @@ type ImportRequest = {
   updateExisting?: boolean;
   mode?: "first" | "refresh";
   paymentDecisions?: PaymentDecisionInput[];
-  mergeDecisions?: Array<{ externalId: string; action: "merge" | "keep_separate"; manualDonorId: string }>;
+  mergeDecisions?: Array<{ externalId: string; action: "merge" | "keep_separate" | "review_later"; manualDonorId: string }>;
   forceReprocess?: boolean;
   forceConfirmation?: string;
 };
@@ -31,6 +31,7 @@ type ManualDonorRow = ManualDonorMatchRow & {
   spouse_first_name: string | null; primary_title: string | null; spouse_title: string | null;
   alternate_mobile_phone: string | null; country: string | null; contact_note: string | null;
 };
+type FullJlDonorRow = ManualDonorRow & { owner_user_id: string; data_source: string; donor_code: string | null; external_source: string | null; external_id: string | null; source_snapshot: string | null; created_at: number; updated_at: number };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
 
@@ -99,7 +100,7 @@ export async function POST(request: Request) {
   const mergeDecisionCodes = new Set<string>();
   if (body.mergeDecisions !== undefined && (!Array.isArray(body.mergeDecisions) || body.mergeDecisions.some((decision) => {
     const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
-    const valid = Boolean(code) && ["merge", "keep_separate"].includes(decision?.action) && typeof decision?.manualDonorId === "string" && Boolean(decision.manualDonorId);
+    const valid = Boolean(code) && ["merge", "keep_separate", "review_later"].includes(decision?.action) && typeof decision?.manualDonorId === "string" && Boolean(decision.manualDonorId);
     if (!valid || mergeDecisionCodes.has(code)) return true;
     mergeDecisionCodes.add(code);
     return false;
@@ -298,7 +299,8 @@ export async function POST(request: Request) {
     profile: jlDetected ? "JL Solutions" : "General spreadsheet",
     mode: jlDetected ? (body.mode === "refresh" ? "refresh" : "first") : "first",
     refresh: jlDetected ? { kind: "household", historicalRecordsDeleted: 0, workspaceRecordsPreserved: true } : undefined,
-    firstRelationshipId: preview.donors[0]?.id ?? null,
+    household: jlDetected ? { created: 0, updated: 0, merged: 0, reviewLater: 0, previousRefreshAt: null as number | null } : undefined,
+    firstRelationshipId: (preview.donors[0]?.id ?? null) as string | null,
     imported: {
       donors: preview.donors.length,
       gifts: preview.gifts.length,
@@ -326,32 +328,68 @@ export async function POST(request: Request) {
     env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
       .bind(userId, user.email, user.displayName, now, now),
   ];
+  const householdChangeRows: Array<{ id: string; importId: string; userId: string; donorId: string; changeType: "insert" | "update" | "merge" | "consolidated"; beforeJson: string | null; afterJson: string; now: number }> = [];
 
   if (jlDetected) {
+    const priorRefresh = await env.DB.prepare("SELECT last_household_refresh_at FROM jl_refresh_state WHERE user_id = ? LIMIT 1").bind(userId).first<{ last_household_refresh_at: number | null }>();
+    if (report.household) report.household.previousRefreshAt = priorRefresh?.last_household_refresh_at ?? null;
     const codes = preview.donors.map((donor) => donor.donorCode?.toLowerCase()).filter(Boolean);
     const existing = codes.length
       ? await env.DB.prepare(`SELECT id, external_id, display_name, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<ExistingJlDonor>()
       : { results: [] as ExistingJlDonor[] };
     const matches = matchJlDonors(preview.donors, existing.results);
-    const unmatched = matches.filter((match) => !match.existing).map((match) => match.donor);
-    const manual = unmatched.length
+    const candidateDonors = matches.map((match) => match.donor);
+    const manual = candidateDonors.length
       ? await env.DB.prepare(`SELECT id, display_name, email, phone, home_phone, address, last_name, primary_first_name, spouse, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, address_line_1, city, state, postal_code, country, contact_note FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'Manual'`).bind(userId).all<ManualDonorRow>()
       : { results: [] as ManualDonorRow[] };
-    const candidateByCode = new Map(findLikelyManualDonorMatches(unmatched, manual.results).map((candidate) => [candidate.externalId.toLowerCase(), candidate]));
+    const candidateByCode = new Map(findLikelyManualDonorMatches(candidateDonors, manual.results).map((candidate) => [candidate.externalId.toLowerCase(), candidate]));
+    const fullExisting = existing.results.length ? await env.DB.prepare(`SELECT id,owner_user_id,data_source,donor_code,external_source,external_id,display_name,email,phone,home_phone,address,last_name,primary_first_name,spouse,spouse_first_name,primary_title,spouse_title,alternate_mobile_phone,address_line_1,city,state,postal_code,country,contact_note,source_snapshot,created_at,updated_at FROM donors WHERE owner_user_id=? AND data_source='live' AND id IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(existing.results.map((row) => row.id))).all<FullJlDonorRow>() : { results: [] as FullJlDonorRow[] };
     const decisionByCode = new Map((body.mergeDecisions ?? []).map((decision) => [decision.externalId.toLowerCase(), decision]));
     for (const candidate of candidateByCode.values()) {
       const decision = decisionByCode.get(candidate.externalId.toLowerCase());
-      if (!decision || !["merge", "keep_separate"].includes(decision.action) || decision.manualDonorId !== candidate.manualDonorId) {
+      if (!decision || !["merge", "keep_separate", "review_later"].includes(decision.action) || decision.manualDonorId !== candidate.manualDonorId) {
         return Response.json({ error: `Review the possible manual donor match for JL ${candidate.externalId} before importing.` }, { status: 422 });
       }
     }
     for (const match of matches) {
       const donor = match.donor;
       const contact = donor.contact!;
+      const code = donor.donorCode ?? "";
+      const candidate = candidateByCode.get(code.toLowerCase());
+      const decision = decisionByCode.get(code.toLowerCase());
+      if (match.existing && candidate && decision?.action === "review_later") {
+        ownedIds.delete(donor.id);
+        if (report.household) report.household.reviewLater += 1;
+        continue;
+      }
+      if (match.existing && candidate && decision?.action === "merge") {
+        const manualDonor = manual.results.find((row) => row.id === candidate.manualDonorId)!;
+        const priorJl = fullExisting.results.find((row) => row.id === match.existing!.id)!;
+        const keep = (current: string | null | undefined, incoming: string | null | undefined) => current?.trim() ? current : incoming ?? null;
+        const merged = { displayName: keep(manualDonor.display_name, donor.name), spouse: keep(manualDonor.spouse, contact.spouseFirstName), email: keep(manualDonor.email, donor.email), phone: keep(manualDonor.phone, donor.phone), address: keep(manualDonor.address, donor.address), lastName: keep(manualDonor.last_name, contact.lastName), primaryFirstName: keep(manualDonor.primary_first_name, contact.primaryFirstName), spouseFirstName: keep(manualDonor.spouse_first_name, contact.spouseFirstName), primaryTitle: keep(manualDonor.primary_title, contact.primaryTitle), spouseTitle: keep(manualDonor.spouse_title, contact.spouseTitle), alternateMobilePhone: keep(manualDonor.alternate_mobile_phone, contact.alternateMobilePhone), homePhone: keep(manualDonor.home_phone, contact.homePhone), addressLine1: keep(manualDonor.address_line_1, contact.addressLine1), city: keep(manualDonor.city, contact.city), state: keep(manualDonor.state, contact.state), postalCode: keep(manualDonor.postal_code, contact.postalCode), country: keep(manualDonor.country, contact.country), contactNote: manualDonor.contact_note };
+        const [giftIds, givingIds, interactionIds, recommendationIds, paymentAuditIds, contactAuditIds] = await Promise.all([
+          env.DB.prepare("SELECT id FROM gifts WHERE donor_id=?").bind(priorJl.id).all<{ id: string }>(), env.DB.prepare("SELECT id FROM giving_activities WHERE donor_id=? AND owner_user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM interactions WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM recommendations WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM jl_payment_assignment_audits WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM donor_contact_audits WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(),
+        ]);
+        const linked = { gifts: giftIds.results.map((row) => row.id), giving_activities: givingIds.results.map((row) => row.id), interactions: interactionIds.results.map((row) => row.id), recommendations: recommendationIds.results.map((row) => row.id), jl_payment_assignment_audits: paymentAuditIds.results.map((row) => row.id), donor_contact_audits: contactAuditIds.results.map((row) => row.id) };
+        const manualBefore = { owner_user_id: userId, data_source: "live", donor_code: null, external_source: "Manual", external_id: null, display_name: manualDonor.display_name, spouse: manualDonor.spouse, email: manualDonor.email, phone: manualDonor.phone, address: manualDonor.address, last_name: manualDonor.last_name, primary_first_name: manualDonor.primary_first_name, spouse_first_name: manualDonor.spouse_first_name, primary_title: manualDonor.primary_title, spouse_title: manualDonor.spouse_title, alternate_mobile_phone: manualDonor.alternate_mobile_phone, home_phone: manualDonor.home_phone, address_line_1: manualDonor.address_line_1, city: manualDonor.city, state: manualDonor.state, postal_code: manualDonor.postal_code, country: manualDonor.country, contact_note: manualDonor.contact_note, source_snapshot: null };
+        const manualAfter = { ...manualBefore, donor_code: code, external_source: "JL Solutions", external_id: code, display_name: merged.displayName, spouse: merged.spouse, email: merged.email, phone: merged.phone, address: merged.address, last_name: merged.lastName, primary_first_name: merged.primaryFirstName, spouse_first_name: merged.spouseFirstName, primary_title: merged.primaryTitle, spouse_title: merged.spouseTitle, alternate_mobile_phone: merged.alternateMobilePhone, home_phone: merged.homePhone, address_line_1: merged.addressLine1, city: merged.city, state: merged.state, postal_code: merged.postalCode, country: merged.country, contact_note: merged.contactNote, source_snapshot: JSON.stringify(sourceSnapshot(donor)) };
+        const jlBefore = { ...Object.fromEntries(Object.entries(priorJl).filter(([field]) => field !== "id")), linked };
+        ownedIds.set(donor.id, manualDonor.id);
+        statements.push(
+          env.DB.prepare("UPDATE gifts SET donor_id=? WHERE donor_id=?").bind(manualDonor.id, priorJl.id), env.DB.prepare("UPDATE giving_activities SET donor_id=? WHERE donor_id=? AND owner_user_id=?").bind(manualDonor.id, priorJl.id, userId), env.DB.prepare("UPDATE interactions SET donor_id=? WHERE donor_id=? AND user_id=?").bind(manualDonor.id, priorJl.id, userId), env.DB.prepare("UPDATE recommendations SET donor_id=? WHERE donor_id=? AND user_id=?").bind(manualDonor.id, priorJl.id, userId), env.DB.prepare("UPDATE jl_payment_assignment_audits SET donor_id=? WHERE donor_id=? AND user_id=?").bind(manualDonor.id, priorJl.id, userId), env.DB.prepare("UPDATE donor_contact_audits SET donor_id=? WHERE donor_id=? AND user_id=?").bind(manualDonor.id, priorJl.id, userId), env.DB.prepare("DELETE FROM donors WHERE id=? AND owner_user_id=? AND data_source='live' AND external_source='JL Solutions'").bind(priorJl.id, userId),
+          env.DB.prepare(`UPDATE donors SET donor_code=?,external_source='JL Solutions',external_id=?,display_name=?,spouse=?,email=?,phone=?,address=?,last_name=?,primary_first_name=?,spouse_first_name=?,primary_title=?,spouse_title=?,alternate_mobile_phone=?,home_phone=?,address_line_1=?,city=?,state=?,postal_code=?,country=?,source_snapshot=?,updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live' AND external_source='Manual'`).bind(code, code, merged.displayName, merged.spouse, merged.email, merged.phone, merged.address, merged.lastName, merged.primaryFirstName, merged.spouseFirstName, merged.primaryTitle, merged.spouseTitle, merged.alternateMobilePhone, merged.homePhone, merged.addressLine1, merged.city, merged.state, merged.postalCode, merged.country, JSON.stringify(sourceSnapshot(donor)), now, manualDonor.id, userId),
+          env.DB.prepare(`INSERT INTO donor_contact_audits (id,user_id,donor_id,action,changed_fields,before_json,after_json,created_at) VALUES (?,?,?,'merged_with_jl',?,?,?,?)`).bind(crypto.randomUUID(), userId, manualDonor.id, JSON.stringify(["externalSource", "externalId"]), JSON.stringify(manualBefore), JSON.stringify(manualAfter), now),
+        );
+        householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId: manualDonor.id, changeType: "merge", beforeJson: JSON.stringify(manualBefore), afterJson: JSON.stringify(manualAfter), now }, { id: crypto.randomUUID(), importId, userId, donorId: priorJl.id, changeType: "consolidated", beforeJson: JSON.stringify(jlBefore), afterJson: JSON.stringify({ mergedInto: manualDonor.id }), now });
+        if (report.household) report.household.merged += 1;
+        continue;
+      }
       if (!match.existing) {
-        const code = donor.donorCode ?? "";
-        const candidate = candidateByCode.get(code.toLowerCase());
-        const decision = decisionByCode.get(code.toLowerCase());
+        if (candidate && decision?.action === "review_later") {
+          ownedIds.delete(donor.id);
+          if (report.household) report.household.reviewLater += 1;
+          continue;
+        }
         if (candidate && decision?.action === "merge") {
           const manualDonor = manual.results.find((row) => row.id === candidate.manualDonorId)!;
           const keep = (current: string | null | undefined, incoming: string | null | undefined) => current?.trim() ? current : incoming ?? null;
@@ -360,6 +398,10 @@ export async function POST(request: Request) {
             lastName: keep(manualDonor.last_name, contact.lastName), primaryFirstName: keep(manualDonor.primary_first_name, contact.primaryFirstName), spouseFirstName: keep(manualDonor.spouse_first_name, contact.spouseFirstName), primaryTitle: keep(manualDonor.primary_title, contact.primaryTitle), spouseTitle: keep(manualDonor.spouse_title, contact.spouseTitle), alternateMobilePhone: keep(manualDonor.alternate_mobile_phone, contact.alternateMobilePhone), homePhone: keep(manualDonor.home_phone, contact.homePhone), addressLine1: keep(manualDonor.address_line_1, contact.addressLine1), city: keep(manualDonor.city, contact.city), state: keep(manualDonor.state, contact.state), postalCode: keep(manualDonor.postal_code, contact.postalCode), country: keep(manualDonor.country, contact.country), contactNote: manualDonor.contact_note,
           };
           ownedIds.set(donor.id, manualDonor.id);
+          const before = { owner_user_id: userId, data_source: "live", donor_code: null, external_source: "Manual", external_id: null, display_name: manualDonor.display_name, spouse: manualDonor.spouse, email: manualDonor.email, phone: manualDonor.phone, address: manualDonor.address, last_name: manualDonor.last_name, primary_first_name: manualDonor.primary_first_name, spouse_first_name: manualDonor.spouse_first_name, primary_title: manualDonor.primary_title, spouse_title: manualDonor.spouse_title, alternate_mobile_phone: manualDonor.alternate_mobile_phone, home_phone: manualDonor.home_phone, address_line_1: manualDonor.address_line_1, city: manualDonor.city, state: manualDonor.state, postal_code: manualDonor.postal_code, country: manualDonor.country, contact_note: manualDonor.contact_note, source_snapshot: null };
+          const after = { ...before, donor_code: code, external_source: "JL Solutions", external_id: code, display_name: merged.displayName, spouse: merged.spouse, email: merged.email, phone: merged.phone, address: merged.address, last_name: merged.lastName, primary_first_name: merged.primaryFirstName, spouse_first_name: merged.spouseFirstName, primary_title: merged.primaryTitle, spouse_title: merged.spouseTitle, alternate_mobile_phone: merged.alternateMobilePhone, home_phone: merged.homePhone, address_line_1: merged.addressLine1, city: merged.city, state: merged.state, postal_code: merged.postalCode, country: merged.country, contact_note: merged.contactNote, source_snapshot: JSON.stringify(sourceSnapshot(donor)) };
+          householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId: manualDonor.id, changeType: "merge", beforeJson: JSON.stringify(before), afterJson: JSON.stringify(after), now });
+          if (report.household) report.household.merged += 1;
           statements.push(env.DB.prepare(`UPDATE donors SET donor_code=?, external_source='JL Solutions', external_id=?, display_name=?, spouse=?, email=?, phone=?, address=?, last_name=?, primary_first_name=?, spouse_first_name=?, primary_title=?, spouse_title=?, alternate_mobile_phone=?, home_phone=?, address_line_1=?, city=?, state=?, postal_code=?, country=?, source_snapshot=?, updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live' AND external_source='Manual'`)
             .bind(code, code, merged.displayName, merged.spouse, merged.email, merged.phone, merged.address, merged.lastName, merged.primaryFirstName, merged.spouseFirstName, merged.primaryTitle, merged.spouseTitle, merged.alternateMobilePhone, merged.homePhone, merged.addressLine1, merged.city, merged.state, merged.postalCode, merged.country, JSON.stringify(sourceSnapshot(donor)), now, manualDonor.id, userId));
           statements.push(env.DB.prepare(`INSERT INTO donor_contact_audits (id,user_id,donor_id,action,changed_fields,before_json,after_json,created_at) VALUES (?,?,?,'merged_with_jl',?,?,?,?)`)
@@ -368,6 +410,9 @@ export async function POST(request: Request) {
         }
         const donorId = crypto.randomUUID();
         ownedIds.set(donor.id, donorId);
+        const inserted = { owner_user_id: userId, data_source: "live", donor_code: donor.donorCode, external_source: "JL Solutions", external_id: donor.donorCode, display_name: donor.name, spouse: contact.spouseFirstName, email: donor.email, phone: donor.phone, address: donor.address, last_name: contact.lastName, primary_first_name: contact.primaryFirstName, spouse_first_name: contact.spouseFirstName, primary_title: contact.primaryTitle, spouse_title: contact.spouseTitle, alternate_mobile_phone: contact.alternateMobilePhone, home_phone: contact.homePhone, address_line_1: contact.addressLine1, city: contact.city, state: contact.state, postal_code: contact.postalCode, country: contact.country, contact_note: null, source_snapshot: JSON.stringify(sourceSnapshot(donor)) };
+        householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId, changeType: "insert", beforeJson: null, afterJson: JSON.stringify(inserted), now });
+        if (report.household) report.household.created += 1;
         statements.push(env.DB.prepare(`INSERT INTO donors (id, owner_user_id, data_source, donor_code, external_source, external_id, display_name, spouse, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot, created_at, updated_at)
           VALUES (?, ?, 'live', ?, 'JL Solutions', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(donorId, userId, donor.donorCode, donor.donorCode, donor.name, contact.spouseFirstName, donor.email, donor.phone, donor.address, contact.lastName, contact.primaryFirstName, contact.spouseFirstName, contact.primaryTitle, contact.spouseTitle, contact.alternateMobilePhone, contact.homePhone, contact.addressLine1, contact.city, contact.state, contact.postalCode, contact.country, JSON.stringify(sourceSnapshot(donor)), now, now));
@@ -376,6 +421,10 @@ export async function POST(request: Request) {
         const assignments = updates.map(([field]) => `${field} = ?`);
         assignments.push("source_snapshot = ?", "updated_at = ?");
         ownedIds.set(donor.id, match.existing.id);
+        const before = { ...Object.fromEntries(updates.map(([field]) => [field, match.existing![field as keyof ExistingJlDonor] ?? null])), source_snapshot: match.existing.source_snapshot };
+        const after = { ...Object.fromEntries(updates), source_snapshot: JSON.stringify(sourceSnapshot(donor)) };
+        householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId: match.existing.id, changeType: "update", beforeJson: JSON.stringify(before), afterJson: JSON.stringify(after), now });
+        if (report.household) report.household.updated += 1;
         statements.push(env.DB.prepare(`UPDATE donors SET ${assignments.join(", ")} WHERE id = ? AND owner_user_id = ? AND data_source = 'live'`)
           .bind(...updates.map(([, value]) => value), JSON.stringify(sourceSnapshot(donor)), now, match.existing.id, userId));
       }
@@ -383,7 +432,8 @@ export async function POST(request: Request) {
   } else {
     statements.push(env.DB.prepare(donorSql).bind(JSON.stringify(donorRows)));
   }
-  report.firstRelationshipId = ownedIds.get(preview.donors[0]?.id ?? "") ?? report.firstRelationshipId;
+  if (jlDetected && report.household) report.imported.donors = report.household.created + report.household.updated + report.household.merged;
+  report.firstRelationshipId = preview.donors.map((donor) => ownedIds.get(donor.id)).find(Boolean) ?? null;
 
   statements.push(
     env.DB.prepare(`INSERT OR IGNORE INTO gifts (id, donor_id, amount_cents, fund, received_at, note, created_at, updated_at)
@@ -399,6 +449,13 @@ export async function POST(request: Request) {
       .bind(importId, userId, fileName, fileHash, body.updateExisting ? 1 : 0, JSON.stringify(report), now, now),
     env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
   );
+  if (jlDetected && householdChangeRows.length) {
+    const importedDonorIds = householdChangeRows.map((change) => change.donorId);
+    statements.push(
+      env.DB.prepare("UPDATE donors SET owner_user_id = ?, data_source = 'live' WHERE owner_user_id = ? AND id IN (SELECT value FROM json_each(?))").bind(userId, userId, JSON.stringify(importedDonorIds)),
+      ...chunkJsonRows(householdChangeRows).map((chunk) => env.DB.prepare(`INSERT INTO household_import_changes (id,import_id,user_id,donor_id,change_type,before_json,after_json,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.importId'),json_extract(value,'$.userId'),json_extract(value,'$.donorId'),json_extract(value,'$.changeType'),json_extract(value,'$.beforeJson'),json_extract(value,'$.afterJson'),json_extract(value,'$.now') FROM json_each(?)`).bind(chunk)),
+    );
+  }
   if (jlDetected) statements.push(env.DB.prepare(`INSERT INTO jl_refresh_state (user_id, last_household_refresh_at, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET last_household_refresh_at = excluded.last_household_refresh_at, updated_at = excluded.updated_at`).bind(userId, now, now));
 

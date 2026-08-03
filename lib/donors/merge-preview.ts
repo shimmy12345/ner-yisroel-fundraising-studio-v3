@@ -10,6 +10,10 @@ export type ManualDonorMatchRow = {
   city: string | null;
   state: string | null;
   postal_code: string | null;
+  last_name?: string | null;
+  primary_first_name?: string | null;
+  spouse?: string | null;
+  spouse_first_name?: string | null;
 };
 
 export type DonorMergeCandidate = {
@@ -36,6 +40,10 @@ export function findLikelyManualDonorMatches(jlDonors: ImportDonor[], manualDono
       if (jlPhone.length >= 7 && [digits(row.phone), digits(row.home_phone)].includes(jlPhone)) { score += 5; reasons.push("same phone"); }
       if (donor.contact?.addressLine1 && text(donor.contact.addressLine1) === text(row.address_line_1)) { score += 2; reasons.push("same address"); }
       if (donor.contact?.city && text(donor.contact.city) === text(row.city) && donor.contact?.state && text(donor.contact.state) === text(row.state)) { score += 2; reasons.push("same city and state"); }
+      if (donor.contact?.lastName && text(donor.contact.lastName) === text(row.last_name)) { score += 2; reasons.push("same last name"); }
+      if (donor.contact?.primaryFirstName && text(donor.contact.primaryFirstName) === text(row.primary_first_name)) { score += 1; reasons.push("same primary first name"); }
+      const jlSpouse = text(donor.contact?.spouseFirstName);
+      if (jlSpouse && [text(row.spouse), text(row.spouse_first_name)].includes(jlSpouse)) { score += 2; reasons.push("same spouse name"); }
       if (score >= 4 && (!best || score > best.score)) best = { row, score, reasons };
     }
     if (best && donor.donorCode) candidates.push({ externalId: donor.donorCode, jlName: donor.name, manualDonorId: best.row.id, manualName: best.row.display_name, reasons: best.reasons });

@@ -12,14 +12,15 @@ export async function GET(request: Request) {
     const requestUrl = new URL(request.url);
     const purpose = requestUrl.searchParams.get("purpose");
     const importId = requestUrl.searchParams.get("importId")?.trim() || null;
-    if ((purpose === "donation_rollback") !== Boolean(importId)) {
+    const rollbackPurpose = purpose === "donation_rollback" || purpose === "household_rollback";
+    if (rollbackPurpose !== Boolean(importId)) {
       return Response.json({ error: "A rollback backup must identify its import batch." }, { status: 422 });
     }
-    if (purpose === "donation_rollback") {
+    if (rollbackPurpose) {
       const ownedImport = await env.DB.prepare("SELECT id FROM data_imports WHERE id = ? AND user_id = ? LIMIT 1").bind(importId, profile.id).first();
       if (!ownedImport) return Response.json({ error: "Import not found" }, { status: 404 });
     }
-    const [donors, gifts, givingActivities, interactions, recommendations, activityAudits, dataImports, importChanges, paymentAssignments, paymentAssignmentAudits, refreshState, rollbackAudits] = await Promise.all([
+    const [donors, gifts, givingActivities, interactions, recommendations, activityAudits, dataImports, importChanges, householdChanges, paymentAssignments, paymentAssignmentAudits, refreshState, rollbackAudits, householdRollbackAudits] = await Promise.all([
       env.DB.prepare("SELECT * FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample' ORDER BY id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM gifts WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY received_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM giving_activities WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY activity_date, id").bind(profile.id).all(),
@@ -28,10 +29,12 @@ export async function GET(request: Request) {
       env.DB.prepare("SELECT * FROM activity_status_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM data_imports WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM giving_activity_import_changes WHERE import_id IN (SELECT id FROM data_imports WHERE user_id = ?) ORDER BY import_id, source_fingerprint").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM household_import_changes WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM jl_payment_assignments WHERE user_id = ? ORDER BY created_at, payment_fingerprint").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM jl_payment_assignment_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM jl_refresh_state WHERE user_id = ?").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM donation_import_rollback_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM household_import_rollback_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
     ]);
     const backupId = crypto.randomUUID();
     const payload = JSON.stringify({
@@ -45,12 +48,14 @@ export async function GET(request: Request) {
       activityStatusAudits: activityAudits.results,
       dataImports: dataImports.results,
       givingActivityImportChanges: importChanges.results,
+      householdImportChanges: householdChanges.results,
       paymentAssignments: paymentAssignments.results,
       paymentAssignmentAudits: paymentAssignmentAudits.results,
       refreshState: refreshState.results,
       rollbackAudits: rollbackAudits.results,
+      householdRollbackAudits: householdRollbackAudits.results,
     }, null, 2);
-    if (purpose === "donation_rollback") {
+    if (rollbackPurpose) {
       await env.DB.prepare("INSERT INTO workspace_backup_audits (id,user_id,purpose,import_id,created_at) VALUES (?,?,?,?,?)")
         .bind(backupId, profile.id, purpose, importId, Math.floor(Date.now() / 1000)).run();
     }

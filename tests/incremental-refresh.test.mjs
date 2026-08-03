@@ -36,7 +36,9 @@ assert.match(route, /ON CONFLICT\(owner_user_id, external_source, source_fingerp
 assert.match(route, /jl_refresh_state/);
 assert.match(route, /historicalRecordsDeleted: 0/);
 assert.match(route, /no database changes were made/i);
-assert.doesNotMatch(route, /DELETE FROM (giving_activities|interactions|recommendations|donors)/i);
+assert.doesNotMatch(route, /DELETE FROM (giving_activities|interactions|recommendations)/i);
+assert.match(route, /decision\?\.action === "merge"/);
+assert.match(route, /DELETE FROM donors WHERE id=\? AND owner_user_id=\? AND data_source='live' AND external_source='JL Solutions'/);
 assert.match(previewRoute, /conflicts:/);
 assert.match(previewRoute, /rejectedRows:/);
 assert.match(page, /ORDER BY completed_at DESC, created_at DESC LIMIT 12/);

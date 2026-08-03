@@ -199,6 +199,35 @@ export const donationImportRollbackAudits = sqliteTable("donation_import_rollbac
   index("donation_import_rollback_audits_user_date_idx").on(table.userId, table.createdAt),
 ]);
 
+export const householdImportChanges = sqliteTable("household_import_changes", {
+  id: text("id").primaryKey(),
+  importId: text("import_id").notNull(),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull(),
+  changeType: text("change_type", { enum: ["insert", "update", "merge", "consolidated"] }).notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, string | number | null> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, string | number | null>>().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("household_import_changes_batch_donor_idx").on(table.importId, table.donorId),
+  index("household_import_changes_user_date_idx").on(table.userId, table.createdAt),
+]);
+
+export const householdImportRollbackAudits = sqliteTable("household_import_rollback_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  importId: text("import_id").notNull(),
+  backupConfirmed: integer("backup_confirmed", { mode: "boolean" }).notNull(),
+  previewJson: text("preview_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  removedDonors: integer("removed_donors").notNull(),
+  restoredDonors: integer("restored_donors").notNull(),
+  preservedLaterEdits: integer("preserved_later_edits").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("household_import_rollback_audits_import_idx").on(table.importId),
+  index("household_import_rollback_audits_user_date_idx").on(table.userId, table.createdAt),
+]);
+
 export const workspaceBackupAudits = sqliteTable("workspace_backup_audits", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
