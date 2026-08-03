@@ -1,4 +1,4 @@
-export type InteractionKind = "call" | "email" | "meeting" | "note" | "personal";
+export type InteractionKind = "call" | "email" | "meeting" | "visit" | "note" | "personal";
 export type ReminderChoice = "none" | "tomorrow" | "next-week" | "custom";
 
 export type InteractionExtraction = {
@@ -16,6 +16,7 @@ const KIND_LABELS: Record<InteractionKind, string> = {
   call: "Call",
   email: "Email",
   meeting: "Meeting",
+  visit: "Visit",
   note: "Note",
   personal: "Personal interaction",
 };
@@ -28,7 +29,8 @@ export function inferInteractionKind(note: string): InteractionKind {
   const lower = note.toLowerCase();
   if (/\b(called|phone|spoke by phone|voicemail)\b/.test(lower)) return "call";
   if (/\b(emailed|email|wrote to|replied)\b/.test(lower)) return "email";
-  if (/\b(coffee|lunch|dinner|met|meeting|visit)\b/.test(lower)) return "meeting";
+  if (/\b(coffee|lunch|dinner|met|meeting)\b/.test(lower)) return "meeting";
+  if (/\b(visit|visited|campus tour|stopped by)\b/.test(lower)) return "visit";
   if (/\b(birthday|anniversary|family|personal)\b/.test(lower)) return "personal";
   return "note";
 }
@@ -37,7 +39,7 @@ export function inferSubject(note: string, kind: InteractionKind): string {
   const lower = note.toLowerCase();
   const firstSentence = note.trim().split(/[.!?]\s|[\r\n]/, 1)[0]?.trim();
   if (firstSentence) {
-    const concise = firstSentence.replace(/^(called|emailed|met with|coffee with)\s+/i, "");
+    const concise = firstSentence.replace(/^(called|emailed|met with|coffee with|visited)\s+/i, "");
     return concise.length > 72 ? `${concise.slice(0, 69).trim()}…` : concise;
   }
   return `${interactionKindLabel(kind)} with donor`;

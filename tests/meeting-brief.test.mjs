@@ -58,6 +58,6 @@ assert.match(page, /Log Meeting Outcome/);
 assert.match(page, /type=meeting/);
 assert.match(donorPage, /Prepare for Meeting/);
 assert.match(today, /Prepare for Meeting/);
-assert.match(capturePage, /requestedParams\.type === "meeting"/);
+assert.match(capturePage, /allowedKinds\.has\(requestedParams\.type/);
 
 process.stdout.write("Meeting brief checks passed.\n");

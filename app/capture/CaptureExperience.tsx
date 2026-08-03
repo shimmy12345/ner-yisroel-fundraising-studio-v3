@@ -16,6 +16,7 @@ const kinds: Array<{ value: InteractionKind; icon: string }> = [
   { value: "call", icon: "☎" },
   { value: "email", icon: "✉" },
   { value: "meeting", icon: "○" },
+  { value: "visit", icon: "⌂" },
   { value: "note", icon: "✎" },
   { value: "personal", icon: "♡" },
 ];
@@ -23,6 +24,7 @@ const kinds: Array<{ value: InteractionKind; icon: string }> = [
 type SaveResult = {
   interactionId: string;
   occurredAt: string;
+  scheduled: boolean;
   reminderAt: string | null;
   extracted: ReturnType<typeof extractInteraction>;
 };
@@ -48,8 +50,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   );
   const validDate = Boolean(parseScheduledDate(occurredAt));
   const future = isFutureScheduledDate(occurredAt);
-  const scheduleError = future && activeKind !== "meeting" ? "Choose Meeting to schedule an interaction in the future." : "";
-  const ready = Boolean(donorId) && note.trim().length >= 4 && validDate && !scheduleError && (reminder !== "custom" || Boolean(customDate));
+  const ready = Boolean(donorId) && note.trim().length >= 4 && validDate && (reminder !== "custom" || Boolean(customDate));
   const dateLabel = schedulingLabel(occurredAt);
   const nowLabel = dateLabel;
 
@@ -101,13 +102,13 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
         <p className="eyebrow">INTERACTION CAPTURED</p>
         <h1>{result.extracted.subject}</h1>
         <p className="capture-lede">
-          {new Date(result.occurredAt).getTime() > Date.now() + 60_000 ? "Scheduled" : "Logged"} as {interactionKindLabel(result.extracted.type).toLowerCase()} on{" "}
+          {result.scheduled ? "Scheduled" : "Logged"} as {interactionKindLabel(result.extracted.type).toLowerCase()} on{" "}
           {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(result.occurredAt))}.
         </p>
         <section className="update-receipt" aria-label="Updated relationship surfaces">
-          <article><span>↗</span><div><strong>Timeline updated</strong><p>The interaction and original note were added to the relationship history.</p></div><b>Done</b></article>
-          <article><span>◇</span><div><strong>Institutional memory updated</strong><p>{result.extracted.memory}</p></div><b>Done</b></article>
-          <article><span>✦</span><div><strong>Relationship summary refreshed</strong><p>{result.extracted.relationshipSummary}</p></div><b>Done</b></article>
+          <article><span>↗</span><div><strong>{result.scheduled ? "Schedule updated" : "Timeline updated"}</strong><p>{result.scheduled ? "This activity is visible on Today and the donor timeline as scheduled work." : "The completed interaction and original note were added to the relationship history."}</p></div><b>Done</b></article>
+          {!result.scheduled && <article><span>◇</span><div><strong>Institutional memory updated</strong><p>{result.extracted.memory}</p></div><b>Done</b></article>}
+          {!result.scheduled && <article><span>✦</span><div><strong>Relationship summary refreshed</strong><p>{result.extracted.relationshipSummary}</p></div><b>Done</b></article>}
           {result.reminderAt && (
             <article><span>◷</span><div><strong>Reminder created</strong><p>{result.extracted.nextAction}</p></div><b>Done</b></article>
           )}
@@ -125,8 +126,8 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
       <header className="capture-header">
         <div>
           <p className="eyebrow">LOG INTERACTION</p>
-          <h1>What happened?</h1>
-          <p className="capture-lede">A few natural words are enough. Everything else is inferred.</p>
+          <h1>What happened or is planned?</h1>
+          <p className="capture-lede">A few natural words and the right date are enough. Everything else is inferred.</p>
         </div>
         <a href={donorId ? `/donors/${encodeURIComponent(donorId)}` : "/donors"} aria-label="Close interaction capture">×</a>
       </header>
@@ -175,7 +176,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
             <label htmlFor="interaction-occurred-at">Date &amp; time</label>
             <input id="interaction-occurred-at" type="datetime-local" value={occurredAt} onChange={(event) => { setOccurredAt(event.target.value); setStatus("idle"); }} />
             <button type="button" onClick={() => setOccurredAt(toLocalDateTimeValue(new Date()))}>Now</button>
-            {scheduleError && <small role="alert">{scheduleError}</small>}
+            {future && <small>Future activities remain scheduled until you log their outcome.</small>}
           </div>
 
           <fieldset className="reminder-picker">
@@ -223,19 +224,26 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           <button className="capture-save" disabled={!ready || status === "saving"} onClick={saveInteraction}>
             {status === "saving" ? "Updating relationship…" : <>Save interaction <span>⌘ ↵</span></>}
           </button>
-          <p className="capture-assurance">One save updates the timeline, relationship summary, memory, and follow-up.</p>
+          <p className="capture-assurance">{future ? "One save adds this to Today and the donor timeline as scheduled work." : "One save updates the timeline, relationship summary, memory, and follow-up."}</p>
         </section>
 
         <aside className="automation-panel">
-          <p className="eyebrow">AUTOMATIC AFTER SAVE</p><h2>Captured once. Reused everywhere.</h2>
-          <p>The original note remains the source of truth while Fundraising OS updates the relationship around it.</p>
+          <p className="eyebrow">AUTOMATIC AFTER SAVE</p><h2>{future ? "Scheduled once. Ready everywhere." : "Captured once. Reused everywhere."}</h2>
+          <p>{future ? "The activity stays scheduled until you record what actually happened." : "The original note remains the source of truth while Fundraising OS updates the relationship around it."}</p>
           <div className="automation-flow">
-            <article><span>1</span><div><strong>Timeline</strong><p>Interaction, type, subject, and selected date and time</p></div></article>
-            <article><span>2</span><div><strong>Institutional memory</strong><p>Durable personal and relationship context</p></div></article>
-            <article><span>3</span><div><strong>AI relationship summary</strong><p>Current story, sentiment, and momentum</p></div></article>
-            <article><span>4</span><div><strong>Reminder or next action</strong><p>Only when requested or a commitment is detected</p></div></article>
+            {future ? <>
+              <article><span>1</span><div><strong>Today or Upcoming</strong><p>Shown on the correct date for the signed-in fundraiser</p></div></article>
+              <article><span>2</span><div><strong>Donor timeline</strong><p>Clearly labeled as scheduled, not completed</p></div></article>
+              <article><span>3</span><div><strong>Outcome capture</strong><p>Ready to log the completed interaction afterward</p></div></article>
+              <article><span>4</span><div><strong>Optional reminder</strong><p>Created only when you request one</p></div></article>
+            </> : <>
+              <article><span>1</span><div><strong>Timeline</strong><p>Interaction, type, subject, and selected date and time</p></div></article>
+              <article><span>2</span><div><strong>Institutional memory</strong><p>Durable personal and relationship context</p></div></article>
+              <article><span>3</span><div><strong>AI relationship summary</strong><p>Current story, sentiment, and momentum</p></div></article>
+              <article><span>4</span><div><strong>Reminder or next action</strong><p>Only when requested or a commitment is detected</p></div></article>
+            </>}
           </div>
-          <div className="trust-note"><span>✓</span><p><strong>No duplicate entry.</strong> Fundraising OS keeps the original note and records every inferred update.</p></div>
+          <div className="trust-note"><span>✓</span><p><strong>No duplicate entry.</strong> {future ? "The planned activity remains separate from the completed outcome you log later." : "Fundraising OS keeps the original note and records every inferred update."}</p></div>
         </aside>
       </div>
     </main>

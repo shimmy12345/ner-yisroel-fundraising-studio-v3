@@ -5,7 +5,7 @@ import { LocalDate } from "./components/LocalDate";
 import { WelcomeExperience } from "./onboarding/WelcomeExperience";
 import { requireChatGPTUser } from "./chatgpt-auth";
 import { ensureUserProfile } from "../lib/auth/profile";
-import { loadWorkspaceBrief, type WorkspaceMeeting, type WorkspacePriority } from "../lib/workspace/live-data";
+import { loadWorkspaceBrief, type WorkspacePriority, type WorkspaceScheduledActivity } from "../lib/workspace/live-data";
 import { shouldShowOnboarding } from "../lib/onboarding/status";
 import { getDataMode } from "../lib/workspace/mode";
 
@@ -27,16 +27,17 @@ function PriorityCard({ priority, index }: { priority: WorkspacePriority; index:
   </article>;
 }
 
-function MeetingCard({ meeting, live }: { meeting: WorkspaceMeeting; live: boolean }) {
-  return <article className="meeting today-meeting-card">
-    <div className="meeting-time"><strong>{meeting.time}</strong><span>{meeting.period}</span></div>
+function ScheduledActivityCard({ activity, live, upcoming = false }: { activity: WorkspaceScheduledActivity; live: boolean; upcoming?: boolean }) {
+  return <article className="meeting today-meeting-card scheduled-activity-card">
+    <div className="meeting-time"><strong>{activity.time}</strong><span>{activity.period}</span>{upcoming && <small>{activity.date}</small>}</div>
     <div className="meeting-line" />
     <div>
-      <h3>{meeting.title}</h3>
-      <p>{meeting.detail}</p>
+      <div className="scheduled-activity-heading"><span className="event-type">{activity.typeLabel}</span><h3>{activity.donorName}</h3></div>
+      <strong className="scheduled-subject">{activity.subject}</strong>
+      <p>{activity.note}</p>
       <div className="meeting-links">
-        {live && <a href={`/donors/${encodeURIComponent(meeting.donorId)}/meeting-brief`}>Prepare for Meeting</a>}
-        <a href={`/donors/${encodeURIComponent(meeting.donorId)}`}>Open relationship →</a>
+        {live && activity.prepareHref ? <a href={activity.prepareHref}>Prepare</a> : <a href={activity.openHref}>Open</a>}
+        {live && activity.logOutcomeHref && <a href={activity.logOutcomeHref}>Log Outcome</a>}
       </div>
     </div>
   </article>;
@@ -61,16 +62,21 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       <a href={nextMeeting ? `/donors/${encodeURIComponent(nextMeeting.donorId)}/meeting-brief` : "/donors"}><span>☼</span><strong>Prepare for Meeting</strong><small>{nextMeeting ? "Open your next donor brief" : "Choose a donor to prepare"}</small></a>
     </nav>
 
+    <section className="today-upcoming today-schedule">
+      <div className="section-title"><div><h2>Today’s Schedule</h2><p>Calls, emails, meetings, visits, notes, and personal interactions scheduled for today</p></div><span className="count">{data.todaySchedule.length}</span></div>
+      {data.todaySchedule.length ? <div className="today-meeting-list">{data.todaySchedule.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} key={item.id} />)}</div> : <p className="empty-copy">No relationship activities are scheduled for today.</p>}
+    </section>
+
     <section className="today-upcoming">
-      <div className="section-title"><div><h2>Upcoming meetings</h2><p>Your next scheduled donor conversations</p></div><span className="count">{data.meetings.length}</span></div>
-      {data.meetings.length ? <div className="today-meeting-list">{data.meetings.map((item) => <MeetingCard meeting={item} live={mode === "live"} key={`${item.donorId}-${item.time}`} />)}</div> : <p className="empty-copy">No upcoming meetings are recorded. Use Schedule Meeting to add one.</p>}
+      <div className="section-title"><div><h2>Upcoming</h2><p>Future scheduled relationship activities</p></div><span className="count">{data.upcomingActivities.length}</span></div>
+      {data.upcomingActivities.length ? <div className="today-meeting-list">{data.upcomingActivities.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} upcoming key={item.id} />)}</div> : <p className="empty-copy">No future relationship activities are scheduled.</p>}
     </section>
 
     <BriefExperience surface="today" data={data} />
 
     <section className="today-priorities" id="priorities">
-      <div className="section-title"><div><h2>{showAll ? "All current priorities" : "Top priorities"}</h2><p>Ranked by overdue reminders, today’s meetings, recent gifts, open commitments, and contact gaps</p></div>{data.priorityCount > data.priorities.length ? <a className="view-all-link" href="/?priorities=all#priorities">View all {data.priorityCount}</a> : showAll ? <a className="view-all-link" href="/#priorities">Show top priorities</a> : null}</div>
-      {data.priorities.length ? <div className="priority-list">{data.priorities.map((item, index) => <PriorityCard key={item.donorId} priority={item} index={index} />)}</div> : <section className="directory-empty"><h2>No priorities yet</h2><p>Your workspace has no due reminders, meetings, gifts, open commitments, or contact gaps requiring attention.</p><a href="/capture?returnTo=%2F">Log an interaction</a></section>}
+      <div className="section-title"><div><h2>{showAll ? "All current priorities" : "Top priorities"}</h2><p>Ranked by overdue reminders, today’s scheduled activities, recent gifts, open commitments, and contact gaps</p></div>{data.priorityCount > data.priorities.length ? <a className="view-all-link" href="/?priorities=all#priorities">View all {data.priorityCount}</a> : showAll ? <a className="view-all-link" href="/#priorities">Show top priorities</a> : null}</div>
+      {data.priorities.length ? <div className="priority-list">{data.priorities.map((item, index) => <PriorityCard key={item.donorId} priority={item} index={index} />)}</div> : <section className="directory-empty"><h2>No priorities yet</h2><p>Your workspace has no due reminders, scheduled activities, gifts, open commitments, or contact gaps requiring attention.</p><a href="/capture?returnTo=%2F">Log an interaction</a></section>}
     </section>
 
     <section className="today-recent-activity">

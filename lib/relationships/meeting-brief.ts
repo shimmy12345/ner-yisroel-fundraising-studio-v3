@@ -54,7 +54,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
     env.DB.prepare(`SELECT i.id, i.type, i.occurred_at, i.summary
       FROM interactions i JOIN donors d ON d.id = i.donor_id
       WHERE i.donor_id = ? AND i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
-        AND i.occurred_at <= ?
+        AND i.occurred_at <= ? AND i.source NOT LIKE 'capture-scheduled:%' AND i.occurred_at <= i.created_at
       ORDER BY i.occurred_at DESC LIMIT 5`).bind(donorId, userId, userId, now).all<InteractionRow>(),
     env.DB.prepare(`SELECT r.id, r.action, r.reason, r.due_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id

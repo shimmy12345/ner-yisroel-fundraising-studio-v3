@@ -19,6 +19,8 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
   const requestedParams = await searchParams;
   const requested = requestedParams.donorId;
   const initialDonorId = donors.results.some((item) => item.id === requested) ? requested! : donors.results[0]?.id ?? "";
+  const allowedKinds = new Set(["call", "email", "meeting", "visit", "note", "personal"]);
+  const initialKind = allowedKinds.has(requestedParams.type ?? "") ? requestedParams.type as "call" | "email" | "meeting" | "visit" | "note" | "personal" : null;
   return <AppShell active="donors"><CaptureExperience donors={donors.results.map((item) => ({
     id: item.id,
     name: item.display_name,
@@ -27,5 +29,5 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
     code: item.external_id || item.donor_code,
     email: item.email,
     phone: item.phone || item.alternate_mobile_phone || item.home_phone,
-  }))} initialDonorId={initialDonorId} initialKind={requestedParams.type === "meeting" ? "meeting" : null} returnTo={requestedParams.returnTo === "/" ? "/" : null} /></AppShell>;
+  }))} initialDonorId={initialDonorId} initialKind={initialKind} returnTo={requestedParams.returnTo === "/" ? "/" : null} /></AppShell>;
 }

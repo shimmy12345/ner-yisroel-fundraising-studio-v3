@@ -10,7 +10,7 @@ export function parseScheduledDate(value: string) {
 
 export function isFutureScheduledDate(value: string, now = new Date()) {
   const parsed = parseScheduledDate(value);
-  return parsed ? parsed.getTime() > now.getTime() + 60_000 : false;
+  return parsed ? parsed.getTime() > now.getTime() : false;
 }
 
 export function schedulingLabel(value: string, now = new Date()) {

@@ -19,7 +19,7 @@ type RequestBody = {
   occurredAt?: string;
 };
 
-const kinds = new Set<InteractionKind>(["call", "email", "meeting", "note", "personal"]);
+const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
 const reminders = new Set<ReminderChoice>(["none", "tomorrow", "next-week", "custom"]);
 
 export async function POST(request: Request) {
@@ -41,9 +41,7 @@ export async function POST(request: Request) {
   const capturedAt = new Date();
   const occurredAt = body.occurredAt ? new Date(body.occurredAt) : capturedAt;
   if (!Number.isFinite(occurredAt.getTime())) return Response.json({ error: "Choose a valid interaction date and time" }, { status: 422 });
-  if (occurredAt.getTime() > capturedAt.getTime() + 60_000 && extracted.type !== "meeting") {
-    return Response.json({ error: "Only meetings can be scheduled in the future" }, { status: 422 });
-  }
+  const scheduled = occurredAt.getTime() > capturedAt.getTime();
   const reminder = reminders.has(body.reminder ?? "none") ? body.reminder ?? "none" : "none";
   const dueAt = reminderDueAt(reminder, body.customDate, capturedAt);
   if (reminder === "custom" && !dueAt) return Response.json({ error: "Choose a custom reminder date" }, { status: 422 });
@@ -55,15 +53,21 @@ export async function POST(request: Request) {
   const userId = profile.id;
   const ownedDonor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live'").bind(donorId, userId).first<{ id: string }>();
   if (!ownedDonor) return Response.json({ error: "Donor not found" }, { status: 404 });
-  const storedType = extracted.type === "personal" ? "note" : extracted.type;
+  const storedType = extracted.type;
+  const source = `${scheduled ? "capture-scheduled" : "capture"}:${extracted.type}`;
   const statements = [
     env.DB.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(interactionId, donorId, userId, storedType, occurredAtEpoch, `${extracted.subject}\n${extracted.summary}`, `capture:${extracted.type}`, now, now),
-    env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
-      .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId, userId),
+      .bind(interactionId, donorId, userId, storedType, occurredAtEpoch, `${extracted.subject}\n${extracted.summary}`, source, now, now),
   ];
 
-  if (dueAt || extracted.commitments.length > 0) {
+  if (!scheduled) {
+    statements.push(
+      env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
+        .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId, userId),
+    );
+  }
+
+  if (dueAt || (!scheduled && extracted.commitments.length > 0)) {
     statements.push(
       env.DB.prepare("INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(
@@ -92,6 +96,7 @@ export async function POST(request: Request) {
   return Response.json({
     interactionId,
     occurredAt: occurredAt.toISOString(),
+    scheduled,
     reminderAt: dueAt?.toISOString() ?? null,
     extracted,
   }, { status: 201 });

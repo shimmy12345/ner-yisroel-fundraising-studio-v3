@@ -6,9 +6,10 @@ import { useBriefSpeech } from "./useBriefSpeech";
 
 export function createBriefText(data: WorkspaceBrief) {
   const priorities = data.priorities.map((item, index) => `${index + 1}. ${item.name}. ${item.reason}. ${item.why} Recommended action: ${item.action}.`).join(" ") || "No current priorities.";
-  const meetings = data.meetings.map((item) => `${item.time} ${item.period}, ${item.title}, ${item.detail}.`).join(" ") || "No upcoming meetings recorded.";
+  const todaySchedule = data.todaySchedule.map((item) => `${item.time} ${item.period}, ${item.typeLabel} with ${item.donorName}, ${item.subject}.`).join(" ") || "No relationship activities are scheduled for today.";
+  const upcoming = data.upcomingActivities.map((item) => `${item.date} at ${item.time} ${item.period}, ${item.typeLabel} with ${item.donorName}, ${item.subject}.`).join(" ") || "No future relationship activities are scheduled.";
   const gifts = data.gifts.map((item) => `${item.name}, ${item.amount}, ${item.detail}.`).join(" ") || "No recent gifts recorded.";
-  return `Your full morning brief. ${data.overview} Top priorities. ${priorities} Upcoming meetings. ${meetings} Recent gifts. ${gifts} Recommended focus. ${data.recommendation}`;
+  return `Your full morning brief. ${data.overview} Today’s schedule. ${todaySchedule} Upcoming activities. ${upcoming} Top priorities. ${priorities} Recent gifts. ${gifts} Recommended focus. ${data.recommendation}`;
 }
 
 export function BriefExperience({ surface, data }: { surface: "today" | "assistant"; data: WorkspaceBrief }) {
@@ -29,7 +30,8 @@ export function BriefExperience({ surface, data }: { surface: "today" | "assista
     {isExpanded && <article className="assistant-full-brief" id={id}>
       <div className="assistant-full-brief-heading"><h3>Full brief</h3><button type="button" onClick={() => setIsExpanded(false)} aria-label={`Close ${surface} full brief`}>Close</button></div><p>{data.overview}</p>
       <section><h4>Top priorities</h4>{data.priorities.length ? <ol>{data.priorities.map((item) => <li key={item.donorId}><strong>{item.name}</strong><span>{item.reason}. {item.why} Recommended action: {item.action}.</span></li>)}</ol> : <p>No time-sensitive priorities are available.</p>}</section>
-      <div className="assistant-brief-columns"><section><h4>Upcoming meetings</h4>{data.meetings.length ? <ul>{data.meetings.map((item) => <li key={`${item.donorId}-${item.time}`}><strong>{item.time} {item.period}</strong><span>{item.title} · {item.detail}</span></li>)}</ul> : <p>No upcoming meetings are recorded.</p>}</section><section><h4>Recent gifts</h4>{data.gifts.length ? <ul>{data.gifts.map((item) => <li key={item.id}><strong>{item.name} · {item.amount}</strong><span>{item.detail}</span></li>)}</ul> : <p>No recent gifts are recorded.</p>}</section></div>
+      <div className="assistant-brief-columns"><section><h4>Today’s schedule</h4>{data.todaySchedule.length ? <ul>{data.todaySchedule.map((item) => <li key={item.id}><strong>{item.time} {item.period} · {item.typeLabel}</strong><span>{item.donorName} · {item.subject}</span></li>)}</ul> : <p>No relationship activities are scheduled for today.</p>}</section><section><h4>Upcoming activities</h4>{data.upcomingActivities.length ? <ul>{data.upcomingActivities.map((item) => <li key={item.id}><strong>{item.date} · {item.time} {item.period}</strong><span>{item.typeLabel} with {item.donorName} · {item.subject}</span></li>)}</ul> : <p>No future relationship activities are scheduled.</p>}</section></div>
+      <section><h4>Recent gifts</h4>{data.gifts.length ? <ul>{data.gifts.map((item) => <li key={item.id}><strong>{item.name} · {item.amount}</strong><span>{item.detail}</span></li>)}</ul> : <p>No recent gifts are recorded.</p>}</section>
       <section className="assistant-brief-focus"><h4>Recommended focus</h4><p>{data.recommendation}</p></section><button className="assistant-collapse-brief" type="button" onClick={() => setIsExpanded(false)}>Collapse full brief</button>
     </article>}
   </section>;

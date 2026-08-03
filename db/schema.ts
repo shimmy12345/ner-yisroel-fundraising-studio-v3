@@ -56,7 +56,7 @@ export const interactions = sqliteTable("interactions", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
   userId: text("user_id").notNull().references(() => users.id),
-  type: text("type", { enum: ["call", "email", "meeting", "note", "gift"] }).notNull(),
+  type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift"] }).notNull(),
   occurredAt: integer("occurred_at", { mode: "timestamp" }).notNull(),
   summary: text("summary").notNull(),
   source: text("source").notNull().default("manual"),

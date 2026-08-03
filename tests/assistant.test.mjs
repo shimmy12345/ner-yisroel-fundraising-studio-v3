@@ -45,7 +45,8 @@ async function run() {
   assert.match(brief, /Collapse full brief/);
   assert.match(brief, /aria-expanded=\{isExpanded\}/);
   assert.match(brief, /Top priorities/);
-  assert.match(brief, /Upcoming meetings/);
+  assert.match(brief, /Today’s schedule/);
+  assert.match(brief, /Upcoming activities/);
   assert.match(brief, /Recent gifts/);
   assert.match(brief, /Recommended focus/);
 
