@@ -1,6 +1,7 @@
 import type { ImportRow } from "./recognition.ts";
 
 export const JL_DONATION_COLUMNS = ["Code", "Name", "Total Due", "Item Num", "Desc", "Campaign", "Due Date", "Amount", "Paid", "Balance Due", "Company"] as const;
+export const JL_COMPACT_DONATION_COLUMNS = ["Code", "First Name", "Last Name", "Date", "Campaign", "Amount"] as const;
 
 export type GivingCategory = "completed_gift" | "open_pledge" | "partially_paid_pledge" | "event_or_ad" | "nonfinancial_entry" | "needs_review";
 export type GivingActivity = {
@@ -27,9 +28,13 @@ export type DonationPreview = {
   counts: Record<GivingCategory, number> & { total: number; zeroDollar: number; suspiciousDates: number };
 };
 
+export type DonationClassificationOptions = { compactPaymentStatus?: "fully_paid" };
+
 export function isJlDonationExport(columns: string[]) {
   const found = new Set(columns.map((column) => column.trim().toLowerCase()));
-  return JL_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
+  const fullExport = JL_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
+  const compactExport = JL_COMPACT_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
+  return fullExport || compactExport;
 }
 
 function currency(value: string) {
@@ -54,14 +59,16 @@ function complimentary(item: string, description: string) {
   return /included|complimentary|no\s*charge|free\b/i.test(`${item} ${description}`);
 }
 
-export function classifyJlDonation(row: ImportRow, now = new Date()): Omit<GivingActivity, "rowNumber" | "fingerprint" | "sourceValues"> {
+export function classifyJlDonation(row: ImportRow, now = new Date(), options: DonationClassificationOptions = {}): Omit<GivingActivity, "rowNumber" | "fingerprint" | "sourceValues"> {
   const code = row.Code?.trim() ?? "";
   const committedCents = currency(row.Amount ?? "");
-  const paidCents = currency(row.Paid ?? "");
-  const balanceCents = currency(row["Balance Due"] ?? "");
-  const date = activityDate(row["Due Date"] ?? "");
+  const hasPaymentStatus = Object.hasOwn(row, "Paid") && Object.hasOwn(row, "Balance Due");
+  const paidCents = hasPaymentStatus ? currency(row.Paid ?? "") : options.compactPaymentStatus === "fully_paid" ? committedCents : 0;
+  const balanceCents = hasPaymentStatus ? currency(row["Balance Due"] ?? "") : 0;
+  const date = activityDate(row["Due Date"] ?? row.Date ?? "");
   const itemType = row["Item Num"]?.trim() ?? "";
   const description = row.Desc?.trim() ?? "";
+  const sourceName = row.Name?.trim() || [row["First Name"], row["Last Name"]].filter(Boolean).join(" ").trim();
   const earliest = Date.UTC(1980, 0, 1) / 1000;
   const latest = Math.floor(new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).getTime() / 1000);
   const suspiciousDate = date !== null && (date < earliest || date > latest);
@@ -70,6 +77,7 @@ export function classifyJlDonation(row: ImportRow, now = new Date()): Omit<Givin
   if (!code) { category = "needs_review"; reviewReason = "Missing JL Code"; }
   else if (date === null) { category = "needs_review"; reviewReason = "Missing or invalid activity date"; }
   else if (suspiciousDate) { category = "needs_review"; reviewReason = "Suspicious historical or future date"; }
+  else if (!hasPaymentStatus && options.compactPaymentStatus !== "fully_paid") { category = "needs_review"; reviewReason = "Payment status cannot be determined because Paid and Balance Due columns are missing"; }
   else if (committedCents === null || paidCents === null || balanceCents === null || committedCents < 0 || paidCents < 0 || balanceCents < 0) { category = "needs_review"; reviewReason = "Malformed or negative amount"; }
   else if (Math.abs(committedCents - paidCents - balanceCents) > 1) { category = "needs_review"; reviewReason = "Amount does not equal paid plus balance"; }
   else if (complimentary(itemType, description) || (committedCents === 0 && paidCents === 0 && balanceCents === 0)) category = "nonfinancial_entry";
@@ -78,12 +86,12 @@ export function classifyJlDonation(row: ImportRow, now = new Date()): Omit<Givin
   else if (committedCents > 0 && paidCents === 0 && balanceCents === committedCents) category = "open_pledge";
   else if (committedCents > 0 && paidCents === committedCents && balanceCents === 0) category = "completed_gift";
   else { category = "needs_review"; reviewReason = "Amounts are ambiguous"; }
-  return { externalHouseholdId: code, sourceName: row.Name?.trim() ?? "", activityDate: date, committedCents, paidCents, balanceCents, itemType, description, sourceCampaign: row.Campaign?.trim() ?? "", category, suspiciousDate, reviewReason };
+  return { externalHouseholdId: code, sourceName, activityDate: date, committedCents, paidCents, balanceCents, itemType, description, sourceCampaign: row.Campaign?.trim() ?? "", category, suspiciousDate, reviewReason };
 }
 
 function canonicalFingerprint(row: ImportRow) {
-  return ["Code", "Due Date", "Item Num", "Desc", "Campaign", "Amount", "Company"]
-    .map((field) => (row[field] ?? "").trim().replace(/\s+/g, " ").toLowerCase()).join("\u001f");
+  return [row.Code, row["Due Date"] ?? row.Date, row["Item Num"], row.Desc, row.Campaign, row.Amount, row.Company]
+    .map((value) => (value ?? "").trim().replace(/\s+/g, " ").toLowerCase()).join("\u001f");
 }
 
 async function sha256(value: string) {
@@ -91,7 +99,7 @@ async function sha256(value: string) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function buildJlDonationPreview(rows: ImportRow[], now = new Date()): Promise<DonationPreview> {
+export async function buildJlDonationPreview(rows: ImportRow[], now = new Date(), options: DonationClassificationOptions = {}): Promise<DonationPreview> {
   const activities: GivingActivity[] = [];
   const duplicateRows: DonationPreview["duplicateRows"] = [];
   const seen = new Set<string>();
@@ -100,7 +108,7 @@ export async function buildJlDonationPreview(rows: ImportRow[], now = new Date()
     const fingerprint = await sha256(canonicalFingerprint(row));
     if (seen.has(fingerprint)) { duplicateRows.push({ row: index + 2, fingerprint }); continue; }
     seen.add(fingerprint);
-    activities.push({ rowNumber: index + 2, fingerprint, ...classifyJlDonation(row, now), sourceValues: Object.fromEntries(JL_DONATION_COLUMNS.map((column) => [column, row[column]?.trim() ?? ""])) });
+    activities.push({ rowNumber: index + 2, fingerprint, ...classifyJlDonation(row, now, options), sourceValues: Object.fromEntries(Object.entries(row).map(([column, value]) => [column, value.trim()])) });
   }
   const categories = { completed_gift: 0, open_pledge: 0, partially_paid_pledge: 0, event_or_ad: 0, nonfinancial_entry: 0, needs_review: 0 };
   activities.forEach((activity) => { categories[activity.category] += 1; });

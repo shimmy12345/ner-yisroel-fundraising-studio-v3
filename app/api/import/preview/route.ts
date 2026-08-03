@@ -8,7 +8,7 @@ import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHou
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
 
-type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string };
+type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid" };
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
   if (!rows.length || rows.length > 25000 || !/^[a-f0-9]{64}$/.test(fileHash)) return Response.json({ error: "The preview could not be validated" }, { status: 422 });
   const columns = Object.keys(rows[0] ?? {});
   if (isJlDonationExport(columns)) {
-    const donationPreview = await buildJlDonationPreview(rows);
+    const donationPreview = await buildJlDonationPreview(rows, new Date(), body.compactPaymentStatus === "fully_paid" ? { compactPaymentStatus: "fully_paid" } : {});
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
     const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
     const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
@@ -41,7 +41,8 @@ export async function POST(request: Request) {
       proposedUpdates: match.proposedUpdates.length,
       alreadyImported: match.alreadyImported,
       conflicts: match.unknownHousehold + match.needsReview,
-      rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.needsReview + match.nonfinancial,
+      reviewRows: match.reviewActivities.map((activity) => ({ row: activity.rowNumber, reason: activity.reviewReason ?? "Row requires review" })),
+      rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.nonfinancial,
       rangeStart: isoDate(range.start),
       rangeEnd: isoDate(range.end),
     } });

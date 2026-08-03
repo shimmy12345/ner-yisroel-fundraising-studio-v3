@@ -5,14 +5,14 @@ import type { ChangeEvent, DragEvent } from "react";
 import { FIELD_LABELS, recognizeColumns, type ColumnMapping, type ColumnSuggestion, type ImportField, type ImportPreview, type ImportRow } from "../../../lib/import/recognition";
 import { decodeCsv, parseCsv, parseXlsx, rowsToRecords } from "../../../lib/import/file-parsers";
 import { isJlSolutionsExport, JL_MAPPING } from "../../../lib/import/jl-solutions";
-import { isJlDonationExport, JL_DONATION_COLUMNS } from "../../../lib/import/jl-donations";
+import { isJlDonationExport } from "../../../lib/import/jl-donations";
 
 type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
-type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
+type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
 type RowFailure = { row: number; category?: FailureCategory; reason: string; values?: ImportRow };
 type ValidationSummary = { totalRows: number; passedRows: number; failedRows: number; duplicateRows: number; nonfinancialRows: number; firstErrors: RowFailure[] };
 type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
-type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; rollbackCauses: FailureCategory[]; validation: ValidationSummary; rejectedRows: RowFailure[]; results: ResultSummary };
+type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
 type ImportReport = {
   importId: string;
   fileName: string;
@@ -20,6 +20,7 @@ type ImportReport = {
   updateExisting: boolean;
   imported: { donors: number; gifts: number; interactions: number; reminders: number };
   rejectedRows: RowFailure[];
+  reviewRows?: RowFailure[];
   warnings: string[];
   firstRelationshipId?: string | null;
   profile?: string;
@@ -29,10 +30,12 @@ type ImportReport = {
   databaseChangesMade?: boolean;
   fatalError?: string | null;
   noChangesMade?: boolean;
+  reviewOnly?: boolean;
+  message?: string;
   refresh?: { kind: "household" | "donation"; rangeStart?: string | null; rangeEnd?: string | null; historicalRecordsDeleted: number; workspaceRecordsPreserved: boolean };
 };
 type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }>; duplicateRows: number; rejectedRows: number };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: RowFailure[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null };
 
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
@@ -47,6 +50,7 @@ const FAILURE_LABELS: Record<FailureCategory, string> = {
   invalid_dates: "Invalid dates",
   invalid_amounts: "Invalid amounts",
   missing_required_fields: "Missing required fields",
+  classification_review: "Classification requires review",
   nonfinancial_entries: "Zero-dollar or nonfinancial entries",
   transaction_database_errors: "Transaction or database error",
   unexpected_exceptions: "Unexpected exception",
@@ -96,6 +100,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
   const [mode, setMode] = useState<"first" | "refresh">(refreshOverview.lastHouseholdRefreshAt ? "refresh" : "first");
   const [donationDetected, setDonationDetected] = useState(false);
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
+  const [compactPaymentStatus, setCompactPaymentStatus] = useState<"review" | "fully_paid">("review");
 
   async function inspectFile(file: File) {
     if (!/\.(csv|xlsx)$/i.test(file.name)) {
@@ -128,6 +133,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       setStep("recognition");
       setJlDetected(detectedJl);
       setDonationDetected(detectedDonation);
+      setCompactPaymentStatus("review");
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
       setStatusMessage("");
     } catch (fileError) {
@@ -152,7 +158,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     setError("");
     setStatusMessage("Checking the preview securely…");
     try {
-      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash }) });
+      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash, compactPaymentStatus }) });
       const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; error?: string };
       if (!response.ok || (!payload.preview && !payload.donation)) throw new Error(payload.error ?? "The preview could not be prepared.");
       setPreview(payload.preview ?? { donors: [], gifts: [], interactions: [], reminders: [], rejectedRows: [], warnings: [] });
@@ -172,7 +178,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, compactPaymentStatus }),
       });
       const payload = await response.json() as ImportReport | ImportFailure | { error?: string };
       if (!response.ok) {
@@ -202,6 +208,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       noChangesMade: true,
       rollbackCauses: ["unexpected_exceptions"],
       validation: { totalRows: rows.length, passedRows: 0, failedRows: rows.length, duplicateRows: 0, nonfinancialRows: 0, firstErrors: [{ row: 0, category: "unexpected_exceptions", reason }] },
+      reviewRows: [],
       rejectedRows: rows.map((_, index) => ({ row: index + 2, category: "unexpected_exceptions", reason: "Row was not written because the import request failed." })),
       results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: rows.length, rejectedRows: rows.length, unmatchedJlCodes: 0, elapsedMs: 0 },
     };
@@ -219,6 +226,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     setJlPreview(null);
     setDonationDetected(false);
     setDonationPreview(null);
+    setCompactPaymentStatus("review");
     setFailureReport(null);
     setReport(null);
     setError("");
@@ -229,17 +237,18 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     return item.values ?? rows[item.row - 2] ?? {};
   }
 
-  function downloadRejectedRows(items: RowFailure[], suffix: string) {
+  function downloadRows(items: RowFailure[], suffix: string, kind: "rejected" | "review") {
     const sourceColumns = Object.keys(rows[0] ?? {});
     const header = ["row", "category", "reason", ...sourceColumns].map(csvValue).join(",");
     const lines = items.map((item) => {
       const values = sourceValues(item);
       return [item.row, item.category ?? "validation", item.reason, ...sourceColumns.map((column) => values[column] ?? "")].map(csvValue).join(",");
     });
-    download(`fundraising-os-rejected-rows-${suffix}.csv`, [header, ...lines].join("\n"), "text/csv");
+    download(`fundraising-os-${kind}-rows-${suffix}.csv`, [header, ...lines].join("\n"), "text/csv");
   }
 
   const stepNumber = step === "upload" ? 2 : step === "recognition" ? 3 : step === "preview" ? 4 : 5;
+  const compactDonation = donationDetected && !("Paid" in (rows[0] ?? {})) && !("Balance Due" in (rows[0] ?? {}));
 
   return (
     <main className="import-page">
@@ -291,10 +300,10 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
               <span>{fileName} · {rows.length.toLocaleString()} rows</span>
             </div>
             {jlDetected && <div className="jl-detected" role="status"><strong>JL Solutions household export detected.</strong><span>The saved household mapping has been applied automatically.</span></div>}
-            {donationDetected && <div className="jl-detected" role="status"><strong>JL Solutions donation export detected.</strong><span>Paid, committed, balance, and source-context fields were recognized automatically.</span></div>}
+            {donationDetected && <div className="jl-detected" role="status"><strong>JL Solutions donation export detected.</strong><span>Available donation columns were recognized automatically. Missing payment-status fields will be held for review.</span></div>}
             <p className="import-lede">High-confidence columns are ready. Review only the ones marked for attention.</p>
             <div className="recognition-list">
-              {donationDetected && JL_DONATION_COLUMNS.map((column) => <article key={column}><div className="recognition-icon">✓</div><div><strong>{column}</strong><span>99% confidence</span></div><div className="recognized-field"><span>{DONATION_LABELS[column]}</span></div></article>)}
+              {donationDetected && Object.keys(rows[0] ?? {}).map((column) => <article key={column}><div className="recognition-icon">✓</div><div><strong>{column}</strong><span>99% confidence</span></div><div className="recognized-field"><span>{DONATION_LABELS[column] ?? "Source context"}</span></div></article>)}
               {suggestions.map((suggestion) => {
                 const selected = mapping[suggestion.column] ?? "ignore";
                 const editing = suggestion.requiresReview || editingColumn === suggestion.column;
@@ -318,6 +327,13 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
                 );
               })}
             </div>
+            {compactDonation && <label className="update-existing-option">
+              <span><strong>Payment status classification</strong><small>This export has Amount but no Paid or Balance Due columns. Keep the safe review default unless this JL export contains completed payments.</small></span>
+              <select aria-label="Payment status classification" value={compactPaymentStatus} onChange={(event) => setCompactPaymentStatus(event.target.value as "review" | "fully_paid")}>
+                <option value="review">Hold every row for review</option>
+                <option value="fully_paid">Treat Amount as fully paid</option>
+              </select>
+            </label>}
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Choose another file</button>
               <button className="onboarding-primary" type="button" onClick={() => void showPreview()} disabled={Boolean(statusMessage)}>{statusMessage || "Review import preview"}</button>
@@ -332,8 +348,9 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             <p className="import-lede">This is a preview only. Nothing has been written to Fundraising OS.</p>
             {donationDetected && donationPreview ? <>
               <p className="jl-export-range">Detected export range: <strong>{donationPreview.rangeStart && donationPreview.rangeEnd ? `${dateLabel(donationPreview.rangeStart)} – ${dateLabel(donationPreview.rangeEnd)}` : "No valid dated rows"}</strong></p>
-              <div className="import-counts"><article><strong>{donationPreview.newActivities.toLocaleString()}</strong><span>new gifts</span></article><article><strong>{donationPreview.proposedUpdates.toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article><article><strong>{donationPreview.conflicts.toLocaleString()}</strong><span>conflicts</span></article><article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article></div>
+              <div className="import-counts"><article><strong>{donationPreview.newActivities.toLocaleString()}</strong><span>new gifts</span></article><article><strong>{donationPreview.proposedUpdates.toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article><article><strong>{donationPreview.needsReview.toLocaleString()}</strong><span>review rows</span></article><article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article></div>
               <div className="import-preview-grid"><section><h2>Ready</h2><p><span>✓</span>Matched by JL Code<b>{donationPreview.matchedRows}</b></p><p><span>✓</span>Open pledges<b>{donationPreview.openPledges}</b></p><p><span>✓</span>Already imported<b>{donationPreview.alreadyImported}</b></p></section><section><h2>Excluded or review</h2><p><span>•</span>Unknown JL Code<b>{donationPreview.unknownHousehold}</b></p><p><span>•</span>Needs review<b>{donationPreview.needsReview}</b></p><p><span>•</span>Suspicious dates<b>{donationPreview.suspiciousDates}</b></p><p><span>•</span>Duplicate source rows<b>{donationPreview.duplicateSourceRows}</b></p><p><span>•</span>Zero-dollar/nonfinancial<b>{donationPreview.nonfinancial}</b></p></section></div>
+              {donationPreview.reviewRows.length > 0 && <section className="import-failure-section"><h2>Rows requiring review</h2><ol className="import-failure-errors">{donationPreview.reviewRows.slice(0, 8).map((item) => <li key={item.row}><strong>Row {item.row}</strong><span>{item.reason}</span></li>)}</ol><button type="button" onClick={() => downloadRows(donationPreview.reviewRows, fileHash.slice(0, 12), "review")}>Download review report CSV</button></section>}
               <p className="import-privacy">Paid totals use Paid. Commitments use Amount. Open balances use Balance Due. Nothing has been written yet.</p>
             </> : <div className="import-counts">
               <article><strong>{preview.donors.length.toLocaleString()}</strong><span>{jlDetected ? "households" : "donors"}</span></article>
@@ -370,6 +387,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             {error && <p className="onboarding-error" role="alert">{error}</p>}
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
+              <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
               <button className="onboarding-primary" type="button" onClick={() => void importData()}>Confirm and import</button>
             </div>
           </section>
@@ -418,7 +436,8 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
               </ol>
             </section>
             <div className="import-report-actions">
-              <button type="button" onClick={() => downloadRejectedRows(failureReport.rejectedRows, failureReport.importId ?? "validation")} disabled={!failureReport.rejectedRows.length}>Download rejected rows CSV</button>
+              <button type="button" onClick={() => downloadRows(failureReport.reviewRows ?? [], failureReport.importId ?? "validation", "review")} disabled={!failureReport.reviewRows?.length}>Download review report CSV</button>
+              <button type="button" onClick={() => downloadRows(failureReport.rejectedRows, failureReport.importId ?? "validation", "rejected")} disabled={!failureReport.rejectedRows.length}>Download rejected rows CSV</button>
               <button type="button" onClick={() => download(`fundraising-os-validation-${failureReport.importId ?? "report"}.json`, JSON.stringify({ fileName, generatedAt: new Date().toISOString(), ...failureReport }, null, 2))}>Download validation report</button>
             </div>
             <div className="import-footer-actions">
@@ -430,11 +449,12 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
 
         {step === "complete" && report && (
           <section className="import-card import-complete">
-            <div className="import-success-mark">✓</div>
-            <p className="eyebrow">IMPORT COMPLETE</p>
-            <h1>Your workspace is ready.</h1>
-            {report.noChangesMade && <div className="import-rollback-assurance"><strong>Your workspace was already current.</strong><span>No gifts or households were duplicated.</span></div>}
-            <p className="import-lede">{report.profile === "JL Solutions Donations" ? `${report.donation?.newActivities ?? 0} new giving activities and ${report.donation?.updatedPledges ?? 0} pledge updates were processed.` : `${report.imported.donors} donors, ${report.imported.gifts} gifts, ${report.imported.interactions} interactions, and ${report.imported.reminders} reminders were processed.`}</p>
+            <div className={report.reviewOnly ? "import-failure-mark" : "import-success-mark"}>{report.reviewOnly ? "!" : "✓"}</div>
+            <p className="eyebrow">{report.reviewOnly ? "REVIEW NEEDED" : "IMPORT COMPLETE"}</p>
+            <h1>{report.reviewOnly ? "No rows were imported." : "Your workspace is ready."}</h1>
+            {report.reviewOnly ? <div className="import-rollback-assurance" role="status"><strong>{report.message}</strong><span>No changes were made to the database. Correct the column setup or source classifications, then retry.</span></div> : report.noChangesMade && <div className="import-rollback-assurance"><strong>Your workspace was already current.</strong><span>No gifts or households were duplicated.</span></div>}
+            {!report.reviewOnly && <p className="import-lede">{report.profile === "JL Solutions Donations" ? `${report.donation?.newActivities ?? 0} new giving activities and ${report.donation?.updatedPledges ?? 0} pledge updates were processed.` : `${report.imported.donors} donors, ${report.imported.gifts} gifts, ${report.imported.interactions} interactions, and ${report.imported.reminders} reminders were processed.`}</p>}
+            {report.reviewOnly && report.reviewRows?.length ? <section className="import-failure-section"><h2>Why each row requires review</h2><ol className="import-failure-errors">{report.reviewRows.slice(0, 8).map((item) => <li key={item.row}><strong>Row {item.row}</strong><span>{item.reason}</span></li>)}</ol></section> : null}
             {report.refresh && <p className="import-preservation-note">Historical gifts were not deleted. Fundraising OS interactions, reminders, notes, summaries, and institutional memory were preserved.</p>}
             {report.warnings.length > 0 && <ul className="import-complete-warnings">{report.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
             {report.results && <div className="import-result-counts import-success-counts">
@@ -451,10 +471,12 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             </div>}
             <div className="import-report-actions">
               <button type="button" onClick={() => download(`fundraising-os-import-${report.importId}.json`, JSON.stringify(report, null, 2))}>Download import report</button>
-              <button type="button" onClick={() => downloadRejectedRows(report.rejectedRows, report.importId)} disabled={!report.rejectedRows.length}>Download rejected rows{report.rejectedRows.length ? ` (${report.rejectedRows.length})` : ""}</button>
+              <button type="button" onClick={() => downloadRows(report.reviewRows ?? [], report.importId, "review")} disabled={!report.reviewRows?.length}>Download review report{report.reviewRows?.length ? ` (${report.reviewRows.length})` : ""}</button>
+              <button type="button" onClick={() => downloadRows(report.rejectedRows, report.importId, "rejected")} disabled={!report.rejectedRows.length}>Download rejected rows{report.rejectedRows.length ? ` (${report.rejectedRows.length})` : ""}</button>
             </div>
+            {report.reviewOnly && <div className="import-footer-actions"><button type="button" onClick={() => { setReport(null); setStep("recognition"); }}>Review column setup</button><button className="onboarding-primary" type="button" onClick={cancelImport}>Choose a corrected file</button></div>}
             {report.firstRelationshipId && <a className="onboarding-secondary" href={`/donors/${encodeURIComponent(report.firstRelationshipId)}`}>Open first imported relationship</a>}
-            <a className="onboarding-primary" href="/donors">View all imported relationships</a>
+            {!report.reviewOnly && <a className="onboarding-primary" href="/donors">View all imported relationships</a>}
           </section>
         )}
       </div>

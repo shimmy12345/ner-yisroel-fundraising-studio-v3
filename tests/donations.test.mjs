@@ -42,6 +42,26 @@ async function run() {
   const csv = rowsToRecords(parseCsv(`${JL_DONATION_COLUMNS.join(",")}\nJL-1,Example,100,GIFT,Scholarship,ANNUAL,2025-01-01,100,100,0,\n`));
   assert.equal(isJlDonationExport(csv.columns), true);
 
+  const compactCsv = rowsToRecords(parseCsv(`Code,First Name,Last Name,Date,Campaign,Amount
+JL-101,Example,One,8/3/2026,ANNUAL,$150.00
+JL-102,Example,Two,8/3/2026,ANNUAL,$18.00
+JL-103,Example,Three,8/2/2026,SPECIAL,"$1,000.00 "
+JL-104,Example,Four,8/3/2026,ANNUAL,$36.00
+JL-105,Example,Five,8/3/2026,SPECIAL,$72.00
+JL-106,Example,Six,8/3/2026,ANNUAL,$100.00
+`));
+  assert.equal(isJlDonationExport(compactCsv.columns), true, "the six-column incremental JL donation shape must not fall through to the household importer");
+  const compactPreview = await buildJlDonationPreview(compactCsv.rows, new Date("2026-08-03"));
+  assert.equal(compactPreview.activities.length, 6);
+  assert.equal(compactPreview.counts.needs_review, 6);
+  assert.ok(compactPreview.activities.every((activity) => activity.reviewReason === "Payment status cannot be determined because Paid and Balance Due columns are missing"));
+  const compactMatch = matchJlDonationActivities(compactPreview, compactPreview.activities.map((activity, index) => ({ id: `donor-${index}`, external_id: activity.externalHouseholdId })), []);
+  assert.equal(compactMatch.matched.length, 0);
+  assert.equal(compactMatch.reviewActivities.length, 6);
+  const approvedCompactPreview = await buildJlDonationPreview(compactCsv.rows, new Date("2026-08-03"), { compactPaymentStatus: "fully_paid" });
+  assert.equal(approvedCompactPreview.counts.completed_gift, 6);
+  assert.ok(approvedCompactPreview.activities.every((activity) => activity.paidCents === activity.committedCents && activity.balanceCents === 0));
+
   const productionShape = Array.from({ length: 6275 }, (_, index) => ({
     id: `jl-giving-${"a".repeat(64)}`, donorId: `imported-code-jl-${index % 248}`, externalHouseholdId: `JL-${index % 248}`,
     fingerprint: "a".repeat(64), activityDate: 1750000000, committedCents: 10000, paidCents: 10000, balanceCents: 0,
@@ -71,12 +91,19 @@ async function run() {
   assert.match(importRoute, /failedRows/);
   assert.match(importRoute, /transaction_database_errors/);
   assert.match(importRoute, /unexpected_exceptions/);
+  assert.match(importRoute, /No rows were imported because every row requires review\./);
+  assert.match(importRoute, /allRowsRequireReview/);
+  assert.match(importRoute, /reviewRows/);
   assert.doesNotMatch(importRoute, /relationship_summary\s*=|institutional_memory\s*=|DELETE FROM interactions/i);
   assert.match(donorPage, /Lifetime paid/);
   assert.match(donorPage, /Open commitments/);
   assert.match(importExperience, /No changes were made to the database\./);
   assert.match(importExperience, /Download rejected rows CSV/);
   assert.match(importExperience, /Download validation report/);
+  assert.match(importExperience, /Download review report CSV/);
+  assert.match(importExperience, /Correct the column setup or source classifications, then retry\./);
+  assert.match(importExperience, /Payment status classification/);
+  assert.match(importExperience, /Treat Amount as fully paid/);
   assert.match(importExperience, /households matched/);
   assert.match(importExperience, /elapsed import time/);
   process.stdout.write("JL donation import checks passed.\n");

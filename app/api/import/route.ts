@@ -17,18 +17,19 @@ type ImportRequest = {
   mapping?: ColumnMapping;
   updateExisting?: boolean;
   mode?: "first" | "refresh";
+  compactPaymentStatus?: "review" | "fully_paid";
 };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
 
-type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
+type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
 type RowFailure = { row: number; category: FailureCategory; reason: string };
 
 function reviewCategory(reason: string | null): FailureCategory {
   if (/code|required/i.test(reason ?? "")) return "missing_required_fields";
   if (/date/i.test(reason ?? "")) return "invalid_dates";
   if (/amount|negative/i.test(reason ?? "")) return "invalid_amounts";
-  return "unexpected_exceptions";
+  return "classification_review";
 }
 
 function safeDatabaseReason(error: unknown) {
@@ -82,23 +83,47 @@ export async function POST(request: Request) {
   if (isJlDonationExport(Object.keys(rows[0] ?? {}))) {
     const startedAt = Date.now();
     try {
-    const donationPreview = await buildJlDonationPreview(rows);
+    const donationPreview = await buildJlDonationPreview(rows, new Date(), body.compactPaymentStatus === "fully_paid" ? { compactPaymentStatus: "fully_paid" } : {});
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
     const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
     const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
     const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
     const match = matchJlDonationActivities(donationPreview, households.results, prior.results);
     const exportRange = donationExportRange(match.matched);
-    const rowFailures: RowFailure[] = [
+    const reviewRows: RowFailure[] = match.reviewActivities
+      .map((activity) => ({ row: activity.rowNumber, category: reviewCategory(activity.reviewReason), reason: activity.reviewReason ?? "Row requires review" }))
+      .sort((a, b) => a.row - b.row);
+    const rejectedRows: RowFailure[] = [
       ...donationPreview.duplicateRows.map((duplicate) => ({ row: duplicate.row, category: "duplicate_records" as const, reason: "Duplicate source row" })),
       ...match.unknownActivities.map((activity) => ({ row: activity.rowNumber, category: "unmatched_jl_codes" as const, reason: "JL Code does not match an imported household" })),
-      ...match.reviewActivities.map((activity) => ({ row: activity.rowNumber, category: reviewCategory(activity.reviewReason), reason: activity.reviewReason ?? "Row requires review" })),
       ...match.nonfinancialActivities.map((activity) => ({ row: activity.rowNumber, category: "nonfinancial_entries" as const, reason: "Zero-dollar, complimentary, or included entry was excluded from giving history" })),
     ].sort((a, b) => a.row - b.row);
-    const validation = { totalRows: rows.length, passedRows: match.matched.length, failedRows: match.unknownHousehold + match.needsReview, duplicateRows: donationPreview.duplicateRows.length, nonfinancialRows: match.nonfinancial, firstErrors: rowFailures.slice(0, 10) };
+    const validationIssues = [...reviewRows, ...rejectedRows].sort((a, b) => a.row - b.row);
+    const validation = { totalRows: rows.length, passedRows: match.matched.length, failedRows: reviewRows.length + rejectedRows.length, duplicateRows: donationPreview.duplicateRows.length, nonfinancialRows: match.nonfinancial, firstErrors: validationIssues.slice(0, 10) };
+    const allRowsRequireReview = reviewRows.length === rows.length && rejectedRows.length === 0;
+    if (allRowsRequireReview) {
+      return Response.json({
+        importId: `review-${fileHash.slice(0, 12)}`,
+        fileName,
+        completedAt: new Date().toISOString(),
+        profile: "JL Solutions Donations",
+        mode: body.mode === "refresh" ? "refresh" : "first",
+        reviewOnly: true,
+        message: "No rows were imported because every row requires review.",
+        databaseChangesMade: false,
+        noChangesMade: true,
+        imported: { donors: 0, gifts: 0, interactions: 0, reminders: 0 },
+        donation: { newActivities: 0, updatedPledges: 0, unchanged: 0, unknownHousehold: 0, needsReview: reviewRows.length, nonfinancialExcluded: 0, duplicateSourceRows: 0 },
+        validation,
+        reviewRows,
+        rejectedRows: [],
+        results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: reviewRows.length, rejectedRows: 0, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
+        warnings: ["No changes were made to the database. Correct the source columns or classification details, then retry."],
+      });
+    }
     if (!match.matched.length) {
-      const rollbackCauses = [...new Set(rowFailures.map((failure) => failure.category))];
-      return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, rejectedRows: rowFailures, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: match.needsReview, rejectedRows: rowFailures.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: Date.now() - startedAt } }, { status: 422 });
+      const rollbackCauses = [...new Set(rejectedRows.map((failure) => failure.category))];
+      return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, reviewRows, rejectedRows, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: Date.now() - startedAt } }, { status: 422 });
     }
     const now = Math.floor(Date.now() / 1000);
     const importId = crypto.randomUUID();
@@ -106,8 +131,8 @@ export async function POST(request: Request) {
     const householdsWithGiving = await env.DB.prepare("SELECT DISTINCT donor_id AS id FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND category NOT IN ('needs_review','nonfinancial_entry')").bind(userId).all<{ id: string }>();
     const givingDonorIds = new Set([...householdsWithGiving.results.map((item) => item.id), ...match.matched.map((item) => item.donorId)]);
     const householdsWithoutGivingHistory = liveHouseholds.results.filter((item) => !givingDonorIds.has(item.id)).length;
-    const results = { validRows: match.matched.length, householdsMatched: new Set(match.matched.map((activity) => activity.donorId)).size, newHouseholds: 0, giftsImported: match.newActivities.length, giftsUpdated: match.proposedUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + match.alreadyImported, rowsRequiringReview: match.needsReview, rejectedRows: rowFailures.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length, unmatchedJlCodes: match.unknownHousehold, householdsWithoutGivingHistory, donationRowsRequiringReview: match.needsReview, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, rejectedRows: rowFailures, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const results = { validRows: match.matched.length, householdsMatched: new Set(match.matched.map((activity) => activity.donorId)).size, newHouseholds: 0, giftsImported: match.newActivities.length, giftsUpdated: match.proposedUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + match.alreadyImported, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: 0 };
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length, unmatchedJlCodes: match.unknownHousehold, householdsWithoutGivingHistory, donationRowsRequiringReview: match.needsReview, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
     const changedActivities = [...match.newActivities, ...match.proposedUpdates];
     const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
@@ -138,7 +163,8 @@ export async function POST(request: Request) {
       const reason = safeDatabaseReason(databaseError);
       const databaseFailure: RowFailure = { row: 0, category: "transaction_database_errors", reason };
       logger.error("jl_donation_import_failed", new Error("Database transaction failed"), { importId, userId, validated: match.matched.length });
-      return Response.json({ error: reason, fatalError: reason, databaseChangesMade: false, noChangesMade: true, rollbackCauses: ["transaction_database_errors"], validation: { ...validation, firstErrors: [databaseFailure, ...validation.firstErrors].slice(0, 10) }, rejectedRows: [...match.matched.map((activity) => ({ row: activity.rowNumber, category: "transaction_database_errors" as const, reason: "Validated row was not written because the database transaction failed" })), ...rowFailures], results: { ...results, giftsImported: 0, giftsUpdated: 0, rejectedRows: match.matched.length + rowFailures.length, elapsedMs: Date.now() - startedAt } }, { status: 500 });
+      const transactionRejectedRows = [...match.matched.map((activity) => ({ row: activity.rowNumber, category: "transaction_database_errors" as const, reason: "Validated row was not written because the database transaction failed" })), ...rejectedRows];
+      return Response.json({ error: reason, fatalError: reason, databaseChangesMade: false, noChangesMade: true, rollbackCauses: ["transaction_database_errors"], validation: { ...validation, firstErrors: [databaseFailure, ...validation.firstErrors].slice(0, 10) }, reviewRows, rejectedRows: transactionRejectedRows, results: { ...results, giftsImported: 0, giftsUpdated: 0, rejectedRows: transactionRejectedRows.length, elapsedMs: Date.now() - startedAt } }, { status: 500 });
     }
     } catch (unexpectedError) {
       logger.error("jl_donation_import_unexpected", new Error("Unexpected import exception"), { userId, rows: rows.length });
