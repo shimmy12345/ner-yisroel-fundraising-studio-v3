@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
@@ -143,6 +143,30 @@ export const jlPaymentAssignments = sqliteTable("jl_payment_assignments", {
   primaryKey({ columns: [table.userId, table.paymentFingerprint] }),
   index("jl_payment_assignments_pledge_idx").on(table.pledgeActivityId),
 ]);
+
+export const donationImportRollbackAudits = sqliteTable("donation_import_rollback_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  importId: text("import_id").notNull(),
+  backupConfirmed: integer("backup_confirmed", { mode: "boolean" }).notNull(),
+  previewJson: text("preview_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  removedGifts: integer("removed_gifts").notNull(),
+  restoredPledges: integer("restored_pledges").notNull(),
+  restoredBalances: integer("restored_balances").notNull(),
+  restoredStatuses: integer("restored_statuses").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("donation_import_rollback_audits_import_idx").on(table.importId),
+  index("donation_import_rollback_audits_user_date_idx").on(table.userId, table.createdAt),
+]);
+
+export const workspaceBackupAudits = sqliteTable("workspace_backup_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  purpose: text("purpose").notNull(),
+  importId: text("import_id"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("workspace_backup_audits_user_import_idx").on(table.userId, table.importId, table.createdAt)]);
 
 export const recommendations = sqliteTable("recommendations", {
   id: text("id").primaryKey(),

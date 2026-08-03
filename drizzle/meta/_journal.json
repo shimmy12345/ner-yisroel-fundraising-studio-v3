@@ -64,6 +64,13 @@
       "when": 1785798000000,
       "tag": "0008_manual_pledge_payment_assignment",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1785884400000,
+      "tag": "0009_donation_import_rollback_audit",
+      "breakpoints": true
     }
   ]
 }

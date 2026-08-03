@@ -39,7 +39,7 @@ assert.match(route, /No records were duplicated/);
 assert.doesNotMatch(route, /DELETE FROM (giving_activities|interactions|recommendations|donors)/i);
 assert.match(previewRoute, /conflicts:/);
 assert.match(previewRoute, /rejectedRows:/);
-assert.match(page, /ORDER BY completed_at DESC LIMIT 8/);
+assert.match(page, /ORDER BY completed_at DESC, created_at DESC LIMIT 12/);
 assert.match(experience, /Suggested donation export/);
 assert.match(experience, /Recent JL refreshes/);
 assert.match(experience, /Historical gifts were not deleted/);

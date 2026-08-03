@@ -6,6 +6,7 @@ import { FIELD_LABELS, recognizeColumns, type ColumnMapping, type ColumnSuggesti
 import { decodeCsv, parseCsv, parseXlsx, rowsToRecords } from "../../../lib/import/file-parsers";
 import { isJlSolutionsExport, JL_MAPPING } from "../../../lib/import/jl-solutions";
 import { isJlDonationExport } from "../../../lib/import/jl-donations";
+import { UndoDonationImport } from "./UndoDonationImport";
 
 type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
 type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
@@ -42,7 +43,7 @@ type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: nu
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
   suggestedRangeStart: string | null; suggestedRangeEnd: string | null;
-  history: Array<{ id: string; fileName: string; completedAt: string | null; kind: string; summary: string }>;
+  history: Array<{ id: string; fileName: string; completedAt: string | null; kind: string; summary: string; status: string; canUndo: boolean }>;
 };
 
 const DONATION_LABELS: Record<string, string> = { Code: "JL household code", Name: "Source household name", "Total Due": "Validation context only", "Item Num": "Item type", Desc: "Description", Campaign: "Supporting source context", "Due Date": "Activity date", Amount: "Committed amount", Paid: "Paid amount", "Balance Due": "Outstanding balance", Company: "Validation context only" };
@@ -301,7 +302,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
               <input ref={inputRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseFile} hidden />
             </div>
             <p className="import-privacy">Your file is inspected in this browser. It is never sent to an AI provider.</p>
-            <section className="jl-import-history"><div><p className="eyebrow">IMPORT HISTORY</p><h2>Recent JL refreshes</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind}</strong><span>{item.fileName}</span></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span></div></li>)}</ol> : <p>No completed imports yet.</p>}</section>
+            <section className="jl-import-history"><div><p className="eyebrow">IMPORT HISTORY</p><h2>Recent JL refreshes</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind} · {item.status === "rolled_back" ? "Reversed" : "Completed"}</strong><span>{item.fileName}</span><span>Batch ID: <code>{item.id}</code></span></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span>{item.canUndo && <UndoDonationImport importId={item.id} />}</div></li>)}</ol> : <p>No completed imports yet.</p>}</section>
             {statusMessage && <p className="import-status" role="status">{statusMessage}</p>}
             {error && <p className="onboarding-error" role="alert">{error}</p>}
           </section>
