@@ -16,7 +16,7 @@ export default async function ImportPage() {
   const profile = await ensureUserProfile(identity);
   const [state, imports] = await Promise.all([
     env.DB.prepare("SELECT last_household_refresh_at, last_donation_refresh_at, last_donation_range_start, last_donation_range_end FROM jl_refresh_state WHERE user_id = ? LIMIT 1").bind(profile.id).first<RefreshRow>(),
-    env.DB.prepare("SELECT id, file_name, status, completed_at, report_json FROM data_imports WHERE user_id = ? AND status IN ('completed','rolled_back') ORDER BY completed_at DESC, created_at DESC LIMIT 12").bind(profile.id).all<HistoryRow>(),
+    env.DB.prepare("SELECT id, file_name, status, completed_at, report_json FROM data_imports WHERE user_id = ? AND status IN ('completed','undone','rolled_back','failed') ORDER BY completed_at DESC, created_at DESC LIMIT 12").bind(profile.id).all<HistoryRow>(),
   ]);
   const suggestion = suggestedDonationRange(state?.last_donation_range_end ?? null);
   let latestCompletedDonationId: string | null = null;

@@ -10,6 +10,7 @@ import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
+import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReprocessBatch, hasForceReprocessConfirmation } from "../../../lib/import/import-deduplication";
 
 type ImportRequest = {
   fileName?: string;
@@ -19,6 +20,8 @@ type ImportRequest = {
   updateExisting?: boolean;
   mode?: "first" | "refresh";
   paymentDecisions?: PaymentDecisionInput[];
+  forceReprocess?: boolean;
+  forceConfirmation?: string;
 };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
@@ -88,18 +91,26 @@ export async function POST(request: Request) {
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
-  const existing = await env.DB.prepare("SELECT id, completed_at FROM data_imports WHERE user_id = ? AND file_hash = ? LIMIT 1").bind(userId, fileHash).first<{ id: string; completed_at: number | null }>();
-  if (existing) {
-    const exactDonation = isJlDonationExport(Object.keys(rows[0] ?? {}));
-    const exactHousehold = isJlSolutionsExport(Object.keys(rows[0] ?? {}));
-    if (exactDonation || exactHousehold) return Response.json({
-      importId: existing.id, fileName, completedAt: new Date().toISOString(), profile: exactDonation ? "JL Solutions Donations" : "JL Solutions",
-      mode: "refresh", databaseChangesMade: false, noChangesMade: true, imported: { donors: 0, gifts: 0, interactions: 0, reminders: 0 }, rejectedRows: [],
-      donation: exactDonation ? { newActivities: 0, updatedPledges: 0, unchanged: rows.length, unknownHousehold: 0, needsReview: 0, nonfinancialExcluded: 0, duplicateSourceRows: 0 } : undefined,
-      results: { validRows: rows.length, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: rows.length, rowsRequiringReview: 0, rejectedRows: 0, unmatchedJlCodes: 0, elapsedMs: 0 },
-      warnings: [`This exact ${exactDonation ? "donation" : "household"} export was already processed${existing.completed_at ? ` on ${new Date(existing.completed_at * 1000).toISOString().slice(0, 10)}` : ""}. No records were duplicated.`],
-    });
-    return Response.json({ error: "This file has already been imported", importId: existing.id }, { status: 409 });
+  const existing = await env.DB.prepare("SELECT id, user_id, status, completed_at FROM data_imports WHERE user_id = ? AND file_hash = ? AND status IN ('active','completed') ORDER BY completed_at DESC, created_at DESC LIMIT 1").bind(userId, fileHash).first<{ id: string; user_id: string; status: string; completed_at: number | null }>();
+  const activeDuplicate = existing && blocksIdenticalImport(existing.status) ? existing : null;
+  if (activeDuplicate && !body.forceReprocess) {
+    return Response.json({
+      error: "This identical file belongs to an active completed import and cannot be processed again.",
+      importId: activeDuplicate.id,
+      duplicateBlocked: true,
+      canForceReprocess: canForceReprocessBatch(userId, activeDuplicate.user_id),
+      priorStatus: activeDuplicate.status,
+      completedAt: activeDuplicate.completed_at,
+      warning: "Force reprocess does not bypass row-level or transaction-level duplicate protection.",
+    }, { status: 409 });
+  }
+  if (body.forceReprocess) {
+    if (!activeDuplicate || !canForceReprocessBatch(userId, activeDuplicate.user_id)) {
+      return Response.json({ error: "Only the authenticated workspace import administrator can force reprocessing." }, { status: 403 });
+    }
+    if (!hasForceReprocessConfirmation(true, body.forceConfirmation)) {
+      return Response.json({ error: "Type FORCE REPROCESS to confirm this protected action." }, { status: 422 });
+    }
   }
 
   if (isJlDonationExport(Object.keys(rows[0] ?? {}))) {
@@ -118,7 +129,7 @@ export async function POST(request: Request) {
       ? await env.DB.prepare(OPEN_PLEDGES_FOR_DONORS_SQL).bind(userId, JSON.stringify(donorIds)).all<OpenPledge>()
       : { results: [] as OpenPledge[] };
     const remembered = compactPaymentExport && fingerprints.length
-      ? await env.DB.prepare(`SELECT payment_fingerprint, decision_type, pledge_activity_id, applied_import_id FROM jl_payment_assignments WHERE user_id = ? AND payment_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<RememberedPaymentDecision>()
+      ? await env.DB.prepare(ACTIVE_PAYMENT_ASSIGNMENTS_SQL).bind(userId, JSON.stringify(fingerprints)).all<RememberedPaymentDecision>()
       : { results: [] as RememberedPaymentDecision[] };
     const rememberedFingerprints = new Set(remembered.results.map((decision) => decision.payment_fingerprint));
     const rememberedWithLegacyGifts = [...remembered.results, ...prior.results.filter((activity) => !rememberedFingerprints.has(activity.source_fingerprint)).map((activity) => ({ payment_fingerprint: activity.source_fingerprint, decision_type: "new_gift" as const, pledge_activity_id: null, applied_import_id: "existing-gift" }))];
@@ -173,6 +184,24 @@ export async function POST(request: Request) {
       const rollbackCauses = [...new Set(rejectedRows.map((failure) => failure.category))];
       return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, reviewRows, rejectedRows, paymentAssignments: paymentCandidates, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: compactPaymentExport ? paymentCandidates.filter((candidate) => !candidate.donorId).length : match.unknownHousehold, elapsedMs: Date.now() - startedAt } }, { status: 422 });
     }
+    if (body.forceReprocess && !newActivities.length && !proposedUpdates.length && !assignmentPlan.pledgeUpdates.length) {
+      return Response.json({
+        importId: activeDuplicate!.id,
+        fileName,
+        completedAt: new Date().toISOString(),
+        profile: "JL Solutions Donations",
+        mode: "refresh",
+        databaseChangesMade: false,
+        noChangesMade: true,
+        imported: { donors: 0, gifts: 0, interactions: 0, reminders: 0 },
+        donation: { newActivities: 0, updatedPledges: 0, unchanged: alreadyImported, unknownHousehold: 0, needsReview: reviewRows.length, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length },
+        validation,
+        reviewRows,
+        rejectedRows,
+        results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: alreadyImported + donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
+        warnings: ["Force reprocess completed row-level duplicate checks. Every payment was already active, so no database changes were made."],
+      });
+    }
     const now = Math.floor(Date.now() / 1000);
     const importId = crypto.randomUUID();
     const liveHouseholds = await env.DB.prepare("SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live'").bind(userId).all<{ id: string }>();
@@ -201,10 +230,10 @@ export async function POST(request: Request) {
     const newGiftDecisionRows = compactPaymentExport ? assignmentPlan.assignments.filter((assignment) => assignment.decisionType === "new_gift").map((assignment) => ({ userId, fingerprint: assignment.fingerprint, decisionType: "new_gift", pledgeId: null, importId, now })) : [];
     const newGiftDecisionStatements = chunkJsonRows(newGiftDecisionRows).map((chunk) => env.DB.prepare(`INSERT INTO jl_payment_assignments (user_id, payment_fingerprint, decision_type, pledge_activity_id, applied_import_id, created_at, updated_at) SELECT json_extract(value,'$.userId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.decisionType'), json_extract(value,'$.pledgeId'), json_extract(value,'$.importId'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
     const pledgeDecisionStatements = assignmentPlan.pledgeUpdates.flatMap((update) => update.paymentFingerprints.map((fingerprint) => env.DB.prepare(`INSERT INTO jl_payment_assignments (user_id, payment_fingerprint, decision_type, pledge_activity_id, applied_import_id, created_at, updated_at) SELECT CASE WHEN EXISTS (SELECT 1 FROM giving_activities WHERE id = ? AND owner_user_id = ? AND donor_id = ? AND balance_cents = ? AND paid_cents = ?) THEN ? ELSE NULL END, ?, 'apply_to_pledge', ?, ?, ?, ?`).bind(update.id, userId, update.donor_id, update.balance_cents, update.paid_cents, userId, fingerprint, update.id, importId, now, now)));
-    const assignmentAuditRows = compactPaymentExport ? assignmentPlan.assignments.map((assignment) => ({ id: crypto.randomUUID(), userId, importId, paymentFingerprint: assignment.fingerprint, donorId: assignment.donorId, pledgeId: assignment.pledgeId, decisionType: assignment.decisionType, paymentCents: assignment.paymentCents, appliedCents: assignment.appliedCents, newGiftCents: assignment.newGiftCents, overpaymentAction: assignment.overpaymentAction, previousPaidCents: assignment.previousPaidCents, nextPaidCents: assignment.nextPaidCents, previousBalanceCents: assignment.previousBalanceCents, nextBalanceCents: assignment.nextBalanceCents, previousStatus: assignment.previousStatus, nextStatus: assignment.nextStatus, now })) : [];
+    const assignmentAuditRows = compactPaymentExport ? assignmentPlan.assignments.map((assignment) => ({ id: crypto.randomUUID(), userId, importId, paymentFingerprint: assignment.fingerprint, donorId: assignment.donorId, pledgeId: assignment.pledgeId, decisionType: assignment.decisionType, paymentCents: assignment.paymentCents, appliedCents: assignment.appliedCents, newGiftCents: assignment.newGiftCents, overpaymentAction: assignment.overpaymentAction, previousPaidCents: assignment.previousPaidCents, nextPaidCents: assignment.nextPaidCents, previousBalanceCents: assignment.previousBalanceCents, nextBalanceCents: assignment.nextBalanceCents, previousStatus: assignment.previousStatus, nextStatus: assignment.nextStatus, paymentDate: candidateByFingerprint.get(assignment.fingerprint)?.paymentDate ?? now, remainingBalanceCents: assignment.nextBalanceCents, now })) : [];
     const assignmentAuditStatements = chunkJsonRows(assignmentAuditRows).map((chunk) => env.DB.prepare(`INSERT INTO jl_payment_assignment_audits
-      (id,user_id,import_id,payment_fingerprint,donor_id,pledge_activity_id,decision_type,payment_cents,applied_cents,new_gift_cents,overpayment_action,previous_paid_cents,next_paid_cents,previous_balance_cents,next_balance_cents,previous_status,next_status,created_at)
-      SELECT json_extract(value,'$.id'),json_extract(value,'$.userId'),json_extract(value,'$.importId'),json_extract(value,'$.paymentFingerprint'),json_extract(value,'$.donorId'),json_extract(value,'$.pledgeId'),json_extract(value,'$.decisionType'),json_extract(value,'$.paymentCents'),json_extract(value,'$.appliedCents'),json_extract(value,'$.newGiftCents'),json_extract(value,'$.overpaymentAction'),json_extract(value,'$.previousPaidCents'),json_extract(value,'$.nextPaidCents'),json_extract(value,'$.previousBalanceCents'),json_extract(value,'$.nextBalanceCents'),json_extract(value,'$.previousStatus'),json_extract(value,'$.nextStatus'),json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
+      (id,user_id,import_id,payment_fingerprint,donor_id,pledge_activity_id,decision_type,payment_cents,applied_cents,new_gift_cents,overpayment_action,previous_paid_cents,next_paid_cents,previous_balance_cents,next_balance_cents,previous_status,next_status,payment_date,remaining_balance_cents,created_at)
+      SELECT json_extract(value,'$.id'),json_extract(value,'$.userId'),json_extract(value,'$.importId'),json_extract(value,'$.paymentFingerprint'),json_extract(value,'$.donorId'),json_extract(value,'$.pledgeId'),json_extract(value,'$.decisionType'),json_extract(value,'$.paymentCents'),json_extract(value,'$.appliedCents'),json_extract(value,'$.newGiftCents'),json_extract(value,'$.overpaymentAction'),json_extract(value,'$.previousPaidCents'),json_extract(value,'$.nextPaidCents'),json_extract(value,'$.previousBalanceCents'),json_extract(value,'$.nextBalanceCents'),json_extract(value,'$.previousStatus'),json_extract(value,'$.nextStatus'),json_extract(value,'$.paymentDate'),json_extract(value,'$.remainingBalanceCents'),json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
     const statements = [
       env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(userId, user.email, user.displayName, now, now),
       ...activityStatements,

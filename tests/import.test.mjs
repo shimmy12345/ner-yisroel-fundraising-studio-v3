@@ -112,7 +112,7 @@ async function run() {
   assert.match(backup, /getChatGPTUser\(\)/);
   assert.match(route, /await env\.DB\.batch\(statements\)/);
   assert.match(route, /Nothing was imported/);
-  assert.match(route, /This file has already been imported/);
+  assert.match(route, /This identical file belongs to an active completed import/);
   assert.match(route, /updateExisting/);
   assert.match(migration, /data_imports_file_hash_unique/);
   assert.match(experience, /Download rejected rows/);

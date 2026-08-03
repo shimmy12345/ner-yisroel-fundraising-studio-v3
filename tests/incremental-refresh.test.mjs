@@ -35,7 +35,7 @@ assert.match(route, /const changedActivities = \[\.\.\.newActivities, \.\.\.prop
 assert.match(route, /ON CONFLICT\(owner_user_id, external_source, source_fingerprint\) DO UPDATE SET paid_cents/);
 assert.match(route, /jl_refresh_state/);
 assert.match(route, /historicalRecordsDeleted: 0/);
-assert.match(route, /No records were duplicated/);
+assert.match(route, /no database changes were made/i);
 assert.doesNotMatch(route, /DELETE FROM (giving_activities|interactions|recommendations|donors)/i);
 assert.match(previewRoute, /conflicts:/);
 assert.match(previewRoute, /rejectedRows:/);

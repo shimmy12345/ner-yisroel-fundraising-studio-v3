@@ -156,7 +156,7 @@ export async function POST(request: Request) {
       AND source_fingerprint IN (SELECT json_extract(value,'$.fingerprint') FROM json_each(?))`)
       .bind(serializedRestored, serializedRestored, serializedRestored, serializedRestored, now, userId, serializedRestored),
     env.DB.prepare("DELETE FROM jl_payment_assignments WHERE user_id = ? AND applied_import_id = ?").bind(userId, importId),
-    env.DB.prepare("UPDATE data_imports SET status = 'rolled_back' WHERE id = ? AND user_id = ? AND status = 'completed'").bind(importId, userId),
+    env.DB.prepare("UPDATE data_imports SET status = 'undone' WHERE id = ? AND user_id = ? AND status = 'completed'").bind(importId, userId),
     env.DB.prepare(`UPDATE jl_refresh_state SET last_donation_refresh_at = ?, last_donation_range_start = ?,
       last_donation_range_end = ?, updated_at = ? WHERE user_id = ?`)
       .bind(result.previousRefresh!.completedAt, result.previousRefresh!.start, result.previousRefresh!.end, now, userId),
@@ -175,7 +175,7 @@ export async function POST(request: Request) {
       restored: preview.totals.pledgeUpdatesRestored,
       auditId,
     });
-    return Response.json({ importId, auditId, status: "rolled_back", ...preview.totals });
+    return Response.json({ importId, auditId, status: "undone", ...preview.totals });
   } catch {
     logger.error("jl_donation_rollback_failed", new Error("Database transaction failed"), { importId, userId });
     return Response.json({ error: "Rollback failed. The transaction was not retained; no partial rollback was kept." }, { status: 500 });

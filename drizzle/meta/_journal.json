@@ -78,6 +78,13 @@
       "when": 1785888000000,
       "tag": "0010_manual_pledge_assignment_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1785891600000,
+      "tag": "0011_reimport_and_payment_timeline",
+      "breakpoints": true
     }
   ]
 }

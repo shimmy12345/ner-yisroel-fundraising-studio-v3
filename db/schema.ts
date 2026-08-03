@@ -162,6 +162,8 @@ export const jlPaymentAssignmentAudits = sqliteTable("jl_payment_assignment_audi
   nextBalanceCents: integer("next_balance_cents"),
   previousStatus: text("previous_status"),
   nextStatus: text("next_status"),
+  paymentDate: integer("payment_date", { mode: "timestamp" }),
+  remainingBalanceCents: integer("remaining_balance_cents"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [
   uniqueIndex("jl_payment_assignment_audits_import_payment_idx").on(table.importId, table.paymentFingerprint),

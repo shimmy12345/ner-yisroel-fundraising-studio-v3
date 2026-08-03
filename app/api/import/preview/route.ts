@@ -8,6 +8,7 @@ import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHou
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
+import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-deduplication";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid" };
 
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
       ? await env.DB.prepare(OPEN_PLEDGES_FOR_DONORS_SQL).bind(profile.id, JSON.stringify(donorIds)).all<OpenPledge>()
       : { results: [] as OpenPledge[] };
     const remembered = compactPaymentExport && fingerprints.length
-      ? await env.DB.prepare(`SELECT payment_fingerprint, decision_type, pledge_activity_id, applied_import_id FROM jl_payment_assignments WHERE user_id = ? AND payment_fingerprint IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(fingerprints)).all<RememberedPaymentDecision>()
+      ? await env.DB.prepare(ACTIVE_PAYMENT_ASSIGNMENTS_SQL).bind(profile.id, JSON.stringify(fingerprints)).all<RememberedPaymentDecision>()
       : { results: [] as RememberedPaymentDecision[] };
     const paymentAssignments = compactPaymentExport ? buildPaymentCandidates(donationPreview.activities, households.results, openPledges.results, remembered.results) : [];
     const publicPaymentAssignments = paymentAssignments.map(({ donorId, openPledges: candidatePledges, ...candidate }) => ({ ...candidate, donorMatched: Boolean(donorId), openPledges: candidatePledges.map((pledge) => ({ id: pledge.id, activity_date: pledge.activity_date, committed_cents: pledge.committed_cents, paid_cents: pledge.paid_cents, balance_cents: pledge.balance_cents, description: pledge.description, source_campaign: pledge.source_campaign })) }));

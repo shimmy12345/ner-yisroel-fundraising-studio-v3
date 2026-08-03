@@ -14,6 +14,7 @@ type RowFailure = { row: number; category?: FailureCategory; reason: string; val
 type ValidationSummary = { totalRows: number; passedRows: number; failedRows: number; duplicateRows: number; nonfinancialRows: number; firstErrors: RowFailure[] };
 type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
 type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
+type DuplicateImportBlock = { error: string; importId: string; duplicateBlocked: true; canForceReprocess: boolean; priorStatus: string; completedAt: number | null; warning: string };
 type ImportReport = {
   importId: string;
   fileName: string;
@@ -107,6 +108,8 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
   const [donationDetected, setDonationDetected] = useState(false);
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
   const [paymentDecisions, setPaymentDecisions] = useState<Record<string, PaymentDecisionState>>({});
+  const [duplicateBlock, setDuplicateBlock] = useState<DuplicateImportBlock | null>(null);
+  const [forceConfirmation, setForceConfirmation] = useState("");
 
   async function inspectFile(file: File) {
     if (!/\.(csv|xlsx)$/i.test(file.name)) {
@@ -140,6 +143,8 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       setJlDetected(detectedJl);
       setDonationDetected(detectedDonation);
       setPaymentDecisions({});
+      setDuplicateBlock(null);
+      setForceConfirmation("");
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
       setStatusMessage("");
     } catch (fileError) {
@@ -162,6 +167,8 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
 
   async function showPreview() {
     setError("");
+    setDuplicateBlock(null);
+    setForceConfirmation("");
     setStatusMessage("Checking the preview securely…");
     try {
       const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash }) });
@@ -177,7 +184,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     } finally { setStatusMessage(""); }
   }
 
-  async function importData() {
+  async function importData(forceReprocess = false) {
     if (!preview || step === "importing") return;
     setStep("importing");
     setError("");
@@ -185,10 +192,16 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })) }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
       });
-      const payload = await response.json() as ImportReport | ImportFailure | { error?: string };
+      const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string };
       if (!response.ok) {
+        if (response.status === 409 && "duplicateBlocked" in payload && payload.duplicateBlocked) {
+          setDuplicateBlock(payload);
+          setError(payload.error);
+          setStep("preview");
+          return;
+        }
         if ("validation" in payload && "rollbackCauses" in payload) {
           setFailureReport(payload as ImportFailure);
           setStep("failed");
@@ -234,6 +247,8 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     setDonationDetected(false);
     setDonationPreview(null);
     setPaymentDecisions({});
+    setDuplicateBlock(null);
+    setForceConfirmation("");
     setFailureReport(null);
     setReport(null);
     setError("");
@@ -319,8 +334,18 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
               <input ref={inputRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseFile} hidden />
             </div>
             <p className="import-privacy">Your file is inspected in this browser. It is never sent to an AI provider.</p>
-            <section className="jl-import-history"><div><p className="eyebrow">IMPORT HISTORY</p><h2>Recent JL refreshes</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind} · {item.status === "rolled_back" ? "Reversed" : "Completed"}</strong><span>{item.fileName}</span><span>Batch ID: <code>{item.id}</code></span></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span>{item.canUndo && <UndoDonationImport importId={item.id} />}</div></li>)}</ol> : <p>No completed imports yet.</p>}</section>
+            <section className="jl-import-history"><div><p className="eyebrow">IMPORT HISTORY</p><h2>Recent JL refreshes</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind} · {item.status === "undone" || item.status === "rolled_back" ? "Undone" : item.status === "failed" ? "Failed" : "Completed"}</strong><span>{item.fileName}</span><span>Batch ID: <code>{item.id}</code></span></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span>{item.canUndo && <UndoDonationImport importId={item.id} />}</div></li>)}</ol> : <p>No completed imports yet.</p>}</section>
             {statusMessage && <p className="import-status" role="status">{statusMessage}</p>}
+            {duplicateBlock && <section className="force-reprocess-warning" role="alert" aria-labelledby="force-reprocess-title">
+              <p className="eyebrow">ADMIN FALLBACK</p>
+              <h2 id="force-reprocess-title">This identical file is still active.</h2>
+              <p>{duplicateBlock.error}</p>
+              <p><strong>Force reprocess will rerun every row-level donor, date, amount, fingerprint, and payment-assignment check.</strong> It will not bypass transaction-level duplicate protection or write a duplicate payment.</p>
+              {duplicateBlock.canForceReprocess ? <>
+                <label>Type <strong>FORCE REPROCESS</strong> to continue<input value={forceConfirmation} onChange={(event) => setForceConfirmation(event.target.value)} autoComplete="off" /></label>
+                <button type="button" className="danger" disabled={forceConfirmation !== "FORCE REPROCESS"} onClick={() => void importData(true)}>Force reprocess</button>
+              </> : <p>This option is available only to the authenticated workspace import administrator.</p>}
+            </section>}
             {error && <p className="onboarding-error" role="alert">{error}</p>}
           </section>
         )}
@@ -435,7 +460,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
               <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
-              <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments > 0}>{unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : "Confirm and import"}</button>
+              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments > 0}>{unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : "Confirm and import"}</button>}
             </div>
           </section>
         )}
