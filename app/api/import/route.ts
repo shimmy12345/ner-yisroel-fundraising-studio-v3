@@ -9,7 +9,7 @@ import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHou
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
-import { buildPaymentCandidates, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
+import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
 
 type ImportRequest = {
   fileName?: string;
@@ -115,7 +115,7 @@ export async function POST(request: Request) {
     const match = matchJlDonationActivities(donationPreview, households.results, prior.results);
     const donorIds = households.results.map((household) => household.id);
     const openPledges = compactPaymentExport && donorIds.length
-      ? await env.DB.prepare(`SELECT id, donor_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, description, source_campaign, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND donor_id IN (SELECT value FROM json_each(?)) AND balance_cents > 0 AND category IN ('open_pledge','partially_paid_pledge') ORDER BY activity_date DESC`).bind(userId, JSON.stringify(donorIds)).all<OpenPledge>()
+      ? await env.DB.prepare(OPEN_PLEDGES_FOR_DONORS_SQL).bind(userId, JSON.stringify(donorIds)).all<OpenPledge>()
       : { results: [] as OpenPledge[] };
     const remembered = compactPaymentExport && fingerprints.length
       ? await env.DB.prepare(`SELECT payment_fingerprint, decision_type, pledge_activity_id, applied_import_id FROM jl_payment_assignments WHERE user_id = ? AND payment_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<RememberedPaymentDecision>()

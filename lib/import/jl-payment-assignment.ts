@@ -1,5 +1,14 @@
 import type { GivingActivity } from "./jl-donations.ts";
 
+export const OPEN_PLEDGES_FOR_DONORS_SQL = `SELECT id, donor_id, source_fingerprint, activity_date,
+  COALESCE(committed_cents, COALESCE(paid_cents, 0) + balance_cents) AS committed_cents,
+  COALESCE(paid_cents, 0) AS paid_cents, balance_cents, description, source_campaign, category, source_snapshot
+  FROM giving_activities
+  WHERE owner_user_id = ? AND record_origin = 'live'
+    AND donor_id IN (SELECT value FROM json_each(?))
+    AND balance_cents > 0
+  ORDER BY activity_date DESC, id`;
+
 export type PaymentDecisionAction = "apply_to_pledge" | "new_gift" | "needs_review";
 export type OverpaymentAction = "split_remainder_new_gift" | null;
 export type PaymentDecisionInput = {

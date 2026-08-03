@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { buildJlDonationPreview } from "../lib/import/jl-donations.ts";
-import { buildPaymentCandidates, planPaymentAssignments } from "../lib/import/jl-payment-assignment.ts";
+import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments } from "../lib/import/jl-payment-assignment.ts";
 
 const rows = [
   { Code: "JL-100", "First Name": "Example", "Last Name": "One", Date: "2026-08-03", Campaign: "ANNUAL", Amount: "25.00" },
@@ -33,6 +33,27 @@ const candidates = buildPaymentCandidates(preview.activities, households, openPl
 assert.equal(candidates.length, 3);
 assert.ok(candidates.every((candidate) => candidate.action === "needs_review"), "ambiguous payments must never be assigned automatically");
 assert.equal(candidates[0].openPledges.length, 1);
+
+const legacyCategoryPledge = {
+  ...openPledges[0],
+  id: "pledge-legacy-category",
+  source_fingerprint: "legacy-category-fingerprint",
+  description: "Building pledge",
+  source_campaign: "CAPITAL",
+  category: "completed_gift",
+  committed_cents: 8000,
+  paid_cents: 2000,
+  balance_cents: 6000,
+};
+const allOpenPledgeCandidates = buildPaymentCandidates(preview.activities.slice(0, 1), households, [...openPledges, legacyCategoryPledge], []);
+assert.equal(allOpenPledgeCandidates[0].openPledges.length, 2, "every positive-balance pledge remains manually selectable regardless of category or campaign");
+const explicitlySelectedPlan = planPaymentAssignments(allOpenPledgeCandidates, [
+  { fingerprint: allOpenPledgeCandidates[0].fingerprint, action: "apply_to_pledge", pledgeId: "pledge-legacy-category" },
+]);
+assert.equal(explicitlySelectedPlan.errors.length, 0);
+assert.equal(explicitlySelectedPlan.pledgeUpdates.length, 1);
+assert.equal(explicitlySelectedPlan.pledgeUpdates[0].id, "pledge-legacy-category", "only the exact pledge selected by the user is updated");
+assert.equal(explicitlySelectedPlan.newGifts.length, 0, "an applied payment must not also create a gift");
 
 const partialPlan = planPaymentAssignments(candidates, [
   { fingerprint: candidates[0].fingerprint, action: "apply_to_pledge", pledgeId: "pledge-100" },
@@ -101,13 +122,20 @@ assert.match(route, /await env\.DB\.batch\(statements\)/);
 assert.match(route, /INSERT INTO jl_payment_assignments/);
 assert.match(route, /INSERT INTO jl_payment_assignment_audits/);
 assert.match(route, /CASE WHEN EXISTS \(SELECT 1 FROM giving_activities/);
-assert.match(previewRoute, /balance_cents > 0/);
-assert.match(previewRoute, /owner_user_id = \?/);
+assert.match(previewRoute, /OPEN_PLEDGES_FOR_DONORS_SQL/);
+assert.match(route, /OPEN_PLEDGES_FOR_DONORS_SQL/);
+assert.match(OPEN_PLEDGES_FOR_DONORS_SQL, /owner_user_id = \?/);
+assert.match(OPEN_PLEDGES_FOR_DONORS_SQL, /record_origin = 'live'/);
+assert.match(OPEN_PLEDGES_FOR_DONORS_SQL, /balance_cents > 0/);
+assert.doesNotMatch(OPEN_PLEDGES_FOR_DONORS_SQL, /category\s+IN/i, "open-pledge selection must not depend on a category allowlist");
 assert.match(rollbackRoute, /DELETE FROM jl_payment_assignments WHERE user_id = \? AND applied_import_id = \?/);
 assert.match(experience, /Apply to open pledge/);
-assert.match(experience, /Treat as new gift\/payment/);
+assert.match(experience, /New gift\/payment/);
 assert.match(experience, /No duplicate gift will be created/);
-assert.match(experience, /Campaign, description, date, and amount differences do not hide pledge choices/);
+assert.match(experience, /automatic-match confidence do not hide pledge choices/);
+assert.match(experience, /aria-required="true"/);
+assert.match(experience, /Remaining balance/);
+assert.match(experience, /Resulting status/);
 assert.match(experience, /split_remainder_new_gift/);
 assert.doesNotMatch(experience, /disabled=\{exceedsBalance\}/);
 assert.match(migration, /PRIMARY KEY \(`user_id`, `payment_fingerprint`\)/);
