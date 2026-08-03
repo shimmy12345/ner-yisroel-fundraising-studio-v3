@@ -22,7 +22,7 @@ export function ActivityActions({ activityId, editHref, scheduled, canCancel }: 
   }
 
   return <div className="activity-actions">
-    <a href={editHref}>Edit</a>
+    <a href={scheduled ? editHref : `/interactions/${encodeURIComponent(activityId)}/outcome`}>{scheduled ? "Edit" : "Edit outcome"}</a>
     {showStateAction && <button type="button" onClick={changeState} disabled={status === "saving"}>{status === "saving" ? "Updating…" : scheduled ? "Cancel" : "Archive"}</button>}
     {status === "error" && <small role="alert">Could not update activity. Try again.</small>}
   </div>;

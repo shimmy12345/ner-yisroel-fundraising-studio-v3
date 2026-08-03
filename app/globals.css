@@ -455,3 +455,15 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 @media (max-width:760px) { .meeting-brief-entry, .meeting-brief-header { align-items:flex-start; flex-direction:column; }.meeting-brief-entry a, .meeting-outcome-button { width:100%; text-align:center; }.meeting-brief-header h1 { font-size:34px; }.meeting-identity-card, .meeting-giving-grid, .meeting-brief-grid { grid-template-columns:1fr; }.meeting-giving-grid article { border-bottom:1px solid var(--line); }.meeting-record-list article { grid-template-columns:1fr; gap:5px; }.meeting-follow-up { grid-column:auto; }.meeting-follow-up .meeting-suggestions { grid-template-columns:1fr; }.meeting-brief-card { padding:19px; } }
 @media (max-width:760px) { .outcome-header { gap:14px; }.outcome-plan-card { grid-template-columns:1fr; gap:20px; }.outcome-plan-card, .outcome-form-card, .outcome-did-not-happen { padding:19px; }.outcome-did-not-happen { grid-template-columns:1fr; }.outcome-alternate-actions { grid-column:auto; display:grid; grid-template-columns:1fr 1fr; }.outcome-alternate-actions button:last-child { grid-column:1 / -1; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; } }
+/* Reversible activity outcomes */
+.cancelled-activity-recovery { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:0 0 16px; padding:12px 14px; border:1px solid #decfc7; border-radius:10px; background:#fbf6f3; }.cancelled-activity-recovery a { color:#315f4b; font-weight:700; }
+.activity-status { display:inline-flex; margin-left:8px; padding:5px 9px; border-radius:999px; background:#e8f0eb; color:#315f4b; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
+.activity-status-cancelled, .activity-status-no-response { background:#f3ebe6; color:#8a493c; }
+.activity-status-completed { background:#e4f1e8; color:#246342; }
+.outcome-confirmation { margin:20px 0; padding:20px; border:1px solid #a9cbb6; border-radius:12px; background:#f0f8f3; }
+.outcome-confirmation h2 { margin:0 0 6px; }.outcome-confirmation > div { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }
+.outcome-confirmation a, .outcome-confirmation button, .secondary-button { min-height:40px; padding:9px 13px; border:1px solid #b7c9bd; border-radius:8px; background:#fff; color:#315f4b; font-weight:750; text-decoration:none; }
+.outcome-follow-up-fields select, .outcome-follow-up-fields textarea { width:100%; }
+.outcome-audit { margin-top:24px; padding:22px; border:1px solid #dbe4de; border-radius:12px; background:#fff; }
+.outcome-audit ol { margin:14px 0 0; padding:0; list-style:none; }.outcome-audit li { display:flex; justify-content:space-between; gap:18px; padding:10px 0; border-top:1px solid #edf1ee; }.outcome-audit li span { color:#68766e; }
+@media (max-width: 680px) { .outcome-audit li { flex-direction:column; gap:3px; }.outcome-confirmation > div { align-items:stretch; flex-direction:column; }.outcome-confirmation a, .outcome-confirmation button { width:100%; text-align:center; } }

@@ -63,6 +63,24 @@ export const interactions = sqliteTable("interactions", {
   ...timestamps,
 }, (table) => [index("interactions_donor_date_idx").on(table.donorId, table.occurredAt)]);
 
+export const activityStatusAudits = sqliteTable("activity_status_audits", {
+  id: text("id").primaryKey(),
+  interactionId: text("interaction_id").notNull().references(() => interactions.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  action: text("action").notNull(),
+  fromStatus: text("from_status").notNull(),
+  toStatus: text("to_status").notNull(),
+  previousSource: text("previous_source").notNull(),
+  nextSource: text("next_source").notNull(),
+  previousOccurredAt: integer("previous_occurred_at").notNull(),
+  nextOccurredAt: integer("next_occurred_at").notNull(),
+  previousSummary: text("previous_summary").notNull(),
+  nextSummary: text("next_summary").notNull(),
+  followUpId: text("follow_up_id"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  undoneAt: integer("undone_at", { mode: "timestamp" }),
+}, (table) => [index("activity_status_audits_interaction_date_idx").on(table.interactionId, table.createdAt)]);
+
 export const gifts = sqliteTable("gifts", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
