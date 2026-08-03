@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
@@ -130,6 +130,19 @@ export const jlRefreshState = sqliteTable("jl_refresh_state", {
   lastDonationRangeEnd: integer("last_donation_range_end", { mode: "timestamp" }),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
+
+export const jlPaymentAssignments = sqliteTable("jl_payment_assignments", {
+  userId: text("user_id").notNull().references(() => users.id),
+  paymentFingerprint: text("payment_fingerprint").notNull(),
+  decisionType: text("decision_type", { enum: ["apply_to_pledge", "new_gift"] }).notNull(),
+  pledgeActivityId: text("pledge_activity_id").references(() => givingActivities.id),
+  appliedImportId: text("applied_import_id").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.paymentFingerprint] }),
+  index("jl_payment_assignments_pledge_idx").on(table.pledgeActivityId),
+]);
 
 export const recommendations = sqliteTable("recommendations", {
   id: text("id").primaryKey(),

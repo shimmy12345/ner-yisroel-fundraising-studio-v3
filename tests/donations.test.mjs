@@ -102,8 +102,7 @@ JL-106,Example,Six,8/3/2026,ANNUAL,$100.00
   assert.match(importExperience, /Download validation report/);
   assert.match(importExperience, /Download review report CSV/);
   assert.match(importExperience, /Correct the column setup or source classifications, then retry\./);
-  assert.match(importExperience, /Payment status classification/);
-  assert.match(importExperience, /Treat Amount as fully paid/);
+  assert.match(importExperience, /MANUAL PAYMENT ASSIGNMENT/);
   assert.match(importExperience, /households matched/);
   assert.match(importExperience, /elapsed import time/);
   process.stdout.write("JL donation import checks passed.\n");

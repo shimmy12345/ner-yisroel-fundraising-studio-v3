@@ -4,11 +4,12 @@ import { buildImportPreview, FIELD_LABELS, type ColumnMapping, type ImportField,
 import { buildJlPreview, isJlSolutionsExport } from "../../../lib/import/jl-solutions";
 import { matchJlDonors, sourceSnapshot, type ExistingJlDonor } from "../../../lib/import/jl-match";
 import { logger } from "../../../lib/logger";
-import { buildJlDonationPreview, isJlDonationExport } from "../../../lib/import/jl-donations";
+import { buildJlDonationPreview, isCompactJlDonationExport, isJlDonationExport } from "../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
+import { buildPaymentCandidates, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
 
 type ImportRequest = {
   fileName?: string;
@@ -17,7 +18,7 @@ type ImportRequest = {
   mapping?: ColumnMapping;
   updateExisting?: boolean;
   mode?: "first" | "refresh";
-  compactPaymentStatus?: "review" | "fully_paid";
+  paymentDecisions?: PaymentDecisionInput[];
 };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
@@ -42,6 +43,16 @@ function safeDatabaseReason(error: unknown) {
   return "The database could not commit the validated donation batch.";
 }
 
+function pledgeSnapshotWithPayments(sourceSnapshot: string, fingerprints: string[]) {
+  let snapshot: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(sourceSnapshot);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) snapshot = parsed;
+  } catch { /* retain a safe empty snapshot for legacy malformed source context */ }
+  const prior = Array.isArray(snapshot.fundraisingOsPaymentFingerprints) ? snapshot.fundraisingOsPaymentFingerprints.filter((value): value is string => typeof value === "string") : [];
+  return JSON.stringify({ ...snapshot, fundraisingOsPaymentFingerprints: [...new Set([...prior, ...fingerprints])] });
+}
+
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
@@ -63,6 +74,16 @@ export async function POST(request: Request) {
   if (Object.values(mapping).some((field) => !allowedFields.has(field))) {
     return Response.json({ error: "The column mapping contains an unsupported field" }, { status: 422 });
   }
+  const paymentDecisions = body.paymentDecisions ?? [];
+  const decisionFingerprints = new Set<string>();
+  if (!Array.isArray(paymentDecisions) || paymentDecisions.some((decision) => {
+    const valid = /^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "")
+      && ["apply_to_pledge", "new_gift", "needs_review"].includes(decision?.action)
+      && (decision.action !== "apply_to_pledge" || typeof decision.pledgeId === "string");
+    if (!valid || decisionFingerprints.has(decision.fingerprint)) return true;
+    decisionFingerprints.add(decision.fingerprint);
+    return false;
+  })) return Response.json({ error: "The payment decisions could not be validated" }, { status: 422 });
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -83,24 +104,49 @@ export async function POST(request: Request) {
   if (isJlDonationExport(Object.keys(rows[0] ?? {}))) {
     const startedAt = Date.now();
     try {
-    const donationPreview = await buildJlDonationPreview(rows, new Date(), body.compactPaymentStatus === "fully_paid" ? { compactPaymentStatus: "fully_paid" } : {});
+    const columns = Object.keys(rows[0] ?? {});
+    const compactPaymentExport = isCompactJlDonationExport(columns);
+    const donationPreview = await buildJlDonationPreview(rows);
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
     const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
-    const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
+    const households = codes.length ? await env.DB.prepare(`SELECT id, external_id, display_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<MatchedHousehold & { display_name: string }>() : { results: [] as Array<MatchedHousehold & { display_name: string }> };
     const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
     const match = matchJlDonationActivities(donationPreview, households.results, prior.results);
-    const exportRange = donationExportRange(match.matched);
-    const reviewRows: RowFailure[] = match.reviewActivities
-      .map((activity) => ({ row: activity.rowNumber, category: reviewCategory(activity.reviewReason), reason: activity.reviewReason ?? "Row requires review" }))
+    const donorIds = households.results.map((household) => household.id);
+    const openPledges = compactPaymentExport && donorIds.length
+      ? await env.DB.prepare(`SELECT id, donor_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, description, source_campaign, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND donor_id IN (SELECT value FROM json_each(?)) AND balance_cents > 0 AND category IN ('open_pledge','partially_paid_pledge') ORDER BY activity_date DESC`).bind(userId, JSON.stringify(donorIds)).all<OpenPledge>()
+      : { results: [] as OpenPledge[] };
+    const remembered = compactPaymentExport && fingerprints.length
+      ? await env.DB.prepare(`SELECT payment_fingerprint, decision_type, pledge_activity_id, applied_import_id FROM jl_payment_assignments WHERE user_id = ? AND payment_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<RememberedPaymentDecision>()
+      : { results: [] as RememberedPaymentDecision[] };
+    const rememberedFingerprints = new Set(remembered.results.map((decision) => decision.payment_fingerprint));
+    const rememberedWithLegacyGifts = [...remembered.results, ...prior.results.filter((activity) => !rememberedFingerprints.has(activity.source_fingerprint)).map((activity) => ({ payment_fingerprint: activity.source_fingerprint, decision_type: "new_gift" as const, pledge_activity_id: null, applied_import_id: "existing-gift" }))];
+    const paymentCandidates = compactPaymentExport ? buildPaymentCandidates(donationPreview.activities, households.results, openPledges.results, rememberedWithLegacyGifts) : [];
+    const assignmentPlan = compactPaymentExport ? planPaymentAssignments(paymentCandidates, paymentDecisions) : { newGiftFingerprints: [] as string[], pledgeUpdates: [], alreadyApplied: [] as string[], errors: [] as Array<{ row: number; reason: string }> };
+    const candidateByFingerprint = new Map(paymentCandidates.map((candidate) => [candidate.fingerprint, candidate]));
+    const activityByFingerprint = new Map(donationPreview.activities.map((activity) => [activity.fingerprint, activity]));
+    const manualNewActivities = assignmentPlan.newGiftFingerprints.map((fingerprint) => {
+      const activity = activityByFingerprint.get(fingerprint)!;
+      const candidate = candidateByFingerprint.get(fingerprint)!;
+      return { ...activity, donorId: candidate.donorId!, paidCents: activity.committedCents, balanceCents: 0, category: "completed_gift" as const, reviewReason: null };
+    });
+    const matchedActivities = compactPaymentExport ? manualNewActivities : match.matched;
+    const newActivities = compactPaymentExport ? manualNewActivities : match.newActivities;
+    const proposedUpdates = compactPaymentExport ? [] : match.proposedUpdates;
+    const alreadyImported = compactPaymentExport ? assignmentPlan.alreadyApplied.length : match.alreadyImported;
+    const exportRange = donationExportRange(compactPaymentExport ? donationPreview.activities : match.matched);
+    const reviewRows: RowFailure[] = (compactPaymentExport
+      ? assignmentPlan.errors.map((error) => ({ ...error, category: reviewCategory(error.reason) }))
+      : match.reviewActivities.map((activity) => ({ row: activity.rowNumber, category: reviewCategory(activity.reviewReason), reason: activity.reviewReason ?? "Row requires review" })))
       .sort((a, b) => a.row - b.row);
     const rejectedRows: RowFailure[] = [
       ...donationPreview.duplicateRows.map((duplicate) => ({ row: duplicate.row, category: "duplicate_records" as const, reason: "Duplicate source row" })),
-      ...match.unknownActivities.map((activity) => ({ row: activity.rowNumber, category: "unmatched_jl_codes" as const, reason: "JL Code does not match an imported household" })),
+      ...(!compactPaymentExport ? match.unknownActivities.map((activity) => ({ row: activity.rowNumber, category: "unmatched_jl_codes" as const, reason: "JL Code does not match an imported household" })) : []),
       ...match.nonfinancialActivities.map((activity) => ({ row: activity.rowNumber, category: "nonfinancial_entries" as const, reason: "Zero-dollar, complimentary, or included entry was excluded from giving history" })),
     ].sort((a, b) => a.row - b.row);
     const validationIssues = [...reviewRows, ...rejectedRows].sort((a, b) => a.row - b.row);
-    const validation = { totalRows: rows.length, passedRows: match.matched.length, failedRows: reviewRows.length + rejectedRows.length, duplicateRows: donationPreview.duplicateRows.length, nonfinancialRows: match.nonfinancial, firstErrors: validationIssues.slice(0, 10) };
-    const allRowsRequireReview = reviewRows.length === rows.length && rejectedRows.length === 0;
+    const validation = { totalRows: rows.length, passedRows: matchedActivities.length + assignmentPlan.pledgeUpdates.reduce((sum, update) => sum + update.paymentFingerprints.length, 0), failedRows: reviewRows.length + rejectedRows.length, duplicateRows: donationPreview.duplicateRows.length + alreadyImported, nonfinancialRows: match.nonfinancial, firstErrors: validationIssues.slice(0, 10) };
+    const allRowsRequireReview = reviewRows.length === rows.length && rejectedRows.length === 0 && alreadyImported === 0;
     if (allRowsRequireReview) {
       return Response.json({
         importId: `review-${fileHash.slice(0, 12)}`,
@@ -117,35 +163,49 @@ export async function POST(request: Request) {
         validation,
         reviewRows,
         rejectedRows: [],
+        paymentAssignments: paymentCandidates,
         results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: reviewRows.length, rejectedRows: 0, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
         warnings: ["No changes were made to the database. Correct the source columns or classification details, then retry."],
       });
     }
-    if (!match.matched.length) {
+    if (!matchedActivities.length && !assignmentPlan.pledgeUpdates.length && !alreadyImported) {
       const rollbackCauses = [...new Set(rejectedRows.map((failure) => failure.category))];
-      return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, reviewRows, rejectedRows, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: Date.now() - startedAt } }, { status: 422 });
+      return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, reviewRows, rejectedRows, paymentAssignments: paymentCandidates, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: compactPaymentExport ? paymentCandidates.filter((candidate) => !candidate.donorId).length : match.unknownHousehold, elapsedMs: Date.now() - startedAt } }, { status: 422 });
     }
     const now = Math.floor(Date.now() / 1000);
     const importId = crypto.randomUUID();
     const liveHouseholds = await env.DB.prepare("SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live'").bind(userId).all<{ id: string }>();
     const householdsWithGiving = await env.DB.prepare("SELECT DISTINCT donor_id AS id FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND category NOT IN ('needs_review','nonfinancial_entry')").bind(userId).all<{ id: string }>();
-    const givingDonorIds = new Set([...householdsWithGiving.results.map((item) => item.id), ...match.matched.map((item) => item.donorId)]);
+    const assignedPledgeDonorIds = assignmentPlan.pledgeUpdates.map((update) => update.donor_id);
+    const givingDonorIds = new Set([...householdsWithGiving.results.map((item) => item.id), ...matchedActivities.map((item) => item.donorId), ...assignedPledgeDonorIds]);
     const householdsWithoutGivingHistory = liveHouseholds.results.filter((item) => !givingDonorIds.has(item.id)).length;
-    const results = { validRows: match.matched.length, householdsMatched: new Set(match.matched.map((activity) => activity.donorId)).size, newHouseholds: 0, giftsImported: match.newActivities.length, giftsUpdated: match.proposedUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + match.alreadyImported, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length, unmatchedJlCodes: match.unknownHousehold, householdsWithoutGivingHistory, donationRowsRequiringReview: match.needsReview, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
-    const changedActivities = [...match.newActivities, ...match.proposedUpdates];
+    const assignedPaymentCount = assignmentPlan.pledgeUpdates.reduce((sum, update) => sum + update.paymentFingerprints.length, 0);
+    const manuallyAssignedFingerprints = new Set([...assignmentPlan.newGiftFingerprints, ...assignmentPlan.pledgeUpdates.flatMap((update) => update.paymentFingerprints)]);
+    const validatedRowNumbers = compactPaymentExport ? paymentCandidates.filter((candidate) => manuallyAssignedFingerprints.has(candidate.fingerprint)).map((candidate) => candidate.row) : match.matched.map((activity) => activity.rowNumber);
+    const matchedDonorIds = new Set([...matchedActivities.map((activity) => activity.donorId), ...assignedPledgeDonorIds]);
+    const unmatchedJlCodes = compactPaymentExport ? paymentCandidates.filter((candidate) => !candidate.donorId).length : match.unknownHousehold;
+    const results = { validRows: matchedActivities.length + assignedPaymentCount, householdsMatched: matchedDonorIds.size, newHouseholds: 0, giftsImported: newActivities.length, giftsUpdated: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + alreadyImported, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes, elapsedMs: 0 };
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: reviewRows.length, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, rememberedSkipped: assignmentPlan.alreadyApplied.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: matchedActivities.length + assignedPaymentCount, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: reviewRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, reviewRows.length && `${reviewRows.length} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const changedActivities = [...newActivities, ...proposedUpdates];
     const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
-    const changeRows = [...match.newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: null, now })), ...match.proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now }))];
+    const changeRows = [...newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: null, now })), ...proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now })), ...assignmentPlan.pledgeUpdates.map((update) => ({ importId, fingerprint: update.source_fingerprint, changeType: "update", previousJson: JSON.stringify({ source_fingerprint: update.source_fingerprint, paid_cents: update.paid_cents, balance_cents: update.balance_cents, category: update.category, source_snapshot: update.source_snapshot }), now }))];
     const activityStatements = chunkJsonRows(activityRows).map((chunk) =>
       env.DB.prepare(`INSERT INTO giving_activities (id, owner_user_id, donor_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, record_origin, source_snapshot, created_at, updated_at)
         SELECT json_extract(value,'$.id'), json_extract(value,'$.ownerUserId'), json_extract(value,'$.donorId'), 'JL Solutions', json_extract(value,'$.externalHouseholdId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.activityDate'), json_extract(value,'$.committedCents'), json_extract(value,'$.paidCents'), json_extract(value,'$.balanceCents'), json_extract(value,'$.itemType'), json_extract(value,'$.description'), json_extract(value,'$.sourceCampaign'), json_extract(value,'$.category'), 'live', json_extract(value,'$.sourceSnapshot'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?) WHERE true
         ON CONFLICT(owner_user_id, external_source, source_fingerprint) DO UPDATE SET paid_cents=excluded.paid_cents, balance_cents=excluded.balance_cents, category=excluded.category, source_snapshot=excluded.source_snapshot, updated_at=excluded.updated_at`).bind(chunk));
     const changeStatements = chunkJsonRows(changeRows).map((chunk) =>
       env.DB.prepare(`INSERT INTO giving_activity_import_changes (import_id, source_fingerprint, change_type, previous_json, created_at) SELECT json_extract(value,'$.importId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.changeType'), json_extract(value,'$.previousJson'), json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
+    const pledgeUpdateStatements = assignmentPlan.pledgeUpdates.map((update) => env.DB.prepare(`UPDATE giving_activities SET paid_cents = ?, balance_cents = ?, category = ?, source_snapshot = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND donor_id = ? AND balance_cents = ? AND paid_cents = ?`).bind(update.nextPaidCents, update.nextBalanceCents, update.nextCategory, pledgeSnapshotWithPayments(update.source_snapshot, update.paymentFingerprints), now, update.id, userId, update.donor_id, update.balance_cents, update.paid_cents));
+    const newGiftDecisionRows = compactPaymentExport ? manualNewActivities.map((activity) => ({ userId, fingerprint: activity.fingerprint, decisionType: "new_gift", pledgeId: null, importId, now })) : [];
+    const newGiftDecisionStatements = chunkJsonRows(newGiftDecisionRows).map((chunk) => env.DB.prepare(`INSERT INTO jl_payment_assignments (user_id, payment_fingerprint, decision_type, pledge_activity_id, applied_import_id, created_at, updated_at) SELECT json_extract(value,'$.userId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.decisionType'), json_extract(value,'$.pledgeId'), json_extract(value,'$.importId'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
+    const pledgeDecisionStatements = assignmentPlan.pledgeUpdates.flatMap((update) => update.paymentFingerprints.map((fingerprint) => env.DB.prepare(`INSERT INTO jl_payment_assignments (user_id, payment_fingerprint, decision_type, pledge_activity_id, applied_import_id, created_at, updated_at) SELECT CASE WHEN EXISTS (SELECT 1 FROM giving_activities WHERE id = ? AND owner_user_id = ? AND donor_id = ? AND balance_cents = ? AND paid_cents = ?) THEN ? ELSE NULL END, ?, 'apply_to_pledge', ?, ?, ?, ?`).bind(update.id, userId, update.donor_id, update.balance_cents, update.paid_cents, userId, fingerprint, update.id, importId, now, now)));
     const statements = [
       env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(userId, user.email, user.displayName, now, now),
       ...activityStatements,
+      ...newGiftDecisionStatements,
+      ...pledgeDecisionStatements,
+      ...pledgeUpdateStatements,
       env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?, ?)").bind(importId, userId, fileName, fileHash, JSON.stringify(report), now, now),
       env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
       env.DB.prepare(`INSERT INTO jl_refresh_state (user_id, last_donation_refresh_at, last_donation_range_start, last_donation_range_end, updated_at)
@@ -157,13 +217,13 @@ export async function POST(request: Request) {
     try {
       await env.DB.batch(statements);
       results.elapsedMs = Date.now() - startedAt;
-      logger.info("jl_donation_import_completed", { importId, userId, rows: rows.length, matched: match.matched.length, review: match.needsReview });
+      logger.info("jl_donation_import_completed", { importId, userId, rows: rows.length, matched: results.validRows, review: reviewRows.length });
       return Response.json(report, { status: 201 });
     } catch (databaseError) {
       const reason = safeDatabaseReason(databaseError);
       const databaseFailure: RowFailure = { row: 0, category: "transaction_database_errors", reason };
-      logger.error("jl_donation_import_failed", new Error("Database transaction failed"), { importId, userId, validated: match.matched.length });
-      const transactionRejectedRows = [...match.matched.map((activity) => ({ row: activity.rowNumber, category: "transaction_database_errors" as const, reason: "Validated row was not written because the database transaction failed" })), ...rejectedRows];
+      logger.error("jl_donation_import_failed", new Error("Database transaction failed"), { importId, userId, validated: validatedRowNumbers.length });
+      const transactionRejectedRows = [...validatedRowNumbers.map((row) => ({ row, category: "transaction_database_errors" as const, reason: "Validated row was not written because the database transaction failed" })), ...rejectedRows];
       return Response.json({ error: reason, fatalError: reason, databaseChangesMade: false, noChangesMade: true, rollbackCauses: ["transaction_database_errors"], validation: { ...validation, firstErrors: [databaseFailure, ...validation.firstErrors].slice(0, 10) }, reviewRows, rejectedRows: transactionRejectedRows, results: { ...results, giftsImported: 0, giftsUpdated: 0, rejectedRows: transactionRejectedRows.length, elapsedMs: Date.now() - startedAt } }, { status: 500 });
     }
     } catch (unexpectedError) {

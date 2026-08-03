@@ -33,8 +33,13 @@ export type DonationClassificationOptions = { compactPaymentStatus?: "fully_paid
 export function isJlDonationExport(columns: string[]) {
   const found = new Set(columns.map((column) => column.trim().toLowerCase()));
   const fullExport = JL_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
-  const compactExport = JL_COMPACT_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
+  const compactExport = isCompactJlDonationExport(columns);
   return fullExport || compactExport;
+}
+
+export function isCompactJlDonationExport(columns: string[]) {
+  const found = new Set(columns.map((column) => column.trim().toLowerCase()));
+  return JL_COMPACT_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
 }
 
 function currency(value: string) {
@@ -90,7 +95,8 @@ export function classifyJlDonation(row: ImportRow, now = new Date(), options: Do
 }
 
 function canonicalFingerprint(row: ImportRow) {
-  return [row.Code, row["Due Date"] ?? row.Date, row["Item Num"], row.Desc, row.Campaign, row.Amount, row.Company]
+  const compactPaymentMarker = Object.hasOwn(row, "Date") && !Object.hasOwn(row, "Due Date") ? ["compact-payment"] : [];
+  return [...compactPaymentMarker, row.Code, row["Due Date"] ?? row.Date, row["Item Num"], row.Desc, row.Campaign, row.Amount, row.Company]
     .map((value) => (value ?? "").trim().replace(/\s+/g, " ").toLowerCase()).join("\u001f");
 }
 

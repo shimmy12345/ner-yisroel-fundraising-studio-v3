@@ -35,7 +35,9 @@ type ImportReport = {
   refresh?: { kind: "household" | "donation"; rangeStart?: string | null; rangeEnd?: string | null; historicalRecordsDeleted: number; workspaceRecordsPreserved: boolean };
 };
 type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }>; duplicateRows: number; rejectedRows: number };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: RowFailure[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null };
+type OpenPledgePreview = { id: string; activity_date: number | null; committed_cents: number; paid_cents: number; balance_cents: number; description: string | null; source_campaign: string | null };
+type PaymentAssignmentPreview = { row: number; fingerprint: string; donorName: string; donorMatched: boolean; paymentDate: number | null; amountCents: number | null; campaign: string; action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; remembered: boolean; alreadyApplied: boolean; reason: string | null; openPledges: OpenPledgePreview[] };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: RowFailure[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[] };
 
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
@@ -78,6 +80,8 @@ function csvValue(value: string | number) {
 }
 
 const dateLabel = (value: string | null) => value ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value.length === 10 ? `${value}T12:00:00` : value)) : "Not yet refreshed";
+const centsLabel = (value: number | null) => value === null ? "Amount unavailable" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
+const epochDateLabel = (value: number | null) => value === null ? "Date unavailable" : new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value * 1000));
 
 export function ImportExperience({ refreshOverview }: { refreshOverview: RefreshOverview }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -100,7 +104,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
   const [mode, setMode] = useState<"first" | "refresh">(refreshOverview.lastHouseholdRefreshAt ? "refresh" : "first");
   const [donationDetected, setDonationDetected] = useState(false);
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
-  const [compactPaymentStatus, setCompactPaymentStatus] = useState<"review" | "fully_paid">("review");
+  const [paymentDecisions, setPaymentDecisions] = useState<Record<string, { action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null }>>({});
 
   async function inspectFile(file: File) {
     if (!/\.(csv|xlsx)$/i.test(file.name)) {
@@ -133,7 +137,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       setStep("recognition");
       setJlDetected(detectedJl);
       setDonationDetected(detectedDonation);
-      setCompactPaymentStatus("review");
+      setPaymentDecisions({});
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
       setStatusMessage("");
     } catch (fileError) {
@@ -158,12 +162,13 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     setError("");
     setStatusMessage("Checking the preview securely…");
     try {
-      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash, compactPaymentStatus }) });
+      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash }) });
       const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; error?: string };
       if (!response.ok || (!payload.preview && !payload.donation)) throw new Error(payload.error ?? "The preview could not be prepared.");
       setPreview(payload.preview ?? { donors: [], gifts: [], interactions: [], reminders: [], rejectedRows: [], warnings: [] });
       setJlPreview(payload.jl ?? null);
       setDonationPreview(payload.donation ?? null);
+      setPaymentDecisions(Object.fromEntries((payload.donation?.paymentAssignments ?? []).map((item) => [item.fingerprint, { action: item.action, pledgeId: item.pledgeId }])));
       setStep("preview");
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "The preview could not be prepared.");
@@ -178,7 +183,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, compactPaymentStatus }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })) }),
       });
       const payload = await response.json() as ImportReport | ImportFailure | { error?: string };
       if (!response.ok) {
@@ -226,7 +231,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     setJlPreview(null);
     setDonationDetected(false);
     setDonationPreview(null);
-    setCompactPaymentStatus("review");
+    setPaymentDecisions({});
     setFailureReport(null);
     setReport(null);
     setError("");
@@ -248,7 +253,16 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
   }
 
   const stepNumber = step === "upload" ? 2 : step === "recognition" ? 3 : step === "preview" ? 4 : 5;
-  const compactDonation = donationDetected && !("Paid" in (rows[0] ?? {})) && !("Balance Due" in (rows[0] ?? {}));
+  const unresolvedPayments = donationPreview?.paymentAssignments.filter((item) => {
+    if (item.alreadyApplied) return false;
+    const decision = paymentDecisions[item.fingerprint];
+    if (!decision || decision.action === "needs_review") return true;
+    if (decision.action !== "apply_to_pledge") return false;
+    const pledge = item.openPledges.find((option) => option.id === decision.pledgeId);
+    return !pledge || (item.amountCents ?? 0) > pledge.balance_cents;
+  }).length ?? 0;
+  const proposedNewPayments = donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && paymentDecisions[item.fingerprint]?.action === "new_gift").length ?? 0;
+  const proposedPledgeUpdates = new Set(donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && paymentDecisions[item.fingerprint]?.action === "apply_to_pledge" && paymentDecisions[item.fingerprint]?.pledgeId).map((item) => paymentDecisions[item.fingerprint].pledgeId) ?? []).size;
 
   return (
     <main className="import-page">
@@ -327,13 +341,6 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
                 );
               })}
             </div>
-            {compactDonation && <label className="update-existing-option">
-              <span><strong>Payment status classification</strong><small>This export has Amount but no Paid or Balance Due columns. Keep the safe review default unless this JL export contains completed payments.</small></span>
-              <select aria-label="Payment status classification" value={compactPaymentStatus} onChange={(event) => setCompactPaymentStatus(event.target.value as "review" | "fully_paid")}>
-                <option value="review">Hold every row for review</option>
-                <option value="fully_paid">Treat Amount as fully paid</option>
-              </select>
-            </label>}
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Choose another file</button>
               <button className="onboarding-primary" type="button" onClick={() => void showPreview()} disabled={Boolean(statusMessage)}>{statusMessage || "Review import preview"}</button>
@@ -348,9 +355,28 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             <p className="import-lede">This is a preview only. Nothing has been written to Fundraising OS.</p>
             {donationDetected && donationPreview ? <>
               <p className="jl-export-range">Detected export range: <strong>{donationPreview.rangeStart && donationPreview.rangeEnd ? `${dateLabel(donationPreview.rangeStart)} – ${dateLabel(donationPreview.rangeEnd)}` : "No valid dated rows"}</strong></p>
-              <div className="import-counts"><article><strong>{donationPreview.newActivities.toLocaleString()}</strong><span>new gifts</span></article><article><strong>{donationPreview.proposedUpdates.toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article><article><strong>{donationPreview.needsReview.toLocaleString()}</strong><span>review rows</span></article><article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article></div>
-              <div className="import-preview-grid"><section><h2>Ready</h2><p><span>✓</span>Matched by JL Code<b>{donationPreview.matchedRows}</b></p><p><span>✓</span>Open pledges<b>{donationPreview.openPledges}</b></p><p><span>✓</span>Already imported<b>{donationPreview.alreadyImported}</b></p></section><section><h2>Excluded or review</h2><p><span>•</span>Unknown JL Code<b>{donationPreview.unknownHousehold}</b></p><p><span>•</span>Needs review<b>{donationPreview.needsReview}</b></p><p><span>•</span>Suspicious dates<b>{donationPreview.suspiciousDates}</b></p><p><span>•</span>Duplicate source rows<b>{donationPreview.duplicateSourceRows}</b></p><p><span>•</span>Zero-dollar/nonfinancial<b>{donationPreview.nonfinancial}</b></p></section></div>
-              {donationPreview.reviewRows.length > 0 && <section className="import-failure-section"><h2>Rows requiring review</h2><ol className="import-failure-errors">{donationPreview.reviewRows.slice(0, 8).map((item) => <li key={item.row}><strong>Row {item.row}</strong><span>{item.reason}</span></li>)}</ol><button type="button" onClick={() => downloadRows(donationPreview.reviewRows, fileHash.slice(0, 12), "review")}>Download review report CSV</button></section>}
+              <div className="import-counts"><article><strong>{(donationPreview.paymentAssignments.length ? proposedNewPayments : donationPreview.newActivities).toLocaleString()}</strong><span>new gifts</span></article><article><strong>{(donationPreview.paymentAssignments.length ? proposedPledgeUpdates : donationPreview.proposedUpdates).toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article><article><strong>{(donationPreview.paymentAssignments.length ? unresolvedPayments : donationPreview.needsReview).toLocaleString()}</strong><span>review rows</span></article><article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article></div>
+              <div className="import-preview-grid"><section><h2>Ready</h2><p><span>✓</span>Matched by JL Code<b>{donationPreview.matchedRows}</b></p><p><span>✓</span>Open pledges<b>{donationPreview.openPledges}</b></p><p><span>✓</span>Already imported<b>{donationPreview.alreadyImported}</b></p></section><section><h2>Excluded or review</h2><p><span>•</span>Unknown JL Code<b>{donationPreview.unknownHousehold}</b></p><p><span>•</span>Needs review<b>{donationPreview.paymentAssignments.length ? unresolvedPayments : donationPreview.needsReview}</b></p><p><span>•</span>Suspicious dates<b>{donationPreview.suspiciousDates}</b></p><p><span>•</span>Duplicate source rows<b>{donationPreview.duplicateSourceRows}</b></p><p><span>•</span>Zero-dollar/nonfinancial<b>{donationPreview.nonfinancial}</b></p></section></div>
+              {donationPreview.reviewRows.length > 0 && donationPreview.paymentAssignments.length === 0 && <section className="import-failure-section"><h2>Rows requiring review</h2><ol className="import-failure-errors">{donationPreview.reviewRows.slice(0, 8).map((item) => <li key={item.row}><strong>Row {item.row}</strong><span>{item.reason}</span></li>)}</ol><button type="button" onClick={() => downloadRows(donationPreview.reviewRows, fileHash.slice(0, 12), "review")}>Download review report CSV</button></section>}
+              {donationPreview.paymentAssignments.length > 0 && <section className="payment-assignment-section" aria-labelledby="payment-assignment-title">
+                <div><p className="eyebrow">MANUAL PAYMENT ASSIGNMENT</p><h2 id="payment-assignment-title">Decide how each payment should be recorded.</h2><p>Nothing is assigned automatically. Review every proposed change before importing.</p></div>
+                <div className="payment-assignment-list">{donationPreview.paymentAssignments.map((item) => {
+                  const decision = paymentDecisions[item.fingerprint] ?? { action: item.action, pledgeId: item.pledgeId };
+                  const invalid = Boolean(item.reason && !item.reason.startsWith("Choose whether") && !item.alreadyApplied);
+                  const selectedPledge = item.openPledges.find((pledge) => pledge.id === decision.pledgeId);
+                  return <article className="payment-assignment-card" key={item.fingerprint}>
+                    <header><div><strong>{item.donorName}</strong><span>Row {item.row} · {epochDateLabel(item.paymentDate)} · {item.campaign || "No campaign"}</span></div><b>{centsLabel(item.amountCents)}</b></header>
+                    {item.alreadyApplied ? <p className="payment-remembered">Already processed: {item.action === "apply_to_pledge" ? "applied to the saved pledge" : "recorded as a new gift"}. It will not be counted again.</p> : <>
+                      <label><span>Classify payment</span><select aria-label={`Classify payment for row ${item.row}`} value={decision.action} disabled={invalid} onChange={(event) => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value as "apply_to_pledge" | "new_gift" | "needs_review", pledgeId: null } }))}><option value="needs_review">Needs review</option><option value="apply_to_pledge" disabled={!item.openPledges.length}>Apply to open pledge</option><option value="new_gift">New gift/payment</option></select></label>
+                      {invalid && <p className="onboarding-error">{item.reason}</p>}
+                      {decision.action === "apply_to_pledge" && <div className="open-pledge-options"><h3>Select the open pledge</h3>{item.openPledges.map((pledge) => { const exceedsBalance = (item.amountCents ?? 0) > pledge.balance_cents; return <label key={pledge.id} className={decision.pledgeId === pledge.id ? "selected" : ""}><input type="radio" name={`pledge-${item.fingerprint}`} checked={decision.pledgeId === pledge.id} disabled={exceedsBalance} onChange={() => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { action: "apply_to_pledge", pledgeId: pledge.id } }))}/><span><strong>{epochDateLabel(pledge.activity_date)} · {pledge.description || pledge.source_campaign || "Open pledge"}</strong><small>Original {centsLabel(pledge.committed_cents)} · Paid {centsLabel(pledge.paid_cents)} · Balance {centsLabel(pledge.balance_cents)}{exceedsBalance ? " · Payment exceeds balance" : ""}</small></span></label>; })}</div>}
+                      {decision.action === "new_gift" && <p className="payment-proposal">Proposed change: create one separate paid gift for {centsLabel(item.amountCents)}.</p>}
+                      {decision.action === "apply_to_pledge" && selectedPledge && <p className="payment-proposal">Proposed change: update this pledge to paid {centsLabel(selectedPledge.paid_cents + (item.amountCents ?? 0))}, balance {centsLabel(selectedPledge.balance_cents - (item.amountCents ?? 0))}{item.amountCents === selectedPledge.balance_cents ? ", and mark it fulfilled" : ""}. No duplicate gift will be created.</p>}
+                      {decision.action === "needs_review" && !invalid && <p className="payment-review-note">{item.reason}</p>}
+                    </>}
+                  </article>;
+                })}</div>
+              </section>}
               <p className="import-privacy">Paid totals use Paid. Commitments use Amount. Open balances use Balance Due. Nothing has been written yet.</p>
             </> : <div className="import-counts">
               <article><strong>{preview.donors.length.toLocaleString()}</strong><span>{jlDetected ? "households" : "donors"}</span></article>
@@ -388,7 +414,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
               <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
-              <button className="onboarding-primary" type="button" onClick={() => void importData()}>Confirm and import</button>
+              <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments > 0}>{unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : "Confirm and import"}</button>
             </div>
           </section>
         )}

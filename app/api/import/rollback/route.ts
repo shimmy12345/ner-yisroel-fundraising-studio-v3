@@ -25,6 +25,7 @@ export async function POST(request: Request) {
   const statements = [
     env.DB.prepare("DELETE FROM giving_activities WHERE owner_user_id = ? AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))").bind(userId, JSON.stringify(inserted)),
     env.DB.prepare(`UPDATE giving_activities SET paid_cents=(SELECT json_extract(value,'$.paid_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), balance_cents=(SELECT json_extract(value,'$.balance_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), category=(SELECT json_extract(value,'$.category') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), source_snapshot=(SELECT json_extract(value,'$.source_snapshot') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint), updated_at=? WHERE owner_user_id = ? AND source_fingerprint IN (SELECT json_extract(value,'$.fingerprint') FROM json_each(?))`).bind(JSON.stringify(updated), JSON.stringify(updated), JSON.stringify(updated), JSON.stringify(updated), now, userId, JSON.stringify(updated)),
+    env.DB.prepare("DELETE FROM jl_payment_assignments WHERE user_id = ? AND applied_import_id = ?").bind(userId, importId),
     env.DB.prepare("UPDATE data_imports SET status = 'rolled_back' WHERE id = ? AND user_id = ?").bind(importId, userId),
   ];
   try {

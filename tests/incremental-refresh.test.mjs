@@ -31,7 +31,7 @@ const page = await readFile(new URL("../app/onboarding/import/page.tsx", import.
 const experience = await readFile(new URL("../app/onboarding/import/ImportExperience.tsx", import.meta.url), "utf8");
 const migration = await readFile(new URL("../drizzle/0007_incremental_jl_refresh.sql", import.meta.url), "utf8");
 
-assert.match(route, /const changedActivities = \[\.\.\.match\.newActivities, \.\.\.match\.proposedUpdates\]/);
+assert.match(route, /const changedActivities = \[\.\.\.newActivities, \.\.\.proposedUpdates\]/);
 assert.match(route, /ON CONFLICT\(owner_user_id, external_source, source_fingerprint\) DO UPDATE SET paid_cents/);
 assert.match(route, /jl_refresh_state/);
 assert.match(route, /historicalRecordsDeleted: 0/);
