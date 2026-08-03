@@ -27,10 +27,10 @@ type SaveResult = {
   extracted: ReturnType<typeof extractInteraction>;
 };
 
-export function CaptureExperience({ donors, initialDonorId }: { donors: DonorSearchRecord[]; initialDonorId: string }) {
+export function CaptureExperience({ donors, initialDonorId, initialKind = null }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null }) {
   const [note, setNote] = useState("");
   const [subject, setSubject] = useState("");
-  const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(null);
+  const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(initialKind);
   const [reminder, setReminder] = useState<ReminderChoice>("none");
   const [customDate, setCustomDate] = useState("");
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -84,7 +84,7 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: DonorSea
   function reset() {
     setNote("");
     setSubject("");
-    setSelectedKind(null);
+    setSelectedKind(initialKind);
     setReminder("none");
     setCustomDate("");
     setOccurredAt(toLocalDateTimeValue(new Date()));
