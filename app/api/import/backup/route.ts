@@ -19,7 +19,7 @@ export async function GET(request: Request) {
       const ownedImport = await env.DB.prepare("SELECT id FROM data_imports WHERE id = ? AND user_id = ? LIMIT 1").bind(importId, profile.id).first();
       if (!ownedImport) return Response.json({ error: "Import not found" }, { status: 404 });
     }
-    const [donors, gifts, givingActivities, interactions, recommendations, activityAudits, dataImports, importChanges, paymentAssignments, refreshState, rollbackAudits] = await Promise.all([
+    const [donors, gifts, givingActivities, interactions, recommendations, activityAudits, dataImports, importChanges, paymentAssignments, paymentAssignmentAudits, refreshState, rollbackAudits] = await Promise.all([
       env.DB.prepare("SELECT * FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample' ORDER BY id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM gifts WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY received_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM giving_activities WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY activity_date, id").bind(profile.id).all(),
@@ -29,6 +29,7 @@ export async function GET(request: Request) {
       env.DB.prepare("SELECT * FROM data_imports WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM giving_activity_import_changes WHERE import_id IN (SELECT id FROM data_imports WHERE user_id = ?) ORDER BY import_id, source_fingerprint").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM jl_payment_assignments WHERE user_id = ? ORDER BY created_at, payment_fingerprint").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM jl_payment_assignment_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM jl_refresh_state WHERE user_id = ?").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM donation_import_rollback_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
     ]);
@@ -45,6 +46,7 @@ export async function GET(request: Request) {
       dataImports: dataImports.results,
       givingActivityImportChanges: importChanges.results,
       paymentAssignments: paymentAssignments.results,
+      paymentAssignmentAudits: paymentAssignmentAudits.results,
       refreshState: refreshState.results,
       rollbackAudits: rollbackAudits.results,
     }, null, 2);

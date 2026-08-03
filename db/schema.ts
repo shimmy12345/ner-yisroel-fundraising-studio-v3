@@ -144,6 +144,31 @@ export const jlPaymentAssignments = sqliteTable("jl_payment_assignments", {
   index("jl_payment_assignments_pledge_idx").on(table.pledgeActivityId),
 ]);
 
+export const jlPaymentAssignmentAudits = sqliteTable("jl_payment_assignment_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  importId: text("import_id").notNull(),
+  paymentFingerprint: text("payment_fingerprint").notNull(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  pledgeActivityId: text("pledge_activity_id").references(() => givingActivities.id),
+  decisionType: text("decision_type", { enum: ["apply_to_pledge", "new_gift"] }).notNull(),
+  paymentCents: integer("payment_cents").notNull(),
+  appliedCents: integer("applied_cents").notNull(),
+  newGiftCents: integer("new_gift_cents").notNull(),
+  overpaymentAction: text("overpayment_action", { enum: ["split_remainder_new_gift"] }),
+  previousPaidCents: integer("previous_paid_cents"),
+  nextPaidCents: integer("next_paid_cents"),
+  previousBalanceCents: integer("previous_balance_cents"),
+  nextBalanceCents: integer("next_balance_cents"),
+  previousStatus: text("previous_status"),
+  nextStatus: text("next_status"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("jl_payment_assignment_audits_import_payment_idx").on(table.importId, table.paymentFingerprint),
+  index("jl_payment_assignment_audits_user_date_idx").on(table.userId, table.createdAt),
+  index("jl_payment_assignment_audits_pledge_idx").on(table.pledgeActivityId, table.createdAt),
+]);
+
 export const donationImportRollbackAudits = sqliteTable("donation_import_rollback_audits", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),

@@ -1,7 +1,13 @@
 import type { GivingActivity } from "./jl-donations.ts";
 
 export type PaymentDecisionAction = "apply_to_pledge" | "new_gift" | "needs_review";
-export type PaymentDecisionInput = { fingerprint: string; action: PaymentDecisionAction; pledgeId?: string | null };
+export type OverpaymentAction = "split_remainder_new_gift" | null;
+export type PaymentDecisionInput = {
+  fingerprint: string;
+  action: PaymentDecisionAction;
+  pledgeId?: string | null;
+  overpaymentAction?: OverpaymentAction;
+};
 export type PaymentHousehold = { id: string; external_id: string; display_name?: string };
 export type OpenPledge = {
   id: string;
@@ -82,12 +88,48 @@ export function buildPaymentCandidates(
   });
 }
 
-export type PlannedPledgeUpdate = OpenPledge & { paymentCents: number; nextPaidCents: number; nextBalanceCents: number; nextCategory: "partially_paid_pledge" | "completed_gift"; paymentFingerprints: string[] };
+export type PlannedPledgeUpdate = OpenPledge & {
+  paymentCents: number;
+  nextPaidCents: number;
+  nextBalanceCents: number;
+  nextCategory: "partially_paid_pledge" | "completed_gift";
+  paymentFingerprints: string[];
+};
+
+export type PlannedNewGift = {
+  sourceFingerprint: string;
+  fingerprint: string;
+  amountCents: number;
+  kind: "full_payment" | "overpayment_remainder";
+};
+
+export type PlannedPaymentAssignment = {
+  row: number;
+  fingerprint: string;
+  donorId: string;
+  decisionType: "apply_to_pledge" | "new_gift";
+  pledgeId: string | null;
+  paymentCents: number;
+  appliedCents: number;
+  newGiftCents: number;
+  overpaymentAction: OverpaymentAction;
+  previousPaidCents: number | null;
+  nextPaidCents: number | null;
+  previousBalanceCents: number | null;
+  nextBalanceCents: number | null;
+  previousStatus: string | null;
+  nextStatus: string | null;
+};
+
+export function remainderGiftFingerprint(paymentFingerprint: string) {
+  return `${paymentFingerprint}:remainder`;
+}
 
 export function planPaymentAssignments(candidates: PaymentCandidate[], decisions: PaymentDecisionInput[]) {
   const inputByFingerprint = new Map(decisions.map((decision) => [decision.fingerprint, decision]));
-  const newGiftFingerprints: string[] = [];
+  const newGifts: PlannedNewGift[] = [];
   const pledgePayments = new Map<string, { pledge: OpenPledge; total: number; fingerprints: string[] }>();
+  const assignments: PlannedPaymentAssignment[] = [];
   const alreadyApplied: string[] = [];
   const errors: Array<{ row: number; reason: string }> = [];
 
@@ -99,11 +141,13 @@ export function planPaymentAssignments(candidates: PaymentCandidate[], decisions
     }
     const decision = inputByFingerprint.get(candidate.fingerprint);
     if (!decision || decision.action === "needs_review") {
-      errors.push({ row: candidate.row, reason: "Choose Apply to open pledge or New gift/payment" });
+      errors.push({ row: candidate.row, reason: "Choose Apply to open pledge or Treat as new gift/payment" });
       continue;
     }
+    const paymentCents = candidate.amountCents ?? 0;
     if (decision.action === "new_gift") {
-      newGiftFingerprints.push(candidate.fingerprint);
+      newGifts.push({ sourceFingerprint: candidate.fingerprint, fingerprint: candidate.fingerprint, amountCents: paymentCents, kind: "full_payment" });
+      assignments.push({ row: candidate.row, fingerprint: candidate.fingerprint, donorId: candidate.donorId!, decisionType: "new_gift", pledgeId: null, paymentCents, appliedCents: 0, newGiftCents: paymentCents, overpaymentAction: null, previousPaidCents: null, nextPaidCents: null, previousBalanceCents: null, nextBalanceCents: null, previousStatus: null, nextStatus: null });
       continue;
     }
     const pledge = candidate.openPledges.find((item) => item.id === decision.pledgeId);
@@ -111,15 +155,30 @@ export function planPaymentAssignments(candidates: PaymentCandidate[], decisions
       errors.push({ row: candidate.row, reason: "Select an open pledge belonging to this donor" });
       continue;
     }
-    const amount = candidate.amountCents ?? 0;
     const accumulated = pledgePayments.get(pledge.id) ?? { pledge, total: 0, fingerprints: [] };
-    if (accumulated.total + amount > pledge.balance_cents) {
-      errors.push({ row: candidate.row, reason: "Payment exceeds the selected pledge balance" });
+    const availableCents = Math.max(0, pledge.balance_cents - accumulated.total);
+    if (availableCents === 0) {
+      errors.push({ row: candidate.row, reason: "The selected pledge is fully allocated by an earlier payment; choose another pledge or return this row to review" });
       continue;
     }
-    accumulated.total += amount;
+    const appliedCents = Math.min(paymentCents, availableCents);
+    const remainderCents = paymentCents - appliedCents;
+    if (remainderCents > 0 && decision.overpaymentAction !== "split_remainder_new_gift") {
+      errors.push({ row: candidate.row, reason: "Payment exceeds the selected pledge balance; choose how to handle the remainder" });
+      continue;
+    }
+    const previousPaidCents = pledge.paid_cents + accumulated.total;
+    const previousBalanceCents = pledge.balance_cents - accumulated.total;
+    const nextPaidCents = previousPaidCents + appliedCents;
+    const nextBalanceCents = previousBalanceCents - appliedCents;
+    const nextStatus = nextBalanceCents === 0 ? "completed_gift" : "partially_paid_pledge";
+    accumulated.total += appliedCents;
     accumulated.fingerprints.push(candidate.fingerprint);
     pledgePayments.set(pledge.id, accumulated);
+    if (remainderCents > 0) {
+      newGifts.push({ sourceFingerprint: candidate.fingerprint, fingerprint: remainderGiftFingerprint(candidate.fingerprint), amountCents: remainderCents, kind: "overpayment_remainder" });
+    }
+    assignments.push({ row: candidate.row, fingerprint: candidate.fingerprint, donorId: candidate.donorId!, decisionType: "apply_to_pledge", pledgeId: pledge.id, paymentCents, appliedCents, newGiftCents: remainderCents, overpaymentAction: remainderCents > 0 ? "split_remainder_new_gift" : null, previousPaidCents, nextPaidCents, previousBalanceCents, nextBalanceCents, previousStatus: previousBalanceCents === 0 ? "completed_gift" : previousPaidCents > 0 ? "partially_paid_pledge" : pledge.category, nextStatus });
   }
 
   const pledgeUpdates: PlannedPledgeUpdate[] = [...pledgePayments.values()].map(({ pledge, total, fingerprints }) => {
@@ -128,5 +187,12 @@ export function planPaymentAssignments(candidates: PaymentCandidate[], decisions
     return { ...pledge, paymentCents: total, nextPaidCents, nextBalanceCents, nextCategory: nextBalanceCents === 0 ? "completed_gift" : "partially_paid_pledge", paymentFingerprints: fingerprints };
   });
 
-  return { newGiftFingerprints, pledgeUpdates, alreadyApplied, errors };
+  return {
+    newGifts,
+    newGiftFingerprints: newGifts.filter((gift) => gift.kind === "full_payment").map((gift) => gift.sourceFingerprint),
+    pledgeUpdates,
+    assignments,
+    alreadyApplied,
+    errors,
+  };
 }

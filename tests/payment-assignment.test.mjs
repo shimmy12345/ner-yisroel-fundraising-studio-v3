@@ -64,22 +64,55 @@ const rememberedPlan = planPaymentAssignments(rememberedCandidates, []);
 assert.deepEqual(rememberedPlan.alreadyApplied, [candidates[0].fingerprint]);
 assert.equal(rememberedPlan.pledgeUpdates.length, 0, "an identical remembered payment must not be applied twice");
 
+const overpaymentRows = [{ Code: "JL-100", "First Name": "Example", "Last Name": "One", Date: "2026-08-05", Campaign: "DIFFERENT-CAMPAIGN", Amount: "125.00" }];
+const overpaymentPreview = await buildJlDonationPreview(overpaymentRows, new Date("2026-08-03"));
+const overpaymentCandidate = buildPaymentCandidates(overpaymentPreview.activities, households, openPledges, [])[0];
+assert.equal(overpaymentCandidate.openPledges.length, 1, "campaign mismatch must not hide a donor's open pledge");
+const unresolvedOverpayment = planPaymentAssignments([overpaymentCandidate], [{ fingerprint: overpaymentCandidate.fingerprint, action: "apply_to_pledge", pledgeId: "pledge-100" }]);
+assert.equal(unresolvedOverpayment.errors.length, 1, "overpayment requires an explicit remainder decision");
+const splitOverpayment = planPaymentAssignments([overpaymentCandidate], [{ fingerprint: overpaymentCandidate.fingerprint, action: "apply_to_pledge", pledgeId: "pledge-100", overpaymentAction: "split_remainder_new_gift" }]);
+assert.equal(splitOverpayment.errors.length, 0);
+assert.equal(splitOverpayment.pledgeUpdates[0].paymentCents, 10000);
+assert.equal(splitOverpayment.pledgeUpdates[0].nextBalanceCents, 0);
+assert.equal(splitOverpayment.pledgeUpdates[0].nextCategory, "completed_gift");
+assert.equal(splitOverpayment.newGifts[0].amountCents, 2500);
+assert.equal(splitOverpayment.newGifts[0].kind, "overpayment_remainder");
+assert.equal(splitOverpayment.assignments[0].appliedCents + splitOverpayment.assignments[0].newGiftCents, 12500, "the source payment must be counted exactly once across pledge and remainder gift");
+
+const twoPaymentsPreview = await buildJlDonationPreview([
+  { Code: "JL-100", Date: "2026-08-06", Campaign: "ONE", Amount: "75.00" },
+  { Code: "JL-100", Date: "2026-08-07", Campaign: "TWO", Amount: "75.00" },
+], new Date("2026-08-03"));
+const twoCandidates = buildPaymentCandidates(twoPaymentsPreview.activities, households, openPledges, []);
+const combinedPlan = planPaymentAssignments(twoCandidates, twoCandidates.map((candidate) => ({ fingerprint: candidate.fingerprint, action: "apply_to_pledge", pledgeId: "pledge-100", overpaymentAction: "split_remainder_new_gift" })));
+assert.equal(combinedPlan.pledgeUpdates[0].paymentCents, 10000, "combined allocations cannot exceed the pledge balance");
+assert.equal(combinedPlan.newGifts.reduce((sum, gift) => sum + gift.amountCents, 0), 5000);
+assert.equal(combinedPlan.assignments.reduce((sum, assignment) => sum + assignment.appliedCents + assignment.newGiftCents, 0), 15000, "combined payments remain counted exactly once");
+
 const route = await readFile(new URL("../app/api/import/route.ts", import.meta.url), "utf8");
 const previewRoute = await readFile(new URL("../app/api/import/preview/route.ts", import.meta.url), "utf8");
 const rollbackRoute = await readFile(new URL("../app/api/import/rollback/route.ts", import.meta.url), "utf8");
 const experience = await readFile(new URL("../app/onboarding/import/ImportExperience.tsx", import.meta.url), "utf8");
 const migration = await readFile(new URL("../drizzle/0008_manual_pledge_payment_assignment.sql", import.meta.url), "utf8");
+const auditMigration = await readFile(new URL("../drizzle/0010_manual_pledge_assignment_audit.sql", import.meta.url), "utf8");
 assert.match(route, /planPaymentAssignments/);
 assert.match(route, /UPDATE giving_activities SET paid_cents = \?, balance_cents = \?, category = \?/);
 assert.match(route, /await env\.DB\.batch\(statements\)/);
 assert.match(route, /INSERT INTO jl_payment_assignments/);
+assert.match(route, /INSERT INTO jl_payment_assignment_audits/);
 assert.match(route, /CASE WHEN EXISTS \(SELECT 1 FROM giving_activities/);
 assert.match(previewRoute, /balance_cents > 0/);
 assert.match(previewRoute, /owner_user_id = \?/);
 assert.match(rollbackRoute, /DELETE FROM jl_payment_assignments WHERE user_id = \? AND applied_import_id = \?/);
 assert.match(experience, /Apply to open pledge/);
-assert.match(experience, /New gift\/payment/);
+assert.match(experience, /Treat as new gift\/payment/);
 assert.match(experience, /No duplicate gift will be created/);
+assert.match(experience, /Campaign, description, date, and amount differences do not hide pledge choices/);
+assert.match(experience, /split_remainder_new_gift/);
+assert.doesNotMatch(experience, /disabled=\{exceedsBalance\}/);
 assert.match(migration, /PRIMARY KEY \(`user_id`, `payment_fingerprint`\)/);
+assert.match(auditMigration, /CREATE TABLE `jl_payment_assignment_audits`/);
+assert.match(auditMigration, /`applied_cents` integer NOT NULL/);
+assert.match(auditMigration, /`new_gift_cents` integer NOT NULL/);
 
 process.stdout.write("Manual pledge payment assignment checks passed.\n");
