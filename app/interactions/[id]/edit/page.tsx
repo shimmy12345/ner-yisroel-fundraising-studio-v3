@@ -34,7 +34,7 @@ export default async function EditActivityPage({ params, searchParams }: { param
   return <AppShell active="donors"><CaptureExperience donors={donors.results.map((item) => ({
     id: item.id, name: item.display_name, lastName: item.last_name, spouse: item.spouse || item.spouse_first_name,
     code: item.external_id || item.donor_code, email: item.email, phone: item.phone || item.alternate_mobile_phone || item.home_phone,
-  }))} initialDonorId={activity.donor_id} initialKind={kind} returnTo={returnTo} initialActivity={{
+  }))} initialDonorId={activity.donor_id} initialKind={kind} returnTo={returnTo} initialNow={new Date().toISOString()} initialActivity={{
     id: activity.id, donorId: activity.donor_id, kind, subject, note: noteParts.join("\n") || subject,
     occurredAt: new Date(activity.occurred_at * 1000).toISOString(), reminderDate,
   }} /></AppShell>;

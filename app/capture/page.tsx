@@ -29,5 +29,5 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
     code: item.external_id || item.donor_code,
     email: item.email,
     phone: item.phone || item.alternate_mobile_phone || item.home_phone,
-  }))} initialDonorId={initialDonorId} initialKind={initialKind} returnTo={requestedParams.returnTo === "/" ? "/" : null} /></AppShell>;
+  }))} initialDonorId={initialDonorId} initialKind={initialKind} returnTo={requestedParams.returnTo === "/" ? "/" : null} initialNow={new Date().toISOString()} /></AppShell>;
 }

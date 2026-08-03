@@ -31,7 +31,7 @@ type SaveResult = {
 
 type InitialActivity = { id: string; donorId: string; kind: InteractionKind; subject: string; note: string; occurredAt: string; reminderDate: string | null };
 
-export function CaptureExperience({ donors, initialDonorId, initialKind = null, returnTo = null, initialActivity = null }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null; returnTo?: string | null; initialActivity?: InitialActivity | null }) {
+export function CaptureExperience({ donors, initialDonorId, initialKind = null, returnTo = null, initialActivity = null, initialNow }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null; returnTo?: string | null; initialActivity?: InitialActivity | null; initialNow: string }) {
   const editing = Boolean(initialActivity);
   const [note, setNote] = useState(initialActivity?.note ?? "");
   const [subject, setSubject] = useState(initialActivity?.subject ?? "");
@@ -41,7 +41,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [result, setResult] = useState<SaveResult | null>(null);
   const [donorId, setDonorId] = useState(initialActivity?.donorId ?? initialDonorId);
-  const [occurredAt, setOccurredAt] = useState(() => initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date()));
+  const [occurredAt, setOccurredAt] = useState(() => initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date(initialNow)));
   const [errorMessage, setErrorMessage] = useState("");
   const activeDonor = donors.find((item) => item.id === donorId);
 
@@ -206,7 +206,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
               <input
                 aria-label="Custom reminder date"
                 type="date"
-                min={new Date().toISOString().slice(0, 10)}
+                min={initialNow.slice(0, 10)}
                 value={customDate}
                 onChange={(event) => setCustomDate(event.target.value)}
               />
