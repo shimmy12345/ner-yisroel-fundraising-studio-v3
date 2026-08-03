@@ -18,7 +18,7 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
     .bind(profile.id).all<{ id: string; display_name: string; last_name: string | null; spouse: string | null; spouse_first_name: string | null; donor_code: string | null; external_id: string | null; email: string | null; phone: string | null; home_phone: string | null; alternate_mobile_phone: string | null }>();
   const requestedParams = await searchParams;
   const requested = requestedParams.donorId;
-  const initialDonorId = donors.results.some((item) => item.id === requested) ? requested! : donors.results[0]?.id ?? "";
+  const initialDonorId = requested && donors.results.some((item) => item.id === requested) ? requested : "";
   const allowedKinds = new Set(["call", "email", "meeting", "visit", "note", "personal"]);
   const initialKind = allowedKinds.has(requestedParams.type ?? "") ? requestedParams.type as "call" | "email" | "meeting" | "visit" | "note" | "personal" : null;
   return <AppShell active="donors"><CaptureExperience donors={donors.results.map((item) => ({

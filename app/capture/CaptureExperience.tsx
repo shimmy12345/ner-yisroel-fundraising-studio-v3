@@ -29,16 +29,19 @@ type SaveResult = {
   extracted: ReturnType<typeof extractInteraction>;
 };
 
-export function CaptureExperience({ donors, initialDonorId, initialKind = null, returnTo = null }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null; returnTo?: "/" | null }) {
-  const [note, setNote] = useState("");
-  const [subject, setSubject] = useState("");
-  const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(initialKind);
-  const [reminder, setReminder] = useState<ReminderChoice>("none");
-  const [customDate, setCustomDate] = useState("");
+type InitialActivity = { id: string; donorId: string; kind: InteractionKind; subject: string; note: string; occurredAt: string; reminderDate: string | null };
+
+export function CaptureExperience({ donors, initialDonorId, initialKind = null, returnTo = null, initialActivity = null }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null; returnTo?: string | null; initialActivity?: InitialActivity | null }) {
+  const editing = Boolean(initialActivity);
+  const [note, setNote] = useState(initialActivity?.note ?? "");
+  const [subject, setSubject] = useState(initialActivity?.subject ?? "");
+  const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(initialActivity?.kind ?? initialKind);
+  const [reminder, setReminder] = useState<ReminderChoice>(initialActivity?.reminderDate ? "custom" : "none");
+  const [customDate, setCustomDate] = useState(initialActivity?.reminderDate ?? "");
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [result, setResult] = useState<SaveResult | null>(null);
-  const [donorId, setDonorId] = useState(initialDonorId);
-  const [occurredAt, setOccurredAt] = useState(() => toLocalDateTimeValue(new Date()));
+  const [donorId, setDonorId] = useState(initialActivity?.donorId ?? initialDonorId);
+  const [occurredAt, setOccurredAt] = useState(() => initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date()));
   const [errorMessage, setErrorMessage] = useState("");
   const activeDonor = donors.find((item) => item.id === donorId);
 
@@ -59,8 +62,8 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     setStatus("saving");
     setErrorMessage("");
     try {
-      const response = await fetch("/api/interactions", {
-        method: "POST",
+      const response = await fetch(initialActivity ? `/api/interactions/${encodeURIComponent(initialActivity.id)}` : "/api/interactions", {
+        method: initialActivity ? "PATCH" : "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           donorId,
@@ -84,12 +87,12 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   }
 
   function reset() {
-    setNote("");
-    setSubject("");
-    setSelectedKind(initialKind);
-    setReminder("none");
-    setCustomDate("");
-    setOccurredAt(toLocalDateTimeValue(new Date()));
+    setNote(initialActivity?.note ?? "");
+    setSubject(initialActivity?.subject ?? "");
+    setSelectedKind(initialActivity?.kind ?? initialKind);
+    setReminder(initialActivity?.reminderDate ? "custom" : "none");
+    setCustomDate(initialActivity?.reminderDate ?? "");
+    setOccurredAt(initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date()));
     setErrorMessage("");
     setResult(null);
     setStatus("idle");
@@ -99,7 +102,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     return (
       <main className="capture-page capture-success">
         <div className="success-mark">✓</div>
-        <p className="eyebrow">INTERACTION CAPTURED</p>
+        <p className="eyebrow">{editing ? "ACTIVITY UPDATED" : "INTERACTION CAPTURED"}</p>
         <h1>{result.extracted.subject}</h1>
         <p className="capture-lede">
           {result.scheduled ? "Scheduled" : "Logged"} as {interactionKindLabel(result.extracted.type).toLowerCase()} on{" "}
@@ -115,7 +118,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
         </section>
         <div className="success-actions">
           <a className="capture-primary" href={`/donors/${encodeURIComponent(donorId)}`}>View updated relationship <span>→</span></a>
-          <button onClick={reset}>Log another</button>
+          <button onClick={reset}>{editing ? "Edit again" : "Log another"}</button>
         </div>
       </main>
     );
@@ -125,8 +128,8 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     <main className="capture-page">
       <header className="capture-header">
         <div>
-          <p className="eyebrow">LOG INTERACTION</p>
-          <h1>What happened or is planned?</h1>
+          <p className="eyebrow">{editing ? "EDIT ACTIVITY" : "LOG INTERACTION"}</p>
+          <h1>{editing ? "Correct the activity" : "What happened or is planned?"}</h1>
           <p className="capture-lede">A few natural words and the right date are enough. Everything else is inferred.</p>
         </div>
         <a href={donorId ? `/donors/${encodeURIComponent(donorId)}` : "/donors"} aria-label="Close interaction capture">×</a>
@@ -135,7 +138,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
       <div className="capture-layout">
         <section className="capture-composer-card">
           <div className="capture-context">
-            <div className="mini-avatar" style={{ background: "#d9e8df" }}>EC</div>
+            <div className="mini-avatar" style={{ background: "#d9e8df" }}>{activeDonor?.name.slice(0, 2).toUpperCase() || "?"}</div>
             <div><strong>{activeDonor?.name || "Choose a donor"}</strong><span>{nowLabel} · defaults to now</span></div>
             <DonorAutocomplete donors={donors} selectedId={donorId} onSelect={setDonorId} />
           </div>
@@ -222,7 +225,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
 
           {status === "error" && <p className="capture-error">{errorMessage} Your note is still here—try again.</p>}
           <button className="capture-save" disabled={!ready || status === "saving"} onClick={saveInteraction}>
-            {status === "saving" ? "Updating relationship…" : <>Save interaction <span>⌘ ↵</span></>}
+            {status === "saving" ? "Updating relationship…" : <>{editing ? "Save changes" : "Save interaction"} <span>⌘ ↵</span></>}
           </button>
           <p className="capture-assurance">{future ? "One save adds this to Today and the donor timeline as scheduled work." : "One save updates the timeline, relationship summary, memory, and follow-up."}</p>
         </section>

@@ -11,7 +11,7 @@ type ScheduledActivityRow = { id: string; donor_id: string; display_name: string
 
 export type WorkspacePriority = { recommendationId?: string; donorId: string; name: string; initials: string; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; detail: string };
-export type WorkspaceScheduledActivity = { id: string; donorId: string; type: string; typeLabel: string; time: string; period: string; date: string; donorName: string; subject: string; note: string; prepareHref: string | null; openHref: string; logOutcomeHref: string | null };
+export type WorkspaceScheduledActivity = { id: string; donorId: string; type: string; typeLabel: string; time: string; period: string; date: string; donorName: string; subject: string; note: string; prepareHref: string | null; openHref: string; editHref: string; logOutcomeHref: string | null; canCancel: boolean };
 export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; amount: string; detail: string };
 export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; todaySchedule: WorkspaceScheduledActivity[]; upcomingActivities: WorkspaceScheduledActivity[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; generatedAt: number };
 
@@ -40,7 +40,7 @@ function activityTypeLabel(type: string) {
   return ({ call: "Call", email: "Email", meeting: "Meeting", visit: "Visit", note: "Note", personal: "Personal interaction" } as Record<string, string>)[type] ?? "Activity";
 }
 
-function scheduledActivity(item: ScheduledActivityRow, timezone: string): WorkspaceScheduledActivity {
+function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: number): WorkspaceScheduledActivity {
   const [subject = activityTypeLabel(item.type), ...noteParts] = item.summary.split("\n");
   const outcomeKind = ["call", "email", "meeting", "visit", "personal"].includes(item.type) ? item.type : null;
   return {
@@ -55,7 +55,9 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string): Worksp
     note: noteParts.join("\n") || subject || "No additional note recorded.",
     prepareHref: item.type === "meeting" ? `/donors/${encodeURIComponent(item.donor_id)}/meeting-brief` : null,
     openHref: `/donors/${encodeURIComponent(item.donor_id)}`,
+    editHref: `/interactions/${encodeURIComponent(item.id)}/edit?returnTo=%2F`,
     logOutcomeHref: outcomeKind ? `/capture?donorId=${encodeURIComponent(item.donor_id)}&type=${outcomeKind}&returnTo=%2F` : null,
+    canCancel: item.occurred_at > now,
   };
 }
 
@@ -72,12 +74,13 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
     env.DB.prepare(`SELECT d.id, d.display_name, d.updated_at FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
-    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
+    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND occurred_at <= created_at" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND occurred_at <= created_at"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE record_origin = 'sample' AND donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ? AND record_origin = 'live'"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, i.type, i.occurred_at, i.summary, i.source, i.created_at
       FROM interactions i JOIN donors d ON d.id = i.donor_id
       WHERE ${demo ? "d.data_source = 'sample'" : "i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'"}
         AND (i.source LIKE 'capture-scheduled:%' OR i.occurred_at > i.created_at)
+        AND i.source NOT LIKE 'cancelled:%' AND i.source NOT LIKE 'archived:%'
         AND i.occurred_at >= ?
       ORDER BY i.occurred_at LIMIT 500`).bind(...(demo ? [now - 86400] : [userId, userId, now - 86400])).all<ScheduledActivityRow>(),
   ]);
@@ -117,7 +120,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const ordered = ranked.sort((a, b) => a.rank - b.rank || a.sortAt - b.sortAt);
   const allPriorities = [...new Map(ordered.map((item) => [item.donorId, item])).values()].map(({ rank: _rank, sortAt: _sortAt, ...priority }) => priority);
   const deduped = allPriorities.slice(0, Math.max(5, Math.min(priorityLimit, 50)));
-  const scheduled = scheduledActivities.results.map((item) => ({ row: item, activity: scheduledActivity(item, timezone) }));
+  const scheduled = scheduledActivities.results.map((item) => ({ row: item, activity: scheduledActivity(item, timezone, now) }));
   const todaySchedule = scheduled.filter(({ row }) => scheduleBucket(row.source, row.occurred_at, row.created_at, now, timezone) === "today").map(({ activity }) => activity);
   const upcomingActivities = scheduled.filter(({ row }) => scheduleBucket(row.source, row.occurred_at, row.created_at, now, timezone) === "upcoming").slice(0, 10).map(({ activity }) => activity);
   const meetings = scheduled.filter(({ row }) => row.type === "meeting" && row.occurred_at >= now).slice(0, 5).map(({ row, activity }) => ({ donorId: row.donor_id, time: activity.time, period: activity.period, title: activity.donorName, detail: `${activity.date} · ${activity.subject}` }));

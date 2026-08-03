@@ -7,6 +7,9 @@ export function isScheduledActivity(source: string, occurredAt: number, createdA
   return source.startsWith("capture-scheduled:") || occurredAt > createdAt;
 }
 
+export function isCancelledActivity(source: string) { return source.startsWith("cancelled:"); }
+export function isArchivedActivity(source: string) { return source.startsWith("archived:"); }
+
 function localDay(epoch: number, timezone: string) {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,

@@ -71,11 +71,11 @@ export async function POST(request: Request) {
     statements.push(
       env.DB.prepare("INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(
-          crypto.randomUUID(),
+          `activity-${interactionId}`,
           donorId,
           userId,
           extracted.nextAction,
-          dueAt ? "Reminder requested while logging the interaction." : "Commitment detected in the interaction.",
+          dueAt ? "Reminder requested for this activity." : "Commitment detected in the interaction.",
           94,
           "open",
           Math.floor((dueAt ?? new Date(occurredAt.getTime() + 7 * 86400000)).getTime() / 1000),

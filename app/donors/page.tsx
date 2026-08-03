@@ -3,6 +3,7 @@ import { AppShell } from "../components/AppShell";
 import { requireChatGPTUser } from "../chatgpt-auth";
 import { ensureUserProfile } from "../../lib/auth/profile";
 import { getDataMode } from "../../lib/workspace/mode";
+import { DonorDirectorySearch } from "./DonorDirectorySearch";
 
 export const dynamic = "force-dynamic";
 
@@ -36,13 +37,13 @@ export default async function DonorsPage({ searchParams }: { searchParams: Promi
   const scopeBinds = mode === "demo" ? [] : [profile.id];
   const query = (await searchParams).q?.trim().slice(0, 80) ?? "";
   const result = query
-    ? await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope} AND (display_name LIKE ? OR last_name LIKE ? OR primary_first_name LIKE ? OR spouse_first_name LIKE ? OR spouse LIKE ? OR donor_code LIKE ? OR external_id LIKE ? OR email LIKE ? OR phone LIKE ? OR home_phone LIKE ? OR alternate_mobile_phone LIKE ?) ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 500`).bind(...scopeBinds, ...Array(11).fill(`%${query}%`)).all<Relationship>()
-    : await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope} ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 500`).bind(...scopeBinds).all<Relationship>();
+    ? await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope} AND (display_name LIKE ? OR last_name LIKE ? OR primary_first_name LIKE ? OR spouse_first_name LIKE ? OR spouse LIKE ? OR donor_code LIKE ? OR external_id LIKE ? OR email LIKE ? OR phone LIKE ? OR home_phone LIKE ? OR alternate_mobile_phone LIKE ?) ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`).bind(...scopeBinds, ...Array(11).fill(`%${query}%`)).all<Relationship>()
+    : await env.DB.prepare(`SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope} ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`).bind(...scopeBinds).all<Relationship>();
   const relationships = result.results;
 
   return <AppShell active="donors"><main className="donor-directory">
     <header className="directory-heading"><div><p className="eyebrow">RELATIONSHIPS · {mode === "demo" ? "DEMO MODE" : "LIVE WORKSPACE"}</p><h1>Your donor households</h1><p>{query ? `${relationships.length} matching relationship${relationships.length === 1 ? "" : "s"}` : `${relationships.length} relationship${relationships.length === 1 ? "" : "s"} in your workspace`}</p></div><a href="/onboarding/import">Import or refresh data</a></header>
-    <form className="directory-search" action="/donors" method="get"><label htmlFor="donor-search">Find a household</label><div><input id="donor-search" name="q" type="search" defaultValue={query} placeholder="Search name, spouse, JL code, email, or phone"/><button type="submit">Search</button>{query && <a href="/donors">Clear</a>}</div></form>
+    <DonorDirectorySearch donors={relationships.map((relationship) => ({ id: relationship.id, name: relationship.display_name, lastName: relationship.last_name, spouse: relationship.spouse || relationship.spouse_first_name, code: relationship.external_id || relationship.donor_code, email: relationship.email, phone: relationship.phone || relationship.alternate_mobile_phone || relationship.home_phone }))} />
     {relationships.length ? <section className="directory-list" aria-label="Donor relationships">{relationships.map((relationship) => {
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");
       const location = [relationship.city, relationship.state].filter(Boolean).join(", ");

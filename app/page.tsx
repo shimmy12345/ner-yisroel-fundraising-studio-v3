@@ -2,6 +2,7 @@ import { AppShell } from "./components/AppShell";
 import { BriefExperience } from "./components/BriefExperience";
 import { CompletePriorityButton } from "./components/CompletePriorityButton";
 import { LocalDate } from "./components/LocalDate";
+import { ActivityActions } from "./components/ActivityActions";
 import { WelcomeExperience } from "./onboarding/WelcomeExperience";
 import { requireChatGPTUser } from "./chatgpt-auth";
 import { ensureUserProfile } from "../lib/auth/profile";
@@ -39,6 +40,7 @@ function ScheduledActivityCard({ activity, live, upcoming = false }: { activity:
         {live && activity.prepareHref ? <a href={activity.prepareHref}>Prepare</a> : <a href={activity.openHref}>Open</a>}
         {live && activity.logOutcomeHref && <a href={activity.logOutcomeHref}>Log Outcome</a>}
       </div>
+      {live && <ActivityActions activityId={activity.id} editHref={activity.editHref} scheduled canCancel={activity.canCancel} />}
     </div>
   </article>;
 }

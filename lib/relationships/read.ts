@@ -23,7 +23,7 @@ export async function getRelationshipUpdates(donorId: string, userId: string): P
     const [donor, interaction, recommendation] = await Promise.all([
       env.DB.prepare("SELECT relationship_summary, institutional_memory FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
         .bind(donorId, userId).first<DonorRow>(),
-      env.DB.prepare("SELECT id, summary, source, occurred_at FROM interactions WHERE donor_id = ? AND user_id = ? AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at ORDER BY occurred_at DESC LIMIT 1")
+      env.DB.prepare("SELECT id, summary, source, occurred_at FROM interactions WHERE donor_id = ? AND user_id = ? AND occurred_at <= ? AND source NOT LIKE 'capture-scheduled:%' AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND occurred_at <= created_at ORDER BY occurred_at DESC LIMIT 1")
         .bind(donorId, userId, Math.floor(Date.now() / 1000)).first<InteractionRow>(),
       env.DB.prepare("SELECT action FROM recommendations WHERE donor_id = ? AND user_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1")
         .bind(donorId, userId).first<RecommendationRow>(),
