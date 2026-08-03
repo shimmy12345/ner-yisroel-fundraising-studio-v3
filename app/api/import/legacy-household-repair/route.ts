@@ -8,14 +8,17 @@ async function assessment(userId: string) {
   if (!batch) return null;
   let firstRelationshipId: string | null = null;
   try { firstRelationshipId = (JSON.parse(batch.report_json) as { firstRelationshipId?: string | null }).firstRelationshipId ?? null; } catch { /* malformed legacy report stays fail-closed */ }
-  const [candidateRows, changes, contactAudits] = await Promise.all([
-    env.DB.prepare(`SELECT id,display_name,donor_code,external_id,external_source,owner_user_id,data_source,created_at,updated_at FROM donors
+  const [candidateRows, changes, contactAudits, directoryRows] = await Promise.all([
+    env.DB.prepare(`SELECT id,display_name,last_name,donor_code,external_id,external_source,owner_user_id,data_source,created_at,updated_at FROM donors
       WHERE owner_user_id=? AND data_source='live' AND (id=? OR created_at=? OR updated_at=?) ORDER BY display_name COLLATE NOCASE`)
       .bind(userId, firstRelationshipId ?? "", batch.completed_at ?? -1, batch.completed_at ?? -1).all<LegacyCandidateRow>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM household_import_changes WHERE import_id=? AND user_id=?").bind(batch.id, userId).first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) AS count FROM donor_contact_audits WHERE user_id=? AND created_at BETWEEN ? AND ?").bind(userId, (batch.completed_at ?? 0) - 1, (batch.completed_at ?? 0) + 1).first<{ count: number }>(),
+    env.DB.prepare(`SELECT id,display_name,last_name,donor_code,external_id,external_source,owner_user_id,data_source,created_at,updated_at FROM donors
+      WHERE owner_user_id=? AND data_source='live' AND COALESCE(external_id,donor_code) IN ('49026','65904') ORDER BY display_name COLLATE NOCASE`)
+      .bind(userId).all<LegacyCandidateRow>(),
   ]);
-  return buildLegacyHouseholdRepairAssessment(batch, candidateRows.results, changes?.count ?? 0, contactAudits?.count ?? 0);
+  return { ...buildLegacyHouseholdRepairAssessment(batch, candidateRows.results, changes?.count ?? 0, contactAudits?.count ?? 0), directoryDiagnostics: directoryRows.results.map((donor) => ({ donorId: donor.id, donorName: donor.display_name, donorCode: donor.external_id || donor.donor_code, storedLastName: donor.last_name, ownerScopedLive: donor.owner_user_id === userId && donor.data_source === "live" })) };
 }
 
 export async function GET() {

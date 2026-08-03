@@ -121,8 +121,8 @@ test("ordinary spreadsheet household imports use the same rollback ledger and ca
 test("the one-time legacy repair tool identifies candidates but blocks timestamp-only rollback", () => {
   const batch = { id: LEGACY_HOUSEHOLD_BATCH_ID, file_name: "legacy-households.csv", status: "completed", report_json: JSON.stringify({ firstRelationshipId: "existing", imported: { donors: 2 } }), created_at: 100, completed_at: 110 };
   const candidates = [
-    { id: "existing", display_name: "Dr. & Mrs. Jonah Armand", donor_code: "A-1", external_id: null, external_source: "JL Solutions", owner_user_id: "owner", data_source: "live", created_at: 10, updated_at: 110 },
-    { id: "possible-new", display_name: "Mr. & Mrs. Peter Z. Greene", donor_code: "G-1", external_id: null, external_source: null, owner_user_id: "owner", data_source: "live", created_at: 110, updated_at: 110 },
+    { id: "existing", display_name: "Dr. & Mrs. Jonah Armand", last_name: null, donor_code: "A-1", external_id: null, external_source: "JL Solutions", owner_user_id: "owner", data_source: "live", created_at: 10, updated_at: 110 },
+    { id: "possible-new", display_name: "Mr. & Mrs. Peter Z. Greene", last_name: null, donor_code: "G-1", external_id: null, external_source: null, owner_user_id: "owner", data_source: "live", created_at: 110, updated_at: 110 },
   ];
   const assessment = buildLegacyHouseholdRepairAssessment(batch, candidates, 0, 0);
   assert.equal(assessment.automaticRepairSafe, false);
@@ -134,9 +134,11 @@ test("the one-time legacy repair tool identifies candidates but blocks timestamp
   const component = read("app/onboarding/import/UndoDonationImport.tsx");
   assert.match(route, /LEGACY_HOUSEHOLD_BATCH_ID/);
   assert.match(route, /owner_user_id=\? AND data_source='live'/);
+  assert.match(route, /IN \('49026','65904'\)/);
   assert.match(route, /status: 409/);
   assert.match(component, /Automatic repair blocked/);
   assert.match(component, /Manual repair plan/);
+  assert.match(component, /Stored last name/);
 });
 
 test("undo can recreate an explicitly consolidated JL household and its original links", () => {

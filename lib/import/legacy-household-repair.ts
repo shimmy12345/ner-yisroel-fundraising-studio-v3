@@ -1,7 +1,7 @@
 export const LEGACY_HOUSEHOLD_BATCH_ID = "95f0c912-b57c-43de-be25-fbd2c082f052";
 
 export type LegacyBatchRow = { id: string; file_name: string; status: string; report_json: string; created_at: number; completed_at: number | null };
-export type LegacyCandidateRow = { id: string; display_name: string; donor_code: string | null; external_id: string | null; external_source: string | null; owner_user_id: string | null; data_source: string; created_at: number; updated_at: number };
+export type LegacyCandidateRow = { id: string; display_name: string; last_name: string | null; donor_code: string | null; external_id: string | null; external_source: string | null; owner_user_id: string | null; data_source: string; created_at: number; updated_at: number };
 
 function reportFirstRelationship(reportJson: string) {
   try { return (JSON.parse(reportJson) as { firstRelationshipId?: string | null }).firstRelationshipId ?? null; } catch { return null; }
@@ -15,7 +15,7 @@ export function buildLegacyHouseholdRepairAssessment(batch: LegacyBatchRow, cand
     if (donor.id === firstRelationshipId) evidence.push("The import report identifies this as the first processed relationship.");
     if (completedAt !== null && donor.created_at === completedAt) evidence.push("The donor row was created in the batch's completion second.");
     if (completedAt !== null && donor.updated_at === completedAt) evidence.push("The donor row was last updated in the batch's completion second.");
-    return { donorId: donor.id, donorName: donor.display_name, donorCode: donor.external_id || donor.donor_code, probableChange: completedAt !== null && donor.created_at === completedAt ? "possible_insert" as const : "possible_update" as const, evidence };
+    return { donorId: donor.id, donorName: donor.display_name, storedLastName: donor.last_name, donorCode: donor.external_id || donor.donor_code, probableChange: completedAt !== null && donor.created_at === completedAt ? "possible_insert" as const : "possible_update" as const, evidence };
   }).filter((donor) => donor.evidence.length > 0);
   const automaticRepairSafe = changeCount > 0;
   const blockers = automaticRepairSafe ? [] : [

@@ -18,7 +18,8 @@ type Preview = {
 type LegacyRepair = {
   automaticRepairSafe: boolean;
   exactAttributionProven: boolean;
-  candidates: Array<{ donorId: string; donorName: string; donorCode: string | null; probableChange: "possible_insert" | "possible_update"; evidence: string[] }>;
+  candidates: Array<{ donorId: string; donorName: string; storedLastName: string | null; donorCode: string | null; probableChange: "possible_insert" | "possible_update"; evidence: string[] }>;
+  directoryDiagnostics: Array<{ donorId: string; donorName: string; donorCode: string | null; storedLastName: string | null; ownerScopedLive: boolean }>;
   blockers: string[];
   manualRepairPlan: string[];
 };
@@ -127,6 +128,7 @@ export function UndoDonationImport({ importId, kind = "donation" }: { importId: 
       {legacyRepair && <section className="legacy-repair-assessment" aria-label="One-time legacy batch repair assessment">
         <h4>One-time legacy batch repair assessment</h4>
         <p><strong>Automatic repair blocked.</strong> The records below are candidates, not proven batch changes.</p>
+        <h4>Directory row diagnostics</h4><ul>{legacyRepair.directoryDiagnostics.map((donor) => <li key={donor.donorId}><strong>{donor.donorName}</strong>{donor.donorCode ? ` · donor code ${donor.donorCode}` : ""}<br /><span>Stored last name: {donor.storedLastName || "Not recorded"} · {donor.ownerScopedLive ? "Active owner-scoped live row" : "Not in the active owner scope"}</span></li>)}</ul>
         {legacyRepair.candidates.length > 0 ? <ul>{legacyRepair.candidates.map((candidate) => <li key={candidate.donorId}><strong>{candidate.donorName}</strong>{candidate.donorCode ? ` · donor code ${candidate.donorCode}` : ""}<br /><span>{candidate.probableChange === "possible_insert" ? "Possible insert" : "Possible update"}: {candidate.evidence.join(" ")}</span></li>)}</ul> : <p>No candidate donor rows could be attributed even tentatively.</p>}
         <h4>Why automatic repair is unsafe</h4><ul>{legacyRepair.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>
         <h4>Manual repair plan</h4><ol>{legacyRepair.manualRepairPlan.map((step) => <li key={step}>{step}</li>)}</ol>
