@@ -9,7 +9,7 @@ export const metadata: Metadata = { title: "Log an interaction" };
 
 export const dynamic = "force-dynamic";
 
-export default async function CapturePage({ searchParams }: { searchParams: Promise<{ donorId?: string; type?: string }> }) {
+export default async function CapturePage({ searchParams }: { searchParams: Promise<{ donorId?: string; type?: string; returnTo?: string }> }) {
   const identity = await requireChatGPTUser("/capture");
   const profile = await ensureUserProfile(identity);
   const donors = await env.DB.prepare(`SELECT id, display_name, last_name, spouse, spouse_first_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone
@@ -27,5 +27,5 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
     code: item.external_id || item.donor_code,
     email: item.email,
     phone: item.phone || item.alternate_mobile_phone || item.home_phone,
-  }))} initialDonorId={initialDonorId} initialKind={requestedParams.type === "meeting" ? "meeting" : null} /></AppShell>;
+  }))} initialDonorId={initialDonorId} initialKind={requestedParams.type === "meeting" ? "meeting" : null} returnTo={requestedParams.returnTo === "/" ? "/" : null} /></AppShell>;
 }

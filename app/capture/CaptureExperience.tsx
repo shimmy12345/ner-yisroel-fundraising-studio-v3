@@ -27,7 +27,7 @@ type SaveResult = {
   extracted: ReturnType<typeof extractInteraction>;
 };
 
-export function CaptureExperience({ donors, initialDonorId, initialKind = null }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null }) {
+export function CaptureExperience({ donors, initialDonorId, initialKind = null, returnTo = null }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null; returnTo?: "/" | null }) {
   const [note, setNote] = useState("");
   const [subject, setSubject] = useState("");
   const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(initialKind);
@@ -75,6 +75,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null }
       if (!response.ok) throw new Error(payload.error || "The interaction could not be saved.");
       setResult(payload);
       setStatus("saved");
+      if (returnTo) window.location.assign(returnTo);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "The interaction could not be saved.");
       setStatus("error");

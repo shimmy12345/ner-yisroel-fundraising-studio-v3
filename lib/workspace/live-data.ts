@@ -1,17 +1,17 @@
 import { env } from "cloudflare:workers";
 import type { DataMode } from "./mode";
 
-type PriorityRow = { id: string; display_name: string; action: string; reason: string; score: number; due_at: number | null };
+type PriorityRow = { recommendation_id: string; donor_id: string; display_name: string; action: string; reason: string; score: number; due_at: number | null };
 type GivingRow = { id: string; donor_id: string; display_name: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null };
 type ContactRow = { id: string; display_name: string; last_contact: number | null; recent_activity: number | null };
 type DonorRow = { id: string; display_name: string; updated_at: number };
 type DonorDateRow = { donor_id: string; value: number | null };
 type ScheduledMeetingRow = { id: string; donor_id: string; display_name: string; occurred_at: number; summary: string };
 
-export type WorkspacePriority = { donorId: string; name: string; initials: string; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string };
+export type WorkspacePriority = { recommendationId?: string; donorId: string; name: string; initials: string; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; detail: string };
 export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; amount: string; detail: string };
-export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; generatedAt: number };
+export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; generatedAt: number };
 
 function initials(name: string) {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
@@ -30,11 +30,15 @@ function timeParts(epoch: number, timezone: string) {
   return { time: `${parts.find((p) => p.type === "hour")?.value}:${parts.find((p) => p.type === "minute")?.value}`, period: parts.find((p) => p.type === "dayPeriod")?.value ?? "" };
 }
 
-export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000)): Promise<WorkspaceBrief> {
+function dayKey(epoch: number, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(epoch * 1000));
+}
+
+export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live'";
   const [reminders, giving, donors, lastContacts, lastActivities, scheduledMeetings] = await Promise.all([
-    env.DB.prepare(`SELECT r.donor_id AS id, d.display_name, r.action, r.reason, r.score, r.due_at
+    env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, r.action, r.reason, r.score, r.due_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
       ORDER BY CASE WHEN r.due_at IS NULL THEN 1 ELSE 0 END, r.due_at, r.score DESC LIMIT 50`).bind(...(demo ? [] : [userId, userId])).all<PriorityRow>(),
@@ -55,26 +59,44 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const activityByDonor = new Map(lastActivities.results.map((item) => [item.donor_id, item.value]));
   const contacts: ContactRow[] = donors.results.map((item) => ({ id: item.id, display_name: item.display_name, last_contact: contactByDonor.get(item.id) ?? null, recent_activity: Math.max(item.updated_at, contactByDonor.get(item.id) ?? 0, activityByDonor.get(item.id) ?? 0) }));
 
-  const priorities: WorkspacePriority[] = [];
+  type RankedPriority = WorkspacePriority & { rank: number; sortAt: number };
+  const ranked: RankedPriority[] = [];
+  const todayKey = dayKey(now, timezone);
   for (const item of reminders.results) {
     const overdue = item.due_at != null && item.due_at < now;
+    const dueToday = item.due_at != null && dayKey(item.due_at, timezone) === todayKey;
     const dueSoon = item.due_at != null && item.due_at <= now + 7 * 86400;
-    priorities.push({ donorId: item.id, name: item.display_name, initials: initials(item.display_name), label: overdue ? "Overdue" : dueSoon ? "Due soon" : "Next action", signal: overdue ? "cool" : "steady", reason: item.action, why: item.due_at ? `${overdue ? "Was due" : "Due"} ${dateLabel(item.due_at, timezone)}. ${item.reason}` : item.reason, action: "Open", href: `/donors/${encodeURIComponent(item.id)}` });
+    ranked.push({ rank: overdue ? 0 : dueToday ? 2 : 5, sortAt: item.due_at ?? Number.MAX_SAFE_INTEGER, recommendationId: item.recommendation_id, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: overdue ? "Overdue reminder" : dueToday ? "Due today" : dueSoon ? "Due soon" : "Next action", signal: overdue ? "cool" : "steady", reason: item.action, why: item.due_at ? `${overdue ? "Was due" : "Due"} ${dateLabel(item.due_at, timezone)}. ${item.reason}` : item.reason, action: "Open donor", href: `/donors/${encodeURIComponent(item.donor_id)}` });
+  }
+  for (const item of scheduledMeetings.results) {
+    if (dayKey(item.occurred_at, timezone) !== todayKey) continue;
+    ranked.push({ rank: 1, sortAt: item.occurred_at, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Meeting today", signal: "warm", reason: item.summary.split("\n")[0] || "Scheduled donor meeting", why: `Scheduled for ${timeParts(item.occurred_at, timezone).time} ${timeParts(item.occurred_at, timezone).period} today.`, action: "Prepare", href: `/donors/${encodeURIComponent(item.donor_id)}/meeting-brief` });
+  }
+  const recentGiftByDonor = new Map<string, GivingRow>();
+  for (const item of giving.results) {
+    const recent = (item.activity_date ?? 0) >= now - 30 * 86400;
+    const contactedAfterGift = (contactByDonor.get(item.donor_id) ?? 0) >= (item.activity_date ?? 0);
+    if ((item.paid_cents ?? 0) > 0 && recent && !contactedAfterGift && !recentGiftByDonor.has(item.donor_id)) recentGiftByDonor.set(item.donor_id, item);
+  }
+  for (const item of recentGiftByDonor.values()) {
+    ranked.push({ rank: 2, sortAt: -(item.activity_date ?? 0), donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Recent gift", signal: "warm", reason: `${money(item.paid_cents ?? 0)} gift needs acknowledgment`, why: `${item.description || item.item_type || "Paid gift"} was recorded ${item.activity_date ? dateLabel(item.activity_date, timezone) : "recently"}. No interaction is recorded after the gift.`, action: "Follow up", href: `/capture?donorId=${encodeURIComponent(item.donor_id)}&returnTo=%2F` });
   }
   const openByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openByDonor.has(item.donor_id)) openByDonor.set(item.donor_id, item);
-  for (const item of openByDonor.values()) priorities.push({ donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Open pledge", signal: "warm", reason: `${money(item.balance_cents ?? 0)} remains open`, why: `${item.description || item.item_type || "Commitment"}${item.activity_date ? ` from ${dateLabel(item.activity_date, timezone)}` : ""}.`, action: "Review", href: `/donors/${encodeURIComponent(item.donor_id)}` });
+  for (const item of openByDonor.values()) ranked.push({ rank: 3, sortAt: item.activity_date ?? 0, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Open commitment", signal: "warm", reason: `${money(item.balance_cents ?? 0)} remains open`, why: `${item.description || item.item_type || "Commitment"}${item.activity_date ? ` from ${dateLabel(item.activity_date, timezone)}` : ""}.`, action: "Review", href: `/donors/${encodeURIComponent(item.donor_id)}` });
   for (const item of contacts) {
     const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null;
-    if (days == null || days >= 90) priorities.push({ donorId: item.id, name: item.display_name, initials: initials(item.display_name), label: "Needs contact", signal: "cool", reason: days == null ? "No meaningful contact recorded" : `${days} days since meaningful contact`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}` });
+    if (days == null || days >= 90) ranked.push({ rank: 4, sortAt: days == null ? Number.MAX_SAFE_INTEGER : -days, donorId: item.id, name: item.display_name, initials: initials(item.display_name), label: "Contact gap", signal: "cool", reason: days == null ? "No meaningful contact recorded" : `${days} days since meaningful contact`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}` });
   }
-  const deduped = [...new Map(priorities.map((item) => [item.donorId, item])).values()].slice(0, 8);
+  const ordered = ranked.sort((a, b) => a.rank - b.rank || a.sortAt - b.sortAt);
+  const allPriorities = [...new Map(ordered.map((item) => [item.donorId, item])).values()].map(({ rank: _rank, sortAt: _sortAt, ...priority }) => priority);
+  const deduped = allPriorities.slice(0, Math.max(5, Math.min(priorityLimit, 50)));
   const meetings = [
     ...scheduledMeetings.results.map((item) => ({ epoch: item.occurred_at, donorId: item.donor_id, ...timeParts(item.occurred_at, timezone), title: item.display_name, detail: `${dateLabel(item.occurred_at, timezone)} · ${item.summary.split("\n")[0] || "Scheduled meeting"}` })),
-    ...reminders.results.filter((item) => item.due_at && /meet|call|visit|appointment/i.test(`${item.action} ${item.reason}`) && item.due_at >= now - 86400 && item.due_at <= now + 7 * 86400).map((item) => ({ epoch: item.due_at!, donorId: item.id, ...timeParts(item.due_at!, timezone), title: item.display_name, detail: item.action })),
+    ...reminders.results.filter((item) => item.due_at && /meet|call|visit|appointment/i.test(`${item.action} ${item.reason}`) && item.due_at >= now - 86400 && item.due_at <= now + 7 * 86400).map((item) => ({ epoch: item.due_at!, donorId: item.donor_id, ...timeParts(item.due_at!, timezone), title: item.display_name, detail: item.action })),
   ].sort((a, b) => a.epoch - b.epoch).slice(0, 5).map(({ epoch: _epoch, ...meeting }) => meeting);
   const gifts = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && (item.activity_date ?? 0) >= now - 30 * 86400).slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${dateLabel(item.activity_date, timezone)}` : ""}` }));
   const overview = deduped.length || gifts.length ? `${deduped.length} relationship priorit${deduped.length === 1 ? "y" : "ies"}, ${meetings.length} upcoming meeting${meetings.length === 1 ? "" : "s"}, and ${gifts.length} recent gift${gifts.length === 1 ? "" : "s"} are visible from your live workspace.` : "Your live workspace has no time-sensitive priorities yet. Import data or log an interaction to build today’s brief.";
   const recommendation = deduped[0] ? `Start with ${deduped[0].name}: ${deduped[0].reason}.` : "No recommended action is available until your workspace contains a due reminder, open pledge, recent gift, or relationship activity.";
-  return { overview, recommendation, priorities: deduped, meetings, gifts, generatedAt: now };
+  return { overview, recommendation, priorities: deduped, priorityCount: allPriorities.length, meetings, gifts, generatedAt: now };
 }
