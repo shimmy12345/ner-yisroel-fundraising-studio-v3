@@ -8,7 +8,7 @@ type OutcomeActivity = {
   donorId: string;
   donorName: string;
   type: string;
-  plannedAt: string;
+  plannedLabel: string;
   subject: string;
   notes: string;
 };
@@ -17,13 +17,13 @@ type OutcomeAction = "complete" | "cancel" | "reschedule" | "no-response";
 
 const typeLabel = (type: string) => type === "personal" ? "Personal interaction" : `${type.charAt(0).toUpperCase()}${type.slice(1)}`;
 
-export function OutcomeExperience({ activity, initialNow, initialRescheduleAt }: { activity: OutcomeActivity; initialNow: string; initialRescheduleAt: string }) {
+export function OutcomeExperience({ activity, initialCompletedValue, initialRescheduleValue }: { activity: OutcomeActivity; initialCompletedValue: string; initialRescheduleValue: string }) {
   const [outcome, setOutcome] = useState("");
-  const [completedAt, setCompletedAt] = useState(toLocalDateTimeValue(new Date(initialNow)));
+  const [completedAt, setCompletedAt] = useState(initialCompletedValue);
   const [followUpEnabled, setFollowUpEnabled] = useState(false);
   const [followUp, setFollowUp] = useState("");
-  const [followUpAt, setFollowUpAt] = useState(toLocalDateTimeValue(new Date(initialRescheduleAt)));
-  const [rescheduledAt, setRescheduledAt] = useState(toLocalDateTimeValue(new Date(initialRescheduleAt)));
+  const [followUpAt, setFollowUpAt] = useState(initialRescheduleValue);
+  const [rescheduledAt, setRescheduledAt] = useState(initialRescheduleValue);
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [error, setError] = useState("");
 
@@ -69,7 +69,7 @@ export function OutcomeExperience({ activity, initialNow, initialRescheduleAt }:
     <section className="outcome-plan-card" aria-label="Original planned activity">
       <div><span className="event-type">{typeLabel(activity.type)}</span><h2>{activity.subject}</h2><p>{activity.donorName}</p></div>
       <dl>
-        <div><dt>Planned</dt><dd>{new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(activity.plannedAt))}</dd></div>
+        <div><dt>Planned</dt><dd>{activity.plannedLabel}</dd></div>
         <div><dt>Original notes</dt><dd>{activity.notes}</dd></div>
       </dl>
     </section>

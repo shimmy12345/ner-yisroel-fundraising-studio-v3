@@ -19,6 +19,24 @@ type ActivityRow = {
   created_at: number;
 };
 
+function localDateTimeValue(date: Date, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
+}
+
+function dateTimeLabel(date: Date, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
 export default async function ActivityOutcomePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const identity = await requireChatGPTUser(`/interactions/${encodeURIComponent(id)}/outcome`);
@@ -37,8 +55,8 @@ export default async function ActivityOutcomePage({ params }: { params: Promise<
     donorId: activity.donor_id,
     donorName: activity.display_name,
     type: activity.type,
-    plannedAt: planned.toISOString(),
+    plannedLabel: dateTimeLabel(planned, profile.timezone),
     subject,
     notes: noteParts.join("\n") || subject,
-  }} initialNow={now.toISOString()} initialRescheduleAt={reschedule.toISOString()} /></AppShell>;
+  }} initialCompletedValue={localDateTimeValue(now, profile.timezone)} initialRescheduleValue={localDateTimeValue(reschedule, profile.timezone)} /></AppShell>;
 }

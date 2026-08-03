@@ -25,6 +25,8 @@ assert.match(liveData, /\/interactions\/\$\{encodeURIComponent\(item\.id\)\}\/ou
 assert.match(liveData, /i\.source NOT LIKE 'capture-completed:%'/);
 assert.match(outcomePage, /isScheduledActivity/);
 assert.match(outcomePage, /i\.user_id = \? AND d\.owner_user_id = \?/);
+assert.match(outcomePage, /localDateTimeValue\(now, profile\.timezone\)/);
+assert.match(outcomePage, /plannedLabel: dateTimeLabel\(planned, profile\.timezone\)/);
 for (const label of ["Outcome / result", "Completed date", "Add a follow-up activity", "Close Activity", "Cancel", "Reschedule", "No response"]) {
   assert.match(outcomeExperience, new RegExp(label));
 }
