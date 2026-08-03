@@ -4,6 +4,8 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { findLikelyManualDonorMatches } from "../lib/donors/merge-preview.ts";
 import { buildHouseholdRollbackPreview } from "../lib/import/household-rollback.ts";
+import { effectiveDonorLastName, searchDonors } from "../lib/relationships/donor-search.ts";
+import { buildLegacyHouseholdRepairAssessment, LEGACY_HOUSEHOLD_BATCH_ID } from "../lib/import/legacy-household-repair.ts";
 
 const read = (path) => fs.readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const migrations = () => fs.readdirSync(new URL("../drizzle", import.meta.url)).filter((file) => /^\d{4}_.+\.sql$/.test(file)).sort();
@@ -12,11 +14,27 @@ test("default and searched donor lists share one owner-scoped live dataset witho
   const page = read("app/donors/page.tsx");
   assert.match(page, /const directorySql = `SELECT/);
   assert.match(page, /owner_user_id = \? AND data_source = 'live'/);
-  assert.match(page, /COALESCE\(NULLIF\(last_name, ''\), display_name\).*COLLATE NOCASE/);
   assert.doesNotMatch(page, /LIMIT 1000/);
   assert.equal((page.match(/FROM donors WHERE \$\{scope\}/g) ?? []).length, 1);
+  assert.equal((page.match(/searchDonors\(/g) ?? []).length, 2);
+  assert.doesNotMatch(page, /searchFilter/);
   assert.match(page, /export const revalidate = 0/);
   assert.match(read("app/components/AppShell.tsx"), /<a className=\{active === "donors".*href="\/donors"/);
+});
+
+test("titled households with a blank stored last name remain visible and sort by inferred surname", () => {
+  const fixtures = [
+    { id: "ordinary", name: "Mr. Aaron Baker", lastName: "Baker", spouse: null, code: null, email: null, phone: null },
+    { id: "titled-a", name: "Dr. & Mrs. Jonah Armand", lastName: null, spouse: "Mira", code: "A-1", email: null, phone: null },
+    { id: "titled-g", name: "Mr. & Mrs. Peter Z. Greene", lastName: "", spouse: "Kara", code: "G-1", email: null, phone: null },
+  ];
+  assert.equal(effectiveDonorLastName(fixtures[1]), "Armand");
+  assert.equal(effectiveDonorLastName(fixtures[2]), "Greene");
+  const defaultRows = searchDonors(fixtures, "", Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(defaultRows.map((row) => row.id), ["titled-a", "ordinary", "titled-g"]);
+  assert.equal(searchDonors(defaultRows, "Armand", Number.MAX_SAFE_INTEGER)[0].id, "titled-a");
+  assert.equal(searchDonors(defaultRows, "Peter Z. Greene", Number.MAX_SAFE_INTEGER)[0].id, "titled-g");
+  assert.deepEqual(new Set(defaultRows.map((row) => row.id)), new Set(fixtures.map((row) => row.id)));
 });
 
 test("a likely manual/JL duplicate cannot be inserted without an explicit three-way decision", () => {
@@ -98,6 +116,27 @@ test("ordinary spreadsheet household imports use the same rollback ledger and ca
   assert.deepEqual(preview.batchDeletes, { gifts: ["gift-1"], interactions: ["interaction-1"], recommendations: ["reminder-1"] });
   assert.equal(preview.totals.batchRecordsRemoved, 3);
   assert.equal(preview.created[0].donorId, "new-household");
+});
+
+test("the one-time legacy repair tool identifies candidates but blocks timestamp-only rollback", () => {
+  const batch = { id: LEGACY_HOUSEHOLD_BATCH_ID, file_name: "legacy-households.csv", status: "completed", report_json: JSON.stringify({ firstRelationshipId: "existing", imported: { donors: 2 } }), created_at: 100, completed_at: 110 };
+  const candidates = [
+    { id: "existing", display_name: "Dr. & Mrs. Jonah Armand", donor_code: "A-1", external_id: null, external_source: "JL Solutions", owner_user_id: "owner", data_source: "live", created_at: 10, updated_at: 110 },
+    { id: "possible-new", display_name: "Mr. & Mrs. Peter Z. Greene", donor_code: "G-1", external_id: null, external_source: null, owner_user_id: "owner", data_source: "live", created_at: 110, updated_at: 110 },
+  ];
+  const assessment = buildLegacyHouseholdRepairAssessment(batch, candidates, 0, 0);
+  assert.equal(assessment.automaticRepairSafe, false);
+  assert.equal(assessment.exactAttributionProven, false);
+  assert.deepEqual(assessment.candidates.map((item) => item.probableChange), ["possible_update", "possible_insert"]);
+  assert.match(assessment.blockers.join(" "), /before-values/);
+  assert.match(assessment.blockers.join(" "), /timestamps are supporting evidence only/i);
+  const route = read("app/api/import/legacy-household-repair/route.ts");
+  const component = read("app/onboarding/import/UndoDonationImport.tsx");
+  assert.match(route, /LEGACY_HOUSEHOLD_BATCH_ID/);
+  assert.match(route, /owner_user_id=\? AND data_source='live'/);
+  assert.match(route, /status: 409/);
+  assert.match(component, /Automatic repair blocked/);
+  assert.match(component, /Manual repair plan/);
 });
 
 test("undo can recreate an explicitly consolidated JL household and its original links", () => {

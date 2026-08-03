@@ -15,6 +15,16 @@ type Preview = {
   restores?: Array<{ donorId: string; donorName: string; preservedFields: string[]; changeType: "update" | "merge" }>;
 };
 
+type LegacyRepair = {
+  automaticRepairSafe: boolean;
+  exactAttributionProven: boolean;
+  candidates: Array<{ donorId: string; donorName: string; donorCode: string | null; probableChange: "possible_insert" | "possible_update"; evidence: string[] }>;
+  blockers: string[];
+  manualRepairPlan: string[];
+};
+
+const LEGACY_HOUSEHOLD_BATCH_ID = "95f0c912-b57c-43de-be25-fbd2c082f052";
+
 function money(cents: number | null) {
   return cents === null ? "Not recorded" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 }
@@ -31,6 +41,7 @@ export function UndoDonationImport({ importId, kind = "donation" }: { importId: 
   const [backupConfirmed, setBackupConfirmed] = useState(false);
   const [backupId, setBackupId] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [legacyRepair, setLegacyRepair] = useState<LegacyRepair | null>(null);
 
   async function inspect() {
     setLoading(true);
@@ -39,6 +50,12 @@ export function UndoDonationImport({ importId, kind = "donation" }: { importId: 
       const response = await fetch(`/api/import/${kind === "household" ? "household-rollback" : "rollback"}?importId=${encodeURIComponent(importId)}`);
       const data = await response.json() as Preview & { error?: string };
       if (!response.ok) throw new Error(data.error ?? "Unable to prepare the rollback preview.");
+      if (kind === "household" && importId === LEGACY_HOUSEHOLD_BATCH_ID) {
+        const repairResponse = await fetch("/api/import/legacy-household-repair", { cache: "no-store" });
+        const repair = await repairResponse.json() as LegacyRepair & { error?: string };
+        if (!repairResponse.ok) throw new Error(repair.error ?? "Unable to prepare the legacy repair assessment.");
+        setLegacyRepair(repair);
+      }
       setPreview(data);
       setOpen(true);
     } catch (cause) {
@@ -107,6 +124,13 @@ export function UndoDonationImport({ importId, kind = "donation" }: { importId: 
       {!!preview?.newGifts?.length && <div><h4>New gifts that will be removed</h4><ul>{preview.newGifts.map((gift) => <li key={gift.sourceFingerprint}><strong>{gift.donorName}</strong> · {date(gift.activityDate)} · {money(gift.amountCents)}{gift.description ? ` · ${gift.description}` : ""}</li>)}</ul></div>}
       {!!preview?.pledgeUpdates?.length && <div><h4>Pledge values that will be restored</h4><ul>{preview.pledgeUpdates.map((pledge) => <li key={pledge.sourceFingerprint}><strong>{pledge.donorName}</strong> · {date(pledge.activityDate)}{pledge.description ? ` · ${pledge.description}` : ""}<br /><span>Paid {money(pledge.currentPaidCents)} → {money(pledge.restoredPaidCents)}; balance {money(pledge.currentBalanceCents)} → {money(pledge.restoredBalanceCents)}; status {pledge.currentStatus ?? "Not recorded"} → {pledge.restoredStatus ?? "Not recorded"}</span></li>)}</ul></div>}
       {!preview?.safe && <div className="onboarding-error" role="alert"><strong>This import cannot be safely reversed.</strong><ul>{preview?.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}
+      {legacyRepair && <section className="legacy-repair-assessment" aria-label="One-time legacy batch repair assessment">
+        <h4>One-time legacy batch repair assessment</h4>
+        <p><strong>Automatic repair blocked.</strong> The records below are candidates, not proven batch changes.</p>
+        {legacyRepair.candidates.length > 0 ? <ul>{legacyRepair.candidates.map((candidate) => <li key={candidate.donorId}><strong>{candidate.donorName}</strong>{candidate.donorCode ? ` · donor code ${candidate.donorCode}` : ""}<br /><span>{candidate.probableChange === "possible_insert" ? "Possible insert" : "Possible update"}: {candidate.evidence.join(" ")}</span></li>)}</ul> : <p>No candidate donor rows could be attributed even tentatively.</p>}
+        <h4>Why automatic repair is unsafe</h4><ul>{legacyRepair.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>
+        <h4>Manual repair plan</h4><ol>{legacyRepair.manualRepairPlan.map((step) => <li key={step}>{step}</li>)}</ol>
+      </section>}
       {preview?.safe && <div className="import-undo-confirmation">
         <p><strong>First, back up the current D1 workspace.</strong> The backup contains your owner-scoped donor workspace and should be stored securely.</p>
         <button type="button" onClick={downloadBackup} disabled={loading}>{backupConfirmed ? "Backup downloaded ✓" : loading ? "Creating backup…" : "Download D1 backup"}</button>

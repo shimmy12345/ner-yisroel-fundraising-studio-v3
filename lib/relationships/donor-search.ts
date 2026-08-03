@@ -18,8 +18,16 @@ function digits(value: string | null | undefined) {
   return (value ?? "").replace(/\D/g, "");
 }
 
+export function effectiveDonorLastName(donor: Pick<DonorSearchRecord, "lastName" | "name">) {
+  const explicit = donor.lastName?.trim();
+  if (explicit) return explicit;
+  const words = donor.name.trim().split(/\s+/).map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}'-]+$/gu, "")).filter(Boolean);
+  if (["family", "household"].includes(normalized(words.at(-1)))) words.pop();
+  return words.at(-1) || donor.name;
+}
+
 export function compareDonorsByLastName(a: DonorSearchRecord, b: DonorSearchRecord) {
-  const byLastName = collator.compare(a.lastName?.trim() || a.name, b.lastName?.trim() || b.name);
+  const byLastName = collator.compare(effectiveDonorLastName(a), effectiveDonorLastName(b));
   return byLastName || collator.compare(a.name, b.name);
 }
 

@@ -73,6 +73,6 @@ assert.match(workspace, /todaySchedule/);
 assert.match(workspace, /upcomingActivities/);
 assert.match(workspace, /i\.user_id = \? AND d\.owner_user_id = \?/);
 assert.match(workspace, /MAX\(occurred_at\).*source NOT LIKE 'capture-scheduled:%'.*occurred_at <= created_at/);
-assert.match(donorDirectory, /COALESCE\(NULLIF\(last_name, ''\), display_name\) COLLATE NOCASE/);
+assert.match(donorDirectory, /searchDonors\(searchable, "", Number\.MAX_SAFE_INTEGER\)/);
 
 process.stdout.write("Capture behavior checks passed.\n");
