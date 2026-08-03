@@ -4,7 +4,7 @@ import { requireChatGPTUser } from "../chatgpt-auth";
 import { ensureUserProfile } from "../../lib/auth/profile";
 import { getDataMode } from "../../lib/workspace/mode";
 import { DonorDirectorySearch } from "./DonorDirectorySearch";
-import { searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
+import { effectiveDonorLastName, searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -51,8 +51,9 @@ export default async function DonorsPage({ searchParams }: { searchParams: Promi
     {relationships.length ? <section className="directory-list" aria-label="Donor relationships">{relationships.map((relationship) => {
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");
       const location = [relationship.city, relationship.state].filter(Boolean).join(", ");
+      const effectiveLastName = effectiveDonorLastName({ name: relationship.display_name, lastName: relationship.last_name });
       return <a className="directory-row" href={`/donors/${encodeURIComponent(relationship.id)}`} key={relationship.id}>
-        <span className="directory-avatar">{initials(relationship.display_name)}</span><span className="directory-identity"><strong>{relationship.display_name}</strong><small>{[members, location].filter(Boolean).join(" · ") || "Relationship details ready to build"}</small></span><span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
+        <span className="directory-avatar">{initials(relationship.display_name)}</span><span className="directory-identity"><strong>{relationship.display_name}</strong><small>{[`Last name: ${effectiveLastName}`, members, location].filter(Boolean).join(" · ")}</small></span><span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
       </a>;
     })}</section> : <section className="directory-empty"><h2>No relationships found</h2><p>{query ? "Try a different household, person, or email." : "Import your donor data to begin building your relationship workspace."}</p>{!query && <a href="/onboarding/import">Import donor data</a>}</section>}
   </main></AppShell>;

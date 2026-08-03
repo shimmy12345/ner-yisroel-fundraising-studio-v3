@@ -19,14 +19,15 @@ test("default and searched donor lists share one owner-scoped live dataset witho
   assert.equal((page.match(/searchDonors\(/g) ?? []).length, 2);
   assert.doesNotMatch(page, /searchFilter/);
   assert.match(page, /export const revalidate = 0/);
+  assert.match(page, /Last name: \$\{effectiveLastName\}/);
   assert.match(read("app/components/AppShell.tsx"), /<a className=\{active === "donors".*href="\/donors"/);
 });
 
-test("titled households with a blank stored last name remain visible and sort by inferred surname", () => {
+test("titled households with a blank or honorific-only stored last name remain visible and sort by inferred surname", () => {
   const fixtures = [
     { id: "ordinary", name: "Mr. Aaron Baker", lastName: "Baker", spouse: null, code: null, email: null, phone: null },
-    { id: "titled-a", name: "Dr. & Mrs. Jonah Armand", lastName: null, spouse: "Mira", code: "A-1", email: null, phone: null },
-    { id: "titled-g", name: "Mr. & Mrs. Peter Z. Greene", lastName: "", spouse: "Kara", code: "G-1", email: null, phone: null },
+    { id: "titled-a", name: "Dr. & Mrs. Jonah Armand", lastName: "Dr.", spouse: "Mira", code: "A-1", email: null, phone: null },
+    { id: "titled-g", name: "Mr. & Mrs. Peter Z. Greene", lastName: "Mr.", spouse: "Kara", code: "G-1", email: null, phone: null },
   ];
   assert.equal(effectiveDonorLastName(fixtures[1]), "Armand");
   assert.equal(effectiveDonorLastName(fixtures[2]), "Greene");

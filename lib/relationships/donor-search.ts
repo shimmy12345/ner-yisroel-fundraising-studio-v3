@@ -9,6 +9,7 @@ export type DonorSearchRecord = {
 };
 
 const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+const HONORIFICS = new Set(["mr", "mrs", "ms", "miss", "dr", "rabbi", "rev", "reverend", "hon"]);
 
 function normalized(value: string | null | undefined) {
   return (value ?? "").trim().toLocaleLowerCase();
@@ -20,7 +21,8 @@ function digits(value: string | null | undefined) {
 
 export function effectiveDonorLastName(donor: Pick<DonorSearchRecord, "lastName" | "name">) {
   const explicit = donor.lastName?.trim();
-  if (explicit) return explicit;
+  const explicitKey = normalized(explicit).replace(/[^\p{L}\p{N}]/gu, "");
+  if (explicit && !HONORIFICS.has(explicitKey)) return explicit;
   const words = donor.name.trim().split(/\s+/).map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}'-]+$/gu, "")).filter(Boolean);
   if (["family", "household"].includes(normalized(words.at(-1)))) words.pop();
   return words.at(-1) || donor.name;
