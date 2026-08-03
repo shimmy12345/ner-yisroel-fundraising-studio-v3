@@ -8,6 +8,9 @@ import {
   type InteractionKind,
   type ReminderChoice,
 } from "../../lib/capture/interaction";
+import { isFutureScheduledDate, parseScheduledDate, schedulingLabel, toLocalDateTimeValue } from "../../lib/capture/scheduling";
+import type { DonorSearchRecord } from "../../lib/relationships/donor-search";
+import { DonorAutocomplete } from "./DonorAutocomplete";
 
 const kinds: Array<{ value: InteractionKind; icon: string }> = [
   { value: "call", icon: "☎" },
@@ -24,7 +27,7 @@ type SaveResult = {
   extracted: ReturnType<typeof extractInteraction>;
 };
 
-export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ id: string; name: string }>; initialDonorId: string }) {
+export function CaptureExperience({ donors, initialDonorId }: { donors: DonorSearchRecord[]; initialDonorId: string }) {
   const [note, setNote] = useState("");
   const [subject, setSubject] = useState("");
   const [selectedKind, setSelectedKind] = useState<InteractionKind | null>(null);
@@ -33,6 +36,8 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [result, setResult] = useState<SaveResult | null>(null);
   const [donorId, setDonorId] = useState(initialDonorId);
+  const [occurredAt, setOccurredAt] = useState(() => toLocalDateTimeValue(new Date()));
+  const [errorMessage, setErrorMessage] = useState("");
   const activeDonor = donors.find((item) => item.id === donorId);
 
   const inferredKind = useMemo(() => inferInteractionKind(note), [note]);
@@ -41,15 +46,17 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
     () => extractInteraction(note, activeKind, subject),
     [activeKind, note, subject],
   );
-  const ready = Boolean(donorId) && note.trim().length >= 4 && (reminder !== "custom" || Boolean(customDate));
-  const nowLabel = useMemo(
-    () => new Intl.DateTimeFormat("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date()),
-    [],
-  );
+  const validDate = Boolean(parseScheduledDate(occurredAt));
+  const future = isFutureScheduledDate(occurredAt);
+  const scheduleError = future && activeKind !== "meeting" ? "Choose Meeting to schedule an interaction in the future." : "";
+  const ready = Boolean(donorId) && note.trim().length >= 4 && validDate && !scheduleError && (reminder !== "custom" || Boolean(customDate));
+  const dateLabel = schedulingLabel(occurredAt);
+  const nowLabel = dateLabel;
 
   async function saveInteraction() {
     if (!ready || status === "saving") return;
     setStatus("saving");
+    setErrorMessage("");
     try {
       const response = await fetch("/api/interactions", {
         method: "POST",
@@ -61,12 +68,15 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
           subject: subject.trim() || undefined,
           reminder,
           customDate: reminder === "custom" ? customDate : undefined,
+          occurredAt: parseScheduledDate(occurredAt)?.toISOString(),
         }),
       });
-      if (!response.ok) throw new Error("Save failed");
-      setResult(await response.json() as SaveResult);
+      const payload = await response.json() as SaveResult & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "The interaction could not be saved.");
+      setResult(payload);
       setStatus("saved");
-    } catch {
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "The interaction could not be saved.");
       setStatus("error");
     }
   }
@@ -77,6 +87,8 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
     setSelectedKind(null);
     setReminder("none");
     setCustomDate("");
+    setOccurredAt(toLocalDateTimeValue(new Date()));
+    setErrorMessage("");
     setResult(null);
     setStatus("idle");
   }
@@ -88,8 +100,8 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
         <p className="eyebrow">INTERACTION CAPTURED</p>
         <h1>{result.extracted.subject}</h1>
         <p className="capture-lede">
-          Logged as {interactionKindLabel(result.extracted.type).toLowerCase()} at{" "}
-          {new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(result.occurredAt))}.
+          {new Date(result.occurredAt).getTime() > Date.now() + 60_000 ? "Scheduled" : "Logged"} as {interactionKindLabel(result.extracted.type).toLowerCase()} on{" "}
+          {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(result.occurredAt))}.
         </p>
         <section className="update-receipt" aria-label="Updated relationship surfaces">
           <article><span>↗</span><div><strong>Timeline updated</strong><p>The interaction and original note were added to the relationship history.</p></div><b>Done</b></article>
@@ -123,7 +135,7 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
           <div className="capture-context">
             <div className="mini-avatar" style={{ background: "#d9e8df" }}>EC</div>
             <div><strong>{activeDonor?.name || "Choose a donor"}</strong><span>{nowLabel} · defaults to now</span></div>
-            <select aria-label="Change donor" value={donorId} onChange={(event) => setDonorId(event.target.value)}><option value="">Choose a donor</option>{donors.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+            <DonorAutocomplete donors={donors} selectedId={donorId} onSelect={setDonorId} />
           </div>
 
           <div className="interaction-kind-picker" aria-label="Interaction type">
@@ -156,6 +168,13 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
             <label htmlFor="interaction-subject">Subject <span>optional</span></label>
             <input id="interaction-subject" value={subject} onChange={(event) => setSubject(event.target.value)} />
             {!subject && note.trim().length >= 4 && <small>AI suggestion: {preview.subject}</small>}
+          </div>
+
+          <div className="interaction-date-row">
+            <label htmlFor="interaction-occurred-at">Date &amp; time</label>
+            <input id="interaction-occurred-at" type="datetime-local" value={occurredAt} onChange={(event) => { setOccurredAt(event.target.value); setStatus("idle"); }} />
+            <button type="button" onClick={() => setOccurredAt(toLocalDateTimeValue(new Date()))}>Now</button>
+            {scheduleError && <small role="alert">{scheduleError}</small>}
           </div>
 
           <fieldset className="reminder-picker">
@@ -193,13 +212,13 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
             <div className="extraction-preview" aria-live="polite">
               <div className="extraction-heading"><span>✦</span><strong>Ready to save</strong><small>No other fields required</small></div>
               <div className="extraction-chips">
-                <span>{interactionKindLabel(preview.type)}</span><span>{preview.sentiment === "warm" ? "Warm, engaged" : "Neutral"}</span><span>Now</span>
+                <span>{interactionKindLabel(preview.type)}</span><span>{preview.sentiment === "warm" ? "Warm, engaged" : "Neutral"}</span><span>{dateLabel}</span>
                 {preview.commitments.length > 0 && <span>{preview.commitments.length} commitment{preview.commitments.length > 1 ? "s" : ""}</span>}
               </div>
             </div>
           )}
 
-          {status === "error" && <p className="capture-error">The interaction could not be saved. Your note is still here—try again.</p>}
+          {status === "error" && <p className="capture-error">{errorMessage} Your note is still here—try again.</p>}
           <button className="capture-save" disabled={!ready || status === "saving"} onClick={saveInteraction}>
             {status === "saving" ? "Updating relationship…" : <>Save interaction <span>⌘ ↵</span></>}
           </button>
@@ -210,7 +229,7 @@ export function CaptureExperience({ donors, initialDonorId }: { donors: Array<{ 
           <p className="eyebrow">AUTOMATIC AFTER SAVE</p><h2>Captured once. Reused everywhere.</h2>
           <p>The original note remains the source of truth while Fundraising OS updates the relationship around it.</p>
           <div className="automation-flow">
-            <article><span>1</span><div><strong>Timeline</strong><p>Interaction, type, subject, and current time</p></div></article>
+            <article><span>1</span><div><strong>Timeline</strong><p>Interaction, type, subject, and selected date and time</p></div></article>
             <article><span>2</span><div><strong>Institutional memory</strong><p>Durable personal and relationship context</p></div></article>
             <article><span>3</span><div><strong>AI relationship summary</strong><p>Current story, sentiment, and momentum</p></div></article>
             <article><span>4</span><div><strong>Reminder or next action</strong><p>Only when requested or a commitment is detected</p></div></article>

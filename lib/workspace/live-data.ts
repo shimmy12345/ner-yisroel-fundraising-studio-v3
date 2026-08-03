@@ -6,6 +6,7 @@ type GivingRow = { id: string; donor_id: string; display_name: string; paid_cent
 type ContactRow = { id: string; display_name: string; last_contact: number | null; recent_activity: number | null };
 type DonorRow = { id: string; display_name: string; updated_at: number };
 type DonorDateRow = { donor_id: string; value: number | null };
+type ScheduledMeetingRow = { id: string; donor_id: string; display_name: string; occurred_at: number; summary: string };
 
 export type WorkspacePriority = { donorId: string; name: string; initials: string; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; detail: string };
@@ -32,7 +33,7 @@ function timeParts(epoch: number, timezone: string) {
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000)): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live'";
-  const [reminders, giving, donors, lastContacts, lastActivities] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, lastActivities, scheduledMeetings] = await Promise.all([
     env.DB.prepare(`SELECT r.donor_id AS id, d.display_name, r.action, r.reason, r.score, r.due_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -42,8 +43,13 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.category NOT IN ('needs_review','nonfinancial_entry')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
     env.DB.prepare(`SELECT d.id, d.display_name, d.updated_at FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
-    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE user_id = ?"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
+    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ?" : "WHERE user_id = ? AND occurred_at <= ?"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE record_origin = 'sample' AND donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ? AND record_origin = 'live'"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
+    env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, i.occurred_at, i.summary
+      FROM interactions i JOIN donors d ON d.id = i.donor_id
+      WHERE ${demo ? "d.data_source = 'sample'" : "i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'"}
+        AND i.type = 'meeting' AND i.occurred_at >= ?
+      ORDER BY i.occurred_at LIMIT 5`).bind(...(demo ? [now] : [userId, userId, now])).all<ScheduledMeetingRow>(),
   ]);
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
   const activityByDonor = new Map(lastActivities.results.map((item) => [item.donor_id, item.value]));
@@ -63,7 +69,10 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     if (days == null || days >= 90) priorities.push({ donorId: item.id, name: item.display_name, initials: initials(item.display_name), label: "Needs contact", signal: "cool", reason: days == null ? "No meaningful contact recorded" : `${days} days since meaningful contact`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}` });
   }
   const deduped = [...new Map(priorities.map((item) => [item.donorId, item])).values()].slice(0, 8);
-  const meetings = reminders.results.filter((item) => item.due_at && /meet|call|visit|appointment/i.test(`${item.action} ${item.reason}`) && item.due_at >= now - 86400 && item.due_at <= now + 7 * 86400).slice(0, 5).map((item) => ({ donorId: item.id, ...timeParts(item.due_at!, timezone), title: item.display_name, detail: item.action }));
+  const meetings = [
+    ...scheduledMeetings.results.map((item) => ({ epoch: item.occurred_at, donorId: item.donor_id, ...timeParts(item.occurred_at, timezone), title: item.display_name, detail: `${dateLabel(item.occurred_at, timezone)} · ${item.summary.split("\n")[0] || "Scheduled meeting"}` })),
+    ...reminders.results.filter((item) => item.due_at && /meet|call|visit|appointment/i.test(`${item.action} ${item.reason}`) && item.due_at >= now - 86400 && item.due_at <= now + 7 * 86400).map((item) => ({ epoch: item.due_at!, donorId: item.id, ...timeParts(item.due_at!, timezone), title: item.display_name, detail: item.action })),
+  ].sort((a, b) => a.epoch - b.epoch).slice(0, 5).map(({ epoch: _epoch, ...meeting }) => meeting);
   const gifts = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && (item.activity_date ?? 0) >= now - 30 * 86400).slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${dateLabel(item.activity_date, timezone)}` : ""}` }));
   const overview = deduped.length || gifts.length ? `${deduped.length} relationship priorit${deduped.length === 1 ? "y" : "ies"}, ${meetings.length} upcoming meeting${meetings.length === 1 ? "" : "s"}, and ${gifts.length} recent gift${gifts.length === 1 ? "" : "s"} are visible from your live workspace.` : "Your live workspace has no time-sensitive priorities yet. Import data or log an interaction to build today’s brief.";
   const recommendation = deduped[0] ? `Start with ${deduped[0].name}: ${deduped[0].reason}.` : "No recommended action is available until your workspace contains a due reminder, open pledge, recent gift, or relationship activity.";

@@ -16,6 +16,7 @@ type RequestBody = {
   subject?: string;
   reminder?: ReminderChoice;
   customDate?: string;
+  occurredAt?: string;
 };
 
 const kinds = new Set<InteractionKind>(["call", "email", "meeting", "note", "personal"]);
@@ -36,13 +37,19 @@ export async function POST(request: Request) {
   }
   if (body.type && !kinds.has(body.type)) return Response.json({ error: "Invalid interaction type" }, { status: 422 });
 
+  const extracted = extractInteraction(note, body.type, body.subject);
+  const capturedAt = new Date();
+  const occurredAt = body.occurredAt ? new Date(body.occurredAt) : capturedAt;
+  if (!Number.isFinite(occurredAt.getTime())) return Response.json({ error: "Choose a valid interaction date and time" }, { status: 422 });
+  if (occurredAt.getTime() > capturedAt.getTime() + 60_000 && extracted.type !== "meeting") {
+    return Response.json({ error: "Only meetings can be scheduled in the future" }, { status: 422 });
+  }
   const reminder = reminders.has(body.reminder ?? "none") ? body.reminder ?? "none" : "none";
-  const occurredAt = new Date();
-  const dueAt = reminderDueAt(reminder, body.customDate, occurredAt);
+  const dueAt = reminderDueAt(reminder, body.customDate, capturedAt);
   if (reminder === "custom" && !dueAt) return Response.json({ error: "Choose a custom reminder date" }, { status: 422 });
 
-  const extracted = extractInteraction(note, body.type, body.subject);
-  const now = Math.floor(occurredAt.getTime() / 1000);
+  const occurredAtEpoch = Math.floor(occurredAt.getTime() / 1000);
+  const now = Math.floor(capturedAt.getTime() / 1000);
   const interactionId = crypto.randomUUID();
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -51,7 +58,7 @@ export async function POST(request: Request) {
   const storedType = extracted.type === "personal" ? "note" : extracted.type;
   const statements = [
     env.DB.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(interactionId, donorId, userId, storedType, now, `${extracted.subject}\n${extracted.summary}`, `capture:${extracted.type}`, now, now),
+      .bind(interactionId, donorId, userId, storedType, occurredAtEpoch, `${extracted.subject}\n${extracted.summary}`, `capture:${extracted.type}`, now, now),
     env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
       .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId, userId),
   ];
