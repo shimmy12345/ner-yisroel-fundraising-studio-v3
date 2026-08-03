@@ -28,9 +28,17 @@ type ImportReport = {
   results?: ResultSummary;
   databaseChangesMade?: boolean;
   fatalError?: string | null;
+  noChangesMade?: boolean;
+  refresh?: { kind: "household" | "donation"; rangeStart?: string | null; rangeEnd?: string | null; historicalRecordsDeleted: number; workspaceRecordsPreserved: boolean };
 };
-type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }> };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number };
+type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }>; duplicateRows: number; rejectedRows: number };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null };
+
+export type RefreshOverview = {
+  lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
+  suggestedRangeStart: string | null; suggestedRangeEnd: string | null;
+  history: Array<{ id: string; fileName: string; completedAt: string | null; kind: string; summary: string }>;
+};
 
 const DONATION_LABELS: Record<string, string> = { Code: "JL household code", Name: "Source household name", "Total Due": "Validation context only", "Item Num": "Item type", Desc: "Description", Campaign: "Supporting source context", "Due Date": "Activity date", Amount: "Committed amount", Paid: "Paid amount", "Balance Due": "Outstanding balance", Company: "Validation context only" };
 const FAILURE_LABELS: Record<FailureCategory, string> = {
@@ -65,7 +73,9 @@ function csvValue(value: string | number) {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-export function ImportExperience() {
+const dateLabel = (value: string | null) => value ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value.length === 10 ? `${value}T12:00:00` : value)) : "Not yet refreshed";
+
+export function ImportExperience({ refreshOverview }: { refreshOverview: RefreshOverview }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<Step>("upload");
   const [dragging, setDragging] = useState(false);
@@ -83,7 +93,7 @@ export function ImportExperience() {
   const [failureReport, setFailureReport] = useState<ImportFailure | null>(null);
   const [jlDetected, setJlDetected] = useState(false);
   const [jlPreview, setJlPreview] = useState<JlPreview | null>(null);
-  const [mode, setMode] = useState<"first" | "refresh">("first");
+  const [mode, setMode] = useState<"first" | "refresh">(refreshOverview.lastHouseholdRefreshAt ? "refresh" : "first");
   const [donationDetected, setDonationDetected] = useState(false);
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
 
@@ -118,7 +128,7 @@ export function ImportExperience() {
       setStep("recognition");
       setJlDetected(detectedJl);
       setDonationDetected(detectedDonation);
-      setMode("first");
+      setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
       setStatusMessage("");
     } catch (fileError) {
       setError(fileError instanceof Error ? fileError.message : "The file could not be read.");
@@ -251,6 +261,10 @@ export function ImportExperience() {
             <p className="eyebrow">BRING YOUR DATA</p>
             <h1>Start with the spreadsheet you already have.</h1>
             <p className="import-lede">We&apos;ll recognize the useful donor, gift, interaction, and reminder information for you. Nothing is imported yet.</p>
+            <section className="jl-refresh-overview" aria-label="JL refresh status">
+              <div><p className="eyebrow">INCREMENTAL JL REFRESH</p><h2>Upload only the recent export you need.</h2><p>Overlapping dates are safe. Existing fingerprints are skipped, changed pledge status is updated, and missing rows never delete history.</p></div>
+              <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{refreshOverview.suggestedRangeStart ? `${dateLabel(refreshOverview.suggestedRangeStart)} – ${dateLabel(refreshOverview.suggestedRangeEnd)}` : `Most recent available range through ${dateLabel(refreshOverview.suggestedRangeEnd)}`}</dd></div></dl>
+            </section>
             <div
               className={`import-dropzone ${dragging ? "dragging" : ""}`}
               onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
@@ -264,6 +278,7 @@ export function ImportExperience() {
               <input ref={inputRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseFile} hidden />
             </div>
             <p className="import-privacy">Your file is inspected in this browser. It is never sent to an AI provider.</p>
+            <section className="jl-import-history"><div><p className="eyebrow">IMPORT HISTORY</p><h2>Recent JL refreshes</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind}</strong><span>{item.fileName}</span></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span></div></li>)}</ol> : <p>No completed imports yet.</p>}</section>
             {statusMessage && <p className="import-status" role="status">{statusMessage}</p>}
             {error && <p className="onboarding-error" role="alert">{error}</p>}
           </section>
@@ -316,7 +331,8 @@ export function ImportExperience() {
             <h1>Your workspace preview</h1>
             <p className="import-lede">This is a preview only. Nothing has been written to Fundraising OS.</p>
             {donationDetected && donationPreview ? <>
-              <div className="import-counts"><article><strong>{donationPreview.rows.toLocaleString()}</strong><span>source rows</span></article><article><strong>{donationPreview.matchedRows.toLocaleString()}</strong><span>matched giving activities</span></article><article><strong>{donationPreview.newActivities.toLocaleString()}</strong><span>new activities</span></article><article><strong>{donationPreview.proposedUpdates.toLocaleString()}</strong><span>pledge updates</span></article></div>
+              <p className="jl-export-range">Detected export range: <strong>{donationPreview.rangeStart && donationPreview.rangeEnd ? `${dateLabel(donationPreview.rangeStart)} – ${dateLabel(donationPreview.rangeEnd)}` : "No valid dated rows"}</strong></p>
+              <div className="import-counts"><article><strong>{donationPreview.newActivities.toLocaleString()}</strong><span>new gifts</span></article><article><strong>{donationPreview.proposedUpdates.toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article><article><strong>{donationPreview.conflicts.toLocaleString()}</strong><span>conflicts</span></article><article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article></div>
               <div className="import-preview-grid"><section><h2>Ready</h2><p><span>✓</span>Matched by JL Code<b>{donationPreview.matchedRows}</b></p><p><span>✓</span>Open pledges<b>{donationPreview.openPledges}</b></p><p><span>✓</span>Already imported<b>{donationPreview.alreadyImported}</b></p></section><section><h2>Excluded or review</h2><p><span>•</span>Unknown JL Code<b>{donationPreview.unknownHousehold}</b></p><p><span>•</span>Needs review<b>{donationPreview.needsReview}</b></p><p><span>•</span>Suspicious dates<b>{donationPreview.suspiciousDates}</b></p><p><span>•</span>Duplicate source rows<b>{donationPreview.duplicateSourceRows}</b></p><p><span>•</span>Zero-dollar/nonfinancial<b>{donationPreview.nonfinancial}</b></p></section></div>
               <p className="import-privacy">Paid totals use Paid. Commitments use Amount. Open balances use Balance Due. Nothing has been written yet.</p>
             </> : <div className="import-counts">
@@ -334,7 +350,9 @@ export function ImportExperience() {
                 <p><strong>{jlPreview.newRelationships}</strong> new relationships</p>
                 <p><strong>{jlPreview.existingRelationships}</strong> matched by JL Code</p>
                 <p><strong>{jlPreview.recordsWithUpdates}</strong> with contact updates</p>
-                <p><strong>{preview.rejectedRows.length}</strong> rejected rows</p>
+                <p><strong>{jlPreview.duplicateRows}</strong> duplicates</p>
+                <p><strong>{jlPreview.conflicts.length}</strong> conflicts</p>
+                <p><strong>{jlPreview.rejectedRows}</strong> rejected rows</p>
               </div>
               {jlPreview.conflicts.length > 0 && <section className="jl-conflicts"><h2>Values needing your attention</h2><p>{jlPreview.conflicts.length} user-edited value{jlPreview.conflicts.length === 1 ? "" : "s"} differ from this JL export. They will not be overwritten.</p>{jlPreview.conflicts.slice(0, 8).map((conflict) => <article key={`${conflict.externalId}-${conflict.field}`}><strong>JL {conflict.externalId}</strong><span>{conflict.field.replaceAll("_", " ")}</span><small>Current: {conflict.currentValue || "Blank"} · JL: {conflict.jlValue || "Blank"}</small></article>)}</section>}
             </>}
@@ -415,7 +433,10 @@ export function ImportExperience() {
             <div className="import-success-mark">✓</div>
             <p className="eyebrow">IMPORT COMPLETE</p>
             <h1>Your workspace is ready.</h1>
+            {report.noChangesMade && <div className="import-rollback-assurance"><strong>Your workspace was already current.</strong><span>No gifts or households were duplicated.</span></div>}
             <p className="import-lede">{report.profile === "JL Solutions Donations" ? `${report.donation?.newActivities ?? 0} new giving activities and ${report.donation?.updatedPledges ?? 0} pledge updates were processed.` : `${report.imported.donors} donors, ${report.imported.gifts} gifts, ${report.imported.interactions} interactions, and ${report.imported.reminders} reminders were processed.`}</p>
+            {report.refresh && <p className="import-preservation-note">Historical gifts were not deleted. Fundraising OS interactions, reminders, notes, summaries, and institutional memory were preserved.</p>}
+            {report.warnings.length > 0 && <ul className="import-complete-warnings">{report.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
             {report.results && <div className="import-result-counts import-success-counts">
               <article><strong>{report.results.validRows.toLocaleString()}</strong><span>valid rows</span></article>
               <article><strong>{report.results.householdsMatched.toLocaleString()}</strong><span>households matched</span></article>

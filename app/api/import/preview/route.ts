@@ -6,6 +6,7 @@ import { matchJlDonors, type ExistingJlDonor } from "../../../../lib/import/jl-m
 import { buildJlDonationPreview, isJlDonationExport } from "../../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../../lib/import/jl-donation-match";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
+import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string };
 
@@ -25,6 +26,7 @@ export async function POST(request: Request) {
     const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
     const existing = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
     const match = matchJlDonationActivities(donationPreview, households.results, existing.results);
+    const range = donationExportRange(match.matched);
     return Response.json({ profile: "jl-donations", donation: {
       rows: rows.length,
       matchedRows: match.matched.length,
@@ -38,6 +40,10 @@ export async function POST(request: Request) {
       newActivities: match.newActivities.length,
       proposedUpdates: match.proposedUpdates.length,
       alreadyImported: match.alreadyImported,
+      conflicts: match.unknownHousehold + match.needsReview,
+      rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.needsReview + match.nonfinancial,
+      rangeStart: isoDate(range.start),
+      rangeEnd: isoDate(range.end),
     } });
   }
   const jlDetected = isJlSolutionsExport(columns);
@@ -59,6 +65,8 @@ export async function POST(request: Request) {
       existingRelationships: matches.filter((match) => match.existing).length,
       recordsWithUpdates: matches.filter((match) => Object.keys(match.safeUpdates).length > 0).length,
       conflicts,
+      duplicateRows: preview.rejectedRows.filter((row) => /duplicate/i.test(row.reason)).length,
+      rejectedRows: preview.rejectedRows.length,
     },
   });
 }

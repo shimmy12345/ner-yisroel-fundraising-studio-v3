@@ -8,6 +8,7 @@ import { buildJlDonationPreview, isJlDonationExport } from "../../../lib/import/
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { ensureUserProfile } from "../../../lib/auth/profile";
+import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
 
 type ImportRequest = {
   fileName?: string;
@@ -64,9 +65,17 @@ export async function POST(request: Request) {
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
-  const existing = await env.DB.prepare("SELECT id FROM data_imports WHERE user_id = ? AND file_hash = ? LIMIT 1").bind(userId, fileHash).first<{ id: string }>();
+  const existing = await env.DB.prepare("SELECT id, completed_at FROM data_imports WHERE user_id = ? AND file_hash = ? LIMIT 1").bind(userId, fileHash).first<{ id: string; completed_at: number | null }>();
   if (existing) {
-    if (isJlDonationExport(Object.keys(rows[0] ?? {}))) return Response.json({ error: "This exact donation file has already been imported.", fatalError: null, importId: existing.id, databaseChangesMade: false, noChangesMade: true, rollbackCauses: ["duplicate_records"], validation: { totalRows: rows.length, passedRows: rows.length, failedRows: 0, duplicateRows: rows.length, nonfinancialRows: 0, firstErrors: [{ row: 0, category: "duplicate_records", reason: "The file fingerprint matches a completed import" }] }, rejectedRows: rows.map((_, index) => ({ row: index + 2, category: "duplicate_records", reason: "Skipped because this exact file was already imported" })), results: { validRows: rows.length, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: rows.length, rowsRequiringReview: 0, rejectedRows: rows.length, unmatchedJlCodes: 0, elapsedMs: 0 } }, { status: 409 });
+    const exactDonation = isJlDonationExport(Object.keys(rows[0] ?? {}));
+    const exactHousehold = isJlSolutionsExport(Object.keys(rows[0] ?? {}));
+    if (exactDonation || exactHousehold) return Response.json({
+      importId: existing.id, fileName, completedAt: new Date().toISOString(), profile: exactDonation ? "JL Solutions Donations" : "JL Solutions",
+      mode: "refresh", databaseChangesMade: false, noChangesMade: true, imported: { donors: 0, gifts: 0, interactions: 0, reminders: 0 }, rejectedRows: [],
+      donation: exactDonation ? { newActivities: 0, updatedPledges: 0, unchanged: rows.length, unknownHousehold: 0, needsReview: 0, nonfinancialExcluded: 0, duplicateSourceRows: 0 } : undefined,
+      results: { validRows: rows.length, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: rows.length, rowsRequiringReview: 0, rejectedRows: 0, unmatchedJlCodes: 0, elapsedMs: 0 },
+      warnings: [`This exact ${exactDonation ? "donation" : "household"} export was already processed${existing.completed_at ? ` on ${new Date(existing.completed_at * 1000).toISOString().slice(0, 10)}` : ""}. No records were duplicated.`],
+    });
     return Response.json({ error: "This file has already been imported", importId: existing.id }, { status: 409 });
   }
 
@@ -79,6 +88,7 @@ export async function POST(request: Request) {
     const households = codes.length ? await env.DB.prepare(`SELECT id, external_id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<MatchedHousehold>() : { results: [] as MatchedHousehold[] };
     const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
     const match = matchJlDonationActivities(donationPreview, households.results, prior.results);
+    const exportRange = donationExportRange(match.matched);
     const rowFailures: RowFailure[] = [
       ...donationPreview.duplicateRows.map((duplicate) => ({ row: duplicate.row, category: "duplicate_records" as const, reason: "Duplicate source row" })),
       ...match.unknownActivities.map((activity) => ({ row: activity.rowNumber, category: "unmatched_jl_codes" as const, reason: "JL Code does not match an imported household" })),
@@ -97,8 +107,9 @@ export async function POST(request: Request) {
     const givingDonorIds = new Set([...householdsWithGiving.results.map((item) => item.id), ...match.matched.map((item) => item.donorId)]);
     const householdsWithoutGivingHistory = liveHouseholds.results.filter((item) => !givingDonorIds.has(item.id)).length;
     const results = { validRows: match.matched.length, householdsMatched: new Set(match.matched.map((activity) => activity.donorId)).size, newHouseholds: 0, giftsImported: match.newActivities.length, giftsUpdated: match.proposedUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + match.alreadyImported, rowsRequiringReview: match.needsReview, rejectedRows: rowFailures.length, unmatchedJlCodes: match.unknownHousehold, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length, unmatchedJlCodes: match.unknownHousehold, householdsWithoutGivingHistory, donationRowsRequiringReview: match.needsReview, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, rejectedRows: rowFailures, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
-    const activityRows = match.matched.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: match.matched[0]?.donorId ?? null, imported: { donors: 0, gifts: match.newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: match.newActivities.length, updatedPledges: match.proposedUpdates.length, unchanged: match.alreadyImported, unknownHousehold: match.unknownHousehold, needsReview: match.needsReview, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length, unmatchedJlCodes: match.unknownHousehold, householdsWithoutGivingHistory, donationRowsRequiringReview: match.needsReview, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, rejectedRows: rowFailures, warnings: [match.unknownHousehold && `${match.unknownHousehold} rows have an unknown JL Code`, match.needsReview && `${match.needsReview} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const changedActivities = [...match.newActivities, ...match.proposedUpdates];
+    const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
     const changeRows = [...match.newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: null, now })), ...match.proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now }))];
     const activityStatements = chunkJsonRows(activityRows).map((chunk) =>
@@ -112,6 +123,10 @@ export async function POST(request: Request) {
       ...activityStatements,
       env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?, ?)").bind(importId, userId, fileName, fileHash, JSON.stringify(report), now, now),
       env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
+      env.DB.prepare(`INSERT INTO jl_refresh_state (user_id, last_donation_refresh_at, last_donation_range_start, last_donation_range_end, updated_at)
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET last_donation_refresh_at = excluded.last_donation_refresh_at,
+        last_donation_range_start = excluded.last_donation_range_start, last_donation_range_end = excluded.last_donation_range_end, updated_at = excluded.updated_at`)
+        .bind(userId, now, exportRange.start, exportRange.end, now),
       ...changeStatements,
     ];
     try {
@@ -145,6 +160,7 @@ export async function POST(request: Request) {
     updateExisting: Boolean(body.updateExisting),
     profile: jlDetected ? "JL Solutions" : "General spreadsheet",
     mode: jlDetected ? (body.mode === "refresh" ? "refresh" : "first") : "first",
+    refresh: jlDetected ? { kind: "household", historicalRecordsDeleted: 0, workspaceRecordsPreserved: true } : undefined,
     firstRelationshipId: preview.donors[0]?.id ?? null,
     imported: {
       donors: preview.donors.length,
@@ -217,6 +233,8 @@ export async function POST(request: Request) {
       .bind(importId, userId, fileName, fileHash, body.updateExisting ? 1 : 0, JSON.stringify(report), now, now),
     env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
   );
+  if (jlDetected) statements.push(env.DB.prepare(`INSERT INTO jl_refresh_state (user_id, last_household_refresh_at, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET last_household_refresh_at = excluded.last_household_refresh_at, updated_at = excluded.updated_at`).bind(userId, now, now));
 
   try {
     await env.DB.batch(statements);

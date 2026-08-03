@@ -122,6 +122,15 @@ export const sampleCleanupAudits = sqliteTable("sample_cleanup_audits", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
 
+export const jlRefreshState = sqliteTable("jl_refresh_state", {
+  userId: text("user_id").primaryKey().notNull().references(() => users.id),
+  lastHouseholdRefreshAt: integer("last_household_refresh_at", { mode: "timestamp" }),
+  lastDonationRefreshAt: integer("last_donation_refresh_at", { mode: "timestamp" }),
+  lastDonationRangeStart: integer("last_donation_range_start", { mode: "timestamp" }),
+  lastDonationRangeEnd: integer("last_donation_range_end", { mode: "timestamp" }),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+});
+
 export const recommendations = sqliteTable("recommendations", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
