@@ -9,6 +9,7 @@ import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, t
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-deduplication";
+import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../../lib/donors/merge-preview";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid" };
 
@@ -70,6 +71,11 @@ export async function POST(request: Request) {
     : { results: [] as ExistingJlDonor[] };
   const matches = matchJlDonors(preview.donors, existing.results);
   const conflicts = matches.flatMap((match) => match.conflicts);
+  const unmatchedDonors = matches.filter((match) => !match.existing).map((match) => match.donor);
+  const manual = unmatchedDonors.length
+    ? await env.DB.prepare(`SELECT id, display_name, email, phone, home_phone, address_line_1, city, state, postal_code FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'Manual'`).bind(profile.id).all<ManualDonorMatchRow>()
+    : { results: [] as ManualDonorMatchRow[] };
+  const mergeCandidates = findLikelyManualDonorMatches(unmatchedDonors, manual.results);
   return Response.json({
     profile: "jl-solutions",
     preview,
@@ -79,6 +85,7 @@ export async function POST(request: Request) {
       existingRelationships: matches.filter((match) => match.existing).length,
       recordsWithUpdates: matches.filter((match) => Object.keys(match.safeUpdates).length > 0).length,
       conflicts,
+      mergeCandidates,
       duplicateRows: preview.rejectedRows.filter((row) => /duplicate/i.test(row.reason)).length,
       rejectedRows: preview.rejectedRows.length,
     },

@@ -36,7 +36,9 @@ type ImportReport = {
   message?: string;
   refresh?: { kind: "household" | "donation"; rangeStart?: string | null; rangeEnd?: string | null; historicalRecordsDeleted: number; workspaceRecordsPreserved: boolean };
 };
-type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }>; duplicateRows: number; rejectedRows: number };
+type MergeCandidate = { externalId: string; jlName: string; manualDonorId: string; manualName: string; reasons: string[] };
+type MergeDecision = { action: "needs_review" | "merge" | "keep_separate"; manualDonorId: string };
+type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; conflicts: Array<{ externalId: string; field: string; currentValue: string; jlValue: string }>; mergeCandidates: MergeCandidate[]; duplicateRows: number; rejectedRows: number };
 type OpenPledgePreview = { id: string; activity_date: number | null; committed_cents: number; paid_cents: number; balance_cents: number; description: string | null; source_campaign: string | null };
 type PaymentAssignmentPreview = { row: number; fingerprint: string; donorName: string; donorMatched: boolean; paymentDate: number | null; amountCents: number | null; campaign: string; action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; remembered: boolean; alreadyApplied: boolean; reason: string | null; openPledges: OpenPledgePreview[] };
 type PaymentDecisionState = { action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; overpaymentAction: "split_remainder_new_gift" | null };
@@ -108,6 +110,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
   const [donationDetected, setDonationDetected] = useState(false);
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
   const [paymentDecisions, setPaymentDecisions] = useState<Record<string, PaymentDecisionState>>({});
+  const [mergeDecisions, setMergeDecisions] = useState<Record<string, MergeDecision>>({});
   const [duplicateBlock, setDuplicateBlock] = useState<DuplicateImportBlock | null>(null);
   const [forceConfirmation, setForceConfirmation] = useState("");
 
@@ -143,6 +146,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       setJlDetected(detectedJl);
       setDonationDetected(detectedDonation);
       setPaymentDecisions({});
+      setMergeDecisions({});
       setDuplicateBlock(null);
       setForceConfirmation("");
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
@@ -176,6 +180,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       if (!response.ok || (!payload.preview && !payload.donation)) throw new Error(payload.error ?? "The preview could not be prepared.");
       setPreview(payload.preview ?? { donors: [], gifts: [], interactions: [], reminders: [], rejectedRows: [], warnings: [] });
       setJlPreview(payload.jl ?? null);
+      setMergeDecisions(Object.fromEntries((payload.jl?.mergeCandidates ?? []).map((candidate) => [candidate.externalId, { action: "needs_review", manualDonorId: candidate.manualDonorId }])));
       setDonationPreview(payload.donation ?? null);
       setPaymentDecisions(Object.fromEntries((payload.donation?.paymentAssignments ?? []).map((item) => [item.fingerprint, { action: item.action, pledgeId: item.pledgeId, overpaymentAction: null }])));
       setStep("preview");
@@ -192,7 +197,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
       });
       const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string };
       if (!response.ok) {
@@ -247,6 +252,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     setDonationDetected(false);
     setDonationPreview(null);
     setPaymentDecisions({});
+    setMergeDecisions({});
     setDuplicateBlock(null);
     setForceConfirmation("");
     setFailureReport(null);
@@ -294,6 +300,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
     const pledge = item.openPledges.find((option) => option.id === decision.pledgeId);
     return !pledge || !paymentAllocations.get(item.fingerprint)?.resolved;
   }).length ?? 0;
+  const unresolvedMerges = jlPreview?.mergeCandidates.filter((candidate) => mergeDecisions[candidate.externalId]?.action === "needs_review").length ?? 0;
   const proposedNewPayments = donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && (paymentDecisions[item.fingerprint]?.action === "new_gift" || (paymentAllocations.get(item.fingerprint)?.remainderCents ?? 0) > 0 && paymentAllocations.get(item.fingerprint)?.resolved)).length ?? 0;
   const proposedPledgeUpdates = new Set(donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && paymentAllocations.get(item.fingerprint)?.resolved && paymentDecisions[item.fingerprint]?.pledgeId).map((item) => paymentDecisions[item.fingerprint].pledgeId) ?? []).size;
 
@@ -444,6 +451,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
                 <p><strong>{jlPreview.rejectedRows}</strong> rejected rows</p>
               </div>
               {jlPreview.conflicts.length > 0 && <section className="jl-conflicts"><h2>Values needing your attention</h2><p>{jlPreview.conflicts.length} user-edited value{jlPreview.conflicts.length === 1 ? "" : "s"} differ from this JL export. They will not be overwritten.</p>{jlPreview.conflicts.slice(0, 8).map((conflict) => <article key={`${conflict.externalId}-${conflict.field}`}><strong>JL {conflict.externalId}</strong><span>{conflict.field.replaceAll("_", " ")}</span><small>Current: {conflict.currentValue || "Blank"} · JL: {conflict.jlValue || "Blank"}</small></article>)}</section>}
+              {jlPreview.mergeCandidates.length > 0 && <section className="jl-merge-candidates"><h2>Possible manual donor matches</h2><p>These are suggestions only. Fundraising OS will never merge a donor automatically.</p>{jlPreview.mergeCandidates.map((candidate) => { const decision = mergeDecisions[candidate.externalId] ?? { action: "needs_review", manualDonorId: candidate.manualDonorId }; return <article key={candidate.externalId}><div><strong>{candidate.jlName} <small>JL {candidate.externalId}</small></strong><span>Possible match: {candidate.manualName}</span><small>{candidate.reasons.join(" · ")}</small></div><label><span>Choose how to continue</span><select aria-label={`Merge decision for JL ${candidate.externalId}`} value={decision.action} onChange={(event) => setMergeDecisions((current) => ({ ...current, [candidate.externalId]: { action: event.target.value as MergeDecision["action"], manualDonorId: candidate.manualDonorId } }))}><option value="needs_review">Needs review</option><option value="merge">Merge and preserve history</option><option value="keep_separate">Keep as separate donors</option></select></label></article>; })}<p className="import-privacy">Merging keeps the manual donor&apos;s internal ID, interactions, reminders, notes, and history. You can change this decision until import confirmation.</p></section>}
             </>}
             {!donationDetected && <div className="import-preview-grid">
               <section><h2>Detected</h2>{[
@@ -460,7 +468,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
               <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
-              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments > 0}>{unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : "Confirm and import"}</button>}
+              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedMerges > 0}>{unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
             </div>
           </section>
         )}

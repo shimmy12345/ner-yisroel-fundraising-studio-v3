@@ -11,6 +11,7 @@ import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReprocessBatch, hasForceReprocessConfirmation } from "../../../lib/import/import-deduplication";
+import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../lib/donors/merge-preview";
 
 type ImportRequest = {
   fileName?: string;
@@ -20,8 +21,15 @@ type ImportRequest = {
   updateExisting?: boolean;
   mode?: "first" | "refresh";
   paymentDecisions?: PaymentDecisionInput[];
+  mergeDecisions?: Array<{ externalId: string; action: "merge" | "keep_separate"; manualDonorId: string }>;
   forceReprocess?: boolean;
   forceConfirmation?: string;
+};
+
+type ManualDonorRow = ManualDonorMatchRow & {
+  address: string | null; last_name: string | null; primary_first_name: string | null; spouse: string | null;
+  spouse_first_name: string | null; primary_title: string | null; spouse_title: string | null;
+  alternate_mobile_phone: string | null; country: string | null; contact_note: string | null;
 };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
@@ -88,6 +96,14 @@ export async function POST(request: Request) {
     decisionFingerprints.add(decision.fingerprint);
     return false;
   })) return Response.json({ error: "The payment decisions could not be validated" }, { status: 422 });
+  const mergeDecisionCodes = new Set<string>();
+  if (body.mergeDecisions !== undefined && (!Array.isArray(body.mergeDecisions) || body.mergeDecisions.some((decision) => {
+    const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
+    const valid = Boolean(code) && ["merge", "keep_separate"].includes(decision?.action) && typeof decision?.manualDonorId === "string" && Boolean(decision.manualDonorId);
+    if (!valid || mergeDecisionCodes.has(code)) return true;
+    mergeDecisionCodes.add(code);
+    return false;
+  }))) return Response.json({ error: "The donor merge decisions could not be validated" }, { status: 422 });
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -317,10 +333,39 @@ export async function POST(request: Request) {
       ? await env.DB.prepare(`SELECT id, external_id, display_name, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<ExistingJlDonor>()
       : { results: [] as ExistingJlDonor[] };
     const matches = matchJlDonors(preview.donors, existing.results);
+    const unmatched = matches.filter((match) => !match.existing).map((match) => match.donor);
+    const manual = unmatched.length
+      ? await env.DB.prepare(`SELECT id, display_name, email, phone, home_phone, address, last_name, primary_first_name, spouse, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, address_line_1, city, state, postal_code, country, contact_note FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND external_source = 'Manual'`).bind(userId).all<ManualDonorRow>()
+      : { results: [] as ManualDonorRow[] };
+    const candidateByCode = new Map(findLikelyManualDonorMatches(unmatched, manual.results).map((candidate) => [candidate.externalId.toLowerCase(), candidate]));
+    const decisionByCode = new Map((body.mergeDecisions ?? []).map((decision) => [decision.externalId.toLowerCase(), decision]));
+    for (const candidate of candidateByCode.values()) {
+      const decision = decisionByCode.get(candidate.externalId.toLowerCase());
+      if (!decision || !["merge", "keep_separate"].includes(decision.action) || decision.manualDonorId !== candidate.manualDonorId) {
+        return Response.json({ error: `Review the possible manual donor match for JL ${candidate.externalId} before importing.` }, { status: 422 });
+      }
+    }
     for (const match of matches) {
       const donor = match.donor;
       const contact = donor.contact!;
       if (!match.existing) {
+        const code = donor.donorCode ?? "";
+        const candidate = candidateByCode.get(code.toLowerCase());
+        const decision = decisionByCode.get(code.toLowerCase());
+        if (candidate && decision?.action === "merge") {
+          const manualDonor = manual.results.find((row) => row.id === candidate.manualDonorId)!;
+          const keep = (current: string | null | undefined, incoming: string | null | undefined) => current?.trim() ? current : incoming ?? null;
+          const merged = {
+            displayName: keep(manualDonor.display_name, donor.name), spouse: keep(manualDonor.spouse, contact.spouseFirstName), email: keep(manualDonor.email, donor.email), phone: keep(manualDonor.phone, donor.phone), address: keep(manualDonor.address, donor.address),
+            lastName: keep(manualDonor.last_name, contact.lastName), primaryFirstName: keep(manualDonor.primary_first_name, contact.primaryFirstName), spouseFirstName: keep(manualDonor.spouse_first_name, contact.spouseFirstName), primaryTitle: keep(manualDonor.primary_title, contact.primaryTitle), spouseTitle: keep(manualDonor.spouse_title, contact.spouseTitle), alternateMobilePhone: keep(manualDonor.alternate_mobile_phone, contact.alternateMobilePhone), homePhone: keep(manualDonor.home_phone, contact.homePhone), addressLine1: keep(manualDonor.address_line_1, contact.addressLine1), city: keep(manualDonor.city, contact.city), state: keep(manualDonor.state, contact.state), postalCode: keep(manualDonor.postal_code, contact.postalCode), country: keep(manualDonor.country, contact.country), contactNote: manualDonor.contact_note,
+          };
+          ownedIds.set(donor.id, manualDonor.id);
+          statements.push(env.DB.prepare(`UPDATE donors SET donor_code=?, external_source='JL Solutions', external_id=?, display_name=?, spouse=?, email=?, phone=?, address=?, last_name=?, primary_first_name=?, spouse_first_name=?, primary_title=?, spouse_title=?, alternate_mobile_phone=?, home_phone=?, address_line_1=?, city=?, state=?, postal_code=?, country=?, source_snapshot=?, updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live' AND external_source='Manual'`)
+            .bind(code, code, merged.displayName, merged.spouse, merged.email, merged.phone, merged.address, merged.lastName, merged.primaryFirstName, merged.spouseFirstName, merged.primaryTitle, merged.spouseTitle, merged.alternateMobilePhone, merged.homePhone, merged.addressLine1, merged.city, merged.state, merged.postalCode, merged.country, JSON.stringify(sourceSnapshot(donor)), now, manualDonor.id, userId));
+          statements.push(env.DB.prepare(`INSERT INTO donor_contact_audits (id,user_id,donor_id,action,changed_fields,before_json,after_json,created_at) VALUES (?,?,?,'merged_with_jl',?,?,?,?)`)
+            .bind(crypto.randomUUID(), userId, manualDonor.id, JSON.stringify(["externalSource", "externalId"]), JSON.stringify({ externalSource: "Manual", externalId: null }), JSON.stringify({ externalSource: "JL Solutions", externalId: code, contact: merged }), now));
+          continue;
+        }
         const donorId = crypto.randomUUID();
         ownedIds.set(donor.id, donorId);
         statements.push(env.DB.prepare(`INSERT INTO donors (id, owner_user_id, data_source, donor_code, external_source, external_id, display_name, spouse, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot, created_at, updated_at)

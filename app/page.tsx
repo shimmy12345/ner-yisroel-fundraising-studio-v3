@@ -61,6 +61,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       <a href="/capture?returnTo=%2F"><span>＋</span><strong>Log Interaction</strong><small>Capture a call, email, or note</small></a>
       <a href="/capture?type=meeting&returnTo=%2F"><span>○</span><strong>Schedule Meeting</strong><small>Choose a donor and future time</small></a>
       <a href="/donors"><span>⌕</span><strong>Find Donor</strong><small>Search your live relationships</small></a>
+      <a href="/donors/new"><span>＋</span><strong>New Donor</strong><small>Add a relationship manually</small></a>
       <a href={nextMeeting ? `/donors/${encodeURIComponent(nextMeeting.donorId)}/meeting-brief` : "/donors"}><span>☼</span><strong>Prepare for Meeting</strong><small>{nextMeeting ? "Open your next donor brief" : "Choose a donor to prepare"}</small></a>
     </nav>
 

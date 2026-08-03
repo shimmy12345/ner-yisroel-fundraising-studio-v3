@@ -49,8 +49,20 @@ export const donors = sqliteTable("donors", {
   postalCode: text("postal_code"),
   country: text("country"),
   sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<Record<string, string>>(),
+  contactNote: text("contact_note"),
   ...timestamps,
 });
+
+export const donorContactAudits = sqliteTable("donor_contact_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  action: text("action", { enum: ["created", "updated", "merged_with_jl"] }).notNull(),
+  changedFields: text("changed_fields", { mode: "json" }).$type<string[]>().notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, string> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, string>>().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("donor_contact_audits_donor_date_idx").on(table.donorId, table.createdAt)]);
 
 export const interactions = sqliteTable("interactions", {
   id: text("id").primaryKey(),

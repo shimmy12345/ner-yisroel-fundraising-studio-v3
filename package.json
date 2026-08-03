@@ -10,7 +10,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node tests/foundation.test.mjs && node tests/capture.test.mjs && node tests/assistant.test.mjs && node tests/import.test.mjs && node tests/donations.test.mjs && node tests/incremental-refresh.test.mjs && node tests/payment-assignment.test.mjs && node tests/donation-rollback.test.mjs && node tests/reimport-payment-timeline.test.mjs && node tests/personalization.test.mjs && node tests/giving-integrity.test.mjs && node tests/meeting-brief.test.mjs && node tests/today.test.mjs && node tests/activity-editing.test.mjs && node tests/activity-outcome.test.mjs",
+    "test": "node tests/foundation.test.mjs && node tests/capture.test.mjs && node tests/assistant.test.mjs && node tests/import.test.mjs && node tests/donations.test.mjs && node tests/incremental-refresh.test.mjs && node tests/payment-assignment.test.mjs && node tests/donation-rollback.test.mjs && node tests/reimport-payment-timeline.test.mjs && node tests/personalization.test.mjs && node tests/giving-integrity.test.mjs && node tests/meeting-brief.test.mjs && node tests/today.test.mjs && node tests/activity-editing.test.mjs && node tests/activity-outcome.test.mjs && node tests/donor-contact-management.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
