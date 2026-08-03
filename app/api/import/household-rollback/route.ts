@@ -5,7 +5,8 @@ import { logger } from "../../../../lib/logger";
 import { buildHouseholdRollbackPreview, HOUSEHOLD_SNAPSHOT_FIELDS, type CurrentHouseholdRow, type HouseholdChangeRow } from "../../../../lib/import/household-rollback";
 
 type ImportRow = { id: string; file_name: string; status: string; report_json: string; completed_at: number | null };
-const isHousehold = (json: string) => { try { return (JSON.parse(json) as { profile?: string }).profile === "JL Solutions"; } catch { return false; } };
+const isHousehold = (json: string) => { try { const report = JSON.parse(json) as { profile?: string; refresh?: { kind?: string } }; return report.profile !== "JL Solutions Donations" && (report.refresh?.kind === "household" || report.profile === "JL Solutions" || report.profile === "General spreadsheet"); } catch { return false; } };
+const isJlHousehold = (json: string) => { try { return (JSON.parse(json) as { profile?: string }).profile === "JL Solutions"; } catch { return false; } };
 
 async function loadPreview(importId: string, userId: string) {
   const dataImport = await env.DB.prepare("SELECT id,file_name,status,report_json,completed_at FROM data_imports WHERE id=? AND user_id=? LIMIT 1").bind(importId, userId).first<ImportRow>();
@@ -17,7 +18,7 @@ async function loadPreview(importId: string, userId: string) {
   if (priorAudit) return { response: Response.json({ error: "This household import has already been reversed." }, { status: 409 }) };
   const changes = await env.DB.prepare("SELECT donor_id,change_type,before_json,after_json FROM household_import_changes WHERE import_id=? AND user_id=? ORDER BY created_at,id").bind(importId, userId).all<HouseholdChangeRow>();
   if (!changes.results.length) {
-    return { dataImport, previousRefreshAt: null, preview: { safe: false, blockers: ["This batch predates household undo tracking, so its exact before-values were not recorded."], created: [], recreates: [], restores: [], totals: { householdsRemoved: 0, householdsRecreated: 0, householdsRestored: 0, laterEditsPreserved: 0 } } };
+    return { dataImport, restoreJlRefresh: isJlHousehold(dataImport.report_json), previousRefreshAt: null, preview: { safe: false, blockers: ["This older batch cannot be undone because its exact before-values and inserted-record IDs were not recorded."], created: [], recreates: [], restores: [], batchDeletes: { gifts: [], interactions: [], recommendations: [] }, totals: { householdsRemoved: 0, householdsRecreated: 0, householdsRestored: 0, laterEditsPreserved: 0, batchRecordsRemoved: 0 } } };
   }
   const donorIds = changes.results.map((change) => change.donor_id);
   const columns = HOUSEHOLD_SNAPSHOT_FIELDS.map((field) => `d.${field}`).join(",");
@@ -29,7 +30,7 @@ async function loadPreview(importId: string, userId: string) {
   const preview = buildHouseholdRollbackPreview(changes.results, current.results);
   let previousRefreshAt: number | null = null;
   try { previousRefreshAt = (JSON.parse(dataImport.report_json) as { household?: { previousRefreshAt?: number | null } }).household?.previousRefreshAt ?? null; } catch { /* null is safe */ }
-  return { dataImport, previousRefreshAt, preview };
+  return { dataImport, restoreJlRefresh: isJlHousehold(dataImport.report_json), previousRefreshAt, preview };
 }
 
 export async function GET(request: Request) {
@@ -60,6 +61,10 @@ export async function POST(request: Request) {
     const entries = Object.entries(item.fields);
     return env.DB.prepare(`UPDATE donors SET ${entries.map(([field]) => `${field}=?`).join(",")},updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live'`).bind(...entries.map(([, value]) => value), now, item.donorId, userId);
   });
+  const batchDeletes = result.preview!.batchDeletes;
+  if (batchDeletes.gifts.length) statements.push(env.DB.prepare("DELETE FROM gifts WHERE id IN (SELECT value FROM json_each(?)) AND donor_id IN (SELECT id FROM donors WHERE owner_user_id=? AND data_source='live')").bind(JSON.stringify(batchDeletes.gifts), userId));
+  if (batchDeletes.interactions.length) statements.push(env.DB.prepare("DELETE FROM interactions WHERE id IN (SELECT value FROM json_each(?)) AND user_id=?").bind(JSON.stringify(batchDeletes.interactions), userId));
+  if (batchDeletes.recommendations.length) statements.push(env.DB.prepare("DELETE FROM recommendations WHERE id IN (SELECT value FROM json_each(?)) AND user_id=?").bind(JSON.stringify(batchDeletes.recommendations), userId));
   for (const donor of result.preview!.created) statements.push(env.DB.prepare("DELETE FROM donors WHERE id=? AND owner_user_id=? AND data_source='live'").bind(donor.donorId, userId));
   const recreateFields = [...HOUSEHOLD_SNAPSHOT_FIELDS, "created_at", "updated_at"].filter((field) => !["owner_user_id", "data_source"].includes(field));
   const linkTables = ["gifts", "giving_activities", "interactions", "recommendations", "jl_payment_assignment_audits", "donor_contact_audits"] as const;
@@ -71,17 +76,17 @@ export async function POST(request: Request) {
     }
   }
   const auditId = crypto.randomUUID();
+  statements.push(env.DB.prepare("UPDATE data_imports SET status='undone' WHERE id=? AND user_id=? AND status='completed'").bind(importId, userId));
+  if (result.restoreJlRefresh) statements.push(env.DB.prepare("UPDATE jl_refresh_state SET last_household_refresh_at=?,updated_at=? WHERE user_id=?").bind(result.previousRefreshAt, now, userId));
   statements.push(
-    env.DB.prepare("UPDATE data_imports SET status='undone' WHERE id=? AND user_id=? AND status='completed'").bind(importId, userId),
-    env.DB.prepare("UPDATE jl_refresh_state SET last_household_refresh_at=?,updated_at=? WHERE user_id=?").bind(result.previousRefreshAt, now, userId),
     env.DB.prepare("INSERT INTO household_import_rollback_audits (id,user_id,import_id,backup_confirmed,preview_json,removed_donors,restored_donors,preserved_later_edits,created_at) VALUES (?,?,?,?,?,?,?,?,?)").bind(auditId, userId, importId, 1, JSON.stringify(result.preview), result.preview!.totals.householdsRemoved, result.preview!.totals.householdsRestored + result.preview!.totals.householdsRecreated, result.preview!.totals.laterEditsPreserved, now),
   );
   try {
     await env.DB.batch(statements);
-    logger.info("jl_household_import_rolled_back", { importId, userId, auditId, removed: result.preview!.totals.householdsRemoved, restored: result.preview!.totals.householdsRestored });
+    logger.info("household_import_rolled_back", { importId, userId, auditId, removed: result.preview!.totals.householdsRemoved, restored: result.preview!.totals.householdsRestored });
     return Response.json({ importId, auditId, status: "undone", ...result.preview!.totals });
   } catch {
-    logger.error("jl_household_rollback_failed", new Error("Database transaction failed"), { importId, userId });
+    logger.error("household_rollback_failed", new Error("Database transaction failed"), { importId, userId });
     return Response.json({ error: "Rollback failed. No partial household rollback was retained." }, { status: 500 });
   }
 }

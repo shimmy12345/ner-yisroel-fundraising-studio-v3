@@ -556,7 +556,7 @@ export function ImportExperience({ refreshOverview }: { refreshOverview: Refresh
             </div>
             {report.reviewOnly && <div className="import-footer-actions"><button type="button" onClick={() => { setReport(null); setStep("recognition"); }}>Review column setup</button><button className="onboarding-primary" type="button" onClick={cancelImport}>Choose a corrected file</button></div>}
             {report.firstRelationshipId && <a className="onboarding-secondary" href={`/donors/${encodeURIComponent(report.firstRelationshipId)}`}>Open first imported relationship</a>}
-            {!report.reviewOnly && <a className="onboarding-primary" href="/donors">View all imported relationships</a>}
+            {!report.reviewOnly && <a className="onboarding-primary" href={`/donors?updated=${encodeURIComponent(report.importId)}`}>View all imported relationships</a>}
           </section>
         )}
       </div>

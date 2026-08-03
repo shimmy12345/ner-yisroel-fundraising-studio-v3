@@ -10,17 +10,29 @@ function parse(value: string | null) {
   try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, string | number | null> : null; } catch { return null; }
 }
 
+type BatchLinkedRows = { gifts?: string[]; interactions?: string[]; recommendations?: string[] };
+
+function batchLinked(after: Record<string, string | number | null> | null): BatchLinkedRows {
+  const value = after?.__batchLinked;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const linked = value as Record<string, unknown>;
+  return Object.fromEntries(["gifts", "interactions", "recommendations"].map((key) => [key, Array.isArray(linked[key]) ? linked[key]!.filter((id): id is string => typeof id === "string") : []])) as BatchLinkedRows;
+}
+
 export function buildHouseholdRollbackPreview(changes: HouseholdChangeRow[], currentRows: CurrentHouseholdRow[]) {
   const currentById = new Map(currentRows.map((row) => [row.id, row]));
   const blockers: string[] = [];
   const created: Array<{ donorId: string; donorName: string }> = [];
   const recreates: Array<{ donorId: string; donorName: string; snapshot: Record<string, unknown>; linked: Record<string, string[]>; mergedInto: string }> = [];
   const restores: Array<{ donorId: string; donorName: string; fields: Record<string, string | number | null>; preservedFields: string[]; changeType: "update" | "merge" }> = [];
+  const batchDeletes = { gifts: [] as string[], interactions: [] as string[], recommendations: [] as string[] };
   let preservedLaterEdits = 0;
   for (const change of changes) {
     const current = currentById.get(change.donor_id);
     const after = parse(change.after_json);
     const before = parse(change.before_json);
+    const linkedRows = batchLinked(after);
+    for (const table of Object.keys(batchDeletes) as Array<keyof typeof batchDeletes>) batchDeletes[table].push(...(linkedRows[table] ?? []));
     if (change.change_type === "consolidated") {
       const rawBefore = parse(change.before_json) as (Record<string, string | number | null> & { linked?: Record<string, string[]> }) | null;
       const mergedInto = typeof after?.mergedInto === "string" ? after.mergedInto : "";
@@ -31,7 +43,8 @@ export function buildHouseholdRollbackPreview(changes: HouseholdChangeRow[], cur
     if (!current || !after) { blockers.push(`Donor ${change.donor_id} no longer matches the recorded batch state.`); continue; }
     if (change.change_type === "insert") {
       const changedAfterImport = HOUSEHOLD_SNAPSHOT_FIELDS.some((field) => (current[field] ?? null) !== (after[field] ?? null));
-      if (current.dependency_count > 0) blockers.push(`${current.display_name} has relationship or giving history created after this import.`);
+      const recordedDependencies = Object.values(linkedRows).reduce((total, ids) => total + (ids?.length ?? 0), 0);
+      if (current.dependency_count > recordedDependencies) blockers.push(`${current.display_name} has relationship or giving history created after this import.`);
       else if (changedAfterImport) blockers.push(`${current.display_name} was edited after this import.`);
       else created.push({ donorId: current.id, donorName: current.display_name });
       continue;
@@ -45,5 +58,6 @@ export function buildHouseholdRollbackPreview(changes: HouseholdChangeRow[], cur
     }
     if (Object.keys(fields).length || preservedFields.length) restores.push({ donorId: current.id, donorName: current.display_name, fields, preservedFields, changeType: change.change_type });
   }
-  return { safe: blockers.length === 0, blockers, created, recreates, restores, totals: { householdsRemoved: created.length, householdsRecreated: recreates.length, householdsRestored: restores.filter((item) => Object.keys(item.fields).length > 0).length, laterEditsPreserved: preservedLaterEdits } };
+  for (const table of Object.keys(batchDeletes) as Array<keyof typeof batchDeletes>) batchDeletes[table] = [...new Set(batchDeletes[table])];
+  return { safe: blockers.length === 0, blockers, created, recreates, restores, batchDeletes, totals: { householdsRemoved: created.length, householdsRecreated: recreates.length, householdsRestored: restores.filter((item) => Object.keys(item.fields).length > 0).length, laterEditsPreserved: preservedLaterEdits, batchRecordsRemoved: Object.values(batchDeletes).reduce((total, ids) => total + ids.length, 0) } };
 }

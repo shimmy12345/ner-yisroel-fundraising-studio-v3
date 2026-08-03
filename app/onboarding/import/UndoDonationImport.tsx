@@ -5,7 +5,7 @@ import { useState } from "react";
 type Preview = {
   safe: boolean;
   blockers: string[];
-  totals: { newGiftsRemoved?: number; pledgeUpdatesRestored?: number; balancesRestored?: number; statusesRestored?: number; householdsRemoved?: number; householdsRecreated?: number; householdsRestored?: number; laterEditsPreserved?: number };
+  totals: { newGiftsRemoved?: number; pledgeUpdatesRestored?: number; balancesRestored?: number; statusesRestored?: number; householdsRemoved?: number; householdsRecreated?: number; householdsRestored?: number; laterEditsPreserved?: number; batchRecordsRemoved?: number };
   newGifts?: Array<{ sourceFingerprint: string; donorName: string; activityDate: number; amountCents: number; description: string | null }>;
   pledgeUpdates?: Array<{ sourceFingerprint: string; donorName: string; activityDate: number; description: string | null; currentPaidCents: number | null; restoredPaidCents: number | null; currentBalanceCents: number | null; restoredBalanceCents: number | null; currentStatus: string | null; restoredStatus: string | null }>;
   fileName?: string;
@@ -92,14 +92,14 @@ export function UndoDonationImport({ importId, kind = "donation" }: { importId: 
     }
   }
 
-  if (!open) return <div className="import-undo-action"><button type="button" disabled={loading} onClick={inspect}>{loading ? "Preparing preview…" : "Undo"}</button>{error && <p role="alert">{error}</p>}</div>;
+  if (!open) return <div className="import-undo-action"><button type="button" disabled={loading} onClick={inspect}>{loading ? "Preparing preview…" : kind === "household" ? "View Details & Undo" : "Undo"}</button>{error && <p role="alert">{error}</p>}</div>;
 
   return (
     <section className="import-undo-preview" aria-labelledby={`undo-${importId}`}>
       <div className="import-section-heading"><div><p className="eyebrow">ROLLBACK PREVIEW</p><h3 id={`undo-${importId}`}>Review exactly what will change</h3></div><button type="button" onClick={() => setOpen(false)}>Close</button></div>
       {kind === "household" && <p><strong>{preview?.fileName}</strong>{preview?.completedAt ? ` · ${date(preview.completedAt)}` : ""}<br />Batch ID: <code>{importId}</code></p>}
       <dl className="import-undo-counts">
-        {kind === "household" ? <><div><dt>New households removed</dt><dd>{preview?.totals.householdsRemoved ?? 0}</dd></div><div><dt>Merged households recreated</dt><dd>{preview?.totals.householdsRecreated ?? 0}</dd></div><div><dt>Households restored</dt><dd>{preview?.totals.householdsRestored ?? 0}</dd></div><div><dt>Later edits preserved</dt><dd>{preview?.totals.laterEditsPreserved ?? 0}</dd></div></> : <><div><dt>New gifts removed</dt><dd>{preview?.totals.newGiftsRemoved ?? 0}</dd></div><div><dt>Pledge updates restored</dt><dd>{preview?.totals.pledgeUpdatesRestored ?? 0}</dd></div><div><dt>Balances restored</dt><dd>{preview?.totals.balancesRestored ?? 0}</dd></div><div><dt>Statuses restored</dt><dd>{preview?.totals.statusesRestored ?? 0}</dd></div></>}
+        {kind === "household" ? <><div><dt>New households removed</dt><dd>{preview?.totals.householdsRemoved ?? 0}</dd></div><div><dt>Merged households recreated</dt><dd>{preview?.totals.householdsRecreated ?? 0}</dd></div><div><dt>Households restored</dt><dd>{preview?.totals.householdsRestored ?? 0}</dd></div><div><dt>Batch records removed</dt><dd>{preview?.totals.batchRecordsRemoved ?? 0}</dd></div><div><dt>Later edits preserved</dt><dd>{preview?.totals.laterEditsPreserved ?? 0}</dd></div></> : <><div><dt>New gifts removed</dt><dd>{preview?.totals.newGiftsRemoved ?? 0}</dd></div><div><dt>Pledge updates restored</dt><dd>{preview?.totals.pledgeUpdatesRestored ?? 0}</dd></div><div><dt>Balances restored</dt><dd>{preview?.totals.balancesRestored ?? 0}</dd></div><div><dt>Statuses restored</dt><dd>{preview?.totals.statusesRestored ?? 0}</dd></div></>}
       </dl>
       {kind === "household" && !!preview?.created?.length && <div><h4>Households created by this batch</h4><ul>{preview.created.map((donor) => <li key={donor.donorId}>{donor.donorName}</li>)}</ul></div>}
       {kind === "household" && !!preview?.recreates?.length && <div><h4>Previously separate households restored by undo</h4><ul>{preview.recreates.map((donor) => <li key={donor.donorId}>{donor.donorName}</li>)}</ul></div>}

@@ -6,6 +6,7 @@ import { getDataMode } from "../../lib/workspace/mode";
 import { DonorDirectorySearch } from "./DonorDirectorySearch";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type Relationship = {
   id: string;

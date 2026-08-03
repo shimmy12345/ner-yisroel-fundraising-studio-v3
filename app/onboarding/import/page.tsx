@@ -25,7 +25,9 @@ export default async function ImportPage() {
     let report: Record<string, unknown> = {};
     try { report = JSON.parse(row.report_json) as Record<string, unknown>; } catch { /* keep history readable */ }
     if (!latestCompletedDonationId && row.status === "completed" && report.profile === "JL Solutions Donations") latestCompletedDonationId = row.id;
-    if (!latestCompletedHouseholdId && row.status === "completed" && report.profile === "JL Solutions") latestCompletedHouseholdId = row.id;
+    const refresh = report.refresh as { kind?: string } | undefined;
+    const household = report.profile !== "JL Solutions Donations" && (refresh?.kind === "household" || report.profile === "JL Solutions" || report.profile === "General spreadsheet");
+    if (!latestCompletedHouseholdId && row.status === "completed" && household) latestCompletedHouseholdId = row.id;
     return { row, report };
   });
   const history = parsedImports.map(({ row, report }) => {

@@ -15,6 +15,8 @@ test("default and searched donor lists share one owner-scoped live dataset witho
   assert.match(page, /COALESCE\(NULLIF\(last_name, ''\), display_name\).*COLLATE NOCASE/);
   assert.doesNotMatch(page, /LIMIT 1000/);
   assert.equal((page.match(/FROM donors WHERE \$\{scope\}/g) ?? []).length, 1);
+  assert.match(page, /export const revalidate = 0/);
+  assert.match(read("app/components/AppShell.tsx"), /<a className=\{active === "donors".*href="\/donors"/);
 });
 
 test("a likely manual/JL duplicate cannot be inserted without an explicit three-way decision", () => {
@@ -50,7 +52,7 @@ test("household rollback restores updates, removes only batch inserts, and prese
   const current = database.prepare("SELECT *,0 AS dependency_count FROM donors ORDER BY id").all();
   const preview = buildHouseholdRollbackPreview(changes, current);
   assert.equal(preview.safe, true);
-  assert.deepEqual(preview.totals, { householdsRemoved: 1, householdsRecreated: 0, householdsRestored: 1, laterEditsPreserved: 1 });
+  assert.deepEqual(preview.totals, { householdsRemoved: 1, householdsRecreated: 0, householdsRestored: 1, laterEditsPreserved: 1, batchRecordsRemoved: 0 });
   assert.deepEqual(preview.restores[0].fields, { email: "old@example.test" });
   database.exec("BEGIN");
   database.prepare("UPDATE donors SET email=? WHERE id=?").run(preview.restores[0].fields.email, "existing");
@@ -72,8 +74,30 @@ test("household undo is batch-scoped, previewed, backed up, and audited", () => 
   assert.match(route, /preserved_later_edits/);
   assert.match(route, /Previously separate|recreateFields/);
   assert.match(history, /latestCompletedHouseholdId/);
+  assert.match(history, /report\.profile === "General spreadsheet"/);
   assert.match(component, /Households created by this batch/);
   assert.match(component, /Later edits preserved/);
+  assert.match(component, /View Details & Undo/);
+});
+
+test("ordinary spreadsheet household imports use the same rollback ledger and capture batch-created records", () => {
+  const route = read("app/api/import/route.ts");
+  const rollback = read("app/api/import/household-rollback/route.ts");
+  assert.match(route, /profile: jlDetected \? "JL Solutions" : "General spreadsheet"/);
+  assert.match(route, /if \(householdChangeRows\.length\)/);
+  assert.doesNotMatch(route, /if \(jlDetected && householdChangeRows\.length\)/);
+  assert.match(route, /after\.__batchLinked = \{ gifts:/);
+  assert.match(rollback, /This older batch cannot be undone because its exact before-values and inserted-record IDs were not recorded/);
+  assert.match(rollback, /DELETE FROM gifts WHERE id IN/);
+  assert.match(rollback, /DELETE FROM interactions WHERE id IN/);
+  assert.match(rollback, /DELETE FROM recommendations WHERE id IN/);
+
+  const changes = [{ donor_id: "new-household", change_type: "insert", before_json: null, after_json: JSON.stringify({ owner_user_id: "user", data_source: "live", display_name: "New Household", __batchLinked: { gifts: ["gift-1"], interactions: ["interaction-1"], recommendations: ["reminder-1"] } }) }];
+  const preview = buildHouseholdRollbackPreview(changes, [{ id: "new-household", owner_user_id: "user", data_source: "live", display_name: "New Household", dependency_count: 3 }]);
+  assert.equal(preview.safe, true);
+  assert.deepEqual(preview.batchDeletes, { gifts: ["gift-1"], interactions: ["interaction-1"], recommendations: ["reminder-1"] });
+  assert.equal(preview.totals.batchRecordsRemoved, 3);
+  assert.equal(preview.created[0].donorId, "new-household");
 });
 
 test("undo can recreate an explicitly consolidated JL household and its original links", () => {

@@ -32,6 +32,7 @@ type ManualDonorRow = ManualDonorMatchRow & {
   alternate_mobile_phone: string | null; country: string | null; contact_note: string | null;
 };
 type FullJlDonorRow = ManualDonorRow & { owner_user_id: string; data_source: string; donor_code: string | null; external_source: string | null; external_id: string | null; source_snapshot: string | null; created_at: number; updated_at: number };
+type GeneralExistingDonor = { id: string; donor_code: string; display_name: string; spouse: string | null; email: string | null; phone: string | null; address: string | null; last_name: string | null; primary_first_name: string | null; spouse_first_name: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
 
@@ -298,8 +299,8 @@ export async function POST(request: Request) {
     updateExisting: Boolean(body.updateExisting),
     profile: jlDetected ? "JL Solutions" : "General spreadsheet",
     mode: jlDetected ? (body.mode === "refresh" ? "refresh" : "first") : "first",
-    refresh: jlDetected ? { kind: "household", historicalRecordsDeleted: 0, workspaceRecordsPreserved: true } : undefined,
-    household: jlDetected ? { created: 0, updated: 0, merged: 0, reviewLater: 0, previousRefreshAt: null as number | null } : undefined,
+    refresh: { kind: "household" as const, historicalRecordsDeleted: 0, workspaceRecordsPreserved: true },
+    household: { created: 0, updated: 0, merged: 0, reviewLater: 0, previousRefreshAt: null as number | null },
     firstRelationshipId: (preview.donors[0]?.id ?? null) as string | null,
     imported: {
       donors: preview.donors.length,
@@ -313,16 +314,6 @@ export async function POST(request: Request) {
   };
 
   const ownedIds = new Map(preview.donors.map((donor) => [donor.id, crypto.randomUUID()]));
-  const donorRows = preview.donors.map((donor) => ({ ...donor, id: ownedIds.get(donor.id), ownerUserId: userId, now }));
-  const giftRows = preview.gifts.map((gift) => ({ ...gift, donorId: ownedIds.get(gift.donorId), now }));
-  const interactionRows = preview.interactions.map((interaction) => ({ ...interaction, donorId: ownedIds.get(interaction.donorId), now, userId, source: `import:${importId}` }));
-  const reminderRows = preview.reminders.map((reminder) => ({ ...reminder, donorId: ownedIds.get(reminder.donorId), now, userId }));
-  const donorSql = body.updateExisting
-    ? `INSERT INTO donors (id, owner_user_id, data_source, donor_code, display_name, spouse, email, phone, address, created_at, updated_at)
-       SELECT json_extract(value, '$.id'), json_extract(value, '$.ownerUserId'), 'live', json_extract(value, '$.donorCode'), json_extract(value, '$.name'), json_extract(value, '$.spouse'), json_extract(value, '$.email'), json_extract(value, '$.phone'), json_extract(value, '$.address'), json_extract(value, '$.now'), json_extract(value, '$.now') FROM json_each(?) WHERE true
-       ON CONFLICT(owner_user_id, donor_code) DO UPDATE SET display_name = excluded.display_name, spouse = excluded.spouse, email = excluded.email, phone = excluded.phone, address = excluded.address, updated_at = excluded.updated_at`
-    : `INSERT OR IGNORE INTO donors (id, owner_user_id, data_source, donor_code, display_name, spouse, email, phone, address, created_at, updated_at)
-       SELECT json_extract(value, '$.id'), json_extract(value, '$.ownerUserId'), 'live', json_extract(value, '$.donorCode'), json_extract(value, '$.name'), json_extract(value, '$.spouse'), json_extract(value, '$.email'), json_extract(value, '$.phone'), json_extract(value, '$.address'), json_extract(value, '$.now'), json_extract(value, '$.now') FROM json_each(?)`;
 
   const statements = [
     env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
@@ -430,10 +421,48 @@ export async function POST(request: Request) {
       }
     }
   } else {
-    statements.push(env.DB.prepare(donorSql).bind(JSON.stringify(donorRows)));
+    const generalCodes = preview.donors.map((donor) => donor.donorCode?.toLowerCase()).filter(Boolean);
+    const existingGeneral = generalCodes.length ? await env.DB.prepare(`SELECT id,donor_code,display_name,spouse,email,phone,address,last_name,primary_first_name,spouse_first_name,home_phone,address_line_1,city,state,postal_code,country FROM donors WHERE owner_user_id=? AND data_source='live' AND lower(donor_code) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(generalCodes)).all<GeneralExistingDonor>() : { results: [] as GeneralExistingDonor[] };
+    const byCode = new Map(existingGeneral.results.map((row) => [row.donor_code.toLowerCase(), row]));
+    for (const donor of preview.donors) {
+      const contact = donor.contact!;
+      const existingDonor = donor.donorCode ? byCode.get(donor.donorCode.toLowerCase()) : undefined;
+      const values = { display_name: donor.name, spouse: donor.spouse, email: donor.email, phone: donor.phone, address: donor.address, last_name: contact.lastName, primary_first_name: contact.primaryFirstName, spouse_first_name: contact.spouseFirstName, home_phone: contact.homePhone, address_line_1: contact.addressLine1, city: contact.city, state: contact.state, postal_code: contact.postalCode, country: contact.country };
+      if (existingDonor) {
+        ownedIds.set(donor.id, existingDonor.id);
+        if (body.updateExisting) {
+          const before = Object.fromEntries(Object.keys(values).map((field) => [field, existingDonor[field as keyof GeneralExistingDonor] ?? null]));
+          householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId: existingDonor.id, changeType: "update", beforeJson: JSON.stringify(before), afterJson: JSON.stringify(values), now });
+          report.household.updated += 1;
+          statements.push(env.DB.prepare(`UPDATE donors SET display_name=?,spouse=?,email=?,phone=?,address=?,last_name=?,primary_first_name=?,spouse_first_name=?,home_phone=?,address_line_1=?,city=?,state=?,postal_code=?,country=?,updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live'`).bind(...Object.values(values), now, existingDonor.id, userId));
+        } else {
+          householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId: existingDonor.id, changeType: "update", beforeJson: JSON.stringify({}), afterJson: JSON.stringify({}), now });
+        }
+        continue;
+      }
+      const donorId = crypto.randomUUID();
+      ownedIds.set(donor.id, donorId);
+      const inserted = { owner_user_id: userId, data_source: "live", donor_code: donor.donorCode, external_source: null, external_id: null, ...values, primary_title: contact.primaryTitle, spouse_title: contact.spouseTitle, alternate_mobile_phone: contact.alternateMobilePhone, contact_note: null, source_snapshot: null };
+      householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId, changeType: "insert", beforeJson: null, afterJson: JSON.stringify(inserted), now });
+      report.household.created += 1;
+      statements.push(env.DB.prepare(`INSERT INTO donors
+        (id,owner_user_id,data_source,donor_code,display_name,spouse,email,phone,address,last_name,primary_first_name,spouse_first_name,primary_title,spouse_title,alternate_mobile_phone,home_phone,address_line_1,city,state,postal_code,country,created_at,updated_at)
+        VALUES (?,?,'live',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(donorId, userId, donor.donorCode, donor.name, donor.spouse, donor.email, donor.phone, donor.address, contact.lastName, contact.primaryFirstName, contact.spouseFirstName, contact.primaryTitle, contact.spouseTitle, contact.alternateMobilePhone, contact.homePhone, contact.addressLine1, contact.city, contact.state, contact.postalCode, contact.country, now, now));
+    }
   }
-  if (jlDetected && report.household) report.imported.donors = report.household.created + report.household.updated + report.household.merged;
+  report.imported.donors = report.household.created + report.household.updated + report.household.merged;
   report.firstRelationshipId = preview.donors.map((donor) => ownedIds.get(donor.id)).find(Boolean) ?? null;
+
+  const giftRows = preview.gifts.map((gift) => ({ ...gift, donorId: ownedIds.get(gift.donorId), now }));
+  const interactionRows = preview.interactions.map((interaction) => ({ ...interaction, donorId: ownedIds.get(interaction.donorId), now, userId, source: `import:${importId}` }));
+  const reminderRows = preview.reminders.map((reminder) => ({ ...reminder, donorId: ownedIds.get(reminder.donorId), now, userId }));
+  for (const change of householdChangeRows) {
+    const originalId = preview.donors.find((donor) => ownedIds.get(donor.id) === change.donorId)?.id;
+    if (!originalId) continue;
+    const after = JSON.parse(change.afterJson) as Record<string, unknown>;
+    after.__batchLinked = { gifts: preview.gifts.filter((item) => item.donorId === originalId).map((item) => item.id), interactions: preview.interactions.filter((item) => item.donorId === originalId).map((item) => item.id), recommendations: preview.reminders.filter((item) => item.donorId === originalId).map((item) => item.id) };
+    change.afterJson = JSON.stringify(after);
+  }
 
   statements.push(
     env.DB.prepare(`INSERT OR IGNORE INTO gifts (id, donor_id, amount_cents, fund, received_at, note, created_at, updated_at)
@@ -449,7 +478,7 @@ export async function POST(request: Request) {
       .bind(importId, userId, fileName, fileHash, body.updateExisting ? 1 : 0, JSON.stringify(report), now, now),
     env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
   );
-  if (jlDetected && householdChangeRows.length) {
+  if (householdChangeRows.length) {
     const importedDonorIds = householdChangeRows.map((change) => change.donorId);
     statements.push(
       env.DB.prepare("UPDATE donors SET owner_user_id = ?, data_source = 'live' WHERE owner_user_id = ? AND id IN (SELECT value FROM json_each(?))").bind(userId, userId, JSON.stringify(importedDonorIds)),
