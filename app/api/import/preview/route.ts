@@ -11,6 +11,7 @@ import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh"
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../../lib/donors/merge-preview";
 import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
+import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid" };
 
@@ -41,6 +42,12 @@ export async function POST(request: Request) {
       : { results: [] as RememberedPaymentDecision[] };
     const paymentAssignments = compactPaymentExport ? buildPaymentCandidates(donationPreview.activities, households.results, openPledges.results, remembered.results) : [];
     const publicPaymentAssignments = paymentAssignments.map(({ donorId, openPledges: candidatePledges, ...candidate }) => ({ ...candidate, donorMatched: Boolean(donorId), openPledges: candidatePledges.map((pledge) => ({ id: pledge.id, activity_date: pledge.activity_date, committed_cents: pledge.committed_cents, paid_cents: pledge.paid_cents, balance_cents: pledge.balance_cents, description: pledge.description, source_campaign: pledge.source_campaign })) }));
+    const pendingInputs = compactPaymentExport
+      ? paymentAssignments.filter((candidate) => candidate.donorId && !candidate.alreadyApplied).map((candidate) => ({ fingerprint: candidate.fingerprint, donorId: candidate.donorId!, activityDate: candidate.paymentDate, committedCents: candidate.amountCents }))
+      : match.newActivities.map((activity) => ({ fingerprint: activity.fingerprint, donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents }));
+    const pendingDonorIds = [...new Set(pendingInputs.map((item) => item.donorId))];
+    const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
+    const pendingMatches = pendingGiftMatches(pendingInputs, pending.results).map((match) => ({ fingerprint: match.fingerprint, candidates: match.candidates.map((candidate) => ({ id: candidate.id, activityDate: candidate.activity_date, amountCents: candidate.committed_cents, designation: candidate.description, note: candidate.private_note })) }));
     return Response.json({ profile: "jl-donations", donation: {
       rows: rows.length,
       matchedRows: compactPaymentExport ? paymentAssignments.filter((candidate) => candidate.donorId).length : match.matched.length,
@@ -60,6 +67,7 @@ export async function POST(request: Request) {
       rangeStart: isoDate(range.start),
       rangeEnd: isoDate(range.end),
       paymentAssignments: publicPaymentAssignments,
+      pendingGiftMatches: pendingMatches,
     } });
   }
   const jlDetected = isJlSolutionsExport(columns);

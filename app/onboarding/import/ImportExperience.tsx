@@ -49,7 +49,10 @@ type JlPreview = { households: number; newRelationships: number; existingRelatio
 type OpenPledgePreview = { id: string; activity_date: number | null; committed_cents: number; paid_cents: number; balance_cents: number; description: string | null; source_campaign: string | null };
 type PaymentAssignmentPreview = { row: number; fingerprint: string; donorName: string; donorMatched: boolean; paymentDate: number | null; amountCents: number | null; campaign: string; action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; remembered: boolean; alreadyApplied: boolean; reason: string | null; openPledges: OpenPledgePreview[] };
 type PaymentDecisionState = { action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; overpaymentAction: "split_remainder_new_gift" | null };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: RowFailure[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[] };
+type PendingGiftMatch = { id: string; activityDate: number; amountCents: number; designation: string | null; note: string | null };
+type PendingGiftMatchPreview = { fingerprint: string; candidates: PendingGiftMatch[] };
+type PendingGiftDecisionState = { action: "needs_decision" | "merge" | "keep_separate"; pendingGiftId: string | null };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: RowFailure[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
 
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
@@ -122,6 +125,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [donationDetected, setDonationDetected] = useState(false);
   const [donationPreview, setDonationPreview] = useState<DonationPreview | null>(null);
   const [paymentDecisions, setPaymentDecisions] = useState<Record<string, PaymentDecisionState>>({});
+  const [pendingGiftDecisions, setPendingGiftDecisions] = useState<Record<string, PendingGiftDecisionState>>({});
   const [mergeDecisions, setMergeDecisions] = useState<Record<string, MergeDecision>>({});
   const [fieldDecisions, setFieldDecisions] = useState<Record<string, FieldDecision>>({});
   const [reviewMode, setReviewMode] = useState<ReviewMode>(initialReviewMode);
@@ -161,6 +165,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setJlDetected(detectedJl);
       setDonationDetected(detectedDonation);
       setPaymentDecisions({});
+      setPendingGiftDecisions({});
       setMergeDecisions({});
       setFieldDecisions({});
       setExistingDonorDecisions({});
@@ -203,6 +208,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setFieldDecisions(Object.fromEntries((payload.jl?.changes ?? []).map((change) => [`${change.externalId}:${change.field}`, "needs_decision"] as const)));
       setDonationPreview(payload.donation ?? null);
       setPaymentDecisions(Object.fromEntries((payload.donation?.paymentAssignments ?? []).map((item) => [item.fingerprint, { action: item.action, pledgeId: item.pledgeId, overpaymentAction: null }])));
+      setPendingGiftDecisions(Object.fromEntries((payload.donation?.pendingGiftMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingGiftId: null }])));
       setStep("preview");
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "The preview could not be prepared.");
@@ -217,7 +223,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
       });
       const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string };
       if (!response.ok) {
@@ -272,6 +278,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setDonationDetected(false);
     setDonationPreview(null);
     setPaymentDecisions({});
+    setPendingGiftDecisions({});
     setMergeDecisions({});
     setFieldDecisions({});
     setExistingDonorDecisions({});
@@ -322,6 +329,14 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     const pledge = item.openPledges.find((option) => option.id === decision.pledgeId);
     return !pledge || !paymentAllocations.get(item.fingerprint)?.resolved;
   }).length ?? 0;
+  const relevantPendingMatches = (donationPreview?.pendingGiftMatches ?? []).filter((match) => {
+    if (!donationPreview?.paymentAssignments.length) return true;
+    return paymentDecisions[match.fingerprint]?.action === "new_gift";
+  });
+  const unresolvedPendingGifts = relevantPendingMatches.filter((match) => {
+    const decision = pendingGiftDecisions[match.fingerprint];
+    return !decision || decision.action === "needs_decision" || (decision.action === "merge" && !match.candidates.some((candidate) => candidate.id === decision.pendingGiftId));
+  }).length;
   const unresolvedMerges = jlPreview?.mergeCandidates.filter((candidate) => !mergeDecisions[candidate.externalId] || mergeDecisions[candidate.externalId].action === "needs_decision").length ?? 0;
   const unresolvedExisting = jlPreview?.existingDonorReviews.filter((donor) => {
     if (mergeDecisions[donor.externalId]?.action === "review_later") return false;
@@ -460,6 +475,20 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                   </article>;
                 })}</div>
               </section>}
+              {relevantPendingMatches.length > 0 && <section className="payment-assignment-section pending-gift-match-section" aria-labelledby="pending-gift-match-title">
+                <div><p className="eyebrow">PENDING GIFT MATCHES</p><h2 id="pending-gift-match-title">Confirm whether these JL gifts replace pending entries.</h2><p>A possible match is never merged automatically. Choose the pending entry to confirm, or keep both records separate.</p></div>
+                <div className="payment-assignment-list">{relevantPendingMatches.map((match) => {
+                  const decision = pendingGiftDecisions[match.fingerprint] ?? { action: "needs_decision" as const, pendingGiftId: null };
+                  return <article className="payment-assignment-card" key={match.fingerprint}>
+                    <label><span>Pending gift decision</span><select required aria-label="Pending gift match decision" value={decision.action === "merge" ? decision.pendingGiftId ?? "needs_decision" : decision.action} onChange={(event) => {
+                      const value = event.target.value;
+                      setPendingGiftDecisions((current) => ({ ...current, [match.fingerprint]: value === "keep_separate" ? { action: "keep_separate", pendingGiftId: null } : value === "needs_decision" ? { action: "needs_decision", pendingGiftId: null } : { action: "merge", pendingGiftId: value } }));
+                    }}><option value="needs_decision" disabled>Choose what to do</option>{match.candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>Confirm pending gift from {epochDateLabel(candidate.activityDate)} · {centsLabel(candidate.amountCents)}{candidate.designation ? ` · ${candidate.designation}` : ""}</option>)}<option value="keep_separate">Keep as separate gifts</option></select></label>
+                    {decision.action === "merge" && <p className="payment-proposal">The selected pending entry will be marked confirmed and excluded from totals; the imported JL record becomes the counted gift. No amount is double-counted.</p>}
+                    {decision.action === "keep_separate" && <p className="payment-review-note">Both records will remain. The pending entry stays unconfirmed and excluded from totals.</p>}
+                  </article>;
+                })}</div>
+              </section>}
               <p className="import-privacy">Paid totals use Paid. Commitments use Amount. Open balances use Balance Due. Nothing has been written yet.</p>
             </> : <div className="import-counts">
               <article><strong>{preview.donors.length.toLocaleString()}</strong><span>{jlDetected ? "households" : "donors"}</span></article>
@@ -500,7 +529,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
               <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
-              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedMerges + unresolvedExisting + codeCollisions > 0}>{codeCollisions > 0 ? "Resolve duplicate JL Codes" : unresolvedExisting > 0 ? `Review ${unresolvedExisting} existing donor${unresolvedExisting === 1 ? "" : "s"}` : unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
+              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedPendingGifts + unresolvedMerges + unresolvedExisting + codeCollisions > 0}>{codeCollisions > 0 ? "Resolve duplicate JL Codes" : unresolvedExisting > 0 ? `Review ${unresolvedExisting} existing donor${unresolvedExisting === 1 ? "" : "s"}` : unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedPendingGifts > 0 ? `Review ${unresolvedPendingGifts} pending gift match${unresolvedPendingGifts === 1 ? "" : "es"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
             </div>
           </section>
         )}

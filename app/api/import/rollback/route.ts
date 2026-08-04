@@ -146,6 +146,12 @@ export async function POST(request: Request) {
     previousRefresh: result.previousRefresh,
   });
   const statements = [
+    env.DB.prepare(`UPDATE giving_activities SET workspace_status='active', confirmed_by_activity_id=NULL, updated_at=?
+      WHERE owner_user_id=? AND category='pending_gift' AND workspace_status='merged'
+      AND id IN (SELECT activity_id FROM giving_activity_management_audits WHERE user_id=? AND import_id=? AND action='pending_matched' AND undone_at IS NULL)
+      AND confirmed_by_activity_id IN (SELECT id FROM giving_activities WHERE owner_user_id=? AND external_source='JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?)))`)
+      .bind(now, userId, userId, importId, userId, JSON.stringify(inserted)),
+    env.DB.prepare("UPDATE giving_activity_management_audits SET undone_at=? WHERE user_id=? AND import_id=? AND action='pending_matched' AND undone_at IS NULL").bind(now, userId, importId),
     env.DB.prepare("DELETE FROM giving_activities WHERE owner_user_id = ? AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))").bind(userId, JSON.stringify(inserted)),
     env.DB.prepare(`UPDATE giving_activities SET
       paid_cents=(SELECT json_extract(value,'$.paid_cents') FROM json_each(?) WHERE json_extract(value,'$.fingerprint')=source_fingerprint),

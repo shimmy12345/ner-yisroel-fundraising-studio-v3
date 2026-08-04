@@ -5,8 +5,9 @@ export const OPEN_PLEDGES_FOR_DONORS_SQL = `SELECT id, donor_id, source_fingerpr
   COALESCE(paid_cents, 0) AS paid_cents, balance_cents, description, source_campaign, category, source_snapshot
   FROM giving_activities
   WHERE owner_user_id = ? AND record_origin = 'live'
+    AND workspace_status = 'active'
     AND donor_id IN (SELECT value FROM json_each(?))
-    AND balance_cents > 0
+    AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift') AND balance_cents > 0
   ORDER BY activity_date DESC, id`;
 
 export type PaymentDecisionAction = "apply_to_pledge" | "new_gift" | "needs_review";

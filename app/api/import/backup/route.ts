@@ -20,13 +20,14 @@ export async function GET(request: Request) {
       const ownedImport = await env.DB.prepare("SELECT id FROM data_imports WHERE id = ? AND user_id = ? LIMIT 1").bind(importId, profile.id).first();
       if (!ownedImport) return Response.json({ error: "Import not found" }, { status: 404 });
     }
-    const [donors, gifts, givingActivities, interactions, recommendations, activityAudits, dataImports, importChanges, householdChanges, paymentAssignments, paymentAssignmentAudits, refreshState, rollbackAudits, householdRollbackAudits] = await Promise.all([
+    const [donors, gifts, givingActivities, interactions, recommendations, activityAudits, givingManagementAudits, dataImports, importChanges, householdChanges, paymentAssignments, paymentAssignmentAudits, refreshState, rollbackAudits, householdRollbackAudits] = await Promise.all([
       env.DB.prepare("SELECT * FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample' ORDER BY id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM gifts WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY received_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM giving_activities WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY activity_date, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM interactions WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY occurred_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM recommendations WHERE donor_id IN (SELECT id FROM donors WHERE (owner_user_id = ? AND data_source = 'live') OR data_source = 'sample') ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM activity_status_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
+      env.DB.prepare("SELECT * FROM giving_activity_management_audits WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM data_imports WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM giving_activity_import_changes WHERE import_id IN (SELECT id FROM data_imports WHERE user_id = ?) ORDER BY import_id, source_fingerprint").bind(profile.id).all(),
       env.DB.prepare("SELECT * FROM household_import_changes WHERE user_id = ? ORDER BY created_at, id").bind(profile.id).all(),
@@ -46,6 +47,7 @@ export async function GET(request: Request) {
       interactions: interactions.results,
       remindersAndNextActions: recommendations.results,
       activityStatusAudits: activityAudits.results,
+      givingActivityManagementAudits: givingManagementAudits.results,
       dataImports: dataImports.results,
       givingActivityImportChanges: importChanges.results,
       householdImportChanges: householdChanges.results,

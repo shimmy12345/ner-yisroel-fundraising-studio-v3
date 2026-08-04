@@ -139,9 +139,31 @@ export const givingActivities = sqliteTable("giving_activities", {
   sourceCampaign: text("source_campaign"),
   recordOrigin: text("record_origin", { enum: ["live", "verification", "sample"] }).notNull().default("live"),
   category: text("category").notNull(),
+  workspaceStatus: text("workspace_status", { enum: ["active", "hidden", "duplicate", "needs_review", "invalid", "merged"] }).notNull().default("active"),
+  privateNote: text("private_note"),
+  confirmedByActivityId: text("confirmed_by_activity_id"),
   sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<Record<string, string>>().notNull(),
   ...timestamps,
 }, (table) => [index("giving_activities_donor_date_idx").on(table.donorId, table.activityDate)]);
+
+export const givingActivityManagementAudits = sqliteTable("giving_activity_management_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  activityId: text("activity_id").notNull(),
+  importId: text("import_id"),
+  action: text("action").notNull(),
+  previousDonorId: text("previous_donor_id"),
+  nextDonorId: text("next_donor_id"),
+  previousStatus: text("previous_status"),
+  nextStatus: text("next_status"),
+  previousNote: text("previous_note"),
+  nextNote: text("next_note"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  undoneAt: integer("undone_at", { mode: "timestamp" }),
+}, (table) => [
+  index("idx_giving_management_audit_activity_date").on(table.activityId, table.createdAt),
+  index("idx_giving_management_audit_import").on(table.importId, table.createdAt),
+]);
 
 export const sampleCleanupAudits = sqliteTable("sample_cleanup_audits", {
   id: text("id").primaryKey(),

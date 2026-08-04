@@ -45,7 +45,7 @@ assert.match(donorPage, /audit\.payment_date/);
 assert.match(donorPage, /batch\.status IN \('active','completed'\)/, "undone payment events must leave the timeline");
 assert.match(donorPage, /pledge_activity_id/);
 assert.match(donorPage, /remaining_balance_cents/);
-assert.match(donorPage, /const paid = activities\.reduce/, "payment events remain display-only and are not added to lifetime giving twice");
+assert.match(donorPage, /const paid = countedActivities\.reduce/, "only counted giving records contribute to totals, and payment events remain display-only");
 assert.doesNotMatch(donorPage, /paid = .*paymentEvents/, "timeline events must not be summed into giving totals");
 
 assert.match(experience, /ADMIN FALLBACK/);

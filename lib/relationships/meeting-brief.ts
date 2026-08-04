@@ -45,7 +45,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
-        AND category NOT IN ('needs_review','nonfinancial_entry')
+        AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
       ORDER BY activity_date DESC LIMIT 1000`).bind(donorId, userId).all<GivingRow>(),
     env.DB.prepare(`SELECT g.id, g.received_at, g.amount_cents, g.fund
       FROM gifts g JOIN donors d ON d.id = g.donor_id
