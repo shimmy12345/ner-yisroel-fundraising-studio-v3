@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { buildImportPreview, FIELD_LABELS, type ColumnMapping, type ImportField, type ImportRow } from "../../../lib/import/recognition";
 import { buildJlPreview, isJlSolutionsExport } from "../../../lib/import/jl-solutions";
-import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, resolveJlUpdates, sourceSnapshot, type ExistingJlDonor, type JlCodeOwner } from "../../../lib/import/jl-match";
+import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, sourceSnapshot, type ExistingJlDonor, type JlCodeOwner } from "../../../lib/import/jl-match";
 import { logger } from "../../../lib/logger";
 import { buildJlDonationPreview, isCompactJlDonationExport, isJlDonationExport } from "../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
@@ -12,6 +12,7 @@ import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReprocessBatch, hasForceReprocessConfirmation } from "../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../lib/donors/merge-preview";
+import { resolveReviewedJlUpdates, validHouseholdReviewMode, type ExistingDonorDecision, type HouseholdReviewMode } from "../../../lib/import/household-review";
 
 type ImportRequest = {
   fileName?: string;
@@ -23,6 +24,8 @@ type ImportRequest = {
   paymentDecisions?: PaymentDecisionInput[];
   mergeDecisions?: Array<{ externalId: string; action: "merge" | "keep_separate" | "review_later"; manualDonorId: string }>;
   fieldDecisions?: Array<{ externalId: string; field: string; action: "keep_local" | "use_jl" }>;
+  existingDonorDecisions?: ExistingDonorDecision[];
+  reviewMode?: HouseholdReviewMode;
   forceReprocess?: boolean;
   forceConfirmation?: string;
 };
@@ -117,6 +120,14 @@ export async function POST(request: Request) {
     fieldDecisionKeys.add(key);
     return false;
   }))) return Response.json({ error: "The JL field decisions could not be validated" }, { status: 422 });
+  const existingDecisionCodes = new Set<string>();
+  if (body.existingDonorDecisions !== undefined && (!Array.isArray(body.existingDonorDecisions) || body.existingDonorDecisions.some((decision) => {
+    const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
+    const valid = Boolean(code) && ["continue", "accept_all", "keep_current", "field_by_field"].includes(decision?.action) && typeof decision?.signature === "string" && Boolean(decision.signature);
+    if (!valid || existingDecisionCodes.has(code)) return true;
+    existingDecisionCodes.add(code);
+    return false;
+  }))) return Response.json({ error: "The existing donor review decisions could not be validated" }, { status: 422 });
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -311,7 +322,7 @@ export async function POST(request: Request) {
     profile: jlDetected ? "JL Solutions" : "General spreadsheet",
     mode: jlDetected ? (body.mode === "refresh" ? "refresh" : "first") : "first",
     refresh: { kind: "household" as const, historicalRecordsDeleted: 0, workspaceRecordsPreserved: true },
-    household: { created: 0, updated: 0, merged: 0, reviewLater: 0, previousRefreshAt: null as number | null },
+    household: { created: 0, updated: 0, merged: 0, reviewLater: 0, previousRefreshAt: null as number | null, reviewMode: profile.importReviewMode, decisions: [] as Array<{ externalId: string; action: string; fields: Record<string, string> }>, duplicateDecisions: [] as Array<{ externalId: string; action: string; manualDonorId: string }> },
     firstRelationshipId: (preview.donors[0]?.id ?? null) as string | null,
     imported: {
       donors: preview.donors.length,
@@ -340,6 +351,7 @@ export async function POST(request: Request) {
       ? await env.DB.prepare(`SELECT id, external_id, display_name, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<ExistingJlDonor>()
       : { results: [] as ExistingJlDonor[] };
     const matches = matchJlDonors(preview.donors, existing.results);
+    if (!validHouseholdReviewMode(body.reviewMode) || body.reviewMode !== profile.importReviewMode) return Response.json({ error: "Your Import Review Mode changed after this preview. Refresh the preview before importing." }, { status: 409 });
     const codeOwners = codes.length ? await env.DB.prepare(`SELECT id,external_source,external_id,donor_code FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL AND (lower(external_id) IN (SELECT value FROM json_each(?)) OR lower(donor_code) IN (SELECT value FROM json_each(?)))`).bind(userId, JSON.stringify(codes), JSON.stringify(codes)).all<JlCodeOwner>() : { results: [] as JlCodeOwner[] };
     const candidateDonors = matches.map((match) => match.donor);
     const manual = candidateDonors.length
@@ -351,6 +363,7 @@ export async function POST(request: Request) {
     if (codeCollisions.length) return Response.json({ error: `JL Code ${codeCollisions[0].externalId} is attached to a different active donor. Resolve that duplicate before importing.` }, { status: 409 });
     const fullExisting = existing.results.length ? await env.DB.prepare(`SELECT id,owner_user_id,data_source,donor_code,external_source,external_id,display_name,email,phone,home_phone,address,last_name,primary_first_name,spouse,spouse_first_name,primary_title,spouse_title,alternate_mobile_phone,address_line_1,city,state,postal_code,country,contact_note,source_snapshot,created_at,updated_at FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL AND id IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(existing.results.map((row) => row.id))).all<FullJlDonorRow>() : { results: [] as FullJlDonorRow[] };
     const decisionByCode = new Map((body.mergeDecisions ?? []).map((decision) => [decision.externalId.toLowerCase(), decision]));
+    const existingDecisionByCode = new Map((body.existingDonorDecisions ?? []).map((decision) => [decision.externalId.toLowerCase(), decision]));
     for (const candidate of candidateByCode.values()) {
       const decision = decisionByCode.get(candidate.externalId.toLowerCase());
       if (!decision || !["merge", "keep_separate", "review_later"].includes(decision.action) || decision.manualDonorId !== candidate.manualDonorId) {
@@ -359,6 +372,7 @@ export async function POST(request: Request) {
       if (candidate.exactCodeMatch && decision.action === "keep_separate") {
         return Response.json({ error: `JL Code ${candidate.externalId} already belongs to a different donor. Merge it, choose Review later, or resolve the duplicate first.` }, { status: 409 });
       }
+      report.household.duplicateDecisions.push({ externalId: candidate.externalId, action: decision.action, manualDonorId: decision.manualDonorId });
     }
     for (const match of matches) {
       const donor = match.donor;
@@ -366,6 +380,15 @@ export async function POST(request: Request) {
       const code = donor.donorCode ?? "";
       const candidate = candidateByCode.get(code.toLowerCase());
       const decision = decisionByCode.get(code.toLowerCase());
+      const existingDecision = existingDecisionByCode.get(code.toLowerCase());
+      let reviewedUpdates: Record<string, string | null> = {};
+      if (match.existing && decision?.action !== "review_later") {
+        const resolution = resolveReviewedJlUpdates(match, profile.importReviewMode, existingDecision, body.fieldDecisions ?? []);
+        if (resolution.error) return Response.json({ error: `JL ${code}: ${resolution.error}` }, { status: resolution.error.includes("changed after") ? 409 : 422 });
+        reviewedUpdates = resolution.updates as Record<string, string | null>;
+        if (existingDecision && (profile.importReviewMode === "review_every" || match.changes.length > 0)) report.household.decisions.push({ externalId: code, action: existingDecision.action, fields: Object.fromEntries(match.changes.map((change) => [change.field, reviewedUpdates[change.field] !== undefined ? "use_jl" : "keep_local"])) });
+      }
+      const reviewedValue = (field: keyof ExistingJlDonor, incoming: string | null | undefined) => match.existing ? (Object.hasOwn(reviewedUpdates, field) ? reviewedUpdates[field] : match.existing[field] as string | null) : incoming ?? null;
       if (match.existing && candidate && decision?.action === "review_later") {
         ownedIds.delete(donor.id);
         if (report.household) report.household.reviewLater += 1;
@@ -375,7 +398,7 @@ export async function POST(request: Request) {
         const manualDonor = manual.results.find((row) => row.id === candidate.manualDonorId)!;
         const priorJl = fullExisting.results.find((row) => row.id === match.existing!.id)!;
         const keep = (current: string | null | undefined, incoming: string | null | undefined) => current?.trim() ? current : incoming ?? null;
-        const merged = { displayName: keep(manualDonor.display_name, donor.name), spouse: keep(manualDonor.spouse, contact.spouseFirstName), email: keep(manualDonor.email, donor.email), phone: keep(manualDonor.phone, donor.phone), address: keep(manualDonor.address, donor.address), lastName: keep(manualDonor.last_name, contact.lastName), primaryFirstName: keep(manualDonor.primary_first_name, contact.primaryFirstName), spouseFirstName: keep(manualDonor.spouse_first_name, contact.spouseFirstName), primaryTitle: keep(manualDonor.primary_title, contact.primaryTitle), spouseTitle: keep(manualDonor.spouse_title, contact.spouseTitle), alternateMobilePhone: keep(manualDonor.alternate_mobile_phone, contact.alternateMobilePhone), homePhone: keep(manualDonor.home_phone, contact.homePhone), addressLine1: keep(manualDonor.address_line_1, contact.addressLine1), city: keep(manualDonor.city, contact.city), state: keep(manualDonor.state, contact.state), postalCode: keep(manualDonor.postal_code, contact.postalCode), country: keep(manualDonor.country, contact.country), contactNote: manualDonor.contact_note };
+        const merged = { displayName: keep(manualDonor.display_name, reviewedValue("display_name", donor.name)), spouse: keep(manualDonor.spouse, reviewedValue("spouse_first_name", contact.spouseFirstName)), email: keep(manualDonor.email, reviewedValue("email", donor.email)), phone: keep(manualDonor.phone, reviewedValue("phone", donor.phone)), address: keep(manualDonor.address, reviewedValue("address", donor.address)), lastName: keep(manualDonor.last_name, reviewedValue("last_name", contact.lastName)), primaryFirstName: keep(manualDonor.primary_first_name, reviewedValue("primary_first_name", contact.primaryFirstName)), spouseFirstName: keep(manualDonor.spouse_first_name, reviewedValue("spouse_first_name", contact.spouseFirstName)), primaryTitle: keep(manualDonor.primary_title, reviewedValue("primary_title", contact.primaryTitle)), spouseTitle: keep(manualDonor.spouse_title, reviewedValue("spouse_title", contact.spouseTitle)), alternateMobilePhone: keep(manualDonor.alternate_mobile_phone, reviewedValue("alternate_mobile_phone", contact.alternateMobilePhone)), homePhone: keep(manualDonor.home_phone, reviewedValue("home_phone", contact.homePhone)), addressLine1: keep(manualDonor.address_line_1, reviewedValue("address_line_1", contact.addressLine1)), city: keep(manualDonor.city, reviewedValue("city", contact.city)), state: keep(manualDonor.state, reviewedValue("state", contact.state)), postalCode: keep(manualDonor.postal_code, reviewedValue("postal_code", contact.postalCode)), country: keep(manualDonor.country, reviewedValue("country", contact.country)), contactNote: manualDonor.contact_note };
         const [giftIds, givingIds, interactionIds, recommendationIds, paymentAuditIds, contactAuditIds] = await Promise.all([
           env.DB.prepare("SELECT id FROM gifts WHERE donor_id=?").bind(priorJl.id).all<{ id: string }>(), env.DB.prepare("SELECT id FROM giving_activities WHERE donor_id=? AND owner_user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM interactions WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM recommendations WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM jl_payment_assignment_audits WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(), env.DB.prepare("SELECT id FROM donor_contact_audits WHERE donor_id=? AND user_id=?").bind(priorJl.id, userId).all<{ id: string }>(),
         ]);
@@ -426,9 +449,7 @@ export async function POST(request: Request) {
           VALUES (?, ?, 'live', ?, 'JL Solutions', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(donorId, userId, donor.donorCode, donor.donorCode, donor.name, contact.spouseFirstName, donor.email, donor.phone, donor.address, contact.lastName, contact.primaryFirstName, contact.spouseFirstName, contact.primaryTitle, contact.spouseTitle, contact.alternateMobilePhone, contact.homePhone, contact.addressLine1, contact.city, contact.state, contact.postalCode, contact.country, JSON.stringify(sourceSnapshot(donor)), now, now));
       } else {
-        const resolution = resolveJlUpdates(match, body.fieldDecisions ?? []);
-        if (resolution.missing.length) return Response.json({ error: `Choose Keep local or Use JL for every changed local value on JL ${code} before importing.` }, { status: 422 });
-        const updates = Object.entries(resolution.updates);
+        const updates = Object.entries(reviewedUpdates);
         if (!updates.length && !match.changes.length) {
           ownedIds.set(donor.id, match.existing.id);
           continue;

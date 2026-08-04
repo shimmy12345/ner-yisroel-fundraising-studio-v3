@@ -23,9 +23,10 @@ export type ExistingJlDonor = {
 };
 
 export type JlFieldChange = { externalId: string; field: string; currentValue: string; jlValue: string; requiresDecision: boolean };
+export type JlFieldComparison = JlFieldChange & { changed: boolean };
 export type JlConflict = JlFieldChange;
 export type JlFieldDecision = { externalId: string; field: string; action: "keep_local" | "use_jl" };
-export type JlMatch = { donor: ImportDonor; existing?: ExistingJlDonor; safeUpdates: Record<string, string | null>; conflicts: JlConflict[]; changes: JlFieldChange[] };
+export type JlMatch = { donor: ImportDonor; existing?: ExistingJlDonor; safeUpdates: Record<string, string | null>; conflicts: JlConflict[]; changes: JlFieldChange[]; comparisons: JlFieldComparison[] };
 
 const fields = {
   display_name: (donor: ImportDonor) => donor.name,
@@ -51,7 +52,7 @@ export function matchJlDonors(donors: ImportDonor[], existingRows: ExistingJlDon
   return donors.map((donor) => {
     const externalId = donor.donorCode ?? "";
     const existing = existingByCode.get(externalId.toLowerCase());
-    if (!existing) return { donor, safeUpdates: {}, conflicts: [], changes: [] };
+    if (!existing) return { donor, safeUpdates: {}, conflicts: [], changes: [], comparisons: [] };
     let previous: Record<string, string | null> = {};
     let hasTrustedSnapshot = false;
     try {
@@ -64,18 +65,23 @@ export function matchJlDonors(donors: ImportDonor[], existingRows: ExistingJlDon
     const safeUpdates: Record<string, string | null> = {};
     const conflicts: JlConflict[] = [];
     const changes: JlFieldChange[] = [];
+    const comparisons: JlFieldComparison[] = [];
     for (const [field, getter] of Object.entries(fields)) {
       const jlValue = getter(donor) ?? null;
       const currentValue = existing[field as keyof ExistingJlDonor] as string | null;
-      if (jlValue === currentValue) continue;
+      if (jlValue === currentValue) {
+        comparisons.push({ externalId, field, currentValue: currentValue ?? "", jlValue: jlValue ?? "", requiresDecision: false, changed: false });
+        continue;
+      }
       const previousValue = Object.hasOwn(previous, field) ? previous[field] : undefined;
       const requiresDecision = !hasTrustedSnapshot || previousValue === undefined || currentValue !== previousValue;
       const change = { externalId, field, currentValue: currentValue ?? "", jlValue: jlValue ?? "", requiresDecision };
       changes.push(change);
+      comparisons.push({ ...change, changed: true });
       if (requiresDecision) conflicts.push(change);
       else safeUpdates[field] = jlValue;
     }
-    return { donor, existing, safeUpdates, conflicts, changes };
+    return { donor, existing, safeUpdates, conflicts, changes, comparisons };
   });
 }
 

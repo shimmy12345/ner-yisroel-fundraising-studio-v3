@@ -111,14 +111,14 @@ test("preview decisions persist to the import request and the server enforces th
   const ui = read("app/onboarding/import/ImportExperience.tsx");
   const previewRoute = read("app/api/import/preview/route.ts");
   const importRoute = read("app/api/import/route.ts");
-  assert.match(ui, /Keep local value/);
-  assert.match(ui, /Use JL value/);
+  assert.match(ui, /Keep current/);
+  assert.match(ui, /Use JL/);
   assert.match(ui, /fieldDecisions:/);
   assert.match(ui, /Review later \(not written\)/);
   assert.match(previewRoute, /changes,/);
   assert.match(previewRoute, /codeCollisions/);
-  assert.match(importRoute, /resolveJlUpdates/);
-  assert.match(importRoute, /resolution\.missing\.length/);
+  assert.match(importRoute, /resolveReviewedJlUpdates/);
+  assert.match(importRoute, /resolution\.error/);
   assert.match(importRoute, /householdChangeRows\.push/);
   assert.match(importRoute, /beforeJson: JSON\.stringify\(before\)/);
   assert.match(importRoute, /attached to a different active donor/);

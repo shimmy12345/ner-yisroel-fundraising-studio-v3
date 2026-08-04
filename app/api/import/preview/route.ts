@@ -10,6 +10,7 @@ import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../../lib/donors/merge-preview";
+import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid" };
 
@@ -80,6 +81,7 @@ export async function POST(request: Request) {
     ? await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, email, phone, home_phone, address_line_1, city, state, postal_code, last_name, primary_first_name, spouse, spouse_first_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'Manual'`).bind(profile.id).all<ManualDonorMatchRow>()
     : { results: [] as ManualDonorMatchRow[] };
   const mergeCandidates = findLikelyManualDonorMatches(candidateDonors, manual.results);
+  const existingDonorReviews = buildExistingDonorReviews(matches, profile.importReviewMode);
   const codeCollisions = findJlCodeCollisions(codeOwners.results);
   for (const conflict of findUnresolvableJlCodeOwners(codeOwners.results, new Set(mergeCandidates.filter((candidate) => candidate.exactCodeMatch).map((candidate) => candidate.manualDonorId)))) if (!codeCollisions.some((item) => item.externalId === conflict.externalId)) codeCollisions.push(conflict);
   return Response.json({
@@ -93,6 +95,8 @@ export async function POST(request: Request) {
       changes,
       conflicts,
       codeCollisions,
+      reviewMode: profile.importReviewMode,
+      existingDonorReviews,
       mergeCandidates,
       duplicateRows: preview.rejectedRows.filter((row) => /duplicate/i.test(row.reason)).length,
       rejectedRows: preview.rejectedRows.length,

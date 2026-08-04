@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { ChatGPTUser } from "../../app/chatgpt-auth";
+import { validHouseholdReviewMode, type HouseholdReviewMode } from "../import/household-review";
 
 export type UserProfile = {
   id: string;
@@ -10,6 +11,7 @@ export type UserProfile = {
   jobTitle: string;
   timezone: string;
   avatarUrl: string;
+  importReviewMode: HouseholdReviewMode;
 };
 
 export function userIdForEmail(email: string) {
@@ -32,7 +34,7 @@ export async function ensureUserProfile(identity: ChatGPTUser): Promise<UserProf
     VALUES (?, ?, ?, ?, 'America/New_York', ?, ?)
     ON CONFLICT(id) DO UPDATE SET email = excluded.email, name = COALESCE(users.name, excluded.name), preferred_first_name = COALESCE(users.preferred_first_name, excluded.preferred_first_name), updated_at = excluded.updated_at`)
     .bind(id, identity.email, identity.fullName ?? identity.displayName, firstName(identity.fullName ?? identity.displayName), now, now).run();
-  const row = await env.DB.prepare("SELECT id, email, name, preferred_first_name, organization_name, job_title, timezone, avatar_url FROM users WHERE id = ?").bind(id).first<Record<string, string | null>>();
+  const row = await env.DB.prepare("SELECT id, email, name, preferred_first_name, organization_name, job_title, timezone, avatar_url, household_import_review_mode FROM users WHERE id = ?").bind(id).first<Record<string, string | null>>();
   return {
     id,
     email: row?.email ?? identity.email,
@@ -42,5 +44,6 @@ export async function ensureUserProfile(identity: ChatGPTUser): Promise<UserProf
     jobTitle: row?.job_title ?? "",
     timezone: row?.timezone ?? "America/New_York",
     avatarUrl: row?.avatar_url ?? "",
+    importReviewMode: validHouseholdReviewMode(row?.household_import_review_mode) ? row.household_import_review_mode : "auto_unchanged",
   };
 }

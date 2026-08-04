@@ -44,5 +44,5 @@ export default async function ImportPage() {
     lastDonationRangeStart: isoDate(state?.last_donation_range_start ?? null), lastDonationRangeEnd: isoDate(state?.last_donation_range_end ?? null),
     suggestedRangeStart: isoDate(suggestion.start), suggestedRangeEnd: isoDate(suggestion.end), history,
   };
-  return <ImportExperience refreshOverview={refreshOverview} />;
+  return <ImportExperience refreshOverview={refreshOverview} initialReviewMode={profile.importReviewMode} />;
 }

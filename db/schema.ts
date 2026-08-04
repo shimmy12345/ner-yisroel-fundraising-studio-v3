@@ -14,6 +14,7 @@ export const users = sqliteTable("users", {
   jobTitle: text("job_title"),
   timezone: text("timezone").notNull().default("America/New_York"),
   avatarUrl: text("avatar_url"),
+  householdImportReviewMode: text("household_import_review_mode", { enum: ["review_every", "changes_only", "auto_unchanged"] }).notNull().default("auto_unchanged"),
   ...timestamps,
 });
 
