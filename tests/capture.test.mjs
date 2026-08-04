@@ -63,6 +63,7 @@ assert.equal(searchDonors(donors, "5551000")[0]?.id, "1");
 const interactionRoute = await readFile(new URL("../app/api/interactions/route.ts", import.meta.url), "utf8");
 const workspace = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
 const donorDirectory = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
+const donorDirectoryExperience = await readFile(new URL("../app/donors/DonorDirectoryExperience.tsx", import.meta.url), "utf8");
 assert.doesNotMatch(interactionRoute, /Only meetings can be scheduled in the future/);
 assert.match(interactionRoute, /capture-scheduled/);
 assert.match(interactionRoute, /if \(!scheduled\)/);
@@ -73,6 +74,7 @@ assert.match(workspace, /todaySchedule/);
 assert.match(workspace, /upcomingActivities/);
 assert.match(workspace, /i\.user_id = \? AND d\.owner_user_id = \?/);
 assert.match(workspace, /MAX\(occurred_at\).*source NOT LIKE 'capture-scheduled:%'.*occurred_at <= created_at/);
-assert.match(donorDirectory, /searchDonors\(searchable, "", Number\.MAX_SAFE_INTEGER\)/);
+assert.match(donorDirectory, /DonorDirectoryExperience/);
+assert.match(donorDirectoryExperience, /searchDonors\(relationships\.map/);
 
 process.stdout.write("Capture behavior checks passed.\n");

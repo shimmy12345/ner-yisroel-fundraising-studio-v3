@@ -6,6 +6,7 @@ const capturePage = await readFile(new URL("../app/capture/page.tsx", import.met
 const capture = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
 const autocomplete = await readFile(new URL("../app/capture/DonorAutocomplete.tsx", import.meta.url), "utf8");
 const directory = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
+const directoryExperience = await readFile(new URL("../app/donors/DonorDirectoryExperience.tsx", import.meta.url), "utf8");
 const directorySearch = await readFile(new URL("../app/donors/DonorDirectorySearch.tsx", import.meta.url), "utf8");
 const editPage = await readFile(new URL("../app/interactions/[id]/edit/page.tsx", import.meta.url), "utf8");
 const activityRoute = await readFile(new URL("../app/api/interactions/[id]/route.ts", import.meta.url), "utf8");
@@ -22,7 +23,8 @@ assert.match(capture, /Save changes/);
 
 assert.match(autocomplete, /useState\(-1\)/);
 assert.match(autocomplete, /activeIndex >= 0/);
-assert.match(directory, /<DonorDirectorySearch/);
+assert.match(directory, /<DonorDirectoryExperience/);
+assert.match(directoryExperience, /<DonorDirectorySearch/);
 assert.match(directorySearch, /<DonorAutocomplete/);
 assert.match(directorySearch, /window\.location\.assign/);
 for (const field of ["lastName", "name", "spouse", "code", "email", "phone"]) assert.match(await readFile(new URL("../lib/relationships/donor-search.ts", import.meta.url), "utf8"), new RegExp(`donor\\.${field}`));

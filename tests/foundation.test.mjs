@@ -10,10 +10,11 @@ async function run() {
   assert.match(shell, /href="\/donors"/);
 
   const donorDirectory = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
+  const donorDirectoryExperience = await readFile(new URL("../app/donors/DonorDirectoryExperience.tsx", import.meta.url), "utf8");
   assert.match(donorDirectory, /FROM donors/);
   assert.match(donorDirectory, /Your donor households/);
   assert.match(donorDirectory, /Import or refresh data/);
-  assert.match(donorDirectory, /donorNavigationHref\(relationship\.id, returnPath, origin\)/);
+  assert.match(donorDirectoryExperience, /donorNavigationHref\(relationship\.id, returnPath, origin\)/);
 
   const hosting = JSON.parse(await readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"));
   assert.equal(hosting.d1, "DB");

@@ -55,14 +55,15 @@ test("donor page exposes understandable breadcrumbs, Home, resilient Back, and m
 });
 
 test("all current donor-entry surfaces carry their origin", async () => {
-  const [directory, search, today, queue, brief] = await Promise.all([
+  const [directory, directoryExperience, search, today, queue, brief] = await Promise.all([
     read("app/donors/page.tsx"),
+    read("app/donors/DonorDirectoryExperience.tsx"),
     read("app/donors/DonorDirectorySearch.tsx"),
     read("app/page.tsx"),
     read("app/components/RelationshipQueueExperience.tsx"),
     read("app/donors/[id]/meeting-brief/page.tsx"),
   ]);
-  assert.match(directory, /DonorOriginLink/);
+  assert.match(directoryExperience, /DonorOriginLink/);
   assert.match(directory, /donorDirectoryReturnPath/);
   assert.match(search, /rememberDonorOrigin/);
   assert.match(search, /history\.replaceState/);
@@ -72,4 +73,3 @@ test("all current donor-entry surfaces carry their origin", async () => {
   assert.match(queue, /"queue"/);
   assert.match(brief, /"meeting-brief"/);
 });
-

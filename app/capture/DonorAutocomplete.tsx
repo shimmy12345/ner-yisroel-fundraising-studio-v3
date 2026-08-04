@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
 
-export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone", initialQuery, onQueryChange }: {
+export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone", initialQuery, onQueryChange, clearable = false }: {
   donors: DonorSearchRecord[];
   selectedId: string;
   onSelect: (id: string) => void;
@@ -12,11 +12,13 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
   placeholder?: string;
   initialQuery?: string;
   onQueryChange?: (query: string) => void;
+  clearable?: boolean;
 }) {
   const selected = donors.find((donor) => donor.id === selectedId);
   const [query, setQuery] = useState(initialQuery ?? selected?.name ?? "");
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
   const matches = useMemo(() => searchDonors(donors, query), [donors, query]);
   const listId = `${inputId}-options`;
 
@@ -27,9 +29,19 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
     setActiveIndex(-1);
   }
 
-  return <div className="donor-autocomplete">
+  function clearQuery() {
+    setQuery("");
+    onQueryChange?.("");
+    onSelect("");
+    setOpen(false);
+    setActiveIndex(-1);
+    inputRef.current?.focus();
+  }
+
+  return <div className={`donor-autocomplete${clearable && query ? " has-clear" : ""}`}>
     <label htmlFor={inputId}>{label}</label>
     <input
+      ref={inputRef}
       id={inputId}
       role="combobox"
       aria-autocomplete="list"
@@ -60,10 +72,13 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
           event.preventDefault();
           choose(matches[activeIndex]);
         } else if (event.key === "Escape") {
-          setOpen(false);
+          if (event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          if (clearable && query) clearQuery(); else setOpen(false);
         }
       }}
     />
+    {clearable && query && <button className="donor-search-clear" type="button" aria-label="Clear donor search" title="Clear search" onMouseDown={(event) => event.preventDefault()} onClick={clearQuery}>&#x2715;</button>}
     {open && <div className="donor-autocomplete-results" id={listId} role="listbox">
       {matches.length ? matches.map((donor, index) => <button
         type="button"

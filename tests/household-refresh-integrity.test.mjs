@@ -16,14 +16,15 @@ const migrations = () => fs.readdirSync(new URL("../drizzle", import.meta.url)).
 
 test("default and searched donor lists share one owner-scoped live dataset without a hidden page cap", () => {
   const page = read("app/donors/page.tsx");
+  const experience = read("app/donors/DonorDirectoryExperience.tsx");
   assert.match(page, /const directorySql = `SELECT/);
   assert.match(page, /owner_user_id = \? AND data_source = 'live'/);
   assert.doesNotMatch(page, /LIMIT 1000/);
   assert.equal((page.match(/FROM donors WHERE \$\{scope\}/g) ?? []).length, 1);
-  assert.equal((page.match(/searchDonors\(/g) ?? []).length, 2);
+  assert.equal((experience.match(/searchDonors\(/g) ?? []).length, 2);
   assert.doesNotMatch(page, /searchFilter/);
   assert.match(page, /export const revalidate = 0/);
-  assert.match(page, /Last name: \$\{effectiveLastName\}/);
+  assert.match(experience, /Last name: \$\{effectiveLastName\}/);
   assert.match(read("app/components/AppShell.tsx"), /<a className=\{active === "donors".*href="\/donors"/);
 });
 

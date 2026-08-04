@@ -47,3 +47,9 @@ export function donorDirectoryReturnPath(params: Record<string, string | string[
   return serialized ? `/donors?${serialized}` : "/donors";
 }
 
+export function donorDirectorySearchPath(currentPath: string, query: string) {
+  const safePath = safeInternalReturnPath(currentPath, "/donors");
+  const parsed = new URL(safePath, "https://fundraising-os.invalid");
+  if (query.trim()) parsed.searchParams.set("q", query.slice(0, 80)); else parsed.searchParams.delete("q");
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
