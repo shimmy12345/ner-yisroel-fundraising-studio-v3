@@ -24,6 +24,7 @@ const importRoute = await readFile(new URL("../app/api/import/route.ts", import.
 const previewRoute = await readFile(new URL("../app/api/import/preview/route.ts", import.meta.url), "utf8");
 const rollbackRoute = await readFile(new URL("../app/api/import/rollback/route.ts", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const experience = await readFile(new URL("../app/onboarding/import/ImportExperience.tsx", import.meta.url), "utf8");
 const migration = await readFile(new URL("../drizzle/0011_reimport_and_payment_timeline.sql", import.meta.url), "utf8");
 
@@ -40,7 +41,7 @@ assert.match(rollbackRoute, /DELETE FROM jl_payment_assignments WHERE user_id = 
 assert.match(rollbackRoute, /status = 'undone'/);
 assert.doesNotMatch(rollbackRoute, /SET status = 'rolled_back'/);
 
-assert.match(donorPage, /Payment applied to pledge/);
+assert.match(unifiedTimeline, /Payment applied to pledge/);
 assert.match(donorPage, /audit\.payment_date/);
 assert.match(donorPage, /batch\.status IN \('active','completed'\)/, "undone payment events must leave the timeline");
 assert.match(donorPage, /pledge_activity_id/);

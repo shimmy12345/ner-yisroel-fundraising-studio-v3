@@ -12,6 +12,7 @@ const activityRoute = await readFile(new URL("../app/api/interactions/[id]/route
 const activityActions = await readFile(new URL("../app/components/ActivityActions.tsx", import.meta.url), "utf8");
 const todayData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 
 assert.match(capturePage, /const initialDonorId = requested && donors\.results\.some/);
 assert.doesNotMatch(capturePage, /donors\.results\[0\]\?\.id/);
@@ -37,8 +38,8 @@ assert.doesNotMatch(activityRoute, /DELETE FROM interactions/);
 assert.match(activityRoute, /DELETE FROM recommendations/);
 assert.match(activityActions, /window\.confirm/);
 assert.match(activityActions, /window\.location\.reload\(\)/);
-assert.match(donorPage, /ActivityActions/);
-assert.match(donorPage, /Cancelled \$\{item\.type\}/);
+assert.match(unifiedTimeline, /ActivityActions/);
+assert.match(unifiedTimeline, /Cancelled ·/);
 assert.match(todayData, /source NOT LIKE 'cancelled:%'/);
 assert.match(todayData, /source NOT LIKE 'archived:%'/);
 assert.equal(isCancelledActivity("cancelled:capture-scheduled:call"), true);

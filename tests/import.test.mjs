@@ -112,6 +112,7 @@ async function run() {
   const help = await readFile(new URL("../app/help/page.tsx", import.meta.url), "utf8");
   const settings = await readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8");
   const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+  const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
   const migration = await readFile(new URL("../drizzle/0002_onboarding_import.sql", import.meta.url), "utf8");
   assert.match(route, /getChatGPTUser\(\)/);
   assert.match(previewRoute, /getChatGPTUser\(\)/);
@@ -130,8 +131,7 @@ async function run() {
   assert.doesNotMatch(route, /console\.(log|info).*rows|logger\..*email/i);
   assert.match(help, /separate JL Solutions donation export/);
   assert.match(settings, /Open data import/);
-  assert.match(donorPage, /No giving history imported yet/);
-  assert.match(donorPage, /No interactions recorded yet/);
+  assert.match(unifiedTimeline, /No relationship activity yet/);
   assert.match(donorPage, /No next action set/);
   assert.doesNotMatch(experience, /api\/assistant|openai|anthropic/i);
 

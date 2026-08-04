@@ -32,6 +32,7 @@ const importRoute = await readFile(new URL("../app/api/import/route.ts", import.
 const previewRoute = await readFile(new URL("../app/api/import/preview/route.ts", import.meta.url), "utf8");
 const rollbackRoute = await readFile(new URL("../app/api/import/rollback/route.ts", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const controls = await readFile(new URL("../app/donors/[id]/GivingManagement.tsx", import.meta.url), "utf8");
 const migration = await readFile(new URL("../drizzle/0016_lightweight_donation_management.sql", import.meta.url), "utf8");
 
@@ -53,7 +54,7 @@ assert.match(CONFIRM_PENDING_GIFT_SQL, /workspace_status='merged'/);
 assert.match(rollbackRoute, /workspace_status='active', confirmed_by_activity_id=NULL/);
 assert.match(rollbackRoute, /giving_activity_management_audits SET undone_at/);
 assert.match(donorPage, /countedActivities/);
-assert.match(donorPage, /pending · unconfirmed/);
+assert.match(unifiedTimeline, /Pending · unconfirmed/);
 assert.match(controls, /JL date and amounts are read-only/);
 assert.match(controls, /Hide from workspace/);
 assert.match(controls, /Mark duplicate/);

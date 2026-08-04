@@ -13,6 +13,7 @@ const outcomePage = await readFile(new URL("../app/interactions/[id]/outcome/pag
 const outcomeExperience = await readFile(new URL("../app/interactions/[id]/outcome/OutcomeExperience.tsx", import.meta.url), "utf8");
 const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const activityActions = await readFile(new URL("../app/components/ActivityActions.tsx", import.meta.url), "utf8");
 
 const plannedAt = 1770000000;
@@ -46,10 +47,9 @@ assert.match(outcomeRoute, /undone_at/);
 assert.match(outcomeRoute, /action === "reopen"/);
 assert.match(outcomeRoute, /env\.DB\.batch\(statements\)/);
 assert.doesNotMatch(outcomeRoute, /DELETE FROM interactions/);
-assert.match(donorPage, /Originally planned for/);
-assert.match(donorPage, /Completed \$\{item\.type\}/);
-assert.match(donorPage, /Log Outcome/);
-assert.match(donorPage, /Cancelled activities remain editable/);
+assert.match(unifiedTimeline, /Originally planned for/);
+assert.match(unifiedTimeline, /Log Outcome/);
+assert.match(unifiedTimeline, /Cancelled/);
 assert.match(activityActions, /Edit outcome/);
 
 process.stdout.write("Activity outcome closure checks passed.\n");

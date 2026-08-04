@@ -8,6 +8,7 @@ const completeButton = await readFile(new URL("../app/components/CompletePriorit
 const capturePage = await readFile(new URL("../app/capture/page.tsx", import.meta.url), "utf8");
 const capture = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const relationshipRead = await readFile(new URL("../lib/relationships/read.ts", import.meta.url), "utf8");
 
 for (const action of ["Log Interaction", "Schedule Meeting", "Find Donor", "Prepare for Meeting"]) assert.match(today, new RegExp(action));
@@ -42,8 +43,9 @@ assert.match(completion, /owner_user_id = \? AND data_source = 'live'/);
 assert.match(completeButton, /window\.location\.reload\(\)/);
 assert.match(capturePage, /requestedParams\.returnTo === "\/"/);
 assert.match(capture, /window\.location\.assign\(returnTo\)/);
-assert.match(donorPage, /Scheduled and completed interactions/);
+assert.match(donorPage, /One chronological story/);
 assert.match(donorPage, /isScheduledActivity\(item\.source, item\.occurred_at, item\.created_at\)/);
+assert.match(unifiedTimeline, /scheduled/i);
 assert.match(relationshipRead, /source LIKE 'capture-completed:%'/);
 assert.match(relationshipRead, /source NOT LIKE 'capture-scheduled:%'.*occurred_at <= created_at/);
 

@@ -10,6 +10,7 @@ async function run() {
   const assistant = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
   const donors = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
   const donor = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
+  const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
   const interactions = await readFile(new URL("../app/api/interactions/route.ts", import.meta.url), "utf8");
   const importRoute = await readFile(new URL("../app/api/import/route.ts", import.meta.url), "utf8");
   const cleanup = await readFile(new URL("../app/api/sample-data/route.ts", import.meta.url), "utf8");
@@ -35,8 +36,7 @@ async function run() {
   assert.match(live, /giving_activities ga JOIN donors/);
   assert.match(live, /days since meaningful contact/);
   assert.match(today, /No priorities yet/);
-  assert.match(donor, /No interactions recorded yet/);
-  assert.match(donor, /No giving history imported yet/);
+  assert.match(unifiedTimeline, /No relationship activity yet/);
 
   assert.match(migration, /owner_user_id/);
   assert.match(migration, /FOREIGN KEY/);
