@@ -3,16 +3,18 @@
 import { useMemo, useState } from "react";
 import { searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
 
-export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone" }: {
+export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone", initialQuery, onQueryChange }: {
   donors: DonorSearchRecord[];
   selectedId: string;
   onSelect: (id: string) => void;
   inputId?: string;
   label?: string;
   placeholder?: string;
+  initialQuery?: string;
+  onQueryChange?: (query: string) => void;
 }) {
   const selected = donors.find((donor) => donor.id === selectedId);
-  const [query, setQuery] = useState(selected?.name ?? "");
+  const [query, setQuery] = useState(initialQuery ?? selected?.name ?? "");
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const matches = useMemo(() => searchDonors(donors, query), [donors, query]);
@@ -41,6 +43,7 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
       onBlur={() => setOpen(false)}
       onChange={(event) => {
         setQuery(event.target.value);
+        onQueryChange?.(event.target.value);
         onSelect("");
         setOpen(true);
         setActiveIndex(-1);

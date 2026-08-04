@@ -52,7 +52,7 @@ const queueExperience = await readFile(new URL("../app/components/RelationshipQu
 const migration = await readFile(new URL("../drizzle/0017_today_relationship_queue.sql", import.meta.url), "utf8");
 
 assert.match(page, /RelationshipQueueExperience/);
-assert.match(queueExperience, /encodeURIComponent\(priority\.donorId\)/, "every queue card exposes a direct donor link");
+assert.match(queueExperience, /donorNavigationHref\(priority\.donorId, queueReturnTo, "queue"\)/, "every queue card exposes a contextual donor link");
 assert.match(queueExperience, /CompletePriorityButton/);
 assert.match(queueExperience, /Dismiss suggestion/);
 assert.match(queueExperience, /closing an activity removes it automatically/);

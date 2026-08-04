@@ -11,6 +11,8 @@ import { PendingGiftForm } from "./GivingManagement";
 import { countsInGivingTotals } from "../../../lib/giving/management";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { UnifiedRelationshipTimeline } from "./UnifiedRelationshipTimeline";
+import { DonorBackNavigation } from "../../components/DonorNavigation";
+import { donorBackLabel, donorNavigationHref, meetingBriefNavigationHref, safeDonorOrigin, safeInternalReturnPath } from "../../../lib/navigation/donor-navigation";
 
 export const metadata: Metadata = { title: "Donor relationship" };
 export const dynamic = "force-dynamic";
@@ -25,14 +27,18 @@ const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "curren
 const date = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 const dateTime = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(epoch * 1000));
 
-export default async function DonorPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function DonorPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ from?: string; origin?: string }> }) {
   const { id } = await params;
-  const identity = await requireChatGPTUser(`/donors/${encodeURIComponent(id)}`);
+  const requestedNavigation = await searchParams;
+  const returnTo = safeInternalReturnPath(requestedNavigation.from, "/donors");
+  const origin = safeDonorOrigin(requestedNavigation.origin, returnTo);
+  const currentHref = donorNavigationHref(id, returnTo, origin);
+  const identity = await requireChatGPTUser(currentHref);
   const profile = await ensureUserProfile(identity);
   const mode = await getDataMode(profile.id);
   const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, email, phone, home_phone, address_line_1, city, state, postal_code, country, primary_first_name, spouse, spouse_first_name, primary_title, spouse_title, external_id, external_source, contact_note, relationship_summary, institutional_memory, archived_at, merged_into_donor_id FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"} LIMIT 1`).bind(...(mode === "demo" ? [id] : [id, profile.id])).first<Donor>();
   if (!donor) notFound();
-  if (mode === "live" && donor.archived_at && donor.merged_into_donor_id) redirect(`/donors/${encodeURIComponent(donor.merged_into_donor_id)}`);
+  if (mode === "live" && donor.archived_at && donor.merged_into_donor_id) redirect(donorNavigationHref(donor.merged_into_donor_id, returnTo, origin));
   if (mode === "live" && !donor.archived_at) {
     const viewedAt = Math.floor(Date.now() / 1000);
     await env.DB.prepare(`INSERT INTO donor_views (user_id,donor_id,viewed_at) VALUES (?,?,?)
@@ -74,9 +80,11 @@ export default async function DonorPage({ params }: { params: Promise<{ id: stri
   const next = recommendationResult.results.find((item) => item.status === "open");
   const completedInteractions = interactionResult.results.filter((item) => !isScheduledActivity(item.source, item.occurred_at, item.created_at) && !isCancelledActivity(item.source));
   const relationshipContext = sanitizeScheduledRelationshipContext(donor.relationship_summary, donor.institutional_memory, interactionResult.results.map((item) => ({ type: item.type, summary: item.summary, source: item.source, occurredAt: item.occurred_at, createdAt: item.created_at })));
-  return <AppShell active="donors"><div className="donor-breadcrumb"><a href="/">Today</a><span>/</span><a href="/donors">Donors</a><span>/</span><strong>{donor.donor_code || donor.external_id || "Relationship"}</strong></div>
+  const donorDirectoryHref = returnTo === "/donors" || returnTo.startsWith("/donors?") ? returnTo : "/donors";
+  return <AppShell active="donors"><div className="donor-breadcrumb"><a href="/">Workspace</a><span>/</span><a href={donorDirectoryHref}>Donors</a><span>/</span><strong>{donor.display_name}</strong></div>
+    <DonorBackNavigation returnTo={returnTo} label={donorBackLabel(origin)} />
     <header className="donor-header"><div className="donor-identity"><div className="avatar donor-avatar">{donor.display_name.slice(0, 2).toUpperCase()}</div><div><div className="identity-line"><h1>{donor.display_name}</h1>{mode === "demo" ? <span className="relationship-badge">Demo record</span> : <span className="relationship-badge">{donor.external_source === "Manual" ? "Manual" : "JL Solutions"}</span>}</div>{people && <p>{people}</p>}<div className="contact-row">{donor.email && <a href={`mailto:${donor.email}`}>✉ {donor.email}</a>}{donor.phone && <a href={`tel:${donor.phone.replace(/\D/g, "")}`}>☎ {donor.phone}</a>}</div></div></div>{mode === "live" && <div className="header-actions"><a href={`/donors/${encodeURIComponent(id)}/edit`}>Edit Contact Details</a><a href={`/donors/${encodeURIComponent(id)}/resolve-duplicate`}>Resolve Duplicate</a><a href={`/capture?donorId=${encodeURIComponent(id)}`}>＋ Log interaction</a></div>}</header>
-    {mode === "live" && <nav className="meeting-brief-entry" aria-label="Meeting preparation"><div><strong>Meeting coming up?</strong><span>Review a concise brief built only from this donor’s live record.</span></div><a href={`/donors/${encodeURIComponent(id)}/meeting-brief`}>Prepare for Meeting</a></nav>}
+    {mode === "live" && <nav className="meeting-brief-entry" aria-label="Meeting preparation"><div><strong>Meeting coming up?</strong><span>Review a concise brief built only from this donor’s live record.</span></div><a href={meetingBriefNavigationHref(id, currentHref, origin)}>Prepare for Meeting</a></nav>}
     <section className="donor-snapshot-grid"><article className="snapshot-card"><p>Lifetime paid</p><strong>{money(paid)}</strong><span>{countedActivities.length + legacyGifts.length} confirmed giving record{countedActivities.length + legacyGifts.length === 1 ? "" : "s"}</span></article><article className="snapshot-card"><p>Most recent paid gift</p><strong>{mostRecent ? money(mostRecent.amount) : "—"}</strong><span>{mostRecent ? date(mostRecent.occurredAt, profile.timezone) : "No paid gift recorded"}</span></article><article className="snapshot-card"><p>Open commitments</p><strong>{money(open)}</strong><span>From included giving history</span></article><article className="snapshot-card"><p>Next action</p><strong>{next?.action || "None set"}</strong><span>{next?.due_at ? `Due ${date(next.due_at, profile.timezone)}` : "No dated reminder"}</span></article></section>
     <div className="relationship-grid"><main className="relationship-main">
       <section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP SUMMARY · RULE-BASED</p><h2>{relationshipContext.summary ? "Current relationship context" : "No relationship summary yet"}</h2></div></div><p className="summary">{relationshipContext.summary || "Log a completed interaction to begin building a relationship summary from this household’s actual activity."}</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">NEXT ACTION</p><h3>{next?.action || "No next action set"}</h3><p>{next?.reason || "Add a reminder when the next step becomes clear."}</p></div></div></section>

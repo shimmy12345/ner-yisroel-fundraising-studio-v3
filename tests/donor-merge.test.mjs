@@ -35,7 +35,7 @@ test("merge route moves every linked history table, archives instead of deletes,
   const route=read("app/api/donors/merge/route.ts"); const page=read("app/donors/[id]/page.tsx"); const importer=read("app/api/import/route.ts"); const ui=read("app/onboarding/import/ImportExperience.tsx");
   for(const table of ["gifts","giving_activities","interactions","recommendations","donor_contact_audits","jl_payment_assignment_audits"]) assert.match(route,new RegExp(`UPDATE ${table} SET donor_id=\\?`));
   assert.match(route,/INSERT INTO donor_merge_audits/); assert.match(route,/archived_at=\?,merged_into_donor_id=\?/); assert.doesNotMatch(route,/DELETE FROM donors/);
-  assert.match(page,/redirect\(`\/donors\/\$\{encodeURIComponent\(donor\.merged_into_donor_id\)\}`\)/); assert.match(page,/Resolve Duplicate/);
+  assert.match(page,/redirect\(donorNavigationHref\(donor\.merged_into_donor_id, returnTo, origin\)\)/); assert.match(page,/Resolve Duplicate/);
   assert.match(ui,/>Resolve Duplicate</); assert.match(ui,/Review later — do not import this household/); assert.match(importer,/decision\?\.action === "review_later"/); assert.doesNotMatch(importer,/DELETE FROM donors WHERE id=\?/);
 });
 

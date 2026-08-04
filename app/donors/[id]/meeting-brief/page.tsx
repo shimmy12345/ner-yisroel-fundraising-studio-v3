@@ -4,6 +4,7 @@ import { AppShell } from "../../../components/AppShell";
 import { requireChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { loadMeetingBrief } from "../../../../lib/relationships/meeting-brief";
+import { donorNavigationHref, safeDonorOrigin, safeInternalReturnPath } from "../../../../lib/navigation/donor-navigation";
 
 export const metadata: Metadata = { title: "Meeting brief" };
 export const dynamic = "force-dynamic";
@@ -16,16 +17,21 @@ function GiftSummary({ gift, timezone, empty }: { gift: { paidCents: number; occ
   return <><strong>{money(gift.paidCents)}</strong><span>{gift.occurredAt ? date(gift.occurredAt, timezone) : "Date not recorded"}{gift.description ? ` · ${gift.description}` : ""}</span></>;
 }
 
-export default async function MeetingBriefPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function MeetingBriefPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ from?: string; origin?: string }> }) {
   const { id } = await params;
-  const identity = await requireChatGPTUser(`/donors/${encodeURIComponent(id)}/meeting-brief`);
+  const requestedNavigation = await searchParams;
+  const priorReturnTo = safeInternalReturnPath(requestedNavigation.from, "/donors");
+  const priorOrigin = safeDonorOrigin(requestedNavigation.origin, priorReturnTo);
+  const meetingBriefPath = `/donors/${encodeURIComponent(id)}/meeting-brief?${new URLSearchParams({ from: priorReturnTo, origin: priorOrigin }).toString()}`;
+  const donorHref = donorNavigationHref(id, meetingBriefPath, "meeting-brief");
+  const identity = await requireChatGPTUser(meetingBriefPath);
   const profile = await ensureUserProfile(identity);
   const brief = await loadMeetingBrief(profile.id, id);
   if (!brief) notFound();
   const members = [brief.donor.primaryName, brief.donor.spouseName].filter(Boolean);
 
   return <AppShell active="donors"><main className="meeting-brief-page">
-    <div className="donor-breadcrumb"><a href="/">Today</a><span>/</span><a href="/donors">Donors</a><span>/</span><a href={`/donors/${encodeURIComponent(id)}`}>{brief.donor.displayName}</a><span>/</span><strong>Meeting brief</strong></div>
+    <div className="donor-breadcrumb"><a href="/">Workspace</a><span>/</span><a href="/donors">Donors</a><span>/</span><a href={donorHref}>{brief.donor.displayName}</a><span>/</span><strong>Meeting brief</strong></div>
     <header className="meeting-brief-header">
       <div><p className="eyebrow">MEETING BRIEF · LIVE DATA</p><h1>Prepare for {brief.donor.displayName}</h1><p>Built only from this household’s authenticated relationship record. Missing information is shown explicitly.</p></div>
       <a className="meeting-outcome-button" href={`/capture?donorId=${encodeURIComponent(id)}&type=meeting`}>Log Meeting Outcome</a>

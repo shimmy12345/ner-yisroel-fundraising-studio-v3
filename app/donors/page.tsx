@@ -5,6 +5,8 @@ import { ensureUserProfile } from "../../lib/auth/profile";
 import { getDataMode } from "../../lib/workspace/mode";
 import { DonorDirectorySearch } from "./DonorDirectorySearch";
 import { effectiveDonorLastName, searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
+import { donorDirectoryReturnPath, donorNavigationHref } from "../../lib/navigation/donor-navigation";
+import { DonorDirectoryPosition, DonorOriginLink } from "../components/DonorNavigation";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -31,13 +33,17 @@ function initials(name: string) {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
 }
 
-export default async function DonorsPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
+export default async function DonorsPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const identity = await requireChatGPTUser("/donors");
   const profile = await ensureUserProfile(identity);
   const mode = await getDataMode(profile.id);
   const scope = mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL";
   const scopeBinds = mode === "demo" ? [] : [profile.id];
-  const query = (await searchParams).q?.trim().slice(0, 80) ?? "";
+  const requestedParams = await searchParams;
+  const rawQuery = Array.isArray(requestedParams.q) ? requestedParams.q[0] : requestedParams.q;
+  const query = rawQuery?.trim().slice(0, 80) ?? "";
+  const returnPath = donorDirectoryReturnPath(requestedParams);
+  const origin = query ? "search" : "donors";
   const directorySql = `SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope}`;
   const result = await env.DB.prepare(directorySql).bind(...scopeBinds).all<Relationship>();
   const relationshipById = new Map(result.results.map((relationship) => [relationship.id, relationship]));
@@ -46,15 +52,16 @@ export default async function DonorsPage({ searchParams }: { searchParams: Promi
   const relationships = searchDonors(sortedSearchable, query, Number.MAX_SAFE_INTEGER).map((relationship) => relationshipById.get(relationship.id)!);
 
   return <AppShell active="donors"><main className="donor-directory">
+    <DonorDirectoryPosition returnPath={returnPath} />
     <header className="directory-heading"><div><p className="eyebrow">RELATIONSHIPS · {mode === "demo" ? "DEMO MODE" : "LIVE WORKSPACE"}</p><h1>Your donor households</h1><p>{query ? `${relationships.length} matching relationship${relationships.length === 1 ? "" : "s"}` : `${relationships.length} relationship${relationships.length === 1 ? "" : "s"} in your workspace`}</p></div><nav className="directory-actions" aria-label="Donor actions">{mode === "live" && <a href="/donors/new">New Donor</a>}<a href="/onboarding/import">Import or refresh data</a></nav></header>
-    <DonorDirectorySearch donors={sortedSearchable} />
+    <DonorDirectorySearch donors={sortedSearchable} initialQuery={query} />
     {relationships.length ? <section className="directory-list" aria-label="Donor relationships">{relationships.map((relationship) => {
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");
       const location = [relationship.city, relationship.state].filter(Boolean).join(", ");
       const effectiveLastName = effectiveDonorLastName({ name: relationship.display_name, lastName: relationship.last_name });
-      return <a className="directory-row" href={`/donors/${encodeURIComponent(relationship.id)}`} key={relationship.id}>
+      return <DonorOriginLink className="directory-row" href={donorNavigationHref(relationship.id, returnPath, origin)} key={relationship.id}>
         <span className="directory-avatar">{initials(relationship.display_name)}</span><span className="directory-identity"><strong>{relationship.display_name}</strong><small>{[`Last name: ${effectiveLastName}`, members, location].filter(Boolean).join(" · ")}</small></span><span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
-      </a>;
+      </DonorOriginLink>;
     })}</section> : <section className="directory-empty"><h2>No relationships found</h2><p>{query ? "Try a different household, person, or email." : "Import your donor data to begin building your relationship workspace."}</p>{!query && <a href="/onboarding/import">Import donor data</a>}</section>}
   </main></AppShell>;
 }
