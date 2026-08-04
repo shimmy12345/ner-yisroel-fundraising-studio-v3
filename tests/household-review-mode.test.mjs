@@ -20,7 +20,8 @@ test("all three modes review the intended unchanged and changed donors", () => {
   assert.deepEqual(buildExistingDonorReviews([unchanged, changed], "changes_only").map((item) => item.externalId), ["JL-7"]);
   assert.deepEqual(buildExistingDonorReviews([unchanged, changed], "auto_unchanged").map((item) => item.externalId), ["JL-7"]);
   assert.match(resolveReviewedJlUpdates(unchanged, "review_every", undefined, []).error, /needs review/);
-  assert.equal(resolveReviewedJlUpdates(unchanged, "review_every", { externalId: "JL-7", action: "continue", signature: householdReviewSignature(unchanged) }, []).error, null);
+  assert.equal(resolveReviewedJlUpdates(unchanged, "review_every", { externalId: "JL-7", action: "keep_current", signature: householdReviewSignature(unchanged) }, []).error, null);
+  assert.deepEqual(resolveReviewedJlUpdates(unchanged, "review_every", { externalId: "JL-7", action: "accept_all", signature: householdReviewSignature(unchanged) }, []).updates, {});
   assert.equal(resolveReviewedJlUpdates(unchanged, "auto_unchanged", undefined, []).error, null);
 });
 
@@ -69,7 +70,7 @@ test("review mode persists in D1 and the UI explains every choice to a first-tim
   const settings = read("app/settings/SettingsExperience.tsx");
   const importer = read("app/onboarding/import/ImportExperience.tsx");
   for (const label of ["Review every existing donor", "Review only donors with changes", "Auto-continue unchanged donors"]) assert.match(settings, new RegExp(label));
-  for (const label of ["No changes detected", "Accept all JL values", "Keep current values", "Review field-by-field", "Change in Settings"]) assert.match(importer, new RegExp(label));
+  for (const label of ["No changes detected", "Accept JL values", "Keep current values", "Review field-by-field", "Change in Settings"]) assert.match(importer, new RegExp(label));
   assert.match(read("app/api/profile/route.ts"), /household_import_review_mode/);
 });
 
@@ -77,6 +78,7 @@ test("final confirmation revalidates mode and records donor decisions in the bat
   const route = read("app/api/import/route.ts");
   assert.match(route, /body\.reviewMode !== profile\.importReviewMode/);
   assert.match(route, /resolveReviewedJlUpdates/);
+  assert.doesNotMatch(route, /\["continue", "accept_all"/);
   assert.match(route, /report\.household\.decisions\.push/);
   assert.match(route, /JSON\.stringify\(report\)/);
   assert.match(route, /beforeJson: JSON\.stringify\(before\)/);

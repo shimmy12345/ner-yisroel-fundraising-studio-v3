@@ -123,7 +123,7 @@ export async function POST(request: Request) {
   const existingDecisionCodes = new Set<string>();
   if (body.existingDonorDecisions !== undefined && (!Array.isArray(body.existingDonorDecisions) || body.existingDonorDecisions.some((decision) => {
     const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
-    const valid = Boolean(code) && ["continue", "accept_all", "keep_current", "field_by_field"].includes(decision?.action) && typeof decision?.signature === "string" && Boolean(decision.signature);
+    const valid = Boolean(code) && ["accept_all", "keep_current", "field_by_field"].includes(decision?.action) && typeof decision?.signature === "string" && Boolean(decision.signature);
     if (!valid || existingDecisionCodes.has(code)) return true;
     existingDecisionCodes.add(code);
     return false;

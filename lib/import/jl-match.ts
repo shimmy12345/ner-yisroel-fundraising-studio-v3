@@ -47,6 +47,15 @@ const fields = {
   country: (donor: ImportDonor) => donor.contact?.country ?? null,
 } as const;
 
+const sourceColumns: Record<keyof typeof fields, string[]> = {
+  display_name: ["Name"], email: ["Fathers E-mail"], phone: ["Fathers Cell"],
+  address: ["Address", "City", "State", "Zip Code", "Country"], last_name: ["Last Name"],
+  primary_first_name: ["Husband First Name"], spouse_first_name: ["Wife First Name"],
+  primary_title: ["Husband Title"], spouse_title: ["Wife Title"], alternate_mobile_phone: ["Cell"],
+  home_phone: ["Home"], address_line_1: ["Address"], city: ["City"], state: ["State"],
+  postal_code: ["Zip Code"], country: ["Country"],
+};
+
 export function matchJlDonors(donors: ImportDonor[], existingRows: ExistingJlDonor[]): JlMatch[] {
   const existingByCode = new Map(existingRows.map((row) => [row.external_id.toLowerCase(), row]));
   return donors.map((donor) => {
@@ -67,6 +76,7 @@ export function matchJlDonors(donors: ImportDonor[], existingRows: ExistingJlDon
     const changes: JlFieldChange[] = [];
     const comparisons: JlFieldComparison[] = [];
     for (const [field, getter] of Object.entries(fields)) {
+      if (donor.sourceProfile === "jl-solutions" && donor.sourceValues && !sourceColumns[field as keyof typeof fields].some((column) => Object.hasOwn(donor.sourceValues!, column))) continue;
       const jlValue = getter(donor) ?? null;
       const currentValue = existing[field as keyof ExistingJlDonor] as string | null;
       if (jlValue === currentValue) {

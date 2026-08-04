@@ -14,7 +14,11 @@ export const JL_MAPPING: ColumnMapping = {
 
 export function isJlSolutionsExport(columns: string[]) {
   const normalized = new Set(columns.map((column) => column.trim().toLowerCase()));
-  return JL_COLUMNS.every((column) => normalized.has(column.toLowerCase()));
+  // JL exports are configurable and often omit empty contact columns. Code and
+  // Name are the stable household identity columns; requiring the entire
+  // canonical export allowed smaller JL refreshes to fall through to the
+  // generic importer and bypass household review.
+  return normalized.has("code") && normalized.has("name");
 }
 
 function looksLikeEmail(value: string) {
@@ -68,7 +72,10 @@ export function buildJlPreview(rows: ImportRow[], fileHash: string): ImportPrevi
   preview.donors.forEach((donor) => {
     donor.sourceProfile = "jl-solutions";
     const sourceRow = validRows.find((row) => row.Code?.trim().toLowerCase() === donor.donorCode?.toLowerCase());
-    donor.sourceValues = sourceRow ? Object.fromEntries(JL_COLUMNS.map((column) => [column, sourceRow[column]?.trim() ?? ""])) : {};
+    // Keep only columns actually present in this export. This lets matching
+    // distinguish an intentionally blank JL value from an omitted column in a
+    // configurable/compact export, so omitted fields can never be cleared.
+    donor.sourceValues = sourceRow ? Object.fromEntries(Object.entries(sourceRow).map(([column, value]) => [column, value?.trim() ?? ""])) : {};
   });
   return { ...preview, rejectedRows: [...rejectedRows, ...preview.rejectedRows], warnings: [...warnings, ...preview.warnings] };
 }

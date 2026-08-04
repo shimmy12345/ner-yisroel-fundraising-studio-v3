@@ -40,6 +40,8 @@ async function run() {
 
   const jlColumns = [...JL_COLUMNS];
   assert.equal(isJlSolutionsExport(jlColumns), true);
+  assert.equal(isJlSolutionsExport(["Code", "Name"]), true, "compact/configurable JL household exports must not bypass review");
+  assert.equal(isJlSolutionsExport(["Donor Code", "Donor Name"]), false);
   assert.equal(JL_MAPPING["Fathers E-mail"], "email");
   assert.equal(JL_MAPPING["Fathers Cell"], "phone");
   assert.equal(JL_MAPPING.Cell, "alternatePhone");
@@ -66,6 +68,10 @@ async function run() {
   assert.match(geographyWarning.warnings.join(" "), /state and country should be reviewed/i);
 
   const existing = { id: jlPreview.donors[0].id, external_id: "JL-100", display_name: "Levine Household", email: "user-edited@example.test", phone: "555-010-1001", address: "10 Cedar Lane, Albany NY 12207-1234", last_name: "Levine", primary_first_name: "Ari", spouse_first_name: "Miriam", primary_title: "Rabbi", spouse_title: "Dr.", alternate_mobile_phone: null, home_phone: "(555) 010-1000", address_line_1: "10 Cedar Lane", city: "Albany", state: "NY", postal_code: "12207-1234", country: "United States", source_snapshot: JSON.stringify({ ...sourceSnapshot(jlPreview.donors[0]), email: "ari@example.test" }) };
+  const compactJl = buildJlPreview([{ Code: "JL-100", Name: "Levine Household" }], "f".repeat(64));
+  const compactMatch = matchJlDonors(compactJl.donors, [existing]);
+  assert.deepEqual(compactMatch[0].comparisons.map((item) => item.field), ["display_name"], "omitted JL columns must not be interpreted as blank values");
+  assert.equal(compactMatch[0].changes.length, 0);
   const changed = buildJlPreview([{ ...jlRows[0], City: "Troy", "Fathers E-mail": "jl-new@example.test" }], "d".repeat(64));
   const matches = matchJlDonors(changed.donors, [existing]);
   assert.equal(matches[0].existing.id, existing.id);
