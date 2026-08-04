@@ -2,10 +2,15 @@ export const GIVING_WORKSPACE_STATUSES = ["active", "hidden", "duplicate", "need
 export type GivingWorkspaceStatus = typeof GIVING_WORKSPACE_STATUSES[number];
 
 export const COUNTED_GIVING_SQL = "workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')";
+export const CONFIRM_PENDING_GIFT_SQL = "UPDATE giving_activities SET workspace_status='merged',confirmed_by_activity_id=?,updated_at=? WHERE id=? AND owner_user_id=? AND donor_id=? AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL";
 
 export function countsInGivingTotals(record: { workspace_status?: string; workspaceStatus?: string; category: string }) {
   return (record.workspace_status ?? record.workspaceStatus ?? "active") === "active"
     && !["needs_review", "nonfinancial_entry", "pending_gift"].includes(record.category);
+}
+
+export function appearsInGivingTimeline(record: { workspace_status?: string; workspaceStatus?: string }) {
+  return (record.workspace_status ?? record.workspaceStatus ?? "active") !== "merged";
 }
 
 export type PendingGiftMatchRow = {

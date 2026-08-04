@@ -13,7 +13,7 @@ import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignm
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReprocessBatch, hasForceReprocessConfirmation } from "../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../lib/donors/merge-preview";
 import { resolveReviewedJlUpdates, validHouseholdReviewMode, type ExistingDonorDecision, type HouseholdReviewMode } from "../../../lib/import/household-review";
-import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../lib/giving/management";
+import { CONFIRM_PENDING_GIFT_SQL, pendingGiftMatches, type PendingGiftMatchRow } from "../../../lib/giving/management";
 
 type ImportRequest = {
   fileName?: string;
@@ -292,7 +292,7 @@ export async function POST(request: Request) {
       const importedActivityId = activityIdByDecisionFingerprint.get(candidateMatch.fingerprint)!;
       const candidate = candidateMatch.candidates.find((item) => item.id === decision.pendingGiftId)!;
       return [
-        env.DB.prepare("UPDATE giving_activities SET workspace_status='merged',confirmed_by_activity_id=?,updated_at=? WHERE id=? AND owner_user_id=? AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL").bind(importedActivityId, now, candidate.id, userId),
+        env.DB.prepare(CONFIRM_PENDING_GIFT_SQL).bind(importedActivityId, now, candidate.id, userId, candidate.donor_id),
         env.DB.prepare(`INSERT INTO giving_activity_management_audits (id,user_id,activity_id,import_id,action,previous_donor_id,next_donor_id,previous_status,next_status,previous_note,next_note,created_at) VALUES (?,?,?,?,'pending_matched',?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), userId, candidate.id, importId, candidate.donor_id, candidate.donor_id, candidate.workspace_status, "merged", candidate.private_note, candidate.private_note, now),
       ];
     });

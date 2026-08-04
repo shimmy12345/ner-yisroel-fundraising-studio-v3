@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { countsInGivingTotals, pendingGiftInput, pendingGiftMatches } from "../lib/giving/management.ts";
+import { CONFIRM_PENDING_GIFT_SQL, countsInGivingTotals, pendingGiftInput, pendingGiftMatches } from "../lib/giving/management.ts";
 
 const statuses = ["hidden", "duplicate", "needs_review", "invalid", "merged"];
 for (const workspace_status of statuses) {
@@ -48,7 +48,8 @@ assert.match(pendingRoute, /await env\.DB\.batch/);
 assert.match(previewRoute, /pendingGiftMatches/);
 assert.match(importRoute, /Review every suggested pending gift match/);
 assert.match(importRoute, /claimedPendingIds/);
-assert.match(importRoute, /workspace_status='merged'/);
+assert.match(importRoute, /CONFIRM_PENDING_GIFT_SQL/);
+assert.match(CONFIRM_PENDING_GIFT_SQL, /workspace_status='merged'/);
 assert.match(rollbackRoute, /workspace_status='active', confirmed_by_activity_id=NULL/);
 assert.match(rollbackRoute, /giving_activity_management_audits SET undone_at/);
 assert.match(donorPage, /countedActivities/);

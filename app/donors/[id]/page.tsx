@@ -10,7 +10,7 @@ import { completedPlannedAt, isCompletedActivity, isNoResponseActivity, isSchedu
 import { isCancelledActivity } from "../../../lib/workspace/scheduled-activity";
 import { ActivityActions } from "../../components/ActivityActions";
 import { GivingRecordActions, PendingGiftForm } from "./GivingManagement";
-import { countsInGivingTotals } from "../../../lib/giving/management";
+import { appearsInGivingTimeline, countsInGivingTotals } from "../../../lib/giving/management";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 
 export const metadata: Metadata = { title: "Donor relationship" };
@@ -66,7 +66,7 @@ export default async function DonorPage({ params }: { params: Promise<{ id: stri
     ...legacyGifts.map((gift) => ({ amount: gift.amount_cents, occurredAt: gift.received_at })),
   ].sort((a, b) => b.occurredAt - a.occurredAt)[0];
   const givingTimeline = [
-    ...activities.map((activity) => ({ kind: "activity" as const, occurredAt: activity.activity_date ?? 0, activity })),
+    ...activities.filter(appearsInGivingTimeline).map((activity) => ({ kind: "activity" as const, occurredAt: activity.activity_date ?? 0, activity })),
     ...paymentEvents.map((payment) => ({ kind: "payment" as const, occurredAt: payment.payment_date, payment })),
   ].sort((a, b) => b.occurredAt - a.occurredAt);
   const people = [donor.primary_first_name && `${donor.primary_title ? `${donor.primary_title} ` : ""}${donor.primary_first_name}`, (donor.spouse || donor.spouse_first_name) && `${donor.spouse_title ? `${donor.spouse_title} ` : ""}${donor.spouse || donor.spouse_first_name}`].filter(Boolean).join(" & ");
