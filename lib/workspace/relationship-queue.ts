@@ -24,6 +24,10 @@ export function relationshipQueueBucket(dueAt: number | null, now: number, timez
   return "upcoming";
 }
 
+export function isRecentPastEvent(eventAt: number | null, now: number, days: number) {
+  return eventAt != null && eventAt <= now && eventAt >= now - days * 86400;
+}
+
 export function dedupeRelationshipQueue<T extends QueueCandidate>(items: T[], dismissedKeys: Set<string>) {
   const ordered = items
     .filter((item) => !dismissedKeys.has(item.queueId))

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { dedupeRelationshipQueue, groupRelationshipQueue, relationshipQueueBucket } from "../lib/workspace/relationship-queue.ts";
+import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket } from "../lib/workspace/relationship-queue.ts";
 
 const now = Math.floor(Date.parse("2026-08-04T14:00:00Z") / 1000);
 const timezone = "America/New_York";
@@ -12,6 +12,9 @@ assert.equal(relationshipQueueBucket(yesterday, now, timezone), "overdue");
 assert.equal(relationshipQueueBucket(today, now, timezone), "today");
 assert.equal(relationshipQueueBucket(thisWeek, now, timezone), "thisWeek");
 assert.equal(relationshipQueueBucket(null, now, timezone), "upcoming");
+assert.equal(isRecentPastEvent(now - 10 * 86400, now, 30), true);
+assert.equal(isRecentPastEvent(now + 86400, now, 30), false, "future-dated gifts are never recent giving");
+assert.equal(isRecentPastEvent(now - 31 * 86400, now, 30), false);
 
 const candidates = [
   { queueId: "reminder:fictional-overdue:1", donorId: "fictional-a", dueAt: yesterday, rank: 0, sortAt: yesterday },

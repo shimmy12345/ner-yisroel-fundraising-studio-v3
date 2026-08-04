@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { DataMode } from "./mode";
 import { scheduleBucket } from "./scheduled-activity";
-import { dedupeRelationshipQueue, groupRelationshipQueue, relationshipQueueBucket, type RelationshipQueueBucket } from "./relationship-queue";
+import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, type RelationshipQueueBucket } from "./relationship-queue";
 
 type PriorityRow = { recommendation_id: string; donor_id: string; display_name: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
 type GivingRow = { id: string; donor_id: string; display_name: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null; updated_at: number };
@@ -127,7 +127,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
 
   const recentGiftByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) {
-    const recent = (item.activity_date ?? 0) >= now - 30 * 86400;
+    const recent = isRecentPastEvent(item.activity_date, now, 30);
     const contactedAfterGift = (contactByDonor.get(item.donor_id) ?? 0) >= (item.activity_date ?? 0);
     if ((item.paid_cents ?? 0) > 0 && recent && !contactedAfterGift && !recentGiftByDonor.has(item.donor_id)) recentGiftByDonor.set(item.donor_id, item);
   }
@@ -151,7 +151,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const todaySchedule = scheduled.filter(({ row }) => scheduleBucket(row.source, row.occurred_at, row.created_at, now, timezone) === "today").map(({ activity }) => activity);
   const upcomingActivities = scheduled.filter(({ row }) => scheduleBucket(row.source, row.occurred_at, row.created_at, now, timezone) === "upcoming").slice(0, 10).map(({ activity }) => activity);
   const meetings = scheduled.filter(({ row }) => row.type === "meeting" && row.occurred_at >= now).slice(0, 5).map(({ row, activity }) => ({ donorId: row.donor_id, time: activity.time, period: activity.period, title: activity.donorName, detail: `${activity.date} · ${activity.subject}` }));
-  const recentGiving = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && (item.activity_date ?? 0) >= now - 30 * 86400);
+  const recentGiving = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && isRecentPastEvent(item.activity_date, now, 30));
   const gifts = recentGiving.slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${dateLabel(item.activity_date, timezone)}` : ""}` }));
   const donorLinks = (rows: DonorLinkRow[], verb: string): WorkspaceDonorLink[] => rows.map((item) => ({ donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), detail: `${verb} ${dateLabel(item.event_at, timezone)}`, href: `/donors/${encodeURIComponent(item.donor_id)}` }));
   const recentlyViewed = donorLinks(recentViews.results, "Viewed");
