@@ -79,6 +79,7 @@ test("final confirmation revalidates mode and records donor decisions in the bat
   assert.match(route, /body\.reviewMode !== profile\.importReviewMode/);
   assert.match(route, /resolveReviewedJlUpdates/);
   assert.doesNotMatch(route, /\["continue", "accept_all"/);
+  assert.match(route, /Existing JL donors cannot be updated through the generic spreadsheet path/);
   assert.match(route, /report\.household\.decisions\.push/);
   assert.match(route, /JSON\.stringify\(report\)/);
   assert.match(route, /beforeJson: JSON\.stringify\(before\)/);

@@ -36,7 +36,7 @@ type ManualDonorRow = ManualDonorMatchRow & {
   alternate_mobile_phone: string | null; country: string | null; contact_note: string | null;
 };
 type FullJlDonorRow = ManualDonorRow & { owner_user_id: string; data_source: string; donor_code: string | null; external_source: string | null; external_id: string | null; source_snapshot: string | null; created_at: number; updated_at: number };
-type GeneralExistingDonor = { id: string; donor_code: string; display_name: string; spouse: string | null; email: string | null; phone: string | null; address: string | null; last_name: string | null; primary_first_name: string | null; spouse_first_name: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null };
+type GeneralExistingDonor = { id: string; donor_code: string; external_source: string | null; display_name: string; spouse: string | null; email: string | null; phone: string | null; address: string | null; last_name: string | null; primary_first_name: string | null; spouse_first_name: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null };
 
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
 
@@ -467,7 +467,10 @@ export async function POST(request: Request) {
     }
   } else {
     const generalCodes = preview.donors.map((donor) => donor.donorCode?.toLowerCase()).filter(Boolean);
-    const existingGeneral = generalCodes.length ? await env.DB.prepare(`SELECT id,donor_code,display_name,spouse,email,phone,address,last_name,primary_first_name,spouse_first_name,home_phone,address_line_1,city,state,postal_code,country FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL AND lower(donor_code) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(generalCodes)).all<GeneralExistingDonor>() : { results: [] as GeneralExistingDonor[] };
+    const existingGeneral = generalCodes.length ? await env.DB.prepare(`SELECT id,donor_code,external_source,display_name,spouse,email,phone,address,last_name,primary_first_name,spouse_first_name,home_phone,address_line_1,city,state,postal_code,country FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL AND lower(donor_code) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(generalCodes)).all<GeneralExistingDonor>() : { results: [] as GeneralExistingDonor[] };
+    if (body.updateExisting && existingGeneral.results.some((row) => row.external_source === "JL Solutions")) {
+      return Response.json({ error: "Existing JL donors cannot be updated through the generic spreadsheet path. Preview this as a JL household export and resolve every required donor review first." }, { status: 422 });
+    }
     const byCode = new Map(existingGeneral.results.map((row) => [row.donor_code.toLowerCase(), row]));
     for (const donor of preview.donors) {
       const contact = donor.contact!;
