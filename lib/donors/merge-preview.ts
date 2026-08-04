@@ -24,6 +24,7 @@ export type DonorMergeCandidate = {
   manualDonorId: string;
   manualName: string;
   reasons: string[];
+  exactCodeMatch: boolean;
 };
 
 function text(value: string | null | undefined) { return (value ?? "").trim().toLocaleLowerCase(); }
@@ -49,7 +50,7 @@ export function findLikelyManualDonorMatches(jlDonors: ImportDonor[], manualDono
       if (jlSpouse && [text(row.spouse), text(row.spouse_first_name)].includes(jlSpouse)) { score += 2; reasons.push("same spouse name"); }
       if (score >= 4 && (!best || score > best.score)) best = { row, score, reasons };
     }
-    if (best && donor.donorCode) candidates.push({ externalId: donor.donorCode, jlName: donor.name, manualDonorId: best.row.id, manualName: best.row.display_name, reasons: best.reasons });
+    if (best && donor.donorCode) candidates.push({ externalId: donor.donorCode, jlName: donor.name, manualDonorId: best.row.id, manualName: best.row.display_name, reasons: best.reasons, exactCodeMatch: best.reasons.includes("same JL Code") });
   }
   return candidates;
 }

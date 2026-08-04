@@ -22,8 +22,10 @@ export type ExistingJlDonor = {
   source_snapshot: string | null;
 };
 
-export type JlConflict = { externalId: string; field: string; currentValue: string; jlValue: string };
-export type JlMatch = { donor: ImportDonor; existing?: ExistingJlDonor; safeUpdates: Record<string, string | null>; conflicts: JlConflict[] };
+export type JlFieldChange = { externalId: string; field: string; currentValue: string; jlValue: string; requiresDecision: boolean };
+export type JlConflict = JlFieldChange;
+export type JlFieldDecision = { externalId: string; field: string; action: "keep_local" | "use_jl" };
+export type JlMatch = { donor: ImportDonor; existing?: ExistingJlDonor; safeUpdates: Record<string, string | null>; conflicts: JlConflict[]; changes: JlFieldChange[] };
 
 const fields = {
   display_name: (donor: ImportDonor) => donor.name,
@@ -49,21 +51,54 @@ export function matchJlDonors(donors: ImportDonor[], existingRows: ExistingJlDon
   return donors.map((donor) => {
     const externalId = donor.donorCode ?? "";
     const existing = existingByCode.get(externalId.toLowerCase());
-    if (!existing) return { donor, safeUpdates: {}, conflicts: [] };
+    if (!existing) return { donor, safeUpdates: {}, conflicts: [], changes: [] };
     let previous: Record<string, string | null> = {};
-    try { previous = existing.source_snapshot ? JSON.parse(existing.source_snapshot) : {}; } catch { previous = {}; }
+    let hasTrustedSnapshot = false;
+    try {
+      const parsed = existing.source_snapshot ? JSON.parse(existing.source_snapshot) : null;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        previous = parsed;
+        hasTrustedSnapshot = true;
+      }
+    } catch { previous = {}; }
     const safeUpdates: Record<string, string | null> = {};
     const conflicts: JlConflict[] = [];
+    const changes: JlFieldChange[] = [];
     for (const [field, getter] of Object.entries(fields)) {
       const jlValue = getter(donor) ?? null;
       const currentValue = existing[field as keyof ExistingJlDonor] as string | null;
-      const previousValue = previous[field] ?? currentValue;
       if (jlValue === currentValue) continue;
-      if (currentValue !== previousValue) conflicts.push({ externalId, field, currentValue: currentValue ?? "", jlValue: jlValue ?? "" });
+      const previousValue = Object.hasOwn(previous, field) ? previous[field] : undefined;
+      const requiresDecision = !hasTrustedSnapshot || previousValue === undefined || currentValue !== previousValue;
+      const change = { externalId, field, currentValue: currentValue ?? "", jlValue: jlValue ?? "", requiresDecision };
+      changes.push(change);
+      if (requiresDecision) conflicts.push(change);
       else safeUpdates[field] = jlValue;
     }
-    return { donor, existing, safeUpdates, conflicts };
+    return { donor, existing, safeUpdates, conflicts, changes };
   });
+}
+
+export function resolveJlUpdates(match: JlMatch, decisions: JlFieldDecision[]) {
+  const byField = new Map(decisions.filter((decision) => decision.externalId.toLowerCase() === (match.donor.donorCode ?? "").toLowerCase()).map((decision) => [decision.field, decision.action]));
+  const missing = match.conflicts.filter((conflict) => !byField.has(conflict.field));
+  const updates = { ...match.safeUpdates };
+  for (const conflict of match.conflicts) if (byField.get(conflict.field) === "use_jl") updates[conflict.field] = conflict.jlValue || null;
+  return { updates, missing };
+}
+
+export type JlCodeOwner = { id: string; external_source: string | null; external_id: string | null; donor_code: string | null };
+export function findJlCodeCollisions(owners: JlCodeOwner[]) {
+  const grouped = new Map<string, JlCodeOwner[]>();
+  for (const owner of owners) {
+    const code = (owner.external_id || owner.donor_code || "").trim().toLowerCase();
+    if (code) grouped.set(code, [...(grouped.get(code) ?? []), owner]);
+  }
+  return [...grouped.entries()].filter(([, rows]) => new Set(rows.map((row) => row.id)).size > 1).map(([externalId, rows]) => ({ externalId, donorIds: [...new Set(rows.map((row) => row.id))] }));
+}
+
+export function findUnresolvableJlCodeOwners(owners: JlCodeOwner[], resolvableManualIds: Set<string>) {
+  return owners.filter((owner) => owner.external_source !== "JL Solutions" && !resolvableManualIds.has(owner.id)).map((owner) => ({ externalId: (owner.external_id || owner.donor_code || "").trim().toLowerCase(), donorIds: [owner.id] })).filter((item) => item.externalId);
 }
 
 export function sourceSnapshot(donor: ImportDonor) {

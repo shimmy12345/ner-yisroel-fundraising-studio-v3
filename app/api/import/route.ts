@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { buildImportPreview, FIELD_LABELS, type ColumnMapping, type ImportField, type ImportRow } from "../../../lib/import/recognition";
 import { buildJlPreview, isJlSolutionsExport } from "../../../lib/import/jl-solutions";
-import { matchJlDonors, sourceSnapshot, type ExistingJlDonor } from "../../../lib/import/jl-match";
+import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, resolveJlUpdates, sourceSnapshot, type ExistingJlDonor, type JlCodeOwner } from "../../../lib/import/jl-match";
 import { logger } from "../../../lib/logger";
 import { buildJlDonationPreview, isCompactJlDonationExport, isJlDonationExport } from "../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
@@ -22,6 +22,7 @@ type ImportRequest = {
   mode?: "first" | "refresh";
   paymentDecisions?: PaymentDecisionInput[];
   mergeDecisions?: Array<{ externalId: string; action: "merge" | "keep_separate" | "review_later"; manualDonorId: string }>;
+  fieldDecisions?: Array<{ externalId: string; field: string; action: "keep_local" | "use_jl" }>;
   forceReprocess?: boolean;
   forceConfirmation?: string;
 };
@@ -106,6 +107,16 @@ export async function POST(request: Request) {
     mergeDecisionCodes.add(code);
     return false;
   }))) return Response.json({ error: "The donor merge decisions could not be validated" }, { status: 422 });
+  const fieldDecisionKeys = new Set<string>();
+  if (body.fieldDecisions !== undefined && (!Array.isArray(body.fieldDecisions) || body.fieldDecisions.some((decision) => {
+    const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
+    const field = typeof decision?.field === "string" ? decision.field.trim() : "";
+    const key = `${code}:${field}`;
+    const valid = Boolean(code && field) && ["keep_local", "use_jl"].includes(decision?.action);
+    if (!valid || fieldDecisionKeys.has(key)) return true;
+    fieldDecisionKeys.add(key);
+    return false;
+  }))) return Response.json({ error: "The JL field decisions could not be validated" }, { status: 422 });
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -329,17 +340,24 @@ export async function POST(request: Request) {
       ? await env.DB.prepare(`SELECT id, external_id, display_name, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<ExistingJlDonor>()
       : { results: [] as ExistingJlDonor[] };
     const matches = matchJlDonors(preview.donors, existing.results);
+    const codeOwners = codes.length ? await env.DB.prepare(`SELECT id,external_source,external_id,donor_code FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL AND (lower(external_id) IN (SELECT value FROM json_each(?)) OR lower(donor_code) IN (SELECT value FROM json_each(?)))`).bind(userId, JSON.stringify(codes), JSON.stringify(codes)).all<JlCodeOwner>() : { results: [] as JlCodeOwner[] };
     const candidateDonors = matches.map((match) => match.donor);
     const manual = candidateDonors.length
       ? await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, email, phone, home_phone, address, last_name, primary_first_name, spouse, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, address_line_1, city, state, postal_code, country, contact_note FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'Manual'`).bind(userId).all<ManualDonorRow>()
       : { results: [] as ManualDonorRow[] };
     const candidateByCode = new Map(findLikelyManualDonorMatches(candidateDonors, manual.results).map((candidate) => [candidate.externalId.toLowerCase(), candidate]));
+    const codeCollisions = findJlCodeCollisions(codeOwners.results);
+    for (const conflict of findUnresolvableJlCodeOwners(codeOwners.results, new Set([...candidateByCode.values()].filter((candidate) => candidate.exactCodeMatch).map((candidate) => candidate.manualDonorId)))) if (!codeCollisions.some((item) => item.externalId === conflict.externalId)) codeCollisions.push(conflict);
+    if (codeCollisions.length) return Response.json({ error: `JL Code ${codeCollisions[0].externalId} is attached to a different active donor. Resolve that duplicate before importing.` }, { status: 409 });
     const fullExisting = existing.results.length ? await env.DB.prepare(`SELECT id,owner_user_id,data_source,donor_code,external_source,external_id,display_name,email,phone,home_phone,address,last_name,primary_first_name,spouse,spouse_first_name,primary_title,spouse_title,alternate_mobile_phone,address_line_1,city,state,postal_code,country,contact_note,source_snapshot,created_at,updated_at FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL AND id IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(existing.results.map((row) => row.id))).all<FullJlDonorRow>() : { results: [] as FullJlDonorRow[] };
     const decisionByCode = new Map((body.mergeDecisions ?? []).map((decision) => [decision.externalId.toLowerCase(), decision]));
     for (const candidate of candidateByCode.values()) {
       const decision = decisionByCode.get(candidate.externalId.toLowerCase());
       if (!decision || !["merge", "keep_separate", "review_later"].includes(decision.action) || decision.manualDonorId !== candidate.manualDonorId) {
         return Response.json({ error: `Review the possible manual donor match for JL ${candidate.externalId} before importing.` }, { status: 422 });
+      }
+      if (candidate.exactCodeMatch && decision.action === "keep_separate") {
+        return Response.json({ error: `JL Code ${candidate.externalId} already belongs to a different donor. Merge it, choose Review later, or resolve the duplicate first.` }, { status: 409 });
       }
     }
     for (const match of matches) {
@@ -407,15 +425,21 @@ export async function POST(request: Request) {
         statements.push(env.DB.prepare(`INSERT INTO donors (id, owner_user_id, data_source, donor_code, external_source, external_id, display_name, spouse, email, phone, address, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, alternate_mobile_phone, home_phone, address_line_1, city, state, postal_code, country, source_snapshot, created_at, updated_at)
           VALUES (?, ?, 'live', ?, 'JL Solutions', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .bind(donorId, userId, donor.donorCode, donor.donorCode, donor.name, contact.spouseFirstName, donor.email, donor.phone, donor.address, contact.lastName, contact.primaryFirstName, contact.spouseFirstName, contact.primaryTitle, contact.spouseTitle, contact.alternateMobilePhone, contact.homePhone, contact.addressLine1, contact.city, contact.state, contact.postalCode, contact.country, JSON.stringify(sourceSnapshot(donor)), now, now));
-      } else if (body.mode === "refresh") {
-        const updates = Object.entries(match.safeUpdates);
+      } else {
+        const resolution = resolveJlUpdates(match, body.fieldDecisions ?? []);
+        if (resolution.missing.length) return Response.json({ error: `Choose Keep local or Use JL for every changed local value on JL ${code} before importing.` }, { status: 422 });
+        const updates = Object.entries(resolution.updates);
+        if (!updates.length && !match.changes.length) {
+          ownedIds.set(donor.id, match.existing.id);
+          continue;
+        }
         const assignments = updates.map(([field]) => `${field} = ?`);
         assignments.push("source_snapshot = ?", "updated_at = ?");
         ownedIds.set(donor.id, match.existing.id);
         const before = { ...Object.fromEntries(updates.map(([field]) => [field, match.existing![field as keyof ExistingJlDonor] ?? null])), source_snapshot: match.existing.source_snapshot };
         const after = { ...Object.fromEntries(updates), source_snapshot: JSON.stringify(sourceSnapshot(donor)) };
         householdChangeRows.push({ id: crypto.randomUUID(), importId, userId, donorId: match.existing.id, changeType: "update", beforeJson: JSON.stringify(before), afterJson: JSON.stringify(after), now });
-        if (report.household) report.household.updated += 1;
+        if (report.household && updates.length) report.household.updated += 1;
         statements.push(env.DB.prepare(`UPDATE donors SET ${assignments.join(", ")} WHERE id = ? AND owner_user_id = ? AND data_source = 'live'`)
           .bind(...updates.map(([, value]) => value), JSON.stringify(sourceSnapshot(donor)), now, match.existing.id, userId));
       }

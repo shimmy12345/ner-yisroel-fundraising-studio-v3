@@ -6,6 +6,10 @@ import { findLikelyManualDonorMatches } from "../lib/donors/merge-preview.ts";
 import { buildHouseholdRollbackPreview } from "../lib/import/household-rollback.ts";
 import { effectiveDonorLastName, searchDonors } from "../lib/relationships/donor-search.ts";
 import { buildLegacyHouseholdRepairAssessment, LEGACY_HOUSEHOLD_BATCH_ID } from "../lib/import/legacy-household-repair.ts";
+import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, resolveJlUpdates, sourceSnapshot } from "../lib/import/jl-match.ts";
+
+const jlDonor = (overrides = {}) => ({ id: "incoming", donorCode: "JL-42", name: "Rosen Household", email: "jl@example.test", phone: "555-1000", address: "10 Main St", spouse: "Leah", contact: { lastName: "Rosen", primaryFirstName: "Ari", spouseFirstName: "Leah", primaryTitle: null, spouseTitle: null, alternateMobilePhone: null, homePhone: null, addressLine1: "10 Main St", city: "Lakewood", state: "NJ", postalCode: "08701", country: "US" }, sourceValues: {}, ...overrides });
+const existingJl = (incoming, overrides = {}) => ({ id: "existing", external_id: "JL-42", display_name: incoming.name, email: incoming.email, phone: incoming.phone, address: incoming.address, last_name: incoming.contact.lastName, primary_first_name: incoming.contact.primaryFirstName, spouse_first_name: incoming.contact.spouseFirstName, primary_title: null, spouse_title: null, alternate_mobile_phone: null, home_phone: null, address_line_1: incoming.contact.addressLine1, city: incoming.contact.city, state: incoming.contact.state, postal_code: incoming.contact.postalCode, country: incoming.contact.country, source_snapshot: JSON.stringify(sourceSnapshot(incoming)), ...overrides });
 
 const read = (path) => fs.readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const migrations = () => fs.readdirSync(new URL("../drizzle", import.meta.url)).filter((file) => /^\d{4}_.+\.sql$/.test(file)).sort();
@@ -56,6 +60,69 @@ test("a likely manual/JL duplicate cannot be inserted without an explicit three-
   assert.match(route, /UPDATE interactions SET donor_id/);
   assert.match(route, /archived_at=\?,merged_into_donor_id=\?/);
   assert.doesNotMatch(route, /DELETE FROM donors WHERE id=.*external_source='JL Solutions'/);
+});
+
+test("same JL donor is a no-op when unchanged and previews ordinary refresh changes", () => {
+  const unchanged = jlDonor();
+  assert.deepEqual(matchJlDonors([unchanged], [existingJl(unchanged)])[0].changes, []);
+  const prior = jlDonor({ email: "old@example.test" });
+  const currentExport = jlDonor();
+  const match = matchJlDonors([currentExport], [existingJl(prior)] )[0];
+  assert.equal(match.changes.length, 1);
+  assert.equal(match.changes[0].field, "email");
+  assert.equal(match.changes[0].requiresDecision, false);
+  assert.deepEqual(resolveJlUpdates(match, []).updates, { email: "jl@example.test" });
+});
+
+test("six-month local overrides and legacy snapshots require an explicit keep-local or use-JL choice", () => {
+  const prior = jlDonor({ email: "old@example.test" });
+  const exportNow = jlDonor({ email: "new-jl@example.test" });
+  const locallyEdited = existingJl(prior, { email: "local@example.test" });
+  const match = matchJlDonors([exportNow], [locallyEdited])[0];
+  assert.equal(match.conflicts[0].field, "email");
+  assert.equal(resolveJlUpdates(match, []).missing.length, 1);
+  assert.deepEqual(resolveJlUpdates(match, [{ externalId: "JL-42", field: "email", action: "keep_local" }]).updates, {});
+  assert.deepEqual(resolveJlUpdates(match, [{ externalId: "JL-42", field: "email", action: "use_jl" }]).updates, { email: "new-jl@example.test" });
+
+  const legacy = matchJlDonors([exportNow], [existingJl(prior, { source_snapshot: "not-json" })])[0];
+  assert.equal(legacy.changes.every((change) => change.requiresDecision), true);
+});
+
+test("duplicate active ownership of one JL Code blocks the batch while archived aliases do not", () => {
+  assert.deepEqual(findJlCodeCollisions([{ id: "jl", external_source: "JL Solutions", external_id: "JL-42", donor_code: "JL-42" }]), []);
+  const collisions = findJlCodeCollisions([
+    { id: "jl", external_source: "JL Solutions", external_id: "JL-42", donor_code: "JL-42" },
+    { id: "manual", external_source: "Manual", external_id: null, donor_code: "jl-42" },
+  ]);
+  assert.deepEqual(collisions, [{ externalId: "jl-42", donorIds: ["jl", "manual"] }]);
+  assert.deepEqual(findUnresolvableJlCodeOwners([{ id: "legacy", external_source: null, external_id: null, donor_code: "JL-42" }], new Set()), [{ externalId: "jl-42", donorIds: ["legacy"] }]);
+});
+
+test("a manual donor already holding the incoming JL Code cannot be kept as a second active record", () => {
+  const candidate = findLikelyManualDonorMatches([jlDonor()], [{ id: "manual", display_name: "Different local label", donor_code: "JL-42", external_id: null, email: null, phone: null, home_phone: null, address_line_1: null, city: null, state: null, postal_code: null }])[0];
+  assert.equal(candidate.exactCodeMatch, true);
+  const ui = read("app/onboarding/import/ImportExperience.tsx");
+  const route = read("app/api/import/route.ts");
+  assert.match(ui, /disabled=\{candidate\.exactCodeMatch\}/);
+  assert.match(route, /candidate\.exactCodeMatch && decision\.action === "keep_separate"/);
+});
+
+test("preview decisions persist to the import request and the server enforces them before D1 writes", () => {
+  const ui = read("app/onboarding/import/ImportExperience.tsx");
+  const previewRoute = read("app/api/import/preview/route.ts");
+  const importRoute = read("app/api/import/route.ts");
+  assert.match(ui, /Keep local value/);
+  assert.match(ui, /Use JL value/);
+  assert.match(ui, /fieldDecisions:/);
+  assert.match(ui, /Review later \(not written\)/);
+  assert.match(previewRoute, /changes,/);
+  assert.match(previewRoute, /codeCollisions/);
+  assert.match(importRoute, /resolveJlUpdates/);
+  assert.match(importRoute, /resolution\.missing\.length/);
+  assert.match(importRoute, /householdChangeRows\.push/);
+  assert.match(importRoute, /beforeJson: JSON\.stringify\(before\)/);
+  assert.match(importRoute, /attached to a different active donor/);
+  assert.doesNotMatch(importRoute, /else if \(body\.mode === "refresh"\)/);
 });
 
 test("household rollback restores updates, removes only batch inserts, and preserves later edits", () => {

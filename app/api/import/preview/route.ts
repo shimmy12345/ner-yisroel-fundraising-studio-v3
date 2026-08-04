@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { buildImportPreview, type ColumnMapping, type ImportRow } from "../../../../lib/import/recognition";
 import { buildJlPreview, isJlSolutionsExport } from "../../../../lib/import/jl-solutions";
-import { matchJlDonors, type ExistingJlDonor } from "../../../../lib/import/jl-match";
+import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, type ExistingJlDonor, type JlCodeOwner } from "../../../../lib/import/jl-match";
 import { buildJlDonationPreview, isCompactJlDonationExport, isJlDonationExport } from "../../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../../lib/import/jl-donation-match";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
@@ -71,11 +71,17 @@ export async function POST(request: Request) {
     : { results: [] as ExistingJlDonor[] };
   const matches = matchJlDonors(preview.donors, existing.results);
   const conflicts = matches.flatMap((match) => match.conflicts);
+  const changes = matches.flatMap((match) => match.changes);
+  const codeOwners = codes.length
+    ? await env.DB.prepare(`SELECT id, external_source, external_id, donor_code FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND (lower(external_id) IN (SELECT value FROM json_each(?)) OR lower(donor_code) IN (SELECT value FROM json_each(?)))`).bind(profile.id, JSON.stringify(codes), JSON.stringify(codes)).all<JlCodeOwner>()
+    : { results: [] as JlCodeOwner[] };
   const candidateDonors = matches.map((match) => match.donor);
   const manual = candidateDonors.length
     ? await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, email, phone, home_phone, address_line_1, city, state, postal_code, last_name, primary_first_name, spouse, spouse_first_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'Manual'`).bind(profile.id).all<ManualDonorMatchRow>()
     : { results: [] as ManualDonorMatchRow[] };
   const mergeCandidates = findLikelyManualDonorMatches(candidateDonors, manual.results);
+  const codeCollisions = findJlCodeCollisions(codeOwners.results);
+  for (const conflict of findUnresolvableJlCodeOwners(codeOwners.results, new Set(mergeCandidates.filter((candidate) => candidate.exactCodeMatch).map((candidate) => candidate.manualDonorId)))) if (!codeCollisions.some((item) => item.externalId === conflict.externalId)) codeCollisions.push(conflict);
   return Response.json({
     profile: "jl-solutions",
     preview,
@@ -83,8 +89,10 @@ export async function POST(request: Request) {
       households: preview.donors.length,
       newRelationships: matches.filter((match) => !match.existing).length,
       existingRelationships: matches.filter((match) => match.existing).length,
-      recordsWithUpdates: matches.filter((match) => Object.keys(match.safeUpdates).length > 0).length,
+      recordsWithUpdates: matches.filter((match) => match.changes.length > 0).length,
+      changes,
       conflicts,
+      codeCollisions,
       mergeCandidates,
       duplicateRows: preview.rejectedRows.filter((row) => /duplicate/i.test(row.reason)).length,
       rejectedRows: preview.rejectedRows.length,
