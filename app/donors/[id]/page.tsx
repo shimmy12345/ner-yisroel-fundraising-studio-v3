@@ -33,6 +33,11 @@ export default async function DonorPage({ params }: { params: Promise<{ id: stri
   const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, email, phone, home_phone, address_line_1, city, state, postal_code, country, primary_first_name, spouse, spouse_first_name, primary_title, spouse_title, external_id, external_source, contact_note, relationship_summary, institutional_memory, archived_at, merged_into_donor_id FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"} LIMIT 1`).bind(...(mode === "demo" ? [id] : [id, profile.id])).first<Donor>();
   if (!donor) notFound();
   if (mode === "live" && donor.archived_at && donor.merged_into_donor_id) redirect(`/donors/${encodeURIComponent(donor.merged_into_donor_id)}`);
+  if (mode === "live" && !donor.archived_at) {
+    const viewedAt = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(`INSERT INTO donor_views (user_id,donor_id,viewed_at) VALUES (?,?,?)
+      ON CONFLICT(user_id,donor_id) DO UPDATE SET viewed_at=excluded.viewed_at`).bind(profile.id, donor.id, viewedAt).run();
+  }
   const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult] = await Promise.all([
     (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>(),
     env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>(),

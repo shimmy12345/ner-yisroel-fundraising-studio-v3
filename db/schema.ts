@@ -56,6 +56,25 @@ export const donors = sqliteTable("donors", {
   ...timestamps,
 });
 
+export const donorViews = sqliteTable("donor_views", {
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  viewedAt: integer("viewed_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.donorId] }),
+  index("donor_views_user_date_idx").on(table.userId, table.viewedAt),
+]);
+
+export const relationshipQueueDismissals = sqliteTable("relationship_queue_dismissals", {
+  userId: text("user_id").notNull().references(() => users.id),
+  itemKey: text("item_key").notNull(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  dismissedAt: integer("dismissed_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.itemKey] }),
+  index("relationship_queue_dismissals_user_date_idx").on(table.userId, table.dismissedAt),
+]);
+
 export const donorMergeAudits = sqliteTable("donor_merge_audits", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
