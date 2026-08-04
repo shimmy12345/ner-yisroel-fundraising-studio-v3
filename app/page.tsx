@@ -1,41 +1,16 @@
 import { AppShell } from "./components/AppShell";
 import { BriefExperience } from "./components/BriefExperience";
-import { CompletePriorityButton } from "./components/CompletePriorityButton";
-import { DismissQueueSuggestionButton } from "./components/DismissQueueSuggestionButton";
+import { RelationshipQueueExperience } from "./components/RelationshipQueueExperience";
 import { LocalDate } from "./components/LocalDate";
 import { ActivityActions } from "./components/ActivityActions";
 import { WelcomeExperience } from "./onboarding/WelcomeExperience";
 import { requireChatGPTUser } from "./chatgpt-auth";
 import { ensureUserProfile } from "../lib/auth/profile";
-import { loadWorkspaceBrief, type WorkspaceDonorLink, type WorkspacePriority, type WorkspaceScheduledActivity } from "../lib/workspace/live-data";
+import { loadWorkspaceBrief, type WorkspaceDonorLink, type WorkspaceScheduledActivity } from "../lib/workspace/live-data";
 import { shouldShowOnboarding } from "../lib/onboarding/status";
 import { getDataMode } from "../lib/workspace/mode";
-import type { RelationshipQueueBucket } from "../lib/workspace/relationship-queue";
 
 export const dynamic = "force-dynamic";
-
-const QUEUE_GROUPS: Array<{ key: RelationshipQueueBucket; title: string; description: string }> = [
-  { key: "overdue", title: "Overdue", description: "Follow-ups that need attention first" },
-  { key: "today", title: "Today", description: "Work that matters before the day ends" },
-  { key: "thisWeek", title: "This Week", description: "Due in the next seven days" },
-  { key: "upcoming", title: "Upcoming", description: "Important work without an immediate deadline" },
-];
-
-function QueueCard({ priority }: { priority: WorkspacePriority }) {
-  return <article className={`priority-card relationship-queue-card ${priority.bucket}`}>
-    <div className="avatar">{priority.initials}</div>
-    <div className="priority-main">
-      <div className="priority-heading"><h3><a href={`/donors/${encodeURIComponent(priority.donorId)}`}>{priority.name}</a></h3><span className={`signal ${priority.signal}`}>{priority.label}</span></div>
-      <p>{priority.reason}</p>
-      <div className="why"><span aria-hidden="true">✦</span><span>{priority.why}</span></div>
-      <time>{priority.dueLabel}</time>
-    </div>
-    <div className="priority-actions">
-      <a className="action-button" href={priority.href}>{priority.action}<span aria-hidden="true">→</span></a>
-      {priority.recommendationId ? <CompletePriorityButton recommendationId={priority.recommendationId} /> : <DismissQueueSuggestionButton queueId={priority.queueId} donorId={priority.donorId} />}
-    </div>
-  </article>;
-}
 
 function ScheduledActivityCard({ activity, live, upcoming = false }: { activity: WorkspaceScheduledActivity; live: boolean; upcoming?: boolean }) {
   return <article className="meeting today-meeting-card scheduled-activity-card">
@@ -68,7 +43,6 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const showAll = (await searchParams).priorities === "all";
   const data = await loadWorkspaceBrief(profile.id, profile.timezone, mode, Math.floor(Date.now() / 1000), showAll ? 50 : 10);
   const nextMeeting = mode === "live" ? data.meetings[0] : null;
-  const queueCount = Object.values(data.relationshipQueue).reduce((sum, items) => sum + items.length, 0);
 
   return <AppShell active="today">
     <header className="page-header today-header"><div><p className="eyebrow today-date"><LocalDate timezone={profile.timezone} /> · {mode === "demo" ? "DEMO MODE" : "LIVE WORKSPACE"}</p><h1>Good morning, {profile.preferredFirstName}.</h1><p className="subhead">Your daily relationship workspace—start with what needs attention, then move through the queue.</p></div></header>
@@ -81,22 +55,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       <a href={nextMeeting ? `/donors/${encodeURIComponent(nextMeeting.donorId)}/meeting-brief` : "/donors"}><span>☼</span><strong>Prepare for Meeting</strong><small>{nextMeeting ? "Open your next donor brief" : "Choose a donor to prepare"}</small></a>
     </nav>
 
-    <section className="today-morning-brief" aria-labelledby="morning-brief-title">
-      <div className="section-title"><div><p className="eyebrow">MORNING BRIEF</p><h2 id="morning-brief-title">What deserves attention today</h2><p>Live counts from your meetings, follow-ups, giving, and reminders</p></div><a className="view-all-link" href="/assistant">Open Assistant</a></div>
-      <div className="morning-brief-grid">
-        <article><strong>{data.morningBrief.meetingsToday}</strong><span>Meetings today</span></article>
-        <article><strong>{data.morningBrief.overdueFollowUps}</strong><span>Overdue follow-ups</span></article>
-        <article><strong>{data.morningBrief.recentGifts}</strong><span>Recent gifts</span></article>
-        <article><strong>{data.morningBrief.upcomingReminders}</strong><span>Upcoming reminders</span></article>
-        <article className="morning-suggested-priority"><span>Suggested priority</span>{data.morningBrief.suggestedPriority ? <><strong>{data.morningBrief.suggestedPriority.name}</strong><p>{data.morningBrief.suggestedPriority.reason}</p><a href={`/donors/${encodeURIComponent(data.morningBrief.suggestedPriority.donorId)}`}>Open relationship →</a></> : <p>No time-sensitive priority is available.</p>}</article>
-      </div>
-    </section>
-
-    <section className="relationship-queue" id="relationship-queue">
-      <div className="section-title"><div><p className="eyebrow">RELATIONSHIP QUEUE</p><h2>{showAll ? "All current relationship work" : "Your next relationship actions"}</h2><p>One clear reason per donor, ordered by urgency. Completing a reminder or closing an activity removes it automatically.</p></div><span className="count">{queueCount}</span></div>
-      {queueCount ? <div className="relationship-queue-groups">{QUEUE_GROUPS.map((group) => data.relationshipQueue[group.key].length ? <section key={group.key} className={`relationship-queue-group ${group.key}`}><header><div><h3>{group.title}</h3><p>{group.description}</p></div><span>{data.relationshipQueue[group.key].length}</span></header><div className="priority-list">{data.relationshipQueue[group.key].map((item) => <QueueCard key={item.queueId} priority={item} />)}</div></section> : null)}</div> : <section className="directory-empty"><h2>Your relationship queue is clear</h2><p>There are no open reminders, scheduled activities, unacknowledged gifts, commitments, or contact gaps requiring attention.</p><a href="/capture?returnTo=%2F">Log an interaction</a></section>}
-      {data.priorityCount > queueCount ? <a className="view-all-link queue-view-all" href="/?priorities=all#relationship-queue">View all {data.priorityCount}</a> : showAll ? <a className="view-all-link queue-view-all" href="/#relationship-queue">Show top actions</a> : null}
-    </section>
+    <RelationshipQueueExperience initialQueue={data.relationshipQueue} morningBrief={data.morningBrief} priorityCount={data.priorityCount} showAll={showAll} />
 
     <section className="today-upcoming today-schedule">
       <div className="section-title"><div><h2>Today's Schedule</h2><p>Calls, emails, meetings, visits, notes, and personal interactions scheduled for today</p></div><span className="count">{data.todaySchedule.length}</span></div>

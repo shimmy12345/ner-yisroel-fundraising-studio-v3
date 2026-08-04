@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket } from "../lib/workspace/relationship-queue.ts";
+import { removeQueueItem, restoreQueueItem } from "../lib/workspace/optimistic-dismissal.ts";
 
 const now = Math.floor(Date.parse("2026-08-04T14:00:00Z") / 1000);
 const timezone = "America/New_York";
@@ -37,18 +38,24 @@ const dismissed = dedupeRelationshipQueue(candidates, new Set(["activity:fiction
 assert.equal(dismissed.some((item) => item.queueId === "activity:fictional-meeting:1"), false, "a dismissed source revision leaves the queue");
 const changedSource = [...candidates.filter((item) => item.queueId !== "activity:fictional-meeting:1"), { queueId: "activity:fictional-meeting:2", donorId: "fictional-b", dueAt: today, rank: 1, sortAt: today }];
 assert.equal(dedupeRelationshipQueue(changedSource, new Set(["activity:fictional-meeting:1"])).some((item) => item.queueId === "activity:fictional-meeting:2"), true, "a changed source returns after an old dismissal");
+const originalOrder = new Map(candidates.map((item, index) => [item.queueId, index]));
+const optimisticallyRemoved = removeQueueItem(candidates, "activity:fictional-meeting:1");
+assert.equal(optimisticallyRemoved.length, candidates.length - 1, "optimistic dismissal updates the visible total immediately");
+assert.deepEqual(restoreQueueItem(optimisticallyRemoved, candidates[2], originalOrder), candidates, "failed persistence restores the exact original order");
+assert.equal(restoreQueueItem(candidates, candidates[2], originalOrder).length, candidates.length, "rapid Undo cannot duplicate a card");
 
 const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
 const dismissRoute = await readFile(new URL("../app/api/relationship-queue/dismiss/route.ts", import.meta.url), "utf8");
-const dismissButton = await readFile(new URL("../app/components/DismissQueueSuggestionButton.tsx", import.meta.url), "utf8");
+const queueExperience = await readFile(new URL("../app/components/RelationshipQueueExperience.tsx", import.meta.url), "utf8");
 const migration = await readFile(new URL("../drizzle/0017_today_relationship_queue.sql", import.meta.url), "utf8");
 
-assert.match(page, /encodeURIComponent\(priority\.donorId\)/, "every queue card exposes a direct donor link");
-assert.match(page, /CompletePriorityButton/);
-assert.match(page, /DismissQueueSuggestionButton/);
-assert.match(page, /closing an activity removes it automatically/);
+assert.match(page, /RelationshipQueueExperience/);
+assert.match(queueExperience, /encodeURIComponent\(priority\.donorId\)/, "every queue card exposes a direct donor link");
+assert.match(queueExperience, /CompletePriorityButton/);
+assert.match(queueExperience, /Dismiss suggestion/);
+assert.match(queueExperience, /closing an activity removes it automatically/);
 assert.match(liveData, /r\.status = 'open'/, "completed reminders cannot remain in the queue");
 assert.match(liveData, /i\.source NOT LIKE 'cancelled:%'/, "cancelled activities cannot remain in the queue");
 assert.match(liveData, /d\.owner_user_id = \? AND d\.data_source = 'live' AND d\.archived_at IS NULL/, "recent lists exclude archived aliases");
@@ -56,7 +63,14 @@ assert.match(donorPage, /INSERT INTO donor_views/);
 assert.match(donorPage, /ON CONFLICT\(user_id,donor_id\)/);
 assert.match(dismissRoute, /getChatGPTUser/);
 assert.match(dismissRoute, /owner_user_id=\?.*data_source='live'.*archived_at IS NULL/);
-assert.match(dismissButton, /Undo/);
+assert.match(queueExperience, /Suggestion dismissed/);
+assert.match(queueExperience, /10_000/);
+assert.match(queueExperience, /setItems\(\(value\) => removeQueueItem\(value, item\.queueId\)\)/);
+assert.match(queueExperience, /setItems\(\(value\) => restoreQueueItem\(value, item, order\)\)/);
+assert.match(queueExperience, /if \(!saved && desiredDismissed/);
+assert.match(queueExperience, /persist\("DELETE", item\)/);
+assert.match(queueExperience, /Undo/);
+assert.doesNotMatch(queueExperience, /window\.location\.(reload|assign)/);
 assert.match(migration, /PRIMARY KEY \(`user_id`,`donor_id`\)/);
 assert.match(migration, /PRIMARY KEY \(`user_id`,`item_key`\)/);
 

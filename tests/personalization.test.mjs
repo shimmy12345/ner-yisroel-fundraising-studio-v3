@@ -6,6 +6,7 @@ async function run() {
   const profileRoute = await readFile(new URL("../app/api/profile/route.ts", import.meta.url), "utf8");
   const shell = await readFile(new URL("../app/components/AppShell.tsx", import.meta.url), "utf8");
   const today = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const relationshipQueue = await readFile(new URL("../app/components/RelationshipQueueExperience.tsx", import.meta.url), "utf8");
   const live = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
   const assistant = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
   const donors = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
@@ -35,7 +36,7 @@ async function run() {
   assert.match(live, /recommendations r JOIN donors/);
   assert.match(live, /giving_activities ga JOIN donors/);
   assert.match(live, /days since meaningful contact/);
-  assert.match(today, /Your relationship queue is clear/);
+  assert.match(relationshipQueue, /Your relationship queue is clear/);
   assert.match(unifiedTimeline, /No relationship activity yet/);
 
   assert.match(migration, /owner_user_id/);
