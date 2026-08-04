@@ -50,8 +50,27 @@ export const donors = sqliteTable("donors", {
   country: text("country"),
   sourceSnapshot: text("source_snapshot", { mode: "json" }).$type<Record<string, string>>(),
   contactNote: text("contact_note"),
+  archivedAt: integer("archived_at", { mode: "timestamp" }),
+  mergedIntoDonorId: text("merged_into_donor_id"),
   ...timestamps,
 });
+
+export const donorMergeAudits = sqliteTable("donor_merge_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  survivingDonorId: text("surviving_donor_id").notNull().references(() => donors.id),
+  archivedDonorId: text("archived_donor_id").notNull().references(() => donors.id),
+  fieldChoicesJson: text("field_choices_json", { mode: "json" }).$type<Record<string, string>>().notNull(),
+  survivorBeforeJson: text("survivor_before_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  duplicateBeforeJson: text("duplicate_before_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  survivorAfterJson: text("survivor_after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  movedCountsJson: text("moved_counts_json", { mode: "json" }).$type<Record<string, number>>().notNull(),
+  source: text("source").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("donor_merge_audits_user_date_idx").on(table.userId, table.createdAt),
+  index("donor_merge_audits_archived_idx").on(table.archivedDonorId),
+]);
 
 export const donorContactAudits = sqliteTable("donor_contact_audits", {
   id: text("id").primaryKey(),

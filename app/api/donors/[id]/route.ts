@@ -20,7 +20,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const profile = await ensureUserProfile(identity);
   const { id } = await params;
   const existing = await env.DB.prepare(`SELECT id,display_name,primary_first_name,spouse,email,phone,home_phone,address_line_1,city,state,postal_code,country,contact_note,external_source,external_id,donor_code
-    FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(id, profile.id).first<ContactRow>();
+    FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL LIMIT 1`).bind(id, profile.id).first<ContactRow>();
   if (!existing) return Response.json({ error: "Donor not found" }, { status: 404 });
   const body = await request.json().catch(() => null) as DonorContactInput | null;
   if (!body) return Response.json({ error: "Invalid donor request" }, { status: 400 });

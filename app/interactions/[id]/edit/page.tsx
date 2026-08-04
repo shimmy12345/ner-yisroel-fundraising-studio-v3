@@ -23,7 +23,7 @@ export default async function EditActivityPage({ params, searchParams }: { param
         AND i.source NOT LIKE 'cancelled:%' AND i.source NOT LIKE 'archived:%' LIMIT 1`).bind(id, profile.id, profile.id).first<InteractionRow>(),
     env.DB.prepare("SELECT due_at FROM recommendations WHERE id = ? AND user_id = ? AND status = 'open' LIMIT 1").bind(`activity-${id}`, profile.id).first<ReminderRow>(),
     env.DB.prepare(`SELECT id, display_name, last_name, spouse, spouse_first_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone FROM donors
-      WHERE owner_user_id = ? AND data_source = 'live' ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`).bind(profile.id).all<DonorRow>(),
+      WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`).bind(profile.id).all<DonorRow>(),
   ]);
   if (!activity) notFound();
   const [subject = "Interaction", ...noteParts] = activity.summary.split("\n");

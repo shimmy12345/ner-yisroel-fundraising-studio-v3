@@ -13,7 +13,7 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
   const identity = await requireChatGPTUser("/capture");
   const profile = await ensureUserProfile(identity);
   const donors = await env.DB.prepare(`SELECT id, display_name, last_name, spouse, spouse_first_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone
-    FROM donors WHERE owner_user_id = ? AND data_source = 'live'
+    FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL
     ORDER BY COALESCE(NULLIF(last_name, ''), display_name) COLLATE NOCASE, display_name COLLATE NOCASE LIMIT 1000`)
     .bind(profile.id).all<{ id: string; display_name: string; last_name: string | null; spouse: string | null; spouse_first_name: string | null; donor_code: string | null; external_id: string | null; email: string | null; phone: string | null; home_phone: string | null; alternate_mobile_phone: string | null }>();
   const requestedParams = await searchParams;

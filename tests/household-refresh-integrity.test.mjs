@@ -44,7 +44,7 @@ test("a likely manual/JL duplicate cannot be inserted without an explicit three-
   const ui = read("app/onboarding/import/ImportExperience.tsx");
   const route = read("app/api/import/route.ts");
   const previewRoute = read("app/api/import/preview/route.ts");
-  assert.match(ui, /Merge and preserve history/);
+  assert.match(ui, /Resolve duplicate and preserve history/);
   assert.match(ui, /Keep as separate donors/);
   assert.match(ui, /Review later — do not import this household/);
   assert.match(ui, /needs_decision/);
@@ -54,7 +54,8 @@ test("a likely manual/JL duplicate cannot be inserted without an explicit three-
   assert.match(previewRoute, /const candidateDonors = matches\.map/);
   assert.match(route, /changeType: "consolidated"/);
   assert.match(route, /UPDATE interactions SET donor_id/);
-  assert.match(route, /DELETE FROM donors WHERE id=.*external_source='JL Solutions'/);
+  assert.match(route, /archived_at=\?,merged_into_donor_id=\?/);
+  assert.doesNotMatch(route, /DELETE FROM donors WHERE id=.*external_source='JL Solutions'/);
 });
 
 test("household rollback restores updates, removes only batch inserts, and preserves later edits", () => {

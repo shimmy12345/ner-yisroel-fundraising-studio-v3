@@ -14,6 +14,8 @@ export type ManualDonorMatchRow = {
   primary_first_name?: string | null;
   spouse?: string | null;
   spouse_first_name?: string | null;
+  donor_code?: string | null;
+  external_id?: string | null;
 };
 
 export type DonorMergeCandidate = {
@@ -34,6 +36,7 @@ export function findLikelyManualDonorMatches(jlDonors: ImportDonor[], manualDono
     for (const row of manualDonors) {
       let score = 0;
       const reasons: string[] = [];
+      if (donor.donorCode && [text(row.donor_code), text(row.external_id)].includes(text(donor.donorCode))) { score += 20; reasons.push("same JL Code"); }
       if (text(donor.name) && text(donor.name) === text(row.display_name)) { score += 4; reasons.push("same household name"); }
       if (donor.email && text(donor.email) === text(row.email)) { score += 5; reasons.push("same email"); }
       const jlPhone = digits(donor.phone);

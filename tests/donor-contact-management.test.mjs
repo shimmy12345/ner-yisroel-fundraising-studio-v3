@@ -46,7 +46,7 @@ test("JL refresh previews local conflicts and never auto-merges manual donors", 
   assert.match(preview, /findLikelyManualDonorMatches/);
   assert.match(preview, /external_source = 'Manual'/);
   assert.match(experience, /Fundraising OS will never merge or add a likely duplicate without your decision/);
-  assert.match(experience, /Merge and preserve history/);
+  assert.match(experience, /Resolve duplicate and preserve history/);
   assert.match(importer, /decision\?\.action === "merge"/);
   assert.match(importer, /ownedIds\.set\(donor\.id, manualDonor\.id\)/);
   assert.match(importer, /merged_with_jl/);

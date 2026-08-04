@@ -23,7 +23,7 @@ export function buildHouseholdRollbackPreview(changes: HouseholdChangeRow[], cur
   const currentById = new Map(currentRows.map((row) => [row.id, row]));
   const blockers: string[] = [];
   const created: Array<{ donorId: string; donorName: string }> = [];
-  const recreates: Array<{ donorId: string; donorName: string; snapshot: Record<string, unknown>; linked: Record<string, string[]>; mergedInto: string }> = [];
+  const recreates: Array<{ donorId: string; donorName: string; snapshot: Record<string, unknown>; linked: Record<string, string[]>; mergedInto: string; restoreArchived: boolean }> = [];
   const restores: Array<{ donorId: string; donorName: string; fields: Record<string, string | number | null>; preservedFields: string[]; changeType: "update" | "merge" }> = [];
   const batchDeletes = { gifts: [] as string[], interactions: [] as string[], recommendations: [] as string[] };
   let preservedLaterEdits = 0;
@@ -37,7 +37,7 @@ export function buildHouseholdRollbackPreview(changes: HouseholdChangeRow[], cur
       const rawBefore = parse(change.before_json) as (Record<string, string | number | null> & { linked?: Record<string, string[]> }) | null;
       const mergedInto = typeof after?.mergedInto === "string" ? after.mergedInto : "";
       if (!rawBefore || !mergedInto || !currentById.has(mergedInto)) blockers.push(`The consolidated donor ${change.donor_id} cannot be recreated safely.`);
-      else { const { linked = {}, ...snapshot } = rawBefore; recreates.push({ donorId: change.donor_id, donorName: String(snapshot.display_name ?? change.donor_id), snapshot, linked, mergedInto }); }
+      else { const { linked = {}, ...snapshot } = rawBefore; recreates.push({ donorId: change.donor_id, donorName: String(snapshot.display_name ?? change.donor_id), snapshot, linked, mergedInto, restoreArchived: Boolean(current?.archived_at && current?.merged_into_donor_id === mergedInto) }); }
       continue;
     }
     if (!current || !after) { blockers.push(`Donor ${change.donor_id} no longer matches the recorded batch state.`); continue; }

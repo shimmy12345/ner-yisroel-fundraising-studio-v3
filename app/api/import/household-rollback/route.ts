@@ -22,7 +22,7 @@ async function loadPreview(importId: string, userId: string) {
   }
   const donorIds = changes.results.map((change) => change.donor_id);
   const columns = HOUSEHOLD_SNAPSHOT_FIELDS.map((field) => `d.${field}`).join(",");
-  const current = await env.DB.prepare(`SELECT d.id,${columns},
+  const current = await env.DB.prepare(`SELECT d.id,d.archived_at,d.merged_into_donor_id,${columns},
     ((SELECT COUNT(*) FROM gifts g WHERE g.donor_id=d.id) + (SELECT COUNT(*) FROM giving_activities ga WHERE ga.donor_id=d.id) +
      (SELECT COUNT(*) FROM interactions i WHERE i.donor_id=d.id) + (SELECT COUNT(*) FROM recommendations r WHERE r.donor_id=d.id) +
      (SELECT COUNT(*) FROM donor_contact_audits a WHERE a.donor_id=d.id AND a.created_at >= ?)) AS dependency_count
@@ -69,7 +69,8 @@ export async function POST(request: Request) {
   const recreateFields = [...HOUSEHOLD_SNAPSHOT_FIELDS, "created_at", "updated_at"].filter((field) => !["owner_user_id", "data_source"].includes(field));
   const linkTables = ["gifts", "giving_activities", "interactions", "recommendations", "jl_payment_assignment_audits", "donor_contact_audits"] as const;
   for (const donor of result.preview!.recreates) {
-    statements.push(env.DB.prepare(`INSERT INTO donors (id,owner_user_id,data_source,${recreateFields.join(",")}) VALUES (?,?,'live',${recreateFields.map(() => "?").join(",")})`).bind(donor.donorId, userId, ...recreateFields.map((field) => donor.snapshot[field] ?? null)));
+    if (donor.restoreArchived) statements.push(env.DB.prepare(`UPDATE donors SET ${recreateFields.map((field) => `${field}=?`).join(",")},archived_at=NULL,merged_into_donor_id=NULL WHERE id=? AND owner_user_id=? AND data_source='live' AND merged_into_donor_id=?`).bind(...recreateFields.map((field) => donor.snapshot[field] ?? null), donor.donorId, userId, donor.mergedInto));
+    else statements.push(env.DB.prepare(`INSERT INTO donors (id,owner_user_id,data_source,${recreateFields.join(",")}) VALUES (?,?,'live',${recreateFields.map(() => "?").join(",")})`).bind(donor.donorId, userId, ...recreateFields.map((field) => donor.snapshot[field] ?? null)));
     for (const table of linkTables) {
       const ids = donor.linked[table] ?? [];
       if (ids.length) statements.push(env.DB.prepare(`UPDATE ${table} SET donor_id=? WHERE donor_id=? AND id IN (SELECT value FROM json_each(?))`).bind(donor.donorId, donor.mergedInto, JSON.stringify(ids)));

@@ -62,7 +62,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
-  const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live'";
+  const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
   const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, r.action, r.reason, r.score, r.due_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id

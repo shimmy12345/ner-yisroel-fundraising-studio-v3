@@ -35,7 +35,7 @@ export default async function DonorsPage({ searchParams }: { searchParams: Promi
   const identity = await requireChatGPTUser("/donors");
   const profile = await ensureUserProfile(identity);
   const mode = await getDataMode(profile.id);
-  const scope = mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'";
+  const scope = mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL";
   const scopeBinds = mode === "demo" ? [] : [profile.id];
   const query = (await searchParams).q?.trim().slice(0, 80) ?? "";
   const directorySql = `SELECT id, display_name, primary_first_name, spouse_first_name, spouse, last_name, donor_code, external_id, email, phone, home_phone, alternate_mobile_phone, city, state, external_source FROM donors WHERE ${scope}`;
