@@ -27,7 +27,8 @@ export function sites(): Plugin {
     async closeBundle() {
       const outputDirectory = resolve(root, "dist", ".openai");
       const hostingConfig = resolve(root, ".openai", "hosting.json");
-      const drizzleSource = resolve(root, "drizzle");
+      const productionBaseline = process.env.FUNDRAISING_OS_SCHEMA_TRACK === "production-baseline";
+      const drizzleSource = productionBaseline ? resolve(root, "production-baseline", "drizzle") : resolve(root, "drizzle");
 
       await rm(outputDirectory, { recursive: true, force: true });
       await mkdir(outputDirectory, { recursive: true });

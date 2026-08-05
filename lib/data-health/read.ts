@@ -27,6 +27,7 @@ import {
   type DataHealthReport,
 } from "./model";
 import { readRemoteMigrationHistory } from "./remote-migrations";
+import { PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
 
@@ -45,6 +46,10 @@ const emptyFacts = (): DataHealthFacts => ({
   remoteMigrationHistoryComplete: false,
   remoteMigrationHistoryConsistent: false,
   remoteMigrationDiagnosticLines: ["Remote migration history has not been verified."],
+  productionBaselineLevel: PRODUCTION_BASELINE_LEVEL,
+  productionBaselineVerified: PRODUCTION_BASELINE_VERIFIED,
+  schemaMatchesBaseline: false,
+  schemaComparisonDifferences: ["The staging schema has not been compared with the production baseline."],
   activeDonors: null,
   duplicateJlCodes: null,
   orphanedGifts: null,
@@ -78,13 +83,16 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
   try {
     const schemaResults = await env.DB.batch([
       env.DB.prepare("SELECT 1 AS connected"),
-      env.DB.prepare("SELECT name FROM sqlite_schema WHERE type='table'"),
+      env.DB.prepare("SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name"),
       env.DB.prepare("PRAGMA table_info('users')"),
       env.DB.prepare("PRAGMA table_info('donors')"),
       env.DB.prepare("PRAGMA table_info('giving_activities')"),
     ]) as unknown as QueryResult[];
     facts.databaseConnected = number(first(schemaResults[0]).connected) === 1;
-    const tableNames = rows(schemaResults[1]).map((row) => String(row.name ?? ""));
+    const tableNames = rows(schemaResults[1]).filter((row) => row.type === "table").map((row) => String(row.name ?? ""));
+    const schemaComparison = compareSchemaObjects(stagingSchemaObjects(rows(schemaResults[1])));
+    facts.schemaMatchesBaseline = schemaComparison.matches;
+    facts.schemaComparisonDifferences = schemaComparison.differences;
     const userColumns = rows(schemaResults[2]).map((row) => String(row.name ?? ""));
     const donorColumns = rows(schemaResults[3]).map((row) => String(row.name ?? ""));
     const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));

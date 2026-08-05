@@ -22,6 +22,10 @@ export type DataHealthFacts = {
   remoteMigrationHistoryComplete: boolean;
   remoteMigrationHistoryConsistent: boolean;
   remoteMigrationDiagnosticLines: string[];
+  productionBaselineLevel: string;
+  productionBaselineVerified: boolean;
+  schemaMatchesBaseline: boolean;
+  schemaComparisonDifferences: string[];
   activeDonors: number | null;
   duplicateJlCodes: number | null;
   orphanedGifts: number | null;
@@ -53,6 +57,8 @@ export type DataHealthReport = {
     journalMigrationLevel: string;
     remoteMigrationLevel: string;
     productionReady: boolean;
+    productionBaselineLevel: string;
+    schemaMatchesBaseline: boolean;
     expectedMigrationLevel: string;
     ledgerComplete: boolean;
     appVersion: string;
@@ -155,6 +161,8 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
   const hasData = (facts.activeDonors ?? 0) > 0;
   const givingReady = [facts.givingSourceTotalCents, facts.givingLinkedTotalCents, facts.invalidGivingRows, facts.duplicateGivingFingerprints].every((value) => value !== null);
   const givingHealthy = givingReady && facts.givingSourceTotalCents === facts.givingLinkedTotalCents && facts.invalidGivingRows === 0 && facts.duplicateGivingFingerprints === 0;
+  const relationshipIntegrityHealthy = [facts.duplicateJlCodes, facts.orphanedGifts, facts.orphanedInteractions, facts.orphanedReminders, facts.orphanedPayments, facts.brokenMergeRedirects].every((value) => value === 0);
+  const productionReady = facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.productionBaselineVerified && facts.schemaMatchesBaseline && givingHealthy && relationshipIntegrityHealthy;
   const checks: HealthCheck[] = [
     {
       id: "database",
@@ -164,9 +172,10 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       explanation: facts.databaseConnected ? "Fundraising OS can read the D1 workspace." : "Fundraising OS could not read D1. No workspace integrity checks were completed.",
     },
     { id: "live-schema", label: "Live schema version", status: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "healthy" : "critical", value: `${facts.currentMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "The live D1 schema contains every expected table and column." : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled." },
-    { id: "migration-journal", label: "Packaged migration journal", status: facts.migrationLedgerComplete ? "healthy" : "critical", value: `${facts.journalMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.migrationLedgerComplete ? "The packaged journal lists every migration once and in order." : "The packaged journal is incomplete. Existing SQL must not be replayed to repair it.", diagnosticLines: facts.migrationLedgerComplete ? [] : MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is packaged but missing from drizzle/meta/_journal.json.`) },
-    { id: "remote-migrations", label: "Remote migration history", status: facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "healthy" : "critical", value: `${facts.remoteMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? `The ${facts.remoteMigrationTable ?? "remote"} table records every packaged migration once and in order.` : "The remote D1 migration table is missing, incomplete, or inconsistent with the packaged sequence.", diagnosticLines: facts.remoteMigrationDiagnosticLines },
-    { id: "production-readiness", label: "Migration production readiness", status: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "healthy" : "critical", value: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "Ready" : "Blocked", explanation: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "Live schema, packaged journal, and remote history agree." : "Production remains blocked until live schema, packaged journal, and remote history agree exactly." },
+    { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
+    { id: "production-baseline", label: "Production rehearsal baseline", status: facts.productionBaselineVerified ? "healthy" : "critical", value: facts.productionBaselineVerified ? `${facts.productionBaselineLevel} · Verified` : `${facts.productionBaselineLevel} · Failed`, explanation: facts.productionBaselineVerified ? "A brand-new empty database reaches the complete schema with no sample or donor data, passes integrity checks, and blocks baseline replay." : "The clean production baseline rehearsal failed. Do not create the production database." },
+    { id: "schema-comparison", label: "Staging ↔ baseline schema", status: facts.schemaMatchesBaseline ? "healthy" : "critical", value: facts.schemaMatchesBaseline ? "Match" : `${facts.schemaComparisonDifferences.length} differences`, explanation: facts.schemaMatchesBaseline ? "Tables, columns, indexes, and constraints match the verified 0019 baseline." : "Material schema differences exist between staging and the production rehearsal.", diagnosticLines: facts.schemaComparisonDifferences },
+    { id: "production-readiness", label: "Production launch readiness", status: productionReady ? "healthy" : "critical", value: productionReady ? "Ready" : "Blocked", explanation: productionReady ? "The clean baseline matches staging and the current workspace integrity checks pass." : "Production remains blocked until the baseline, schema comparison, and relationship-data integrity checks all pass." },
     {
       id: "active-donors",
       label: "Active donors",
@@ -244,7 +253,9 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       migrationLevel: facts.currentMigrationLevel ?? "Unknown",
       journalMigrationLevel: facts.journalMigrationLevel ?? "Unknown",
       remoteMigrationLevel: facts.remoteMigrationLevel ?? "Unknown",
-      productionReady: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent,
+      productionReady,
+      productionBaselineLevel: facts.productionBaselineLevel,
+      schemaMatchesBaseline: facts.schemaMatchesBaseline,
       expectedMigrationLevel: EXPECTED_MIGRATION_LEVEL,
       ledgerComplete: facts.migrationLedgerComplete,
       appVersion: facts.appVersion,
