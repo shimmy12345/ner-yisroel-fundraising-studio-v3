@@ -1,0 +1,125 @@
+import { env } from "cloudflare:workers";
+import {
+  ACTIVE_DONORS_SQL,
+  BROKEN_MERGE_REDIRECTS_SQL,
+  DUPLICATE_GIVING_FINGERPRINTS_SQL,
+  DUPLICATE_JL_CODES_SQL,
+  FAILED_IMPORTS_SQL,
+  GIVING_RECONCILIATION_SQL,
+  LAST_BACKUP_SQL,
+  LATEST_DONATION_REVIEW_SQL,
+  ORPHANED_GIFTS_SQL,
+  ORPHANED_INTERACTIONS_SQL,
+  ORPHANED_PAYMENTS_SQL,
+  ORPHANED_REMINDERS_SQL,
+  REFRESH_STATE_SQL,
+} from "./queries";
+import {
+  APP_VERSION,
+  MIGRATION_LEDGER_COMPLETE,
+  buildDataHealthReport,
+  inferMigrationLevel,
+  schemaIsReady,
+  type DataHealthFacts,
+  type DataHealthReport,
+} from "./model";
+
+type QueryResult = { results?: Array<Record<string, unknown>> };
+
+const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRAISING_OS_COMMIT__.trim()
+  ? __FUNDRAISING_OS_COMMIT__.trim()
+  : null;
+
+const emptyFacts = (): DataHealthFacts => ({
+  databaseConnected: false,
+  schemaReady: false,
+  currentMigrationLevel: null,
+  migrationLedgerComplete: MIGRATION_LEDGER_COMPLETE,
+  activeDonors: null,
+  duplicateJlCodes: null,
+  orphanedGifts: null,
+  orphanedInteractions: null,
+  orphanedReminders: null,
+  orphanedPayments: null,
+  brokenMergeRedirects: null,
+  givingSourceTotalCents: null,
+  givingLinkedTotalCents: null,
+  invalidGivingRows: null,
+  duplicateGivingFingerprints: null,
+  unmatchedJlCodes: null,
+  pendingPledgeAssignments: null,
+  failedOrIncompleteImports: null,
+  lastHouseholdRefreshAt: null,
+  lastDonationRefreshAt: null,
+  lastBackupAt: null,
+  appVersion: APP_VERSION,
+  deployedCommit,
+});
+
+const rows = (result: QueryResult | undefined) => result?.results ?? [];
+const first = (result: QueryResult | undefined) => rows(result)[0] ?? {};
+const number = (value: unknown, fallback: number | null = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+export async function loadDataHealth(userId: string): Promise<DataHealthReport> {
+  const facts = emptyFacts();
+  try {
+    const schemaResults = await env.DB.batch([
+      env.DB.prepare("SELECT 1 AS connected"),
+      env.DB.prepare("SELECT name FROM sqlite_schema WHERE type='table'"),
+      env.DB.prepare("PRAGMA table_info('users')"),
+      env.DB.prepare("PRAGMA table_info('donors')"),
+      env.DB.prepare("PRAGMA table_info('giving_activities')"),
+    ]) as unknown as QueryResult[];
+    facts.databaseConnected = number(first(schemaResults[0]).connected) === 1;
+    const tableNames = rows(schemaResults[1]).map((row) => String(row.name ?? ""));
+    const userColumns = rows(schemaResults[2]).map((row) => String(row.name ?? ""));
+    const donorColumns = rows(schemaResults[3]).map((row) => String(row.name ?? ""));
+    const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));
+    facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns);
+    facts.schemaReady = schemaIsReady(tableNames, userColumns, donorColumns, givingColumns);
+    if (!facts.schemaReady) return buildDataHealthReport(facts);
+
+    const healthResults = await env.DB.batch([
+      env.DB.prepare(ACTIVE_DONORS_SQL).bind(userId),
+      env.DB.prepare(DUPLICATE_JL_CODES_SQL).bind(userId),
+      env.DB.prepare(ORPHANED_GIFTS_SQL).bind(userId),
+      env.DB.prepare(ORPHANED_INTERACTIONS_SQL).bind(userId, userId),
+      env.DB.prepare(ORPHANED_REMINDERS_SQL).bind(userId, userId),
+      env.DB.prepare(ORPHANED_PAYMENTS_SQL).bind(userId, userId, userId),
+      env.DB.prepare(BROKEN_MERGE_REDIRECTS_SQL).bind(userId, userId),
+      env.DB.prepare(GIVING_RECONCILIATION_SQL).bind(userId, userId),
+      env.DB.prepare(DUPLICATE_GIVING_FINGERPRINTS_SQL).bind(userId),
+      env.DB.prepare(LATEST_DONATION_REVIEW_SQL).bind(userId),
+      env.DB.prepare(FAILED_IMPORTS_SQL).bind(userId),
+      env.DB.prepare(REFRESH_STATE_SQL).bind(userId),
+      env.DB.prepare(LAST_BACKUP_SQL).bind(userId),
+    ]) as unknown as QueryResult[];
+
+    const giving = first(healthResults[7]);
+    const latestDonation = first(healthResults[9]);
+    const refresh = first(healthResults[11]);
+    facts.activeDonors = number(first(healthResults[0]).count);
+    facts.duplicateJlCodes = number(first(healthResults[1]).count);
+    facts.orphanedGifts = number(first(healthResults[2]).count);
+    facts.orphanedInteractions = number(first(healthResults[3]).count);
+    facts.orphanedReminders = number(first(healthResults[4]).count);
+    facts.orphanedPayments = number(first(healthResults[5]).count);
+    facts.brokenMergeRedirects = number(first(healthResults[6]).count);
+    facts.givingSourceTotalCents = number(giving.source_total_cents);
+    facts.givingLinkedTotalCents = number(giving.linked_total_cents);
+    facts.invalidGivingRows = number(giving.invalid_rows);
+    facts.duplicateGivingFingerprints = number(first(healthResults[8]).count);
+    facts.unmatchedJlCodes = number(latestDonation.unmatched_jl_codes);
+    facts.pendingPledgeAssignments = number(latestDonation.pending_assignments);
+    facts.failedOrIncompleteImports = number(first(healthResults[10]).count);
+    facts.lastHouseholdRefreshAt = number(refresh.last_household_refresh_at, null);
+    facts.lastDonationRefreshAt = number(refresh.last_donation_refresh_at, null);
+    facts.lastBackupAt = number(first(healthResults[12]).created_at, null);
+    return buildDataHealthReport(facts);
+  } catch {
+    return buildDataHealthReport(facts);
+  }
+}

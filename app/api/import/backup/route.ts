@@ -57,10 +57,8 @@ export async function GET(request: Request) {
       rollbackAudits: rollbackAudits.results,
       householdRollbackAudits: householdRollbackAudits.results,
     }, null, 2);
-    if (rollbackPurpose) {
-      await env.DB.prepare("INSERT INTO workspace_backup_audits (id,user_id,purpose,import_id,created_at) VALUES (?,?,?,?,?)")
-        .bind(backupId, profile.id, purpose, importId, Math.floor(Date.now() / 1000)).run();
-    }
+    await env.DB.prepare("INSERT INTO workspace_backup_audits (id,user_id,purpose,import_id,created_at) VALUES (?,?,?,?,?)")
+      .bind(backupId, profile.id, rollbackPurpose ? purpose : "workspace_export", importId, Math.floor(Date.now() / 1000)).run();
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     return new Response(payload, {
       headers: {

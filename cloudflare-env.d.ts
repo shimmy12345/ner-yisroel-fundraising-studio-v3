@@ -14,6 +14,8 @@ interface D1Database {
   batch(statements: D1PreparedStatement[]): Promise<unknown[]>;
 }
 
+declare const __FUNDRAISING_OS_COMMIT__: string | null;
+
 declare module "cloudflare:workers" {
   export const env: {
     DB: D1Database;
