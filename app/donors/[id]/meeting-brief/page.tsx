@@ -6,6 +6,7 @@ import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { loadMeetingBrief } from "../../../../lib/relationships/meeting-brief";
 import { donorNavigationHref, safeDonorOrigin, safeInternalReturnPath } from "../../../../lib/navigation/donor-navigation";
 import { financialDateLabel } from "../../../../lib/financial-date";
+import { donorInitials, numericDonorCode } from "../../../../lib/relationships/donor-identity";
 
 export const metadata: Metadata = { title: "Meeting brief" };
 export const dynamic = "force-dynamic";
@@ -30,16 +31,18 @@ export default async function MeetingBriefPage({ params, searchParams }: { param
   const brief = await loadMeetingBrief(profile.id, id);
   if (!brief) notFound();
   const members = [brief.donor.primaryName, brief.donor.spouseName].filter(Boolean);
+  const donorCode = numericDonorCode({ donorCode: brief.donor.donorCode, externalId: brief.donor.externalId });
+  const initials = donorInitials({ displayName: brief.donor.displayName, primaryFirstName: brief.donor.primaryFirstName, lastName: brief.donor.lastName });
 
   return <AppShell active="donors"><main className="meeting-brief-page">
     <div className="donor-breadcrumb"><a href="/">Workspace</a><span>/</span><a href="/donors">Donors</a><span>/</span><a href={donorHref}>{brief.donor.displayName}</a><span>/</span><strong>Meeting brief</strong></div>
     <header className="meeting-brief-header">
-      <div><p className="eyebrow">MEETING BRIEF · LIVE DATA</p><h1>Prepare for {brief.donor.displayName}</h1><p>Built only from this household’s authenticated relationship record. Missing information is shown explicitly.</p></div>
+      <div><p className="eyebrow">MEETING BRIEF · LIVE DATA</p><h1>Prepare for {brief.donor.displayName}</h1>{donorCode && <span className="donor-code meeting-header-code">{donorCode}</span>}<p>Built only from this household’s authenticated relationship record. Missing information is shown explicitly.</p></div>
       <a className="meeting-outcome-button" href={`/capture?donorId=${encodeURIComponent(id)}&type=meeting`}>Log Meeting Outcome</a>
     </header>
 
     <section className="meeting-identity-card">
-      <div><p className="eyebrow">DONOR &amp; HOUSEHOLD</p><h2>{brief.donor.displayName}</h2><p>{members.length ? members.join(" & ") : "Household member names are not recorded."}</p><small>{brief.donor.externalId || brief.donor.donorCode ? `JL code ${brief.donor.externalId || brief.donor.donorCode}` : "No donor code recorded"}</small></div>
+      <div className="meeting-donor-identity"><span className="avatar">{initials}</span><div><p className="eyebrow">DONOR &amp; HOUSEHOLD</p><h2>{brief.donor.displayName}</h2>{donorCode && <span className="donor-code">{donorCode}</span>}<p>{members.length ? members.join(" & ") : "Household member names are not recorded."}</p></div></div>
       <div><p className="eyebrow">CONTACT</p>{brief.donor.email ? <a href={`mailto:${brief.donor.email}`}>{brief.donor.email}</a> : <p>No email recorded.</p>}{brief.donor.phone ? <a href={`tel:${brief.donor.phone.replace(/\D/g, "")}`}>{brief.donor.phone}</a> : brief.donor.homePhone ? <a href={`tel:${brief.donor.homePhone.replace(/\D/g, "")}`}>{brief.donor.homePhone}</a> : <p>No phone recorded.</p>}{brief.donor.address.length ? <address>{brief.donor.address.map((line) => <span key={line}>{line}</span>)}</address> : <p>No address recorded.</p>}</div>
     </section>
 

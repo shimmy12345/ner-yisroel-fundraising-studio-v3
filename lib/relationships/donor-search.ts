@@ -1,6 +1,7 @@
 export type DonorSearchRecord = {
   id: string;
   name: string;
+  primaryFirstName?: string | null;
   lastName: string | null;
   spouse: string | null;
   code: string | null;

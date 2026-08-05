@@ -7,7 +7,7 @@ import { activityStatus, completedPlannedAt, isArchivedActivity } from "../../..
 import { OutcomeExperience } from "./OutcomeExperience";
 
 export const dynamic = "force-dynamic";
-type ActivityRow = { id: string; donor_id: string; display_name: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
+type ActivityRow = { id: string; donor_id: string; display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null; type: string; occurred_at: number; summary: string; source: string; created_at: number };
 type AuditRow = { id: string; action: string; from_status: string; to_status: string; created_at: number; undone_at: number | null };
 
 function localDateTimeValue(date: Date, timezone: string) {
@@ -21,7 +21,7 @@ export default async function ActivityOutcomePage({ params }: { params: Promise<
   const { id } = await params;
   const identity = await requireChatGPTUser(`/interactions/${encodeURIComponent(id)}/outcome`);
   const profile = await ensureUserProfile(identity);
-  const activity = await env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, i.type, i.occurred_at, i.summary, i.source, i.created_at
+  const activity = await env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, i.type, i.occurred_at, i.summary, i.source, i.created_at
     FROM interactions i JOIN donors d ON d.id = i.donor_id
     WHERE i.id = ? AND i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live' LIMIT 1`).bind(id, profile.id, profile.id).first<ActivityRow>();
   if (!activity || isArchivedActivity(activity.source)) notFound();
@@ -38,7 +38,7 @@ export default async function ActivityOutcomePage({ params }: { params: Promise<
   const reschedule = plannedEpoch * 1000 > now.getTime() ? new Date(plannedEpoch * 1000) : new Date(now.getTime() + 86400000);
   const followSummary = followUp?.summary.split("\n") ?? [];
   return <AppShell active="donors"><OutcomeExperience activity={{
-    id: activity.id, donorId: activity.donor_id, donorName: activity.display_name, type: activity.type, status,
+    id: activity.id, donorId: activity.donor_id, donorName: activity.display_name, primaryFirstName: activity.primary_first_name, lastName: activity.last_name, donorCode: activity.external_id || activity.donor_code, type: activity.type, status,
     plannedLabel: dateTimeLabel(new Date(plannedEpoch * 1000), profile.timezone), subject, notes, outcome,
     completedLabel: status === "completed" || status === "no-response" ? dateTimeLabel(new Date(activity.occurred_at * 1000), profile.timezone) : null,
   }} initialCompletedValue={localDateTimeValue(status === "completed" || status === "no-response" ? new Date(activity.occurred_at * 1000) : now, profile.timezone)}

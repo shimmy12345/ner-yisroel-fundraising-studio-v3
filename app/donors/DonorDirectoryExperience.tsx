@@ -5,6 +5,7 @@ import { DonorDirectorySearch } from "./DonorDirectorySearch";
 import { DonorOriginLink } from "../components/DonorNavigation";
 import { effectiveDonorLastName, searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
 import { donorNavigationHref } from "../../lib/navigation/donor-navigation";
+import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
 
 export type DirectoryRelationship = {
   id: string;
@@ -24,10 +25,6 @@ export type DirectoryRelationship = {
   external_source: string | null;
 };
 
-function initials(name: string) {
-  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
-}
-
 export function DonorDirectoryExperience({ relationships, initialQuery, initialReturnPath }: { relationships: DirectoryRelationship[]; initialQuery: string; initialReturnPath: string }) {
   const [query, setQuery] = useState(initialQuery);
   const [returnPath, setReturnPath] = useState(initialReturnPath);
@@ -35,6 +32,7 @@ export function DonorDirectoryExperience({ relationships, initialQuery, initialR
   const donors = useMemo<DonorSearchRecord[]>(() => searchDonors(relationships.map((relationship) => ({
     id: relationship.id,
     name: relationship.display_name,
+    primaryFirstName: relationship.primary_first_name,
     lastName: relationship.last_name,
     spouse: relationship.spouse || relationship.spouse_first_name,
     code: relationship.external_id || relationship.donor_code,
@@ -51,8 +49,9 @@ export function DonorDirectoryExperience({ relationships, initialQuery, initialR
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");
       const location = [relationship.city, relationship.state].filter(Boolean).join(", ");
       const effectiveLastName = effectiveDonorLastName({ name: relationship.display_name, lastName: relationship.last_name });
+      const code = numericDonorCode({ donorCode: relationship.donor_code, externalId: relationship.external_id });
       return <DonorOriginLink className="directory-row" href={donorNavigationHref(relationship.id, returnPath, origin)} key={relationship.id}>
-        <span className="directory-avatar">{initials(relationship.display_name)}</span><span className="directory-identity"><strong>{relationship.display_name}</strong><small>{[`Last name: ${effectiveLastName}`, members, location].filter(Boolean).join(" · ")}</small></span><span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
+        <span className="directory-avatar">{donorInitials({ displayName: relationship.display_name, primaryFirstName: relationship.primary_first_name, lastName: relationship.last_name })}</span><span className="directory-identity"><strong>{relationship.display_name}</strong>{code && <span className="donor-code">{code}</span>}<small>{[`Last name: ${effectiveLastName}`, members, location].filter(Boolean).join(" · ")}</small></span><span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
       </DonorOriginLink>;
     })}</section> : <section className="directory-empty"><h2>No relationships found</h2><p>{searching ? "Try a different household, person, code, email, or phone, or clear the search to see everyone." : "Import your donor data to begin building your relationship workspace."}</p>{!searching && <a href="/onboarding/import">Import donor data</a>}</section>}
   </>;

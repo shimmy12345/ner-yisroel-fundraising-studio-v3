@@ -3,6 +3,8 @@ export type MeetingBriefDonor = {
   displayName: string;
   donorCode: string | null;
   externalId: string | null;
+  lastName: string | null;
+  primaryFirstName: string | null;
   primaryName: string | null;
   spouseName: string | null;
   email: string | null;

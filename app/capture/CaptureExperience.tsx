@@ -11,6 +11,7 @@ import {
 import { isFutureScheduledDate, parseScheduledDate, schedulingLabel, toLocalDateTimeValue } from "../../lib/capture/scheduling";
 import type { DonorSearchRecord } from "../../lib/relationships/donor-search";
 import { DonorAutocomplete } from "./DonorAutocomplete";
+import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
 
 const kinds: Array<{ value: InteractionKind; icon: string }> = [
   { value: "call", icon: "☎" },
@@ -138,8 +139,8 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
       <div className="capture-layout">
         <section className="capture-composer-card">
           <div className="capture-context">
-            <div className="mini-avatar" style={{ background: "#d9e8df" }}>{activeDonor?.name.slice(0, 2).toUpperCase() || "?"}</div>
-            <div><strong>{activeDonor?.name || "Choose a donor"}</strong><span>{nowLabel} · defaults to now</span></div>
+            <div className="mini-avatar" style={{ background: "#d9e8df" }}>{activeDonor ? donorInitials({ displayName: activeDonor.name, primaryFirstName: activeDonor.primaryFirstName, lastName: activeDonor.lastName }) : "?"}</div>
+            <div><strong>{activeDonor?.name || "Choose a donor"}</strong>{activeDonor && numericDonorCode({ donorCode: activeDonor.code }) && <span className="donor-code">{numericDonorCode({ donorCode: activeDonor.code })}</span>}<span>{nowLabel} · defaults to now</span></div>
             <DonorAutocomplete donors={donors} selectedId={donorId} onSelect={setDonorId} />
           </div>
 

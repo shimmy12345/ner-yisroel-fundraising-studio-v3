@@ -7,6 +7,8 @@ const donor = {
   displayName: "Adler Household",
   donorCode: "JL-100",
   externalId: "JL-100",
+  lastName: "Example",
+  primaryFirstName: "Ari",
   primaryName: "Ari",
   spouseName: "Miriam",
   email: "adler@example.test",

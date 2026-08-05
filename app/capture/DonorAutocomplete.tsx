@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
+import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
 
 export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone", initialQuery, onQueryChange, clearable = false }: {
   donors: DonorSearchRecord[];
@@ -90,8 +91,8 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => choose(donor)}
       >
-        <strong>{donor.name}</strong>
-        <span>{[donor.spouse, donor.code && `JL code ${donor.code}`, donor.email, donor.phone].filter(Boolean).join(" · ")}</span>
+        <span className="autocomplete-avatar">{donorInitials({ displayName: donor.name, primaryFirstName: donor.primaryFirstName, lastName: donor.lastName })}</span>
+        <span className="autocomplete-identity"><strong>{donor.name}</strong>{numericDonorCode({ donorCode: donor.code }) && <span className="donor-code">{numericDonorCode({ donorCode: donor.code })}</span>}<small>{[donor.spouse, donor.email, donor.phone].filter(Boolean).join(" · ")}</small></span>
       </button>) : <p>No matching donors</p>}
     </div>}
   </div>;

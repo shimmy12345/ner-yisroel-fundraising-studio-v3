@@ -13,6 +13,7 @@ type DonorRow = {
   display_name: string;
   donor_code: string | null;
   external_id: string | null;
+  last_name: string | null;
   primary_first_name: string | null;
   spouse_first_name: string | null;
   primary_title: string | null;
@@ -37,7 +38,7 @@ function titled(title: string | null, name: string | null) {
 }
 
 export async function loadMeetingBrief(userId: string, donorId: string, now = Math.floor(Date.now() / 1000)): Promise<MeetingBrief | null> {
-  const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, primary_first_name, spouse_first_name, primary_title, spouse_title, email, phone, home_phone, address_line_1, city, state, postal_code, country
+  const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, email, phone, home_phone, address_line_1, city, state, postal_code, country
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
@@ -74,6 +75,8 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
     displayName: donor.display_name,
     donorCode: donor.donor_code,
     externalId: donor.external_id,
+    lastName: donor.last_name,
+    primaryFirstName: donor.primary_first_name,
     primaryName: titled(donor.primary_title, donor.primary_first_name),
     spouseName: titled(donor.spouse_title, donor.spouse_first_name),
     email: donor.email,

@@ -38,7 +38,7 @@ export type OrphanRecordRow = {
   survivor_archived_at: number | null;
 };
 
-export const HEALTH_REPAIR_DONORS_SQL = `SELECT id,display_name AS name,last_name AS lastName,
+export const HEALTH_REPAIR_DONORS_SQL = `SELECT id,display_name AS name,primary_first_name AS primaryFirstName,last_name AS lastName,
   COALESCE(spouse,spouse_first_name) AS spouse,COALESCE(external_id,donor_code) AS code,email,
   COALESCE(phone,alternate_mobile_phone,home_phone) AS phone
   FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL

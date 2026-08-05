@@ -20,8 +20,9 @@ function ScheduledActivityCard({ activity, live, upcoming = false }: { activity:
   return <article className="meeting today-meeting-card scheduled-activity-card">
     <div className="meeting-time"><strong>{activity.time}</strong><span>{activity.period}</span>{upcoming && <small>{activity.date}</small>}</div>
     <div className="meeting-line" />
+    <div className="mini-avatar scheduled-donor-avatar">{activity.initials}</div>
     <div>
-      <div className="scheduled-activity-heading"><span className="event-type">{activity.typeLabel}</span><h3><a href={openHref}>{activity.donorName}</a></h3></div>
+      <div className="scheduled-activity-heading"><span className="event-type">{activity.typeLabel}</span><h3><a href={openHref}>{activity.donorName}</a></h3>{activity.donorCode && <span className="donor-code">{activity.donorCode}</span>}</div>
       <strong className="scheduled-subject">{activity.subject}</strong>
       <p>{activity.note}</p>
       <div className="meeting-links">
@@ -36,7 +37,7 @@ function ScheduledActivityCard({ activity, live, upcoming = false }: { activity:
 function DonorStrip({ id, title, description, donors }: { id: string; title: string; description: string; donors: WorkspaceDonorLink[] }) {
   const returnTo = `/#${id}`;
   return <section className="today-relationship-strip" id={id}><div className="section-title"><div><h2>{title}</h2><p>{description}</p></div><span className="count">{donors.length}</span></div>
-    {donors.length ? <div className="relationship-link-list">{donors.map((donor) => <a href={donorNavigationHref(donor.donorId, returnTo, "recent")} key={donor.donorId}><span className="mini-avatar">{donor.initials}</span><span><strong>{donor.name}</strong><small>{donor.detail}</small></span><span aria-hidden="true">→</span></a>)}</div> : <p className="empty-copy">Nothing to show yet. Open or update a donor relationship and it will appear here.</p>}
+    {donors.length ? <div className="relationship-link-list">{donors.map((donor) => <a href={donorNavigationHref(donor.donorId, returnTo, "recent")} key={donor.donorId}><span className="mini-avatar">{donor.initials}</span><span><strong>{donor.name}</strong>{donor.donorCode && <span className="donor-code">{donor.donorCode}</span>}<small>{donor.detail}</small></span><span aria-hidden="true">→</span></a>)}</div> : <p className="empty-copy">Nothing to show yet. Open or update a donor relationship and it will appear here.</p>}
   </section>;
 }
 
@@ -81,7 +82,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
 
     <section className="today-recent-activity" id="recent-activity">
       <div className="section-title"><div><h2>Recent giving activity</h2><p>Paid gifts recorded in the last 30 days</p></div><span className="count">{data.gifts.length}</span></div>
-      {data.gifts.length ? <div className="today-gift-list">{data.gifts.map((gift) => <a className="gift-row" key={gift.id} href={donorNavigationHref(gift.donorId, "/#recent-activity", "recent")}><div className="mini-avatar">{gift.initials}</div><div><h3>{gift.name}</h3><p>{gift.detail}</p></div><strong>{gift.amount}</strong></a>)}</div> : <p className="empty-copy">No gifts were recorded in the last 30 days.</p>}
+      {data.gifts.length ? <div className="today-gift-list">{data.gifts.map((gift) => <a className="gift-row" key={gift.id} href={donorNavigationHref(gift.donorId, "/#recent-activity", "recent")}><div className="mini-avatar">{gift.initials}</div><div><h3>{gift.name}</h3>{gift.donorCode && <span className="donor-code">{gift.donorCode}</span>}<p>{gift.detail}</p></div><strong>{gift.amount}</strong></a>)}</div> : <p className="empty-copy">No gifts were recorded in the last 30 days.</p>}
     </section>
   </AppShell>;
 }

@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { toLocalDateTimeValue } from "../../../../lib/capture/scheduling";
+import { donorInitials, numericDonorCode } from "../../../../lib/relationships/donor-identity";
 
 type ActivityStatus = "scheduled" | "completed" | "no-response" | "cancelled" | "archived" | "logged";
-type OutcomeActivity = { id: string; donorId: string; donorName: string; type: string; status: ActivityStatus; plannedLabel: string; completedLabel: string | null; subject: string; notes: string; outcome: string };
+type OutcomeActivity = { id: string; donorId: string; donorName: string; primaryFirstName: string | null; lastName: string | null; donorCode: string | null; type: string; status: ActivityStatus; plannedLabel: string; completedLabel: string | null; subject: string; notes: string; outcome: string };
 type OutcomeAction = "complete" | "cancel" | "reschedule" | "no-response" | "reopen" | "undo";
 type FollowUp = { id: string; type: string; at: string; subject: string; notes: string } | null;
 type Audit = { id: string; action: string; from_status: string; to_status: string; createdLabel: string; undone_at: number | null };
@@ -53,10 +54,11 @@ export function OutcomeExperience({ activity, initialCompletedValue, initialResc
 
   const followUpReady = !followUpEnabled || (Boolean(followUpType) && Boolean(followUpAt));
   const canClose = outcome.trim().length >= 2 && followUpReady;
+  const code = numericDonorCode({ donorCode: activity.donorCode });
   return <main className="outcome-page">
     <header className="outcome-header"><div><p className="eyebrow">ACTIVITY OUTCOME</p><h1>Close the loop</h1><p>Update the original activity without creating a duplicate.</p></div><a href={`/donors/${encodeURIComponent(activity.donorId)}`} aria-label="Close outcome form">×</a></header>
     <section className="outcome-plan-card" aria-label="Activity details">
-      <div><span className="event-type">{typeLabel(activity.type)}</span><span className={`activity-status activity-status-${currentStatus}`}>{statusLabel(currentStatus)}</span><h2>{activity.subject}</h2><p>{activity.donorName}</p></div>
+      <div className="outcome-activity-identity"><span className="mini-avatar">{donorInitials({ displayName: activity.donorName, primaryFirstName: activity.primaryFirstName, lastName: activity.lastName })}</span><div><span className="event-type">{typeLabel(activity.type)}</span><span className={`activity-status activity-status-${currentStatus}`}>{statusLabel(currentStatus)}</span><h2>{activity.subject}</h2><p>{activity.donorName}</p>{code && <span className="donor-code">{code}</span>}</div></div>
       <dl><div><dt>Scheduled</dt><dd>{activity.plannedLabel}</dd></div>{activity.completedLabel && <div><dt>Completed</dt><dd>{activity.completedLabel}</dd></div>}</dl>
     </section>
 
