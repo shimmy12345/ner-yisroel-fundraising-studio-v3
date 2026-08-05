@@ -58,22 +58,24 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       <a href="/capture?type=meeting&returnTo=%2F"><span>◷</span><strong>Schedule Meeting</strong><small>Choose a donor and future time</small></a>
       <a href="/donors"><span>⌕</span><strong>Find Donor</strong><small>Search your live relationships</small></a>
       <a href="/donors/new"><span>＋</span><strong>New Donor</strong><small>Add a relationship manually</small></a>
+      <a href="/onboarding/import"><span>⇧</span><strong>Import JL Export</strong><small>Households or donations</small></a>
       <a href={nextMeeting ? meetingBriefNavigationHref(nextMeeting.donorId, "/", "today") : "/donors"}><span>☼</span><strong>Prepare for Meeting</strong><small>{nextMeeting ? "Open your next donor brief" : "Choose a donor to prepare"}</small></a>
     </nav>
 
-    <RelationshipQueueExperience initialQueue={data.relationshipQueue} morningBrief={data.morningBrief} priorityCount={data.priorityCount} showAll={showAll} />
+    <div className="today-workflow-group today-act-now"><p className="today-group-label">ACT NOW</p>
+      <RelationshipQueueExperience initialQueue={data.relationshipQueue} morningBrief={data.morningBrief} priorityCount={data.priorityCount} showAll={showAll} />
+      <section className="today-upcoming today-schedule" id="today-schedule">
+        <div className="section-title"><div><h2>Today's Schedule</h2><p>Everything scheduled for today, in one place</p></div><span className="count">{data.todaySchedule.length}</span></div>
+        {data.todaySchedule.length ? <div className="today-meeting-list">{data.todaySchedule.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} key={item.id} />)}</div> : <p className="empty-copy">No relationship activities are scheduled for today.</p>}
+      </section>
+    </div>
 
-    <section className="today-upcoming today-schedule" id="today-schedule">
-      <div className="section-title"><div><h2>Today's Schedule</h2><p>Calls, emails, meetings, visits, notes, and personal interactions scheduled for today</p></div><span className="count">{data.todaySchedule.length}</span></div>
-      {data.todaySchedule.length ? <div className="today-meeting-list">{data.todaySchedule.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} key={item.id} />)}</div> : <p className="empty-copy">No relationship activities are scheduled for today.</p>}
-    </section>
-
-    <section className="today-upcoming" id="upcoming-schedule">
+    <div className="today-workflow-group today-plan-ahead"><p className="today-group-label">PLAN AHEAD</p><section className="today-upcoming" id="upcoming-schedule">
       <div className="section-title"><div><h2>Upcoming scheduled activities</h2><p>Future calls, emails, meetings, visits, notes, and personal interactions</p></div><span className="count">{data.upcomingActivities.length}</span></div>
       {data.upcomingActivities.length ? <div className="today-meeting-list">{data.upcomingActivities.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} upcoming key={item.id} />)}</div> : <p className="empty-copy">No future relationship activities are scheduled.</p>}
-    </section>
+    </section></div>
 
-    <BriefExperience surface="today" data={data} />
+    <div className="today-workflow-group today-reference"><p className="today-group-label">REFERENCE</p><BriefExperience surface="today" data={data} />
 
     <div className="today-relationship-strips">
       <DonorStrip id="recently-viewed" title="Recently viewed donors" description="Return to relationships you opened most recently" donors={data.recentlyViewed} />
@@ -83,6 +85,6 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
     <section className="today-recent-activity" id="recent-activity">
       <div className="section-title"><div><h2>Recent giving activity</h2><p>Paid gifts recorded in the last 30 days</p></div><span className="count">{data.gifts.length}</span></div>
       {data.gifts.length ? <div className="today-gift-list">{data.gifts.map((gift) => <a className="gift-row" key={gift.id} href={donorNavigationHref(gift.donorId, "/#recent-activity", "recent")}><div className="mini-avatar">{gift.initials}</div><div><h3>{gift.name}</h3>{gift.donorCode && <span className="donor-code">{gift.donorCode}</span>}<p>{gift.detail}</p></div><strong>{gift.amount}</strong></a>)}</div> : <p className="empty-copy">No gifts were recorded in the last 30 days.</p>}
-    </section>
+    </section></div>
   </AppShell>;
 }

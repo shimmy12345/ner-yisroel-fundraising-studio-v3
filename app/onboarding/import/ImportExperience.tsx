@@ -58,6 +58,8 @@ type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: nu
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
   suggestedRangeStart: string | null; suggestedRangeEnd: string | null;
+  pendingReviews: number;
+  undoAvailable: number;
   history: Array<{ id: string; fileName: string; completedAt: string | null; kind: string; summary: string; status: string; canUndo: boolean; undoKind: "donation" | "household" | null }>;
 };
 
@@ -312,7 +314,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     download(`fundraising-os-${kind}-rows-${suffix}.csv`, [header, ...lines].join("\n"), "text/csv");
   }
 
-  const stepNumber = step === "upload" ? 2 : step === "recognition" ? 3 : step === "preview" ? 4 : 5;
+  const stepNumber = step === "upload" ? 1 : step === "recognition" ? 2 : step === "preview" ? 3 : 4;
   const paymentAllocations = new Map<string, { priorAllocatedCents: number; appliedCents: number; remainderCents: number; resolved: boolean }>();
   const allocatedByPledge = new Map<string, number>();
   for (const item of donationPreview?.paymentAssignments ?? []) {
@@ -366,7 +368,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       </header>
       <div className="import-shell">
         <nav className="import-progress" aria-label="Import progress">
-          {["Welcome", "Upload", "Recognize", "Preview", "Import"].map((label, index) => (
+          {["Upload", "Review", "Preview", "Import"].map((label, index) => (
             <span key={label} className={index + 1 < stepNumber ? "done" : index + 1 === stepNumber ? "active" : ""}>
               <b>{index + 1 < stepNumber ? "✓" : index + 1}</b>{label}
             </span>
@@ -375,11 +377,17 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
 
         {step === "upload" && (
           <section className="import-card import-upload-step">
-            <p className="eyebrow">BRING YOUR DATA</p>
-            <h1>Start with the spreadsheet you already have.</h1>
-            <p className="import-lede">We&apos;ll recognize the useful donor, gift, interaction, and reminder information for you. Nothing is imported yet.</p>
+            <p className="eyebrow">IMPORT CENTER</p>
+            <h1>Import a JL export.</h1>
+            <p className="import-lede">Upload a household or donation export. Fundraising OS identifies the file and takes you directly to the review that matters. Nothing is imported yet.</p>
+            <div className="import-center-status" aria-label="Import center status">
+              <article><span>Households</span><strong>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</strong><small>Last refresh</small></article>
+              <article><span>Donations</span><strong>{dateLabel(refreshOverview.lastDonationRefreshAt)}</strong><small>Last refresh</small></article>
+              <article className={refreshOverview.pendingReviews ? "attention" : ""}><span>Pending reviews</span><strong>{refreshOverview.pendingReviews.toLocaleString()}</strong><small>{refreshOverview.pendingReviews ? "Rows needing a decision" : "Nothing waiting"}</small></article>
+              <article><span>Undo available</span><strong>{refreshOverview.undoAvailable.toLocaleString()}</strong><small>{refreshOverview.undoAvailable === 1 ? "Recent import" : "Recent imports"}</small></article>
+            </div>
             <section className="jl-refresh-overview" aria-label="JL refresh status">
-              <div><p className="eyebrow">INCREMENTAL JL REFRESH</p><h2>Upload only the recent export you need.</h2><p>Overlapping dates are safe. Existing fingerprints are skipped, changed pledge status is updated, and missing rows never delete history.</p></div>
+              <div><p className="eyebrow">NEXT REFRESH</p><h2>Use the most recent export you have.</h2><p>Fundraising OS checks overlapping rows, keeps your relationship history, and shows every proposed change before writing.</p></div>
               <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{refreshOverview.suggestedRangeStart ? `${dateLabel(refreshOverview.suggestedRangeStart)} – ${dateLabel(refreshOverview.suggestedRangeEnd)}` : `Most recent available range through ${dateLabel(refreshOverview.suggestedRangeEnd)}`}</dd></div></dl>
             </section>
             <div
@@ -389,13 +397,13 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
               onDrop={dropFile}
             >
               <div className="import-file-icon">⇧</div>
-              <strong>Drop your spreadsheet here</strong>
-              <p>CSV or Excel (.xlsx), up to 10 MB</p>
+              <strong>Drop either JL export here</strong>
+              <p>Household or donation · CSV or Excel (.xlsx), up to 10 MB</p>
               <button type="button" onClick={() => inputRef.current?.click()}>Choose a file</button>
               <input ref={inputRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseFile} hidden />
             </div>
             <p className="import-privacy">Your file is inspected in this browser. It is never sent to an AI provider.</p>
-            <section className="jl-import-history"><div><p className="eyebrow">IMPORT HISTORY</p><h2>Recent JL refreshes</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind} · {item.status === "undone" || item.status === "rolled_back" ? "Undone" : item.status === "failed" ? "Failed" : "Completed"}</strong><span>{item.fileName}</span><span>Batch ID: <code>{item.id}</code></span></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span>{item.canUndo && item.undoKind && <UndoDonationImport importId={item.id} kind={item.undoKind} />}</div></li>)}</ol> : <p>No completed imports yet.</p>}</section>
+            <section className="jl-import-history"><div><p className="eyebrow">RECENT IMPORTS</p><h2>What changed most recently</h2></div>{refreshOverview.history.length ? <ol>{refreshOverview.history.map((item) => <li key={item.id}><div><strong>{item.kind} · {item.status === "undone" || item.status === "rolled_back" ? "Undone" : item.status === "failed" ? "Needs attention" : "Completed"}</strong><span>{item.fileName}</span><details><summary>Import details</summary><span>Batch ID: <code>{item.id}</code></span></details></div><div><strong>{dateLabel(item.completedAt)}</strong><span>{item.summary}</span>{item.canUndo && item.undoKind && <UndoDonationImport importId={item.id} kind={item.undoKind} />}</div></li>)}</ol> : <p>No imports yet.</p>}</section>
             {statusMessage && <p className="import-status" role="status">{statusMessage}</p>}
             {duplicateBlock && <section className="force-reprocess-warning" role="alert" aria-labelledby="force-reprocess-title">
               <p className="eyebrow">ADMIN FALLBACK</p>

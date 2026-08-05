@@ -38,11 +38,17 @@ export default async function ImportPage() {
       kind: report.profile === "JL Solutions Donations" ? "Donation" : report.profile === "JL Solutions" ? "Household" : "Spreadsheet",
       summary: donation ? `${donation.newActivities ?? 0} new · ${donation.updatedPledges ?? 0} updated · ${donation.unchanged ?? 0} unchanged` : `${imported?.donors ?? 0} households processed` };
   });
+  const latestReviewReport = parsedImports.find(({ row, report }) => row.status === "completed" && report.profile === "JL Solutions Donations");
+  const latestResults = latestReviewReport?.report.results as { rowsRequiringReview?: number } | undefined;
+  const latestDonation = latestReviewReport?.report.donation as { needsReview?: number } | undefined;
   const refreshOverview: RefreshOverview = {
     lastHouseholdRefreshAt: state?.last_household_refresh_at ? new Date(state.last_household_refresh_at * 1000).toISOString() : null,
     lastDonationRefreshAt: state?.last_donation_refresh_at ? new Date(state.last_donation_refresh_at * 1000).toISOString() : null,
     lastDonationRangeStart: isoDate(state?.last_donation_range_start ?? null), lastDonationRangeEnd: isoDate(state?.last_donation_range_end ?? null),
-    suggestedRangeStart: isoDate(suggestion.start), suggestedRangeEnd: isoDate(suggestion.end), history,
+    suggestedRangeStart: isoDate(suggestion.start), suggestedRangeEnd: isoDate(suggestion.end),
+    pendingReviews: latestResults?.rowsRequiringReview ?? latestDonation?.needsReview ?? 0,
+    undoAvailable: history.filter((item) => item.canUndo).length,
+    history,
   };
   return <ImportExperience refreshOverview={refreshOverview} initialReviewMode={profile.importReviewMode} />;
 }

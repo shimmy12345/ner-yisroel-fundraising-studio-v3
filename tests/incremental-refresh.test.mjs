@@ -44,7 +44,12 @@ assert.match(previewRoute, /conflicts:/);
 assert.match(previewRoute, /rejectedRows:/);
 assert.match(page, /ORDER BY completed_at DESC, created_at DESC LIMIT 12/);
 assert.match(experience, /Suggested donation export/);
-assert.match(experience, /Recent JL refreshes/);
+assert.match(experience, /IMPORT CENTER/);
+assert.match(experience, /Pending reviews/);
+assert.match(experience, /Undo available/);
+assert.match(experience, /Household or donation/);
+assert.match(experience, /\["Upload", "Review", "Preview", "Import"\]/);
+assert.doesNotMatch(experience, /\["Welcome", "Upload"/);
 assert.match(experience, /Historical gifts were not deleted/);
 assert.match(migration, /CREATE TABLE `jl_refresh_state`/);
 

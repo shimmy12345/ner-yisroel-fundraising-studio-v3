@@ -22,7 +22,7 @@ const brief = buildMeetingBrief(
     { id: "gift-old", occurredAt: 1700000000, paidCents: 50000, balanceCents: 0, description: "Annual gift" },
     { id: "gift-recent", occurredAt: 1750000000, paidCents: 25000, balanceCents: 10000, description: "Scholarship fund" },
   ],
-  [{ id: "interaction-a", type: "call", occurredAt: 1740000000, summary: "Discussed the recorded visit\nNo additional assumptions." }],
+  [{ id: "interaction-a", type: "call", occurredAt: 1740000000, summary: "Scholarship outcomes\nDiscussed scholarship outcomes with Maya Cohen and a campus visit." }],
   [{ id: "reminder-a", action: "Send the recorded materials", reason: "Committed during the last call", dueAt: 1760000000 }],
 );
 
@@ -32,6 +32,8 @@ assert.equal(brief.recentGift?.id, "gift-recent");
 assert.equal(brief.largestGift?.id, "gift-old");
 assert.equal(brief.openPledgeCents, 10000);
 assert.equal(brief.lastMeaningfulContact?.id, "interaction-a");
+assert.deepEqual(brief.recentDiscussionTopics, ["Scholarship update", "Impact update"]);
+assert.deepEqual(brief.peopleMentioned, ["Maya Cohen"]);
 assert.equal(brief.discussionTopics.length, 3);
 assert.equal(brief.followUpActions.length, 3);
 assert.match(brief.discussionTopics.map((topic) => topic.detail).join(" "), /Scholarship fund/);
@@ -58,6 +60,8 @@ assert.match(loader, /r\.donor_id = \? AND r\.user_id = \? AND d\.owner_user_id 
 assert.doesNotMatch(loader, /data_source = 'sample'/);
 assert.match(page, /Log Meeting Outcome/);
 assert.match(page, /type=meeting/);
+for (const section of ["LAST INTERACTION", "RECENT DISCUSSION TOPICS", "OPEN COMMITMENTS", "LAST GIFT", "PEOPLE MENTIONED", "SUGGESTED PREPARATION"]) assert.match(page, new RegExp(section));
+assert.doesNotMatch(page, /LIVE DATA|authenticated relationship record|data-backed|implementation|confidence|classification/i);
 assert.match(donorPage, /Prepare for Meeting/);
 assert.match(today, /Prepare for Meeting/);
 assert.match(capturePage, /allowedKinds\.has\(requestedParams\.type/);

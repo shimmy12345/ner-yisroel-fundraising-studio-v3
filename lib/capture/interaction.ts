@@ -87,22 +87,46 @@ function commitmentAction(sentence: string) {
   return direct ? concise(`${direct[1]}${direct[2]}`.replace(/[.!?]+$/, ""), 120) : null;
 }
 
-export function actionableRelationshipSnapshot(note: string, kind: InteractionKind) {
+export type RelationshipSnapshotDetails = {
+  topics: string[];
+  people: string[];
+  organizations: string[];
+  commitments: string[];
+  openFollowUps: string[];
+  relationshipChanges: string[];
+  recommendedNextAction: string;
+};
+
+export function relationshipSnapshotDetails(note: string, kind: InteractionKind): RelationshipSnapshotDetails {
   const sentences = sentenceList(note);
-  const topics = inferSubject(note, kind);
+  const topics = inferSubject(note, kind).split(" and ").map((topic) => topic.replace(/^./, (letter) => letter.toUpperCase()));
   const people = mentionedPeople(note);
   const organizations = mentionedOrganizations(note);
   const commitmentSentences = sentences.filter((sentence) => /\b(promised|agreed|committed|will|would|send|follow up|follow-up|call back|introduce|schedule|share|provide)\b/i.test(sentence)).slice(0, 3);
   const relationshipChanges = sentences.filter((sentence) => /\b(increased|decreased|changed|newly|no longer|ready|hesitant|more involved|less involved|reconnected|stepped back)\b/i.test(sentence)).slice(0, 2);
   const nextAction = commitmentSentences.map(commitmentAction).find(Boolean) ?? "Review this note before the next interaction";
+  return {
+    topics,
+    people,
+    organizations,
+    commitments: commitmentSentences.map((item) => concise(item).replace(/[.!?]+$/, "")),
+    openFollowUps: commitmentSentences.length ? [nextAction] : [],
+    relationshipChanges: relationshipChanges.map((item) => concise(item).replace(/[.!?]+$/, "")),
+    recommendedNextAction: nextAction,
+  };
+}
+
+export function actionableRelationshipSnapshot(note: string, kind: InteractionKind) {
+  const details = relationshipSnapshotDetails(note, kind);
+  const topicLabel = details.topics.map((topic, index) => index ? topic.toLowerCase() : topic).join(" and ");
   return [
-    `Latest discussion topics: ${topics}.`,
-    people.length ? `People mentioned: ${people.join(", ")}.` : null,
-    organizations.length ? `Organizations mentioned: ${organizations.join(", ")}.` : null,
-    commitmentSentences.length ? `Commitments: ${commitmentSentences.map((item) => concise(item).replace(/[.!?]+$/, "")).join("; ")}.` : null,
-    commitmentSentences.length ? `Open follow-ups: ${nextAction}.` : null,
-    relationshipChanges.length ? `Relationship changes: ${relationshipChanges.map((item) => concise(item).replace(/[.!?]+$/, "")).join("; ")}.` : null,
-    `Recommended next action: ${nextAction}.`,
+    `Latest discussion topics: ${topicLabel}.`,
+    details.people.length ? `People mentioned: ${details.people.join(", ")}.` : null,
+    details.organizations.length ? `Organizations mentioned: ${details.organizations.join(", ")}.` : null,
+    details.commitments.length ? `Commitments: ${details.commitments.join("; ")}.` : null,
+    details.openFollowUps.length ? `Open follow-ups: ${details.openFollowUps.join("; ")}.` : null,
+    details.relationshipChanges.length ? `Relationship changes: ${details.relationshipChanges.join("; ")}.` : null,
+    `Recommended next action: ${details.recommendedNextAction}.`,
   ].filter(Boolean).join("\n");
 }
 

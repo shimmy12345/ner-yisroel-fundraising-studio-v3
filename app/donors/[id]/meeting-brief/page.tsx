@@ -7,6 +7,7 @@ import { loadMeetingBrief } from "../../../../lib/relationships/meeting-brief";
 import { donorNavigationHref, safeDonorOrigin, safeInternalReturnPath } from "../../../../lib/navigation/donor-navigation";
 import { financialDateLabel } from "../../../../lib/financial-date";
 import { donorInitials, numericDonorCode } from "../../../../lib/relationships/donor-identity";
+import { splitInteractionSummary } from "../../../../lib/capture/interaction";
 
 export const metadata: Metadata = { title: "Meeting brief" };
 export const dynamic = "force-dynamic";
@@ -33,11 +34,12 @@ export default async function MeetingBriefPage({ params, searchParams }: { param
   const members = [brief.donor.primaryName, brief.donor.spouseName].filter(Boolean);
   const donorCode = numericDonorCode({ donorCode: brief.donor.donorCode, externalId: brief.donor.externalId });
   const initials = donorInitials({ displayName: brief.donor.displayName, primaryFirstName: brief.donor.primaryFirstName, lastName: brief.donor.lastName });
+  const latestInteraction = brief.lastMeaningfulContact ? splitInteractionSummary(brief.lastMeaningfulContact.summary) : null;
 
   return <AppShell active="donors"><main className="meeting-brief-page">
     <div className="donor-breadcrumb"><a href="/">Workspace</a><span>/</span><a href="/donors">Donors</a><span>/</span><a href={donorHref}>{brief.donor.displayName}</a><span>/</span><strong>Meeting brief</strong></div>
     <header className="meeting-brief-header">
-      <div><p className="eyebrow">MEETING BRIEF · LIVE DATA</p><h1>Prepare for {brief.donor.displayName}</h1>{donorCode && <span className="donor-code meeting-header-code">{donorCode}</span>}<p>Built only from this household’s authenticated relationship record. Missing information is shown explicitly.</p></div>
+      <div><p className="eyebrow">MEETING PREP</p><h1>Prepare for {brief.donor.displayName}</h1>{donorCode && <span className="donor-code meeting-header-code">{donorCode}</span>}<p>A one-minute briefing from this donor&apos;s recorded relationship history.</p></div>
       <a className="meeting-outcome-button" href={`/capture?donorId=${encodeURIComponent(id)}&type=meeting`}>Log Meeting Outcome</a>
     </header>
 
@@ -46,19 +48,13 @@ export default async function MeetingBriefPage({ params, searchParams }: { param
       <div><p className="eyebrow">CONTACT</p>{brief.donor.email ? <a href={`mailto:${brief.donor.email}`}>{brief.donor.email}</a> : <p>No email recorded.</p>}{brief.donor.phone ? <a href={`tel:${brief.donor.phone.replace(/\D/g, "")}`}>{brief.donor.phone}</a> : brief.donor.homePhone ? <a href={`tel:${brief.donor.homePhone.replace(/\D/g, "")}`}>{brief.donor.homePhone}</a> : <p>No phone recorded.</p>}{brief.donor.address.length ? <address>{brief.donor.address.map((line) => <span key={line}>{line}</span>)}</address> : <p>No address recorded.</p>}</div>
     </section>
 
-    <section className="meeting-giving-grid" aria-label="Giving snapshot">
-      <article><p>Lifetime paid</p><strong>{money(brief.lifetimePaidCents)}</strong><span>{brief.lifetimePaidCents ? "From recorded paid giving" : "No paid giving recorded"}</span></article>
-      <article><p>Recent gift</p><GiftSummary gift={brief.recentGift} empty="No paid gift recorded" /></article>
-      <article><p>Largest gift</p><GiftSummary gift={brief.largestGift} empty="No paid gift recorded" /></article>
-      <article><p>Open pledge balance</p><strong>{money(brief.openPledgeCents)}</strong><span>{brief.openPledgeCents ? "Recorded outstanding balance" : "No open pledge balance"}</span></article>
-    </section>
-
-    <div className="meeting-brief-grid">
-      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">RECENT INTERACTIONS</p><h2>Relationship context</h2></div>{brief.recentInteractions.length ? <div className="meeting-record-list">{brief.recentInteractions.map((item) => <article key={item.id}><time>{date(item.occurredAt, profile.timezone)}</time><div><strong>{item.summary.split("\n")[0]}</strong><p>{item.summary.split("\n").slice(1).join("\n") || "No additional notes recorded."}</p><span>{item.type}</span></div></article>)}</div> : <p className="meeting-empty">No prior interactions are recorded for this household.</p>}</section>
-      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">OPEN REMINDERS &amp; COMMITMENTS</p><h2>Unfinished work</h2></div>{brief.openReminders.length ? <div className="meeting-record-list">{brief.openReminders.map((item) => <article key={item.id}><time>{item.dueAt ? date(item.dueAt, profile.timezone) : "No due date"}</time><div><strong>{item.action}</strong><p>{item.reason}</p></div></article>)}</div> : <p className="meeting-empty">No open reminders or commitments are recorded.</p>}</section>
-      <section className="meeting-brief-card meeting-last-contact"><div className="meeting-card-heading"><p className="eyebrow">LAST MEANINGFUL CONTACT</p><h2>{brief.lastMeaningfulContact ? date(brief.lastMeaningfulContact.occurredAt, profile.timezone) : "None recorded"}</h2></div><p>{brief.lastMeaningfulContact ? brief.lastMeaningfulContact.summary.split("\n")[0] : "There is no completed interaction to summarize."}</p></section>
-      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">3 DISCUSSION TOPICS</p><h2>Data-backed conversation</h2></div><ol className="meeting-suggestions">{brief.discussionTopics.map((topic) => <li key={topic.title}><strong>{topic.title}</strong><p>{topic.detail}</p></li>)}</ol></section>
-      <section className="meeting-brief-card meeting-follow-up"><div className="meeting-card-heading"><p className="eyebrow">SUGGESTED FOLLOW-UP</p><h2>After the meeting</h2></div><ol className="meeting-suggestions">{brief.followUpActions.map((action) => <li key={action.title}><strong>{action.title}</strong><p>{action.detail}</p></li>)}</ol><a href={`/capture?donorId=${encodeURIComponent(id)}&type=meeting`}>Log Meeting Outcome</a></section>
+    <div className="meeting-brief-essential-grid">
+      <section className="meeting-brief-card meeting-brief-last-interaction"><div className="meeting-card-heading"><p className="eyebrow">LAST INTERACTION</p><h2>{brief.lastMeaningfulContact ? date(brief.lastMeaningfulContact.occurredAt, profile.timezone) : "None recorded"}</h2></div>{latestInteraction ? <><strong>{latestInteraction.timelineTitle}</strong><p>{latestInteraction.timelineNote}</p><span className="event-type">{brief.lastMeaningfulContact?.type}</span></> : <p className="meeting-empty">No previous interaction is recorded.</p>}</section>
+      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">RECENT DISCUSSION TOPICS</p><h2>What has been discussed</h2></div>{brief.recentDiscussionTopics.length ? <ul className="meeting-topic-list">{brief.recentDiscussionTopics.map((topic) => <li key={topic}>{topic}</li>)}</ul> : <p className="meeting-empty">No discussion topics are recorded yet.</p>}</section>
+      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">OPEN COMMITMENTS</p><h2>What still needs attention</h2></div>{brief.openReminders.length ? <div className="meeting-commitment-list">{brief.openReminders.map((item) => <article key={item.id}><strong>{item.action}</strong><span>{item.dueAt ? `Due ${date(item.dueAt, profile.timezone)}` : "No due date"}</span>{item.reason && <p>{item.reason}</p>}</article>)}</div> : <p className="meeting-empty">No open commitments are recorded.</p>}</section>
+      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">LAST GIFT</p><h2>Giving context</h2></div><div className="meeting-last-gift"><GiftSummary gift={brief.recentGift} empty="No paid gift recorded" /></div><p className="meeting-giving-context">{brief.lifetimePaidCents ? `${money(brief.lifetimePaidCents)} lifetime paid` : "No paid giving recorded"}{brief.openPledgeCents ? ` · ${money(brief.openPledgeCents)} open pledge balance` : ""}</p></section>
+      <section className="meeting-brief-card"><div className="meeting-card-heading"><p className="eyebrow">PEOPLE MENTIONED</p><h2>Names to remember</h2></div>{brief.peopleMentioned.length ? <ul className="meeting-people-list">{brief.peopleMentioned.map((person) => <li key={person}>{person}</li>)}</ul> : <p className="meeting-empty">No additional people are mentioned in recent notes.</p>}</section>
+      <section className="meeting-brief-card meeting-preparation-card"><div className="meeting-card-heading"><p className="eyebrow">SUGGESTED PREPARATION</p><h2>Before the conversation</h2></div><ol className="meeting-suggestions">{brief.discussionTopics.map((topic) => <li key={topic.title}><strong>{topic.title}</strong><p>{topic.detail}</p></li>)}</ol><a className="meeting-outcome-button" href={`/capture?donorId=${encodeURIComponent(id)}&type=meeting`}>Log Meeting Outcome</a></section>
     </div>
   </main></AppShell>;
 }

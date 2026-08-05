@@ -11,8 +11,9 @@ const capture = await readFile(new URL("../app/capture/CaptureExperience.tsx", i
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
 const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const relationshipRead = await readFile(new URL("../lib/relationships/read.ts", import.meta.url), "utf8");
+const appShell = await readFile(new URL("../app/components/AppShell.tsx", import.meta.url), "utf8");
 
-for (const action of ["Log Interaction", "Schedule Meeting", "Find Donor", "Prepare for Meeting"]) assert.match(today, new RegExp(action));
+for (const action of ["Log Interaction", "Schedule Meeting", "Find Donor", "Import JL Export", "Prepare for Meeting"]) assert.match(today, new RegExp(action));
 assert.ok(today.indexOf("today-quick-actions") < today.indexOf("<RelationshipQueueExperience"));
 assert.ok(today.indexOf("<RelationshipQueueExperience") < today.indexOf("today-upcoming today-schedule"));
 assert.ok(today.indexOf("<BriefExperience") < today.indexOf("today-recent-activity"));
@@ -46,7 +47,13 @@ assert.match(liveData, /d\.archived_at IS NULL/);
 
 assert.match(completion, /id = \? AND user_id = \? AND status = 'open'/);
 assert.match(completion, /owner_user_id = \? AND data_source = 'live'/);
-assert.match(completeButton, /window\.location\.reload\(\)/);
+assert.doesNotMatch(completeButton, /window\.location\.reload\(\)/);
+assert.match(completeButton, /onOptimisticComplete/);
+assert.match(queueExperience, /completeOptimistically/);
+assert.match(queueExperience, /restoreFailedCompletion/);
+for (const group of ["ACT NOW", "PLAN AHEAD", "REFERENCE"]) assert.match(today, new RegExp(group));
+assert.match(appShell, /active === "import"/);
+assert.match(appShell, /href="\/onboarding\/import"/);
 assert.match(capturePage, /requestedParams\.returnTo === "\/"/);
 assert.match(capture, /window\.location\.assign\(returnTo\)/);
 assert.match(donorPage, /One chronological story/);

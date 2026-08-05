@@ -44,6 +44,8 @@ export type MeetingBrief = {
   recentInteractions: MeetingBriefInteraction[];
   openReminders: MeetingBriefReminder[];
   lastMeaningfulContact: MeetingBriefInteraction | null;
+  recentDiscussionTopics: string[];
+  peopleMentioned: string[];
   discussionTopics: Array<{ title: string; detail: string }>;
   followUpActions: Array<{ title: string; detail: string }>;
 };
@@ -64,6 +66,14 @@ export function buildMeetingBrief(
   const recentInteractions = [...interactions].sort((a, b) => b.occurredAt - a.occurredAt).slice(0, 5);
   const openReminders = [...reminders].sort((a, b) => (a.dueAt ?? Number.MAX_SAFE_INTEGER) - (b.dueAt ?? Number.MAX_SAFE_INTEGER)).slice(0, 5);
   const openPledgeCents = gifts.reduce((sum, gift) => sum + Math.max(0, gift.balanceCents), 0);
+  const allowedKinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+  const relationshipSignals = recentInteractions.map((interaction) => {
+    const { note, subject } = splitInteractionSummary(interaction.summary);
+    const kind = allowedKinds.has(interaction.type as InteractionKind) ? interaction.type as InteractionKind : "note";
+    return relationshipSnapshotDetails(note || subject, kind);
+  });
+  const recentDiscussionTopics = [...new Set(relationshipSignals.flatMap((item) => item.topics))].slice(0, 5);
+  const peopleMentioned = [...new Set(relationshipSignals.flatMap((item) => item.people))].slice(0, 8);
 
   const discussionTopics = [
     recentGift
@@ -98,7 +108,10 @@ export function buildMeetingBrief(
     recentInteractions,
     openReminders,
     lastMeaningfulContact: recentInteractions[0] ?? null,
+    recentDiscussionTopics,
+    peopleMentioned,
     discussionTopics,
     followUpActions,
   };
 }
+import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";
