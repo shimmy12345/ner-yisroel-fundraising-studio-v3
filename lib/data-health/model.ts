@@ -12,6 +12,7 @@ export type HealthCheck = {
 };
 
 export type DataHealthFacts = {
+  deploymentEnvironment: "staging" | "production";
   databaseConnected: boolean;
   schemaReady: boolean;
   currentMigrationLevel: string | null;
@@ -24,8 +25,10 @@ export type DataHealthFacts = {
   remoteMigrationDiagnosticLines: string[];
   productionBaselineLevel: string;
   productionBaselineVerified: boolean;
+  productionBaselineApplied: boolean;
   schemaMatchesBaseline: boolean;
   schemaComparisonDifferences: string[];
+  businessDataRows: number | null;
   activeDonors: number | null;
   duplicateJlCodes: number | null;
   orphanedGifts: number | null;
@@ -53,6 +56,8 @@ export type DataHealthReport = {
   summary: string;
   checks: HealthCheck[];
   platform: {
+    deploymentEnvironment: "staging" | "production";
+    businessDataRows: number | null;
     migrationLevel: string;
     journalMigrationLevel: string;
     remoteMigrationLevel: string;
@@ -158,11 +163,14 @@ function timestampCheck(id: string, label: string, timestamp: number | null, has
 }
 
 export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Date().toISOString()): DataHealthReport {
+  const deploymentEnvironment = facts.deploymentEnvironment ?? "staging";
+  const productionBaselineApplied = facts.productionBaselineApplied ?? facts.productionBaselineVerified;
+  const businessDataRows = facts.businessDataRows ?? facts.activeDonors;
   const hasData = (facts.activeDonors ?? 0) > 0;
   const givingReady = [facts.givingSourceTotalCents, facts.givingLinkedTotalCents, facts.invalidGivingRows, facts.duplicateGivingFingerprints].every((value) => value !== null);
   const givingHealthy = givingReady && facts.givingSourceTotalCents === facts.givingLinkedTotalCents && facts.invalidGivingRows === 0 && facts.duplicateGivingFingerprints === 0;
   const relationshipIntegrityHealthy = [facts.duplicateJlCodes, facts.orphanedGifts, facts.orphanedInteractions, facts.orphanedReminders, facts.orphanedPayments, facts.brokenMergeRedirects].every((value) => value === 0);
-  const productionReady = facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.productionBaselineVerified && facts.schemaMatchesBaseline && givingHealthy && relationshipIntegrityHealthy;
+  const productionReady = facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.productionBaselineVerified && productionBaselineApplied && facts.schemaMatchesBaseline && givingHealthy && relationshipIntegrityHealthy;
   const checks: HealthCheck[] = [
     {
       id: "database",
@@ -172,10 +180,19 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       explanation: facts.databaseConnected ? "Fundraising OS can read the D1 workspace." : "Fundraising OS could not read D1. No workspace integrity checks were completed.",
     },
     { id: "live-schema", label: "Live schema version", status: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "healthy" : "critical", value: `${facts.currentMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "The live D1 schema contains every expected table and column." : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled." },
-    { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
-    { id: "production-baseline", label: "Production rehearsal baseline", status: facts.productionBaselineVerified ? "healthy" : "critical", value: facts.productionBaselineVerified ? `${facts.productionBaselineLevel} · Verified` : `${facts.productionBaselineLevel} · Failed`, explanation: facts.productionBaselineVerified ? "A brand-new empty database reaches the complete schema with no sample or donor data, passes integrity checks, and blocks baseline replay." : "The clean production baseline rehearsal failed. Do not create the production database." },
+    deploymentEnvironment === "production"
+      ? { id: "staging-migration-history", label: "Production migration history", status: productionBaselineApplied ? "healthy" : "critical", value: productionBaselineApplied ? "Baseline 0019" : "Unverified", explanation: productionBaselineApplied ? "This database was created from the verified 0019 production baseline. Legacy staging history was not copied." : "The production baseline marker or schema hash is missing. Do not load business data." }
+      : { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
+    { id: "production-baseline", label: "Production rehearsal baseline", status: facts.productionBaselineVerified && productionBaselineApplied ? "healthy" : "critical", value: facts.productionBaselineVerified && productionBaselineApplied ? `${facts.productionBaselineLevel} · Verified` : `${facts.productionBaselineLevel} · Failed`, explanation: facts.productionBaselineVerified && productionBaselineApplied ? "The verified schema-only baseline is present, passes integrity checks, and blocks baseline replay." : "The clean production baseline verification failed. Do not load business data." },
     { id: "schema-comparison", label: "Staging ↔ baseline schema", status: facts.schemaMatchesBaseline ? "healthy" : "critical", value: facts.schemaMatchesBaseline ? "Match" : `${facts.schemaComparisonDifferences.length} differences`, explanation: facts.schemaMatchesBaseline ? "Application tables, columns, indexes, and constraints match the verified 0019 baseline. Cloudflare-managed infrastructure tables are reported separately from application schema." : "Material application-schema differences exist between staging and the production rehearsal.", diagnosticLines: facts.schemaComparisonDifferences },
     { id: "production-readiness", label: "Production launch readiness", status: productionReady ? "healthy" : "critical", value: productionReady ? "Ready" : "Blocked", explanation: productionReady ? "The clean baseline matches staging and the current workspace integrity checks pass." : "Production remains blocked until the baseline, schema comparison, and relationship-data integrity checks all pass." },
+    {
+      id: "business-data-state",
+      label: deploymentEnvironment === "production" ? "Production data state" : "Staging data state",
+      status: businessDataRows === null || businessDataRows === undefined ? "unavailable" : businessDataRows === 0 ? "healthy" : "info",
+      value: businessDataRows === null || businessDataRows === undefined ? "Not checked" : businessDataRows === 0 ? "Schema only" : "Live records present",
+      explanation: businessDataRows === null || businessDataRows === undefined ? "The application tables could not be counted." : businessDataRows === 0 ? "No users, donors, gifts, interactions, reminders, imports, or audit records are stored." : "Application records are present; the health report continues to validate ownership, links, and totals without exposing them.",
+    },
     {
       id: "active-donors",
       label: "Active donors",
@@ -250,6 +267,8 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     summary: status === "healthy" ? "Workspace data and the application foundation are healthy." : status === "critical" ? "One or more issues need attention before the workspace can be considered healthy." : "The workspace is usable, with follow-up items to review.",
     checks,
     platform: {
+      deploymentEnvironment,
+      businessDataRows: businessDataRows ?? null,
       migrationLevel: facts.currentMigrationLevel ?? "Unknown",
       journalMigrationLevel: facts.journalMigrationLevel ?? "Unknown",
       remoteMigrationLevel: facts.remoteMigrationLevel ?? "Unknown",

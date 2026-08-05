@@ -46,6 +46,7 @@ export default defineConfig(async () => {
   return {
     define: {
       __FUNDRAISING_OS_COMMIT__: JSON.stringify(process.env.FUNDRAISING_OS_COMMIT ?? null),
+      __FUNDRAISING_OS_ENVIRONMENT__: JSON.stringify(process.env.FUNDRAISING_OS_ENVIRONMENT === "production" ? "production" : "staging"),
     },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }

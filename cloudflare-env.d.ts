@@ -15,6 +15,7 @@ interface D1Database {
 }
 
 declare const __FUNDRAISING_OS_COMMIT__: string | null;
+declare const __FUNDRAISING_OS_ENVIRONMENT__: "staging" | "production";
 
 declare module "cloudflare:workers" {
   export const env: {

@@ -7,6 +7,7 @@ export const PRODUCTION_BASELINE_LEVEL = manifest.baselineLevel;
 export const PRODUCTION_BASELINE_HASH = manifest.schemaHash;
 export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
+export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 20;
 
 // These tables belong to the hosting/runtime layer, not the Fundraising OS

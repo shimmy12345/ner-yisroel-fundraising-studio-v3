@@ -27,15 +27,18 @@ import {
   type DataHealthReport,
 } from "./model";
 import { readRemoteMigrationHistory } from "./remote-migrations";
-import { PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
+import { PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_TABLES, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
 
 const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRAISING_OS_COMMIT__.trim()
   ? __FUNDRAISING_OS_COMMIT__.trim()
   : null;
+const deploymentEnvironment = typeof __FUNDRAISING_OS_ENVIRONMENT__ === "string" && __FUNDRAISING_OS_ENVIRONMENT__ === "production" ? "production" : "staging";
+const businessDataCountSql = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 
 const emptyFacts = (): DataHealthFacts => ({
+  deploymentEnvironment,
   databaseConnected: false,
   schemaReady: false,
   currentMigrationLevel: null,
@@ -48,8 +51,10 @@ const emptyFacts = (): DataHealthFacts => ({
   remoteMigrationDiagnosticLines: ["Remote migration history has not been verified."],
   productionBaselineLevel: PRODUCTION_BASELINE_LEVEL,
   productionBaselineVerified: PRODUCTION_BASELINE_VERIFIED,
+  productionBaselineApplied: deploymentEnvironment === "staging",
   schemaMatchesBaseline: false,
   schemaComparisonDifferences: ["The staging schema has not been compared with the production baseline."],
+  businessDataRows: null,
   activeDonors: null,
   duplicateJlCodes: null,
   orphanedGifts: null,
@@ -98,6 +103,10 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));
     facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns);
     facts.schemaReady = schemaIsReady(tableNames, userColumns, donorColumns, givingColumns);
+    if (deploymentEnvironment === "production" && tableNames.includes("production_schema_baseline")) {
+      const marker = await env.DB.prepare("SELECT schema_hash FROM production_schema_baseline WHERE id = '0019'").first<{ schema_hash?: string }>();
+      facts.productionBaselineApplied = marker?.schema_hash === PRODUCTION_BASELINE_HASH;
+    }
     const remoteHistory = await readRemoteMigrationHistory(env.DB);
     const remoteReconciliation = reconcileRemoteMigrationTags(remoteHistory.entries.map((entry) => entry.tag));
     facts.remoteMigrationLevel = remoteReconciliation.level;
@@ -106,6 +115,8 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     facts.remoteMigrationHistoryConsistent = remoteReconciliation.consistent;
     facts.remoteMigrationDiagnosticLines = remoteHistory.diagnostic ? [remoteHistory.diagnostic] : remoteReconciliation.diagnostics;
     if (!facts.schemaReady) return buildDataHealthReport(facts);
+
+    facts.businessDataRows = number((await env.DB.prepare(businessDataCountSql).first<{ count?: number }>())?.count, null);
 
     const healthResults = await env.DB.batch([
       env.DB.prepare(ACTIVE_DONORS_SQL).bind(userId),

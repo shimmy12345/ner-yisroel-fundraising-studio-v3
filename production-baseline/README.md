@@ -1,5 +1,7 @@
 # Production database baseline
 
+Production environment: **Fundraising OS Production** (`fundraising-os-production`). It uses a Sites project and D1 database that are distinct from staging. The normal `pnpm build` remains the staging build; only `pnpm build:production` packages this baseline and the production project configuration.
+
 This folder is the clean starting point for a brand-new Fundraising OS production database. It contains the complete application schema through version 0019 and no donor, gift, interaction, reminder, sample, or test data.
 
 The existing staging database is intentionally treated as a legacy database. Never apply this baseline to staging and never mark staging migrations as verified.
@@ -14,3 +16,10 @@ Before a production launch:
 6. Do not copy staging data until backup, restore, and data-migration rehearsals are separately approved.
 
 If any check differs, stop the launch. Do not edit D1 metadata or replay legacy migrations to force a green result.
+
+Operational safeguards:
+
+- A production build stops if the production and staging project IDs ever match.
+- Reapplying the baseline stops on existing tables rather than guessing what ran.
+- A future migration requires regenerating the manifest and passing the drift test before production packaging succeeds.
+- The authenticated health endpoint is read-only, so checking a new database does not create a user record.

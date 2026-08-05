@@ -71,6 +71,13 @@ test("production baseline is isolated from staging and future drift fails closed
   assert.equal(JSON.parse(read("drizzle/meta/_journal.json")).entries.length, 14, "legacy staging history remains untouched and unverified");
   assert.match(read("build/sites-vite-plugin.ts"), /FUNDRAISING_OS_SCHEMA_TRACK === "production-baseline"/);
   assert.doesNotMatch(read(".openai/hosting.json"), /production-baseline/, "staging keeps the legacy migration track by default");
+  const stagingHosting = JSON.parse(read(".openai/hosting.json"));
+  const productionHosting = JSON.parse(read(".openai/hosting.production.json"));
+  assert.notEqual(productionHosting.project_id, stagingHosting.project_id);
+  assert.equal(productionHosting.d1, "DB");
+  assert.match(read("build/sites-vite-plugin.ts"), /Production packaging requires a distinct production project ID/);
+  assert.match(read("app/api/health/route.ts"), /userIdForEmail/);
+  assert.doesNotMatch(read("app/api/health/route.ts"), /ensureUserProfile/);
   const liveRows = manifest.ddlTopology.map((object) => ({ ...object, tbl_name: object.type === "table" ? object.name : "ignored" }));
   assert.equal(compareSchemaObjects(stagingSchemaObjects(liveRows)).matches, true);
 });
