@@ -368,6 +368,12 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .subject-suggestion button:hover { background:#edf5f0; }
 .subject-suggestion button:focus-visible { outline:3px solid #d9e9e0; outline-offset:2px; }
 .ai-summary-card .summary { white-space:pre-line; }
+.relationship-snapshot-preview { margin-top:10px; padding-top:11px; border-top:1px solid #dfe8e2; }
+.relationship-snapshot-preview label { display:flex; align-items:flex-start; gap:9px; color:#315f4b; cursor:pointer; }
+.relationship-snapshot-preview input { width:17px; height:17px; margin-top:2px; accent-color:#3e725b; }
+.relationship-snapshot-preview label span { display:grid; gap:2px; }
+.relationship-snapshot-preview label small { color:#718078; font-weight:500; }
+.relationship-snapshot-preview > p { margin:10px 0 0 26px; color:#53635b; font-size:12px; line-height:1.6; white-space:pre-line; }
 .reminder-picker legend { width: 130px; }
 .reminder-picker button { padding: 9px 11px; font-size: 12px; }
 .reminder-picker > input { width: calc(100% - 130px); margin-left: 130px; }

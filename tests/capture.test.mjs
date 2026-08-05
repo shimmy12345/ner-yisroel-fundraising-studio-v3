@@ -79,13 +79,17 @@ const donorDirectory = await readFile(new URL("../app/donors/page.tsx", import.m
 const donorDirectoryExperience = await readFile(new URL("../app/donors/DonorDirectoryExperience.tsx", import.meta.url), "utf8");
 assert.doesNotMatch(interactionRoute, /Only meetings can be scheduled in the future/);
 assert.match(interactionRoute, /capture-scheduled/);
-assert.match(interactionRoute, /if \(!scheduled\)/);
+assert.match(interactionRoute, /if \(!scheduled && body\.acceptRelationshipSnapshot === true\)/);
 assert.match(interactionRoute, /\["call", "email", "meeting", "visit", "note", "personal"\]/);
 assert.match(interactionRoute, /storedType, occurredAtEpoch/);
 assert.match(captureExperience, /subject: subject\.trim\(\)/, "the accepted field value, including blank, is sent explicitly");
 assert.match(captureExperience, /placeholder=\{note\.trim\(\)\.length >= 4 \? preview\.suggestedSubject/);
 assert.match(captureExperience, /Use suggestion/);
 assert.doesNotMatch(captureExperience, /subject: subject\.trim\(\) \|\| undefined/);
+assert.match(captureExperience, /acceptRelationshipSnapshot/);
+assert.match(captureExperience, /Nothing generated is saved unless you check this box/);
+assert.match(interactionRoute, /body\.acceptRelationshipSnapshot === true/);
+assert.doesNotMatch(interactionRoute, /!scheduled && extracted\.commitments\.length > 0/, "detected commitments do not silently create saved follow-ups");
 assert.match(timelineExperience, /splitInteractionSummary\(activity\.summary\)/);
 assert.match(workspace, /i\.source LIKE 'capture-scheduled:%' OR i\.occurred_at > i\.created_at/);
 assert.match(workspace, /todaySchedule/);

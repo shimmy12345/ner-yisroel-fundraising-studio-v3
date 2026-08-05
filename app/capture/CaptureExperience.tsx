@@ -27,6 +27,7 @@ type SaveResult = {
   occurredAt: string;
   scheduled: boolean;
   reminderAt: string | null;
+  relationshipUpdated: boolean;
   extracted: ReturnType<typeof extractInteraction>;
 };
 
@@ -44,6 +45,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   const [donorId, setDonorId] = useState(initialActivity?.donorId ?? initialDonorId);
   const [occurredAt, setOccurredAt] = useState(() => initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date(initialNow)));
   const [errorMessage, setErrorMessage] = useState("");
+  const [acceptRelationshipSnapshot, setAcceptRelationshipSnapshot] = useState(false);
   const activeDonor = donors.find((item) => item.id === donorId);
 
   const inferredKind = useMemo(() => inferInteractionKind(note), [note]);
@@ -74,6 +76,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           reminder,
           customDate: reminder === "custom" ? customDate : undefined,
           occurredAt: parseScheduledDate(occurredAt)?.toISOString(),
+          acceptRelationshipSnapshot,
         }),
       });
       const payload = await response.json() as SaveResult & { error?: string };
@@ -95,6 +98,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     setCustomDate(initialActivity?.reminderDate ?? "");
     setOccurredAt(initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date()));
     setErrorMessage("");
+    setAcceptRelationshipSnapshot(false);
     setResult(null);
     setStatus("idle");
   }
@@ -111,8 +115,9 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
         </p>
         <section className="update-receipt" aria-label="Updated relationship surfaces">
           <article><span>↗</span><div><strong>{result.scheduled ? "Schedule updated" : "Timeline updated"}</strong><p>{result.scheduled ? "This activity is visible on Today and the donor timeline as scheduled work." : "The completed interaction and original note were added to the relationship history."}</p></div><b>Done</b></article>
-          {!result.scheduled && <article><span>◇</span><div><strong>Institutional memory updated</strong><p>{result.extracted.memory}</p></div><b>Done</b></article>}
-          {!result.scheduled && <article><span>✦</span><div><strong>Relationship summary refreshed</strong><p>{result.extracted.relationshipSummary}</p></div><b>Done</b></article>}
+          {!result.scheduled && result.relationshipUpdated && <article><span>◇</span><div><strong>Institutional memory updated</strong><p>{result.extracted.memory}</p></div><b>Done</b></article>}
+          {!result.scheduled && result.relationshipUpdated && <article><span>✦</span><div><strong>Relationship snapshot refreshed</strong><p>{result.extracted.relationshipSummary}</p></div><b>Done</b></article>}
+          {!result.scheduled && !result.relationshipUpdated && <article><span>✓</span><div><strong>Relationship snapshot unchanged</strong><p>The generated draft was not accepted, so it was not saved.</p></div><b>Done</b></article>}
           {result.reminderAt && (
             <article><span>◷</span><div><strong>Reminder created</strong><p>{result.extracted.nextAction}</p></div><b>Done</b></article>
           )}
@@ -221,6 +226,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
                 <span>{interactionKindLabel(preview.type)}</span><span>{dateLabel}</span>
                 {preview.commitments.length > 0 && <span>{preview.commitments.length} commitment{preview.commitments.length > 1 ? "s" : ""}</span>}
               </div>
+              {!future && <div className="relationship-snapshot-preview"><label><input type="checkbox" checked={acceptRelationshipSnapshot} onChange={(event) => setAcceptRelationshipSnapshot(event.target.checked)} /><span><strong>Use this relationship snapshot</strong><small>Nothing generated is saved unless you check this box.</small></span></label><p>{preview.relationshipSummary}</p></div>}
             </div>
           )}
 

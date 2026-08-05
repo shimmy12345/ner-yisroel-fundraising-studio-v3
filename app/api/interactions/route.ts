@@ -17,6 +17,7 @@ type RequestBody = {
   reminder?: ReminderChoice;
   customDate?: string;
   occurredAt?: string;
+  acceptRelationshipSnapshot?: boolean;
 };
 
 const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
@@ -60,14 +61,14 @@ export async function POST(request: Request) {
       .bind(interactionId, donorId, userId, storedType, occurredAtEpoch, `${extracted.subject}\n${extracted.summary}`, source, now, now),
   ];
 
-  if (!scheduled) {
+  if (!scheduled && body.acceptRelationshipSnapshot === true) {
     statements.push(
       env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
         .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId, userId),
     );
   }
 
-  if (dueAt || (!scheduled && extracted.commitments.length > 0)) {
+  if (dueAt) {
     statements.push(
       env.DB.prepare("INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(
@@ -75,10 +76,10 @@ export async function POST(request: Request) {
           donorId,
           userId,
           extracted.nextAction,
-          dueAt ? "Reminder requested for this activity." : "Commitment detected in the interaction.",
+          "Reminder requested for this activity.",
           94,
           "open",
-          Math.floor((dueAt ?? new Date(occurredAt.getTime() + 7 * 86400000)).getTime() / 1000),
+          Math.floor(dueAt.getTime() / 1000),
           now,
           now,
         ),
@@ -98,6 +99,7 @@ export async function POST(request: Request) {
     occurredAt: occurredAt.toISOString(),
     scheduled,
     reminderAt: dueAt?.toISOString() ?? null,
+    relationshipUpdated: !scheduled && body.acceptRelationshipSnapshot === true,
     extracted,
   }, { status: 201 });
 }

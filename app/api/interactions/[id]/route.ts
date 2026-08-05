@@ -7,7 +7,7 @@ import { logger } from "../../../../lib/logger";
 
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
 type DonorContext = { relationship_summary: string | null; institutional_memory: string | null };
-type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string };
+type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string; acceptRelationshipSnapshot?: boolean };
 const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
 const reminders = new Set<ReminderChoice>(["none", "tomorrow", "next-week", "custom"]);
 
@@ -84,17 +84,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   const oldOther = await latestOther(existing.donor_id, profile.id, id);
   const newOther = donorId === existing.donor_id ? oldOther : await latestOther(donorId, profile.id, id);
-  if (donorId !== existing.donor_id) statements.push(contextStatement(existing.donor_id, profile.id, old, oldOther ? extraction(oldOther) : null));
-  if (!scheduled && (!newOther || occurredAtEpoch >= newOther.occurred_at)) {
+  if (body.acceptRelationshipSnapshot === true && donorId !== existing.donor_id) statements.push(contextStatement(existing.donor_id, profile.id, old, oldOther ? extraction(oldOther) : null));
+  if (body.acceptRelationshipSnapshot === true && !scheduled && (!newOther || occurredAtEpoch >= newOther.occurred_at)) {
     statements.push(env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = 86, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'").bind(next.relationshipSummary, next.memory, now, donorId, profile.id));
-  } else if (donorId === existing.donor_id) {
+  } else if (body.acceptRelationshipSnapshot === true && donorId === existing.donor_id) {
     statements.push(contextStatement(donorId, profile.id, old, newOther ? extraction(newOther) : null));
   }
 
   try { await env.DB.batch(statements); }
   catch (error) { logger.error("activity_edit_failed", error, { interactionId: id, userId: profile.id }); return Response.json({ error: "Activity could not be updated" }, { status: 500 }); }
   logger.info("activity_edited", { interactionId: id, userId: profile.id });
-  return Response.json({ interactionId: id, occurredAt: occurredAt.toISOString(), scheduled, reminderAt: dueAt?.toISOString() ?? null, extracted: next });
+  return Response.json({ interactionId: id, occurredAt: occurredAt.toISOString(), scheduled, reminderAt: dueAt?.toISOString() ?? null, relationshipUpdated: body.acceptRelationshipSnapshot === true && !scheduled, extracted: next });
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
