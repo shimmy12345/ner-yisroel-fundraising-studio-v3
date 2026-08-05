@@ -4,8 +4,8 @@ export type ReminderChoice = "none" | "tomorrow" | "next-week" | "custom";
 export type InteractionExtraction = {
   type: InteractionKind;
   subject: string;
+  suggestedSubject: string;
   summary: string;
-  sentiment: "warm" | "neutral";
   memory: string;
   relationshipSummary: string;
   nextAction: string;
@@ -36,20 +36,94 @@ export function inferInteractionKind(note: string): InteractionKind {
 }
 
 export function inferSubject(note: string, kind: InteractionKind): string {
-  const lower = note.toLowerCase();
-  const firstSentence = note.trim().split(/[.!?]\s|[\r\n]/, 1)[0]?.trim();
-  if (firstSentence) {
-    const concise = firstSentence.replace(/^(called|emailed|met with|coffee with|visited)\s+/i, "");
-    return concise.length > 72 ? `${concise.slice(0, 69).trim()}…` : concise;
-  }
-  return `${interactionKindLabel(kind)} with donor`;
+  const signals: Array<[RegExp, string]> = [
+    [/\b(pledge|pledged|pledge balance|installment|payment)\b/i, "Pledge payment"],
+    [/\b(gift|giving|donation|contribution)\b/i, "Giving follow-up"],
+    [/\b(scholarship|student|tuition|education)\b/i, "Scholarship update"],
+    [/\b(outcome|outcomes|impact|result|results|progress report|annual report)\b/i, "Impact update"],
+    [/\b(campus|tour|school visit|site visit)\b/i, "Campus visit"],
+    [/\b(proposal|request for support|funding request|ask amount)\b/i, "Proposal follow-up"],
+    [/\b(event|gala|dinner|reception|parlor meeting)\b/i, "Event planning"],
+    [/\b(family|spouse|son|daughter|birthday|anniversary)\b/i, "Personal update"],
+  ];
+  const matches = signals
+    .map(([pattern, label]) => ({ label, index: note.search(pattern) }))
+    .filter((item) => item.index >= 0)
+    .sort((a, b) => a.index - b.index)
+    .filter((item, index, all) => all.findIndex((candidate) => candidate.label === item.label) === index)
+    .slice(0, 2)
+    .map((item) => item.label);
+  if (matches.length === 2) return `${matches[0]} and ${matches[1].toLowerCase()}`;
+  if (matches.length === 1) return matches[0];
+  const fallbacks: Record<InteractionKind, string> = {
+    call: "Donor call follow-up",
+    email: "Donor email follow-up",
+    meeting: "Donor meeting follow-up",
+    visit: "Donor visit follow-up",
+    note: "Relationship update",
+    personal: "Personal update",
+  };
+  return fallbacks[kind];
 }
 
-export function reminderDueAt(
-  choice: ReminderChoice,
-  customDate: string | undefined,
-  now: Date,
-): Date | null {
+const sentenceList = (note: string) => note.trim().split(/(?:[.!?]+\s+|[\r\n]+)/).map((item) => item.trim()).filter(Boolean);
+const concise = (value: string, max = 180) => value.length <= max ? value : `${value.slice(0, max - 1).trim()}…`;
+
+function mentionedPeople(note: string) {
+  const ignored = new Set(["Called", "Emailed", "Meeting", "Coffee", "Lunch", "Dinner", "Visited", "Discussed", "Shared", "Send", "Follow", "The", "This", "She", "He", "They", "We", "I"]);
+  const names = note.match(/\b\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*)*/gu) ?? [];
+  return [...new Set(names.map((name) => name.trim().replace(/[’']s$/u, "")).filter((name) => !ignored.has(name) && !/\b(?:Foundation|University|College|School|Yeshiva|Synagogue|Congregation|Hospital|Inc|LLC)\b/u.test(name)))].slice(0, 5);
+}
+
+function mentionedOrganizations(note: string) {
+  const organizations = note.match(/\b(?:\p{Lu}[\p{L}'’&.-]*\s+){0,5}(?:Foundation|University|College|School|Yeshiva|Synagogue|Congregation|Hospital|Company|Inc\.?|LLC)\b/gu) ?? [];
+  return [...new Set(organizations.map((item) => item.trim()))].slice(0, 5);
+}
+
+function commitmentAction(sentence: string) {
+  const match = sentence.match(/\b(?:promised|agreed|committed|will|would)\s+(?:to\s+)?(.+)/i);
+  if (match?.[1]) return concise(match[1].replace(/[.!?]+$/, ""), 120);
+  const direct = sentence.match(/\b(send|follow up|call back|introduce|schedule|share|provide)\b(.+)/i);
+  return direct ? concise(`${direct[1]}${direct[2]}`.replace(/[.!?]+$/, ""), 120) : null;
+}
+
+export function actionableRelationshipSnapshot(note: string, kind: InteractionKind) {
+  const sentences = sentenceList(note);
+  const topics = inferSubject(note, kind);
+  const people = mentionedPeople(note);
+  const organizations = mentionedOrganizations(note);
+  const commitmentSentences = sentences.filter((sentence) => /\b(promised|agreed|committed|will|would|send|follow up|follow-up|call back|introduce|schedule|share|provide)\b/i.test(sentence)).slice(0, 3);
+  const relationshipChanges = sentences.filter((sentence) => /\b(increased|decreased|changed|newly|no longer|ready|hesitant|more involved|less involved|reconnected|stepped back)\b/i.test(sentence)).slice(0, 2);
+  const nextAction = commitmentSentences.map(commitmentAction).find(Boolean) ?? "Review this note before the next interaction";
+  return [
+    `Latest discussion topics: ${topics}.`,
+    people.length ? `People mentioned: ${people.join(", ")}.` : null,
+    organizations.length ? `Organizations mentioned: ${organizations.join(", ")}.` : null,
+    commitmentSentences.length ? `Commitments: ${commitmentSentences.map((item) => concise(item).replace(/[.!?]+$/, "")).join("; ")}.` : null,
+    commitmentSentences.length ? `Open follow-ups: ${nextAction}.` : null,
+    relationshipChanges.length ? `Relationship changes: ${relationshipChanges.map((item) => concise(item).replace(/[.!?]+$/, "")).join("; ")}.` : null,
+    `Recommended next action: ${nextAction}.`,
+  ].filter(Boolean).join("\n");
+}
+
+export function sanitizeRelationshipSnapshot(value: string | null) {
+  if (!value) return value;
+  const cleaned = value
+    .split(/(?<=[.!?])\s+|[\r\n]+/)
+    .map((item) => item.trim())
+    .filter((item) => item && !/\b(?:AI confidence|sentiment|classification|extraction status|positive or negative sentiment was inferred)\b/i.test(item))
+    .join(" ");
+  return cleaned || null;
+}
+
+export function splitInteractionSummary(summary: string) {
+  const [subject = "", ...noteParts] = summary.split("\n");
+  const note = noteParts.join("\n");
+  const firstLine = note.split(/[\r\n]/, 1)[0]?.trim() ?? "";
+  return { subject, note, timelineTitle: subject.trim() || "Interaction Note", timelineNote: (subject.trim() ? note.trim() : firstLine) || "No additional notes recorded." };
+}
+
+export function reminderDueAt(choice: ReminderChoice, customDate: string | undefined, now: Date): Date | null {
   if (choice === "none") return null;
   const due = new Date(now);
   due.setHours(9, 0, 0, 0);
@@ -63,27 +137,24 @@ export function reminderDueAt(
   return due;
 }
 
-export function extractInteraction(
-  note: string,
-  requestedKind?: InteractionKind,
-  requestedSubject?: string,
-): InteractionExtraction {
+export function extractInteraction(note: string, requestedKind?: InteractionKind, requestedSubject?: string): InteractionExtraction {
   const type = requestedKind ?? inferInteractionKind(note);
-  const subject = requestedSubject?.trim() || inferSubject(note, type);
+  const subject = requestedSubject?.trim() ?? "";
+  const suggestedSubject = inferSubject(note, type);
   const lower = note.toLowerCase();
+  const actionContext = subject || suggestedSubject;
   const commitments = [
-    ...(lower.includes("send") ? [`Send the material referenced in “${subject}”`] : []),
-    ...(/follow up|follow-up/.test(lower) ? [`Follow up on “${subject}”`] : []),
+    ...(lower.includes("send") ? [`Send the material referenced in “${actionContext}”`] : []),
+    ...(/follow up|follow-up/.test(lower) ? [`Follow up on “${actionContext}”`] : []),
   ];
-  const warm = /loved|excited|interested|warm|glad|grateful|enthusiastic/.test(lower);
   return {
     type,
     subject,
+    suggestedSubject,
     summary: note.trim(),
-    sentiment: warm ? "warm" : "neutral",
-    memory: `Captured from ${interactionKindLabel(type).toLowerCase()}: ${note.trim()}`,
-    relationshipSummary: `Latest ${interactionKindLabel(type).toLowerCase()}: ${subject}. ${warm ? "The interaction showed positive engagement." : "No positive or negative sentiment was inferred."}`,
-    nextAction: commitments[0] ?? `Follow up on ${subject.toLowerCase()}.`,
+    memory: `${interactionKindLabel(type)} context: ${note.trim()}`,
+    relationshipSummary: actionableRelationshipSnapshot(note, type),
+    nextAction: commitments[0] ?? `Review the ${interactionKindLabel(type).toLowerCase()} note before the next interaction.`,
     commitments,
   };
 }

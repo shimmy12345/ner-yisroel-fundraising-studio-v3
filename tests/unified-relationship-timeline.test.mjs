@@ -40,6 +40,7 @@ for (const filter of ["gifts", "pledges", "payments", "calls", "emails", "meetin
 
 const page = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
 const component = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
+const interactionHelper = await readFile(new URL("../lib/capture/interaction.ts", import.meta.url), "utf8");
 assert.match(page, /UNIFIED RELATIONSHIP TIMELINE/);
 assert.doesNotMatch(page, /RELATIONSHIP HISTORY|GIVING HISTORY/);
 assert.match(component, /Filter relationship timeline/);
@@ -50,6 +51,8 @@ assert.match(component, /Edit or reopen/);
 assert.match(component, /GivingRecordActions/);
 assert.match(component, /CompletePriorityButton/);
 assert.match(component, /No relationship activity yet/);
-assert.match(component, /No additional notes recorded/);
+assert.match(component, /splitInteractionSummary/);
+assert.match(interactionHelper, /Interaction Note/);
+assert.match(interactionHelper, /No additional notes recorded/);
 
 process.stdout.write("Unified relationship timeline checks passed.\n");

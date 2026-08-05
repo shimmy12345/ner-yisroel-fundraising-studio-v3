@@ -70,7 +70,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           donorId,
           note,
           type: activeKind,
-          subject: subject.trim() || undefined,
+          subject: subject.trim(),
           reminder,
           customDate: reminder === "custom" ? customDate : undefined,
           occurredAt: parseScheduledDate(occurredAt)?.toISOString(),
@@ -104,7 +104,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
       <main className="capture-page capture-success">
         <div className="success-mark">✓</div>
         <p className="eyebrow">{editing ? "ACTIVITY UPDATED" : "INTERACTION CAPTURED"}</p>
-        <h1>{result.extracted.subject}</h1>
+        <h1>{result.extracted.subject || "Interaction Note"}</h1>
         <p className="capture-lede">
           {result.scheduled ? "Scheduled" : "Logged"} as {interactionKindLabel(result.extracted.type).toLowerCase()} on{" "}
           {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(result.occurredAt))}.
@@ -172,8 +172,8 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
 
           <div className="subject-row">
             <label htmlFor="interaction-subject">Subject <span>optional</span></label>
-            <input id="interaction-subject" value={subject} onChange={(event) => setSubject(event.target.value)} />
-            {!subject && note.trim().length >= 4 && <small>AI suggestion: {preview.subject}</small>}
+            <input id="interaction-subject" value={subject} placeholder={note.trim().length >= 4 ? preview.suggestedSubject : undefined} onChange={(event) => setSubject(event.target.value)} />
+            {!subject && note.trim().length >= 4 && <small className="subject-suggestion">Suggested subject: {preview.suggestedSubject} <button type="button" onClick={() => setSubject(preview.suggestedSubject)}>Use suggestion</button></small>}
           </div>
 
           <div className="interaction-date-row">
@@ -218,7 +218,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
             <div className="extraction-preview" aria-live="polite">
               <div className="extraction-heading"><span>✦</span><strong>Ready to save</strong><small>No other fields required</small></div>
               <div className="extraction-chips">
-                <span>{interactionKindLabel(preview.type)}</span><span>{preview.sentiment === "warm" ? "Warm, engaged" : "Neutral"}</span><span>{dateLabel}</span>
+                <span>{interactionKindLabel(preview.type)}</span><span>{dateLabel}</span>
                 {preview.commitments.length > 0 && <span>{preview.commitments.length} commitment{preview.commitments.length > 1 ? "s" : ""}</span>}
               </div>
             </div>
@@ -243,7 +243,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
             </> : <>
               <article><span>1</span><div><strong>Timeline</strong><p>Interaction, type, subject, and selected date and time</p></div></article>
               <article><span>2</span><div><strong>Institutional memory</strong><p>Durable personal and relationship context</p></div></article>
-              <article><span>3</span><div><strong>AI relationship summary</strong><p>Current story, sentiment, and momentum</p></div></article>
+              <article><span>3</span><div><strong>Relationship snapshot</strong><p>Discussion topics, commitments, relationship changes, and the next useful action</p></div></article>
               <article><span>4</span><div><strong>Reminder or next action</strong><p>Only when requested or a commitment is detected</p></div></article>
             </>}
           </div>

@@ -4,6 +4,8 @@ import {
   inferInteractionKind,
   inferSubject,
   reminderDueAt,
+  sanitizeRelationshipSnapshot,
+  splitInteractionSummary,
 } from "../lib/capture/interaction.ts";
 import { isFutureScheduledDate, parseScheduledDate, schedulingLabel, toLocalDateTimeValue } from "../lib/capture/scheduling.ts";
 import { searchDonors } from "../lib/relationships/donor-search.ts";
@@ -13,13 +15,22 @@ import { readFile } from "node:fs/promises";
 const note = "Coffee with Elena. She loved Maya’s update and wants to visit campus this fall. I promised to send the outcomes brief.";
 
 assert.equal(inferInteractionKind(note), "meeting");
-assert.equal(inferSubject(note, "meeting"), "Elena");
+assert.equal(inferSubject(note, "meeting"), "Campus visit and impact update");
 
 const extracted = extractInteraction(note);
 assert.equal(extracted.type, "meeting");
-assert.equal(extracted.subject, "Elena");
-assert.equal(extracted.sentiment, "warm");
-assert.deepEqual(extracted.commitments, ['Send the material referenced in “Elena”']);
+assert.equal(extracted.subject, "", "an unaccepted suggestion never becomes the saved subject");
+assert.equal(extracted.suggestedSubject, "Campus visit and impact update");
+assert.deepEqual(extracted.commitments, ['Send the material referenced in “Campus visit and impact update”']);
+assert.equal(extractInteraction(note, "meeting", "Campus stewardship").subject, "Campus stewardship", "an explicitly accepted subject is preserved");
+assert.match(extracted.relationshipSummary, /Latest discussion topics: Campus visit and impact update\./);
+assert.match(extracted.relationshipSummary, /People mentioned: Elena, Maya/);
+assert.match(extracted.relationshipSummary, /Commitments:/);
+assert.match(extracted.relationshipSummary, /Recommended next action:/);
+assert.doesNotMatch(extracted.relationshipSummary, /sentiment|confidence|classification|extraction/i);
+assert.deepEqual(splitInteractionSummary("\nFirst line of the note\nSecond line"), { subject: "", note: "First line of the note\nSecond line", timelineTitle: "Interaction Note", timelineNote: "First line of the note" });
+assert.deepEqual(splitInteractionSummary("Stewardship call\nFirst line\nSecond line"), { subject: "Stewardship call", note: "First line\nSecond line", timelineTitle: "Stewardship call", timelineNote: "First line\nSecond line" });
+assert.equal(sanitizeRelationshipSnapshot("Latest meeting: Campus visit. No positive or negative sentiment was inferred."), "Latest meeting: Campus visit.");
 assert.equal(inferInteractionKind("Visited the campus with Elena"), "visit");
 assert.equal(extractInteraction("Visited the campus with Elena").type, "visit");
 
@@ -61,6 +72,8 @@ assert.equal(searchDonors(donors, "JL-200")[0]?.id, "2");
 assert.equal(searchDonors(donors, "5551000")[0]?.id, "1");
 
 const interactionRoute = await readFile(new URL("../app/api/interactions/route.ts", import.meta.url), "utf8");
+const captureExperience = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
+const timelineExperience = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const workspace = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
 const donorDirectory = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
 const donorDirectoryExperience = await readFile(new URL("../app/donors/DonorDirectoryExperience.tsx", import.meta.url), "utf8");
@@ -69,6 +82,11 @@ assert.match(interactionRoute, /capture-scheduled/);
 assert.match(interactionRoute, /if \(!scheduled\)/);
 assert.match(interactionRoute, /\["call", "email", "meeting", "visit", "note", "personal"\]/);
 assert.match(interactionRoute, /storedType, occurredAtEpoch/);
+assert.match(captureExperience, /subject: subject\.trim\(\)/, "the accepted field value, including blank, is sent explicitly");
+assert.match(captureExperience, /placeholder=\{note\.trim\(\)\.length >= 4 \? preview\.suggestedSubject/);
+assert.match(captureExperience, /Use suggestion/);
+assert.doesNotMatch(captureExperience, /subject: subject\.trim\(\) \|\| undefined/);
+assert.match(timelineExperience, /splitInteractionSummary\(activity\.summary\)/);
 assert.match(workspace, /i\.source LIKE 'capture-scheduled:%' OR i\.occurred_at > i\.created_at/);
 assert.match(workspace, /todaySchedule/);
 assert.match(workspace, /upcomingActivities/);
