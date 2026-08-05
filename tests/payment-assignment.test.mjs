@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { buildJlDonationPreview } from "../lib/import/jl-donations.ts";
+import { buildJlDonationPreview, JL_COMPACT_DONATION_COLUMNS, JL_DONATION_COLUMNS, paymentActivitiesForAssignment } from "../lib/import/jl-donations.ts";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments } from "../lib/import/jl-payment-assignment.ts";
 
 const rows = [
@@ -33,6 +33,22 @@ const candidates = buildPaymentCandidates(preview.activities, households, openPl
 assert.equal(candidates.length, 3);
 assert.ok(candidates.every((candidate) => candidate.action === "needs_review"), "ambiguous payments must never be assigned automatically");
 assert.equal(candidates[0].openPledges.length, 1);
+
+const fullRows = [
+  { Code: "JL-100", Name: "Example One", "Total Due": "25", "Item Num": "PAYMENT", Desc: "Pledge payment", Campaign: "UNRELATED", "Due Date": "2026-08-03", Amount: "25.00", Paid: "25.00", "Balance Due": "0", Company: "" },
+  { Code: "JL-100", Name: "Example One", "Total Due": "100", "Item Num": "PLEDGE", Desc: "Annual commitment", Campaign: "ANNUAL", "Due Date": "2026-08-03", Amount: "100.00", Paid: "0", "Balance Due": "100.00", Company: "" },
+  { Code: "JL-200", Name: "Example Two", "Total Due": "40", "Item Num": "GIFT", Desc: "Annual gift", Campaign: "payment assistance fund", "Due Date": "2026-08-03", Amount: "40.00", Paid: "40.00", "Balance Due": "0", Company: "" },
+];
+const fullPreview = await buildJlDonationPreview(fullRows, new Date("2026-08-03"));
+const fullPayments = paymentActivitiesForAssignment(fullPreview.activities, [...JL_DONATION_COLUMNS]);
+assert.equal(fullPayments.length, 1, "only explicit full-export payment transactions enter manual assignment");
+assert.equal(fullPayments[0].itemType, "PAYMENT");
+assert.equal(fullPayments[0].committedCents, 2500, "full-export assignment uses Paid as the payment amount");
+assert.equal(paymentActivitiesForAssignment(preview.activities, [...JL_COMPACT_DONATION_COLUMNS]).length, 3, "every compact-export row remains eligible");
+const fullCandidates = buildPaymentCandidates(fullPayments, households, openPledges, []);
+assert.equal(fullCandidates[0].openPledges.length, 1, "full-export payments see the same live open pledges as the workspace");
+assert.equal(fullCandidates[0].action, "needs_review", "full-export payments are never silently assigned");
+assert.equal(buildPaymentCandidates([fullPayments[0]], [{ id: "donor-100", external_id: "JL-100" }], [], [])[0].openPledges.length, 0, "donors without open pledges remain eligible for standalone gifts");
 
 const legacyCategoryPledge = {
   ...openPledges[0],
@@ -117,12 +133,16 @@ const experience = await readFile(new URL("../app/onboarding/import/ImportExperi
 const migration = await readFile(new URL("../drizzle/0008_manual_pledge_payment_assignment.sql", import.meta.url), "utf8");
 const auditMigration = await readFile(new URL("../drizzle/0010_manual_pledge_assignment_audit.sql", import.meta.url), "utf8");
 assert.match(route, /planPaymentAssignments/);
+assert.match(route, /paymentActivitiesForAssignment/);
+assert.doesNotMatch(route, /compactPaymentExport\s*\?\s*buildPaymentCandidates/, "full exports must not bypass manual assignment");
 assert.match(route, /UPDATE giving_activities SET paid_cents = \?, balance_cents = \?, category = \?/);
 assert.match(route, /await env\.DB\.batch\(statements\)/);
 assert.match(route, /INSERT INTO jl_payment_assignments/);
 assert.match(route, /INSERT INTO jl_payment_assignment_audits/);
 assert.match(route, /CASE WHEN EXISTS \(SELECT 1 FROM giving_activities/);
 assert.match(previewRoute, /OPEN_PLEDGES_FOR_DONORS_SQL/);
+assert.match(previewRoute, /paymentActivitiesForAssignment/);
+assert.doesNotMatch(previewRoute, /compactPaymentExport\s*&&\s*donorIds/, "preview must query the workspace's open pledges for both export shapes");
 assert.match(route, /OPEN_PLEDGES_FOR_DONORS_SQL/);
 assert.match(OPEN_PLEDGES_FOR_DONORS_SQL, /owner_user_id = \?/);
 assert.match(OPEN_PLEDGES_FOR_DONORS_SQL, /record_origin = 'live'/);

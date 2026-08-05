@@ -42,6 +42,23 @@ export function isCompactJlDonationExport(columns: string[]) {
   return JL_COMPACT_DONATION_COLUMNS.every((column) => found.has(column.toLowerCase()));
 }
 
+function isExplicitJlPayment(activity: GivingActivity) {
+  // Full JL exports distinguish payment transactions with Item Num/Desc. Do not
+  // infer this from Campaign: campaigns describe purpose, not transaction type.
+  return /\b(?:payment|pmt|pymt|installment)\b/i.test(`${activity.itemType} ${activity.description}`)
+    && (activity.paidCents ?? 0) > 0;
+}
+
+export function paymentActivitiesForAssignment(activities: GivingActivity[], columns: string[]) {
+  if (isCompactJlDonationExport(columns)) return activities;
+  return activities.filter(isExplicitJlPayment).map((activity) => ({
+    ...activity,
+    // A full-export payment can carry pledge context in Amount/Balance Due. The
+    // actual payment applied is the Paid value, never the contextual total.
+    committedCents: activity.paidCents,
+  }));
+}
+
 function currency(value: string) {
   if (!value.trim()) return 0;
   const normalized = value.replace(/[$,\s]/g, "").replace(/^\((.+)\)$/, "-$1");
