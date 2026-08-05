@@ -27,7 +27,7 @@ import {
   type DataHealthReport,
 } from "./model";
 import { readRemoteMigrationHistory } from "./remote-migrations";
-import { PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_TABLES, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
+import { BUSINESS_DATA_COUNT_SQL, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
 
@@ -35,7 +35,6 @@ const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRA
   ? __FUNDRAISING_OS_COMMIT__.trim()
   : null;
 const deploymentEnvironment = typeof __FUNDRAISING_OS_ENVIRONMENT__ === "string" && __FUNDRAISING_OS_ENVIRONMENT__ === "production" ? "production" : "staging";
-const businessDataCountSql = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 
 const emptyFacts = (): DataHealthFacts => ({
   deploymentEnvironment,
@@ -116,7 +115,7 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     facts.remoteMigrationDiagnosticLines = remoteHistory.diagnostic ? [remoteHistory.diagnostic] : remoteReconciliation.diagnostics;
     if (!facts.schemaReady) return buildDataHealthReport(facts);
 
-    facts.businessDataRows = number((await env.DB.prepare(businessDataCountSql).first<{ count?: number }>())?.count, null);
+    facts.businessDataRows = number((await env.DB.prepare(BUSINESS_DATA_COUNT_SQL).first<{ count?: number }>())?.count, null);
 
     const healthResults = await env.DB.batch([
       env.DB.prepare(ACTIVE_DONORS_SQL).bind(userId),

@@ -1,0 +1,8 @@
+name = "fundraising-os-restore-rehearsal"
+main = "../../worker/index.ts"
+compatibility_date = "2026-08-05"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "fundraising-os-restore-rehearsal"
+database_id = "00000000-0000-4000-8000-000000000019"

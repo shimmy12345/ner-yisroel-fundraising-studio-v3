@@ -18,6 +18,7 @@ export default async function OperationalHealthPage() {
       </div>
       <a className="secondary-button" href="/">Return to workspace</a>
     </header>
+    {__FUNDRAISING_OS_ENVIRONMENT__ === "production" && <p><a className="secondary-button" href="/api/operations/schema-backup">Download schema-only production backup</a></p>}
     <DataHealthDashboard initialReport={report} />
   </main>;
 }

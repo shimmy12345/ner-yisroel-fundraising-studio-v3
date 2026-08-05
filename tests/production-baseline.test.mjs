@@ -59,6 +59,7 @@ test("schema comparison excludes only known platform-managed tables", () => {
     ...manifest.ddlTopology.map((object) => ({ ...object, tbl_name: object.type === "table" ? object.name : "ignored" })),
     { type: "table", name: "__appgarden_migrations", tbl_name: "__appgarden_migrations", sql: "CREATE TABLE __appgarden_migrations (id text)" },
     { type: "table", name: "_cf_KV", tbl_name: "_cf_KV", sql: "CREATE TABLE _cf_KV (key text)" },
+    { type: "table", name: "_cf_METADATA", tbl_name: "_cf_METADATA", sql: "CREATE TABLE _cf_METADATA (key text)" },
   ];
   assert.equal(compareSchemaObjects(stagingSchemaObjects(liveRows)).matches, true);
   liveRows.push({ type: "table", name: "unrecognized_runtime_table", tbl_name: "unrecognized_runtime_table", sql: "CREATE TABLE unrecognized_runtime_table (id text)" });
