@@ -72,5 +72,5 @@ test("repair route and first-time UI enforce ownership, confirmation, audit, and
   for (const label of ["Internal record ID", "Current donor ID", "Why it is orphaned", "Likely cause", "Suggested repair", "Move to surviving donor", "Dismiss as false positive"]) assert.match(ui, new RegExp(label));
   assert.match(ui, /DonorAutocomplete/); assert.match(ui, /Confirm:/); assert.match(dashboard, /Inspect details/);
   assert.match(migration, /previous_state_json/); assert.match(migration, /next_state_json/);
-  assert.deepEqual(MISSING_LEDGER_MIGRATIONS, ["0014_donor_merge_resolution", "0015_household_import_review_mode", "0016_lightweight_donation_management", "0017_today_relationship_queue", "0018_data_health_repairs"]);
+  assert.deepEqual(MISSING_LEDGER_MIGRATIONS, ["0014_donor_merge_resolution", "0015_household_import_review_mode", "0016_lightweight_donation_management", "0017_today_relationship_queue", "0018_data_health_repairs", "0019_legacy_test_orphan_cleanup"]);
 });

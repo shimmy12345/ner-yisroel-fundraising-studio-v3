@@ -18,6 +18,7 @@ export const ORPHANED_GIFTS_SQL = `SELECT COUNT(*) AS count FROM gifts g
 export const ORPHANED_INTERACTIONS_SQL = `SELECT COUNT(*) AS count FROM interactions i
   LEFT JOIN donors d ON d.id=i.donor_id
   WHERE i.user_id=? AND i.source NOT LIKE 'archived:%'
+    AND (d.id IS NULL OR d.data_source<>'sample')
     AND (d.id IS NULL OR d.owner_user_id<>? OR d.data_source<>'live' OR d.archived_at IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM data_health_repair_audits a
       WHERE a.user_id=i.user_id AND a.record_type='interaction' AND a.record_id=i.id
@@ -26,6 +27,7 @@ export const ORPHANED_INTERACTIONS_SQL = `SELECT COUNT(*) AS count FROM interact
 export const ORPHANED_REMINDERS_SQL = `SELECT COUNT(*) AS count FROM recommendations r
   LEFT JOIN donors d ON d.id=r.donor_id
   WHERE r.user_id=? AND r.status<>'dismissed'
+    AND (d.id IS NULL OR d.data_source<>'sample')
     AND (d.id IS NULL OR d.owner_user_id<>? OR d.data_source<>'live' OR d.archived_at IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM data_health_repair_audits a
       WHERE a.user_id=r.user_id AND a.record_type='reminder' AND a.record_id=r.id

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { DataHealthReport, HealthCheck, HealthStatus } from "../../lib/data-health/model";
 import { DataHealthIssueDetails } from "./DataHealthIssueDetails";
+import { LegacyTestOrphanCleanup } from "./LegacyTestOrphanCleanup";
 
 const icons: Record<HealthStatus, string> = { healthy: "✓", attention: "!", critical: "×", info: "i", unavailable: "—" };
 
@@ -65,5 +66,6 @@ export function DataHealthDashboard({ initialReport }: { initialReport: DataHeal
       </article>)}
     </div>
     {selectedCheck && <DataHealthIssueDetails check={selectedCheck} onClose={() => setSelectedCheckId(null)} onReport={setReport} />}
+    <LegacyTestOrphanCleanup onReport={setReport} />
   </section>;
 }

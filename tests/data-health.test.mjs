@@ -105,7 +105,7 @@ test("a healthy established workspace receives a clear green result", () => {
 
 test("six-month edge cases avoid false green results", () => {
   assert.equal(MIGRATION_LEDGER_COMPLETE,false,"the known 0014-0017 journal gap remains visible until deliberately repaired");
-  assert.equal(inferMigrationLevel(["donors","data_imports","donor_views","relationship_queue_dismissals","data_health_repair_audits"],[],[],[]),"0018");
+  assert.equal(inferMigrationLevel(["donors","data_imports","donor_views","relationship_queue_dismissals","data_health_repair_audits","legacy_test_cleanup_audits"],[],[],[]),"0019");
   assert.equal(schemaIsReady(["donors"],[],[],[]),false,"a partially migrated database never runs deeper checks as zero");
   const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0017",migrationLedgerComplete:true,activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastBackupAt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
   assert.equal(newWorkspace.checks.find((check)=>check.id==="household-refresh").status,"info","a new manual-only workspace is not falsely failed for having no JL refresh");

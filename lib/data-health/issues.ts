@@ -55,6 +55,7 @@ export const ORPHANED_INTERACTION_DETAILS_SQL = `SELECT i.id,i.donor_id,i.occurr
   LEFT JOIN donors d ON d.id=i.donor_id
   LEFT JOIN donors survivor ON survivor.id=d.merged_into_donor_id
   WHERE i.user_id=? AND i.source NOT LIKE 'archived:%'
+    AND (d.id IS NULL OR d.data_source<>'sample')
     AND (d.id IS NULL OR d.owner_user_id<>? OR d.data_source<>'live' OR d.archived_at IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM data_health_repair_audits a
       WHERE a.user_id=i.user_id AND a.record_type='interaction' AND a.record_id=i.id
@@ -66,6 +67,7 @@ export const ORPHANED_REMINDER_DETAILS_SQL = `SELECT r.id,r.donor_id,COALESCE(r.
   LEFT JOIN donors d ON d.id=r.donor_id
   LEFT JOIN donors survivor ON survivor.id=d.merged_into_donor_id
   WHERE r.user_id=? AND r.status<>'dismissed'
+    AND (d.id IS NULL OR d.data_source<>'sample')
     AND (d.id IS NULL OR d.owner_user_id<>? OR d.data_source<>'live' OR d.archived_at IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM data_health_repair_audits a
       WHERE a.user_id=r.user_id AND a.record_type='reminder' AND a.record_id=r.id
@@ -86,19 +88,19 @@ export function explainOrphan(row: OrphanRecordRow, ownerUserId: string) {
     survivingDonorId: null,
     canDismiss: false,
   };
-  if (row.donor_owner_user_id !== ownerUserId) return {
-    whyOrphaned: "The current donor belongs to a different workspace owner.",
-    likelyCause: "An older write linked the record without enforcing owner scope.",
-    suggestedRepair: "Reattach this record to an active donor in your workspace.",
-    survivingDonorId: null,
-    canDismiss: false,
-  };
   if (row.donor_data_source !== "live") return {
     whyOrphaned: "The current donor is not a live workspace donor.",
     likelyCause: "Sample or verification data remained linked after the workspace switched to live data.",
     suggestedRepair: "Reattach to a live donor, archive the record, or dismiss it after confirming the link is intentionally excluded.",
     survivingDonorId: null,
     canDismiss: true,
+  };
+  if (row.donor_owner_user_id !== ownerUserId) return {
+    whyOrphaned: "The current donor belongs to a different workspace owner.",
+    likelyCause: "An older write linked the record without enforcing owner scope.",
+    suggestedRepair: "Reattach this record to an active donor in your workspace.",
+    survivingDonorId: null,
+    canDismiss: false,
   };
   if (row.donor_archived_at !== null && validSurvivor) return {
     whyOrphaned: "The current donor was archived during a merge.",

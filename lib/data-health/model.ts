@@ -51,7 +51,7 @@ export type DataHealthReport = {
   };
 };
 
-export const EXPECTED_MIGRATION_LEVEL = "0018";
+export const EXPECTED_MIGRATION_LEVEL = "0019";
 export const APP_VERSION = "0.1.0";
 
 export const EXPECTED_MIGRATION_TAGS = [
@@ -74,6 +74,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0016_lightweight_donation_management",
   "0017_today_relationship_queue",
   "0018_data_health_repairs",
+  "0019_legacy_test_orphan_cleanup",
 ] as const;
 
 // This mirrors drizzle/meta/_journal.json. Keeping the known gap visible is
@@ -237,6 +238,7 @@ export function inferMigrationLevel(tableNames: Iterable<string>, userColumns: I
   const users = new Set(userColumns);
   const donors = new Set(donorColumns);
   const giving = new Set(givingColumns);
+  if (tables.has("legacy_test_cleanup_audits")) return "0019";
   if (tables.has("data_health_repair_audits")) return "0018";
   if (tables.has("relationship_queue_dismissals") && tables.has("donor_views")) return "0017";
   if (tables.has("giving_activity_management_audits") && giving.has("workspace_status")) return "0016";
@@ -256,7 +258,7 @@ export function inferMigrationLevel(tableNames: Iterable<string>, userColumns: I
 
 export function schemaIsReady(tableNames: Iterable<string>, userColumns: Iterable<string>, donorColumns: Iterable<string>, givingColumns: Iterable<string>) {
   const tables = new Set(tableNames);
-  const requiredTables = ["users", "donors", "gifts", "giving_activities", "interactions", "recommendations", "data_imports", "jl_refresh_state", "jl_payment_assignments", "donor_merge_audits", "workspace_backup_audits", "giving_activity_management_audits", "relationship_queue_dismissals", "donor_views", "data_health_repair_audits"];
+  const requiredTables = ["users", "donors", "gifts", "giving_activities", "interactions", "recommendations", "data_imports", "jl_refresh_state", "jl_payment_assignments", "donor_merge_audits", "workspace_backup_audits", "giving_activity_management_audits", "relationship_queue_dismissals", "donor_views", "data_health_repair_audits", "legacy_test_cleanup_audits"];
   return requiredTables.every((table) => tables.has(table))
     && new Set(userColumns).has("household_import_review_mode")
     && ["archived_at", "merged_into_donor_id"].every((column) => new Set(donorColumns).has(column))

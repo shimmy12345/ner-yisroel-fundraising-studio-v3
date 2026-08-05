@@ -149,6 +149,16 @@ export const dataHealthRepairAudits = sqliteTable("data_health_repair_audits", {
   index("idx_data_health_repairs_user_date").on(table.userId, table.createdAt),
 ]);
 
+export const legacyTestCleanupAudits = sqliteTable("legacy_test_cleanup_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  previewHash: text("preview_hash").notNull(),
+  recordsJson: text("records_json", { mode: "json" }).$type<Array<Record<string, string>>>().notNull(),
+  archivedInteractions: integer("archived_interactions").notNull(),
+  archivedReminders: integer("archived_reminders").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("idx_legacy_test_cleanup_user_date").on(table.userId, table.createdAt)]);
+
 export const gifts = sqliteTable("gifts", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
