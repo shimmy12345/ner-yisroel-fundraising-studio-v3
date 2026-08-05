@@ -1,20 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DataHealthReport, HealthCheck, HealthStatus } from "../../lib/data-health/model";
 
 const icons: Record<HealthStatus, string> = { healthy: "✓", attention: "!", critical: "×", info: "i", unavailable: "—" };
 
-function displayValue(check: HealthCheck) {
+function formatTimestamp(value: string, useLocalTime: boolean) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  if (useLocalTime) return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  return `${date.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC`;
+}
+
+function displayValue(check: HealthCheck, useLocalTime: boolean) {
   if (!["household-refresh", "donation-refresh", "backup"].includes(check.id) || !check.value.includes("T")) return check.value;
-  const date = new Date(check.value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : check.value;
+  return formatTimestamp(check.value, useLocalTime);
 }
 
 export function DataHealthDashboard({ initialReport }: { initialReport: DataHealthReport }) {
   const [report, setReport] = useState(initialReport);
   const [state, setState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [useLocalTime, setUseLocalTime] = useState(false);
+
+  useEffect(() => setUseLocalTime(true), []);
 
   async function runHealthCheck() {
     if (state === "loading") return;
@@ -42,14 +51,14 @@ export function DataHealthDashboard({ initialReport }: { initialReport: DataHeal
       <div className={`data-health-overall ${report.status}`}><span aria-hidden="true">{report.status === "healthy" ? "✓" : report.status === "critical" ? "×" : "!"}</span><strong>{report.status === "healthy" ? "Healthy" : report.status === "critical" ? "Needs attention" : "Review recommended"}</strong></div>
     </div>
     <div className="data-health-run">
-      <div><strong>{report.summary}</strong><small>Last checked {new Date(report.checkedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</small></div>
+      <div><strong>{report.summary}</strong><small>Last checked {formatTimestamp(report.checkedAt, useLocalTime)}</small></div>
       <button type="button" onClick={runHealthCheck} disabled={state === "loading"} aria-describedby="health-check-status">{state === "loading" ? "Running health check…" : "Run health check"}</button>
     </div>
     {message && <p id="health-check-status" className={state === "error" ? "capture-error" : "capture-assurance"} role={state === "error" ? "alert" : "status"}>{message}</p>}
     <div className="data-health-grid">
       {report.checks.map((check) => <article className={`data-health-check ${check.status}`} key={check.id}>
         <span className="data-health-icon" aria-hidden="true">{icons[check.status]}</span>
-        <div><div className="data-health-check-heading"><h3>{check.label}</h3><strong>{displayValue(check)}</strong></div><p>{check.explanation}</p>{check.actionHref && <a href={check.actionHref}>{check.actionLabel ?? "Review"} <span aria-hidden="true">→</span></a>}</div>
+        <div><div className="data-health-check-heading"><h3>{check.label}</h3><strong>{displayValue(check, useLocalTime)}</strong></div><p>{check.explanation}</p>{check.actionHref && <a href={check.actionHref}>{check.actionLabel ?? "Review"} <span aria-hidden="true">→</span></a>}</div>
       </article>)}
     </div>
   </section>;

@@ -117,5 +117,6 @@ test("route and interface are authenticated, owner scoped, honest, and actionabl
   assert.match(loader,/env\.DB\.batch/); assert.match(loader,/schemaIsReady/); assert.match(queries,/owner_user_id=\?/); assert.doesNotMatch(queries,/display_name|donor_name/);
   for(const label of ["Database connection","Database migrations","Active donors","Duplicate active JL Codes","Orphaned gifts","Orphaned interactions","Orphaned reminders","Orphaned pledge payments","Broken merge redirects","Giving-total reconciliation","Unmatched JL Codes","Pending pledge assignments","Failed or incomplete imports","Last household refresh","Last donation refresh","Last successful backup","Deployed version"]) assert.match(read("lib/data-health/model.ts"),new RegExp(label));
   assert.match(ui,/Run health check/); assert.match(ui,/state === "loading"/); assert.match(ui,/setState\("success"\)/); assert.match(ui,/setState\("error"\)/); assert.match(ui,/Names, amounts, and source rows are never shown/); assert.match(settings,/Data Health/);
+  assert.match(ui,/useEffect\(\(\) => setUseLocalTime\(true\)/,"timestamps must keep server and first client render deterministic before switching to local time");
   assert.match(backup,/workspace_export/); assert.match(vite,/FUNDRAISING_OS_COMMIT/);
 });
