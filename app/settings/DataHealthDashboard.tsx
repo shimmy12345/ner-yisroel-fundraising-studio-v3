@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { DataHealthReport, HealthCheck, HealthStatus } from "../../lib/data-health/model";
+import { DataHealthIssueDetails } from "./DataHealthIssueDetails";
 
 const icons: Record<HealthStatus, string> = { healthy: "✓", attention: "!", critical: "×", info: "i", unavailable: "—" };
 
@@ -22,8 +23,10 @@ export function DataHealthDashboard({ initialReport }: { initialReport: DataHeal
   const [state, setState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
   const [useLocalTime, setUseLocalTime] = useState(false);
+  const [selectedCheckId, setSelectedCheckId] = useState<string | null>(null);
 
   useEffect(() => setUseLocalTime(true), []);
+  const selectedCheck = report.checks.find((check) => check.id === selectedCheckId) ?? null;
 
   async function runHealthCheck() {
     if (state === "loading") return;
@@ -58,8 +61,9 @@ export function DataHealthDashboard({ initialReport }: { initialReport: DataHeal
     <div className="data-health-grid">
       {report.checks.map((check) => <article className={`data-health-check ${check.status}`} key={check.id}>
         <span className="data-health-icon" aria-hidden="true">{icons[check.status]}</span>
-        <div><div className="data-health-check-heading"><h3>{check.label}</h3><strong>{displayValue(check, useLocalTime)}</strong></div><p>{check.explanation}</p>{check.actionHref && <a href={check.actionHref}>{check.actionLabel ?? "Review"} <span aria-hidden="true">→</span></a>}</div>
+        <div><div className="data-health-check-heading"><h3>{check.label}</h3><strong>{displayValue(check, useLocalTime)}</strong></div><p>{check.explanation}</p>{["critical", "attention", "unavailable"].includes(check.status) && <button className="health-inspect-button" type="button" onClick={() => setSelectedCheckId(check.id)} aria-expanded={selectedCheckId === check.id}>Inspect details <span aria-hidden="true">↓</span></button>}</div>
       </article>)}
     </div>
+    {selectedCheck && <DataHealthIssueDetails check={selectedCheck} onClose={() => setSelectedCheckId(null)} onReport={setReport} />}
   </section>;
 }

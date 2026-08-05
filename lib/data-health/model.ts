@@ -8,6 +8,7 @@ export type HealthCheck = {
   explanation: string;
   actionHref?: string;
   actionLabel?: string;
+  diagnosticLines?: string[];
 };
 
 export type DataHealthFacts = {
@@ -50,7 +51,7 @@ export type DataHealthReport = {
   };
 };
 
-export const EXPECTED_MIGRATION_LEVEL = "0017";
+export const EXPECTED_MIGRATION_LEVEL = "0018";
 export const APP_VERSION = "0.1.0";
 
 export const EXPECTED_MIGRATION_TAGS = [
@@ -72,6 +73,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0015_household_import_review_mode",
   "0016_lightweight_donation_management",
   "0017_today_relationship_queue",
+  "0018_data_health_repairs",
 ] as const;
 
 // This mirrors drizzle/meta/_journal.json. Keeping the known gap visible is
@@ -82,6 +84,8 @@ export const LEDGERED_MIGRATION_TAGS = EXPECTED_MIGRATION_TAGS.slice(0, 14);
 export const MIGRATION_LEDGER_COMPLETE =
   LEDGERED_MIGRATION_TAGS.length === EXPECTED_MIGRATION_TAGS.length &&
   EXPECTED_MIGRATION_TAGS.every((tag, index) => LEDGERED_MIGRATION_TAGS[index] === tag);
+
+export const MISSING_LEDGER_MIGRATIONS = EXPECTED_MIGRATION_TAGS.filter((tag) => !LEDGERED_MIGRATION_TAGS.includes(tag));
 
 const numberValue = (value: number | null) => value === null ? "Unavailable" : value.toLocaleString("en-US");
 
@@ -143,6 +147,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
         : facts.migrationLedgerComplete
           ? "The schema and migration ledger are complete."
           : "The live schema is ready, but the migration ledger does not include every packaged migration. Repair the release ledger before production launch.",
+      diagnosticLines: facts.migrationLedgerComplete ? [] : MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is packaged but missing from drizzle/meta/_journal.json.`),
     },
     {
       id: "active-donors",
@@ -232,6 +237,7 @@ export function inferMigrationLevel(tableNames: Iterable<string>, userColumns: I
   const users = new Set(userColumns);
   const donors = new Set(donorColumns);
   const giving = new Set(givingColumns);
+  if (tables.has("data_health_repair_audits")) return "0018";
   if (tables.has("relationship_queue_dismissals") && tables.has("donor_views")) return "0017";
   if (tables.has("giving_activity_management_audits") && giving.has("workspace_status")) return "0016";
   if (users.has("household_import_review_mode")) return "0015";
@@ -250,7 +256,7 @@ export function inferMigrationLevel(tableNames: Iterable<string>, userColumns: I
 
 export function schemaIsReady(tableNames: Iterable<string>, userColumns: Iterable<string>, donorColumns: Iterable<string>, givingColumns: Iterable<string>) {
   const tables = new Set(tableNames);
-  const requiredTables = ["users", "donors", "gifts", "giving_activities", "interactions", "recommendations", "data_imports", "jl_refresh_state", "jl_payment_assignments", "donor_merge_audits", "workspace_backup_audits", "giving_activity_management_audits", "relationship_queue_dismissals", "donor_views"];
+  const requiredTables = ["users", "donors", "gifts", "giving_activities", "interactions", "recommendations", "data_imports", "jl_refresh_state", "jl_payment_assignments", "donor_merge_audits", "workspace_backup_audits", "giving_activity_management_audits", "relationship_queue_dismissals", "donor_views", "data_health_repair_audits"];
   return requiredTables.every((table) => tables.has(table))
     && new Set(userColumns).has("household_import_review_mode")
     && ["archived_at", "merged_into_donor_id"].every((column) => new Set(donorColumns).has(column))

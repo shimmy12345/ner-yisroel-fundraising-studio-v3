@@ -132,6 +132,23 @@ export const activityStatusAudits = sqliteTable("activity_status_audits", {
   undoneAt: integer("undone_at", { mode: "timestamp" }),
 }, (table) => [index("activity_status_audits_interaction_date_idx").on(table.interactionId, table.createdAt)]);
 
+export const dataHealthRepairAudits = sqliteTable("data_health_repair_audits", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  recordType: text("record_type", { enum: ["interaction", "reminder"] }).notNull(),
+  recordId: text("record_id").notNull(),
+  action: text("action", { enum: ["reattach", "move_to_survivor", "archive", "dismiss_false_positive"] }).notNull(),
+  previousDonorId: text("previous_donor_id"),
+  nextDonorId: text("next_donor_id"),
+  previousStateJson: text("previous_state_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  nextStateJson: text("next_state_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  reason: text("reason").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("idx_data_health_repairs_user_record").on(table.userId, table.recordType, table.recordId, table.createdAt),
+  index("idx_data_health_repairs_user_date").on(table.userId, table.createdAt),
+]);
+
 export const gifts = sqliteTable("gifts", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
