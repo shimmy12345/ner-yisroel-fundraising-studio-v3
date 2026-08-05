@@ -651,3 +651,78 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .meeting-donor-identity { grid-template-columns:38px minmax(0,1fr); }
   .meeting-donor-identity > .avatar { width:38px; height:38px; }
 }
+
+/* Homepage command center */
+.today-header { margin-bottom:20px; }
+.today-header .subhead { max-width:650px; margin-bottom:0; font-size:15px; line-height:1.55; }
+.today-command-grid { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(330px,.9fr); gap:16px; align-items:start; margin-bottom:22px; }
+.today-command-grid.agenda-empty .today-coming-up { grid-column:auto; }
+.today-command-section,.today-actions-section,.today-brief-section { min-width:0; padding:19px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:0 5px 18px rgba(31,54,45,.045); }
+.today-agenda { border-top:3px solid #316c54; }
+.today-coming-up { border-top:3px solid #a7b8ae; background:#fbfcfa; }
+.command-section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:13px; }
+.command-section-heading .eyebrow { margin-bottom:4px; }
+.command-section-heading h2 { margin:0; font-family:Georgia,serif; font-size:23px; line-height:1.25; font-weight:500; }
+.command-section-heading .count { margin-top:4px; font-size:11px; }
+.command-empty { margin:0; padding:11px 12px; border-radius:9px; background:#f2f6f3; color:#53655c; font-size:13px; line-height:1.45; }
+.future-placeholder { display:flex; align-items:center; gap:7px; margin:12px 0 0; padding-top:11px; border-top:1px solid #e8ebe8; color:#8b948f; font-size:11px; line-height:1.4; }
+.future-placeholder span { color:#6f877b; font-size:14px; }
+.command-activity-list { grid-template-columns:1fr; gap:7px; margin-bottom:11px; }
+.command-activity-list .today-meeting-card { padding:11px; background:#fff; }
+.command-activity-list .scheduled-activity-card { grid-template-columns:54px 1px 28px minmax(0,1fr); gap:8px; }
+.command-activity-list .scheduled-donor-avatar { width:28px; height:28px; }
+.command-activity-list .scheduled-activity-card p { display:none; }
+.command-activity-list .meeting-links { margin-top:5px; }
+.command-queue .relationship-queue-groups { gap:9px; }
+.command-queue .relationship-queue-group { margin:0; }
+.command-queue .relationship-queue-group > header { margin:0 0 6px; padding:0; }
+.command-queue .relationship-queue-group > header h3 { font-size:12px; }
+.command-queue .relationship-queue-group > header p { display:none; }
+.command-queue .priority-list { box-shadow:none; border-radius:10px; }
+.command-queue .priority-card { grid-template-columns:34px minmax(0,1fr) auto; gap:9px; padding:10px 11px; }
+.command-queue .avatar { width:34px; height:34px; }
+.command-queue .priority-heading { align-items:flex-start; }
+.command-queue .priority-main > p { margin:3px 0; font-size:12px; line-height:1.35; }
+.command-queue .why { display:none; }
+.command-queue .priority-main time { color:#89938e; font-size:10px; }
+.command-queue .signal { font-size:8px; }
+.command-queue .priority-actions { display:flex; min-width:0; align-items:center; gap:5px; }
+.command-queue .action-button,.command-queue .complete-priority-button,.command-queue .dismiss-queue-button { min-width:0; min-height:32px; padding:6px 8px; font-size:10px; }
+.command-queue .dismiss-queue-button { max-width:78px; }
+.command-queue .queue-view-all,.command-view-all { display:inline-flex; margin-top:10px; }
+.today-actions-section { margin-bottom:22px; padding:17px 19px 19px; }
+.today-actions-section.emphasized { border-color:#aac2b5; background:#f8fbf9; box-shadow:0 8px 24px rgba(31,76,58,.08); }
+.today-actions-section .command-section-heading { margin-bottom:10px; }
+.today-actions-section .command-section-heading h2 { font-size:20px; }
+.today-actions-section .today-quick-actions { grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin:0; }
+.today-actions-section .today-quick-actions a { min-height:70px; padding:12px; box-shadow:none; }
+.today-actions-section .today-quick-actions strong { font-size:13px; }
+.today-actions-section .today-quick-actions small { font-size:10px; }
+.today-brief-section { margin-bottom:0; background:transparent; box-shadow:none; }
+.today-brief-section > .command-section-heading { margin-bottom:10px; }
+.today-brief-section > .command-section-heading h2 { font-size:20px; }
+.today-brief-section .brief-experience-today { margin:0; padding:18px; box-shadow:none; }
+.morning-brief-complete { display:grid; grid-template-columns:28px minmax(0,1fr) auto; align-items:center; gap:12px; padding:13px 15px; border:1px solid #d7e2dc; border-radius:11px; background:#f2f6f3; }
+.morning-brief-complete > span { display:grid; width:28px; height:28px; place-items:center; border-radius:50%; background:#dcebe2; color:#286047; font-weight:850; }
+.morning-brief-complete h3 { margin:0; font-size:14px; }
+.morning-brief-complete p { display:-webkit-box; margin:3px 0 0; overflow:hidden; color:var(--muted); font-size:11px; line-height:1.4; -webkit-box-orient:vertical; -webkit-line-clamp:1; }
+.morning-brief-complete button { min-height:36px; padding:8px 11px; border:1px solid #cad9d1; border-radius:8px; background:#fff; color:#315f4b; font-size:12px; font-weight:750; cursor:pointer; }
+.assistant-dismiss-brief { color:#6f7c76 !important; background:transparent !important; }
+@media (max-width:1100px) {
+  .today-command-grid { grid-template-columns:1fr; }
+  .today-command-grid.agenda-empty .today-coming-up { grid-column:auto; }
+  .today-actions-section .today-quick-actions { grid-template-columns:repeat(5,minmax(130px,1fr)); overflow-x:auto; padding-bottom:4px; }
+}
+@media (max-width:760px) {
+  .today-command-grid { gap:12px; margin-bottom:16px; }
+  .today-command-section,.today-actions-section,.today-brief-section { padding:15px; }
+  .command-section-heading h2 { font-size:21px; }
+  .command-queue .priority-card { grid-template-columns:32px minmax(0,1fr); }
+  .command-queue .priority-actions { grid-column:2; display:grid; grid-template-columns:1fr 1fr; width:100%; }
+  .command-queue .dismiss-queue-button { max-width:none; }
+  .today-actions-section .today-quick-actions { grid-template-columns:1fr 1fr; overflow:visible; }
+  .today-actions-section .today-quick-actions a { min-height:68px; }
+  .today-actions-section .today-quick-actions a:last-child { grid-column:1 / -1; }
+  .morning-brief-complete { grid-template-columns:28px 1fr; }
+  .morning-brief-complete button { grid-column:2; justify-self:start; }
+}

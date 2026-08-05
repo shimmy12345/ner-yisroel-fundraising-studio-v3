@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { WorkspaceMorningBrief, WorkspacePriority } from "../../lib/workspace/live-data";
+import type { WorkspacePriority } from "../../lib/workspace/live-data";
 import type { RelationshipQueueBucket } from "../../lib/workspace/relationship-queue";
 import { removeQueueItem, restoreQueueItem } from "../../lib/workspace/optimistic-dismissal";
 import { CompletePriorityButton } from "./CompletePriorityButton";
@@ -9,9 +9,9 @@ import { donorNavigationHref, meetingBriefNavigationHref } from "../../lib/navig
 
 const GROUPS: Array<{ key: RelationshipQueueBucket; title: string; description: string }> = [
   { key: "overdue", title: "Overdue", description: "Follow-ups that need attention first" },
-  { key: "today", title: "Today", description: "Work that matters before the day ends" },
+  { key: "today", title: "Due today", description: "Calls, follow-ups, gifts, and reminders for today" },
   { key: "thisWeek", title: "This Week", description: "Due in the next seven days" },
-  { key: "upcoming", title: "Upcoming", description: "Important work without an immediate deadline" },
+  { key: "upcoming", title: "Later", description: "Open commitments and future relationship work" },
 ];
 
 type Toast = { item: WorkspacePriority; kind: "dismissed" | "restored" | "completed" | "error"; message: string };
@@ -27,8 +27,9 @@ function queueActionHref(item: WorkspacePriority, returnTo: string) {
   return item.href;
 }
 
-export function RelationshipQueueExperience({ initialQueue, morningBrief, priorityCount, showAll }: { initialQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; morningBrief: WorkspaceMorningBrief; priorityCount: number; showAll: boolean }) {
-  const initialItems = useMemo(() => GROUPS.flatMap((group) => initialQueue[group.key]), [initialQueue]);
+export function RelationshipQueueExperience({ initialQueue, priorityCount, showAll, scope, expanded = false }: { initialQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; priorityCount: number; showAll: boolean; scope: "agenda" | "coming"; expanded?: boolean }) {
+  const scopeGroups = useMemo(() => GROUPS.filter((group) => scope === "agenda" ? group.key === "overdue" || group.key === "today" : group.key === "thisWeek" || group.key === "upcoming"), [scope]);
+  const initialItems = useMemo(() => scopeGroups.flatMap((group) => initialQueue[group.key]), [initialQueue, scopeGroups]);
   const order = useMemo(() => new Map(initialItems.map((item, index) => [item.queueId, index])), [initialItems]);
   const [items, setItems] = useState(initialItems);
   const [toasts, setToasts] = useState<Record<string, Toast>>({});
@@ -99,29 +100,20 @@ export function RelationshipQueueExperience({ initialQueue, morningBrief, priori
   const grouped = useMemo(() => Object.fromEntries(GROUPS.map((group) => [group.key, items.filter((item) => item.bucket === group.key)])) as Record<RelationshipQueueBucket, WorkspacePriority[]>, [items]);
   const visibleCount = items.length;
   const adjustedPriorityCount = Math.max(0, priorityCount - (initialItems.length - visibleCount));
-  const suggestedPriority = items[0] ?? null;
-  const queueReturnTo = showAll ? "/?priorities=all#relationship-queue" : "/#relationship-queue";
+  const queueAnchor = scope === "agenda" ? "relationship-queue" : "coming-up-queue";
+  const queueReturnTo = showAll ? `/?priorities=all#${queueAnchor}` : `/#${queueAnchor}`;
+  const displayLimit = showAll ? visibleCount : expanded ? 5 : scope === "agenda" ? 5 : 3;
+  const displayIds = new Set(items.slice(0, displayLimit).map((item) => item.queueId));
+  const displayedCount = Math.min(visibleCount, displayLimit);
 
   return <>
-    <section className="today-morning-brief" aria-labelledby="morning-brief-title">
-      <div className="section-title"><div><p className="eyebrow">MORNING BRIEF</p><h2 id="morning-brief-title">What deserves attention today</h2><p>Live counts from your meetings, follow-ups, giving, and reminders</p></div><a className="view-all-link" href="/assistant">Open Assistant</a></div>
-      <div className="morning-brief-grid">
-        <article><strong>{morningBrief.meetingsToday}</strong><span>Meetings today</span></article>
-        <article><strong>{morningBrief.overdueFollowUps}</strong><span>Overdue follow-ups</span></article>
-        <article><strong>{morningBrief.recentGifts}</strong><span>Recent gifts</span></article>
-        <article><strong>{morningBrief.upcomingReminders}</strong><span>Upcoming reminders</span></article>
-        <article className="morning-suggested-priority"><span>Suggested priority</span>{suggestedPriority ? <><strong>{suggestedPriority.name}</strong>{suggestedPriority.donorCode && <span className="donor-code">{suggestedPriority.donorCode}</span>}<p>{suggestedPriority.reason}</p><a href={donorNavigationHref(suggestedPriority.donorId, queueReturnTo, "queue")}>Open relationship →</a></> : <p>No time-sensitive priority is available.</p>}</article>
-      </div>
-    </section>
-
-    <section className="relationship-queue" id="relationship-queue">
-      <div className="section-title"><div><p className="eyebrow">RELATIONSHIP QUEUE</p><h2>{showAll ? "All current relationship work" : "Your next relationship actions"}</h2><p>One clear reason per donor, ordered by urgency. Completing a reminder or closing an activity removes it automatically.</p></div><span className="count" aria-label={`${visibleCount} visible relationship actions`}>{visibleCount}</span></div>
-      {visibleCount ? <div className="relationship-queue-groups">{GROUPS.map((group) => grouped[group.key].length ? <section key={group.key} className={`relationship-queue-group ${group.key}`}><header><div><h3>{group.title}</h3><p>{group.description}</p></div><span>{grouped[group.key].length}</span></header><div className="priority-list">{grouped[group.key].map((priority) => <article key={priority.queueId} className={`priority-card relationship-queue-card ${priority.bucket}`}>
+    <div className={`relationship-queue command-queue ${scope}`} id={scope === "agenda" ? "relationship-queue" : "coming-up-queue"}>
+      {visibleCount ? <div className="relationship-queue-groups">{scopeGroups.map((group) => grouped[group.key].some((item) => displayIds.has(item.queueId)) ? <section key={group.key} className={`relationship-queue-group ${group.key}`}><header><div><h3>{group.title}</h3><p>{group.description}</p></div><span>{grouped[group.key].length}</span></header><div className="priority-list">{grouped[group.key].filter((item) => displayIds.has(item.queueId)).map((priority) => <article key={priority.queueId} className={`priority-card relationship-queue-card ${priority.bucket}`}>
         <div className="avatar">{priority.initials}</div><div className="priority-main"><div className="priority-heading"><div><h3><a href={donorNavigationHref(priority.donorId, queueReturnTo, "queue")}>{priority.name}</a></h3>{priority.donorCode && <span className="donor-code">{priority.donorCode}</span>}</div><span className={`signal ${priority.signal}`}>{priority.label}</span></div><p>{priority.reason}</p><div className="why"><span aria-hidden="true">✦</span><span>{priority.why}</span></div><time>{priority.dueLabel}</time></div>
         <div className="priority-actions"><a className="action-button" href={queueActionHref(priority, queueReturnTo)}>{priority.action}<span aria-hidden="true">→</span></a>{priority.recommendationId ? <CompletePriorityButton recommendationId={priority.recommendationId} onOptimisticComplete={() => completeOptimistically(priority)} onCompleteFailed={() => restoreFailedCompletion(priority)} /> : <button type="button" className="dismiss-queue-button" disabled={busyIds.has(priority.queueId)} onClick={() => void dismiss(priority)}>{busyIds.has(priority.queueId) ? "Restoring…" : "Dismiss suggestion"}</button>}</div>
-      </article>)}</div></section> : null)}</div> : <section className="directory-empty"><h2>Your relationship queue is clear</h2><p>There are no open reminders, scheduled activities, unacknowledged gifts, commitments, or contact gaps requiring attention.</p><a href="/capture?returnTo=%2F">Log an interaction</a></section>}
-      {adjustedPriorityCount > visibleCount ? <a className="view-all-link queue-view-all" href="/?priorities=all#relationship-queue">View all {adjustedPriorityCount}</a> : showAll ? <a className="view-all-link queue-view-all" href="/#relationship-queue">Show top actions</a> : null}
-    </section>
+      </article>)}</div></section> : null)}</div> : null}
+      {!showAll && (visibleCount > displayedCount || adjustedPriorityCount > visibleCount) ? <a className="view-all-link queue-view-all" href={`/?priorities=all#${queueAnchor}`}>View all priorities</a> : showAll ? <a className="view-all-link queue-view-all" href={`/#${queueAnchor}`}>Show top actions</a> : null}
+    </div>
 
     <div className="queue-toast-region" aria-live="polite" aria-atomic="false">{Object.values(toasts).map((toast) => <div className={`queue-toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"} key={toast.item.queueId}><span>{toast.message}</span>{toast.kind === "dismissed" && <button type="button" onClick={() => void undo(toast.item)}>Undo</button>}</div>)}</div>
   </>;

@@ -61,8 +61,7 @@ test("contact schema migration adds notes and immutable audit history", () => {
   assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='donor_contact_audits'").get().name, "donor_contact_audits");
 });
 
-test("entry points expose New Donor and donor contact editing", () => {
+test("donor directory exposes New Donor and donor contact editing", () => {
   assert.match(read("app/donors/page.tsx"), /href="\/donors\/new"/);
-  assert.match(read("app/page.tsx"), /href="\/donors\/new"/);
   assert.match(read("app/donors/[id]/page.tsx"), /Edit Contact Details/);
 });

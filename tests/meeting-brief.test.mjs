@@ -63,7 +63,8 @@ assert.match(page, /type=meeting/);
 for (const section of ["LAST INTERACTION", "RECENT DISCUSSION TOPICS", "OPEN COMMITMENTS", "LAST GIFT", "PEOPLE MENTIONED", "SUGGESTED PREPARATION"]) assert.match(page, new RegExp(section));
 assert.doesNotMatch(page, /LIVE DATA|authenticated relationship record|data-backed|implementation|confidence|classification/i);
 assert.match(donorPage, /Prepare for Meeting/);
-assert.match(today, /Prepare for Meeting/);
+assert.match(today, /activity\.prepareHref/);
+assert.match(today, />Prepare</);
 assert.match(capturePage, /allowedKinds\.has\(requestedParams\.type/);
 
 process.stdout.write("Meeting brief checks passed.\n");
