@@ -16,6 +16,12 @@ export type DataHealthFacts = {
   schemaReady: boolean;
   currentMigrationLevel: string | null;
   migrationLedgerComplete: boolean;
+  journalMigrationLevel: string | null;
+  remoteMigrationLevel: string | null;
+  remoteMigrationTable: string | null;
+  remoteMigrationHistoryComplete: boolean;
+  remoteMigrationHistoryConsistent: boolean;
+  remoteMigrationDiagnosticLines: string[];
   activeDonors: number | null;
   duplicateJlCodes: number | null;
   orphanedGifts: number | null;
@@ -44,6 +50,9 @@ export type DataHealthReport = {
   checks: HealthCheck[];
   platform: {
     migrationLevel: string;
+    journalMigrationLevel: string;
+    remoteMigrationLevel: string;
+    productionReady: boolean;
     expectedMigrationLevel: string;
     ledgerComplete: boolean;
     appVersion: string;
@@ -87,6 +96,22 @@ export const MIGRATION_LEDGER_COMPLETE =
   EXPECTED_MIGRATION_TAGS.every((tag, index) => LEDGERED_MIGRATION_TAGS[index] === tag);
 
 export const MISSING_LEDGER_MIGRATIONS = EXPECTED_MIGRATION_TAGS.filter((tag) => !LEDGERED_MIGRATION_TAGS.includes(tag));
+
+export function migrationLevelFromTags(tags: readonly string[]) {
+  const last = tags.at(-1);
+  return last?.match(/^(\d{4})_/)?.[1] ?? null;
+}
+
+export function reconcileRemoteMigrationTags(remoteTags: readonly string[], expectedTags: readonly string[] = EXPECTED_MIGRATION_TAGS) {
+  const diagnostics: string[] = [];
+  const duplicates = remoteTags.filter((tag, index) => remoteTags.indexOf(tag) !== index);
+  if (duplicates.length) diagnostics.push(`Duplicate remote migration entries: ${[...new Set(duplicates)].join(", ")}.`);
+  const firstMismatch = remoteTags.findIndex((tag, index) => expectedTags[index] !== tag);
+  if (firstMismatch >= 0) diagnostics.push(`Remote sequence ${firstMismatch} is ${remoteTags[firstMismatch]}; expected ${expectedTags[firstMismatch] ?? "no additional migration"}.`);
+  if (firstMismatch < 0 && remoteTags.length < expectedTags.length) diagnostics.push(`Remote history stops after ${remoteTags.at(-1) ?? "no migration"}; ${expectedTags.length - remoteTags.length} packaged migrations are missing.`);
+  const consistent = diagnostics.length === 0;
+  return { level: migrationLevelFromTags(remoteTags), complete: consistent && remoteTags.length === expectedTags.length, consistent, diagnostics };
+}
 
 const numberValue = (value: number | null) => value === null ? "Unavailable" : value.toLocaleString("en-US");
 
@@ -138,18 +163,10 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       value: facts.databaseConnected ? "Connected" : "Unavailable",
       explanation: facts.databaseConnected ? "Fundraising OS can read the D1 workspace." : "Fundraising OS could not read D1. No workspace integrity checks were completed.",
     },
-    {
-      id: "migrations",
-      label: "Database migrations",
-      status: facts.schemaReady && facts.migrationLedgerComplete ? "healthy" : "critical",
-      value: `${facts.currentMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`,
-      explanation: !facts.schemaReady
-        ? "The database is missing required tables or columns. Do not run imports until the schema is repaired."
-        : facts.migrationLedgerComplete
-          ? "The schema and migration ledger are complete."
-          : "The live schema is ready, but the migration ledger does not include every packaged migration. Repair the release ledger before production launch.",
-      diagnosticLines: facts.migrationLedgerComplete ? [] : MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is packaged but missing from drizzle/meta/_journal.json.`),
-    },
+    { id: "live-schema", label: "Live schema version", status: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "healthy" : "critical", value: `${facts.currentMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "The live D1 schema contains every expected table and column." : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled." },
+    { id: "migration-journal", label: "Packaged migration journal", status: facts.migrationLedgerComplete ? "healthy" : "critical", value: `${facts.journalMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.migrationLedgerComplete ? "The packaged journal lists every migration once and in order." : "The packaged journal is incomplete. Existing SQL must not be replayed to repair it.", diagnosticLines: facts.migrationLedgerComplete ? [] : MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is packaged but missing from drizzle/meta/_journal.json.`) },
+    { id: "remote-migrations", label: "Remote migration history", status: facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "healthy" : "critical", value: `${facts.remoteMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? `The ${facts.remoteMigrationTable ?? "remote"} table records every packaged migration once and in order.` : "The remote D1 migration table is missing, incomplete, or inconsistent with the packaged sequence.", diagnosticLines: facts.remoteMigrationDiagnosticLines },
+    { id: "production-readiness", label: "Migration production readiness", status: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "healthy" : "critical", value: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "Ready" : "Blocked", explanation: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent ? "Live schema, packaged journal, and remote history agree." : "Production remains blocked until live schema, packaged journal, and remote history agree exactly." },
     {
       id: "active-donors",
       label: "Active donors",
@@ -225,6 +242,9 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     checks,
     platform: {
       migrationLevel: facts.currentMigrationLevel ?? "Unknown",
+      journalMigrationLevel: facts.journalMigrationLevel ?? "Unknown",
+      remoteMigrationLevel: facts.remoteMigrationLevel ?? "Unknown",
+      productionReady: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.migrationLedgerComplete && facts.remoteMigrationHistoryComplete && facts.remoteMigrationHistoryConsistent,
       expectedMigrationLevel: EXPECTED_MIGRATION_LEVEL,
       ledgerComplete: facts.migrationLedgerComplete,
       appVersion: facts.appVersion,

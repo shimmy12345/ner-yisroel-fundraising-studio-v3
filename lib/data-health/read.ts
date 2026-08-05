@@ -17,12 +17,16 @@ import {
 import {
   APP_VERSION,
   MIGRATION_LEDGER_COMPLETE,
+  LEDGERED_MIGRATION_TAGS,
   buildDataHealthReport,
   inferMigrationLevel,
+  migrationLevelFromTags,
+  reconcileRemoteMigrationTags,
   schemaIsReady,
   type DataHealthFacts,
   type DataHealthReport,
 } from "./model";
+import { readRemoteMigrationHistory } from "./remote-migrations";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
 
@@ -35,6 +39,12 @@ const emptyFacts = (): DataHealthFacts => ({
   schemaReady: false,
   currentMigrationLevel: null,
   migrationLedgerComplete: MIGRATION_LEDGER_COMPLETE,
+  journalMigrationLevel: migrationLevelFromTags(LEDGERED_MIGRATION_TAGS),
+  remoteMigrationLevel: null,
+  remoteMigrationTable: null,
+  remoteMigrationHistoryComplete: false,
+  remoteMigrationHistoryConsistent: false,
+  remoteMigrationDiagnosticLines: ["Remote migration history has not been verified."],
   activeDonors: null,
   duplicateJlCodes: null,
   orphanedGifts: null,
@@ -80,6 +90,13 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));
     facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns);
     facts.schemaReady = schemaIsReady(tableNames, userColumns, donorColumns, givingColumns);
+    const remoteHistory = await readRemoteMigrationHistory(env.DB);
+    const remoteReconciliation = reconcileRemoteMigrationTags(remoteHistory.entries.map((entry) => entry.tag));
+    facts.remoteMigrationLevel = remoteReconciliation.level;
+    facts.remoteMigrationTable = remoteHistory.tableName;
+    facts.remoteMigrationHistoryComplete = remoteReconciliation.complete;
+    facts.remoteMigrationHistoryConsistent = remoteReconciliation.consistent;
+    facts.remoteMigrationDiagnosticLines = remoteHistory.diagnostic ? [remoteHistory.diagnostic] : remoteReconciliation.diagnostics;
     if (!facts.schemaReady) return buildDataHealthReport(facts);
 
     const healthResults = await env.DB.batch([

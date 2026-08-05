@@ -9,6 +9,8 @@ import {
   buildDataHealthReport,
   inferMigrationLevel,
   schemaIsReady,
+  reconcileRemoteMigrationTags,
+  EXPECTED_MIGRATION_TAGS,
 } from "../lib/data-health/model.ts";
 import {
   ACTIVE_DONORS_SQL,
@@ -74,7 +76,7 @@ test("fictional integrity failures are detected without exposing donor details",
   const refresh = db.prepare(REFRESH_STATE_SQL).get(owner);
   const backup = db.prepare(LAST_BACKUP_SQL).get(owner);
   const facts = {
-    databaseConnected: true, schemaReady: true, currentMigrationLevel: EXPECTED_MIGRATION_LEVEL, migrationLedgerComplete: true,
+    databaseConnected: true, schemaReady: true, currentMigrationLevel: EXPECTED_MIGRATION_LEVEL, migrationLedgerComplete: true, journalMigrationLevel: EXPECTED_MIGRATION_LEVEL, remoteMigrationLevel: EXPECTED_MIGRATION_LEVEL, remoteMigrationTable: "d1_migrations", remoteMigrationHistoryComplete: true, remoteMigrationHistoryConsistent: true, remoteMigrationDiagnosticLines: [],
     activeDonors: count(db, ACTIVE_DONORS_SQL, owner), duplicateJlCodes: count(db, DUPLICATE_JL_CODES_SQL, owner),
     orphanedGifts: count(db, ORPHANED_GIFTS_SQL, owner), orphanedInteractions: count(db, ORPHANED_INTERACTIONS_SQL, owner, owner),
     orphanedReminders: count(db, ORPHANED_REMINDERS_SQL, owner, owner), orphanedPayments: count(db, ORPHANED_PAYMENTS_SQL, owner, owner, owner),
@@ -98,7 +100,7 @@ test("fictional integrity failures are detected without exposing donor details",
 });
 
 test("a healthy established workspace receives a clear green result", () => {
-  const report = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0017",migrationLedgerComplete:true,activeDonors:12,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:100,givingLinkedTotalCents:100,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:now,lastDonationRefreshAt:now,lastBackupAt:now,appVersion:APP_VERSION,deployedCommit:"healthy123" });
+  const report = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],activeDonors:12,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:100,givingLinkedTotalCents:100,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:now,lastDonationRefreshAt:now,lastBackupAt:now,appVersion:APP_VERSION,deployedCommit:"healthy123" });
   assert.equal(report.status,"healthy");
   assert.match(report.summary,/healthy/i);
 });
@@ -107,16 +109,20 @@ test("six-month edge cases avoid false green results", () => {
   assert.equal(MIGRATION_LEDGER_COMPLETE,false,"the known 0014-0017 journal gap remains visible until deliberately repaired");
   assert.equal(inferMigrationLevel(["donors","data_imports","donor_views","relationship_queue_dismissals","data_health_repair_audits","legacy_test_cleanup_audits"],[],[],[]),"0019");
   assert.equal(schemaIsReady(["donors"],[],[],[]),false,"a partially migrated database never runs deeper checks as zero");
-  const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0017",migrationLedgerComplete:true,activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastBackupAt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
+  const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastBackupAt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
   assert.equal(newWorkspace.checks.find((check)=>check.id==="household-refresh").status,"info","a new manual-only workspace is not falsely failed for having no JL refresh");
   assert.equal(newWorkspace.checks.find((check)=>check.id==="backup").status,"attention","backup readiness remains explicit even before the first import");
+  assert.equal(reconcileRemoteMigrationTags(EXPECTED_MIGRATION_TAGS).complete, true);
+  assert.equal(reconcileRemoteMigrationTags([...EXPECTED_MIGRATION_TAGS, EXPECTED_MIGRATION_TAGS.at(-1)]).consistent, false, "duplicate remote rows block readiness");
+  assert.equal(reconcileRemoteMigrationTags(EXPECTED_MIGRATION_TAGS.filter((tag) => !tag.startsWith("0016_"))).consistent, false, "a remote history gap blocks readiness");
+  assert.equal(reconcileRemoteMigrationTags([...EXPECTED_MIGRATION_TAGS].reverse()).consistent, false, "out-of-order remote history blocks readiness");
 });
 
 test("route and interface are authenticated, owner scoped, honest, and actionable", () => {
   const route=read("app/api/health/route.ts"), loader=read("lib/data-health/read.ts"), queries=read("lib/data-health/queries.ts"), ui=read("app/settings/DataHealthDashboard.tsx"), settings=read("app/settings/page.tsx"), backup=read("app/api/import/backup/route.ts"), vite=read("vite.config.ts");
   assert.match(route,/getChatGPTUser/); assert.match(route,/Authentication required/); assert.match(route,/loadDataHealth\(profile\.id\)/); assert.match(route,/cache-control/);
   assert.match(loader,/env\.DB\.batch/); assert.match(loader,/schemaIsReady/); assert.match(queries,/owner_user_id=\?/); assert.doesNotMatch(queries,/display_name|donor_name/);
-  for(const label of ["Database connection","Database migrations","Active donors","Duplicate active JL Codes","Orphaned gifts","Orphaned interactions","Orphaned reminders","Orphaned pledge payments","Broken merge redirects","Giving-total reconciliation","Unmatched JL Codes","Pending pledge assignments","Failed or incomplete imports","Last household refresh","Last donation refresh","Last successful backup","Deployed version"]) assert.match(read("lib/data-health/model.ts"),new RegExp(label));
+  for(const label of ["Database connection","Live schema version","Packaged migration journal","Remote migration history","Migration production readiness","Active donors","Duplicate active JL Codes","Orphaned gifts","Orphaned interactions","Orphaned reminders","Orphaned pledge payments","Broken merge redirects","Giving-total reconciliation","Unmatched JL Codes","Pending pledge assignments","Failed or incomplete imports","Last household refresh","Last donation refresh","Last successful backup","Deployed version"]) assert.match(read("lib/data-health/model.ts"),new RegExp(label));
   assert.match(ui,/Run health check/); assert.match(ui,/state === "loading"/); assert.match(ui,/setState\("success"\)/); assert.match(ui,/setState\("error"\)/); assert.match(ui,/Names, amounts, and source rows are never shown/); assert.match(settings,/Data Health/);
   assert.match(ui,/useEffect\(\(\) => setUseLocalTime\(true\)/,"timestamps must keep server and first client render deterministic before switching to local time");
   assert.match(backup,/workspace_export/); assert.match(backup,/dataHealthRepairAudits/); assert.match(vite,/FUNDRAISING_OS_COMMIT/);
