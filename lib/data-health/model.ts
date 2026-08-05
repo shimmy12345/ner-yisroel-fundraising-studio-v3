@@ -151,6 +151,7 @@ function timestampCheck(id: string, label: string, timestamp: number | null, has
     if (Number.isFinite(date.getTime())) return { id, label, status: "healthy", value: date.toISOString(), explanation: kind === "backup" ? "A successful workspace backup is recorded." : "A successful JL refresh is recorded." };
   }
   if (!hasData && kind === "refresh") return { id, label, status: "info", value: "Not yet", explanation: "No JL refresh is expected in a new or manual-only workspace." };
+  if (!hasData && kind === "backup") return { id, label, status: "info", value: "Not required yet", explanation: "This database contains schema only. Create the first backup before loading or creating business data." };
   return {
     id,
     label,
