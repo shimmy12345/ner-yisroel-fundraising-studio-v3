@@ -5,6 +5,7 @@ import { requireChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { loadMeetingBrief } from "../../../../lib/relationships/meeting-brief";
 import { donorNavigationHref, safeDonorOrigin, safeInternalReturnPath } from "../../../../lib/navigation/donor-navigation";
+import { financialDateLabel } from "../../../../lib/financial-date";
 
 export const metadata: Metadata = { title: "Meeting brief" };
 export const dynamic = "force-dynamic";
@@ -12,9 +13,9 @@ export const dynamic = "force-dynamic";
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const date = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 
-function GiftSummary({ gift, timezone, empty }: { gift: { paidCents: number; occurredAt: number | null; description: string | null } | null; timezone: string; empty: string }) {
+function GiftSummary({ gift, empty }: { gift: { paidCents: number; occurredAt: number | null; description: string | null } | null; empty: string }) {
   if (!gift) return <span>{empty}</span>;
-  return <><strong>{money(gift.paidCents)}</strong><span>{gift.occurredAt ? date(gift.occurredAt, timezone) : "Date not recorded"}{gift.description ? ` · ${gift.description}` : ""}</span></>;
+  return <><strong>{money(gift.paidCents)}</strong><span>{gift.occurredAt ? financialDateLabel(gift.occurredAt) : "Date not recorded"}{gift.description ? ` · ${gift.description}` : ""}</span></>;
 }
 
 export default async function MeetingBriefPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ from?: string; origin?: string }> }) {
@@ -44,8 +45,8 @@ export default async function MeetingBriefPage({ params, searchParams }: { param
 
     <section className="meeting-giving-grid" aria-label="Giving snapshot">
       <article><p>Lifetime paid</p><strong>{money(brief.lifetimePaidCents)}</strong><span>{brief.lifetimePaidCents ? "From recorded paid giving" : "No paid giving recorded"}</span></article>
-      <article><p>Recent gift</p><GiftSummary gift={brief.recentGift} timezone={profile.timezone} empty="No paid gift recorded" /></article>
-      <article><p>Largest gift</p><GiftSummary gift={brief.largestGift} timezone={profile.timezone} empty="No paid gift recorded" /></article>
+      <article><p>Recent gift</p><GiftSummary gift={brief.recentGift} empty="No paid gift recorded" /></article>
+      <article><p>Largest gift</p><GiftSummary gift={brief.largestGift} empty="No paid gift recorded" /></article>
       <article><p>Open pledge balance</p><strong>{money(brief.openPledgeCents)}</strong><span>{brief.openPledgeCents ? "Recorded outstanding balance" : "No open pledge balance"}</span></article>
     </section>
 

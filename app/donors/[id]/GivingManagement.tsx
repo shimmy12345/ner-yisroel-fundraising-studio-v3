@@ -46,7 +46,10 @@ export function GivingRecordActions({ activity, donors }: { activity: Activity; 
 export function PendingGiftForm({ donors, initialDonorId }: { donors: DonorSearchRecord[]; initialDonorId: string }) {
   const [open, setOpen] = useState(false);
   const [donorId, setDonorId] = useState(initialDonorId);
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  });
   const [amount, setAmount] = useState("");
   const [designation, setDesignation] = useState("");
   const [note, setNote] = useState("");

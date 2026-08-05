@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { DataMode } from "./mode";
 import { scheduleBucket } from "./scheduled-activity";
 import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, type RelationshipQueueBucket } from "./relationship-queue";
+import { financialDateLabel } from "../financial-date.ts";
 
 type PriorityRow = { recommendation_id: string; donor_id: string; display_name: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
 type GivingRow = { id: string; donor_id: string; display_name: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null; updated_at: number };
@@ -131,11 +132,11 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     const contactedAfterGift = (contactByDonor.get(item.donor_id) ?? 0) >= (item.activity_date ?? 0);
     if ((item.paid_cents ?? 0) > 0 && recent && !contactedAfterGift && !recentGiftByDonor.has(item.donor_id)) recentGiftByDonor.set(item.donor_id, item);
   }
-  for (const item of recentGiftByDonor.values()) ranked.push({ queueId: `gift:${item.id}:${item.updated_at}`, rank: 2, sortAt: -(item.activity_date ?? 0), donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Recent gift", signal: "warm", reason: `${money(item.paid_cents ?? 0)} gift needs acknowledgment`, why: `${item.description || item.item_type || "Paid gift"} was recorded ${item.activity_date ? dateLabel(item.activity_date, timezone) : "recently"}. No interaction is recorded after the gift.`, action: "Follow up", href: `/capture?donorId=${encodeURIComponent(item.donor_id)}&returnTo=%2F`, dueAt: now, dueLabel: "Suggested today" });
+  for (const item of recentGiftByDonor.values()) ranked.push({ queueId: `gift:${item.id}:${item.updated_at}`, rank: 2, sortAt: -(item.activity_date ?? 0), donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Recent gift", signal: "warm", reason: `${money(item.paid_cents ?? 0)} gift needs acknowledgment`, why: `${item.description || item.item_type || "Paid gift"} was recorded ${item.activity_date ? financialDateLabel(item.activity_date) : "recently"}. No interaction is recorded after the gift.`, action: "Follow up", href: `/capture?donorId=${encodeURIComponent(item.donor_id)}&returnTo=%2F`, dueAt: now, dueLabel: "Suggested today" });
 
   const openByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openByDonor.has(item.donor_id)) openByDonor.set(item.donor_id, item);
-  for (const item of openByDonor.values()) ranked.push({ queueId: `commitment:${item.id}:${item.updated_at}`, rank: 3, sortAt: item.activity_date ?? 0, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Open commitment", signal: "warm", reason: `${money(item.balance_cents ?? 0)} remains open`, why: `${item.description || item.item_type || "Commitment"}${item.activity_date ? ` from ${dateLabel(item.activity_date, timezone)}` : ""}.`, action: "Review", href: `/donors/${encodeURIComponent(item.donor_id)}`, dueAt: null, dueLabel: "No due date recorded" });
+  for (const item of openByDonor.values()) ranked.push({ queueId: `commitment:${item.id}:${item.updated_at}`, rank: 3, sortAt: item.activity_date ?? 0, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), label: "Open commitment", signal: "warm", reason: `${money(item.balance_cents ?? 0)} remains open`, why: `${item.description || item.item_type || "Commitment"}${item.activity_date ? ` from ${financialDateLabel(item.activity_date)}` : ""}.`, action: "Review", href: `/donors/${encodeURIComponent(item.donor_id)}`, dueAt: null, dueLabel: "No due date recorded" });
 
   for (const item of contacts) {
     const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null;
@@ -152,7 +153,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const upcomingActivities = scheduled.filter(({ row }) => scheduleBucket(row.source, row.occurred_at, row.created_at, now, timezone) === "upcoming").slice(0, 10).map(({ activity }) => activity);
   const meetings = scheduled.filter(({ row }) => row.type === "meeting" && row.occurred_at >= now).slice(0, 5).map(({ row, activity }) => ({ donorId: row.donor_id, time: activity.time, period: activity.period, title: activity.donorName, detail: `${activity.date} · ${activity.subject}` }));
   const recentGiving = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && isRecentPastEvent(item.activity_date, now, 30));
-  const gifts = recentGiving.slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${dateLabel(item.activity_date, timezone)}` : ""}` }));
+  const gifts = recentGiving.slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${financialDateLabel(item.activity_date)}` : ""}` }));
   const donorLinks = (rows: DonorLinkRow[], verb: string): WorkspaceDonorLink[] => rows.map((item) => ({ donorId: item.donor_id, name: item.display_name, initials: initials(item.display_name), detail: `${verb} ${dateLabel(item.event_at, timezone)}`, href: `/donors/${encodeURIComponent(item.donor_id)}` }));
   const recentlyViewed = donorLinks(recentViews.results, "Viewed");
   const recentlyUpdated = donorLinks(recentUpdates.results.filter((item) => item.event_at > 0), "Updated");

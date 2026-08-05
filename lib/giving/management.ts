@@ -1,3 +1,5 @@
+import { parseFinancialDate } from "../financial-date.ts";
+
 export const GIVING_WORKSPACE_STATUSES = ["active", "hidden", "duplicate", "needs_review", "invalid", "merged"] as const;
 export type GivingWorkspaceStatus = typeof GIVING_WORKSPACE_STATUSES[number];
 
@@ -49,9 +51,9 @@ export function pendingGiftInput(value: unknown) {
   const designation = typeof body.designation === "string" ? body.designation.trim().slice(0, 160) : "";
   const note = typeof body.note === "string" ? body.note.trim().slice(0, 2000) : "";
   const amount = typeof body.amount === "number" ? body.amount : Number(String(body.amount ?? "").replace(/[$,\s]/g, ""));
-  const date = typeof body.date === "string" ? Date.parse(`${body.date}T12:00:00`) : Number.NaN;
+  const date = typeof body.date === "string" ? parseFinancialDate(body.date) : null;
   const amountCents = Number.isFinite(amount) ? Math.round(amount * 100) : 0;
-  const activityDate = Number.isFinite(date) ? Math.floor(date / 1000) : null;
+  const activityDate = date;
   const errors: string[] = [];
   if (!donorId) errors.push("Choose a donor.");
   if (amountCents <= 0 || amountCents > 100_000_000_00) errors.push("Enter a positive gift amount below $100 million.");

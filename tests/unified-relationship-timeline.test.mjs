@@ -27,8 +27,8 @@ const reminders = [
 
 const timeline = buildUnifiedTimeline({ giving, legacyGifts: [], payments, interactions, reminders, now: 1_000 });
 assert.deepEqual(timeline.map((item) => item.key), [
-  "interaction:call", "reminder:reminder", "interaction:cancelled", "interaction:followup", "giving:fictional-gift", "interaction:meeting", "payment:fictional-payment", "giving:fictional-pledge", "payment:orphan-payment", "giving:undated-gift",
-], "all sources sort by actual event, completion, cancellation, due, payment, or commitment time; undated records sort last");
+  "interaction:call", "reminder:reminder", "interaction:cancelled", "interaction:followup", "interaction:meeting", "giving:fictional-gift", "giving:fictional-pledge", "payment:fictional-payment", "payment:orphan-payment", "giving:undated-gift",
+], "activities sort by actual time, financial records use stable calendar-date ordering, and undated records sort last");
 assert.equal(timeline.filter((item) => item.key === "payment:fictional-payment").length, 1, "duplicate payment events render once");
 assert.equal(timeline.some((item) => item.key === "reminder:activity-call"), false, "a generated reminder does not duplicate its scheduled activity");
 assert.equal(timeline.some((item) => item.key === "giving:merged-pending"), false, "a merged pending gift does not duplicate its confirmed gift");

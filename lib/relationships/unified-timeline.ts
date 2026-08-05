@@ -1,5 +1,6 @@
 import { appearsInGivingTimeline } from "../giving/management.ts";
 import { activityStatus, completedPlannedAt, isNoResponseActivity } from "../workspace/scheduled-activity.ts";
+import { normalizeFinancialDate } from "../financial-date.ts";
 
 export type TimelineFilter = "all" | "gifts" | "pledges" | "payments" | "calls" | "emails" | "meetings" | "notes" | "reminders" | "other";
 export type TimelineStatus = "scheduled" | "completed" | "cancelled" | "pending" | "open" | "overdue" | "needs-review" | "excluded";
@@ -50,13 +51,13 @@ export function buildUnifiedTimeline(input: {
   const items: UnifiedTimelineItem[] = [];
 
   for (const giving of input.giving.filter(appearsInGivingTimeline)) {
-    items.push({ key: `giving:${giving.id}`, kind: "giving", filter: givingFilter(giving), status: givingStatus(giving), eventAt: giving.activity_date ?? 0, giving });
+    items.push({ key: `giving:${giving.id}`, kind: "giving", filter: givingFilter(giving), status: givingStatus(giving), eventAt: giving.activity_date === null ? -1 : normalizeFinancialDate(giving.activity_date), giving });
   }
-  for (const gift of input.legacyGifts) items.push({ key: `legacy-gift:${gift.id}`, kind: "legacy-gift", filter: "gifts", status: "completed", eventAt: gift.received_at, gift });
+  for (const gift of input.legacyGifts) items.push({ key: `legacy-gift:${gift.id}`, kind: "legacy-gift", filter: "gifts", status: "completed", eventAt: normalizeFinancialDate(gift.received_at), gift });
   for (const payment of input.payments) {
     if (seenPaymentIds.has(payment.id)) continue;
     seenPaymentIds.add(payment.id);
-    items.push({ key: `payment:${payment.id}`, kind: "payment", filter: "payments", status: "completed", eventAt: payment.payment_date, linkedPledgeExists: givingIds.has(payment.pledge_activity_id), payment });
+    items.push({ key: `payment:${payment.id}`, kind: "payment", filter: "payments", status: "completed", eventAt: normalizeFinancialDate(payment.payment_date), linkedPledgeExists: givingIds.has(payment.pledge_activity_id), payment });
   }
   for (const interaction of input.interactions) {
     const rawStatus = activityStatus(interaction.source, interaction.occurred_at, interaction.created_at);

@@ -21,7 +21,8 @@
     "0016_lightweight_donation_management.sql",
     "0017_today_relationship_queue.sql",
     "0018_data_health_repairs.sql",
-    "0019_legacy_test_orphan_cleanup.sql"
+    "0019_legacy_test_orphan_cleanup.sql",
+    "0020_financial_date_only.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {

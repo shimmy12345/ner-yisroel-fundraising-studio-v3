@@ -1,4 +1,5 @@
 import type { ImportRow } from "./recognition.ts";
+import { parseFinancialDate } from "../financial-date.ts";
 
 export const JL_DONATION_COLUMNS = ["Code", "Name", "Total Due", "Item Num", "Desc", "Campaign", "Due Date", "Amount", "Paid", "Balance Due", "Company"] as const;
 export const JL_COMPACT_DONATION_COLUMNS = ["Code", "First Name", "Last Name", "Date", "Campaign", "Amount"] as const;
@@ -67,10 +68,7 @@ function currency(value: string) {
 }
 
 function activityDate(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Date.parse(trimmed);
-  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+  return parseFinancialDate(value);
 }
 
 function eventOrAd(item: string, description: string) {
@@ -92,7 +90,7 @@ export function classifyJlDonation(row: ImportRow, now = new Date(), options: Do
   const description = row.Desc?.trim() ?? "";
   const sourceName = row.Name?.trim() || [row["First Name"], row["Last Name"]].filter(Boolean).join(" ").trim();
   const earliest = Date.UTC(1980, 0, 1) / 1000;
-  const latest = Math.floor(new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).getTime() / 1000);
+  const latest = Date.UTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()) / 1000;
   const suspiciousDate = date !== null && (date < earliest || date > latest);
   let category: GivingCategory;
   let reviewReason: string | null = null;
@@ -151,7 +149,7 @@ export function calculateGivingSnapshot(activities: GivingActivity[], now = new 
   const middle = Math.floor(sortedAmounts.length / 2);
   const typical = sortedAmounts.length ? (sortedAmounts.length % 2 ? sortedAmounts[middle] : Math.round((sortedAmounts[middle - 1] + sortedAmounts[middle]) / 2)) : 0;
   const years = new Map<number, number>();
-  paid.forEach((activity) => { const year = new Date(activity.activityDate! * 1000).getFullYear(); years.set(year, (years.get(year) ?? 0) + activity.paidCents!); });
+  paid.forEach((activity) => { const year = new Date(activity.activityDate! * 1000).getUTCFullYear(); years.set(year, (years.get(year) ?? 0) + activity.paidCents!); });
   const descriptions = new Map<string, number>();
   financial.forEach((activity) => { if (activity.description) descriptions.set(activity.description, (descriptions.get(activity.description) ?? 0) + 1); });
   const open = financial.filter((activity) => (activity.balanceCents ?? 0) > 0).sort((a, b) => (b.activityDate ?? 0) - (a.activityDate ?? 0));

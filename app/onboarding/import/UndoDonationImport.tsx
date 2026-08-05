@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { financialDateLabel } from "../../../lib/financial-date";
 
 type Preview = {
   safe: boolean;
@@ -31,7 +32,7 @@ function money(cents: number | null) {
 }
 
 function date(timestamp: number) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(timestamp * 1000));
+  return financialDateLabel(timestamp);
 }
 
 export function UndoDonationImport({ importId, kind = "donation" }: { importId: string; kind?: "donation" | "household" }) {

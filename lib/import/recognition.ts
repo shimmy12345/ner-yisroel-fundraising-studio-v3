@@ -1,3 +1,5 @@
+import { parseFinancialDate } from "../financial-date.ts";
+
 export type ImportField =
   | "donorCode"
   | "donorName"
@@ -295,7 +297,7 @@ export function buildImportPreview(rows: ImportRow[], mapping: ColumnMapping, fi
     const giftDateValue = valueFor(row, mapping, "giftDate");
     const giftAmountValue = valueFor(row, mapping, "giftAmount");
     if (giftDateValue || giftAmountValue) {
-      const date = timestamp(giftDateValue);
+      const date = parseFinancialDate(giftDateValue);
       const amountCents = amountInCents(giftAmountValue);
       if (date === null || amountCents === null) {
         rejectedRows.push({ row: rowNumber, reason: "Gift requires a valid date and non-negative amount", values: row });

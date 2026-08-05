@@ -7,6 +7,7 @@ import { decodeCsv, parseCsv, parseXlsx, rowsToRecords } from "../../../lib/impo
 import { isJlSolutionsExport, JL_MAPPING } from "../../../lib/import/jl-solutions";
 import { isJlDonationExport } from "../../../lib/import/jl-donations";
 import { UndoDonationImport } from "./UndoDonationImport";
+import { financialDateLabel, parseFinancialDate } from "../../../lib/financial-date";
 
 type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
 type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
@@ -94,9 +95,16 @@ function csvValue(value: string | number) {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-const dateLabel = (value: string | null) => value ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value.length === 10 ? `${value}T12:00:00` : value)) : "Not yet refreshed";
+const dateLabel = (value: string | null) => {
+  if (!value) return "Not yet refreshed";
+  if (value.length === 10) {
+    const financialDate = parseFinancialDate(value);
+    return financialDate === null ? "Date unavailable" : financialDateLabel(financialDate);
+  }
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value));
+};
 const centsLabel = (value: number | null) => value === null ? "Amount unavailable" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
-const epochDateLabel = (value: number | null) => value === null ? "Date unavailable" : new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value * 1000));
+const epochDateLabel = (value: number | null) => value === null ? "Date unavailable" : financialDateLabel(value);
 const REVIEW_MODE_COPY: Record<ReviewMode, { label: string; description: string }> = {
   review_every: { label: "Review every existing donor", description: "Every JL Code match waits for your confirmation, even when nothing changed." },
   changes_only: { label: "Review only donors with changes", description: "Unchanged matches continue automatically; changed donors wait for review." },
