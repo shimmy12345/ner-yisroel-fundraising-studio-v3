@@ -9,6 +9,18 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 20;
 
+// These tables belong to the hosting/runtime layer, not the Fundraising OS
+// application schema. They are intentionally absent from a portable D1
+// production baseline and must never make an otherwise identical application
+// schema look unsafe.
+export const PLATFORM_MANAGED_SCHEMA_OBJECTS = new Set([
+  "__appgarden_migrations",
+  "_cf_KV",
+  "d1_migrations",
+  "__drizzle_migrations",
+  "drizzle_migrations",
+]);
+
 export const normalizeSchemaSql = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 export function compareSchemaObjects(liveObjects: readonly SchemaObject[], baselineObjects: readonly SchemaObject[] = PRODUCTION_BASELINE_OBJECTS): SchemaComparison {
@@ -26,7 +38,7 @@ export function compareSchemaObjects(liveObjects: readonly SchemaObject[], basel
 
 export function stagingSchemaObjects(rows: Array<Record<string, unknown>>): SchemaObject[] {
   return rows
-    .filter((row) => (row.type === "table" || row.type === "index") && typeof row.name === "string" && typeof row.sql === "string" && !String(row.name).startsWith("sqlite_") && !["d1_migrations", "__drizzle_migrations", "drizzle_migrations"].includes(String(row.name)))
+    .filter((row) => (row.type === "table" || row.type === "index") && typeof row.name === "string" && typeof row.sql === "string" && !String(row.name).startsWith("sqlite_") && !PLATFORM_MANAGED_SCHEMA_OBJECTS.has(String(row.name)))
     .map((row) => ({ type: row.type as "table" | "index", name: String(row.name), sql: normalizeSchemaSql(row.sql) }))
     .sort((a, b) => `${a.type}:${a.name}`.localeCompare(`${b.type}:${b.name}`));
 }

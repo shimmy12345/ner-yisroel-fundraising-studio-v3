@@ -54,6 +54,17 @@ test("schema comparison detects missing, unexpected, and changed constraints or 
   assert.match(compareSchemaObjects(changed).differences.join(" "), /Table definition differs: giving_activities/);
 });
 
+test("schema comparison excludes only known platform-managed tables", () => {
+  const liveRows = [
+    ...manifest.ddlTopology.map((object) => ({ ...object, tbl_name: object.type === "table" ? object.name : "ignored" })),
+    { type: "table", name: "__appgarden_migrations", tbl_name: "__appgarden_migrations", sql: "CREATE TABLE __appgarden_migrations (id text)" },
+    { type: "table", name: "_cf_KV", tbl_name: "_cf_KV", sql: "CREATE TABLE _cf_KV (key text)" },
+  ];
+  assert.equal(compareSchemaObjects(stagingSchemaObjects(liveRows)).matches, true);
+  liveRows.push({ type: "table", name: "unrecognized_runtime_table", tbl_name: "unrecognized_runtime_table", sql: "CREATE TABLE unrecognized_runtime_table (id text)" });
+  assert.match(compareSchemaObjects(stagingSchemaObjects(liveRows)).differences.join(" "), /Unexpected table: unrecognized_runtime_table/);
+});
+
 test("production baseline is isolated from staging and future drift fails closed", () => {
   const migrationFiles = fs.readdirSync(path.join(root, "drizzle")).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
   assert.deepEqual(manifest.sourceMigrations, migrationFiles, "a new legacy migration requires regenerating and rehearsing the baseline");
