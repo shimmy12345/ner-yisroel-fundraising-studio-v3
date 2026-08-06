@@ -21,16 +21,15 @@
     }
   ],
   "vars": {
-    // Placeholder — the Cloudflare Access team domain, e.g.
-    // "your-team.cloudflareaccess.com". Created in the Zero Trust dashboard.
-    "TEAM_DOMAIN": "<TEAM_DOMAIN_PLACEHOLDER>",
-    // Placeholder — the AUD tag of the Access Application protecting this
-    // Worker's route, from the Access dashboard after creating the app.
-    "POLICY_AUD": "<POLICY_AUD_PLACEHOLDER>",
-    // Placeholder — the sole email allowed to authenticate. Enforced both by
-    // the Access policy itself and, independently, by this app's own JWT
-    // verification (defense in depth).
-    "STAGING_OWNER_EMAIL": "<STAGING_OWNER_EMAIL_PLACEHOLDER>"
+    // The Cloudflare Access team domain for the Zero Trust org protecting
+    // this Worker.
+    "TEAM_DOMAIN": "fundraising-os.cloudflareaccess.com",
+    // The AUD tag of the Access Application protecting this Worker's route.
+    "POLICY_AUD": "b9796074ba20c3787bd3fc697c0eb0de6981f240081ff3018fb28e5bb95971ed",
+    // The sole email allowed to authenticate. Enforced both by the Access
+    // policy itself and, independently, by this app's own JWT verification
+    // (defense in depth).
+    "STAGING_OWNER_EMAIL": "sgoldstein@nirc.edu"
   },
   "observability": { "enabled": true }
 }
