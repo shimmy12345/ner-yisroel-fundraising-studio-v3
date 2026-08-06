@@ -49,8 +49,8 @@ export default defineConfig(async () => {
       __FUNDRAISING_OS_ENVIRONMENT__: JSON.stringify(
         process.env.FUNDRAISING_OS_ENVIRONMENT === "production"
           ? "production"
-          : process.env.FUNDRAISING_OS_ENVIRONMENT === "sandbox"
-            ? "sandbox"
+          : process.env.FUNDRAISING_OS_ENVIRONMENT === "staging-independent"
+            ? "staging-independent"
             : "staging",
       ),
     },

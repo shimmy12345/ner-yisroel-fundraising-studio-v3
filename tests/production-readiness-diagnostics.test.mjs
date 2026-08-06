@@ -61,10 +61,10 @@ function stagingFacts(overrides = {}) {
   };
 }
 
-function sandboxFacts(overrides = {}) {
+function independentStagingFacts(overrides = {}) {
   return {
     ...productionFacts(),
-    deploymentEnvironment: "sandbox",
+    deploymentEnvironment: "staging-independent",
     ...overrides,
   };
 }
@@ -135,50 +135,50 @@ test("staging never derives production readiness from its own local baseline-mar
   assert.match(readiness.explanation, /never derived from staging/);
 });
 
-test("sandbox: verified clean baseline and empty business data render the exact requested summary, with no production-launch wording", () => {
-  const report = buildDataHealthReport(sandboxFacts({ businessDataRows: 0, activeDonors: 0 }));
-  assert.equal(check(report, "sandbox-environment").value, "Sandbox");
-  assert.equal(check(report, "sandbox-baseline").value, "Verified");
-  assert.equal(check(report, "sandbox-business-data").value, "Empty");
+test("independent staging: verified clean baseline and empty business data render the exact requested summary, with no production-launch wording", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 0, activeDonors: 0 }));
+  assert.equal(check(report, "independent-staging-environment").value, "Independent Staging");
+  assert.equal(check(report, "independent-staging-baseline").value, "Verified");
+  assert.equal(check(report, "independent-staging-business-data").value, "Empty");
 
   // Production-only wording and launch-readiness claims must remain production-only.
   const readiness = check(report, "production-readiness");
-  assert.equal(readiness.status, "info", "sandbox must never claim production launch readiness");
+  assert.equal(readiness.status, "info", "independent staging must never claim production launch readiness");
   assert.notEqual(readiness.value, "Blocked");
-  assert.equal(check(report, "production-baseline").label, "Production baseline artifact", "sandbox reuses staging's informational-only production-baseline wording verbatim");
+  assert.equal(check(report, "production-baseline").label, "Production baseline artifact", "independent staging reuses legacy staging's informational-only production-baseline wording verbatim");
   assert.deepEqual(report.platform.productionReadinessBlockers, []);
 });
 
-test("sandbox: an unreadable baseline marker reports Unknown, never Failed, on the sandbox-specific check", () => {
-  const report = buildDataHealthReport(sandboxFacts({ productionBaselineState: "unreadable", productionBaselineApplied: false }));
-  const baseline = check(report, "sandbox-baseline");
+test("independent staging: an unreadable baseline marker reports Unknown, never Failed, on the independent-staging-specific check", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ productionBaselineState: "unreadable", productionBaselineApplied: false }));
+  const baseline = check(report, "independent-staging-baseline");
   assert.equal(baseline.value, "Unknown");
   assert.equal(baseline.status, "unavailable");
   assert.notEqual(baseline.status, "critical");
 });
 
-test("sandbox: a hash mismatch is reported as Mismatch on the sandbox-specific check and flags business-data risk", () => {
-  const report = buildDataHealthReport(sandboxFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
-  const baseline = check(report, "sandbox-baseline");
+test("independent staging: a hash mismatch is reported as Mismatch on the independent-staging-specific check and flags business-data risk", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
+  const baseline = check(report, "independent-staging-baseline");
   assert.equal(baseline.value, "Mismatch");
   assert.equal(baseline.status, "critical");
   assert.equal(baseline.evidence.businessDataAtRisk, true);
 });
 
-test("sandbox: nonzero business data is reported, not Empty", () => {
-  const report = buildDataHealthReport(sandboxFacts({ businessDataRows: 3, activeDonors: 3 }));
-  const businessData = check(report, "sandbox-business-data");
+test("independent staging: nonzero business data is reported, not Empty", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 3, activeDonors: 3 }));
+  const businessData = check(report, "independent-staging-business-data");
   assert.notEqual(businessData.value, "Empty");
   assert.match(businessData.value, /3 row/);
   assert.equal(businessData.status, "attention");
 });
 
-test("sandbox summary checks do not appear on staging or production", () => {
+test("independent-staging summary checks do not appear on legacy staging or production", () => {
   const stagingReport = buildDataHealthReport(stagingFacts());
   const productionReport = buildDataHealthReport(productionFacts());
   for (const report of [stagingReport, productionReport]) {
-    assert.equal(check(report, "sandbox-environment"), undefined);
-    assert.equal(check(report, "sandbox-baseline"), undefined);
-    assert.equal(check(report, "sandbox-business-data"), undefined);
+    assert.equal(check(report, "independent-staging-environment"), undefined);
+    assert.equal(check(report, "independent-staging-baseline"), undefined);
+    assert.equal(check(report, "independent-staging-business-data"), undefined);
   }
 });

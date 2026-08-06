@@ -5,7 +5,7 @@ import handler from "vinext/server/app-router-entry";
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
-  // Not bound on the independent sandbox Worker (Cloudflare Images is not
+  // Not bound on the independent staging Worker (Cloudflare Images is not
   // required to run the app). When absent, image requests are served
   // unoptimized rather than transformed.
   IMAGES?: {

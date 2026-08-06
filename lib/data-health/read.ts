@@ -36,12 +36,13 @@ const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRA
   : null;
 const deploymentEnvironment =
   __FUNDRAISING_OS_ENVIRONMENT__ === "production" ? "production" :
-  __FUNDRAISING_OS_ENVIRONMENT__ === "sandbox" ? "sandbox" :
+  __FUNDRAISING_OS_ENVIRONMENT__ === "staging-independent" ? "staging-independent" :
   "staging";
-// The sandbox Worker is bootstrapped from the same verified baseline as
-// production and carries a live production_schema_baseline marker, so it
-// is checked the same way. Only staging is structurally exempt.
-const checksLiveBaseline = deploymentEnvironment === "production" || deploymentEnvironment === "sandbox";
+// The independent staging Worker is bootstrapped from the same verified
+// baseline as production and carries a live production_schema_baseline
+// marker, so it is checked the same way. Only legacy (ChatGPT Sites)
+// staging is structurally exempt.
+const checksLiveBaseline = deploymentEnvironment === "production" || deploymentEnvironment === "staging-independent";
 
 const emptyFacts = (): DataHealthFacts => ({
   deploymentEnvironment,

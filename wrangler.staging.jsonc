@@ -1,0 +1,38 @@
+{
+  // Independent Cloudflare staging Worker — distinct from legacy ChatGPT
+  // Sites staging and from production. Never edit this file to point at
+  // production or legacy staging resources.
+  "name": "fundraising-os-staging",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client",
+    "binding": "ASSETS"
+  },
+  // Cloudflare Images (IMAGES binding) is intentionally omitted — it is not
+  // required to run the app. worker/index.ts falls back to serving images
+  // unoptimized when this binding is absent.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fundraising-os-staging-db",
+      // Placeholder — replace with the database_id returned by:
+      //   wrangler d1 create fundraising-os-staging-db
+      "database_id": "<D1_DATABASE_ID_PLACEHOLDER>"
+    }
+  ],
+  "vars": {
+    // Placeholder — the Cloudflare Access team domain, e.g.
+    // "your-team.cloudflareaccess.com". Created in the Zero Trust dashboard.
+    "TEAM_DOMAIN": "<TEAM_DOMAIN_PLACEHOLDER>",
+    // Placeholder — the AUD tag of the Access Application protecting this
+    // Worker's route, from the Access dashboard after creating the app.
+    "POLICY_AUD": "<POLICY_AUD_PLACEHOLDER>",
+    // Placeholder — the sole email allowed to authenticate. Enforced both by
+    // the Access policy itself and, independently, by this app's own JWT
+    // verification (defense in depth).
+    "STAGING_OWNER_EMAIL": "<STAGING_OWNER_EMAIL_PLACEHOLDER>"
+  },
+  "observability": { "enabled": true }
+}

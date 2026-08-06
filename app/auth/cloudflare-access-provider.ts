@@ -16,7 +16,7 @@ export const cloudflareAccessAuthProvider: AuthProvider = {
     const identity = await verifyAccessToken(token, {
       teamDomain,
       policyAud,
-      ownerEmail: env.SANDBOX_OWNER_EMAIL,
+      ownerEmail: env.STAGING_OWNER_EMAIL,
     });
     if (!identity) return null;
 

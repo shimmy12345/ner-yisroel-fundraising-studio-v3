@@ -44,7 +44,7 @@ const chatGPTHeaderProvider: AuthProvider = {
 
 // Checks the ChatGPT Sites header first (unchanged precedence), then falls
 // back to Cloudflare Access only when that header is absent — e.g. on an
-// independent sandbox Worker with no ChatGPT Sites gateway in front of it.
+// independent staging Worker with no ChatGPT Sites gateway in front of it.
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   return resolveIdentity([chatGPTHeaderProvider, cloudflareAccessAuthProvider]);
 }
