@@ -141,6 +141,8 @@ could silently target the wrong environment. Do not add one.
 
 ## Backup procedure
 
+Application-level backups (inside the running app, for real workspace data):
+
 - `pnpm db:baseline:generate` / `pnpm db:baseline:rehearse` — regenerate and
   rehearse the packaged clean-baseline artifact (schema only, no data).
 - `/api/import/backup` — authenticated, full live workspace backup
@@ -150,15 +152,252 @@ could silently target the wrong environment. Do not add one.
   `BUSINESS_DATA_COUNT_SQL`: it refuses to run if any business data exists,
   to prevent a schema-only export from being mistaken for a full backup.
 
+For a raw, database-level backup/restore of `fundraising-os-staging-db`
+itself (independent of the app), see the runbook below.
+
+## D1 backup and restore runbook (independent staging)
+
+Every command below was run against the actual deployed
+`fundraising-os-staging-db` (or its `--help` output) with Wrangler 4.92.0 to
+confirm exact syntax and output — nothing here is guessed. Substitute
+`fundraising-os-staging-db` for the target database name if this is ever
+adapted for another database; never point it at anything legacy-ChatGPT-Sites-managed.
+
+### 1. Creating a backup
+
+Two independent mechanisms exist. Use both for anything that matters.
+
+**a. SQL export (portable file, works with any empty D1 database)**
+
+```bash
+wrangler d1 export fundraising-os-staging-db --remote \
+  --output=backups/fundraising-os-staging-db-<TIMESTAMP>.sql
+```
+
+Replace `<TIMESTAMP>` with a compact UTC ISO-8601 timestamp, e.g.
+`20260806T202706Z` — this repository already uses that exact convention for
+other backup artifacts (see `Downloads/fundraising-os-backup-*.json` on
+past exports). Full recommended filename:
+`fundraising-os-staging-db-20260806T202706Z.sql`.
+
+Confirmed expected output (from an actual run):
+
+```
+ ⛅️ wrangler 4.92.0
+──────────────────────────────────────────────
+Resource location: remote
+
+? ⚠️ This process may take some time, during which your D1 database will be unavailable to serve queries.
+  Ok to proceed?
+🌀 Executing on remote database fundraising-os-staging-db (<database-id>):
+├ Creating export
+│
+You can also download your export from the following URL manually. This link will be valid for one hour: https://<presigned-r2-url>
+├ Downloading SQL to <output-path>
+│
+🌀 Downloaded to <output-path> successfully!
+```
+
+Notes verified directly from a real export:
+- The confirmation prompt (`Ok to proceed?`) appears interactively; pass
+  `-y` / `--skip-confirmation` to skip it in a script. **The database is
+  unavailable to serve queries while the export runs** — do not export
+  during any window where the app must stay responsive.
+- Wrangler also prints a one-hour presigned R2 download URL as an
+  alternative to the local file — **never commit that URL anywhere**; it is
+  a bearer credential for the raw export while it's valid.
+- The exported file opens with `PRAGMA defer_foreign_keys=TRUE;`, then full
+  `CREATE TABLE` / `CREATE INDEX` DDL, then `INSERT` statements for every
+  row (confirmed: a real export of this database contained `INSERT INTO
+  "users" ...`, `INSERT INTO "onboarding_preferences" ...`, and `INSERT
+  INTO "production_schema_baseline" ...` rows, plus SQLite's own internal
+  `sqlite_stat1` rows).
+- The `CREATE TABLE` statements do **not** include `IF NOT EXISTS`
+  (confirmed by inspecting the real export) — see the restore warning below
+  before ever replaying this file.
+- Useful flags confirmed via `--help`: `--no-schema` (data only),
+  `--no-data` (schema only), `--table <name>` (repeatable, limit to
+  specific tables), `--local` (export the local `wrangler dev` database
+  instead of the remote one).
+
+**b. D1 Time Travel bookmark (built-in, no file to manage)**
+
+D1 automatically retains point-in-time recovery for the last 30 days with
+no explicit "create backup" step. To record the current bookmark for later
+reference:
+
+```bash
+wrangler d1 time-travel info fundraising-os-staging-db
+```
+
+Confirmed expected output (from an actual run):
+
+```
+ ⛅️ wrangler 4.92.0
+──────────────────────────────────────────────
+Resource location: remote
+
+🚧 Time Traveling...
+⚠️ The current bookmark is '<bookmark-id>'
+⚡️ To restore to this specific bookmark, run:
+ `wrangler d1 time-travel restore fundraising-os-staging-db --bookmark=<bookmark-id>`
+```
+
+Record the printed bookmark ID (and the wall-clock time) somewhere durable
+before any risky operation — it is the exact restore target if that
+operation goes wrong. `--timestamp <unix-or-RFC3339>` retrieves the
+bookmark for a specific past moment instead of "now".
+
+**Verifying a backup completed:**
+- SQL export: confirm the CLI printed `Downloaded to <path> successfully!`,
+  the file exists, is non-empty, and its first line is
+  `PRAGMA defer_foreign_keys=TRUE;`. Spot-check row counts by grepping for
+  `^INSERT INTO "users"` / your table of interest.
+- Time Travel bookmark: confirm the CLI printed a bookmark ID starting with
+  a hex/dash pattern like `0000000e-00000000-...` and no error.
+
+### 2. Restoring a backup
+
+**Preferred: D1 Time Travel restore** (no file handling, works for "undo
+the last N minutes/hours/days" within the 30-day window):
+
+```bash
+wrangler d1 time-travel restore fundraising-os-staging-db --bookmark=<bookmark-id>
+```
+
+or, to restore to a specific past moment instead of a recorded bookmark:
+
+```bash
+wrangler d1 time-travel restore fundraising-os-staging-db --timestamp=<unix-or-RFC3339>
+```
+
+Prerequisites:
+- The bookmark or timestamp must be within the last 30 days.
+- You must know (or look up via `time-travel info --timestamp=...`) the
+  target bookmark before running the restore.
+
+**This is destructive** — it replaces the database's current state
+entirely. `time-travel restore` has no separate `-y` confirmation flag
+documented in `--help`, so treat every invocation as if it executes
+immediately; do not run it against `fundraising-os-staging-db` without
+having just confirmed the bookmark is the one you want via `time-travel
+info`.
+
+Expected execution time was not empirically measured against a large
+database in this session (this environment's database is a few hundred
+KB) — do not assume it is instant on a larger dataset; treat it the same
+as the export warning above (the database may be briefly unavailable) and
+schedule accordingly.
+
+Verifying the restore succeeded:
+- Re-run `wrangler d1 execute fundraising-os-staging-db --remote --command
+  "SELECT id, schema_hash FROM production_schema_baseline;"` and confirm
+  the row matches `production-baseline/schema-manifest.json`'s
+  `schemaHash`.
+- Load `/settings` as the owner and confirm Workspace Health's
+  `independent-staging-baseline` check reads **Verified**.
+- Spot-check row counts on the tables you expected the restore to affect.
+
+**Alternative: restoring from a SQL export file.** Only viable against a
+database with **no existing schema** — the export's `CREATE TABLE`
+statements have no `IF NOT EXISTS` (verified above), so replaying an
+export against a database that already has these tables fails with
+"table already exists" errors. This path is for recreating the database
+from scratch (see disaster recovery scenario 3 below), not for undoing
+recent changes on an already-populated database — use Time Travel for
+that instead:
+
+```bash
+wrangler d1 execute fundraising-os-staging-db --remote --file=backups/fundraising-os-staging-db-<TIMESTAMP>.sql
+```
+
+Confirmed behavior from real use of `d1 execute --file` against this
+database: Wrangler prints
+`Note: if the execution fails to complete, your DB will return to its
+original state and you can safely retry.` — the whole file is applied as
+one atomic operation; a mid-file failure does not leave a half-applied
+schema.
+
+### 3. Recovering from a failed import
+
+- If `wrangler d1 execute --remote --file=...` reports an error: per the
+  confirmed message above, the database already rolled back to its
+  pre-attempt state automatically. Re-run the same command after fixing
+  whatever caused the failure (bad SQL, wrong file, schema mismatch) — do
+  not assume partial damage occurred.
+- If the failure happened inside the app (e.g. an in-app import route) and
+  you're unsure of the database's state afterward: check
+  `data_imports`/`*_import_changes`/`*_rollback_audits` tables for the
+  batch, and prefer the app's own import-undo path (`app/api/import/rollback`,
+  `app/api/import/household-rollback`) over manual `DELETE`s — those routes
+  are batch-scoped and audited; ad hoc SQL deletes are not.
+- If neither applies (e.g. a raw `d1 execute` against unrelated tables
+  produced a bad state that already committed successfully): use D1 Time
+  Travel to restore to the bookmark recorded immediately before the
+  attempt (see §2). This is why recording a bookmark before any risky
+  operation is a required step, not an optional one.
+
+### 4. Returning the environment to a known-good state
+
+In order of increasing severity — stop at the first one that applies:
+
+1. **Only test/fundraising data is wrong, schema is fine**: use the
+   Independent Staging Reset (Settings → Developer,
+   `app/api/operations/staging-reset/route.ts`) — see "Staging reset
+   procedure" below. Fastest, and purpose-built for exactly this.
+2. **Something changed recently and you have a bookmark**: `wrangler d1
+   time-travel restore fundraising-os-staging-db --bookmark=<bookmark-id>`.
+3. **No good bookmark, but you have a SQL export from before things went
+   wrong, and the current database can be discarded**: `wrangler d1 delete
+   fundraising-os-staging-db -y` (destroys the database — the `--database_id`
+   in `wrangler.staging.jsonc` becomes invalid), then `wrangler d1 create
+   fundraising-os-staging-db`, update `wrangler.staging.jsonc`'s
+   `database_id` with the new one, then restore the export (§2's
+   file-based path) or re-apply the baseline + migrations from scratch
+   (disaster recovery scenario 3).
+4. **The Worker itself is misbehaving but the database is fine**: redeploy
+   with `wrangler deploy --config wrangler.staging.jsonc` — the Worker
+   holds no state of its own.
+
+After any of these, always re-verify per §2's "Verifying the restore
+succeeded" steps before considering the environment good again.
+
+### 5. Checklist before importing production-shaped data
+
+Independent staging is expected to stay empty (Workspace Health's
+"Business data: Empty"). Before ever importing anything resembling real
+production data into it:
+
+- [ ] Confirm this really is `fundraising-os-staging-db`
+      (`wrangler d1 info fundraising-os-staging-db`) and not any
+      legacy-ChatGPT-Sites-managed database — there is no automated guard
+      against pointing an import at the wrong database.
+- [ ] Record a Time Travel bookmark first (`wrangler d1 time-travel info
+      fundraising-os-staging-db`) so the pre-import state is recoverable.
+- [ ] Take a SQL export as a second, portable copy
+      (`wrangler d1 export ... --output=backups/fundraising-os-staging-db-<TIMESTAMP>.sql`).
+- [ ] Confirm `Business data: Empty` and `Baseline: Verified` on Workspace
+      Health immediately before the import, so you know the starting state
+      was clean.
+- [ ] Confirm you actually intend real/production-shaped data in a
+      throwaway independent-staging environment — per
+      `FUNDRAISING_OS_PRINCIPLES.md`, sample/test data must never appear in
+      live workspace mode, and the inverse (real-shaped data in a
+      disposable sandbox) deserves the same scrutiny. Get explicit sign-off
+      before proceeding if there's any doubt.
+- [ ] After the import, re-run the "Verifying a backup completed" /
+      Workspace Health checks above to confirm the environment is in the
+      state you expect, not a partially-applied one.
+
 ## Rollback procedure
 
 - **Worker code**: `wrangler rollback` (or `wrangler deployments list` /
   `wrangler versions deploy` to pin an older version) against
   `wrangler.staging.jsonc` — Cloudflare retains recent Worker versions.
-- **D1 data**: D1's built-in Time Travel (`wrangler d1 time-travel`) can
-  restore the database to a prior point-in-time bookmark. `scripts/rehearse-production-restore.mjs`
-  exercises the schema-only restore path end-to-end against a local SQLite
-  copy before trusting it against a live database.
+- **D1 data**: see the "D1 backup and restore runbook" above.
+  `scripts/rehearse-production-restore.mjs` exercises the schema-only
+  restore path end-to-end against a local SQLite copy before trusting it
+  against a live database.
 - Never roll back Worker code and D1 data independently without checking
   they're compatible — a rolled-back Worker expecting a newer schema (or
   vice versa) will misbehave silently rather than erroring.
@@ -182,21 +421,10 @@ the deleted rows. Appropriate for a throwaway staging environment only.
 
 ## Disaster recovery
 
-For independent staging, in order of preference:
-
-1. **Bad data only, schema fine**: run the staging reset procedure above.
-2. **Bad schema or corrupted state, D1 database still exists**: use D1 Time
-   Travel to restore to a known-good bookmark, then re-verify via
-   Workspace Health (Baseline should read "Verified").
-3. **D1 database itself is gone or unrecoverable**: recreate it
-   (`wrangler d1 create fundraising-os-staging-db`), re-apply
-   `production-baseline/drizzle/0000_production_baseline_0019.sql` and any
-   migrations beyond it in order, update the `database_id` in
-   `wrangler.staging.jsonc`, and redeploy. This is exactly the sequence
-   this environment was originally created with.
-4. **Worker itself is gone or misconfigured**: redeploy from this repo with
-   `wrangler deploy --config wrangler.staging.jsonc` — the Worker has no
-   state of its own outside the D1 binding.
+For independent staging, see "D1 backup and restore runbook" above,
+§4 ("Returning the environment to a known-good state") for the full,
+severity-ordered procedure — staging reset, then Time Travel restore, then
+recreate-from-export/baseline, then Worker redeploy.
 
 Legacy ChatGPT Sites staging/production disaster recovery is out of scope
 for this repository — it is owned by the private Sites source repository
