@@ -28,16 +28,13 @@ import {
 } from "./model";
 import { readRemoteMigrationHistory } from "./remote-migrations";
 import { ACCOUNT_CONFIGURATION_COUNT_SQL, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
+import { deploymentEnvironment } from "../environment";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
 
 const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRAISING_OS_COMMIT__.trim()
   ? __FUNDRAISING_OS_COMMIT__.trim()
   : null;
-const deploymentEnvironment =
-  __FUNDRAISING_OS_ENVIRONMENT__ === "production" ? "production" :
-  __FUNDRAISING_OS_ENVIRONMENT__ === "staging-independent" ? "staging-independent" :
-  "staging";
 // The independent staging Worker is bootstrapped from the same verified
 // baseline as production and carries a live production_schema_baseline
 // marker, so it is checked the same way. Only legacy (ChatGPT Sites)
