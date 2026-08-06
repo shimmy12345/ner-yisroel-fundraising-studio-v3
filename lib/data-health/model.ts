@@ -1,5 +1,17 @@
 export type HealthStatus = "healthy" | "attention" | "critical" | "info" | "unavailable";
 
+// "unavailable" is this report's Unknown state: evidence could not be read,
+// so the check must not claim Failed (which asserts a verified negative).
+export type HealthEvidence = {
+  expected: string;
+  actual: string;
+  evidenceSource: string;
+  lastVerifiedAt: string | null;
+  severity: "none" | "low" | "medium" | "high";
+  businessDataAtRisk: boolean;
+  repairStep: string;
+};
+
 export type HealthCheck = {
   id: string;
   label: string;
@@ -9,6 +21,7 @@ export type HealthCheck = {
   actionHref?: string;
   actionLabel?: string;
   diagnosticLines?: string[];
+  evidence?: HealthEvidence;
 };
 
 export type DataHealthFacts = {
@@ -26,6 +39,13 @@ export type DataHealthFacts = {
   productionBaselineLevel: string;
   productionBaselineVerified: boolean;
   productionBaselineApplied: boolean;
+  // Live-evidence state for the production D1 baseline marker. Only ever
+  // populated by reading the production environment's own database — never
+  // derived from staging. "not-applicable" means this fact was not checked
+  // because the current request is not against production.
+  productionBaselineState: "verified" | "not-applied" | "hash-mismatch" | "unreadable" | "not-applicable";
+  productionBaselineEvidenceSource: string;
+  productionBaselineVerifiedAt: string | null;
   schemaMatchesBaseline: boolean;
   schemaComparisonDifferences: string[];
   businessDataRows: number | null;
@@ -62,6 +82,9 @@ export type DataHealthReport = {
     journalMigrationLevel: string;
     remoteMigrationLevel: string;
     productionReady: boolean;
+    // Only meaningful when deploymentEnvironment is "production" — staging
+    // never contributes to production launch readiness.
+    productionReadinessBlockers: string[];
     productionBaselineLevel: string;
     schemaMatchesBaseline: boolean;
     expectedMigrationLevel: string;
@@ -163,15 +186,88 @@ function timestampCheck(id: string, label: string, timestamp: number | null, has
   };
 }
 
+function productionBaselineCheck(facts: DataHealthFacts): HealthCheck {
+  const level = facts.productionBaselineLevel;
+  if (facts.deploymentEnvironment !== "production") {
+    const packagedValid = facts.productionBaselineVerified;
+    return {
+      id: "production-baseline",
+      label: "Production baseline artifact",
+      status: packagedValid ? "info" : "critical",
+      value: packagedValid ? `${level} · Packaged` : `${level} · Invalid`,
+      explanation: packagedValid
+        ? "This is the packaged 0019 baseline artifact bundled with this build, verified at build time. Staging is a legacy database that never carries the production_schema_baseline marker by design, so this value is informational only and never represents or blocks production launch readiness."
+        : "The packaged baseline artifact bundled with this build failed its own internal validation. This does not reflect staging's live database.",
+      evidence: {
+        expected: "baselineLevel \"0019\", a 64-character hex schemaHash, and 20 source migrations in production-baseline/schema-manifest.json.",
+        actual: packagedValid ? "The bundled manifest matches the expected shape." : "The bundled manifest failed level, hash-format, or source-migration-count validation.",
+        evidenceSource: "Build-time schema-manifest.json bundled with this deployment, not any live database.",
+        lastVerifiedAt: null,
+        severity: packagedValid ? "none" : "high",
+        businessDataAtRisk: false,
+        repairStep: packagedValid ? "None." : "Run `pnpm db:baseline:generate` then `pnpm db:baseline:rehearse` to regenerate and re-verify the baseline artifact.",
+      },
+    };
+  }
+  const evidenceSource = facts.productionBaselineEvidenceSource || "Live query against the production D1 binding (production_schema_baseline table).";
+  const verifiedAt = facts.productionBaselineVerifiedAt ?? null;
+  const byState = {
+    verified: { status: "healthy" as const, value: `${level} · Verified`, explanation: "The production D1 database carries the production_schema_baseline marker and its schema_hash matches the packaged 0019 baseline exactly.", severity: "none" as const, businessDataAtRisk: false, repairStep: "None.", actual: "production_schema_baseline row for id '0019' present with a matching schema_hash." },
+    "not-applied": { status: "critical" as const, value: `${level} · Not yet applied`, explanation: "The production D1 database does not contain the production_schema_baseline table. The verified baseline artifact has not been applied to this database yet.", severity: "high" as const, businessDataAtRisk: false, repairStep: "Apply production-baseline/drizzle/0000_production_baseline_0019.sql to the production D1 database (remote), then reload this page to re-verify.", actual: "No production_schema_baseline table exists in the live production D1." },
+    "hash-mismatch": { status: "critical" as const, value: `${level} · Mismatch`, explanation: "The production D1 database has a production_schema_baseline marker, but its recorded schema_hash does not match the packaged 0019 baseline. The live schema may not be what this build expects.", severity: "high" as const, businessDataAtRisk: true, repairStep: "Do not launch. Compare the live schema_hash against production-baseline/schema-manifest.json and investigate the discrepancy before taking any further action.", actual: "production_schema_baseline row present with a schema_hash that differs from the packaged baseline." },
+    unreadable: { status: "unavailable" as const, value: `${level} · Unknown`, explanation: "The production baseline marker could not be read from the live database (a connection or query error occurred). This is not a confirmed failure — the check could not complete.", severity: "medium" as const, businessDataAtRisk: true, repairStep: "Re-run the health check. If this persists, verify the production D1 binding and the health check's database permissions.", actual: "The verification query against production_schema_baseline did not complete." },
+    "not-applicable": { status: "unavailable" as const, value: `${level} · Unknown`, explanation: "This request's deployment environment could not be classified as production, so the live baseline marker was not checked.", severity: "medium" as const, businessDataAtRisk: true, repairStep: "Re-run the health check on the production environment.", actual: "Deployment environment was not resolved as production." },
+  };
+  const detail = byState[facts.productionBaselineState] ?? byState.unreadable;
+  return {
+    id: "production-baseline",
+    label: "Production rehearsal baseline",
+    status: detail.status,
+    value: detail.value,
+    explanation: detail.explanation,
+    evidence: { expected: "A production_schema_baseline row for id '0019' whose schema_hash equals the packaged baseline's schemaHash.", actual: detail.actual, evidenceSource, lastVerifiedAt: verifiedAt, severity: detail.severity, businessDataAtRisk: detail.businessDataAtRisk, repairStep: detail.repairStep },
+  };
+}
+
+function productionReadinessCheck(facts: DataHealthFacts, productionReady: boolean, blockers: string[]): HealthCheck {
+  if (facts.deploymentEnvironment !== "production") {
+    return {
+      id: "production-readiness",
+      label: "Production launch readiness",
+      status: "info",
+      value: "Evaluated on production only",
+      explanation: "Production launch readiness reflects the production environment's own live database and packaged baseline. It is never derived from staging's local state — open this page on the production environment to see its current readiness.",
+      evidence: { expected: "Not applicable on this environment.", actual: "This request was made against a non-production environment.", evidenceSource: "Deployment environment resolved from this build's configuration.", lastVerifiedAt: null, severity: "none", businessDataAtRisk: false, repairStep: "None." },
+    };
+  }
+  return {
+    id: "production-readiness",
+    label: "Production launch readiness",
+    status: productionReady ? "healthy" : "critical",
+    value: productionReady ? "Ready" : "Blocked",
+    explanation: productionReady ? "The clean baseline matches staging and the current workspace integrity checks pass." : `Production remains blocked by ${blockers.length} check${blockers.length === 1 ? "" : "s"}. See the itemized list below.`,
+    diagnosticLines: productionReady ? [] : blockers,
+    evidence: { expected: "Zero blocking checks.", actual: `${blockers.length} blocking check${blockers.length === 1 ? "" : "s"}.`, evidenceSource: "Live production D1 query combined with the packaged baseline artifact.", lastVerifiedAt: facts.productionBaselineVerifiedAt ?? null, severity: productionReady ? "none" : "high", businessDataAtRisk: false, repairStep: productionReady ? "None." : "Resolve each listed blocking check, then re-run this health check." },
+  };
+}
+
 export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Date().toISOString()): DataHealthReport {
   const deploymentEnvironment = facts.deploymentEnvironment ?? "staging";
-  const productionBaselineApplied = facts.productionBaselineApplied ?? facts.productionBaselineVerified;
+  const productionBaselineApplied = deploymentEnvironment === "production" ? facts.productionBaselineState === "verified" : true;
   const businessDataRows = facts.businessDataRows ?? facts.activeDonors;
   const hasData = (facts.activeDonors ?? 0) > 0;
   const givingReady = [facts.givingSourceTotalCents, facts.givingLinkedTotalCents, facts.invalidGivingRows, facts.duplicateGivingFingerprints].every((value) => value !== null);
   const givingHealthy = givingReady && facts.givingSourceTotalCents === facts.givingLinkedTotalCents && facts.invalidGivingRows === 0 && facts.duplicateGivingFingerprints === 0;
   const relationshipIntegrityHealthy = [facts.duplicateJlCodes, facts.orphanedGifts, facts.orphanedInteractions, facts.orphanedReminders, facts.orphanedPayments, facts.brokenMergeRedirects].every((value) => value === 0);
   const productionReady = facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.productionBaselineVerified && productionBaselineApplied && facts.schemaMatchesBaseline && givingHealthy && relationshipIntegrityHealthy;
+  const productionBlockers: string[] = deploymentEnvironment === "production" && !productionReady ? [
+    ...(!facts.schemaReady ? ["Live schema is not ready: required application tables or columns are missing."] : []),
+    ...(facts.currentMigrationLevel !== EXPECTED_MIGRATION_LEVEL ? [`Live migration level is ${facts.currentMigrationLevel ?? "Unknown"}; expected ${EXPECTED_MIGRATION_LEVEL}.`] : []),
+    ...(!productionBaselineApplied || !facts.productionBaselineVerified ? [`Production rehearsal baseline is not verified (current state: ${facts.productionBaselineState}).`] : []),
+    ...(!facts.schemaMatchesBaseline ? [`Staging ↔ baseline schema comparison found ${facts.schemaComparisonDifferences.length} difference(s).`] : []),
+    ...(!givingHealthy ? ["Giving-total reconciliation has not passed."] : []),
+    ...(!relationshipIntegrityHealthy ? ["One or more relationship-data integrity checks (duplicates, orphans, broken merge redirects) have not passed."] : []),
+  ] : [];
   const checks: HealthCheck[] = [
     {
       id: "database",
@@ -184,9 +280,9 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     deploymentEnvironment === "production"
       ? { id: "staging-migration-history", label: "Production migration history", status: productionBaselineApplied ? "healthy" : "critical", value: productionBaselineApplied ? "Baseline 0019" : "Unverified", explanation: productionBaselineApplied ? "This database was created from the verified 0019 production baseline. Legacy staging history was not copied." : "The production baseline marker or schema hash is missing. Do not load business data." }
       : { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
-    { id: "production-baseline", label: "Production rehearsal baseline", status: facts.productionBaselineVerified && productionBaselineApplied ? "healthy" : "critical", value: facts.productionBaselineVerified && productionBaselineApplied ? `${facts.productionBaselineLevel} · Verified` : `${facts.productionBaselineLevel} · Failed`, explanation: facts.productionBaselineVerified && productionBaselineApplied ? "The verified schema-only baseline is present, passes integrity checks, and blocks baseline replay." : "The clean production baseline verification failed. Do not load business data." },
+    productionBaselineCheck(facts),
     { id: "schema-comparison", label: "Staging ↔ baseline schema", status: facts.schemaMatchesBaseline ? "healthy" : "critical", value: facts.schemaMatchesBaseline ? "Match" : `${facts.schemaComparisonDifferences.length} differences`, explanation: facts.schemaMatchesBaseline ? "Application tables, columns, indexes, and constraints match the verified 0019 baseline. Cloudflare-managed infrastructure tables are reported separately from application schema." : "Material application-schema differences exist between staging and the production rehearsal.", diagnosticLines: facts.schemaComparisonDifferences },
-    { id: "production-readiness", label: "Production launch readiness", status: productionReady ? "healthy" : "critical", value: productionReady ? "Ready" : "Blocked", explanation: productionReady ? "The clean baseline matches staging and the current workspace integrity checks pass." : "Production remains blocked until the baseline, schema comparison, and relationship-data integrity checks all pass." },
+    productionReadinessCheck(facts, productionReady, productionBlockers),
     {
       id: "business-data-state",
       label: deploymentEnvironment === "production" ? "Production data state" : "Staging data state",
@@ -274,6 +370,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       journalMigrationLevel: facts.journalMigrationLevel ?? "Unknown",
       remoteMigrationLevel: facts.remoteMigrationLevel ?? "Unknown",
       productionReady,
+      productionReadinessBlockers: productionBlockers,
       productionBaselineLevel: facts.productionBaselineLevel,
       schemaMatchesBaseline: facts.schemaMatchesBaseline,
       expectedMigrationLevel: EXPECTED_MIGRATION_LEVEL,

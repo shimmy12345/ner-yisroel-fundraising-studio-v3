@@ -4,15 +4,9 @@ import { useEffect, useState } from "react";
 import type { DataHealthReport, HealthCheck, HealthStatus } from "../../lib/data-health/model";
 import { DataHealthIssueDetails } from "./DataHealthIssueDetails";
 import { LegacyTestOrphanCleanup } from "./LegacyTestOrphanCleanup";
+import { formatTimestamp } from "./dataHealthFormat";
 
 const icons: Record<HealthStatus, string> = { healthy: "✓", attention: "!", critical: "×", info: "i", unavailable: "—" };
-
-function formatTimestamp(value: string, useLocalTime: boolean) {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return value;
-  if (useLocalTime) return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-  return `${date.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC`;
-}
 
 function displayValue(check: HealthCheck, useLocalTime: boolean) {
   if (!["household-refresh", "donation-refresh", "backup"].includes(check.id) || !check.value.includes("T")) return check.value;
@@ -65,7 +59,7 @@ export function DataHealthDashboard({ initialReport }: { initialReport: DataHeal
         <div><div className="data-health-check-heading"><h3>{check.label}</h3><strong>{displayValue(check, useLocalTime)}</strong></div><p>{check.explanation}</p>{["critical", "attention", "unavailable"].includes(check.status) && <button className="health-inspect-button" type="button" onClick={() => setSelectedCheckId(check.id)} aria-expanded={selectedCheckId === check.id}>Inspect details <span aria-hidden="true">↓</span></button>}</div>
       </article>)}
     </div>
-    {selectedCheck && <DataHealthIssueDetails check={selectedCheck} onClose={() => setSelectedCheckId(null)} onReport={setReport} />}
+    {selectedCheck && <DataHealthIssueDetails check={selectedCheck} onClose={() => setSelectedCheckId(null)} onReport={setReport} useLocalTime={useLocalTime} />}
     <LegacyTestOrphanCleanup onReport={setReport} />
   </section>;
 }

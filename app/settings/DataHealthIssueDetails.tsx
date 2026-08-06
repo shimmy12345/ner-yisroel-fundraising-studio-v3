@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { DonorAutocomplete } from "../capture/DonorAutocomplete";
 import type { DataHealthReport, HealthCheck } from "../../lib/data-health/model";
 import type { HealthIssue, HealthIssueResponse, HealthRepairAction } from "../../lib/data-health/issues";
+import { formatTimestamp } from "./dataHealthFormat";
 
 type PendingRepair = { issue: HealthIssue; action: HealthRepairAction; targetDonorId: string | null };
 
@@ -21,7 +22,7 @@ function repairExplanation(pending: PendingRepair) {
   return "This leaves the record unchanged and records why this specific donor link should no longer count as a health issue.";
 }
 
-export function DataHealthIssueDetails({ check, onClose, onReport }: { check: HealthCheck; onClose: () => void; onReport: (report: DataHealthReport) => void }) {
+export function DataHealthIssueDetails({ check, onClose, onReport, useLocalTime }: { check: HealthCheck; onClose: () => void; onReport: (report: DataHealthReport) => void; useLocalTime: boolean }) {
   const orphanCheck = check.id === "orphaned-interactions" || check.id === "orphaned-reminders";
   const [data, setData] = useState<HealthIssueResponse | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "saving" | "error">(orphanCheck ? "loading" : "ready");
@@ -83,8 +84,24 @@ export function DataHealthIssueDetails({ check, onClose, onReport }: { check: He
 
   return <section className="data-health-detail" aria-labelledby="health-detail-title">
     <div className="data-health-detail-header"><div><p className="eyebrow">DIAGNOSTIC</p><h3 id="health-detail-title">{check.label}</h3><p>{check.explanation}</p></div><button type="button" onClick={onClose} aria-label="Close health diagnostic">Close</button></div>
-    {check.diagnosticLines?.length ? <div className="migration-diagnostic"><strong>Missing from the migration ledger</strong><ul>{check.diagnosticLines.map((line) => <li key={line}>{line}</li>)}</ul><p>The SQL files are packaged, but production launch remains blocked until ledger repair is rehearsed without replaying migrations.</p></div> : null}
-    {!orphanCheck && !check.diagnosticLines?.length ? <div className="health-general-diagnostic"><strong>Current result: {check.value}</strong><p>{check.explanation}</p>{check.actionHref && <a href={check.actionHref}>{check.actionLabel ?? "Open related workspace"}</a>}</div> : null}
+    {check.diagnosticLines?.length ? <div className="migration-diagnostic">
+      <strong>{check.id === "staging-migration-history" ? "Missing from the migration ledger" : check.id === "production-readiness" ? "Blocking checks" : "Details"}</strong>
+      <ul>{check.diagnosticLines.map((line) => <li key={line}>{line}</li>)}</ul>
+      {check.id === "staging-migration-history" && <p>The SQL files are packaged, but production launch remains blocked until ledger repair is rehearsed without replaying migrations.</p>}
+    </div> : null}
+    {check.evidence ? <div className="health-general-diagnostic">
+      <dl>
+        <div><dt>Current result</dt><dd>{check.value}</dd></div>
+        <div><dt>Expected</dt><dd>{check.evidence.expected}</dd></div>
+        <div><dt>Actual</dt><dd>{check.evidence.actual}</dd></div>
+        <div><dt>Evidence source</dt><dd>{check.evidence.evidenceSource}</dd></div>
+        <div><dt>Last successful verification</dt><dd>{check.evidence.lastVerifiedAt ? formatTimestamp(check.evidence.lastVerifiedAt, useLocalTime) : "Not yet verified"}</dd></div>
+        <div><dt>Severity</dt><dd>{check.evidence.severity}</dd></div>
+        <div><dt>Business data at risk</dt><dd>{check.evidence.businessDataAtRisk ? "Yes" : "No"}</dd></div>
+        <div><dt>Repair step</dt><dd>{check.evidence.repairStep}</dd></div>
+      </dl>
+      {check.actionHref && <a href={check.actionHref}>{check.actionLabel ?? "Open related workspace"}</a>}
+    </div> : (!orphanCheck && !check.diagnosticLines?.length ? <div className="health-general-diagnostic"><strong>Current result: {check.value}</strong><p>{check.explanation}</p>{check.actionHref && <a href={check.actionHref}>{check.actionLabel ?? "Open related workspace"}</a>}</div> : null)}
     {status === "loading" && <p className="health-detail-state" role="status">Loading affected records…</p>}
     {message && <p className={status === "error" ? "capture-error" : "capture-assurance"} role={status === "error" ? "alert" : "status"}>{message}</p>}
     {orphanCheck && data && !data.issues.length ? <div className="health-detail-empty"><strong>No unresolved records remain.</strong><p>The health count has been refreshed.</p></div> : null}

@@ -51,6 +51,9 @@ const emptyFacts = (): DataHealthFacts => ({
   productionBaselineLevel: PRODUCTION_BASELINE_LEVEL,
   productionBaselineVerified: PRODUCTION_BASELINE_VERIFIED,
   productionBaselineApplied: deploymentEnvironment === "staging",
+  productionBaselineState: deploymentEnvironment === "production" ? "unreadable" : "not-applicable",
+  productionBaselineEvidenceSource: deploymentEnvironment === "production" ? "Live query against the production D1 binding did not complete." : "Not evaluated: this request is not against the production environment.",
+  productionBaselineVerifiedAt: null,
   schemaMatchesBaseline: false,
   schemaComparisonDifferences: ["The staging schema has not been compared with the production baseline."],
   businessDataRows: null,
@@ -102,9 +105,31 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));
     facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns);
     facts.schemaReady = schemaIsReady(tableNames, userColumns, donorColumns, givingColumns);
-    if (deploymentEnvironment === "production" && tableNames.includes("production_schema_baseline")) {
-      const marker = await env.DB.prepare("SELECT schema_hash FROM production_schema_baseline WHERE id = '0019'").first<{ schema_hash?: string }>();
-      facts.productionBaselineApplied = marker?.schema_hash === PRODUCTION_BASELINE_HASH;
+    if (deploymentEnvironment === "production") {
+      if (!tableNames.includes("production_schema_baseline")) {
+        // A genuinely new production D1 never carries this marker until the
+        // baseline SQL is applied to it directly — this is expected, not an
+        // error, and must read as "not yet applied", never "Failed".
+        facts.productionBaselineState = "not-applied";
+        facts.productionBaselineApplied = false;
+        facts.productionBaselineEvidenceSource = "Live query against the production D1 binding: no production_schema_baseline table exists.";
+      } else {
+        try {
+          const marker = await env.DB.prepare("SELECT schema_hash, created_at FROM production_schema_baseline WHERE id = '0019'").first<{ schema_hash?: string; created_at?: number }>();
+          const verified = marker?.schema_hash === PRODUCTION_BASELINE_HASH;
+          facts.productionBaselineState = verified ? "verified" : "hash-mismatch";
+          facts.productionBaselineApplied = verified;
+          facts.productionBaselineEvidenceSource = "Live query against the production D1 binding (production_schema_baseline table, id '0019').";
+          facts.productionBaselineVerifiedAt = marker?.created_at ? new Date(marker.created_at * 1000).toISOString() : null;
+        } catch {
+          // The table exists but the row could not be read — this is
+          // genuinely unknown, not a confirmed failure. Never fold this into
+          // the same "Failed" bucket as a real hash mismatch.
+          facts.productionBaselineState = "unreadable";
+          facts.productionBaselineApplied = false;
+          facts.productionBaselineEvidenceSource = "Live query against production_schema_baseline failed (connection or query error) after the table was found.";
+        }
+      }
     }
     const remoteHistory = await readRemoteMigrationHistory(env.DB);
     const remoteReconciliation = reconcileRemoteMigrationTags(remoteHistory.entries.map((entry) => entry.tag));
