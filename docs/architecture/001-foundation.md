@@ -14,7 +14,10 @@ Status: accepted for Milestone 1
   access a runtime binding directly.
 - Keep AI providers behind the `AIService` interface. Every AI result must carry
   rationale, confidence, and source identifiers so recommendations remain
-  explainable and auditable.
+  explainable and auditable. This metadata may be retained internally for
+  auditability; confidence scores and other technical AI metadata should not
+  be surfaced to fundraisers unless explicitly requested or operationally
+  necessary.
 - Treat Today as a read model assembled from donors, interactions, gifts,
   recommendations, and calendar sources. Ranking logic remains outside visual
   components.
