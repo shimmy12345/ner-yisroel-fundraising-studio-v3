@@ -1,0 +1,53 @@
+{
+  // ============================================================
+  // EXAMPLE / TEMPLATE ONLY — THIS FILE DEPLOYS NOTHING.
+  // ============================================================
+  //
+  // Fundraising OS's real production environment is the legacy ChatGPT
+  // Sites platform: managed by the private Sites source repository and
+  // packaged via `.openai/hosting.production.json`, NOT wrangler and NOT
+  // this file. There is no independent, wrangler-managed production
+  // Worker today.
+  //
+  // This template exists only to show the shape an independent production
+  // Worker config WOULD take, mirroring the real, deployed
+  // wrangler.staging.jsonc. Every identifying value below is a placeholder
+  // — the name, database name/id, and vars are intentionally invalid so
+  // that running `wrangler deploy --config wrangler.production.example.jsonc`
+  // fails closed instead of silently doing something real.
+  //
+  // If an independent production Worker is ever explicitly approved:
+  //   1. Copy this file to wrangler.production.jsonc.
+  //   2. Replace every REPLACE_-prefixed value below the same way
+  //      wrangler.staging.jsonc's were populated (see docs/DEPLOYMENT.md).
+  //   3. Get explicit approval before the first `wrangler deploy` — per
+  //      docs/FUNDRAISING_OS_PRINCIPLES.md, production deployment always
+  //      requires separate explicit approval.
+  "name": "fundraising-os-production-REPLACE-BEFORE-USE",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client",
+    "binding": "ASSETS"
+  },
+  // Cloudflare Images (IMAGES binding) is optional — see wrangler.staging.jsonc.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "REPLACE_WITH_REAL_PRODUCTION_DATABASE_NAME",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "vars": {
+    // The app currently reads this exact variable name regardless of
+    // environment tier (see lib/auth/cloudflare-access.ts) — adopting this
+    // template for a real environment does not require a code change, but
+    // renaming these to non-"STAGING"-prefixed names would be a reasonable
+    // follow-up if an independent production Worker is ever built.
+    "TEAM_DOMAIN": "REPLACE_WITH_REAL_TEAM_DOMAIN",
+    "POLICY_AUD": "REPLACE_WITH_REAL_POLICY_AUD",
+    "STAGING_OWNER_EMAIL": "REPLACE_WITH_REAL_OWNER_EMAIL"
+  },
+  "observability": { "enabled": true }
+}

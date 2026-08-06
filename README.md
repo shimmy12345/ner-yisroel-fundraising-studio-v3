@@ -27,4 +27,6 @@ pnpm test
 pnpm build
 ```
 
-Architecture decisions are documented in `docs/architecture`.
+Architecture decisions are documented in `docs/architecture`. Deployment
+architecture, environments, and procedures are documented in
+[`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
