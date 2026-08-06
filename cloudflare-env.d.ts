@@ -15,10 +15,15 @@ interface D1Database {
 }
 
 declare const __FUNDRAISING_OS_COMMIT__: string | null;
-declare const __FUNDRAISING_OS_ENVIRONMENT__: "staging" | "production";
+declare const __FUNDRAISING_OS_ENVIRONMENT__: "staging" | "production" | "sandbox";
 
 declare module "cloudflare:workers" {
   export const env: {
     DB: D1Database;
+    // Only present on the independent sandbox Worker, for Cloudflare Access
+    // JWT verification. Absent on ChatGPT Sites staging/production.
+    TEAM_DOMAIN?: string;
+    POLICY_AUD?: string;
+    SANDBOX_OWNER_EMAIL?: string;
   };
 }

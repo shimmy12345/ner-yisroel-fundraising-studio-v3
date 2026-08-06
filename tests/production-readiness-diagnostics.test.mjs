@@ -61,6 +61,14 @@ function stagingFacts(overrides = {}) {
   };
 }
 
+function sandboxFacts(overrides = {}) {
+  return {
+    ...productionFacts(),
+    deploymentEnvironment: "sandbox",
+    ...overrides,
+  };
+}
+
 const check = (report, id) => report.checks.find((c) => c.id === id);
 
 test("verified baseline: production reports Ready with no blockers", () => {
@@ -125,4 +133,52 @@ test("staging never derives production readiness from its own local baseline-mar
   assert.equal(baseline.label, "Production baseline artifact");
   assert.equal(readiness.status, "info");
   assert.match(readiness.explanation, /never derived from staging/);
+});
+
+test("sandbox: verified clean baseline and empty business data render the exact requested summary, with no production-launch wording", () => {
+  const report = buildDataHealthReport(sandboxFacts({ businessDataRows: 0, activeDonors: 0 }));
+  assert.equal(check(report, "sandbox-environment").value, "Sandbox");
+  assert.equal(check(report, "sandbox-baseline").value, "Verified");
+  assert.equal(check(report, "sandbox-business-data").value, "Empty");
+
+  // Production-only wording and launch-readiness claims must remain production-only.
+  const readiness = check(report, "production-readiness");
+  assert.equal(readiness.status, "info", "sandbox must never claim production launch readiness");
+  assert.notEqual(readiness.value, "Blocked");
+  assert.equal(check(report, "production-baseline").label, "Production baseline artifact", "sandbox reuses staging's informational-only production-baseline wording verbatim");
+  assert.deepEqual(report.platform.productionReadinessBlockers, []);
+});
+
+test("sandbox: an unreadable baseline marker reports Unknown, never Failed, on the sandbox-specific check", () => {
+  const report = buildDataHealthReport(sandboxFacts({ productionBaselineState: "unreadable", productionBaselineApplied: false }));
+  const baseline = check(report, "sandbox-baseline");
+  assert.equal(baseline.value, "Unknown");
+  assert.equal(baseline.status, "unavailable");
+  assert.notEqual(baseline.status, "critical");
+});
+
+test("sandbox: a hash mismatch is reported as Mismatch on the sandbox-specific check and flags business-data risk", () => {
+  const report = buildDataHealthReport(sandboxFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
+  const baseline = check(report, "sandbox-baseline");
+  assert.equal(baseline.value, "Mismatch");
+  assert.equal(baseline.status, "critical");
+  assert.equal(baseline.evidence.businessDataAtRisk, true);
+});
+
+test("sandbox: nonzero business data is reported, not Empty", () => {
+  const report = buildDataHealthReport(sandboxFacts({ businessDataRows: 3, activeDonors: 3 }));
+  const businessData = check(report, "sandbox-business-data");
+  assert.notEqual(businessData.value, "Empty");
+  assert.match(businessData.value, /3 row/);
+  assert.equal(businessData.status, "attention");
+});
+
+test("sandbox summary checks do not appear on staging or production", () => {
+  const stagingReport = buildDataHealthReport(stagingFacts());
+  const productionReport = buildDataHealthReport(productionFacts());
+  for (const report of [stagingReport, productionReport]) {
+    assert.equal(check(report, "sandbox-environment"), undefined);
+    assert.equal(check(report, "sandbox-baseline"), undefined);
+    assert.equal(check(report, "sandbox-business-data"), undefined);
+  }
 });

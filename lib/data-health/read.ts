@@ -34,7 +34,14 @@ type QueryResult = { results?: Array<Record<string, unknown>> };
 const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRAISING_OS_COMMIT__.trim()
   ? __FUNDRAISING_OS_COMMIT__.trim()
   : null;
-const deploymentEnvironment = typeof __FUNDRAISING_OS_ENVIRONMENT__ === "string" && __FUNDRAISING_OS_ENVIRONMENT__ === "production" ? "production" : "staging";
+const deploymentEnvironment =
+  __FUNDRAISING_OS_ENVIRONMENT__ === "production" ? "production" :
+  __FUNDRAISING_OS_ENVIRONMENT__ === "sandbox" ? "sandbox" :
+  "staging";
+// The sandbox Worker is bootstrapped from the same verified baseline as
+// production and carries a live production_schema_baseline marker, so it
+// is checked the same way. Only staging is structurally exempt.
+const checksLiveBaseline = deploymentEnvironment === "production" || deploymentEnvironment === "sandbox";
 
 const emptyFacts = (): DataHealthFacts => ({
   deploymentEnvironment,
@@ -51,8 +58,8 @@ const emptyFacts = (): DataHealthFacts => ({
   productionBaselineLevel: PRODUCTION_BASELINE_LEVEL,
   productionBaselineVerified: PRODUCTION_BASELINE_VERIFIED,
   productionBaselineApplied: deploymentEnvironment === "staging",
-  productionBaselineState: deploymentEnvironment === "production" ? "unreadable" : "not-applicable",
-  productionBaselineEvidenceSource: deploymentEnvironment === "production" ? "Live query against the production D1 binding did not complete." : "Not evaluated: this request is not against the production environment.",
+  productionBaselineState: checksLiveBaseline ? "unreadable" : "not-applicable",
+  productionBaselineEvidenceSource: checksLiveBaseline ? "Live query against this environment's D1 binding did not complete." : "Not evaluated: this request is not against an environment with a live baseline marker.",
   productionBaselineVerifiedAt: null,
   schemaMatchesBaseline: false,
   schemaComparisonDifferences: ["The staging schema has not been compared with the production baseline."],
@@ -105,21 +112,21 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));
     facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns);
     facts.schemaReady = schemaIsReady(tableNames, userColumns, donorColumns, givingColumns);
-    if (deploymentEnvironment === "production") {
+    if (checksLiveBaseline) {
       if (!tableNames.includes("production_schema_baseline")) {
-        // A genuinely new production D1 never carries this marker until the
-        // baseline SQL is applied to it directly — this is expected, not an
-        // error, and must read as "not yet applied", never "Failed".
+        // A genuinely new D1 never carries this marker until the baseline
+        // SQL is applied to it directly — this is expected, not an error,
+        // and must read as "not yet applied", never "Failed".
         facts.productionBaselineState = "not-applied";
         facts.productionBaselineApplied = false;
-        facts.productionBaselineEvidenceSource = "Live query against the production D1 binding: no production_schema_baseline table exists.";
+        facts.productionBaselineEvidenceSource = "Live query against this environment's D1 binding: no production_schema_baseline table exists.";
       } else {
         try {
           const marker = await env.DB.prepare("SELECT schema_hash, created_at FROM production_schema_baseline WHERE id = '0019'").first<{ schema_hash?: string; created_at?: number }>();
           const verified = marker?.schema_hash === PRODUCTION_BASELINE_HASH;
           facts.productionBaselineState = verified ? "verified" : "hash-mismatch";
           facts.productionBaselineApplied = verified;
-          facts.productionBaselineEvidenceSource = "Live query against the production D1 binding (production_schema_baseline table, id '0019').";
+          facts.productionBaselineEvidenceSource = "Live query against this environment's D1 binding (production_schema_baseline table, id '0019').";
           facts.productionBaselineVerifiedAt = marker?.created_at ? new Date(marker.created_at * 1000).toISOString() : null;
         } catch {
           // The table exists but the row could not be read — this is

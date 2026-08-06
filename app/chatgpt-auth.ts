@@ -1,5 +1,7 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { resolveIdentity, type AuthProvider } from "../lib/auth/provider";
+import { cloudflareAccessAuthProvider } from "./auth/cloudflare-access-provider";
 
 export type ChatGPTUser = {
   displayName: string;
@@ -16,23 +18,35 @@ const SIGN_IN_PATH = "/signin-with-chatgpt";
 const SIGN_OUT_PATH = "/signout-with-chatgpt";
 const CALLBACK_PATH = "/callback";
 
+// The ChatGPT Sites gateway is the trusted party that sets this header;
+// unchanged from before the auth provider abstraction existed.
+const chatGPTHeaderProvider: AuthProvider = {
+  name: "chatgpt-sites",
+  async resolve() {
+    const requestHeaders = await headers();
+    const email = requestHeaders.get(USER_EMAIL_HEADER);
+    if (!email) return null;
+
+    const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
+    const fullName =
+      encodedFullName &&
+      requestHeaders.get(USER_FULL_NAME_ENCODING_HEADER) === PERCENT_ENCODED_UTF8
+        ? safeDecodeURIComponent(encodedFullName)
+        : null;
+
+    return {
+      displayName: fullName ?? email,
+      email,
+      fullName,
+    };
+  },
+};
+
+// Checks the ChatGPT Sites header first (unchanged precedence), then falls
+// back to Cloudflare Access only when that header is absent — e.g. on an
+// independent sandbox Worker with no ChatGPT Sites gateway in front of it.
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!email) return null;
-
-  const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get(USER_FULL_NAME_ENCODING_HEADER) === PERCENT_ENCODED_UTF8
-      ? safeDecodeURIComponent(encodedFullName)
-      : null;
-
-  return {
-    displayName: fullName ?? email,
-    email,
-    fullName,
-  };
+  return resolveIdentity([chatGPTHeaderProvider, cloudflareAccessAuthProvider]);
 }
 
 export async function requireChatGPTUser(

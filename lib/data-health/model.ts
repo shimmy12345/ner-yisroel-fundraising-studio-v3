@@ -25,7 +25,7 @@ export type HealthCheck = {
 };
 
 export type DataHealthFacts = {
-  deploymentEnvironment: "staging" | "production";
+  deploymentEnvironment: "staging" | "production" | "sandbox";
   databaseConnected: boolean;
   schemaReady: boolean;
   currentMigrationLevel: string | null;
@@ -76,7 +76,7 @@ export type DataHealthReport = {
   summary: string;
   checks: HealthCheck[];
   platform: {
-    deploymentEnvironment: "staging" | "production";
+    deploymentEnvironment: "staging" | "production" | "sandbox";
     businessDataRows: number | null;
     migrationLevel: string;
     journalMigrationLevel: string;
@@ -251,6 +251,67 @@ function productionReadinessCheck(facts: DataHealthFacts, productionReady: boole
   };
 }
 
+const SANDBOX_BASELINE_LABEL: Record<DataHealthFacts["productionBaselineState"], string> = {
+  verified: "Verified",
+  "not-applied": "Not yet applied",
+  "hash-mismatch": "Mismatch",
+  unreadable: "Unknown",
+  "not-applicable": "Unknown",
+};
+
+// The independent sandbox Worker/D1 is bootstrapped from the same verified
+// 0019 baseline as production, so it reuses that live-evidence plumbing —
+// but it must never use production's "launch readiness"/"Blocked" wording,
+// since it is never a launch gate for anything. Kept entirely separate from
+// productionBaselineCheck/productionReadinessCheck so that wording can never
+// leak between the two.
+function sandboxSummaryChecks(facts: DataHealthFacts, businessDataRows: number | null): HealthCheck[] {
+  const baselineState = facts.productionBaselineState;
+  const baselineStatus: HealthStatus =
+    baselineState === "verified" ? "healthy"
+    : baselineState === "unreadable" || baselineState === "not-applicable" ? "unavailable"
+    : "critical";
+  return [
+    {
+      id: "sandbox-environment",
+      label: "Environment",
+      status: "info",
+      value: "Sandbox",
+      explanation: "This is an independent Cloudflare sandbox Worker and D1, isolated from ChatGPT Sites staging and production. It is never a launch gate for either.",
+    },
+    {
+      id: "sandbox-baseline",
+      label: "Baseline",
+      status: baselineStatus,
+      value: SANDBOX_BASELINE_LABEL[baselineState],
+      explanation:
+        baselineState === "verified" ? "This sandbox's D1 carries the production_schema_baseline marker and its schema_hash matches the packaged 0019 baseline exactly."
+        : baselineState === "not-applied" ? "The verified 0019 baseline SQL has not been applied to this sandbox's D1 yet."
+        : baselineState === "hash-mismatch" ? "This sandbox's baseline marker does not match the packaged 0019 baseline."
+        : "The baseline marker could not be read. This is not a confirmed failure — the check could not complete.",
+      evidence: {
+        expected: "A production_schema_baseline row for id '0019' whose schema_hash equals the packaged baseline's schemaHash.",
+        actual: facts.productionBaselineEvidenceSource,
+        evidenceSource: facts.productionBaselineEvidenceSource,
+        lastVerifiedAt: facts.productionBaselineVerifiedAt,
+        severity: baselineStatus === "healthy" ? "none" : baselineStatus === "unavailable" ? "medium" : "high",
+        businessDataAtRisk: baselineState === "hash-mismatch",
+        repairStep: baselineState === "verified" ? "None." : "Apply production-baseline/drizzle/0000_production_baseline_0019.sql to this sandbox's D1, then reload this page to re-verify.",
+      },
+    },
+    {
+      id: "sandbox-business-data",
+      label: "Business data",
+      status: businessDataRows === null ? "unavailable" : businessDataRows === 0 ? "healthy" : "attention",
+      value: businessDataRows === null ? "Not checked" : businessDataRows === 0 ? "Empty" : `Contains ${businessDataRows.toLocaleString("en-US")} row(s)`,
+      explanation:
+        businessDataRows === null ? "The application tables could not be counted."
+        : businessDataRows === 0 ? "No users, donors, gifts, interactions, or other application records are stored in this sandbox."
+        : "This sandbox contains application records — it is expected to remain empty.",
+    },
+  ];
+}
+
 export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Date().toISOString()): DataHealthReport {
   const deploymentEnvironment = facts.deploymentEnvironment ?? "staging";
   const productionBaselineApplied = deploymentEnvironment === "production" ? facts.productionBaselineState === "verified" : true;
@@ -269,6 +330,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     ...(!relationshipIntegrityHealthy ? ["One or more relationship-data integrity checks (duplicates, orphans, broken merge redirects) have not passed."] : []),
   ] : [];
   const checks: HealthCheck[] = [
+    ...(deploymentEnvironment === "sandbox" ? sandboxSummaryChecks(facts, businessDataRows) : []),
     {
       id: "database",
       label: "Database connection",
