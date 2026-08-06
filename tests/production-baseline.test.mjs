@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { generateBaseline, schemaTopology } from "../scripts/generate-production-baseline.mjs";
-import { compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { ACTIVE_DONORS_SQL, DUPLICATE_GIVING_FINGERPRINTS_SQL, DUPLICATE_JL_CODES_SQL, GIVING_RECONCILIATION_SQL, ORPHANED_GIFTS_SQL, ORPHANED_INTERACTIONS_SQL, ORPHANED_PAYMENTS_SQL, ORPHANED_REMINDERS_SQL } from "../lib/data-health/queries.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -85,4 +85,30 @@ test("production baseline is isolated from staging and future drift fails closed
   assert.doesNotMatch(read("app/api/health/route.ts"), /ensureUserProfile/);
   const liveRows = manifest.ddlTopology.map((object) => ({ ...object, tbl_name: object.type === "table" ? object.name : "ignored" }));
   assert.equal(compareSchemaObjects(stagingSchemaObjects(liveRows)).matches, true);
+});
+
+test("fundraising-data count excludes account/configuration tables while the backup-safety gate stays untouched", () => {
+  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences"]);
+  assert.ok(!FUNDRAISING_DATA_TABLES.includes("users"), "users must never count toward fundraising data");
+  assert.ok(!FUNDRAISING_DATA_TABLES.includes("onboarding_preferences"), "onboarding_preferences must never count toward fundraising data");
+  assert.ok(FUNDRAISING_DATA_TABLES.includes("donors"));
+  assert.ok(FUNDRAISING_DATA_TABLES.includes("gifts"));
+  assert.match(BUSINESS_DATA_COUNT_SQL, /"users"/, "the pre-existing backup-safety gate SQL is unchanged and still counts users");
+
+  const database = freshDatabase();
+  const now = Math.floor(Date.now() / 1000);
+  const count = (sql) => database.prepare(sql).get().count;
+
+  assert.equal(count(FUNDRAISING_DATA_COUNT_SQL), 0, "a fresh baseline has no fundraising data");
+  assert.equal(count(ACCOUNT_CONFIGURATION_COUNT_SQL), 0, "a fresh baseline has no owner configured yet");
+
+  database.exec(`INSERT INTO users (id, email, created_at, updated_at) VALUES ('owner-1', 'sgoldstein@nirc.edu', ${now}, ${now})`);
+  assert.equal(count(FUNDRAISING_DATA_COUNT_SQL), 0, "the owner's own account row must never register as fundraising data");
+  assert.equal(count(ACCOUNT_CONFIGURATION_COUNT_SQL), 1, "the owner's account is tracked separately");
+  assert.equal(count(BUSINESS_DATA_COUNT_SQL), 1, "the untouched backup-safety gate still counts the account row");
+
+  database.exec(`INSERT INTO donors (id, display_name, created_at, updated_at) VALUES ('donor-1', 'Fictional Donor', ${now}, ${now})`);
+  assert.equal(count(FUNDRAISING_DATA_COUNT_SQL), 1, "adding a fictional donor must change fundraising data to non-empty");
+  assert.equal(count(ACCOUNT_CONFIGURATION_COUNT_SQL), 1, "adding a donor must not change the account count");
+  database.close();
 });

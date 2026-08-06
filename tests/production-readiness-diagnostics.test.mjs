@@ -26,6 +26,8 @@ function productionFacts(overrides = {}) {
     schemaMatchesBaseline: true,
     schemaComparisonDifferences: [],
     businessDataRows: 0,
+    fundraisingDataRows: 0,
+    accountConfigurationRows: 1,
     activeDonors: 0,
     duplicateJlCodes: 0,
     orphanedGifts: 0,
@@ -135,11 +137,12 @@ test("staging never derives production readiness from its own local baseline-mar
   assert.match(readiness.explanation, /never derived from staging/);
 });
 
-test("independent staging: verified clean baseline and empty business data render the exact requested summary, with no production-launch wording", () => {
-  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 0, activeDonors: 0 }));
+test("independent staging: verified clean baseline, empty business data, and one configured owner render the exact requested summary, with no production-launch wording", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ fundraisingDataRows: 0, accountConfigurationRows: 1, activeDonors: 0 }));
   assert.equal(check(report, "independent-staging-environment").value, "Independent Staging");
   assert.equal(check(report, "independent-staging-baseline").value, "Verified");
   assert.equal(check(report, "independent-staging-business-data").value, "Empty");
+  assert.equal(check(report, "independent-staging-account-setup").value, "1 owner configured");
 
   // Production-only wording and launch-readiness claims must remain production-only.
   const readiness = check(report, "production-readiness");
@@ -165,12 +168,27 @@ test("independent staging: a hash mismatch is reported as Mismatch on the indepe
   assert.equal(baseline.evidence.businessDataAtRisk, true);
 });
 
-test("independent staging: nonzero business data is reported, not Empty", () => {
-  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 3, activeDonors: 3 }));
+test("independent staging: the owner's account row alone (no fundraising data) never triggers a business-data warning", () => {
+  // businessDataRows still reflects the raw all-tables count (as computed by
+  // BUSINESS_DATA_COUNT_SQL for the backup-safety gate, unaffected by this
+  // fix) but fundraisingDataRows is what the Business data check reads.
+  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 2, fundraisingDataRows: 0, accountConfigurationRows: 1, activeDonors: 0 }));
+  const businessData = check(report, "independent-staging-business-data");
+  assert.equal(businessData.value, "Empty");
+  assert.equal(businessData.status, "healthy");
+  const accountSetup = check(report, "independent-staging-account-setup");
+  assert.equal(accountSetup.value, "1 owner configured");
+  assert.equal(accountSetup.status, "info");
+});
+
+test("independent staging: adding a fictional donor or gift changes Business data to non-empty", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 3, fundraisingDataRows: 1, accountConfigurationRows: 1, activeDonors: 1 }));
   const businessData = check(report, "independent-staging-business-data");
   assert.notEqual(businessData.value, "Empty");
-  assert.match(businessData.value, /3 row/);
+  assert.match(businessData.value, /1 row/);
   assert.equal(businessData.status, "attention");
+  // Adding fundraising data must not change the separately-tracked account count.
+  assert.equal(check(report, "independent-staging-account-setup").value, "1 owner configured");
 });
 
 test("independent-staging summary checks do not appear on legacy staging or production", () => {
@@ -180,5 +198,6 @@ test("independent-staging summary checks do not appear on legacy staging or prod
     assert.equal(check(report, "independent-staging-environment"), undefined);
     assert.equal(check(report, "independent-staging-baseline"), undefined);
     assert.equal(check(report, "independent-staging-business-data"), undefined);
+    assert.equal(check(report, "independent-staging-account-setup"), undefined);
   }
 });

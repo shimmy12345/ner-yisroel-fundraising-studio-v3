@@ -49,6 +49,14 @@ export type DataHealthFacts = {
   schemaMatchesBaseline: boolean;
   schemaComparisonDifferences: string[];
   businessDataRows: number | null;
+  // Same set of tables as businessDataRows, minus the app's own
+  // account/configuration tables (users, onboarding_preferences). Used only
+  // by the independent-staging summary's "Business data" check, so the
+  // existing business-data-state check above keeps its original meaning.
+  fundraisingDataRows: number | null;
+  // Row count for the app's own account/configuration tables. Used only by
+  // the independent-staging summary's "Account setup" check.
+  accountConfigurationRows: number | null;
   activeDonors: number | null;
   duplicateJlCodes: number | null;
   orphanedGifts: number | null;
@@ -266,7 +274,7 @@ const INDEPENDENT_STAGING_BASELINE_LABEL: Record<DataHealthFacts["productionBase
 // productionBaselineCheck/productionReadinessCheck so that wording can never
 // leak between the two. Also distinct from the legacy ChatGPT Sites staging
 // environment, which remains classified as "staging" throughout this file.
-function independentStagingSummaryChecks(facts: DataHealthFacts, businessDataRows: number | null): HealthCheck[] {
+function independentStagingSummaryChecks(facts: DataHealthFacts): HealthCheck[] {
   const baselineState = facts.productionBaselineState;
   const baselineStatus: HealthStatus =
     baselineState === "verified" ? "healthy"
@@ -303,12 +311,19 @@ function independentStagingSummaryChecks(facts: DataHealthFacts, businessDataRow
     {
       id: "independent-staging-business-data",
       label: "Business data",
-      status: businessDataRows === null ? "unavailable" : businessDataRows === 0 ? "healthy" : "attention",
-      value: businessDataRows === null ? "Not checked" : businessDataRows === 0 ? "Empty" : `Contains ${businessDataRows.toLocaleString("en-US")} row(s)`,
+      status: facts.fundraisingDataRows === null ? "unavailable" : facts.fundraisingDataRows === 0 ? "healthy" : "attention",
+      value: facts.fundraisingDataRows === null ? "Not checked" : facts.fundraisingDataRows === 0 ? "Empty" : `Contains ${facts.fundraisingDataRows.toLocaleString("en-US")} row(s)`,
       explanation:
-        businessDataRows === null ? "The application tables could not be counted."
-        : businessDataRows === 0 ? "No users, donors, gifts, interactions, or other application records are stored in this environment."
-        : "This environment contains application records — it is expected to remain empty.",
+        facts.fundraisingDataRows === null ? "The application tables could not be counted."
+        : facts.fundraisingDataRows === 0 ? "No donors, gifts, giving activities, interactions, reminders, imports, or related fundraising records are stored in this environment. The owner's own account row is tracked separately under Account setup and is never counted here."
+        : "This environment contains fundraising records — it is expected to remain empty.",
+    },
+    {
+      id: "independent-staging-account-setup",
+      label: "Account setup",
+      status: "info",
+      value: facts.accountConfigurationRows === null ? "Not checked" : facts.accountConfigurationRows === 0 ? "No owner configured yet" : `${facts.accountConfigurationRows} owner${facts.accountConfigurationRows === 1 ? "" : "s"} configured`,
+      explanation: "The number of app-account rows in this environment, created automatically the first time an owner authenticates. This is account/configuration state, not fundraising business data, and is never counted toward Business data above.",
     },
   ];
 }
@@ -331,7 +346,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     ...(!relationshipIntegrityHealthy ? ["One or more relationship-data integrity checks (duplicates, orphans, broken merge redirects) have not passed."] : []),
   ] : [];
   const checks: HealthCheck[] = [
-    ...(deploymentEnvironment === "staging-independent" ? independentStagingSummaryChecks(facts, businessDataRows) : []),
+    ...(deploymentEnvironment === "staging-independent" ? independentStagingSummaryChecks(facts) : []),
     {
       id: "database",
       label: "Database connection",

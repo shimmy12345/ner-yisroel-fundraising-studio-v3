@@ -27,7 +27,7 @@ import {
   type DataHealthReport,
 } from "./model";
 import { readRemoteMigrationHistory } from "./remote-migrations";
-import { BUSINESS_DATA_COUNT_SQL, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
+import { ACCOUNT_CONFIGURATION_COUNT_SQL, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
 
@@ -65,6 +65,8 @@ const emptyFacts = (): DataHealthFacts => ({
   schemaMatchesBaseline: false,
   schemaComparisonDifferences: ["The staging schema has not been compared with the production baseline."],
   businessDataRows: null,
+  fundraisingDataRows: null,
+  accountConfigurationRows: null,
   activeDonors: null,
   duplicateJlCodes: null,
   orphanedGifts: null,
@@ -149,6 +151,8 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     if (!facts.schemaReady) return buildDataHealthReport(facts);
 
     facts.businessDataRows = number((await env.DB.prepare(BUSINESS_DATA_COUNT_SQL).first<{ count?: number }>())?.count, null);
+    facts.fundraisingDataRows = number((await env.DB.prepare(FUNDRAISING_DATA_COUNT_SQL).first<{ count?: number }>())?.count, null);
+    facts.accountConfigurationRows = number((await env.DB.prepare(ACCOUNT_CONFIGURATION_COUNT_SQL).first<{ count?: number }>())?.count, null);
 
     const healthResults = await env.DB.batch([
       env.DB.prepare(ACTIVE_DONORS_SQL).bind(userId),

@@ -11,6 +11,18 @@ export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((ob
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 20;
 
+// Tables that hold the app's own account/authentication state rather than a
+// fundraiser's relationship or giving data. A brand-new environment is
+// expected to contain exactly one owner's row here after their first
+// authenticated visit; that must never register as fundraising business
+// data. Used only by the independent-staging Workspace Health summary — the
+// backup-safety gate and rehearsal scripts keep using the untouched,
+// intentionally conservative BUSINESS_DATA_COUNT_SQL above.
+export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences"];
+export const FUNDRAISING_DATA_TABLES = PRODUCTION_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table));
+export const FUNDRAISING_DATA_COUNT_SQL = `SELECT ${FUNDRAISING_DATA_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
+export const ACCOUNT_CONFIGURATION_COUNT_SQL = `SELECT COUNT(*) AS count FROM "users"`;
+
 // These tables belong to the hosting/runtime layer, not the Fundraising OS
 // application schema. They are intentionally absent from a portable D1
 // production baseline and must never make an otherwise identical application
