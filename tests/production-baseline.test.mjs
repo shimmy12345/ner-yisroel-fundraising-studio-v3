@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { generateBaseline, schemaTopology } from "../scripts/generate-production-baseline.mjs";
-import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { ACCOUNT_CONFIGURATION_COUNT_SQL, ACCOUNT_CONFIGURATION_TABLES, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_SOURCE_MIGRATIONS, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { ACTIVE_DONORS_SQL, DUPLICATE_GIVING_FINGERPRINTS_SQL, DUPLICATE_JL_CODES_SQL, GIVING_RECONCILIATION_SQL, ORPHANED_GIFTS_SQL, ORPHANED_INTERACTIONS_SQL, ORPHANED_PAYMENTS_SQL, ORPHANED_REMINDERS_SQL } from "../lib/data-health/queries.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -111,4 +111,16 @@ test("fundraising-data count excludes account/configuration tables while the bac
   assert.equal(count(FUNDRAISING_DATA_COUNT_SQL), 1, "adding a fictional donor must change fundraising data to non-empty");
   assert.equal(count(ACCOUNT_CONFIGURATION_COUNT_SQL), 1, "adding a donor must not change the account count");
   database.close();
+});
+
+test("baseline verification invariant accounts for the data-only 0020 migration", () => {
+  // 0020_financial_date_only.sql only UPDATEs existing rows (no CREATE/ALTER
+  // TABLE), so replaying it against the empty baseline database must leave
+  // the schema level and hash exactly as they were at 0019 — only the
+  // source-migration count grows.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0020_financial_date_only.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 21);
+  assert.equal(PRODUCTION_BASELINE_LEVEL, "0019", "a data-only migration must not bump the schema level");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });
