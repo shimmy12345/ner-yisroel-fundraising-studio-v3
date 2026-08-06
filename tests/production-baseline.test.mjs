@@ -9,6 +9,10 @@ import { ACTIVE_DONORS_SQL, DUPLICATE_GIVING_FINGERPRINTS_SQL, DUPLICATE_JL_CODE
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+// Checkout line-ending normalization (e.g. core.autocrlf) can turn the
+// committed LF-only baseline into CRLF on disk without changing its
+// contents; normalize only for this comparison, never the files themselves.
+const normalizeLineEndings = (text) => text.replace(/\r\n/g, "\n");
 const baseline = read("production-baseline/drizzle/0000_production_baseline_0019.sql");
 const manifest = JSON.parse(read("production-baseline/schema-manifest.json"));
 
@@ -20,7 +24,7 @@ function freshDatabase() {
 
 test("authoritative 0019 baseline is reproducible, empty, and replay-safe", () => {
   const generated = generateBaseline();
-  assert.equal(baseline, generated.baseline);
+  assert.equal(normalizeLineEndings(baseline), normalizeLineEndings(generated.baseline));
   assert.deepEqual(manifest, generated.manifest);
   const database = freshDatabase();
   assert.equal(database.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
