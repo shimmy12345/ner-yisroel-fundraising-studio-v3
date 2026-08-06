@@ -17,9 +17,7 @@
     {
       "binding": "DB",
       "database_name": "fundraising-os-staging-db",
-      // Placeholder — replace with the database_id returned by:
-      //   wrangler d1 create fundraising-os-staging-db
-      "database_id": "<D1_DATABASE_ID_PLACEHOLDER>"
+      "database_id": "6c18396c-0a8f-4f2c-ba83-ea809ec10289"
     }
   ],
   "vars": {
