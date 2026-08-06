@@ -201,3 +201,18 @@ test("independent-staging summary checks do not appear on legacy staging or prod
     assert.equal(check(report, "independent-staging-account-setup"), undefined);
   }
 });
+
+test("missing deployed-commit metadata is informational and never taints the overall report status", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ deployedCommit: null }));
+  const release = check(report, "release");
+  assert.equal(release.status, "info", "a missing commit SHA must never render as attention/critical");
+  assert.equal(release.value, report.platform.appVersion, "falls back to the app version alone");
+  assert.equal(report.status, "healthy", "missing build metadata must not push the overall report away from healthy");
+});
+
+test("a present deployed commit shows the app version and a short SHA, and stays healthy", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ deployedCommit: "abcdef1234567890" }));
+  const release = check(report, "release");
+  assert.equal(release.status, "healthy");
+  assert.equal(release.value, `${report.platform.appVersion} · abcdef1`);
+});

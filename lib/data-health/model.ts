@@ -425,7 +425,10 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     {
       id: "release",
       label: "Deployed version",
-      status: facts.deployedCommit ? "healthy" : "attention",
+      // Missing commit metadata is informational only — it never signals a
+      // problem worth review, so it must never push the overall report
+      // status away from "healthy" the way "attention" would.
+      status: facts.deployedCommit ? "healthy" : "info",
       value: facts.deployedCommit ? `${facts.appVersion} · ${facts.deployedCommit.slice(0, 7)}` : facts.appVersion,
       explanation: facts.deployedCommit ? "This health report identifies the deployed application commit." : "The application version is available, but commit metadata was not injected into this build.",
     },
