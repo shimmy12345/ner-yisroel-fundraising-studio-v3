@@ -4,8 +4,8 @@ import { useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
 import { FIELD_LABELS, recognizeColumns, type ColumnMapping, type ColumnSuggestion, type ImportField, type ImportPreview, type ImportRow } from "../../../lib/import/recognition";
 import { decodeCsv, parseCsv, parseXlsx, rowsToRecords } from "../../../lib/import/file-parsers";
-import { isJlSolutionsExport, JL_MAPPING } from "../../../lib/import/jl-solutions";
-import { isJlDonationExport } from "../../../lib/import/jl-donations";
+import { JL_MAPPING } from "../../../lib/import/jl-solutions";
+import { classifyJlImportType, countStrongDonationIndicators } from "../../../lib/import/jl-export-type";
 import { UndoDonationImport } from "./UndoDonationImport";
 import { financialDateLabel, parseFinancialDate } from "../../../lib/financial-date";
 
@@ -167,8 +167,12 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         ? parseCsv(decodeCsv(buffer))
         : parseXlsx(buffer);
       const table = rowsToRecords(parsedRows);
-      const detectedDonation = isJlDonationExport(table.columns);
-      const detectedJl = isJlSolutionsExport(table.columns);
+      // The same classifier used by the preview and commit routes decides
+      // the type here too, so the upload-time banner and mapping choice can
+      // never disagree with what preview/commit will do with this file.
+      const importType = classifyJlImportType(table.columns, table.rows);
+      const detectedDonation = importType === "donation";
+      const detectedJl = importType === "household";
       const recognized = detectedDonation ? [] : detectedJl
         ? table.columns.map((column) => ({ column, field: JL_MAPPING[column] ?? "ignore" as const, confidence: 0.99, requiresReview: false }))
         : recognizeColumns(table.columns);
@@ -186,7 +190,11 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setFieldDecisions({});
       setExistingDonorDecisions({});
       setReviewDecisions({});
-      setAmbiguousType(null);
+      setConfirmedType(undefined);
+      setAmbiguousType(importType === "ambiguous" ? {
+        donationIndicatorCount: countStrongDonationIndicators(table.columns, table.rows),
+        message: "This file has some donation-shaped columns but is not clearly one type. Choose whether this is a Household export or a Donation export before continuing.",
+      } : null);
       setDuplicateBlock(null);
       setForceConfirmation("");
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
