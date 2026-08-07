@@ -118,9 +118,17 @@ test("baseline verification invariant accounts for the data-only 0020 migration"
   // TABLE), so replaying it against the empty baseline database must leave
   // the schema level and hash exactly as they were at 0019 — only the
   // source-migration count grows.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0020_financial_date_only.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 21);
+  assert.ok(manifest.sourceMigrations.includes("0020_financial_date_only.sql"));
   assert.equal(PRODUCTION_BASELINE_LEVEL, "0019", "a data-only migration must not bump the schema level");
+});
+
+test("baseline picks up the schema-changing 0021 migration", () => {
+  // 0021_import_preview_sessions.sql adds two new tables, so — unlike
+  // 0020 — the schema hash must change; the level label stays "0019"
+  // regardless, since it identifies the bootstrap file's historical origin,
+  // not its current contents.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0021_import_preview_sessions.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 22);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

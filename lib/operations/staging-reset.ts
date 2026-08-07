@@ -17,6 +17,9 @@ export const STAGING_RESET_TABLE_ORDER = [
   "legacy_test_cleanup_audits",
   "sample_cleanup_audits",
   "workspace_backup_audits",
+  // import_preview_session_chunks references import_preview_sessions.
+  "import_preview_session_chunks",
+  "import_preview_sessions",
   // Depend only on `interactions` or `donors`.
   "activity_status_audits",
   "donor_contact_audits",

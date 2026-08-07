@@ -206,6 +206,27 @@ CREATE TABLE `household_import_rollback_audits` (
   FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `import_preview_session_chunks` (
+  `session_id` text NOT NULL,
+  `chunk_index` integer NOT NULL,
+  `rows_json` text NOT NULL,
+  PRIMARY KEY (`session_id`,`chunk_index`),
+  FOREIGN KEY (`session_id`) REFERENCES `import_preview_sessions`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `import_preview_sessions` (
+  `id` text PRIMARY KEY NOT NULL,
+  `owner_user_id` text NOT NULL,
+  `file_hash` text NOT NULL,
+  `file_name` text NOT NULL,
+  `mapping_json` text NOT NULL,
+  `force_type` text,
+  `row_count` integer NOT NULL,
+  `created_at` integer NOT NULL,
+  `expires_at` integer NOT NULL,
+  FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `interactions` (
   `id` text PRIMARY KEY NOT NULL,
   `donor_id` text NOT NULL,
@@ -407,6 +428,8 @@ CREATE INDEX `idx_giving_management_audit_import` ON `giving_activity_management
 CREATE INDEX `idx_legacy_test_cleanup_user_date`
 ON `legacy_test_cleanup_audits` (`user_id`,`created_at`);
 
+CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sessions` (`owner_user_id`,`expires_at`);
+
 CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`);
 
 CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`);
@@ -432,5 +455,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','0df7c3561261e9e500d8f7fe563ea76ae19fcb0304a994ff5354b210e0f4e41b',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','aa7d07b9961ac40985c567681c2f910d6855e2e7085b7f3ec5210d516e059757',1785944072);
 PRAGMA optimize;

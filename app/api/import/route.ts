@@ -11,6 +11,8 @@ import { resolvePossibleDuplicateDecisions, type ReviewDecision } from "../../..
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, resolveCrossImportDecisions, toExistingDonationRecord, type CrossImportDecision, type RawExistingDonationRow } from "../../../lib/import/jl-donation-cross-import";
 import { buildRejectedRows, resolveRejectionDecisions, type RejectionDecision } from "../../../lib/import/jl-donation-rejection-review";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
+import { isPreviewSessionUsable, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../lib/import/preview-session";
+import { resolveAttemptCommitAction, type ImportAttemptRow } from "../../../lib/import/import-attempt";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
@@ -38,6 +40,8 @@ type ImportRequest = {
   reviewDecisions?: ReviewDecision[];
   crossImportDecisions?: CrossImportDecision[];
   rejectionDecisions?: RejectionDecision[];
+  previewSessionId?: string;
+  attemptId?: string;
 };
 
 type ManualDonorRow = ManualDonorMatchRow & {
@@ -83,6 +87,8 @@ function pledgeSnapshotWithPayments(sourceSnapshot: string, fingerprints: string
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  const profile = await ensureUserProfile(user);
+  const userId = profile.id;
 
   let body: ImportRequest;
   try {
@@ -91,10 +97,27 @@ export async function POST(request: Request) {
     return Response.json({ error: "Invalid import request" }, { status: 400 });
   }
 
-  const fileName = body.fileName?.trim() ?? "";
-  const fileHash = body.fileHash?.trim().toLowerCase() ?? "";
-  const rows = Array.isArray(body.rows) ? body.rows : [];
-  const mapping = body.mapping ?? {};
+  let fileName = body.fileName?.trim() ?? "";
+  let fileHash = body.fileHash?.trim().toLowerCase() ?? "";
+  let rows: ImportRow[] = Array.isArray(body.rows) ? body.rows : [];
+  let mapping: ColumnMapping = body.mapping ?? {};
+  let forceType = body.forceType;
+
+  // Prefer the server-stored preview session over a resent file: the client
+  // sends only the session id plus decisions, not the full parsed rows.
+  const previewSessionId = typeof body.previewSessionId === "string" ? body.previewSessionId.trim() : "";
+  if (previewSessionId) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const session = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, created_at, expires_at FROM import_preview_sessions WHERE id = ?").bind(previewSessionId).first<PreviewSessionRow>();
+    if (!isPreviewSessionUsable(session, userId, nowSeconds)) {
+      return Response.json({ error: "Your review session has expired. Refresh the preview and try again.", sessionExpired: true }, { status: 410 });
+    }
+    const chunkRows = await env.DB.prepare("SELECT rows_json FROM import_preview_session_chunks WHERE session_id = ? ORDER BY chunk_index").bind(previewSessionId).all<{ rows_json: string }>();
+    fileName = session.file_name;
+    fileHash = session.file_hash;
+    rows = reconstructRowsFromChunks(chunkRows.results.map((row) => row.rows_json));
+    forceType = (session.force_type as "household" | "donation" | undefined) ?? forceType;
+  }
   if (!fileName || !/^[a-f0-9]{64}$/.test(fileHash) || !rows.length || rows.length > 25000) {
     return Response.json({ error: "The import file could not be validated" }, { status: 422 });
   }
@@ -162,8 +185,6 @@ export async function POST(request: Request) {
     return false;
   }))) return Response.json({ error: "The existing donor review decisions could not be validated" }, { status: 422 });
 
-  const profile = await ensureUserProfile(user);
-  const userId = profile.id;
   const existing = await env.DB.prepare("SELECT id, user_id, status, completed_at FROM data_imports WHERE user_id = ? AND file_hash = ? AND status IN ('active','completed') ORDER BY completed_at DESC, created_at DESC LIMIT 1").bind(userId, fileHash).first<{ id: string; user_id: string; status: string; completed_at: number | null }>();
   const activeDuplicate = existing && blocksIdenticalImport(existing.status) ? existing : null;
   if (activeDuplicate && !body.forceReprocess) {
@@ -186,13 +207,50 @@ export async function POST(request: Request) {
     }
   }
 
-  const importType = body.forceType ?? classifyJlImportType(Object.keys(rows[0] ?? {}), rows);
+  const importType = forceType ?? classifyJlImportType(Object.keys(rows[0] ?? {}), rows);
   if (importType === "ambiguous") {
     return Response.json({ error: "This file has some donation-shaped columns but is not clearly one type. Choose whether this is a Household export or a Donation export before importing.", ambiguousType: true }, { status: 422 });
   }
 
   if (importType === "donation") {
     const startedAt = Date.now();
+    const attemptId = typeof body.attemptId === "string" && /^[0-9a-f-]{36}$/i.test(body.attemptId) ? body.attemptId : crypto.randomUUID();
+
+    // Measure, never log donor/financial content: row and decision counts,
+    // and the request's own reported byte size, are enough to tell whether
+    // a large reviewed import is approaching a Worker limit.
+    logger.info("jl_donation_import_commit_received", {
+      userId, attemptId, rows: rows.length,
+      requestBytes: Number(request.headers.get("content-length") ?? 0),
+      reviewDecisions: reviewDecisions.length,
+      crossImportDecisions: crossImportDecisions.length,
+      rejectionDecisions: rejectionDecisions.length,
+      pendingGiftDecisions: (body.pendingGiftDecisions ?? []).length,
+      paymentDecisions: paymentDecisions.length,
+      usedPreviewSession: Boolean(previewSessionId),
+    });
+
+    // Idempotency: an attemptId is issued once per commit click and reused
+    // by the client across any lost-response recovery. A completed attempt
+    // is replayed (no re-run, no second write); an attempt already in
+    // flight is refused rather than processed twice concurrently.
+    const existingAttempt = await env.DB.prepare("SELECT id, status, report_json, created_at FROM data_imports WHERE id = ? AND user_id = ?").bind(attemptId, userId).first<ImportAttemptRow>();
+    const attemptAction = resolveAttemptCommitAction(existingAttempt);
+    if (attemptAction === "replay") {
+      logger.info("jl_donation_import_replay", { userId, attemptId });
+      return Response.json(JSON.parse(existingAttempt!.report_json));
+    }
+    if (attemptAction === "reject_in_progress") {
+      return Response.json({ error: "This import attempt is already being processed. Check its status before retrying.", attemptId, attemptStatus: "processing" }, { status: 409 });
+    }
+    const markerNow = Math.floor(Date.now() / 1000);
+    if (existingAttempt) {
+      await env.DB.prepare("UPDATE data_imports SET status = 'processing', file_name = ?, file_hash = ? WHERE id = ?").bind(fileName, fileHash, attemptId).run();
+    } else {
+      await env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at) VALUES (?, ?, ?, ?, 'processing', 0, '{}', ?)").bind(attemptId, userId, fileName, fileHash, markerNow).run();
+    }
+
+    const response = await (async (): Promise<Response> => {
     try {
     const columns = Object.keys(rows[0] ?? {});
     const donationPreview = await buildJlDonationPreview(rows);
@@ -359,7 +417,7 @@ export async function POST(request: Request) {
       });
     }
     const now = Math.floor(Date.now() / 1000);
-    const importId = crypto.randomUUID();
+    const importId = attemptId;
     const liveHouseholds = await env.DB.prepare("SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(userId).all<{ id: string }>();
     const householdsWithGiving = await env.DB.prepare("SELECT DISTINCT donor_id AS id FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')").bind(userId).all<{ id: string }>();
     const assignedPledgeDonorIds = assignmentPlan.pledgeUpdates.map((update) => update.donor_id);
@@ -414,7 +472,12 @@ export async function POST(request: Request) {
       ...pledgeDecisionStatements,
       ...pledgeUpdateStatements,
       ...pendingMergeStatements,
-      env.DB.prepare("INSERT INTO data_imports (id, user_id, file_name, file_hash, status, update_existing, report_json, created_at, completed_at) VALUES (?, ?, ?, ?, 'completed', 1, ?, ?, ?)").bind(importId, userId, fileName, fileHash, JSON.stringify(report), now, now),
+      // UPDATE, not INSERT: the row for this attemptId was already created
+      // (status='processing') before this heavy work began, so a lost
+      // response can still be reconciled by attemptId. Marking it
+      // 'completed' atomically with the financial writes below means the
+      // status endpoint never reports "committed" before it actually is.
+      env.DB.prepare("UPDATE data_imports SET file_name = ?, file_hash = ?, status = 'completed', update_existing = 1, report_json = ?, completed_at = ? WHERE id = ?").bind(fileName, fileHash, JSON.stringify(report), now, importId),
       ...assignmentAuditStatements,
       env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
       env.DB.prepare(`INSERT INTO jl_refresh_state (user_id, last_donation_refresh_at, last_donation_range_start, last_donation_range_end, updated_at)
@@ -440,6 +503,22 @@ export async function POST(request: Request) {
       const failure: RowFailure = { row: 0, category: "unexpected_exceptions", reason: "An unexpected exception occurred while preparing the donation import." };
       return Response.json({ error: failure.reason, fatalError: failure.reason, databaseChangesMade: false, noChangesMade: true, rollbackCauses: ["unexpected_exceptions"], validation: { totalRows: rows.length, passedRows: 0, failedRows: rows.length, duplicateRows: 0, nonfinancialRows: 0, firstErrors: [failure] }, rejectedRows: rows.map((_, index) => ({ row: index + 2, category: "unexpected_exceptions" as const, reason: "Row was not written because import preparation failed" })), results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: rows.length, rejectedRows: rows.length, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt } }, { status: 500 });
     }
+    })();
+
+    // Best-effort finalize: the success path below already updates this row
+    // to 'completed' atomically together with the financial writes, in the
+    // same batch, so this is a no-op there. Every other exit (a validation
+    // rejection, or a caught database/unexpected error) never touched that
+    // row at all, so this is what actually clears it out of 'processing' --
+    // the step that makes the status endpoint trustworthy even when this
+    // response itself never reaches the browser.
+    try {
+      const responseBody = await response.clone().json();
+      await env.DB.prepare("UPDATE data_imports SET status = ?, report_json = ?, completed_at = ? WHERE id = ? AND status != 'completed'").bind(response.ok ? "completed" : "failed", JSON.stringify(responseBody), Math.floor(Date.now() / 1000), attemptId).run();
+    } catch (finalizeError) {
+      logger.error("jl_donation_import_attempt_finalize_failed", finalizeError, { userId, attemptId });
+    }
+    return response;
   }
 
   const jlDetected = importType === "household";

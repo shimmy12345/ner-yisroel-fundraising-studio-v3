@@ -14,7 +14,7 @@ type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dat
 type RowFailure = { row: number; category?: FailureCategory; reason: string; values?: ImportRow };
 type ValidationSummary = { totalRows: number; passedRows: number; failedRows: number; duplicateRows: number; nonfinancialRows: number; firstErrors: RowFailure[] };
 type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
-type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
+type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; outcomeStatus?: "not_committed" | "processing" | "unknown"; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
 type DuplicateImportBlock = { error: string; importId: string; duplicateBlocked: true; canForceReprocess: boolean; priorStatus: string; completedAt: number | null; warning: string };
 type ImportReport = {
   importId: string;
@@ -157,6 +157,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [confirmedType, setConfirmedType] = useState<"household" | "donation" | undefined>(undefined);
   const [duplicateBlock, setDuplicateBlock] = useState<DuplicateImportBlock | null>(null);
   const [forceConfirmation, setForceConfirmation] = useState("");
+  const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
+  const [attemptId, setAttemptId] = useState<string | null>(null);
 
   async function inspectFile(file: File) {
     if (!/\.(csv|xlsx)$/i.test(file.name)) {
@@ -209,6 +211,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       } : null);
       setDuplicateBlock(null);
       setForceConfirmation("");
+      setPreviewSessionId(null);
+      setAttemptId(null);
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
       setStatusMessage("");
     } catch (fileError) {
@@ -236,8 +240,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setAmbiguousType(null);
     setStatusMessage("Checking the preview securely…");
     try {
-      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash, forceType }) });
-      const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; ambiguous?: { donationIndicatorCount: number; message: string }; error?: string };
+      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash, fileName, forceType }) });
+      const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; previewSessionId?: string; ambiguous?: { donationIndicatorCount: number; message: string }; error?: string };
       if (payload.profile === "ambiguous" && payload.ambiguous) {
         setAmbiguousType(payload.ambiguous);
         return;
@@ -259,6 +263,11 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setRejectionDecisions(Object.fromEntries((payload.donation?.rejectedRowDetails ?? []).filter((item) => item.severity === "reviewable").map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
       setRejectedRowFilter("all");
       setConfirmedType(forceType);
+      // A server-stored session for this reviewed file, and a fresh
+      // idempotency id for whatever commit attempt follows this preview --
+      // reused across any lost-response recovery for that same attempt.
+      setPreviewSessionId(payload.previewSessionId ?? null);
+      setAttemptId(crypto.randomUUID());
       setStep("preview");
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "The preview could not be prepared.");
@@ -269,18 +278,44 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     if (!preview || step === "importing") return;
     setStep("importing");
     setError("");
+
+    // Session preflight: a lightweight authenticated call before committing.
+    // Hundreds of reviewed rows can take a long time to work through, long
+    // enough for the session to have lapsed since the preview was loaded.
+    // This never discards paymentDecisions/reviewDecisions/etc. -- only a
+    // fresh commit or a new file upload resets those.
     try {
-      const response = await fetch("/api/import", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, forceType: confirmedType, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), rejectionDecisions: Object.entries(rejectionDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedJlCode: decision.action === "match_donor" ? decision.correctedJlCode : undefined })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
+      const sessionCheck = await fetch("/api/profile");
+      if (sessionCheck.status === 401) { setFailureReport(sessionExpiredFailure()); setStep("failed"); return; }
+    } catch { /* the preflight itself is inconclusive on a network error; fall through to the real attempt */ }
+
+    const currentAttemptId = attemptId ?? crypto.randomUUID();
+    if (!attemptId) setAttemptId(currentAttemptId);
+    try {
+      const body = JSON.stringify({
+        fileName, fileHash, mapping, updateExisting, mode, reviewMode, forceType: confirmedType,
+        previewSessionId, attemptId: currentAttemptId,
+        // The full parsed file is only sent when there is no server-stored
+        // preview session for it (e.g. the household/general import paths).
+        rows: previewSessionId ? undefined : rows,
+        paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), rejectionDecisions: Object.entries(rejectionDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedJlCode: decision.action === "match_donor" ? decision.correctedJlCode : undefined })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined,
       });
-      const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string };
+      const response = await fetch("/api/import", { method: "POST", headers: { "content-type": "application/json" }, body });
+      const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string; sessionExpired?: boolean; attemptStatus?: string };
       if (!response.ok) {
         if (response.status === 409 && "duplicateBlocked" in payload && payload.duplicateBlocked) {
           setDuplicateBlock(payload);
           setError(payload.error);
           setStep("preview");
+          return;
+        }
+        if (response.status === 410 && "sessionExpired" in payload && payload.sessionExpired) {
+          setError("Your review session has expired. Refresh the preview and try again.");
+          setStep("preview");
+          return;
+        }
+        if (response.status === 409 && "attemptStatus" in payload && payload.attemptStatus === "processing") {
+          await reconcileLostCommitResponse();
           return;
         }
         if ("validation" in payload && "rollbackCauses" in payload) {
@@ -295,24 +330,64 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       }
       setReport(payload as ImportReport);
       setStep("complete");
-    } catch (importError) {
-      setFailureReport(unexpectedFailure(importError instanceof Error ? importError.message : "The import request could not be completed."));
-      setStep("failed");
+    } catch {
+      // fetch() itself rejected (e.g. "Failed to fetch") -- this never means
+      // the write didn't happen, only that this response never arrived.
+      await reconcileLostCommitResponse();
     }
   }
 
-  function unexpectedFailure(reason: string): ImportFailure {
+  function unexpectedFailure(reason: string, outcomeStatus: "not_committed" | "processing" | "unknown" = "not_committed"): ImportFailure {
+    // "not_committed" is a confirmed outcome (a validated server error, or a
+    // status check that positively found nothing was written) -- safe to
+    // say plainly nothing changed. "processing"/"unknown" must never make
+    // that claim: the write may already have happened even though this
+    // response was lost.
+    const confirmedNotWritten = outcomeStatus === "not_committed";
     return {
       error: reason,
       fatalError: reason,
       databaseChangesMade: false,
-      noChangesMade: true,
+      noChangesMade: confirmedNotWritten,
+      outcomeStatus,
       rollbackCauses: ["unexpected_exceptions"],
       validation: { totalRows: rows.length, passedRows: 0, failedRows: rows.length, duplicateRows: 0, nonfinancialRows: 0, firstErrors: [{ row: 0, category: "unexpected_exceptions", reason }] },
       reviewRows: [],
-      rejectedRows: rows.map((_, index) => ({ row: index + 2, category: "unexpected_exceptions", reason: "Row was not written because the import request failed." })),
-      results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: rows.length, rejectedRows: rows.length, unmatchedJlCodes: 0, elapsedMs: 0 },
+      rejectedRows: confirmedNotWritten ? rows.map((_, index) => ({ row: index + 2, category: "unexpected_exceptions", reason: "Row was not written because the import request failed." })) : [],
+      results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: rows.length, rejectedRows: confirmedNotWritten ? rows.length : 0, unmatchedJlCodes: 0, elapsedMs: 0 },
     };
+  }
+
+  function sessionExpiredFailure(): ImportFailure {
+    return unexpectedFailure("Your session expired. Sign in again before importing.", "not_committed");
+  }
+
+  // Reconciles a commit whose response was lost (fetch() itself threw, most
+  // often surfaced to the browser as "Failed to fetch") by asking the
+  // status endpoint what actually happened, instead of assuming failure.
+  async function reconcileLostCommitResponse() {
+    if (!attemptId) { setFailureReport(unexpectedFailure("The import request could not be completed and its outcome could not be confirmed. Check your recent imports before trying again.", "unknown")); setStep("failed"); return; }
+    try {
+      const statusResponse = await fetch(`/api/import/status?attemptId=${encodeURIComponent(attemptId)}`);
+      if (statusResponse.status === 401) { setFailureReport(sessionExpiredFailure()); setStep("failed"); return; }
+      const statusPayload = await statusResponse.json() as { status?: "committed" | "not_committed" | "processing" | "unknown"; report?: ImportReport | null };
+      if (statusPayload.status === "committed" && statusPayload.report) { setReport(statusPayload.report); setStep("complete"); return; }
+      if (statusPayload.status === "not_committed") {
+        setFailureReport(unexpectedFailure("The connection was lost before this import completed. No changes were made to the database — it is safe to try again.", "not_committed"));
+        setStep("failed");
+        return;
+      }
+      if (statusPayload.status === "processing") {
+        setFailureReport(unexpectedFailure("This import is still processing on the server. Wait a moment and check again before retrying — do not resubmit yet.", "processing"));
+        setStep("failed");
+        return;
+      }
+      setFailureReport(unexpectedFailure("The connection was lost and we could not confirm whether this import completed. Do not retry blindly — check your recent imports before trying again.", "unknown"));
+      setStep("failed");
+    } catch {
+      setFailureReport(unexpectedFailure("The connection was lost and we could not confirm whether this import completed. Do not retry blindly — check your recent imports before trying again.", "unknown"));
+      setStep("failed");
+    }
   }
 
   function cancelImport() {
@@ -339,6 +414,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setAmbiguousType(null);
     setDuplicateBlock(null);
     setForceConfirmation("");
+    setPreviewSessionId(null);
+    setAttemptId(null);
     setFailureReport(null);
     setReport(null);
     setError("");
@@ -735,13 +812,25 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         {step === "failed" && failureReport && (
           <section className="import-card import-failed" aria-labelledby="import-failed-title">
             <div className="import-failure-mark" aria-hidden="true">!</div>
-            <p className="eyebrow">IMPORT NOT COMPLETED</p>
-            <h1 id="import-failed-title">We couldn&apos;t import this file.</h1>
+            <p className="eyebrow">{failureReport.outcomeStatus === "processing" ? "IMPORT STILL PROCESSING" : failureReport.outcomeStatus === "unknown" ? "OUTCOME UNKNOWN" : "IMPORT NOT COMPLETED"}</p>
+            <h1 id="import-failed-title">{failureReport.outcomeStatus === "processing" ? "This import hasn't finished yet." : failureReport.outcomeStatus === "unknown" ? "We couldn't confirm what happened." : "We couldn't import this file."}</h1>
             <p className="import-lede">{failureReport.error}</p>
-            <div className="import-rollback-assurance" role="status">
-              <strong>No changes were made to the database.</strong>
-              <span>The donation transaction was rolled back as one unit, so no partial data was kept.</span>
-            </div>
+            {failureReport.outcomeStatus === "processing" ? (
+              <div className="import-rollback-assurance" role="status">
+                <strong>This import may still be running on the server.</strong>
+                <span>Wait a moment, then check your recent imports before trying again. Resubmitting now could start a second attempt while this one is still working.</span>
+              </div>
+            ) : failureReport.outcomeStatus === "unknown" ? (
+              <div className="import-fatal-error" role="alert">
+                <strong>We could not confirm whether this import wrote anything.</strong>
+                <span>Do not retry blindly. Check your recent imports (or ask an administrator to check Worker logs) before importing this file again.</span>
+              </div>
+            ) : (
+              <div className="import-rollback-assurance" role="status">
+                <strong>No changes were made to the database.</strong>
+                <span>The donation transaction was rolled back as one unit, so no partial data was kept.</span>
+              </div>
+            )}
             <div className="import-result-counts">
               <article><strong>{failureReport.results.validRows.toLocaleString()}</strong><span>valid rows</span></article>
               <article><strong>{failureReport.results.giftsImported.toLocaleString()}</strong><span>imported rows</span></article>

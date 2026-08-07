@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "0df7c3561261e9e500d8f7fe563ea76ae19fcb0304a994ff5354b210e0f4e41b",
+  "schemaHash": "aa7d07b9961ac40985c567681c2f910d6855e2e7085b7f3ec5210d516e059757",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -22,7 +22,8 @@
     "0017_today_relationship_queue.sql",
     "0018_data_health_repairs.sql",
     "0019_legacy_test_orphan_cleanup.sql",
-    "0020_financial_date_only.sql"
+    "0020_financial_date_only.sql",
+    "0021_import_preview_sessions.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -1987,6 +1988,156 @@
         "checks": []
       },
       {
+        "name": "import_preview_session_chunks",
+        "columns": [
+          {
+            "name": "session_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "chunk_index",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "rows_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "session_id",
+            "toTable": "import_preview_sessions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": null,
+            "columns": [
+              "session_id",
+              "chunk_index"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "import_preview_sessions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "owner_user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "file_hash",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "file_name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "mapping_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "force_type",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "row_count",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "expires_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "owner_user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "import_preview_sessions_owner_expires_idx",
+            "columns": [
+              "owner_user_id",
+              "expires_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sessions` (`owner_user_id`,`expires_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
         "name": "interactions",
         "columns": [
           {
@@ -3163,6 +3314,16 @@
     },
     {
       "type": "table",
+      "name": "import_preview_session_chunks",
+      "sql": "CREATE TABLE `import_preview_session_chunks` ( `session_id` text NOT NULL, `chunk_index` integer NOT NULL, `rows_json` text NOT NULL, PRIMARY KEY (`session_id`,`chunk_index`), FOREIGN KEY (`session_id`) REFERENCES `import_preview_sessions`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "import_preview_sessions",
+      "sql": "CREATE TABLE `import_preview_sessions` ( `id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL, `file_hash` text NOT NULL, `file_name` text NOT NULL, `mapping_json` text NOT NULL, `force_type` text, `row_count` integer NOT NULL, `created_at` integer NOT NULL, `expires_at` integer NOT NULL, FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "interactions",
       "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -3365,6 +3526,11 @@
       "type": "index",
       "name": "idx_legacy_test_cleanup_user_date",
       "sql": "CREATE INDEX `idx_legacy_test_cleanup_user_date` ON `legacy_test_cleanup_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "import_preview_sessions_owner_expires_idx",
+      "sql": "CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sessions` (`owner_user_id`,`expires_at`)"
     },
     {
       "type": "index",

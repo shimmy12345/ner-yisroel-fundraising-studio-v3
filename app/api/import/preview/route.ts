@@ -8,6 +8,8 @@ import { classifyJlImportType, countStrongDonationIndicators } from "../../../..
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../../lib/import/jl-donation-match";
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, toExistingDonationRecord, type RawExistingDonationRow } from "../../../../lib/import/jl-donation-cross-import";
 import { buildRejectedRows } from "../../../../lib/import/jl-donation-rejection-review";
+import { chunkJsonRows } from "../../../../lib/import/d1-json-chunks";
+import { previewSessionExpiresAt } from "../../../../lib/import/preview-session";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
@@ -16,7 +18,26 @@ import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../..
 import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
 import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
 
-type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation" };
+type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; fileName?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation" };
+
+// Persists this donation file's parsed rows server-side, owner-scoped and
+// short-lived, so the final commit can send this id instead of the entire
+// file again. Any prior expired sessions for this owner are opportunistically
+// cleaned up in the same batch.
+async function saveDonationPreviewSession(ownerUserId: string, fileHash: string, fileName: string, importType: string, rows: ImportRow[]): Promise<string> {
+  const sessionId = crypto.randomUUID();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const expiresAt = previewSessionExpiresAt(nowSeconds);
+  const expiredSessions = await env.DB.prepare("SELECT id FROM import_preview_sessions WHERE owner_user_id = ? AND expires_at <= ?").bind(ownerUserId, nowSeconds).all<{ id: string }>();
+  const expiredIds = expiredSessions.results.map((row) => row.id);
+  await env.DB.batch([
+    ...expiredIds.map((id) => env.DB.prepare("DELETE FROM import_preview_session_chunks WHERE session_id = ?").bind(id)),
+    ...(expiredIds.length ? [env.DB.prepare(`DELETE FROM import_preview_sessions WHERE id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(expiredIds))] : []),
+    env.DB.prepare("INSERT INTO import_preview_sessions (id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, created_at, expires_at) VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?)").bind(sessionId, ownerUserId, fileHash, fileName, importType, rows.length, nowSeconds, expiresAt),
+    ...chunkJsonRows(rows).map((chunk, index) => env.DB.prepare("INSERT INTO import_preview_session_chunks (session_id, chunk_index, rows_json) VALUES (?, ?, ?)").bind(sessionId, index, chunk)),
+  ]);
+  return sessionId;
+}
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -83,7 +104,10 @@ export async function POST(request: Request) {
     const pendingDonorIds = [...new Set(pendingInputs.map((item) => item.donorId))];
     const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
     const pendingMatches = pendingGiftMatches(pendingInputs, pending.results).map((match) => ({ fingerprint: match.fingerprint, candidates: match.candidates.map((candidate) => ({ id: candidate.id, activityDate: candidate.activity_date, amountCents: candidate.committed_cents, designation: candidate.description, note: candidate.private_note })) }));
-    return Response.json({ profile: "jl-donations", donation: {
+    // Persist the parsed rows server-side so the final commit request can
+    // send this id instead of re-uploading the entire file.
+    const previewSessionId = await saveDonationPreviewSession(profile.id, fileHash, body.fileName ?? "", "donation", rows);
+    return Response.json({ profile: "jl-donations", previewSessionId, donation: {
       rows: rows.length,
       matchedRows: match.matched.length + paymentAssignments.filter((candidate) => candidate.donorId).length,
       unknownHousehold: match.unknownHousehold + paymentAssignments.filter((candidate) => !candidate.donorId).length,

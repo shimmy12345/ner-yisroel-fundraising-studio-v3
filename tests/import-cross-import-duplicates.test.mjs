@@ -130,7 +130,10 @@ async function run() {
   assert.match(previewRoute, /findStableIdCrossImportMatches/);
   assert.match(previewRoute, /findFingerprintCrossImportMatches/);
   assert.doesNotMatch(previewRoute, /resolveCrossImportDecisions/, "the preview route must never resolve/apply cross-import decisions -- only the commit route may write");
-  assert.doesNotMatch(previewRoute, /INSERT INTO|UPDATE giving_activities|DELETE FROM/i);
+  // Preview persists only its own short-lived, non-financial session state
+  // (see lib/import/preview-session.ts) -- it must never write a financial
+  // or donor record.
+  assert.doesNotMatch(previewRoute, /INSERT INTO (?!import_preview_session)|UPDATE giving_activities|UPDATE donors|DELETE FROM (?!import_preview_session)/i);
 
   // Commit route wires the resolution in before building the insertable set
   // and audits the override.
