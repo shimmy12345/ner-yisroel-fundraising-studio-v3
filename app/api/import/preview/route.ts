@@ -1,9 +1,10 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { buildImportPreview, type ColumnMapping, type ImportRow } from "../../../../lib/import/recognition";
-import { buildJlPreview, isJlSolutionsExport } from "../../../../lib/import/jl-solutions";
+import { buildJlPreview } from "../../../../lib/import/jl-solutions";
 import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, type ExistingJlDonor, type JlCodeOwner } from "../../../../lib/import/jl-match";
-import { buildJlDonationPreview, isJlDonationExport, paymentActivitiesForAssignment } from "../../../../lib/import/jl-donations";
+import { buildJlDonationPreview, paymentActivitiesForAssignment } from "../../../../lib/import/jl-donations";
+import { classifyJlImportType, countStrongDonationIndicators } from "../../../../lib/import/jl-export-type";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../../lib/import/jl-donation-match";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
@@ -13,7 +14,7 @@ import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../..
 import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
 import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
 
-type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid" };
+type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation" };
 
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -24,7 +25,17 @@ export async function POST(request: Request) {
   const fileHash = body.fileHash ?? "";
   if (!rows.length || rows.length > 25000 || !/^[a-f0-9]{64}$/.test(fileHash)) return Response.json({ error: "The preview could not be validated" }, { status: 422 });
   const columns = Object.keys(rows[0] ?? {});
-  if (isJlDonationExport(columns)) {
+  const importType = body.forceType ?? classifyJlImportType(columns, rows);
+  if (importType === "ambiguous") {
+    return Response.json({
+      profile: "ambiguous",
+      ambiguous: {
+        donationIndicatorCount: countStrongDonationIndicators(columns, rows),
+        message: "This file has some donation-shaped columns but is not clearly one type. Choose whether this is a Household export or a Donation export before continuing.",
+      },
+    });
+  }
+  if (importType === "donation") {
     const donationPreview = await buildJlDonationPreview(rows);
     const paymentActivities = paymentActivitiesForAssignment(donationPreview.activities, columns);
     const paymentFingerprints = new Set(paymentActivities.map((activity) => activity.fingerprint));
@@ -68,7 +79,19 @@ export async function POST(request: Request) {
       proposedUpdates: match.proposedUpdates.length,
       alreadyImported: match.alreadyImported + paymentAssignments.filter((candidate) => candidate.alreadyApplied).length,
       conflicts: match.unknownHousehold + match.needsReview + paymentAssignments.filter((candidate) => !candidate.alreadyApplied).length,
-      reviewRows: match.reviewActivities.map((activity) => ({ row: activity.rowNumber, reason: activity.reviewReason ?? "Row requires review" })),
+      reviewRows: match.reviewActivities.map((activity) => ({
+        row: activity.rowNumber,
+        fingerprint: activity.fingerprint,
+        reason: activity.reviewReason ?? "Row requires review",
+        donor: activity.sourceName || null,
+        jlCode: activity.externalHouseholdId || null,
+        campaign: activity.sourceCampaign || null,
+        date: activity.activityDate,
+        amountCents: activity.committedCents,
+        duplicateGroupKey: activity.duplicateGroupKey,
+        duplicateGroupSize: activity.duplicateGroupSize,
+        resolvable: activity.duplicateStatus === "possible_duplicate",
+      })),
       rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.nonfinancial,
       rangeStart: isoDate(range.start),
       rangeEnd: isoDate(range.end),
@@ -76,7 +99,7 @@ export async function POST(request: Request) {
       pendingGiftMatches: pendingMatches,
     } });
   }
-  const jlDetected = isJlSolutionsExport(columns);
+  const jlDetected = importType === "household";
   const preview = jlDetected ? buildJlPreview(rows, fileHash) : buildImportPreview(rows, body.mapping ?? {}, fileHash);
   if (!jlDetected) return Response.json({ profile: "general", preview });
 

@@ -21,20 +21,30 @@ async function run() {
   const windowsText = decodeCsv(Uint8Array.from([0x44,0x65,0x73,0x63,0x0a,0x93,0x47,0x69,0x66,0x74,0x94]).buffer);
   assert.equal(windowsText, "Desc\n“Gift”");
 
+  // Two identical rows with no stable transaction ID can no longer be
+  // proven duplicate from this export alone, so both become reviewable
+  // "possible duplicate" rows instead of one being silently dropped.
   const preview = await buildJlDonationPreview([base, { ...base }, { ...base, Code: "JL-901", Paid: "0", "Balance Due": "100" }], new Date("2026-07-31"));
-  assert.equal(preview.duplicateRows.length, 1);
-  assert.equal(preview.counts.completed_gift, 1);
+  assert.equal(preview.duplicateRows.length, 0, "content repetition without a stable ID is never a hard-rejected duplicate");
+  assert.equal(preview.counts.completed_gift, 0, "both repeated rows are held for review rather than one being auto-kept");
+  assert.equal(preview.counts.needs_review, 2);
   assert.equal(preview.counts.open_pledge, 1);
+  assert.equal(preview.activities[0].duplicateStatus, "possible_duplicate");
+  assert.equal(preview.activities[0].duplicateGroupSize, 2);
+  assert.equal(preview.activities[0].underlyingCategory, "completed_gift", "the true category is preserved for a later import-anyway decision");
+  assert.notEqual(preview.activities[0].fingerprint, preview.activities[1].fingerprint, "each occurrence must have its own fingerprint");
 
+  const singleRowPreview = await buildJlDonationPreview([base], new Date("2026-07-31"));
   const changedPayment = await buildJlDonationPreview([{ ...base, Paid: "40", "Balance Due": "60", "Total Due": "999" }], new Date("2026-07-31"));
-  assert.equal(changedPayment.activities[0].fingerprint, preview.activities[0].fingerprint, "payment/balance and invoice total must not change the stable activity fingerprint");
+  assert.equal(changedPayment.activities[0].fingerprint, singleRowPreview.activities[0].fingerprint, "payment/balance and invoice total must not change the stable activity fingerprint");
   const matched = matchJlDonationActivities(changedPayment, [{ id: "imported-code-jl-900", external_id: "JL-900" }], [{ source_fingerprint: changedPayment.activities[0].fingerprint, paid_cents: 0, balance_cents: 10000, category: "open_pledge", source_snapshot: "{}" }]);
   assert.equal(matched.proposedUpdates.length, 1);
   assert.equal(matched.newActivities.length, 0);
   const unknown = matchJlDonationActivities(preview, [], []);
-  assert.equal(unknown.unknownHousehold, 2);
+  assert.equal(unknown.unknownHousehold, 1, "the two possible-duplicate rows route to review before household matching, leaving only the unique row");
+  assert.equal(unknown.needsReview, 2);
 
-  const snapshot = calculateGivingSnapshot([preview.activities[0], changedPayment.activities[0]], new Date("2026-07-31"));
+  const snapshot = calculateGivingSnapshot([singleRowPreview.activities[0], changedPayment.activities[0]], new Date("2026-07-31"));
   assert.equal(snapshot.lifetimePaidCents, 14000);
   assert.equal(snapshot.outstandingCents, 6000);
   assert.equal(snapshot.typicalPaidCents, 7000);

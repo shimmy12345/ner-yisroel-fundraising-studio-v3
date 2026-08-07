@@ -1,11 +1,13 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { buildImportPreview, FIELD_LABELS, type ColumnMapping, type ImportField, type ImportRow } from "../../../lib/import/recognition";
-import { buildJlPreview, isJlSolutionsExport } from "../../../lib/import/jl-solutions";
+import { buildJlPreview } from "../../../lib/import/jl-solutions";
 import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, sourceSnapshot, type ExistingJlDonor, type JlCodeOwner } from "../../../lib/import/jl-match";
 import { logger } from "../../../lib/logger";
-import { buildJlDonationPreview, isJlDonationExport, paymentActivitiesForAssignment } from "../../../lib/import/jl-donations";
+import { buildJlDonationPreview, paymentActivitiesForAssignment } from "../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
+import { classifyJlImportType } from "../../../lib/import/jl-export-type";
+import { resolvePossibleDuplicateDecisions, type ReviewDecision } from "../../../lib/import/jl-donation-review";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
@@ -30,6 +32,8 @@ type ImportRequest = {
   forceReprocess?: boolean;
   forceConfirmation?: string;
   pendingGiftDecisions?: Array<{ fingerprint: string; action: "merge" | "keep_separate"; pendingGiftId?: string | null }>;
+  forceType?: "household" | "donation";
+  reviewDecisions?: ReviewDecision[];
 };
 
 type ManualDonorRow = ManualDonorMatchRow & {
@@ -111,6 +115,11 @@ export async function POST(request: Request) {
     if (!valid || pendingDecisionFingerprints.has(decision.fingerprint)) return true;
     pendingDecisionFingerprints.add(decision.fingerprint); return false;
   }))) return Response.json({ error: "The pending gift decisions could not be validated" }, { status: 422 });
+  const reviewDecisions = body.reviewDecisions ?? [];
+  if (!Array.isArray(reviewDecisions) || reviewDecisions.some((decision) => {
+    return !(/^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["import_anyway", "skip", "review_later"].includes(decision?.action)
+      && (decision.groupKey === undefined || decision.groupKey === null || /^[a-f0-9]{64}$/.test(decision.groupKey)));
+  })) return Response.json({ error: "The review decisions could not be validated" }, { status: 422 });
   const mergeDecisionCodes = new Set<string>();
   if (body.mergeDecisions !== undefined && (!Array.isArray(body.mergeDecisions) || body.mergeDecisions.some((decision) => {
     const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
@@ -162,11 +171,22 @@ export async function POST(request: Request) {
     }
   }
 
-  if (isJlDonationExport(Object.keys(rows[0] ?? {}))) {
+  const importType = body.forceType ?? classifyJlImportType(Object.keys(rows[0] ?? {}), rows);
+  if (importType === "ambiguous") {
+    return Response.json({ error: "This file has some donation-shaped columns but is not clearly one type. Choose whether this is a Household export or a Donation export before importing.", ambiguousType: true }, { status: 422 });
+  }
+
+  if (importType === "donation") {
     const startedAt = Date.now();
     try {
     const columns = Object.keys(rows[0] ?? {});
     const donationPreview = await buildJlDonationPreview(rows);
+    const reviewResolution = resolvePossibleDuplicateDecisions(donationPreview.activities, reviewDecisions);
+    if (reviewResolution.unresolvedFingerprints.length) {
+      return Response.json({ error: "Review every possible-duplicate row before importing.", unresolvedReviewFingerprints: reviewResolution.unresolvedFingerprints }, { status: 422 });
+    }
+    const approvedByFingerprint = new Map(reviewResolution.approvedActivities.map((activity) => [activity.fingerprint, activity]));
+    donationPreview.activities = donationPreview.activities.map((activity) => approvedByFingerprint.get(activity.fingerprint) ?? activity);
     const paymentActivities = paymentActivitiesForAssignment(donationPreview.activities, columns);
     const paymentFingerprints = new Set(paymentActivities.map((activity) => activity.fingerprint));
     const standardPreview = { ...donationPreview, activities: donationPreview.activities.filter((activity) => !paymentFingerprints.has(activity.fingerprint)) };
@@ -351,7 +371,7 @@ export async function POST(request: Request) {
     }
   }
 
-  const jlDetected = isJlSolutionsExport(Object.keys(rows[0] ?? {}));
+  const jlDetected = importType === "household";
   const preview = jlDetected ? buildJlPreview(rows, fileHash) : buildImportPreview(rows, mapping, fileHash);
   if (!preview.donors.length) return Response.json({ error: "No valid donors were found" }, { status: 422 });
 
