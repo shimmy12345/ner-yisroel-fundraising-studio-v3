@@ -4,10 +4,11 @@ import { buildImportPreview, FIELD_LABELS, type ColumnMapping, type ImportField,
 import { buildJlPreview } from "../../../lib/import/jl-solutions";
 import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, sourceSnapshot, type ExistingJlDonor, type JlCodeOwner } from "../../../lib/import/jl-match";
 import { logger } from "../../../lib/logger";
-import { buildJlDonationPreview, paymentActivitiesForAssignment } from "../../../lib/import/jl-donations";
+import { buildJlDonationPreview, paymentActivitiesForAssignment, stableTransactionId } from "../../../lib/import/jl-donations";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../lib/import/jl-donation-match";
 import { classifyJlImportType } from "../../../lib/import/jl-export-type";
 import { resolvePossibleDuplicateDecisions, type ReviewDecision } from "../../../lib/import/jl-donation-review";
+import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, resolveCrossImportDecisions, toExistingDonationRecord, type CrossImportDecision, type RawExistingDonationRow } from "../../../lib/import/jl-donation-cross-import";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
@@ -34,6 +35,7 @@ type ImportRequest = {
   pendingGiftDecisions?: Array<{ fingerprint: string; action: "merge" | "keep_separate"; pendingGiftId?: string | null }>;
   forceType?: "household" | "donation";
   reviewDecisions?: ReviewDecision[];
+  crossImportDecisions?: CrossImportDecision[];
 };
 
 type ManualDonorRow = ManualDonorMatchRow & {
@@ -120,6 +122,10 @@ export async function POST(request: Request) {
     return !(/^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["import_anyway", "skip", "review_later"].includes(decision?.action)
       && (decision.groupKey === undefined || decision.groupKey === null || /^[a-f0-9]{64}$/.test(decision.groupKey)));
   })) return Response.json({ error: "The review decisions could not be validated" }, { status: 422 });
+  const crossImportDecisions = body.crossImportDecisions ?? [];
+  if (!Array.isArray(crossImportDecisions) || crossImportDecisions.some((decision) => {
+    return !(/^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["import_anyway", "skip", "review_later"].includes(decision?.action));
+  })) return Response.json({ error: "The cross-import duplicate decisions could not be validated" }, { status: 422 });
   const mergeDecisionCodes = new Set<string>();
   if (body.mergeDecisions !== undefined && (!Array.isArray(body.mergeDecisions) || body.mergeDecisions.some((decision) => {
     const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
@@ -193,8 +199,35 @@ export async function POST(request: Request) {
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
     const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
     const households = codes.length ? await env.DB.prepare(`SELECT id, external_id, display_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(codes)).all<MatchedHousehold & { display_name: string }>() : { results: [] as Array<MatchedHousehold & { display_name: string }> };
-    const prior = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
+    const prior = fingerprints.length ? await env.DB.prepare(`SELECT id, donor_id, activity_date, committed_cents, source_campaign, source_fingerprint, paid_cents, balance_cents, category, source_snapshot, created_at FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(fingerprints)).all<ExistingGivingActivity & RawExistingDonationRow>() : { results: [] as Array<ExistingGivingActivity & RawExistingDonationRow> };
     const match = matchJlDonationActivities(standardPreview, households.results, prior.results);
+    // Cross-import duplicate protection (lib/import/jl-donation-cross-import.ts):
+    // a stable transaction ID already used in a prior import is a confirmed
+    // duplicate; a matching content fingerprint with unchanged payment
+    // fields (what would otherwise silently count as "already imported") is
+    // a possible duplicate. Both default to Skip unless the user explicitly
+    // chooses "Import anyway" for that row.
+    const existingByFingerprintRecord = new Map(prior.results.map((record) => [record.source_fingerprint, toExistingDonationRecord(record)]));
+    const proposedUpdateFingerprints = new Set(match.proposedUpdates.map((activity) => activity.fingerprint));
+    const unchangedExistingActivities = match.matched.filter((activity) => existingByFingerprintRecord.has(activity.fingerprint) && !proposedUpdateFingerprints.has(activity.fingerprint));
+    const hasStableIds = donationPreview.activities.some((activity) => stableTransactionId(activity.sourceValues) !== null);
+    const broadExisting = hasStableIds
+      ? await env.DB.prepare(`SELECT id, donor_id, activity_date, committed_cents, source_campaign, source_snapshot, created_at FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions'`).bind(userId).all<RawExistingDonationRow>()
+      : { results: [] as RawExistingDonationRow[] };
+    const stableIdMatches = findStableIdCrossImportMatches(match.newActivities, broadExisting.results.map(toExistingDonationRecord));
+    const crossImportMatches = [...stableIdMatches, ...findFingerprintCrossImportMatches(unchangedExistingActivities, existingByFingerprintRecord, new Set(stableIdMatches.map((item) => item.fingerprint)))];
+    const crossImportActivityByFingerprint = new Map([...match.newActivities, ...unchangedExistingActivities].map((activity) => [activity.fingerprint, activity]));
+    const crossImportResolution = await resolveCrossImportDecisions(crossImportActivityByFingerprint, crossImportMatches, crossImportDecisions, crypto.randomUUID());
+    const crossImportExcludeSet = new Set(crossImportResolution.excludeFingerprints);
+    // A confirmed duplicate approved via "Import anyway" keeps its original
+    // fingerprint; a possible duplicate approved that way gets a new
+    // override fingerprint. Key the audit note by whichever fingerprint the
+    // inserted row will actually carry.
+    const crossImportAuditByFingerprint = new Map<string, string>();
+    for (const outcome of crossImportResolution.outcomes) {
+      if (outcome.matchType === "confirmed_duplicate" && outcome.auditPreviousJson) crossImportAuditByFingerprint.set(outcome.fingerprint, outcome.auditPreviousJson);
+    }
+    for (const addition of crossImportResolution.approvedAdditions) crossImportAuditByFingerprint.set(addition.activity.fingerprint, addition.auditPreviousJson);
     const donorIds = households.results.map((household) => household.id);
     const openPledges = donorIds.length
       ? await env.DB.prepare(OPEN_PLEDGES_FOR_DONORS_SQL).bind(userId, JSON.stringify(donorIds)).all<OpenPledge>()
@@ -215,7 +248,11 @@ export async function POST(request: Request) {
       return { ...activity, fingerprint: gift.fingerprint, donorId: candidate.donorId!, committedCents: gift.amountCents, paidCents: gift.amountCents, balanceCents: 0, category: "completed_gift" as const, reviewReason: null, sourceValues: { ...activity.sourceValues, fundraisingOsPaymentFingerprint: gift.sourceFingerprint, fundraisingOsAllocation: gift.kind } };
     });
     const matchedActivities = [...match.matched, ...manualNewActivities];
-    const newActivities = [...match.newActivities, ...manualNewActivities];
+    const newActivities = [
+      ...match.newActivities.filter((activity) => !crossImportExcludeSet.has(activity.fingerprint)),
+      ...manualNewActivities,
+      ...crossImportResolution.approvedAdditions.map((entry) => entry.activity),
+    ];
     const proposedUpdates = match.proposedUpdates;
     const alreadyImported = match.alreadyImported + assignmentPlan.alreadyApplied.length;
     const pendingKey = (activity: typeof newActivities[number]) => activity.sourceValues.fundraisingOsPaymentFingerprint || activity.fingerprint;
@@ -306,7 +343,7 @@ export async function POST(request: Request) {
     const matchedDonorIds = new Set([...matchedActivities.map((activity) => activity.donorId), ...assignedPledgeDonorIds]);
     const unmatchedJlCodes = match.unknownHousehold + paymentCandidates.filter((candidate) => !candidate.donorId).length;
     const results = { validRows: match.matched.length + assignmentPlan.assignments.length, householdsMatched: matchedDonorIds.size, newHouseholds: 0, giftsImported: newActivities.length, giftsUpdated: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + alreadyImported, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: reviewRows.length, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length, pendingGiftsConfirmed: claimedPendingIds.size }, paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, overpaymentRemainders: assignmentPlan.newGifts.filter((gift) => gift.kind === "overpayment_remainder").length, rememberedSkipped: assignmentPlan.alreadyApplied.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length + assignmentPlan.assignments.length, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: reviewRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, reviewRows.length && `${reviewRows.length} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: reviewRows.length, nonfinancialExcluded: match.nonfinancial, duplicateSourceRows: donationPreview.duplicateRows.length, pendingGiftsConfirmed: claimedPendingIds.size, crossImportDuplicatesSkipped: crossImportResolution.outcomes.filter((outcome) => outcome.action === "skipped").length, crossImportDuplicatesImportedAnyway: crossImportResolution.outcomes.filter((outcome) => outcome.action === "imported").length }, crossImportRows: crossImportResolution.outcomes.map((outcome) => ({ fingerprint: outcome.fingerprint, matchType: outcome.matchType, action: outcome.action, existingActivityId: outcome.existing.activityId, existingDonorId: outcome.existing.donorId, existingActivityDate: outcome.existing.activityDate, existingAmountCents: outcome.existing.committedCents, existingCampaign: outcome.existing.sourceCampaign, existingImportedAt: outcome.existing.importedAt })), paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, overpaymentRemainders: assignmentPlan.newGifts.filter((gift) => gift.kind === "overpayment_remainder").length, rememberedSkipped: assignmentPlan.alreadyApplied.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length + assignmentPlan.assignments.length, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: reviewRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, reviewRows.length && `${reviewRows.length} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
     const changedActivities = [...newActivities, ...proposedUpdates];
     const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, decisionFingerprint: pendingKey(activity), activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const activityIdByDecisionFingerprint = new Map(activityRows.map((row) => [row.decisionFingerprint, row.id]));
@@ -321,7 +358,7 @@ export async function POST(request: Request) {
       ];
     });
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
-    const changeRows = [...newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: null, now })), ...proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now })), ...assignmentPlan.pledgeUpdates.map((update) => ({ importId, fingerprint: update.source_fingerprint, changeType: "update", previousJson: JSON.stringify({ source_fingerprint: update.source_fingerprint, paid_cents: update.paid_cents, balance_cents: update.balance_cents, category: update.category, source_snapshot: update.source_snapshot }), now }))];
+    const changeRows = [...newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: crossImportAuditByFingerprint.get(activity.fingerprint) ?? null, now })), ...proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now })), ...assignmentPlan.pledgeUpdates.map((update) => ({ importId, fingerprint: update.source_fingerprint, changeType: "update", previousJson: JSON.stringify({ source_fingerprint: update.source_fingerprint, paid_cents: update.paid_cents, balance_cents: update.balance_cents, category: update.category, source_snapshot: update.source_snapshot }), now }))];
     const activityStatements = chunkJsonRows(activityRows).map((chunk) =>
       env.DB.prepare(`INSERT INTO giving_activities (id, owner_user_id, donor_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, record_origin, source_snapshot, created_at, updated_at)
         SELECT json_extract(value,'$.id'), json_extract(value,'$.ownerUserId'), json_extract(value,'$.donorId'), 'JL Solutions', json_extract(value,'$.externalHouseholdId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.activityDate'), json_extract(value,'$.committedCents'), json_extract(value,'$.paidCents'), json_extract(value,'$.balanceCents'), json_extract(value,'$.itemType'), json_extract(value,'$.description'), json_extract(value,'$.sourceCampaign'), json_extract(value,'$.category'), 'live', json_extract(value,'$.sourceSnapshot'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?) WHERE true

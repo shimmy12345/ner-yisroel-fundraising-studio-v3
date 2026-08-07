@@ -3,9 +3,10 @@ import { getChatGPTUser } from "../../../chatgpt-auth";
 import { buildImportPreview, type ColumnMapping, type ImportRow } from "../../../../lib/import/recognition";
 import { buildJlPreview } from "../../../../lib/import/jl-solutions";
 import { findJlCodeCollisions, findUnresolvableJlCodeOwners, matchJlDonors, type ExistingJlDonor, type JlCodeOwner } from "../../../../lib/import/jl-match";
-import { buildJlDonationPreview, paymentActivitiesForAssignment } from "../../../../lib/import/jl-donations";
+import { buildJlDonationPreview, paymentActivitiesForAssignment, stableTransactionId } from "../../../../lib/import/jl-donations";
 import { classifyJlImportType, countStrongDonationIndicators } from "../../../../lib/import/jl-export-type";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../../lib/import/jl-donation-match";
+import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, toExistingDonationRecord, type RawExistingDonationRow } from "../../../../lib/import/jl-donation-cross-import";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
@@ -43,8 +44,24 @@ export async function POST(request: Request) {
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
     const fingerprints = donationPreview.activities.map((activity) => activity.fingerprint);
     const households = codes.length ? await env.DB.prepare(`SELECT id, external_id, display_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND external_source = 'JL Solutions' AND lower(external_id) IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(codes)).all<MatchedHousehold & { display_name: string }>() : { results: [] as Array<MatchedHousehold & { display_name: string }> };
-    const existing = fingerprints.length ? await env.DB.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category, source_snapshot FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(fingerprints)).all<ExistingGivingActivity>() : { results: [] as ExistingGivingActivity[] };
+    const existing = fingerprints.length ? await env.DB.prepare(`SELECT id, donor_id, activity_date, committed_cents, source_campaign, source_fingerprint, paid_cents, balance_cents, category, source_snapshot, created_at FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions' AND source_fingerprint IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(fingerprints)).all<ExistingGivingActivity & RawExistingDonationRow>() : { results: [] as Array<ExistingGivingActivity & RawExistingDonationRow> };
     const match = matchJlDonationActivities(standardPreview, households.results, existing.results);
+    // Cross-import duplicate protection: a stable transaction ID already
+    // seen on a prior import is a confirmed duplicate regardless of this
+    // file's own fingerprint; a matching content fingerprint with no
+    // changed payment fields (the same rows matchJlDonationActivities
+    // already treats as "already imported") is a possible duplicate worth
+    // surfacing. Neither query touches or mutates any financial record.
+    const existingByFingerprintRecord = new Map(existing.results.map((record) => [record.source_fingerprint, toExistingDonationRecord(record)]));
+    const proposedUpdateFingerprints = new Set(match.proposedUpdates.map((activity) => activity.fingerprint));
+    const unchangedExistingActivities = match.matched.filter((activity) => existingByFingerprintRecord.has(activity.fingerprint) && !proposedUpdateFingerprints.has(activity.fingerprint));
+    const hasStableIds = donationPreview.activities.some((activity) => stableTransactionId(activity.sourceValues) !== null);
+    const broadExisting = hasStableIds
+      ? await env.DB.prepare(`SELECT id, donor_id, activity_date, committed_cents, source_campaign, source_snapshot, created_at FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND external_source = 'JL Solutions'`).bind(profile.id).all<RawExistingDonationRow>()
+      : { results: [] as RawExistingDonationRow[] };
+    const stableIdMatches = findStableIdCrossImportMatches(match.newActivities, broadExisting.results.map(toExistingDonationRecord));
+    const crossImportMatches = [...stableIdMatches, ...findFingerprintCrossImportMatches(unchangedExistingActivities, existingByFingerprintRecord, new Set(stableIdMatches.map((item) => item.fingerprint)))];
+    const crossImportSourceByFingerprint = new Map([...match.newActivities, ...unchangedExistingActivities].map((activity) => [activity.fingerprint, activity]));
     const range = donationExportRange([...match.matched, ...paymentActivities]);
     const donorIds = households.results.map((household) => household.id);
     const openPledges = donorIds.length
@@ -97,6 +114,24 @@ export async function POST(request: Request) {
       rangeEnd: isoDate(range.end),
       paymentAssignments: publicPaymentAssignments,
       pendingGiftMatches: pendingMatches,
+      crossImportRows: crossImportMatches.map((item) => {
+        const activity = crossImportSourceByFingerprint.get(item.fingerprint);
+        return {
+          fingerprint: item.fingerprint,
+          matchType: item.matchType,
+          reason: item.reason,
+          row: activity?.rowNumber ?? null,
+          donor: activity?.sourceName || null,
+          jlCode: activity?.externalHouseholdId || null,
+          campaign: activity?.sourceCampaign || null,
+          date: activity?.activityDate ?? null,
+          amountCents: activity?.committedCents ?? null,
+          existingActivityDate: item.existing.activityDate,
+          existingAmountCents: item.existing.committedCents,
+          existingCampaign: item.existing.sourceCampaign,
+          existingImportedAt: item.existing.importedAt,
+        };
+      }),
     } });
   }
   const jlDetected = importType === "household";

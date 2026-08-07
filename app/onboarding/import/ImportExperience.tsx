@@ -56,7 +56,8 @@ type PendingGiftDecisionState = { action: "needs_decision" | "merge" | "keep_sep
 type ReviewRowItem = { row: number; fingerprint: string; reason: string; donor: string | null; jlCode: string | null; campaign: string | null; date: number | null; amountCents: number | null; duplicateGroupKey: string | null; duplicateGroupSize: number; resolvable: boolean };
 type ReviewDecisionAction = "needs_decision" | "import_anyway" | "skip" | "review_later";
 type ReviewDecisionState = { action: ReviewDecisionAction };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
+type CrossImportRow = { fingerprint: string; matchType: "confirmed_duplicate" | "possible_duplicate"; reason: string; row: number | null; donor: string | null; jlCode: string | null; campaign: string | null; date: number | null; amountCents: number | null; existingActivityDate: number | null; existingAmountCents: number | null; existingCampaign: string | null; existingImportedAt: number };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
 
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
@@ -144,6 +145,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [reviewMode, setReviewMode] = useState<ReviewMode>(initialReviewMode);
   const [existingDonorDecisions, setExistingDonorDecisions] = useState<Record<string, ExistingDecisionState>>({});
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, ReviewDecisionState>>({});
+  const [crossImportDecisions, setCrossImportDecisions] = useState<Record<string, ReviewDecisionState>>({});
   const [ambiguousType, setAmbiguousType] = useState<{ donationIndicatorCount: number; message: string } | null>(null);
   const [confirmedType, setConfirmedType] = useState<"household" | "donation" | undefined>(undefined);
   const [duplicateBlock, setDuplicateBlock] = useState<DuplicateImportBlock | null>(null);
@@ -190,6 +192,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setFieldDecisions({});
       setExistingDonorDecisions({});
       setReviewDecisions({});
+      setCrossImportDecisions({});
       setConfirmedType(undefined);
       setAmbiguousType(importType === "ambiguous" ? {
         donationIndicatorCount: countStrongDonationIndicators(table.columns, table.rows),
@@ -243,6 +246,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setPaymentDecisions(Object.fromEntries((payload.donation?.paymentAssignments ?? []).map((item) => [item.fingerprint, { action: item.action, pledgeId: item.pledgeId, overpaymentAction: null }])));
       setPendingGiftDecisions(Object.fromEntries((payload.donation?.pendingGiftMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingGiftId: null }])));
       setReviewDecisions(Object.fromEntries((payload.donation?.reviewRows ?? []).filter((item) => item.resolvable).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
+      setCrossImportDecisions(Object.fromEntries((payload.donation?.crossImportRows ?? []).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
       setConfirmedType(forceType);
       setStep("preview");
     } catch (previewError) {
@@ -258,7 +262,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, forceType: confirmedType, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, forceType: confirmedType, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
       });
       const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string };
       if (!response.ok) {
@@ -318,6 +322,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setFieldDecisions({});
     setExistingDonorDecisions({});
     setReviewDecisions({});
+    setCrossImportDecisions({});
     setAmbiguousType(null);
     setDuplicateBlock(null);
     setForceConfirmation("");
@@ -515,7 +520,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                         <span>{item.donor ?? "Unknown donor"}{item.jlCode ? ` · JL ${item.jlCode}` : ""}{item.campaign ? ` · ${item.campaign}` : ""}</span>
                         <span>{epochDateLabel(item.date)} · {centsLabel(item.amountCents)}</span>
                         <span className="review-queue-reason">{item.reason}</span>
-                        {item.duplicateGroupSize > 1 && <span className="review-queue-match">Appears {item.duplicateGroupSize} times in this file with a matching donor, date, campaign, and amount.</span>}
+                        {item.duplicateGroupSize > 1 && <span className="review-queue-match"><em className="review-queue-badge">Duplicate within this file</em> Appears {item.duplicateGroupSize} times in this file with a matching donor, date, campaign, and amount.</span>}
                       </div>
                       {item.resolvable ? <div className="review-queue-actions">
                         <select aria-label={`Review decision for row ${item.row}`} value={decision.action} onChange={(event) => setReviewDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value as ReviewDecisionAction } }))}>
@@ -530,6 +535,33 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                   );
                 })}</ol>
                 <button type="button" onClick={() => downloadRows(donationPreview.reviewRows, fileHash.slice(0, 12), "review")}>Download review report CSV</button>
+              </section>}
+              {donationPreview.crossImportRows.length > 0 && <section className="import-failure-section review-queue-section cross-import-section" id="cross-import-queue" aria-labelledby="cross-import-queue-title">
+                <h2 id="cross-import-queue-title">Already exists in Fundraising OS</h2>
+                <p>These rows are not repeated within this file — each one matches a gift already imported in a previous upload. By default, none of them will be imported again.</p>
+                <ol className="review-queue-list">{donationPreview.crossImportRows.map((item) => {
+                  const decision = crossImportDecisions[item.fingerprint] ?? { action: "needs_decision" as const };
+                  return (
+                    <li key={item.fingerprint} className="review-queue-row">
+                      <div className="review-queue-row-details">
+                        <em className="review-queue-badge cross-import-badge">{item.matchType === "confirmed_duplicate" ? "Confirmed duplicate" : "Possible duplicate"}</em>
+                        <strong>{item.row ? `Row ${item.row}` : "This row"}</strong>
+                        <span>{item.donor ?? "Unknown donor"}{item.jlCode ? ` · JL ${item.jlCode}` : ""}{item.campaign ? ` · ${item.campaign}` : ""}</span>
+                        <span>{epochDateLabel(item.date)} · {centsLabel(item.amountCents)}</span>
+                        <span className="review-queue-reason">{item.reason}</span>
+                        <span className="review-queue-match">Existing gift: {epochDateLabel(item.existingActivityDate)} · {centsLabel(item.existingAmountCents)}{item.existingCampaign ? ` · ${item.existingCampaign}` : ""} · imported {dateLabel(new Date(item.existingImportedAt * 1000).toISOString())}</span>
+                      </div>
+                      <div className="review-queue-actions">
+                        <select aria-label="Cross-import duplicate decision" value={decision.action} onChange={(event) => setCrossImportDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value as ReviewDecisionAction } }))}>
+                          <option value="needs_decision">Skip (default)</option>
+                          <option value="import_anyway">Import anyway</option>
+                          <option value="skip">Skip</option>
+                          <option value="review_later">Review later</option>
+                        </select>
+                      </div>
+                    </li>
+                  );
+                })}</ol>
               </section>}
               {donationPreview.paymentAssignments.length > 0 && <section className="payment-assignment-section" aria-labelledby="payment-assignment-title">
                 <div><p className="eyebrow">MANUAL PAYMENT ASSIGNMENT</p><h2 id="payment-assignment-title">Decide how each payment should be recorded.</h2><p>Nothing is assigned automatically. Review every proposed change before importing.</p></div>
