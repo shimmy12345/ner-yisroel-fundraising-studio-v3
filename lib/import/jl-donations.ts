@@ -49,7 +49,7 @@ export function stableTransactionId(row: ImportRow): string | null {
 
 export type DonationPreview = {
   activities: GivingActivity[];
-  duplicateRows: Array<{ row: number; fingerprint: string }>;
+  duplicateRows: Array<{ row: number; fingerprint: string; donor: string; jlCode: string; campaign: string; date: number | null; amountCents: number | null; originalRow: number | null }>;
   counts: Record<GivingCategory, number> & { total: number; zeroDollar: number; suspiciousDates: number };
 };
 
@@ -165,13 +165,17 @@ export async function buildJlDonationPreview(rows: ImportRow[], now = new Date()
 
   // Stable-ID duplicates: a repeated ID is proof of the same transaction,
   // so this preserves the original hard-rejection behavior exactly.
-  const seenStableIds = new Set<string>();
+  const seenStableIds = new Map<string, number>();
   const withoutStableId: typeof prepared = [];
   for (const item of prepared) {
     if (item.stableId === null) { withoutStableId.push(item); continue; }
     const idKey = item.stableId.trim().toLowerCase();
-    if (seenStableIds.has(idKey)) { duplicateRows.push({ row: item.rowNumber, fingerprint: item.groupFingerprint }); continue; }
-    seenStableIds.add(idKey);
+    const originalRow = seenStableIds.get(idKey);
+    if (originalRow !== undefined) {
+      duplicateRows.push({ row: item.rowNumber, fingerprint: item.groupFingerprint, donor: item.classified.sourceName, jlCode: item.classified.externalHouseholdId, campaign: item.classified.sourceCampaign, date: item.classified.activityDate, amountCents: item.classified.committedCents, originalRow });
+      continue;
+    }
+    seenStableIds.set(idKey, item.rowNumber);
     activities.push({ rowNumber: item.rowNumber, fingerprint: item.groupFingerprint, ...item.classified, underlyingCategory: item.classified.category, duplicateStatus: null, duplicateGroupKey: null, duplicateGroupSize: 1, sourceValues: item.sourceValues });
   }
 

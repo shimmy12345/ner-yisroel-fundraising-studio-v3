@@ -57,7 +57,12 @@ type ReviewRowItem = { row: number; fingerprint: string; reason: string; donor: 
 type ReviewDecisionAction = "needs_decision" | "import_anyway" | "skip" | "review_later";
 type ReviewDecisionState = { action: ReviewDecisionAction };
 type CrossImportRow = { fingerprint: string; matchType: "confirmed_duplicate" | "possible_duplicate"; reason: string; row: number | null; donor: string | null; jlCode: string | null; campaign: string | null; date: number | null; amountCents: number | null; existingActivityDate: number | null; existingAmountCents: number | null; existingCampaign: string | null; existingImportedAt: number };
-type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
+type RejectedRowCategory = "duplicate_transaction_id" | "unmatched_jl_code" | "nonfinancial_entry";
+type RejectedRowItem = { fingerprint: string; row: number; category: RejectedRowCategory; severity: "hard" | "reviewable"; reason: string; donor: string | null; jlCode: string | null; campaign: string | null; date: number | null; amountCents: number | null; existingMatchRow: number | null };
+type RejectionDecisionAction = "needs_decision" | "import_anyway" | "match_donor" | "skip" | "review_later";
+type RejectionDecisionState = { action: RejectionDecisionAction; correctedJlCode?: string };
+type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rejectedRowDetails: RejectedRowItem[]; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
+const REJECTED_ROW_CATEGORY_LABELS: Record<RejectedRowCategory, string> = { duplicate_transaction_id: "Duplicate transaction ID", unmatched_jl_code: "Unmatched JL Code", nonfinancial_entry: "Zero-dollar / nonfinancial entry" };
 
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
@@ -146,6 +151,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [existingDonorDecisions, setExistingDonorDecisions] = useState<Record<string, ExistingDecisionState>>({});
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, ReviewDecisionState>>({});
   const [crossImportDecisions, setCrossImportDecisions] = useState<Record<string, ReviewDecisionState>>({});
+  const [rejectionDecisions, setRejectionDecisions] = useState<Record<string, RejectionDecisionState>>({});
+  const [rejectedRowFilter, setRejectedRowFilter] = useState<RejectedRowCategory | "all">("all");
   const [ambiguousType, setAmbiguousType] = useState<{ donationIndicatorCount: number; message: string } | null>(null);
   const [confirmedType, setConfirmedType] = useState<"household" | "donation" | undefined>(undefined);
   const [duplicateBlock, setDuplicateBlock] = useState<DuplicateImportBlock | null>(null);
@@ -193,6 +200,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setExistingDonorDecisions({});
       setReviewDecisions({});
       setCrossImportDecisions({});
+      setRejectionDecisions({});
+      setRejectedRowFilter("all");
       setConfirmedType(undefined);
       setAmbiguousType(importType === "ambiguous" ? {
         donationIndicatorCount: countStrongDonationIndicators(table.columns, table.rows),
@@ -247,6 +256,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setPendingGiftDecisions(Object.fromEntries((payload.donation?.pendingGiftMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingGiftId: null }])));
       setReviewDecisions(Object.fromEntries((payload.donation?.reviewRows ?? []).filter((item) => item.resolvable).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
       setCrossImportDecisions(Object.fromEntries((payload.donation?.crossImportRows ?? []).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
+      setRejectionDecisions(Object.fromEntries((payload.donation?.rejectedRowDetails ?? []).filter((item) => item.severity === "reviewable").map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
+      setRejectedRowFilter("all");
       setConfirmedType(forceType);
       setStep("preview");
     } catch (previewError) {
@@ -262,7 +273,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       const response = await fetch("/api/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, forceType: confirmedType, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
+        body: JSON.stringify({ fileName, fileHash, rows, mapping, updateExisting, mode, reviewMode, forceType: confirmedType, paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), rejectionDecisions: Object.entries(rejectionDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedJlCode: decision.action === "match_donor" ? decision.correctedJlCode : undefined })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined }),
       });
       const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string };
       if (!response.ok) {
@@ -323,6 +334,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setExistingDonorDecisions({});
     setReviewDecisions({});
     setCrossImportDecisions({});
+    setRejectionDecisions({});
+    setRejectedRowFilter("all");
     setAmbiguousType(null);
     setDuplicateBlock(null);
     setForceConfirmation("");
@@ -382,6 +395,11 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   }).length;
   const resolvableReviewRows = donationPreview?.reviewRows.filter((item) => item.resolvable) ?? [];
   const unresolvedReviewRows = resolvableReviewRows.filter((item) => (reviewDecisions[item.fingerprint]?.action ?? "needs_decision") === "needs_decision").length;
+  const reviewableRejectedRows = donationPreview?.rejectedRowDetails.filter((item) => item.severity === "reviewable") ?? [];
+  const hardRejectedRows = donationPreview?.rejectedRowDetails.filter((item) => item.severity === "hard") ?? [];
+  const resolvedRejectedRows = reviewableRejectedRows.filter((item) => (rejectionDecisions[item.fingerprint]?.action ?? "needs_decision") !== "needs_decision").length;
+  const unresolvedRejectedRows = reviewableRejectedRows.length - resolvedRejectedRows;
+  const visibleRejectedRows = rejectedRowFilter === "all" ? (donationPreview?.rejectedRowDetails ?? []) : (donationPreview?.rejectedRowDetails ?? []).filter((item) => item.category === rejectedRowFilter);
   const unresolvedMerges = jlPreview?.mergeCandidates.filter((candidate) => !mergeDecisions[candidate.externalId] || mergeDecisions[candidate.externalId].action === "needs_decision").length ?? 0;
   const unresolvedExisting = jlPreview?.existingDonorReviews.filter((donor) => {
     if (mergeDecisions[donor.externalId]?.action === "review_later") return false;
@@ -505,7 +523,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             <p className="import-lede">This is a preview only. Nothing has been written to Fundraising OS.</p>
             {donationDetected && donationPreview ? <>
               <p className="jl-export-range">Detected export range: <strong>{donationPreview.rangeStart && donationPreview.rangeEnd ? `${dateLabel(donationPreview.rangeStart)} – ${dateLabel(donationPreview.rangeEnd)}` : "No valid dated rows"}</strong></p>
-              <div className="import-counts"><article><strong>{(donationPreview.newActivities + proposedNewPayments).toLocaleString()}</strong><span>new gifts</span></article><article><strong>{(donationPreview.proposedUpdates + proposedPledgeUpdates).toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article>{donationPreview.reviewRows.length > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("review-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows — click to review</span></button> : <article><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows</span></article>}<article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article></div>
+              <div className="import-counts"><article><strong>{(donationPreview.newActivities + proposedNewPayments).toLocaleString()}</strong><span>new gifts</span></article><article><strong>{(donationPreview.proposedUpdates + proposedPledgeUpdates).toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article>{donationPreview.reviewRows.length > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("review-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows — click to review</span></button> : <article><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows</span></article>}{donationPreview.rejectedRows > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("rejected-rows-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows — click to review</span></button> : <article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article>}</div>
               <div className="import-preview-grid"><section><h2>Ready</h2><p><span>✓</span>Matched by JL Code<b>{donationPreview.matchedRows}</b></p><p><span>✓</span>Open pledges<b>{donationPreview.openPledges}</b></p><p><span>✓</span>Already imported<b>{donationPreview.alreadyImported}</b></p></section><section><h2>Excluded or review</h2><p><span>•</span>Unknown JL Code<b>{donationPreview.unknownHousehold}</b></p><p><span>•</span>Needs review<b>{donationPreview.needsReview + unresolvedPayments}</b></p><p><span>•</span>Suspicious dates<b>{donationPreview.suspiciousDates}</b></p><p><span>•</span>Duplicate source rows<b>{donationPreview.duplicateSourceRows}</b></p><p><span>•</span>Zero-dollar/nonfinancial<b>{donationPreview.nonfinancial}</b></p></section></div>
               {donationPreview.reviewRows.length > 0 && <section className="import-failure-section review-queue-section" id="review-queue" aria-labelledby="review-queue-title">
                 <h2 id="review-queue-title">Rows requiring review</h2>
@@ -559,6 +577,68 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                           <option value="review_later">Review later</option>
                         </select>
                       </div>
+                    </li>
+                  );
+                })}</ol>
+              </section>}
+              {donationPreview.rejectedRowDetails.length > 0 && <section className="import-failure-section review-queue-section rejected-rows-section" id="rejected-rows-queue" aria-labelledby="rejected-rows-queue-title">
+                <h2 id="rejected-rows-queue-title">Rejected rows</h2>
+                <div className="rejected-rows-counts">
+                  <span>Hard rejected <b>{hardRejectedRows.length}</b></span>
+                  <span>Reviewable <b>{reviewableRejectedRows.length}</b></span>
+                  <span>Resolved <b>{resolvedRejectedRows}</b></span>
+                  <span>Unresolved <b>{unresolvedRejectedRows}</b></span>
+                </div>
+                <p>{unresolvedRejectedRows > 0 ? `${unresolvedRejectedRows} rejected row${unresolvedRejectedRows === 1 ? "" : "s"} still need a decision before you can import.` : "Every reviewable rejected row has a decision."}</p>
+                <label className="rejected-rows-filter"><span>Filter by reason</span>
+                  <select value={rejectedRowFilter} onChange={(event) => setRejectedRowFilter(event.target.value as RejectedRowCategory | "all")}>
+                    <option value="all">All reasons</option>
+                    {(Object.entries(REJECTED_ROW_CATEGORY_LABELS) as Array<[RejectedRowCategory, string]>).map(([category, label]) => <option key={category} value={category}>{label}</option>)}
+                  </select>
+                </label>
+                <div className="rejected-rows-bulk-actions">{(["unmatched_jl_code", "nonfinancial_entry"] as const).filter((category) => (rejectedRowFilter === "all" || rejectedRowFilter === category) && donationPreview.rejectedRowDetails.some((item) => item.category === category)).map((category) => {
+                  const rowsInCategory = donationPreview.rejectedRowDetails.filter((item) => item.category === category);
+                  return (
+                    <div key={category} className="rejected-rows-bulk-group">
+                      <span>{REJECTED_ROW_CATEGORY_LABELS[category]} ({rowsInCategory.length})</span>
+                      <button type="button" onClick={() => setRejectionDecisions((current) => ({ ...current, ...Object.fromEntries(rowsInCategory.map((row) => [row.fingerprint, { action: "skip" as const }])) }))}>Skip all</button>
+                      <button type="button" onClick={() => setRejectionDecisions((current) => ({ ...current, ...Object.fromEntries(rowsInCategory.map((row) => [row.fingerprint, { action: "review_later" as const }])) }))}>Review later, all</button>
+                      {category === "nonfinancial_entry" && <button type="button" onClick={() => setRejectionDecisions((current) => ({ ...current, ...Object.fromEntries(rowsInCategory.map((row) => [row.fingerprint, { action: "import_anyway" as const }])) }))}>Import anyway, all</button>}
+                    </div>
+                  );
+                })}</div>
+                <ol className="review-queue-list">{visibleRejectedRows.map((item) => {
+                  const decision = rejectionDecisions[item.fingerprint] ?? { action: "needs_decision" as const };
+                  return (
+                    <li key={item.fingerprint} className="review-queue-row">
+                      <div className="review-queue-row-details">
+                        <em className={item.severity === "hard" ? "review-queue-badge" : "review-queue-badge cross-import-badge"}>{item.severity === "hard" ? "Hard rejection" : "Reviewable"}</em>
+                        <strong>Row {item.row}</strong>
+                        <span>{item.donor ?? "Unknown donor"}{item.jlCode ? ` · JL ${item.jlCode}` : ""}{item.campaign ? ` · ${item.campaign}` : ""}</span>
+                        <span>{epochDateLabel(item.date)} · {centsLabel(item.amountCents)}</span>
+                        <span className="review-queue-reason">{item.reason}</span>
+                        {item.existingMatchRow !== null && <span className="review-queue-match">Matches row {item.existingMatchRow} earlier in this same file.</span>}
+                      </div>
+                      {item.severity === "hard" ? <p className="payment-review-note">This row cannot be imported until the underlying issue is corrected in the source file.</p> : item.category === "unmatched_jl_code" ? (
+                        <div className="review-queue-actions rejected-row-correction">
+                          <input type="text" placeholder="Correct JL Code" aria-label={`Corrected JL Code for row ${item.row}`} value={decision.correctedJlCode ?? ""} onChange={(event) => setRejectionDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value.trim() ? "match_donor" : "needs_decision", correctedJlCode: event.target.value } }))} />
+                          <select aria-label={`Rejected row decision for row ${item.row}`} value={decision.action} onChange={(event) => setRejectionDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value as RejectionDecisionAction, correctedJlCode: current[item.fingerprint]?.correctedJlCode } }))}>
+                            <option value="needs_decision" disabled>Choose an action</option>
+                            <option value="match_donor">Match donor with corrected code</option>
+                            <option value="skip">Skip</option>
+                            <option value="review_later">Review later</option>
+                          </select>
+                        </div>
+                      ) : (
+                        <div className="review-queue-actions">
+                          <select aria-label={`Rejected row decision for row ${item.row}`} value={decision.action} onChange={(event) => setRejectionDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value as RejectionDecisionAction } }))}>
+                            <option value="needs_decision" disabled>Choose an action</option>
+                            <option value="import_anyway">Import anyway</option>
+                            <option value="skip">Skip</option>
+                            <option value="review_later">Review later</option>
+                          </select>
+                        </div>
+                      )}
                     </li>
                   );
                 })}</ol>
@@ -639,7 +719,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             <div className="import-footer-actions">
               <button type="button" onClick={cancelImport}>Cancel import</button>
               <button type="button" onClick={() => setStep("recognition")}>Review column setup</button>
-              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedPendingGifts + unresolvedReviewRows + unresolvedMerges + unresolvedExisting + codeCollisions > 0}>{codeCollisions > 0 ? "Resolve duplicate JL Codes" : unresolvedExisting > 0 ? `Review ${unresolvedExisting} existing donor${unresolvedExisting === 1 ? "" : "s"}` : unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedPendingGifts > 0 ? `Review ${unresolvedPendingGifts} pending gift match${unresolvedPendingGifts === 1 ? "" : "es"}` : unresolvedReviewRows > 0 ? `Review ${unresolvedReviewRows} possible duplicate row${unresolvedReviewRows === 1 ? "" : "s"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
+              {!duplicateBlock && <button className="onboarding-primary" type="button" onClick={() => void importData()} disabled={unresolvedPayments + unresolvedPendingGifts + unresolvedReviewRows + unresolvedRejectedRows + unresolvedMerges + unresolvedExisting + codeCollisions > 0}>{codeCollisions > 0 ? "Resolve duplicate JL Codes" : unresolvedExisting > 0 ? `Review ${unresolvedExisting} existing donor${unresolvedExisting === 1 ? "" : "s"}` : unresolvedPayments > 0 ? `Review ${unresolvedPayments} payment${unresolvedPayments === 1 ? "" : "s"}` : unresolvedPendingGifts > 0 ? `Review ${unresolvedPendingGifts} pending gift match${unresolvedPendingGifts === 1 ? "" : "es"}` : unresolvedReviewRows > 0 ? `Review ${unresolvedReviewRows} possible duplicate row${unresolvedReviewRows === 1 ? "" : "s"}` : unresolvedRejectedRows > 0 ? `Review ${unresolvedRejectedRows} rejected row${unresolvedRejectedRows === 1 ? "" : "s"}` : unresolvedMerges > 0 ? `Review ${unresolvedMerges} possible match${unresolvedMerges === 1 ? "" : "es"}` : "Confirm and import"}</button>}
             </div>
           </section>
         )}

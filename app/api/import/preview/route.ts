@@ -7,6 +7,7 @@ import { buildJlDonationPreview, paymentActivitiesForAssignment, stableTransacti
 import { classifyJlImportType, countStrongDonationIndicators } from "../../../../lib/import/jl-export-type";
 import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHousehold } from "../../../../lib/import/jl-donation-match";
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, toExistingDonationRecord, type RawExistingDonationRow } from "../../../../lib/import/jl-donation-cross-import";
+import { buildRejectedRows } from "../../../../lib/import/jl-donation-rejection-review";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
@@ -110,6 +111,7 @@ export async function POST(request: Request) {
         resolvable: activity.duplicateStatus === "possible_duplicate",
       })),
       rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.nonfinancial,
+      rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities),
       rangeStart: isoDate(range.start),
       rangeEnd: isoDate(range.end),
       paymentAssignments: publicPaymentAssignments,
