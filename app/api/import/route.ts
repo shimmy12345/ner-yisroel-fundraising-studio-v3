@@ -10,6 +10,7 @@ import { classifyJlImportType } from "../../../lib/import/jl-export-type";
 import { resolvePossibleDuplicateDecisions, type ReviewDecision } from "../../../lib/import/jl-donation-review";
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, resolveCrossImportDecisions, toExistingDonationRecord, type CrossImportDecision, type RawExistingDonationRow } from "../../../lib/import/jl-donation-cross-import";
 import { buildRejectedRows, resolveRejectionDecisions, type RejectionDecision } from "../../../lib/import/jl-donation-rejection-review";
+import { findStillUnresolvedDateFingerprints, resolveDateDecisions, type DateDecision } from "../../../lib/import/jl-donation-date-review";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { isPreviewSessionUsable, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../lib/import/preview-session";
 import { resolveAttemptCommitAction, type ImportAttemptRow } from "../../../lib/import/import-attempt";
@@ -40,6 +41,7 @@ type ImportRequest = {
   reviewDecisions?: ReviewDecision[];
   crossImportDecisions?: CrossImportDecision[];
   rejectionDecisions?: RejectionDecision[];
+  dateDecisions?: DateDecision[];
   previewSessionId?: string;
   attemptId?: string;
 };
@@ -158,6 +160,12 @@ export async function POST(request: Request) {
       && (decision.correctedJlCode === undefined || typeof decision.correctedJlCode === "string" && Boolean(decision.correctedJlCode.trim()));
     return !valid;
   })) return Response.json({ error: "The rejected row decisions could not be validated" }, { status: 422 });
+  const dateDecisions = body.dateDecisions ?? [];
+  if (!Array.isArray(dateDecisions) || dateDecisions.some((decision) => {
+    const valid = /^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["correct_date", "accept_as_is", "skip", "review_later"].includes(decision?.action)
+      && (decision.correctedDate === undefined || typeof decision.correctedDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(decision.correctedDate.trim()));
+    return !valid;
+  })) return Response.json({ error: "The date review decisions could not be validated" }, { status: 422 });
   const mergeDecisionCodes = new Set<string>();
   if (body.mergeDecisions !== undefined && (!Array.isArray(body.mergeDecisions) || body.mergeDecisions.some((decision) => {
     const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";
@@ -253,14 +261,39 @@ export async function POST(request: Request) {
     const response = await (async (): Promise<Response> => {
     try {
     const columns = Object.keys(rows[0] ?? {});
-    const donationPreview = await buildJlDonationPreview(rows);
+    // Date review (lib/import/jl-donation-date-review.ts) is resolved
+    // first and rebuilds the preview from the corrected rows: a corrected
+    // or accepted date changes the row's own content, and every normal
+    // rule (duplicate grouping, household matching, amount checks) must
+    // apply to that corrected content, not the original invalid/suspicious
+    // one. The original source column is never touched -- corrections are
+    // carried as a separate annotation (see classifyJlDonation) so
+    // source_snapshot always keeps the original value too.
+    const initialDonationPreview = await buildJlDonationPreview(rows);
+    const dateResolution = resolveDateDecisions(rows, initialDonationPreview.activities, dateDecisions);
+    if (dateResolution.unresolvedFingerprints.length) {
+      return Response.json({ error: "Review every flagged date before importing.", unresolvedDateFingerprints: dateResolution.unresolvedFingerprints }, { status: 422 });
+    }
+    const donationPreview = dateResolution.appliedRowNumbers.size ? await buildJlDonationPreview(dateResolution.rows) : initialDonationPreview;
+    const stillUnresolvedDateFingerprints = findStillUnresolvedDateFingerprints(dateResolution.appliedRowNumbers, donationPreview.activities);
+    if (stillUnresolvedDateFingerprints.length) {
+      return Response.json({ error: "A corrected date still needs review before importing.", unresolvedDateFingerprints: stillUnresolvedDateFingerprints }, { status: 422 });
+    }
+    const dateEditByFingerprint = new Map(dateResolution.edits.map((edit) => [edit.row, edit]));
+    const dateAuditByFingerprint = new Map(donationPreview.activities.filter((activity) => dateEditByFingerprint.has(activity.rowNumber)).map((activity) => {
+      const edit = dateEditByFingerprint.get(activity.rowNumber)!;
+      return [activity.fingerprint, JSON.stringify({ correction: true, field: edit.field, originalValue: edit.originalValue, correctedValue: edit.correctedValue })];
+    }));
     const reviewResolution = resolvePossibleDuplicateDecisions(donationPreview.activities, reviewDecisions);
     if (reviewResolution.unresolvedFingerprints.length) {
       return Response.json({ error: "Review every possible-duplicate row before importing.", unresolvedReviewFingerprints: reviewResolution.unresolvedFingerprints }, { status: 422 });
     }
     const approvedByFingerprint = new Map(reviewResolution.approvedActivities.map((activity) => [activity.fingerprint, activity]));
     donationPreview.activities = donationPreview.activities.map((activity) => approvedByFingerprint.get(activity.fingerprint) ?? activity);
-    const paymentActivities = paymentActivitiesForAssignment(donationPreview.activities, columns);
+    // A row with an unresolved date problem stays in the general review
+    // queue instead of being swept into payment assignment, which has no
+    // way to correct a date -- one queue, one place to resolve it.
+    const paymentActivities = paymentActivitiesForAssignment(donationPreview.activities.filter((activity) => activity.dateIssue === null), columns);
     const paymentFingerprints = new Set(paymentActivities.map((activity) => activity.fingerprint));
     const standardPreview = { ...donationPreview, activities: donationPreview.activities.filter((activity) => !paymentFingerprints.has(activity.fingerprint)) };
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
@@ -450,7 +483,7 @@ export async function POST(request: Request) {
       ];
     });
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
-    const changeRows = [...newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: crossImportAuditByFingerprint.get(activity.fingerprint) ?? rejectionAuditByFingerprint.get(activity.fingerprint) ?? null, now })), ...proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now })), ...assignmentPlan.pledgeUpdates.map((update) => ({ importId, fingerprint: update.source_fingerprint, changeType: "update", previousJson: JSON.stringify({ source_fingerprint: update.source_fingerprint, paid_cents: update.paid_cents, balance_cents: update.balance_cents, category: update.category, source_snapshot: update.source_snapshot }), now }))];
+    const changeRows = [...newActivities.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "insert", previousJson: crossImportAuditByFingerprint.get(activity.fingerprint) ?? rejectionAuditByFingerprint.get(activity.fingerprint) ?? dateAuditByFingerprint.get(activity.fingerprint) ?? null, now })), ...proposedUpdates.map((activity) => ({ importId, fingerprint: activity.fingerprint, changeType: "update", previousJson: JSON.stringify(priorByFingerprint.get(activity.fingerprint)), now })), ...assignmentPlan.pledgeUpdates.map((update) => ({ importId, fingerprint: update.source_fingerprint, changeType: "update", previousJson: JSON.stringify({ source_fingerprint: update.source_fingerprint, paid_cents: update.paid_cents, balance_cents: update.balance_cents, category: update.category, source_snapshot: update.source_snapshot }), now }))];
     const activityStatements = chunkJsonRows(activityRows).map((chunk) =>
       env.DB.prepare(`INSERT INTO giving_activities (id, owner_user_id, donor_id, external_source, external_household_id, source_fingerprint, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, record_origin, source_snapshot, created_at, updated_at)
         SELECT json_extract(value,'$.id'), json_extract(value,'$.ownerUserId'), json_extract(value,'$.donorId'), 'JL Solutions', json_extract(value,'$.externalHouseholdId'), json_extract(value,'$.fingerprint'), json_extract(value,'$.activityDate'), json_extract(value,'$.committedCents'), json_extract(value,'$.paidCents'), json_extract(value,'$.balanceCents'), json_extract(value,'$.itemType'), json_extract(value,'$.description'), json_extract(value,'$.sourceCampaign'), json_extract(value,'$.category'), 'live', json_extract(value,'$.sourceSnapshot'), json_extract(value,'$.now'), json_extract(value,'$.now') FROM json_each(?) WHERE true

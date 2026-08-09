@@ -29,6 +29,12 @@ export type GivingActivity = {
   // without recomputing classification from scratch.
   underlyingCategory: GivingCategory;
   suspiciousDate: boolean;
+  // "invalid": the source value could not become a financial date at all
+  // (unparseable, impossible calendar date, or blank when required) --
+  // never offered "Accept as-is". "suspicious": a structurally valid date
+  // outside the expected historical/future window -- may be accepted as-is
+  // or corrected. Null once resolved (corrected, or accepted).
+  dateIssue: "invalid" | "suspicious" | null;
   reviewReason: string | null;
   sourceValues: Record<string, string>;
   // Set only when this row shares donor/date/campaign/amount content with
@@ -109,18 +115,24 @@ export function classifyJlDonation(row: ImportRow, now = new Date(), options: Do
   const hasPaymentStatus = Object.hasOwn(row, "Paid") && Object.hasOwn(row, "Balance Due");
   const paidCents = hasPaymentStatus ? currency(row.Paid ?? "") : options.compactPaymentStatus === "fully_paid" ? committedCents : 0;
   const balanceCents = hasPaymentStatus ? currency(row["Balance Due"] ?? "") : 0;
-  const date = activityDate(row["Due Date"] ?? row.Date ?? "");
+  // A row-level correction annotation (see lib/import/jl-donation-date-review.ts)
+  // always wins over the original source column -- the original value stays
+  // untouched under its own key in sourceValues for the audit trail.
+  const correctedDateOverride = row.fundraisingOsCorrectedDate?.trim();
+  const date = activityDate(correctedDateOverride || row["Due Date"] || row.Date || "");
+  const acceptedSuspiciousDate = row.fundraisingOsAcceptSuspiciousDate === "true";
   const itemType = row["Item Num"]?.trim() ?? "";
   const description = row.Desc?.trim() ?? "";
   const sourceName = row.Name?.trim() || [row["First Name"], row["Last Name"]].filter(Boolean).join(" ").trim();
   const earliest = Date.UTC(1980, 0, 1) / 1000;
   const latest = Date.UTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()) / 1000;
   const suspiciousDate = date !== null && (date < earliest || date > latest);
+  const dateIssue: "invalid" | "suspicious" | null = date === null ? "invalid" : suspiciousDate && !acceptedSuspiciousDate ? "suspicious" : null;
   let category: GivingCategory;
   let reviewReason: string | null = null;
   if (!code) { category = "needs_review"; reviewReason = "Missing JL Code"; }
   else if (date === null) { category = "needs_review"; reviewReason = "Missing or invalid activity date"; }
-  else if (suspiciousDate) { category = "needs_review"; reviewReason = "Suspicious historical or future date"; }
+  else if (suspiciousDate && !acceptedSuspiciousDate) { category = "needs_review"; reviewReason = "Suspicious historical or future date"; }
   else if (!hasPaymentStatus && options.compactPaymentStatus !== "fully_paid") { category = "needs_review"; reviewReason = "Payment status cannot be determined because Paid and Balance Due columns are missing"; }
   else if (committedCents === null || paidCents === null || balanceCents === null || committedCents < 0 || paidCents < 0 || balanceCents < 0) { category = "needs_review"; reviewReason = "Malformed or negative amount"; }
   else if (Math.abs(committedCents - paidCents - balanceCents) > 1) { category = "needs_review"; reviewReason = "Amount does not equal paid plus balance"; }
@@ -130,18 +142,29 @@ export function classifyJlDonation(row: ImportRow, now = new Date(), options: Do
   else if (committedCents > 0 && paidCents === 0 && balanceCents === committedCents) category = "open_pledge";
   else if (committedCents > 0 && paidCents === committedCents && balanceCents === 0) category = "completed_gift";
   else { category = "needs_review"; reviewReason = "Amounts are ambiguous"; }
-  return { externalHouseholdId: code, sourceName, activityDate: date, committedCents, paidCents, balanceCents, itemType, description, sourceCampaign: row.Campaign?.trim() ?? "", category, suspiciousDate, reviewReason };
+  return { externalHouseholdId: code, sourceName, activityDate: date, committedCents, paidCents, balanceCents, itemType, description, sourceCampaign: row.Campaign?.trim() ?? "", category, suspiciousDate, dateIssue, reviewReason };
 }
 
 function canonicalFingerprint(row: ImportRow) {
   const compactPaymentMarker = Object.hasOwn(row, "Date") && !Object.hasOwn(row, "Due Date") ? ["compact-payment"] : [];
-  return [...compactPaymentMarker, row.Code, row["Due Date"] ?? row.Date, row["Item Num"], row.Desc, row.Campaign, row.Amount, row.Company]
+  // A corrected date changes the row's identity for duplicate-matching
+  // purposes on purpose: it must be re-checked against other rows/existing
+  // records under the corrected identity, not the original invalid/
+  // suspicious one.
+  const correctedDateOverride = row.fundraisingOsCorrectedDate?.trim();
+  return [...compactPaymentMarker, row.Code, correctedDateOverride || row["Due Date"] || row.Date, row["Item Num"], row.Desc, row.Campaign, row.Amount, row.Company]
     .map((value) => (value ?? "").trim().replace(/\s+/g, " ").toLowerCase()).join("\u001f");
 }
 
 async function sha256(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Exposed so a single row can be re-fingerprinted identically to how
+// buildJlDonationPreview would (see lib/import/jl-donation-date-review.ts).
+export async function computeGroupFingerprint(row: ImportRow): Promise<string> {
+  return sha256(canonicalFingerprint(row));
 }
 
 // Amount is never the sole evidence of duplication — canonicalFingerprint

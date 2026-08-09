@@ -60,7 +60,10 @@ export async function POST(request: Request) {
   }
   if (importType === "donation") {
     const donationPreview = await buildJlDonationPreview(rows);
-    const paymentActivities = paymentActivitiesForAssignment(donationPreview.activities, columns);
+    // A row with an unresolved date problem stays in the general review
+    // queue instead of being swept into payment assignment, which has no
+    // way to correct a date -- one queue, one place to resolve it.
+    const paymentActivities = paymentActivitiesForAssignment(donationPreview.activities.filter((activity) => activity.dateIssue === null), columns);
     const paymentFingerprints = new Set(paymentActivities.map((activity) => activity.fingerprint));
     const standardPreview = { ...donationPreview, activities: donationPreview.activities.filter((activity) => !paymentFingerprints.has(activity.fingerprint)) };
     const codes = [...new Set(donationPreview.activities.map((activity) => activity.externalHouseholdId.toLowerCase()).filter(Boolean))];
@@ -127,12 +130,15 @@ export async function POST(request: Request) {
         reason: activity.reviewReason ?? "Row requires review",
         donor: activity.sourceName || null,
         jlCode: activity.externalHouseholdId || null,
+        transactionType: activity.itemType || null,
         campaign: activity.sourceCampaign || null,
         date: activity.activityDate,
+        originalDateValue: activity.sourceValues["Due Date"] || activity.sourceValues.Date || null,
         amountCents: activity.committedCents,
         duplicateGroupKey: activity.duplicateGroupKey,
         duplicateGroupSize: activity.duplicateGroupSize,
-        resolvable: activity.duplicateStatus === "possible_duplicate",
+        dateIssue: activity.dateIssue,
+        resolvable: activity.duplicateStatus === "possible_duplicate" || activity.dateIssue !== null,
       })),
       rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.nonfinancial,
       rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities),
