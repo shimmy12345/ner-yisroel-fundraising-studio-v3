@@ -10,7 +10,7 @@ import { classifyJlImportType } from "../../../lib/import/jl-export-type";
 import { resolvePossibleDuplicateDecisions, type ReviewDecision } from "../../../lib/import/jl-donation-review";
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, resolveCrossImportDecisions, toExistingDonationRecord, type CrossImportDecision, type RawExistingDonationRow } from "../../../lib/import/jl-donation-cross-import";
 import { buildRejectedRows, resolveRejectionDecisions, type RejectionDecision } from "../../../lib/import/jl-donation-rejection-review";
-import { findStillUnresolvedDateFingerprints, resolveDateDecisions, type DateDecision } from "../../../lib/import/jl-donation-date-review";
+import { findInvalidDateDecisions, findStillUnresolvedDateFingerprints, resolveDateDecisions, type DateDecision } from "../../../lib/import/jl-donation-date-review";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
 import { isPreviewSessionUsable, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../lib/import/preview-session";
 import { resolveAttemptCommitAction, type ImportAttemptRow } from "../../../lib/import/import-attempt";
@@ -161,11 +161,15 @@ export async function POST(request: Request) {
     return !valid;
   })) return Response.json({ error: "The rejected row decisions could not be validated" }, { status: 422 });
   const dateDecisions = body.dateDecisions ?? [];
-  if (!Array.isArray(dateDecisions) || dateDecisions.some((decision) => {
-    const valid = /^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["correct_date", "accept_as_is", "skip", "review_later"].includes(decision?.action)
-      && (decision.correctedDate === undefined || typeof decision.correctedDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(decision.correctedDate.trim()));
-    return !valid;
-  })) return Response.json({ error: "The date review decisions could not be validated" }, { status: 422 });
+  const invalidDateDecisions = findInvalidDateDecisions(dateDecisions);
+  if (invalidDateDecisions.length) {
+    // Every invalid entry is reported (not just the first) so a single bad
+    // row -- e.g. a native date input that emitted a malformed intermediate
+    // value like a 5-digit year -- never masks itself among hundreds of
+    // otherwise-valid decisions, and the client can point the user at the
+    // exact row instead of failing the whole batch opaquely.
+    return Response.json({ error: "The date review decisions could not be validated", invalidDateDecisions }, { status: 422 });
+  }
   const mergeDecisionCodes = new Set<string>();
   if (body.mergeDecisions !== undefined && (!Array.isArray(body.mergeDecisions) || body.mergeDecisions.some((decision) => {
     const code = typeof decision?.externalId === "string" ? decision.externalId.trim().toLowerCase() : "";

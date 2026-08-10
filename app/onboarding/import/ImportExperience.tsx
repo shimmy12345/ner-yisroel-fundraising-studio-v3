@@ -8,6 +8,7 @@ import { JL_MAPPING } from "../../../lib/import/jl-solutions";
 import { classifyJlImportType, countStrongDonationIndicators } from "../../../lib/import/jl-export-type";
 import { UndoDonationImport } from "./UndoDonationImport";
 import { financialDateLabel, parseFinancialDate } from "../../../lib/financial-date";
+import { isDateDecisionComplete } from "../../../lib/import/jl-donation-date-review";
 
 type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
 type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
@@ -16,6 +17,7 @@ type ValidationSummary = { totalRows: number; passedRows: number; failedRows: nu
 type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
 type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; outcomeStatus?: "not_committed" | "processing" | "unknown"; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
 type DuplicateImportBlock = { error: string; importId: string; duplicateBlocked: true; canForceReprocess: boolean; priorStatus: string; completedAt: number | null; warning: string };
+type UnresolvedDecisionsFailure = { error: string; sessionExpired?: boolean; attemptStatus?: string; invalidDateDecisions?: Array<{ fingerprint: string | null; reason: string }>; unresolvedDateFingerprints?: string[]; unresolvedReviewFingerprints?: string[]; unresolvedRejectionFingerprints?: string[] };
 type ImportReport = {
   importId: string;
   fileName: string;
@@ -376,7 +378,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         paymentDecisions: Object.entries(paymentDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })), pendingGiftDecisions: Object.entries(pendingGiftDecisions).map(([fingerprint, decision]) => ({ fingerprint, ...decision })).filter((decision) => decision.action !== "needs_decision"), reviewDecisions: Object.entries(reviewDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, groupKey: donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.duplicateGroupKey ?? null })).filter((decision) => decision.action !== "needs_decision"), crossImportDecisions: Object.entries(crossImportDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action })).filter((decision) => decision.action !== "needs_decision"), rejectionDecisions: Object.entries(rejectionDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedJlCode: decision.action === "match_donor" ? decision.correctedJlCode : undefined })).filter((decision) => decision.action !== "needs_decision"), dateDecisions: Object.entries(dateDecisions).map(([fingerprint, decision]) => ({ fingerprint, action: decision.action, correctedDate: decision.action === "correct_date" ? decision.correctedDate : undefined })).filter((decision) => decision.action !== "needs_decision"), mergeDecisions: Object.entries(mergeDecisions).map(([externalId, decision]) => ({ externalId, ...decision })), existingDonorDecisions: Object.entries(existingDonorDecisions).map(([externalId, decision]) => ({ externalId, ...decision })).filter((decision) => decision.action !== "needs_decision"), fieldDecisions: (jlPreview?.changes ?? []).map((change) => ({ externalId: change.externalId, field: change.field, action: fieldDecisions[`${change.externalId}:${change.field}`] })).filter((decision) => decision.action !== "needs_decision"), forceReprocess, forceConfirmation: forceReprocess ? forceConfirmation : undefined,
       });
       const response = await fetch("/api/import", { method: "POST", headers: { "content-type": "application/json" }, body });
-      const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | { error?: string; sessionExpired?: boolean; attemptStatus?: string };
+      const payload = await response.json() as ImportReport | ImportFailure | DuplicateImportBlock | UnresolvedDecisionsFailure;
       if (!response.ok) {
         if (response.status === 409 && "duplicateBlocked" in payload && payload.duplicateBlocked) {
           setDuplicateBlock(payload);
@@ -391,6 +393,47 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         }
         if (response.status === 409 && "attemptStatus" in payload && payload.attemptStatus === "processing") {
           await reconcileLostCommitResponse();
+          return;
+        }
+        // Defense in depth: the client-side gates above (unresolvedDateRows
+        // etc.) should already keep a bad decision set from ever reaching
+        // here, but if the server still rejects specific rows -- e.g. a
+        // decision saved before this fix, or a row the rebuilt preview
+        // reclassified -- never drop the whole review into the generic
+        // "failed" step. Nothing was written (this 422 happens before any
+        // D1 write), so send the user straight back to the exact rows that
+        // need attention with everything else untouched.
+        const unresolved = payload as UnresolvedDecisionsFailure;
+        const staleFingerprints = [
+          ...(unresolved.invalidDateDecisions ?? []).map((entry) => entry.fingerprint).filter((fp): fp is string => Boolean(fp)),
+          ...(unresolved.unresolvedDateFingerprints ?? []),
+          ...(unresolved.unresolvedReviewFingerprints ?? []),
+          ...(unresolved.unresolvedRejectionFingerprints ?? []),
+        ];
+        if (staleFingerprints.length) {
+          const staleSet = new Set(staleFingerprints);
+          setDateDecisions((current) => {
+            const next = { ...current };
+            for (const fingerprint of staleSet) if (next[fingerprint]) next[fingerprint] = { action: "correct_date", correctedDate: undefined };
+            return next;
+          });
+          setReviewDecisions((current) => {
+            const next = { ...current };
+            for (const fingerprint of staleSet) delete next[fingerprint];
+            return next;
+          });
+          setRejectionDecisions((current) => {
+            const next = { ...current };
+            for (const fingerprint of staleSet) delete next[fingerprint];
+            return next;
+          });
+          const affectedRows = [...staleSet]
+            .map((fingerprint) => donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.row ?? donationPreview?.rejectedRowDetails.find((item) => item.fingerprint === fingerprint)?.row)
+            .filter((row): row is number => row !== undefined)
+            .sort((a, b) => a - b);
+          const rowLabel = affectedRows.length ? `Row${affectedRows.length === 1 ? "" : "s"} ${affectedRows.join(", ")}` : `${staleFingerprints.length} row${staleFingerprints.length === 1 ? "" : "s"}`;
+          setError(`${unresolved.error} ${rowLabel} need${affectedRows.length === 1 ? "s" : ""} attention below. Every other decision you already made is unchanged. No changes were made to the database.`);
+          setStep("preview");
           return;
         }
         if ("validation" in payload && "rollbackCauses" in payload) {
@@ -553,7 +596,13 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const unresolvedDateRows = dateReviewRows.filter((item) => {
     const decision = dateDecisions[item.fingerprint];
     if (!decision || decision.action === "needs_decision") return true;
-    return decision.action === "correct_date" && !decision.correctedDate;
+    // A native <input type="date"> can emit a malformed intermediate value
+    // while a user is mid-edit (e.g. a 5-digit year) -- a truthy-only check
+    // on correctedDate would wrongly treat that as resolved and let it
+    // reach the server, which validates format strictly and rejects the
+    // whole commit batch. isDateDecisionComplete applies that same rule
+    // here so the row stays flagged until it is genuinely a valid date.
+    return !isDateDecisionComplete(decision);
   }).length;
   const reviewableRejectedRows = donationPreview?.rejectedRowDetails.filter((item) => item.severity === "reviewable") ?? [];
   const hardRejectedRows = donationPreview?.rejectedRowDetails.filter((item) => item.severity === "hard") ?? [];

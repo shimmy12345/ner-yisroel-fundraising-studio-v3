@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { buildJlDonationPreview, classifyJlDonation } from "../lib/import/jl-donations.ts";
 import { matchJlDonationActivities } from "../lib/import/jl-donation-match.ts";
-import { resolveDateDecisions, findStillUnresolvedDateFingerprints } from "../lib/import/jl-donation-date-review.ts";
+import { resolveDateDecisions, findStillUnresolvedDateFingerprints, findInvalidDateDecisions, isDateDecisionComplete, sanitizeDraftDateDecisions } from "../lib/import/jl-donation-date-review.ts";
 
 const base = { Code: "JL-900", Name: "Fictional Family", "Total Due": "100", "Item Num": "GIFT", Desc: "Education support", Campaign: "ANNUAL", "Due Date": "2025-06-15", Amount: "100.00", Paid: "100.00", "Balance Due": "0", Company: "" };
 const now = new Date("2026-08-09");
@@ -131,9 +131,32 @@ async function run() {
   const paymentPreview = await buildJlDonationPreview([paymentRow], now);
   assert.equal(paymentPreview.activities[0].dateIssue, "invalid");
 
+  // ---- Regression: a live incident on a 6,266-row / 5,625-decision import
+  // failed final commit with "The date review decisions could not be
+  // validated" because one saved dateDecision had correctedDate
+  // "20219-11-14" -- a 5-digit year a native <input type="date"> can emit
+  // mid-edit. The client's old "is this resolved?" check only tested
+  // truthiness, so this malformed-but-non-empty value looked complete and
+  // reached the server, which correctly (but opaquely, for the whole
+  // batch) rejected it. Every layer must now catch this specific value. ----
+  const malformedYearDecision = { fingerprint: "a".repeat(64), action: "correct_date", correctedDate: "20219-11-14" };
+  assert.equal(isDateDecisionComplete(malformedYearDecision), false, "the client pre-commit gate must not treat a malformed year as resolved");
+  const invalidEntries = findInvalidDateDecisions([malformedYearDecision]);
+  assert.equal(invalidEntries.length, 1);
+  assert.equal(invalidEntries[0].fingerprint, malformedYearDecision.fingerprint);
+  assert.match(invalidEntries[0].reason, /not a valid calendar date/);
+  assert.deepEqual(findInvalidDateDecisions([{ fingerprint: "a".repeat(64), action: "correct_date", correctedDate: "2021-11-14" }]), [], "a genuinely valid correction must still pass");
+  const sanitizedDraft = sanitizeDraftDateDecisions({ [malformedYearDecision.fingerprint]: { action: "correct_date", correctedDate: "20219-11-14" } });
+  assert.deepEqual(sanitizedDraft[malformedYearDecision.fingerprint], { action: "correct_date" }, "a malformed corrected date must never be durably saved to the draft as if the row were resolved");
+
   const importExperience = await readFile(new URL("../app/onboarding/import/ImportExperience.tsx", import.meta.url), "utf8");
   const importRoute = await readFile(new URL("../app/api/import/route.ts", import.meta.url), "utf8");
   const previewRoute = await readFile(new URL("../app/api/import/preview/route.ts", import.meta.url), "utf8");
+  const draftRoute = await readFile(new URL("../app/api/import/draft/route.ts", import.meta.url), "utf8");
+
+  assert.match(importRoute, /findInvalidDateDecisions\(/, "the commit route must use the shared validator, not a second inline copy of the date-format rule");
+  assert.match(importExperience, /isDateDecisionComplete\(/, "the client pre-commit gate must use the same validator the server enforces");
+  assert.match(draftRoute, /sanitizeDraftDateDecisions\(/, "incremental draft saves must sanitize date decisions before persisting them");
 
   assert.match(importRoute, /resolveDateDecisions\(/);
   assert.match(importRoute, /findStillUnresolvedDateFingerprints\(/);

@@ -26,6 +26,69 @@ export type DateReviewResolution = {
 };
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/;
+const ALLOWED_DATE_ACTIONS: DateReviewAction[] = ["correct_date", "accept_as_is", "skip", "review_later"];
+
+// A corrected date is only ever "complete" if it is both shaped like a date
+// and an actual calendar date (parseFinancialDate rejects e.g. 2021-02-30).
+// This is the exact rule resolveDateDecisions already enforces for
+// correct_date below -- exported so callers never need a second, looser
+// copy of it (a native <input type="date"> can emit a malformed
+// intermediate value while a user is mid-edit, e.g. a 5-digit year, and a
+// truthy-only check would wrongly treat that as resolved).
+export function isValidCorrectedDate(value: unknown): value is string {
+  return typeof value === "string" && DATE_ONLY_PATTERN.test(value.trim()) && parseFinancialDate(value.trim()) !== null;
+}
+
+// Whether a single decision (the client's per-row shape, without its own
+// fingerprint key) is complete enough to submit. Used both to gate the
+// "Confirm and import" button client-side and, in the same shape, to decide
+// what is safe to keep in a saved draft.
+export function isDateDecisionComplete(decision: { action?: unknown; correctedDate?: unknown } | undefined): boolean {
+  if (!decision || !ALLOWED_DATE_ACTIONS.includes(decision.action as DateReviewAction)) return false;
+  if (decision.action !== "correct_date") return true;
+  return isValidCorrectedDate(decision.correctedDate);
+}
+
+// The exact structural rule the commit route enforces on the wire (array)
+// shape, shared so the server's 422 and the client's pre-submit check can
+// never drift apart. Returns every invalid entry with a human reason
+// instead of a single blanket boolean, so a rejection can point at the
+// specific row instead of failing the whole batch opaquely.
+export function findInvalidDateDecisions(dateDecisions: unknown): Array<{ fingerprint: string | null; reason: string }> {
+  if (!Array.isArray(dateDecisions)) return [{ fingerprint: null, reason: "dateDecisions must be an array" }];
+  const invalid: Array<{ fingerprint: string | null; reason: string }> = [];
+  for (const raw of dateDecisions) {
+    const decision = raw as { fingerprint?: unknown; action?: unknown; correctedDate?: unknown } | null;
+    const fingerprint = typeof decision?.fingerprint === "string" ? decision.fingerprint : null;
+    if (!fingerprint || !FINGERPRINT_PATTERN.test(fingerprint)) { invalid.push({ fingerprint, reason: "missing or malformed fingerprint" }); continue; }
+    if (!ALLOWED_DATE_ACTIONS.includes(decision?.action as DateReviewAction)) { invalid.push({ fingerprint, reason: `unrecognized action "${String(decision?.action)}"` }); continue; }
+    if (decision?.correctedDate !== undefined && !isValidCorrectedDate(decision.correctedDate)) {
+      invalid.push({ fingerprint, reason: `corrected date "${String(decision.correctedDate)}" is not a valid calendar date` });
+    }
+  }
+  return invalid;
+}
+
+// Sanitizes the client's fingerprint-keyed draft shape (distinct from the
+// array shape above, used only at final commit) before it is durably
+// persisted. A decision with an unrecognized action is dropped entirely
+// (equivalent to "no decision yet"); a correct_date decision with an
+// invalid corrected date keeps the user's chosen action but drops the bad
+// value, so it is stored as still-incomplete rather than silently looking
+// resolved days later when the draft is resumed.
+export function sanitizeDraftDateDecisions(value: unknown): Record<string, { action: DateReviewAction; correctedDate?: string }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const sanitized: Record<string, { action: DateReviewAction; correctedDate?: string }> = {};
+  for (const [fingerprint, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!FINGERPRINT_PATTERN.test(fingerprint)) continue;
+    const decision = raw as { action?: unknown; correctedDate?: unknown } | null;
+    if (!decision || !ALLOWED_DATE_ACTIONS.includes(decision.action as DateReviewAction)) continue;
+    const action = decision.action as DateReviewAction;
+    sanitized[fingerprint] = isValidCorrectedDate(decision.correctedDate) ? { action, correctedDate: (decision.correctedDate as string).trim() } : { action };
+  }
+  return sanitized;
+}
 
 // Pure and structural only -- it decides whether a decision is usable for
 // the issue it targets and annotates the affected raw rows accordingly. It
@@ -59,8 +122,8 @@ export function resolveDateDecisions(rows: ImportRow[], activities: GivingActivi
     }
 
     if (decision.action === "correct_date") {
-      const correctedDate = decision.correctedDate?.trim() ?? "";
-      if (!DATE_ONLY_PATTERN.test(correctedDate) || parseFinancialDate(correctedDate) === null) { unresolvedFingerprints.push(activity.fingerprint); continue; }
+      if (!isValidCorrectedDate(decision.correctedDate)) { unresolvedFingerprints.push(activity.fingerprint); continue; }
+      const correctedDate = decision.correctedDate!.trim();
       const originalDateField = Object.hasOwn(originalRow, "Due Date") ? "Due Date" : "Date";
       const originalDateValue = (originalRow[originalDateField] ?? "").trim();
       nextRows[rowIndex] = { ...originalRow, fundraisingOsCorrectedDate: correctedDate };

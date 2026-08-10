@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { isPreviewSessionUsable, previewSessionExpiresAt, type PreviewSessionRow } from "../../../../lib/import/preview-session";
+import { sanitizeDraftDateDecisions } from "../../../../lib/import/jl-donation-date-review";
 
 export const dynamic = "force-dynamic";
 
@@ -42,8 +43,15 @@ export async function PUT(request: Request) {
   if (!isPreviewSessionUsable(session, profile.id, now)) {
     return Response.json({ error: "This draft has expired or no longer exists.", draftUnavailable: true }, { status: 410 });
   }
+  // A momentarily malformed decision (e.g. a native date input emitting a
+  // 5-digit year mid-edit) must never be durably saved as if the row were
+  // resolved -- sanitize dateDecisions before persisting so a stale invalid
+  // value can't sit unnoticed in the draft for days and only surface as a
+  // whole-batch rejection at final commit.
+  const sanitizedDecisions: Record<string, unknown> = { ...body.decisions };
+  if ("dateDecisions" in sanitizedDecisions) sanitizedDecisions.dateDecisions = sanitizeDraftDateDecisions(sanitizedDecisions.dateDecisions);
   await env.DB.prepare("UPDATE import_preview_sessions SET decisions_json = ?, progress_resolved = ?, progress_total = ?, updated_at = ?, expires_at = ? WHERE id = ?")
-    .bind(JSON.stringify(body.decisions), progressResolved, progressTotal, now, previewSessionExpiresAt(now), previewSessionId)
+    .bind(JSON.stringify(sanitizedDecisions), progressResolved, progressTotal, now, previewSessionExpiresAt(now), previewSessionId)
     .run();
   return Response.json({ savedAt: now, expiresAt: previewSessionExpiresAt(now) });
 }
