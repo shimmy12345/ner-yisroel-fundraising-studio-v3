@@ -9,7 +9,7 @@ import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHou
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, toExistingDonationRecord, type RawExistingDonationRow } from "../../../../lib/import/jl-donation-cross-import";
 import { buildRejectedRows } from "../../../../lib/import/jl-donation-rejection-review";
 import { chunkJsonRows } from "../../../../lib/import/d1-json-chunks";
-import { previewSessionExpiresAt } from "../../../../lib/import/preview-session";
+import { isPreviewSessionUsable, parseDraftDecisions, previewSessionExpiresAt, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../../lib/import/preview-session";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
@@ -18,25 +18,49 @@ import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../..
 import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
 import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
 
-type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; fileName?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation" };
+type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; fileName?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation"; previewSessionId?: string };
 
-// Persists this donation file's parsed rows server-side, owner-scoped and
-// short-lived, so the final commit can send this id instead of the entire
-// file again. Any prior expired sessions for this owner are opportunistically
-// cleaned up in the same batch.
-async function saveDonationPreviewSession(ownerUserId: string, fileHash: string, fileName: string, importType: string, rows: ImportRow[]): Promise<string> {
-  const sessionId = crypto.randomUUID();
+// Persists this donation file's parsed rows server-side, owner-scoped, as a
+// durable review draft: the final commit sends this id instead of the
+// entire file again, and the same row accumulates the user's review
+// decisions as they work through them (see /api/import/draft). If an open
+// (status='draft'), unexpired draft already exists for this exact owner +
+// fileHash, it is reused and its decisions are returned for restoration --
+// the SAME file re-previewed is not a reason to lose review progress.
+// Any of this owner's other expired drafts are opportunistically cleaned
+// up in the same batch.
+async function upsertDonationDraft(ownerUserId: string, fileHash: string, fileName: string, importType: string, rows: ImportRow[]): Promise<{ previewSessionId: string; restoredDecisions: Record<string, Record<string, unknown>> }> {
   const nowSeconds = Math.floor(Date.now() / 1000);
+  const existing = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, decisions_json, status, progress_resolved, progress_total, created_at, updated_at, expires_at FROM import_preview_sessions WHERE owner_user_id = ? AND file_hash = ? AND status = 'draft' ORDER BY updated_at DESC LIMIT 1").bind(ownerUserId, fileHash).first<PreviewSessionRow>();
+  if (isPreviewSessionUsable(existing, ownerUserId, nowSeconds)) {
+    await env.DB.prepare("UPDATE import_preview_sessions SET updated_at = ?, expires_at = ? WHERE id = ?").bind(nowSeconds, previewSessionExpiresAt(nowSeconds), existing.id).run();
+    return { previewSessionId: existing.id, restoredDecisions: parseDraftDecisions(existing.decisions_json) };
+  }
+
+  const sessionId = crypto.randomUUID();
   const expiresAt = previewSessionExpiresAt(nowSeconds);
-  const expiredSessions = await env.DB.prepare("SELECT id FROM import_preview_sessions WHERE owner_user_id = ? AND expires_at <= ?").bind(ownerUserId, nowSeconds).all<{ id: string }>();
+  const expiredSessions = await env.DB.prepare("SELECT id FROM import_preview_sessions WHERE owner_user_id = ? AND (expires_at <= ? OR status != 'draft')").bind(ownerUserId, nowSeconds).all<{ id: string }>();
   const expiredIds = expiredSessions.results.map((row) => row.id);
   await env.DB.batch([
     ...expiredIds.map((id) => env.DB.prepare("DELETE FROM import_preview_session_chunks WHERE session_id = ?").bind(id)),
     ...(expiredIds.length ? [env.DB.prepare(`DELETE FROM import_preview_sessions WHERE id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(expiredIds))] : []),
-    env.DB.prepare("INSERT INTO import_preview_sessions (id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, created_at, expires_at) VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?)").bind(sessionId, ownerUserId, fileHash, fileName, importType, rows.length, nowSeconds, expiresAt),
+    env.DB.prepare("INSERT INTO import_preview_sessions (id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, decisions_json, status, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, '{}', ?, ?, '{}', 'draft', ?, ?, ?)").bind(sessionId, ownerUserId, fileHash, fileName, importType, rows.length, nowSeconds, nowSeconds, expiresAt),
     ...chunkJsonRows(rows).map((chunk, index) => env.DB.prepare("INSERT INTO import_preview_session_chunks (session_id, chunk_index, rows_json) VALUES (?, ?, ?)").bind(sessionId, index, chunk)),
   ]);
-  return sessionId;
+  return { previewSessionId: sessionId, restoredDecisions: {} };
+}
+
+// Loads an existing draft's own stored rows for the resume flow, where the
+// client sends only the draft id -- never a client-supplied fileHash/rows,
+// so a resumed review can never be pointed at different content than the
+// exact file it was created from.
+async function loadDraftRows(ownerUserId: string, previewSessionId: string): Promise<{ session: PreviewSessionRow; rows: ImportRow[] } | null> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const session = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, decisions_json, status, progress_resolved, progress_total, created_at, updated_at, expires_at FROM import_preview_sessions WHERE id = ?").bind(previewSessionId).first<PreviewSessionRow>();
+  if (!isPreviewSessionUsable(session, ownerUserId, nowSeconds)) return null;
+  const chunkRows = await env.DB.prepare("SELECT rows_json FROM import_preview_session_chunks WHERE session_id = ? ORDER BY chunk_index").bind(previewSessionId).all<{ rows_json: string }>();
+  await env.DB.prepare("UPDATE import_preview_sessions SET updated_at = ?, expires_at = ? WHERE id = ?").bind(nowSeconds, previewSessionExpiresAt(nowSeconds), previewSessionId).run();
+  return { session, rows: reconstructRowsFromChunks(chunkRows.results.map((row) => row.rows_json)) };
 }
 
 export async function POST(request: Request) {
@@ -44,8 +68,27 @@ export async function POST(request: Request) {
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
   const profile = await ensureUserProfile(user);
   const body = await request.json() as PreviewRequest;
-  const rows = Array.isArray(body.rows) ? body.rows : [];
-  const fileHash = body.fileHash ?? "";
+
+  // Resume flow: the client sends only the draft id (no file at all) --
+  // never trust a client-supplied fileHash/rows here, so a resumed review
+  // can only ever be rebuilt from the exact rows that draft was created
+  // from, tied to the authenticated owner.
+  const resumeSessionId = typeof body.previewSessionId === "string" ? body.previewSessionId.trim() : "";
+  let rows: ImportRow[];
+  let restoredDecisions: Record<string, Record<string, unknown>> = {};
+  let resumedFileHash: string | undefined;
+  let resumedFileName: string | undefined;
+  if (resumeSessionId) {
+    const draft = await loadDraftRows(profile.id, resumeSessionId);
+    if (!draft) return Response.json({ error: "This draft has expired or no longer exists. Choose the file again to start a new review.", draftUnavailable: true }, { status: 410 });
+    rows = draft.rows;
+    restoredDecisions = parseDraftDecisions(draft.session.decisions_json);
+    resumedFileHash = draft.session.file_hash;
+    resumedFileName = draft.session.file_name;
+  } else {
+    rows = Array.isArray(body.rows) ? body.rows : [];
+  }
+  const fileHash = resumedFileHash ?? body.fileHash ?? "";
   if (!rows.length || rows.length > 25000 || !/^[a-f0-9]{64}$/.test(fileHash)) return Response.json({ error: "The preview could not be validated" }, { status: 422 });
   const columns = Object.keys(rows[0] ?? {});
   const importType = body.forceType ?? classifyJlImportType(columns, rows);
@@ -107,10 +150,12 @@ export async function POST(request: Request) {
     const pendingDonorIds = [...new Set(pendingInputs.map((item) => item.donorId))];
     const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
     const pendingMatches = pendingGiftMatches(pendingInputs, pending.results).map((match) => ({ fingerprint: match.fingerprint, candidates: match.candidates.map((candidate) => ({ id: candidate.id, activityDate: candidate.activity_date, amountCents: candidate.committed_cents, designation: candidate.description, note: candidate.private_note })) }));
-    // Persist the parsed rows server-side so the final commit request can
-    // send this id instead of re-uploading the entire file.
-    const previewSessionId = await saveDonationPreviewSession(profile.id, fileHash, body.fileName ?? "", "donation", rows);
-    return Response.json({ profile: "jl-donations", previewSessionId, donation: {
+    // Persist the parsed rows server-side (or reuse this owner's existing
+    // open draft for the exact same fileHash, restoring its decisions) so
+    // the final commit request can send this id instead of re-uploading
+    // the entire file, and so review progress survives a refresh.
+    const draft = resumeSessionId ? { previewSessionId: resumeSessionId, restoredDecisions } : await upsertDonationDraft(profile.id, fileHash, resumedFileName ?? body.fileName ?? "", "donation", rows);
+    return Response.json({ profile: "jl-donations", previewSessionId: draft.previewSessionId, restoredDecisions: draft.restoredDecisions, fileName: resumedFileName ?? body.fileName ?? "", fileHash, donation: {
       rows: rows.length,
       matchedRows: match.matched.length + paymentAssignments.filter((candidate) => candidate.donorId).length,
       unknownHousehold: match.unknownHousehold + paymentAssignments.filter((candidate) => !candidate.donorId).length,

@@ -52,7 +52,7 @@ async function run() {
 
   // ---- Preview state is owner-scoped and expires. ----
   const now = 1_800_000_000;
-  const session = { id: "session-1", owner_user_id: "owner-a", file_hash: "a".repeat(64), file_name: "f.csv", mapping_json: "{}", force_type: "donation", row_count: rowCount, created_at: now, expires_at: now + PREVIEW_SESSION_TTL_SECONDS };
+  const session = { id: "session-1", owner_user_id: "owner-a", file_hash: "a".repeat(64), file_name: "f.csv", mapping_json: "{}", force_type: "donation", row_count: rowCount, decisions_json: "{}", status: "draft", progress_resolved: 0, progress_total: 0, created_at: now, updated_at: now, expires_at: now + PREVIEW_SESSION_TTL_SECONDS };
   assert.equal(isPreviewSessionUsable(session, "owner-a", now), true);
   assert.equal(isPreviewSessionUsable(session, "owner-b", now), false, "a session must never be usable by a different owner");
   assert.equal(isPreviewSessionUsable(session, "owner-a", session.expires_at), false, "a session must not be usable at or after its expiry");
@@ -100,7 +100,7 @@ async function run() {
   assert.match(importExperience, /api\/import\/status\?attemptId=/);
 
   // ---- Preview persists session state, never mutating financial tables. ----
-  assert.match(previewRoute, /saveDonationPreviewSession/);
+  assert.match(previewRoute, /upsertDonationDraft/);
   assert.match(previewRoute, /previewSessionId/);
 
   // ---- Never claim a lost-response import failed when the outcome is

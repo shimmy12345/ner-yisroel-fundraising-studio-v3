@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
 import { FIELD_LABELS, recognizeColumns, type ColumnMapping, type ColumnSuggestion, type ImportField, type ImportPreview, type ImportRow } from "../../../lib/import/recognition";
 import { decodeCsv, parseCsv, parseXlsx, rowsToRecords } from "../../../lib/import/file-parsers";
@@ -65,6 +65,8 @@ type RejectionDecisionAction = "needs_decision" | "import_anyway" | "match_donor
 type RejectionDecisionState = { action: RejectionDecisionAction; correctedJlCode?: string };
 type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rejectedRowDetails: RejectedRowItem[]; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
 const REJECTED_ROW_CATEGORY_LABELS: Record<RejectedRowCategory, string> = { duplicate_transaction_id: "Duplicate transaction ID", unmatched_jl_code: "Unmatched JL Code", nonfinancial_entry: "Zero-dollar / nonfinancial entry" };
+type ResumableDraft = { id: string; file_name: string; file_hash: string; row_count: number; progress_resolved: number; progress_total: number; created_at: number; updated_at: number; expires_at: number };
+type DecisionMaps = { reviewDecisions: Record<string, ReviewDecisionState>; crossImportDecisions: Record<string, ReviewDecisionState>; rejectionDecisions: Record<string, RejectionDecisionState>; dateDecisions: Record<string, DateDecisionState> };
 
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
@@ -162,6 +164,9 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [forceConfirmation, setForceConfirmation] = useState("");
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [resumableDrafts, setResumableDrafts] = useState<ResumableDraft[]>([]);
+  const [changedRowsNotice, setChangedRowsNotice] = useState<number>(0);
+  const saveDraftTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function inspectFile(file: File) {
     if (!/\.(csv|xlsx)$/i.test(file.name)) {
@@ -217,6 +222,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setForceConfirmation("");
       setPreviewSessionId(null);
       setAttemptId(null);
+      setChangedRowsNotice(0);
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
       setStatusMessage("");
     } catch (fileError) {
@@ -237,20 +243,30 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     if (file) void inspectFile(file);
   }
 
-  async function showPreview(forceType?: "household" | "donation") {
+  async function showPreview(forceType?: "household" | "donation", resumeSessionId?: string) {
     setError("");
     setDuplicateBlock(null);
     setForceConfirmation("");
     setAmbiguousType(null);
-    setStatusMessage("Checking the preview securely…");
+    setStatusMessage(resumeSessionId ? "Resuming your review…" : "Checking the preview securely…");
     try {
-      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows, mapping, fileHash, fileName, forceType }) });
-      const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; previewSessionId?: string; ambiguous?: { donationIndicatorCount: number; message: string }; error?: string };
+      const body = resumeSessionId ? { previewSessionId: resumeSessionId, forceType } : { rows, mapping, fileHash, fileName, forceType };
+      const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; previewSessionId?: string; restoredDecisions?: Record<string, Record<string, unknown>>; fileName?: string; fileHash?: string; ambiguous?: { donationIndicatorCount: number; message: string }; error?: string; draftUnavailable?: boolean };
       if (payload.profile === "ambiguous" && payload.ambiguous) {
         setAmbiguousType(payload.ambiguous);
         return;
       }
+      if (response.status === 410 && payload.draftUnavailable) {
+        setError(payload.error ?? "This draft is no longer available.");
+        void fetchResumableDrafts();
+        return;
+      }
       if (!response.ok || (!payload.preview && !payload.donation)) throw new Error(payload.error ?? "The preview could not be prepared.");
+      if (resumeSessionId) {
+        setFileName(payload.fileName ?? "");
+        setFileHash(payload.fileHash ?? "");
+      }
       setPreview(payload.preview ?? { donors: [], gifts: [], interactions: [], reminders: [], rejectedRows: [], warnings: [] });
       setJlPreview(payload.jl ?? null);
       if (payload.jl) setReviewMode(payload.jl.reviewMode);
@@ -260,15 +276,43 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setDonationPreview(payload.donation ?? null);
       setDonationDetected(payload.profile === "jl-donations");
       setJlDetected(payload.profile === "jl-solutions");
-      setPaymentDecisions(Object.fromEntries((payload.donation?.paymentAssignments ?? []).map((item) => [item.fingerprint, { action: item.action, pledgeId: item.pledgeId, overpaymentAction: null }])));
-      setPendingGiftDecisions(Object.fromEntries((payload.donation?.pendingGiftMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingGiftId: null }])));
-      setReviewDecisions(Object.fromEntries((payload.donation?.reviewRows ?? []).filter((item) => item.resolvable && item.dateIssue === null).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
-      setCrossImportDecisions(Object.fromEntries((payload.donation?.crossImportRows ?? []).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
-      setRejectionDecisions(Object.fromEntries((payload.donation?.rejectedRowDetails ?? []).filter((item) => item.severity === "reviewable").map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
-      setDateDecisions(Object.fromEntries((payload.donation?.reviewRows ?? []).filter((item) => item.dateIssue !== null).map((item) => [item.fingerprint, { action: "needs_decision" as const }])));
+      // Restoring saved decisions never guesses: a saved decision is kept
+      // only when its fingerprint still appears among this preview's own
+      // reviewable rows. Anything dropped means that specific row's content
+      // changed since it was reviewed -- it will show up needing a fresh
+      // decision instead of silently keeping a stale one.
+      const restoreDecisions = (saved: Record<string, unknown> | undefined, currentFingerprints: string[]) => {
+        const currentSet = new Set(currentFingerprints);
+        let dropped = 0;
+        const restored: Record<string, unknown> = {};
+        for (const [fingerprint, value] of Object.entries(saved ?? {})) {
+          if (currentSet.has(fingerprint)) restored[fingerprint] = value; else dropped += 1;
+        }
+        return { restored, dropped };
+      };
+      const restored = payload.restoredDecisions ?? {};
+      const paymentInit = Object.fromEntries((payload.donation?.paymentAssignments ?? []).map((item) => [item.fingerprint, { action: item.action, pledgeId: item.pledgeId, overpaymentAction: null }]));
+      const paymentRestore = restoreDecisions(restored.paymentDecisions, (payload.donation?.paymentAssignments ?? []).map((item) => item.fingerprint));
+      setPaymentDecisions({ ...paymentInit, ...paymentRestore.restored } as Record<string, PaymentDecisionState>);
+      const pendingInit = Object.fromEntries((payload.donation?.pendingGiftMatches ?? []).map((item) => [item.fingerprint, { action: "needs_decision", pendingGiftId: null }]));
+      const pendingRestore = restoreDecisions(restored.pendingGiftDecisions, (payload.donation?.pendingGiftMatches ?? []).map((item) => item.fingerprint));
+      setPendingGiftDecisions({ ...pendingInit, ...pendingRestore.restored } as Record<string, PendingGiftDecisionState>);
+      const reviewFingerprints = (payload.donation?.reviewRows ?? []).filter((item) => item.resolvable && item.dateIssue === null).map((item) => item.fingerprint);
+      const reviewRestore = restoreDecisions(restored.reviewDecisions, reviewFingerprints);
+      setReviewDecisions({ ...Object.fromEntries(reviewFingerprints.map((fingerprint) => [fingerprint, { action: "needs_decision" as const }])), ...reviewRestore.restored } as Record<string, ReviewDecisionState>);
+      const crossImportFingerprints = (payload.donation?.crossImportRows ?? []).map((item) => item.fingerprint);
+      const crossImportRestore = restoreDecisions(restored.crossImportDecisions, crossImportFingerprints);
+      setCrossImportDecisions({ ...Object.fromEntries(crossImportFingerprints.map((fingerprint) => [fingerprint, { action: "needs_decision" as const }])), ...crossImportRestore.restored } as Record<string, ReviewDecisionState>);
+      const rejectionFingerprints = (payload.donation?.rejectedRowDetails ?? []).filter((item) => item.severity === "reviewable").map((item) => item.fingerprint);
+      const rejectionRestore = restoreDecisions(restored.rejectionDecisions, rejectionFingerprints);
+      setRejectionDecisions({ ...Object.fromEntries(rejectionFingerprints.map((fingerprint) => [fingerprint, { action: "needs_decision" as const }])), ...rejectionRestore.restored } as Record<string, RejectionDecisionState>);
+      const dateFingerprints = (payload.donation?.reviewRows ?? []).filter((item) => item.dateIssue !== null).map((item) => item.fingerprint);
+      const dateRestore = restoreDecisions(restored.dateDecisions, dateFingerprints);
+      setDateDecisions({ ...Object.fromEntries(dateFingerprints.map((fingerprint) => [fingerprint, { action: "needs_decision" as const }])), ...dateRestore.restored } as Record<string, DateDecisionState>);
+      setChangedRowsNotice(paymentRestore.dropped + pendingRestore.dropped + reviewRestore.dropped + crossImportRestore.dropped + rejectionRestore.dropped + dateRestore.dropped);
       setRejectedRowFilter("all");
       setConfirmedType(forceType);
-      // A server-stored session for this reviewed file, and a fresh
+      // A server-stored draft for this reviewed file, and a fresh
       // idempotency id for whatever commit attempt follows this preview --
       // reused across any lost-response recovery for that same attempt.
       setPreviewSessionId(payload.previewSessionId ?? null);
@@ -278,6 +322,32 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setError(previewError instanceof Error ? previewError.message : "The preview could not be prepared.");
     } finally { setStatusMessage(""); }
   }
+
+  async function fetchResumableDrafts() {
+    try {
+      const response = await fetch("/api/import/draft");
+      if (!response.ok) return;
+      const payload = await response.json() as { drafts?: ResumableDraft[] };
+      setResumableDrafts(payload.drafts ?? []);
+    } catch { /* the resumable-drafts list is a convenience; a failed fetch just leaves it empty */ }
+  }
+
+  function resumeDraft(draft: ResumableDraft) {
+    void showPreview(undefined, draft.id);
+  }
+
+  async function discardDraft(id: string) {
+    try {
+      await fetch(`/api/import/draft?previewSessionId=${encodeURIComponent(id)}`, { method: "DELETE" });
+    } finally {
+      void fetchResumableDrafts();
+    }
+  }
+
+  useEffect(() => {
+    if (step === "upload") void fetchResumableDrafts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   async function importData(forceReprocess = false) {
     if (!preview || step === "importing") return;
@@ -422,6 +492,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setForceConfirmation("");
     setPreviewSessionId(null);
     setAttemptId(null);
+    setChangedRowsNotice(0);
     setFailureReport(null);
     setReport(null);
     setError("");
@@ -500,6 +571,32 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const codeCollisions = jlPreview?.codeCollisions.length ?? 0;
   const proposedNewPayments = donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && (paymentDecisions[item.fingerprint]?.action === "new_gift" || (paymentAllocations.get(item.fingerprint)?.remainderCents ?? 0) > 0 && paymentAllocations.get(item.fingerprint)?.resolved)).length ?? 0;
   const proposedPledgeUpdates = new Set(donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && paymentAllocations.get(item.fingerprint)?.resolved && paymentDecisions[item.fingerprint]?.pledgeId).map((item) => paymentDecisions[item.fingerprint].pledgeId) ?? []).size;
+  const crossImportResolvedCount = (donationPreview?.crossImportRows ?? []).filter((item) => (crossImportDecisions[item.fingerprint]?.action ?? "needs_decision") !== "needs_decision").length;
+  const draftProgressTotal = resolvableReviewRows.length + dateReviewRows.length + (donationPreview?.crossImportRows.length ?? 0) + reviewableRejectedRows.length;
+  const draftProgressResolved = (resolvableReviewRows.length - unresolvedReviewRows) + (dateReviewRows.length - unresolvedDateRows) + crossImportResolvedCount + resolvedRejectedRows;
+
+  // Saves review progress incrementally as the user works, debounced so
+  // rapid decision changes do not each fire their own request. Every save
+  // also extends the draft's inactivity expiration server-side -- this is
+  // what makes an actively reviewed import outlive any fixed TTL.
+  useEffect(() => {
+    if (step !== "preview" || !previewSessionId || !donationDetected) return;
+    if (saveDraftTimeoutRef.current) clearTimeout(saveDraftTimeoutRef.current);
+    saveDraftTimeoutRef.current = setTimeout(() => {
+      void fetch("/api/import/draft", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          previewSessionId,
+          decisions: { reviewDecisions, crossImportDecisions, rejectionDecisions, dateDecisions, paymentDecisions, pendingGiftDecisions },
+          progressResolved: draftProgressResolved,
+          progressTotal: draftProgressTotal,
+        }),
+      });
+    }, 1200);
+    return () => { if (saveDraftTimeoutRef.current) clearTimeout(saveDraftTimeoutRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, previewSessionId, donationDetected, reviewDecisions, crossImportDecisions, rejectionDecisions, dateDecisions, paymentDecisions, pendingGiftDecisions]);
 
   return (
     <main className="import-page">
@@ -531,6 +628,23 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
               <div><p className="eyebrow">NEXT REFRESH</p><h2>Use the most recent export you have.</h2><p>Fundraising OS checks overlapping rows, keeps your relationship history, and shows every proposed change before writing.</p></div>
               <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{refreshOverview.suggestedRangeStart ? `${dateLabel(refreshOverview.suggestedRangeStart)} – ${dateLabel(refreshOverview.suggestedRangeEnd)}` : `Most recent available range through ${dateLabel(refreshOverview.suggestedRangeEnd)}`}</dd></div></dl>
             </section>
+            {resumableDrafts.length > 0 && <section className="resumable-drafts-section" aria-labelledby="resumable-drafts-title">
+              <p className="eyebrow">UNFINISHED REVIEW</p>
+              <h2 id="resumable-drafts-title">Pick up where you left off</h2>
+              <ol className="resumable-drafts-list">{resumableDrafts.map((draft) => (
+                <li key={draft.id} className="resumable-draft-row">
+                  <div className="resumable-draft-details">
+                    <strong>{draft.file_name}</strong>
+                    <span>{draft.row_count.toLocaleString()} rows · last worked on {dateLabel(new Date(draft.updated_at * 1000).toISOString())}</span>
+                    <span>{draft.progress_total > 0 ? `${draft.progress_resolved.toLocaleString()}/${draft.progress_total.toLocaleString()} rows resolved` : "Review not yet started"}</span>
+                  </div>
+                  <div className="resumable-draft-actions">
+                    <button type="button" className="onboarding-primary" onClick={() => resumeDraft(draft)}>Resume review</button>
+                    <button type="button" onClick={() => void discardDraft(draft.id)}>Discard draft</button>
+                  </div>
+                </li>
+              ))}</ol>
+            </section>}
             <div
               className={`import-dropzone ${dragging ? "dragging" : ""}`}
               onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
@@ -610,6 +724,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             <p className="eyebrow">READY FOR REVIEW</p>
             <h1>Your workspace preview</h1>
             <p className="import-lede">This is a preview only. Nothing has been written to Fundraising OS.</p>
+            {changedRowsNotice > 0 && <div className="import-rollback-assurance" role="status"><strong>{changedRowsNotice} row{changedRowsNotice === 1 ? "" : "s"} changed since you last reviewed this file.</strong><span>Every other saved decision was restored. The changed rows below need a fresh decision.</span></div>}
             {donationDetected && donationPreview ? <>
               <p className="jl-export-range">Detected export range: <strong>{donationPreview.rangeStart && donationPreview.rangeEnd ? `${dateLabel(donationPreview.rangeStart)} – ${dateLabel(donationPreview.rangeEnd)}` : "No valid dated rows"}</strong></p>
               <div className="import-counts"><article><strong>{(donationPreview.newActivities + proposedNewPayments).toLocaleString()}</strong><span>new gifts</span></article><article><strong>{(donationPreview.proposedUpdates + proposedPledgeUpdates).toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article>{donationPreview.reviewRows.length > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("review-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows — click to review</span></button> : <article><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows</span></article>}{donationPreview.rejectedRows > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("rejected-rows-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows — click to review</span></button> : <article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article>}</div>

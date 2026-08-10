@@ -223,7 +223,7 @@ CREATE TABLE `import_preview_sessions` (
   `force_type` text,
   `row_count` integer NOT NULL,
   `created_at` integer NOT NULL,
-  `expires_at` integer NOT NULL,
+  `expires_at` integer NOT NULL, `decisions_json` text NOT NULL DEFAULT '{}', `status` text NOT NULL DEFAULT 'draft', `updated_at` integer NOT NULL DEFAULT 0, `progress_resolved` integer NOT NULL DEFAULT 0, `progress_total` integer NOT NULL DEFAULT 0,
   FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
@@ -430,6 +430,8 @@ ON `legacy_test_cleanup_audits` (`user_id`,`created_at`);
 
 CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sessions` (`owner_user_id`,`expires_at`);
 
+CREATE INDEX `import_preview_sessions_owner_status_idx` ON `import_preview_sessions` (`owner_user_id`,`status`,`expires_at`);
+
 CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`);
 
 CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`);
@@ -455,5 +457,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','aa7d07b9961ac40985c567681c2f910d6855e2e7085b7f3ec5210d516e059757',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','59044f26262dbc4473880a73f5d32a17f34d14fa37b6c02c6bef7929aeefabc4',1785944072);
 PRAGMA optimize;

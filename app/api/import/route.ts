@@ -110,7 +110,7 @@ export async function POST(request: Request) {
   const previewSessionId = typeof body.previewSessionId === "string" ? body.previewSessionId.trim() : "";
   if (previewSessionId) {
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const session = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, created_at, expires_at FROM import_preview_sessions WHERE id = ?").bind(previewSessionId).first<PreviewSessionRow>();
+    const session = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, decisions_json, status, progress_resolved, progress_total, created_at, updated_at, expires_at FROM import_preview_sessions WHERE id = ?").bind(previewSessionId).first<PreviewSessionRow>();
     if (!isPreviewSessionUsable(session, userId, nowSeconds)) {
       return Response.json({ error: "Your review session has expired. Refresh the preview and try again.", sessionExpired: true }, { status: 410 });
     }
@@ -511,6 +511,10 @@ export async function POST(request: Request) {
       // 'completed' atomically with the financial writes below means the
       // status endpoint never reports "committed" before it actually is.
       env.DB.prepare("UPDATE data_imports SET file_name = ?, file_hash = ?, status = 'completed', update_existing = 1, report_json = ?, completed_at = ? WHERE id = ?").bind(fileName, fileHash, JSON.stringify(report), now, importId),
+      // Close the review draft on success, atomically with the financial
+      // write, so it can never later be resumed or reused for a different
+      // import of the same file.
+      ...(previewSessionId ? [env.DB.prepare("UPDATE import_preview_sessions SET status = 'committed', updated_at = ? WHERE id = ?").bind(now, previewSessionId)] : []),
       ...assignmentAuditStatements,
       env.DB.prepare("INSERT INTO onboarding_preferences (user_id, sample_data_acknowledged, data_mode, updated_at) VALUES (?, 1, 'live', ?) ON CONFLICT(user_id) DO UPDATE SET data_mode = 'live', updated_at = excluded.updated_at").bind(userId, now),
       env.DB.prepare(`INSERT INTO jl_refresh_state (user_id, last_donation_refresh_at, last_donation_range_start, last_donation_range_end, updated_at)
