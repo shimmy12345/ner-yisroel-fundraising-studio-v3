@@ -46,6 +46,38 @@ export function isPreviewSessionUsable(session: PreviewSessionRow | null | undef
   return true;
 }
 
+// A committed session's decisions_json is never cleared (only its status
+// changes) -- specifically so rows the user marked "review later" stay
+// resolvable afterward. This reopens that exact session for a follow-up
+// review pass, not the ordinary in-progress-draft resume above: only the
+// rows still saved as "review_later" need attention, and re-submitting
+// already-imported rows is always safe (the commit route's existing
+// cross-import/fingerprint duplicate protection treats them as already
+// imported and never double-writes them).
+export function isReopenableForFollowUp(session: PreviewSessionRow | null | undefined, authenticatedOwnerUserId: string, now: number): session is PreviewSessionRow {
+  if (!session) return false;
+  if (session.owner_user_id !== authenticatedOwnerUserId) return false;
+  if (session.status !== "draft" && session.status !== "committed") return false;
+  if (session.expires_at <= now) return false;
+  return true;
+}
+
+// Counts "review later" decisions saved across every decision map this
+// session tracks -- used to decide whether a committed session still has
+// outstanding follow-up work worth surfacing, without reclassifying the
+// file just to find out.
+export function countReviewLaterDecisions(decisionsJson: string): number {
+  const decisions = parseDraftDecisions(decisionsJson);
+  let count = 0;
+  for (const map of Object.values(decisions)) {
+    if (!map || typeof map !== "object") continue;
+    for (const decision of Object.values(map)) {
+      if (decision && typeof decision === "object" && (decision as { action?: unknown }).action === "review_later") count += 1;
+    }
+  }
+  return count;
+}
+
 // Whether a draft is old/inactive enough to no longer offer for resume,
 // even though the row itself may still physically exist in D1 (cleanup is
 // lazy/opportunistic, not the source of truth for usability).

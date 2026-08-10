@@ -12,9 +12,15 @@ import { isDateDecisionComplete } from "../../../lib/import/jl-donation-date-rev
 
 type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
 type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
-type RowFailure = { row: number; category?: FailureCategory; reason: string; values?: ImportRow };
+type DonationRowDisposition = "skipped" | "review_later" | "unresolved";
+type RowFailure = { row: number; category?: FailureCategory; reason: string; values?: ImportRow; fingerprint?: string | null; disposition?: DonationRowDisposition; donor?: string | null; jlCode?: string | null; campaign?: string | null; date?: number | null; amountCents?: number | null };
 type ValidationSummary = { totalRows: number; passedRows: number; failedRows: number; duplicateRows: number; nonfinancialRows: number; firstErrors: RowFailure[] };
-type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
+// rowsRequiringReview is a row genuinely blocking, unresolvable-in-app
+// disposition -- it must always be 0 for a completed import (every
+// decision-driven review path blocks commit while unresolved). skippedRows
+// and reviewLaterRows are already-resolved outcomes, tracked separately so
+// the completion screen never calls reviewed rows "requiring review".
+type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; skippedRows?: number; reviewLaterRows?: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
 type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; outcomeStatus?: "not_committed" | "processing" | "unknown"; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
 type DuplicateImportBlock = { error: string; importId: string; duplicateBlocked: true; canForceReprocess: boolean; priorStatus: string; completedAt: number | null; warning: string };
 type UnresolvedDecisionsFailure = { error: string; sessionExpired?: boolean; attemptStatus?: string; invalidDateDecisions?: Array<{ fingerprint: string | null; reason: string }>; unresolvedDateFingerprints?: string[]; unresolvedReviewFingerprints?: string[]; unresolvedRejectionFingerprints?: string[] };
@@ -26,6 +32,7 @@ type ImportReport = {
   imported: { donors: number; gifts: number; interactions: number; reminders: number };
   rejectedRows: RowFailure[];
   reviewRows?: RowFailure[];
+  rejectedRowDetails?: Array<RejectedRowItem & { outcome: "hard_excluded" | "imported" | "skipped" }>;
   warnings: string[];
   firstRelationshipId?: string | null;
   profile?: string;
@@ -68,6 +75,7 @@ type RejectionDecisionState = { action: RejectionDecisionAction; correctedJlCode
 type DonationPreview = { rows: number; matchedRows: number; unknownHousehold: number; duplicateSourceRows: number; zeroDollar: number; openPledges: number; needsReview: number; suspiciousDates: number; nonfinancial: number; newActivities: number; proposedUpdates: number; alreadyImported: number; conflicts: number; reviewRows: ReviewRowItem[]; crossImportRows: CrossImportRow[]; rejectedRows: number; rejectedRowDetails: RejectedRowItem[]; rangeStart: string | null; rangeEnd: string | null; paymentAssignments: PaymentAssignmentPreview[]; pendingGiftMatches?: PendingGiftMatchPreview[] };
 const REJECTED_ROW_CATEGORY_LABELS: Record<RejectedRowCategory, string> = { duplicate_transaction_id: "Duplicate transaction ID", unmatched_jl_code: "Unmatched JL Code", nonfinancial_entry: "Zero-dollar / nonfinancial entry" };
 type ResumableDraft = { id: string; file_name: string; file_hash: string; row_count: number; progress_resolved: number; progress_total: number; created_at: number; updated_at: number; expires_at: number };
+type ResumableReviewLater = ResumableDraft & { reviewLaterCount: number };
 type DecisionMaps = { reviewDecisions: Record<string, ReviewDecisionState>; crossImportDecisions: Record<string, ReviewDecisionState>; rejectionDecisions: Record<string, RejectionDecisionState>; dateDecisions: Record<string, DateDecisionState> };
 
 export type RefreshOverview = {
@@ -167,6 +175,9 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
   const [attemptId, setAttemptId] = useState<string | null>(null);
   const [resumableDrafts, setResumableDrafts] = useState<ResumableDraft[]>([]);
+  const [resumableReviewLater, setResumableReviewLater] = useState<ResumableReviewLater[]>([]);
+  const [followUpReview, setFollowUpReview] = useState(false);
+  const [rowDrillDown, setRowDrillDown] = useState<{ title: string; description: string; rows: RowFailure[] } | null>(null);
   const [changedRowsNotice, setChangedRowsNotice] = useState<number>(0);
   const saveDraftTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -223,6 +234,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       setDuplicateBlock(null);
       setForceConfirmation("");
       setPreviewSessionId(null);
+      setFollowUpReview(false);
       setAttemptId(null);
       setChangedRowsNotice(0);
       setMode((detectedJl && refreshOverview.lastHouseholdRefreshAt) || (detectedDonation && refreshOverview.lastDonationRefreshAt) ? "refresh" : "first");
@@ -254,7 +266,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     try {
       const body = resumeSessionId ? { previewSessionId: resumeSessionId, forceType } : { rows, mapping, fileHash, fileName, forceType };
       const response = await fetch("/api/import/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-      const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; previewSessionId?: string; restoredDecisions?: Record<string, Record<string, unknown>>; fileName?: string; fileHash?: string; ambiguous?: { donationIndicatorCount: number; message: string }; error?: string; draftUnavailable?: boolean };
+      const payload = await response.json() as { profile?: string; preview?: ImportPreview; jl?: JlPreview; donation?: DonationPreview; previewSessionId?: string; restoredDecisions?: Record<string, Record<string, unknown>>; resumedFollowUp?: boolean; fileName?: string; fileHash?: string; ambiguous?: { donationIndicatorCount: number; message: string }; error?: string; draftUnavailable?: boolean };
       if (payload.profile === "ambiguous" && payload.ambiguous) {
         setAmbiguousType(payload.ambiguous);
         return;
@@ -318,6 +330,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       // idempotency id for whatever commit attempt follows this preview --
       // reused across any lost-response recovery for that same attempt.
       setPreviewSessionId(payload.previewSessionId ?? null);
+      setFollowUpReview(Boolean(payload.resumedFollowUp));
       setAttemptId(crypto.randomUUID());
       setStep("preview");
     } catch (previewError) {
@@ -329,8 +342,9 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     try {
       const response = await fetch("/api/import/draft");
       if (!response.ok) return;
-      const payload = await response.json() as { drafts?: ResumableDraft[] };
+      const payload = await response.json() as { drafts?: ResumableDraft[]; reviewLater?: ResumableReviewLater[] };
       setResumableDrafts(payload.drafts ?? []);
+      setResumableReviewLater(payload.reviewLater ?? []);
     } catch { /* the resumable-drafts list is a convenience; a failed fetch just leaves it empty */ }
   }
 
@@ -447,6 +461,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         return;
       }
       setReport(payload as ImportReport);
+      setRowDrillDown(null);
       setStep("complete");
     } catch {
       // fetch() itself rejected (e.g. "Failed to fetch") -- this never means
@@ -534,9 +549,11 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     setDuplicateBlock(null);
     setForceConfirmation("");
     setPreviewSessionId(null);
+    setFollowUpReview(false);
     setAttemptId(null);
     setChangedRowsNotice(0);
     setFailureReport(null);
+    setRowDrillDown(null);
     setReport(null);
     setError("");
     if (inputRef.current) inputRef.current.value = "";
@@ -694,6 +711,23 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                 </li>
               ))}</ol>
             </section>}
+            {resumableReviewLater.length > 0 && <section className="resumable-drafts-section review-later-section" aria-labelledby="review-later-title">
+              <p className="eyebrow">SAVED FOR LATER REVIEW</p>
+              <h2 id="review-later-title">Finish the rows you deferred</h2>
+              <p>These imports already completed. Everything else was decided; only the rows below still need a decision.</p>
+              <ol className="resumable-drafts-list">{resumableReviewLater.map((session) => (
+                <li key={session.id} className="resumable-draft-row">
+                  <div className="resumable-draft-details">
+                    <strong>{session.file_name}</strong>
+                    <span>{session.reviewLaterCount.toLocaleString()} saved for later review · last worked on {dateLabel(new Date(session.updated_at * 1000).toISOString())}</span>
+                  </div>
+                  <div className="resumable-draft-actions">
+                    <button type="button" className="onboarding-primary" onClick={() => resumeDraft(session)}>Resolve now</button>
+                    <button type="button" onClick={() => void discardDraft(session.id)}>Dismiss</button>
+                  </div>
+                </li>
+              ))}</ol>
+            </section>}
             <div
               className={`import-dropzone ${dragging ? "dragging" : ""}`}
               onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
@@ -774,6 +808,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             <h1>Your workspace preview</h1>
             <p className="import-lede">This is a preview only. Nothing has been written to Fundraising OS.</p>
             {changedRowsNotice > 0 && <div className="import-rollback-assurance" role="status"><strong>{changedRowsNotice} row{changedRowsNotice === 1 ? "" : "s"} changed since you last reviewed this file.</strong><span>Every other saved decision was restored. The changed rows below need a fresh decision.</span></div>}
+            {followUpReview && <div className="import-rollback-assurance" role="status"><strong>This file already imported successfully.</strong><span>Every prior decision is unchanged. Only the rows you saved for later review are shown below needing a decision.</span></div>}
             {donationDetected && donationPreview ? <>
               <p className="jl-export-range">Detected export range: <strong>{donationPreview.rangeStart && donationPreview.rangeEnd ? `${dateLabel(donationPreview.rangeStart)} – ${dateLabel(donationPreview.rangeEnd)}` : "No valid dated rows"}</strong></p>
               <div className="import-counts"><article><strong>{(donationPreview.newActivities + proposedNewPayments).toLocaleString()}</strong><span>new gifts</span></article><article><strong>{(donationPreview.proposedUpdates + proposedPledgeUpdates).toLocaleString()}</strong><span>pledge updates</span></article><article><strong>{donationPreview.alreadyImported.toLocaleString()}</strong><span>existing duplicates</span></article>{donationPreview.reviewRows.length > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("review-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows — click to review</span></button> : <article><strong>{(donationPreview.needsReview + unresolvedPayments).toLocaleString()}</strong><span>review rows</span></article>}{donationPreview.rejectedRows > 0 ? <button type="button" className="import-count-card" onClick={() => document.getElementById("rejected-rows-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows — click to review</span></button> : <article><strong>{donationPreview.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article>}</div>
@@ -1068,18 +1103,49 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             {report.reviewOnly && report.reviewRows?.length ? <section className="import-failure-section"><h2>Why each row requires review</h2><ol className="import-failure-errors">{report.reviewRows.slice(0, 8).map((item) => <li key={item.row}><strong>Row {item.row}</strong><span>{item.reason}</span></li>)}</ol></section> : null}
             {report.refresh && <p className="import-preservation-note">Historical gifts were not deleted. Fundraising OS interactions, reminders, notes, summaries, and institutional memory were preserved.</p>}
             {report.warnings.length > 0 && <ul className="import-complete-warnings">{report.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
-            {report.results && <div className="import-result-counts import-success-counts">
-              <article><strong>{report.results.validRows.toLocaleString()}</strong><span>valid rows</span></article>
-              <article><strong>{report.results.householdsMatched.toLocaleString()}</strong><span>households matched</span></article>
-              <article><strong>{report.results.newHouseholds.toLocaleString()}</strong><span>new households</span></article>
-              <article><strong>{report.results.giftsImported.toLocaleString()}</strong><span>gifts imported</span></article>
-              <article><strong>{report.results.giftsUpdated.toLocaleString()}</strong><span>gifts updated</span></article>
-              <article><strong>{report.results.duplicateRowsSkipped.toLocaleString()}</strong><span>duplicate rows skipped</span></article>
-              <article><strong>{report.results.rowsRequiringReview.toLocaleString()}</strong><span>rows requiring review</span></article>
-              <article><strong>{report.results.rejectedRows.toLocaleString()}</strong><span>rejected rows</span></article>
-              <article><strong>{report.results.unmatchedJlCodes.toLocaleString()}</strong><span>unmatched JL Codes</span></article>
-              <article><strong>{(report.results.elapsedMs / 1000).toFixed(1)}s</strong><span>elapsed import time</span></article>
-            </div>}
+            {!report.reviewOnly && (report.results?.rowsRequiringReview ?? 0) > 0 && <div className="import-rollback-assurance" role="alert"><strong>{report.results!.rowsRequiringReview.toLocaleString()} row{report.results!.rowsRequiringReview === 1 ? "" : "s"} could not be resolved at all.</strong><span>These rows have no decision to make in this workflow (e.g. a missing JL Code or an unreadable amount) -- they require a corrected source file, not further review here.</span></div>}
+            {report.results && (() => {
+              const skippedRows = (report.reviewRows ?? []).filter((row) => row.disposition === "skipped");
+              const reviewLaterRows = (report.reviewRows ?? []).filter((row) => row.disposition === "review_later");
+              const unresolvedRows = (report.reviewRows ?? []).filter((row) => row.disposition === "unresolved");
+              const rejectedRowDetails: RowFailure[] = (report.rejectedRowDetails ?? []).map((item) => ({ row: item.row, fingerprint: item.fingerprint, reason: item.reason, donor: item.donor, jlCode: item.jlCode, campaign: item.campaign, date: item.date, amountCents: item.amountCents }));
+              const countCard = (count: number, label: string, description: string, rows: RowFailure[]) => (
+                count > 0
+                  ? <button type="button" className="import-count-card" onClick={() => setRowDrillDown({ title: label, description, rows })}><strong>{count.toLocaleString()}</strong><span>{label} — click to view</span></button>
+                  : <article><strong>0</strong><span>{label}</span></article>
+              );
+              return <>
+                <div className="import-result-counts import-success-counts">
+                  <article><strong>{report.results.giftsImported.toLocaleString()}</strong><span>gifts imported</span></article>
+                  <article><strong>{report.results.giftsUpdated.toLocaleString()}</strong><span>gifts updated</span></article>
+                  <article><strong>{report.results.householdsMatched.toLocaleString()}</strong><span>households matched</span></article>
+                  {countCard(skippedRows.length, "skipped by you", "You chose not to import these rows.", skippedRows)}
+                  {countCard(reviewLaterRows.length, "saved for later review", "You chose to decide these later. They remain resumable from the Import Center.", reviewLaterRows)}
+                  {countCard(rejectedRowDetails.length, "rejected", "Unmatched JL Codes, nonfinancial entries, and in-file duplicate transaction IDs.", rejectedRowDetails)}
+                  {countCard(unresolvedRows.length, "unresolved", "No decision exists for these in this workflow -- they need a corrected source file.", unresolvedRows)}
+                </div>
+                {rowDrillDown && <section className="import-failure-section row-drilldown-section" role="region" aria-label={rowDrillDown.title}>
+                  <div className="row-drilldown-header"><h2>{rowDrillDown.rows.length.toLocaleString()} {rowDrillDown.title}</h2><button type="button" onClick={() => setRowDrillDown(null)}>Close</button></div>
+                  <p>{rowDrillDown.description}</p>
+                  <ol className="import-failure-errors row-drilldown-list">{rowDrillDown.rows.map((item) => (
+                    <li key={`${item.row}-${item.fingerprint ?? ""}`}>
+                      <strong>Row {item.row}</strong>
+                      <span>{item.donor ?? "Unknown donor"}{item.jlCode ? ` · JL ${item.jlCode}` : ""}{item.campaign ? ` · ${item.campaign}` : ""}</span>
+                      {(item.date != null || item.amountCents != null) && <span>{item.date != null ? epochDateLabel(item.date) : ""}{item.date != null && item.amountCents != null ? " · " : ""}{item.amountCents != null ? centsLabel(item.amountCents) : ""}</span>}
+                      <span className="review-queue-reason">{item.reason}</span>
+                    </li>
+                  ))}</ol>
+                  <button type="button" onClick={() => downloadRows(rowDrillDown.rows, report.importId, "review")}>Download these rows as CSV</button>
+                </section>}
+                <details className="import-result-counts-detail"><summary>All counts</summary><div className="import-result-counts import-success-counts">
+                  <article><strong>{report.results.validRows.toLocaleString()}</strong><span>valid rows</span></article>
+                  <article><strong>{report.results.newHouseholds.toLocaleString()}</strong><span>new households</span></article>
+                  <article><strong>{report.results.duplicateRowsSkipped.toLocaleString()}</strong><span>duplicate rows skipped</span></article>
+                  <article><strong>{report.results.unmatchedJlCodes.toLocaleString()}</strong><span>unmatched JL Codes</span></article>
+                  <article><strong>{(report.results.elapsedMs / 1000).toFixed(1)}s</strong><span>elapsed import time</span></article>
+                </div></details>
+              </>;
+            })()}
             <div className="import-report-actions">
               <button type="button" onClick={() => download(`fundraising-os-import-${report.importId}.json`, JSON.stringify(report, null, 2))}>Download import report</button>
               <button type="button" onClick={() => downloadRows(report.reviewRows ?? [], report.importId, "review")} disabled={!report.reviewRows?.length}>Download review report{report.reviewRows?.length ? ` (${report.reviewRows.length})` : ""}</button>

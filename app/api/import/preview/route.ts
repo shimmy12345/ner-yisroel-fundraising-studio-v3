@@ -9,7 +9,7 @@ import { matchJlDonationActivities, type ExistingGivingActivity, type MatchedHou
 import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, toExistingDonationRecord, type RawExistingDonationRow } from "../../../../lib/import/jl-donation-cross-import";
 import { buildRejectedRows } from "../../../../lib/import/jl-donation-rejection-review";
 import { chunkJsonRows } from "../../../../lib/import/d1-json-chunks";
-import { isPreviewSessionUsable, parseDraftDecisions, previewSessionExpiresAt, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../../lib/import/preview-session";
+import { isPreviewSessionUsable, isReopenableForFollowUp, parseDraftDecisions, previewSessionExpiresAt, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../../lib/import/preview-session";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
@@ -53,13 +53,22 @@ async function upsertDonationDraft(ownerUserId: string, fileHash: string, fileNa
 // Loads an existing draft's own stored rows for the resume flow, where the
 // client sends only the draft id -- never a client-supplied fileHash/rows,
 // so a resumed review can never be pointed at different content than the
-// exact file it was created from.
+// exact file it was created from. A committed session may also be reopened
+// this way -- specifically so "review later" rows from a completed import
+// remain resolvable in a later session (see isReopenableForFollowUp);
+// re-submitting already-imported rows is always safe, since the commit
+// route's own duplicate protection recognizes them as already imported.
 async function loadDraftRows(ownerUserId: string, previewSessionId: string): Promise<{ session: PreviewSessionRow; rows: ImportRow[] } | null> {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const session = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, decisions_json, status, progress_resolved, progress_total, created_at, updated_at, expires_at FROM import_preview_sessions WHERE id = ?").bind(previewSessionId).first<PreviewSessionRow>();
-  if (!isPreviewSessionUsable(session, ownerUserId, nowSeconds)) return null;
+  if (!isReopenableForFollowUp(session, ownerUserId, nowSeconds)) return null;
   const chunkRows = await env.DB.prepare("SELECT rows_json FROM import_preview_session_chunks WHERE session_id = ? ORDER BY chunk_index").bind(previewSessionId).all<{ rows_json: string }>();
-  await env.DB.prepare("UPDATE import_preview_sessions SET updated_at = ?, expires_at = ? WHERE id = ?").bind(nowSeconds, previewSessionExpiresAt(nowSeconds), previewSessionId).run();
+  // A committed session stays committed -- reopening it for a follow-up
+  // pass on its review-later rows must never make it look like an
+  // in-progress draft (or eligible for the ordinary "resume unfinished
+  // import" list), only its activity window is extended.
+  if (session.status === "draft") await env.DB.prepare("UPDATE import_preview_sessions SET updated_at = ?, expires_at = ? WHERE id = ?").bind(nowSeconds, previewSessionExpiresAt(nowSeconds), previewSessionId).run();
+  else await env.DB.prepare("UPDATE import_preview_sessions SET expires_at = ? WHERE id = ?").bind(previewSessionExpiresAt(nowSeconds), previewSessionId).run();
   return { session, rows: reconstructRowsFromChunks(chunkRows.results.map((row) => row.rows_json)) };
 }
 
@@ -78,6 +87,7 @@ export async function POST(request: Request) {
   let restoredDecisions: Record<string, Record<string, unknown>> = {};
   let resumedFileHash: string | undefined;
   let resumedFileName: string | undefined;
+  let resumedFollowUp = false;
   if (resumeSessionId) {
     const draft = await loadDraftRows(profile.id, resumeSessionId);
     if (!draft) return Response.json({ error: "This draft has expired or no longer exists. Choose the file again to start a new review.", draftUnavailable: true }, { status: 410 });
@@ -85,6 +95,19 @@ export async function POST(request: Request) {
     restoredDecisions = parseDraftDecisions(draft.session.decisions_json);
     resumedFileHash = draft.session.file_hash;
     resumedFileName = draft.session.file_name;
+    // Reopening an already-committed import: only rows explicitly saved as
+    // "review later" still need a decision -- skip/import_anyway/accepted
+    // rows are left exactly as they were (harmless to resubmit; duplicate
+    // protection recognizes them as already imported).
+    resumedFollowUp = draft.session.status === "committed";
+    if (resumedFollowUp) {
+      for (const map of Object.values(restoredDecisions)) {
+        if (!map || typeof map !== "object") continue;
+        for (const [key, decision] of Object.entries(map)) {
+          if (decision && typeof decision === "object" && (decision as { action?: unknown }).action === "review_later") delete map[key];
+        }
+      }
+    }
   } else {
     rows = Array.isArray(body.rows) ? body.rows : [];
   }
@@ -155,7 +178,7 @@ export async function POST(request: Request) {
     // the final commit request can send this id instead of re-uploading
     // the entire file, and so review progress survives a refresh.
     const draft = resumeSessionId ? { previewSessionId: resumeSessionId, restoredDecisions } : await upsertDonationDraft(profile.id, fileHash, resumedFileName ?? body.fileName ?? "", "donation", rows);
-    return Response.json({ profile: "jl-donations", previewSessionId: draft.previewSessionId, restoredDecisions: draft.restoredDecisions, fileName: resumedFileName ?? body.fileName ?? "", fileHash, donation: {
+    return Response.json({ profile: "jl-donations", previewSessionId: draft.previewSessionId, restoredDecisions: draft.restoredDecisions, resumedFollowUp, fileName: resumedFileName ?? body.fileName ?? "", fileHash, donation: {
       rows: rows.length,
       matchedRows: match.matched.length + paymentAssignments.filter((candidate) => candidate.donorId).length,
       unknownHousehold: match.unknownHousehold + paymentAssignments.filter((candidate) => !candidate.donorId).length,

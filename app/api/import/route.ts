@@ -12,7 +12,7 @@ import { findFingerprintCrossImportMatches, findStableIdCrossImportMatches, reso
 import { buildRejectedRows, resolveRejectionDecisions, type RejectionDecision } from "../../../lib/import/jl-donation-rejection-review";
 import { findInvalidDateDecisions, findStillUnresolvedDateFingerprints, resolveDateDecisions, type DateDecision } from "../../../lib/import/jl-donation-date-review";
 import { chunkJsonRows } from "../../../lib/import/d1-json-chunks";
-import { isPreviewSessionUsable, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../lib/import/preview-session";
+import { isReopenableForFollowUp, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../lib/import/preview-session";
 import { resolveAttemptCommitAction, type ImportAttemptRow } from "../../../lib/import/import-attempt";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
@@ -57,7 +57,18 @@ type GeneralExistingDonor = { id: string; donor_code: string; external_source: s
 const allowedFields = new Set<ImportField | "ignore">(["ignore", ...Object.keys(FIELD_LABELS) as ImportField[]]);
 
 type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
-type RowFailure = { row: number; category: FailureCategory; reason: string };
+// A row that is still classified needs_review after every decision has been
+// resolved is not one thing -- it is either an explicit "skip" or "review
+// later" choice the user already made (fully resolved, just excluded from
+// this import), or -- only for reasons no decision UI exists for at all,
+// e.g. a missing JL Code or an unparseable amount -- a row that can never
+// be resolved without a corrected source file. "unresolved" here never
+// means "blocked commit and should have stopped it": every decision-driven
+// path (duplicates, rejections, dates, payments) already blocks commit with
+// a 422 while genuinely undecided. See findGenuinelyUnresolvedRows below,
+// which is what the completion-screen invariant actually checks.
+type DonationRowDisposition = "skipped" | "review_later" | "unresolved";
+type RowFailure = { row: number; category: FailureCategory; reason: string; fingerprint?: string | null; disposition?: DonationRowDisposition; donor?: string | null; jlCode?: string | null; campaign?: string | null; date?: number | null; amountCents?: number | null };
 
 function reviewCategory(reason: string | null): FailureCategory {
   if (/code|required/i.test(reason ?? "")) return "missing_required_fields";
@@ -111,7 +122,11 @@ export async function POST(request: Request) {
   if (previewSessionId) {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const session = await env.DB.prepare("SELECT id, owner_user_id, file_hash, file_name, mapping_json, force_type, row_count, decisions_json, status, progress_resolved, progress_total, created_at, updated_at, expires_at FROM import_preview_sessions WHERE id = ?").bind(previewSessionId).first<PreviewSessionRow>();
-    if (!isPreviewSessionUsable(session, userId, nowSeconds)) {
+    // A committed session may be resubmitted for a "review later" follow-up
+    // pass (see isReopenableForFollowUp) -- already-imported rows are
+    // recognized and never double-written by the duplicate protection
+    // below, so re-running commit against the same session is safe.
+    if (!isReopenableForFollowUp(session, userId, nowSeconds)) {
       return Response.json({ error: "Your review session has expired. Refresh the preview and try again.", sessionExpired: true }, { status: 410 });
     }
     const chunkRows = await env.DB.prepare("SELECT rows_json FROM import_preview_session_chunks WHERE session_id = ? ORDER BY chunk_index").bind(previewSessionId).all<{ rows_json: string }>();
@@ -362,6 +377,16 @@ export async function POST(request: Request) {
     const rememberedWithLegacyGifts = [...remembered.results, ...prior.results.filter((activity) => !rememberedFingerprints.has(activity.source_fingerprint)).map((activity) => ({ payment_fingerprint: activity.source_fingerprint, decision_type: "new_gift" as const, pledge_activity_id: null, applied_import_id: "existing-gift" }))];
     const paymentCandidates = buildPaymentCandidates(paymentActivities, households.results, openPledges.results, rememberedWithLegacyGifts);
     const assignmentPlan = planPaymentAssignments(paymentCandidates, paymentDecisions);
+    if (assignmentPlan.errors.length) {
+      // Every other decision type (duplicates, rejections, dates) blocks
+      // commit while genuinely unresolved rather than silently excluding
+      // the row and letting the rest of the batch through -- payment
+      // assignment must follow the same rule. A stale or invalid pledge
+      // selection (e.g. the pledge was fully allocated by a concurrent
+      // import since preview was loaded) is a decision that needs
+      // re-review, not a row that quietly falls out of the import.
+      return Response.json({ error: "Review every payment assignment before importing.", unresolvedPaymentRows: assignmentPlan.errors.map((error) => error.row) }, { status: 422 });
+    }
     const candidateByFingerprint = new Map(paymentCandidates.map((candidate) => [candidate.fingerprint, candidate]));
     const activityByFingerprint = new Map(donationPreview.activities.map((activity) => [activity.fingerprint, activity]));
     const manualNewActivities = assignmentPlan.newGifts.map((gift) => {
@@ -397,11 +422,35 @@ export async function POST(request: Request) {
       }
     }
     const exportRange = donationExportRange([...match.matched, ...paymentActivities]);
-    const reviewRows: RowFailure[] = [
-      ...assignmentPlan.errors.map((error) => ({ ...error, category: reviewCategory(error.reason) })),
-      ...match.reviewActivities.map((activity) => ({ row: activity.rowNumber, category: reviewCategory(activity.reviewReason), reason: activity.reviewReason ?? "Row requires review" })),
-    ]
-      .sort((a, b) => a.row - b.row);
+    // match.reviewActivities is every activity still classified needs_review
+    // after approved (import_anyway) rows were already swapped out above --
+    // every one of these had to have a resolved decision to reach this
+    // point (possible-duplicate and rejection decisions both block commit
+    // with a 422 while genuinely unresolved), so this is never "still
+    // pending a decision." It is either an explicit skip/review-later
+    // choice, or -- only for reasons with no decision UI at all, like a
+    // missing JL Code -- a row that can never be resolved without a
+    // corrected source file.
+    const reviewDecisionByFingerprint = new Map(reviewDecisions.map((decision) => [decision.fingerprint, decision.action]));
+    const reviewRows: RowFailure[] = match.reviewActivities.map((activity) => {
+      const isPossibleDuplicate = activity.duplicateStatus === "possible_duplicate";
+      const decisionAction = isPossibleDuplicate ? reviewDecisionByFingerprint.get(activity.fingerprint) : undefined;
+      const disposition: DonationRowDisposition = decisionAction === "review_later" ? "review_later" : decisionAction === "skip" ? "skipped" : "unresolved";
+      // Known definitively from the row's own classification -- never
+      // re-derived by pattern-matching the reason text, which previously
+      // mislabeled every possible-duplicate row as "invalid_dates" because
+      // its reason happens to contain the word "date" ("identical donor,
+      // date, campaign, and amount").
+      const category: FailureCategory = isPossibleDuplicate ? "duplicate_records" : reviewCategory(activity.reviewReason);
+      return { row: activity.rowNumber, category, reason: activity.reviewReason ?? "Row requires review", fingerprint: activity.fingerprint, disposition, donor: activity.sourceName || null, jlCode: activity.externalHouseholdId || null, campaign: activity.sourceCampaign || null, date: activity.activityDate, amountCents: activity.committedCents };
+    }).sort((a, b) => a.row - b.row);
+    const skippedReviewRows = reviewRows.filter((row) => row.disposition === "skipped");
+    const reviewLaterRows = reviewRows.filter((row) => row.disposition === "review_later");
+    // The completion-screen invariant: this must always be 0 for a
+    // completed import. Computed for real (not hardcoded) so a future
+    // decision path that forgets to block commit while unresolved is
+    // caught here instead of silently reported as "0 unresolved".
+    const genuinelyUnresolvedRows = reviewRows.filter((row) => row.disposition === "unresolved");
     const rejectedRows: RowFailure[] = [
       ...donationPreview.duplicateRows.map((duplicate) => ({ row: duplicate.row, category: "duplicate_records" as const, reason: "Duplicate source row" })),
       ...match.unknownActivities.filter((activity) => !rejectionApprovedFingerprints.has(activity.fingerprint)).map((activity) => ({ row: activity.rowNumber, category: "unmatched_jl_codes" as const, reason: "JL Code does not match an imported household" })),
@@ -427,13 +476,13 @@ export async function POST(request: Request) {
         reviewRows,
         rejectedRows: [],
         paymentAssignments: paymentCandidates,
-        results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: reviewRows.length, rejectedRows: 0, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
+        results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: 0, rowsRequiringReview: genuinelyUnresolvedRows.length, skippedRows: skippedReviewRows.length, reviewLaterRows: reviewLaterRows.length, rejectedRows: 0, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
         warnings: ["No changes were made to the database. Correct the source columns or classification details, then retry."],
       });
     }
     if (!matchedActivities.length && !assignmentPlan.pledgeUpdates.length && !alreadyImported) {
       const rollbackCauses = [...new Set(rejectedRows.map((failure) => failure.category))];
-      return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, reviewRows, rejectedRows, paymentAssignments: paymentCandidates, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: match.unknownHousehold + paymentCandidates.filter((candidate) => !candidate.donorId).length, elapsedMs: Date.now() - startedAt } }, { status: 422 });
+      return Response.json({ error: "No donation rows were eligible for import.", fatalError: null, databaseChangesMade: false, noChangesMade: true, rollbackCauses, validation, reviewRows, rejectedRows, paymentAssignments: paymentCandidates, results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: donationPreview.duplicateRows.length, rowsRequiringReview: genuinelyUnresolvedRows.length, skippedRows: skippedReviewRows.length, reviewLaterRows: reviewLaterRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: match.unknownHousehold + paymentCandidates.filter((candidate) => !candidate.donorId).length, elapsedMs: Date.now() - startedAt } }, { status: 422 });
     }
     if (body.forceReprocess && !newActivities.length && !proposedUpdates.length && !assignmentPlan.pledgeUpdates.length) {
       return Response.json({
@@ -449,7 +498,7 @@ export async function POST(request: Request) {
         validation,
         reviewRows,
         rejectedRows,
-        results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: alreadyImported + donationPreview.duplicateRows.length, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
+        results: { validRows: 0, householdsMatched: 0, newHouseholds: 0, giftsImported: 0, giftsUpdated: 0, duplicateRowsSkipped: alreadyImported + donationPreview.duplicateRows.length, rowsRequiringReview: genuinelyUnresolvedRows.length, skippedRows: skippedReviewRows.length, reviewLaterRows: reviewLaterRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes: 0, elapsedMs: Date.now() - startedAt },
         warnings: ["Force reprocess completed row-level duplicate checks. Every payment was already active, so no database changes were made."],
       });
     }
@@ -471,8 +520,8 @@ export async function POST(request: Request) {
     const resolvedNonfinancialCount = match.nonfinancialActivities.filter((activity) => rejectionApprovedFingerprints.has(activity.fingerprint)).length;
     const unmatchedJlCodes = match.unknownHousehold - resolvedUnmatchedCount + paymentCandidates.filter((candidate) => !candidate.donorId).length;
     const nonfinancialExcluded = match.nonfinancial - resolvedNonfinancialCount;
-    const results = { validRows: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length, householdsMatched: matchedDonorIds.size, newHouseholds: 0, giftsImported: newActivities.length, giftsUpdated: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + alreadyImported, rowsRequiringReview: reviewRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: reviewRows.length, nonfinancialExcluded, duplicateSourceRows: donationPreview.duplicateRows.length, pendingGiftsConfirmed: claimedPendingIds.size, crossImportDuplicatesSkipped: crossImportResolution.outcomes.filter((outcome) => outcome.action === "skipped").length, crossImportDuplicatesImportedAnyway: crossImportResolution.outcomes.filter((outcome) => outcome.action === "imported").length }, crossImportRows: crossImportResolution.outcomes.map((outcome) => ({ fingerprint: outcome.fingerprint, matchType: outcome.matchType, action: outcome.action, existingActivityId: outcome.existing.activityId, existingDonorId: outcome.existing.donorId, existingActivityDate: outcome.existing.activityDate, existingAmountCents: outcome.existing.committedCents, existingCampaign: outcome.existing.sourceCampaign, existingImportedAt: outcome.existing.importedAt })), paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, overpaymentRemainders: assignmentPlan.newGifts.filter((gift) => gift.kind === "overpayment_remainder").length, rememberedSkipped: assignmentPlan.alreadyApplied.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: reviewRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities).map((item) => ({ ...item, outcome: item.severity === "hard" ? "hard_excluded" as const : rejectionApprovedFingerprints.has(item.fingerprint) ? "imported" as const : "skipped" as const })), warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, reviewRows.length && `${reviewRows.length} rows need review`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const results = { validRows: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length, householdsMatched: matchedDonorIds.size, newHouseholds: 0, giftsImported: newActivities.length, giftsUpdated: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + alreadyImported, rowsRequiringReview: genuinelyUnresolvedRows.length, skippedRows: skippedReviewRows.length, reviewLaterRows: reviewLaterRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes, elapsedMs: 0 };
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: reviewRows.length, nonfinancialExcluded, duplicateSourceRows: donationPreview.duplicateRows.length, pendingGiftsConfirmed: claimedPendingIds.size, crossImportDuplicatesSkipped: crossImportResolution.outcomes.filter((outcome) => outcome.action === "skipped").length, crossImportDuplicatesImportedAnyway: crossImportResolution.outcomes.filter((outcome) => outcome.action === "imported").length }, crossImportRows: crossImportResolution.outcomes.map((outcome) => ({ fingerprint: outcome.fingerprint, matchType: outcome.matchType, action: outcome.action, existingActivityId: outcome.existing.activityId, existingDonorId: outcome.existing.donorId, existingActivityDate: outcome.existing.activityDate, existingAmountCents: outcome.existing.committedCents, existingCampaign: outcome.existing.sourceCampaign, existingImportedAt: outcome.existing.importedAt })), paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, overpaymentRemainders: assignmentPlan.newGifts.filter((gift) => gift.kind === "overpayment_remainder").length, rememberedSkipped: assignmentPlan.alreadyApplied.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: reviewRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities).map((item) => ({ ...item, outcome: item.severity === "hard" ? "hard_excluded" as const : rejectionApprovedFingerprints.has(item.fingerprint) ? "imported" as const : "skipped" as const })), warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, skippedReviewRows.length && `${skippedReviewRows.length} rows were skipped during review`, reviewLaterRows.length && `${reviewLaterRows.length} rows were saved for later review`, genuinelyUnresolvedRows.length && `${genuinelyUnresolvedRows.length} rows are unresolved and require a corrected source file`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
     const changedActivities = [...newActivities, ...proposedUpdates];
     const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, decisionFingerprint: pendingKey(activity), activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const activityIdByDecisionFingerprint = new Map(activityRows.map((row) => [row.decisionFingerprint, row.id]));

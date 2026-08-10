@@ -91,7 +91,7 @@ async function run() {
   assert.match(importRoute, /status = 'processing'/);
   assert.match(importRoute, /status != 'completed'/);
   assert.match(importRoute, /import_preview_sessions/);
-  assert.match(importRoute, /isPreviewSessionUsable\(/);
+  assert.match(importRoute, /isReopenableForFollowUp\(/, "the commit route must still enforce owner+expiry scoping on the stored session, now via the follow-up-aware check");
 
   // ---- Status endpoint reconciles a lost response, owner-scoped. ----
   assert.match(statusRoute, /classifyAttemptOutcome\(/);

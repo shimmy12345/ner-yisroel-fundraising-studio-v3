@@ -1,23 +1,34 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
-import { isPreviewSessionUsable, previewSessionExpiresAt, type PreviewSessionRow } from "../../../../lib/import/preview-session";
+import { countReviewLaterDecisions, isPreviewSessionUsable, previewSessionExpiresAt, type PreviewSessionRow } from "../../../../lib/import/preview-session";
 import { sanitizeDraftDateDecisions } from "../../../../lib/import/jl-donation-date-review";
 
 export const dynamic = "force-dynamic";
 
 // Lists this owner's resumable, unfinished donation review drafts, most
-// recently active first. Never another owner's -- scoped by the
-// authenticated user's id, not anything client-supplied.
+// recently active first, plus any already-completed import that still has
+// rows the user explicitly saved for later review -- both are "unfinished
+// work on a file", just at different stages. Never another owner's --
+// scoped by the authenticated user's id, not anything client-supplied.
 export async function GET() {
   const identity = await getChatGPTUser();
   if (!identity) return Response.json({ error: "Authentication required" }, { status: 401 });
   const profile = await ensureUserProfile(identity);
   const now = Math.floor(Date.now() / 1000);
-  const drafts = await env.DB.prepare("SELECT id, file_name, file_hash, row_count, progress_resolved, progress_total, created_at, updated_at, expires_at FROM import_preview_sessions WHERE owner_user_id = ? AND status = 'draft' AND expires_at > ? ORDER BY updated_at DESC LIMIT 20")
+  const sessions = await env.DB.prepare("SELECT id, file_name, file_hash, row_count, progress_resolved, progress_total, created_at, updated_at, expires_at, status, decisions_json FROM import_preview_sessions WHERE owner_user_id = ? AND status IN ('draft', 'committed') AND expires_at > ? ORDER BY updated_at DESC LIMIT 50")
     .bind(profile.id, now)
-    .all<{ id: string; file_name: string; file_hash: string; row_count: number; progress_resolved: number; progress_total: number; created_at: number; updated_at: number; expires_at: number }>();
-  return Response.json({ drafts: drafts.results }, { headers: { "cache-control": "no-store" } });
+    .all<{ id: string; file_name: string; file_hash: string; row_count: number; progress_resolved: number; progress_total: number; created_at: number; updated_at: number; expires_at: number; status: string; decisions_json: string }>();
+  const drafts = sessions.results
+    .filter((session) => session.status === "draft")
+    .map(({ decisions_json: _decisionsJson, status: _status, ...draft }) => draft);
+  const reviewLater = sessions.results
+    .filter((session) => session.status === "committed")
+    .map((session) => ({ ...session, reviewLaterCount: countReviewLaterDecisions(session.decisions_json) }))
+    .filter((session) => session.reviewLaterCount > 0)
+    .map(({ decisions_json: _decisionsJson, status: _status, ...session }) => session)
+    .slice(0, 20);
+  return Response.json({ drafts, reviewLater }, { headers: { "cache-control": "no-store" } });
 }
 
 type SaveDecisionsRequest = { previewSessionId?: string; decisions?: Record<string, unknown>; progressResolved?: number; progressTotal?: number };
