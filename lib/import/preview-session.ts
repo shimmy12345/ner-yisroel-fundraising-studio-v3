@@ -98,6 +98,37 @@ export function countPendingPaymentDecisions(decisionsJson: string): number {
   return count;
 }
 
+const NEEDS_DECISION_ACTIONS = new Set(["needs_decision", "needs_review"]);
+
+// Counts rows that genuinely still require a user decision, across every
+// decision map this session tracks (possible duplicates, rejected/reviewable
+// rows, date review, cross-import duplicates, payment/pledge assignments,
+// pending-gift matches) -- "needs_decision" is the sentinel every map but
+// paymentDecisions uses for "not yet decided"; paymentDecisions uses
+// "needs_review" for the same thing. Skip, import_anyway, corrected dates,
+// accepted suspicious dates, match_donor, apply_to_pledge/new_gift, and
+// review_later are all resolved decisions (review_later is intentionally
+// deferred, not unresolved -- see countReviewLaterDecisions) and are never
+// counted here. Callers must only sum this over active (status='draft',
+// unexpired) sessions: a committed import can never contribute, since every
+// decision-driven review path already blocks commit on an unresolved
+// fingerprint before anything is written (see app/api/import/route.ts) --
+// and a stale "needs_decision" left over in a committed session's
+// last-saved decisions_json (the draft-save debounce can lag behind the
+// exact decision set actually submitted at commit time) must never be
+// mistaken for currently-pending work.
+export function countUnresolvedDecisions(decisionsJson: string): number {
+  const decisions = parseDraftDecisions(decisionsJson);
+  let count = 0;
+  for (const map of Object.values(decisions)) {
+    if (!map || typeof map !== "object") continue;
+    for (const decision of Object.values(map)) {
+      if (decision && typeof decision === "object" && NEEDS_DECISION_ACTIONS.has(String((decision as { action?: unknown }).action))) count += 1;
+    }
+  }
+  return count;
+}
+
 // Whether a draft is old/inactive enough to no longer offer for resume,
 // even though the row itself may still physically exist in D1 (cleanup is
 // lazy/opportunistic, not the source of truth for usability).

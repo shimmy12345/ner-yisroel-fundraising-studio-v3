@@ -3,6 +3,8 @@ import { env } from "cloudflare:workers";
 import { requireChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { isoDate, suggestedDonationRange } from "../../../lib/import/jl-refresh";
+import { IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL } from "../../../lib/data-health/queries";
+import { countUnresolvedDecisions } from "../../../lib/import/preview-session";
 import { ImportExperience, type RefreshOverview } from "./ImportExperience";
 
 export const metadata: Metadata = { title: "Import donor data" };
@@ -14,9 +16,14 @@ type HistoryRow = { id: string; file_name: string; status: string; completed_at:
 export default async function ImportPage() {
   const identity = await requireChatGPTUser("/onboarding/import");
   const profile = await ensureUserProfile(identity);
-  const [state, imports] = await Promise.all([
+  const [state, imports, sessions] = await Promise.all([
     env.DB.prepare("SELECT last_household_refresh_at, last_donation_refresh_at, last_donation_range_start, last_donation_range_end FROM jl_refresh_state WHERE user_id = ? LIMIT 1").bind(profile.id).first<RefreshRow>(),
     env.DB.prepare("SELECT id, file_name, status, completed_at, report_json FROM data_imports WHERE user_id = ? AND status IN ('completed','undone','rolled_back','failed') ORDER BY completed_at DESC, created_at DESC LIMIT 12").bind(profile.id).all<HistoryRow>(),
+    // Same canonical, decisions_json-based review-state query Workspace
+    // Health uses (lib/data-health/queries.ts) -- never a completed import's
+    // frozen report_json, which stops meaning "still pending" the moment a
+    // row is explicitly decided (see countUnresolvedDecisions).
+    env.DB.prepare(IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL).bind(profile.id).all<{ status: string; decisions_json: string; expires_at: number }>(),
   ]);
   const suggestion = suggestedDonationRange(state?.last_donation_range_end ?? null);
   let latestCompletedDonationId: string | null = null;
@@ -38,15 +45,23 @@ export default async function ImportPage() {
       kind: report.profile === "JL Solutions Donations" ? "Donation" : report.profile === "JL Solutions" ? "Household" : "Spreadsheet",
       summary: donation ? `${donation.newActivities ?? 0} new · ${donation.updatedPledges ?? 0} updated · ${donation.unchanged ?? 0} unchanged` : `${imported?.donors ?? 0} households processed` };
   });
-  const latestReviewReport = parsedImports.find(({ row, report }) => row.status === "completed" && report.profile === "JL Solutions Donations");
-  const latestResults = latestReviewReport?.report.results as { rowsRequiringReview?: number } | undefined;
-  const latestDonation = latestReviewReport?.report.donation as { needsReview?: number } | undefined;
+  const now = Math.floor(Date.now() / 1000);
+  // Only active, unexpired drafts can hold a genuinely unresolved decision --
+  // a committed session's last-saved decisions_json can lag behind exactly
+  // what was submitted at commit time (the debounced draft-save is not
+  // guaranteed to have fired again after the final decision was made), and
+  // every decision-driven review path already blocks commit on a real
+  // unresolved fingerprint before anything is written. Counting a committed
+  // session here would risk exactly the stale-count bug this fixes.
+  const pendingReviews = (sessions.results ?? [])
+    .filter((session) => session.status === "draft" && session.expires_at > now)
+    .reduce((sum, session) => sum + countUnresolvedDecisions(session.decisions_json), 0);
   const refreshOverview: RefreshOverview = {
     lastHouseholdRefreshAt: state?.last_household_refresh_at ? new Date(state.last_household_refresh_at * 1000).toISOString() : null,
     lastDonationRefreshAt: state?.last_donation_refresh_at ? new Date(state.last_donation_refresh_at * 1000).toISOString() : null,
     lastDonationRangeStart: isoDate(state?.last_donation_range_start ?? null), lastDonationRangeEnd: isoDate(state?.last_donation_range_end ?? null),
     suggestedRangeStart: isoDate(suggestion.start), suggestedRangeEnd: isoDate(suggestion.end),
-    pendingReviews: latestResults?.rowsRequiringReview ?? latestDonation?.needsReview ?? 0,
+    pendingReviews,
     undoAvailable: history.filter((item) => item.canUndo).length,
     history,
   };
