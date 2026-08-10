@@ -22,7 +22,13 @@ async function run() {
   assert.match(profileRoute, /organizationName/);
   assert.match(profileRoute, /timezone/);
   assert.match(shell, /profile\.fullName/);
-  assert.match(today, /Good morning, \{profile\.preferredFirstName\}/);
+  // The greeting must be computed from the actual time of day in the
+  // user's stored timezone, not a hardcoded "Good morning" -- see
+  // tests/local-time.test.mjs for the full boundary/timezone regression
+  // coverage of timeOfDayGreeting itself.
+  assert.match(today, /\{greeting\}, \{profile\.preferredFirstName\}/);
+  assert.match(today, /timeOfDayGreeting\(now, profile\.timezone\)/);
+  assert.doesNotMatch(today, /Good morning, \{profile\.preferredFirstName\}/, "the greeting must never be a hardcoded literal again");
   assert.match(today, /LocalDate timezone=\{profile\.timezone\}/);
 
   assert.match(live, /data_source = 'live'/);

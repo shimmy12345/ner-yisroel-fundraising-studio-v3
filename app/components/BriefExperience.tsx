@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { WorkspaceBrief } from "../../lib/workspace/live-data";
+import { localDayKey } from "../../lib/workspace/local-time";
 import { useBriefSpeech } from "./useBriefSpeech";
 
 export function createBriefText(data: WorkspaceBrief) {
@@ -12,7 +13,7 @@ export function createBriefText(data: WorkspaceBrief) {
   return `Your full morning brief. ${data.overview} Today’s schedule. ${todaySchedule} Upcoming activities. ${upcoming} Top priorities. ${priorities} Recent gifts. ${gifts} Recommended focus. ${data.recommendation}`;
 }
 
-export function BriefExperience({ surface, data }: { surface: "today" | "assistant"; data: WorkspaceBrief }) {
+export function BriefExperience({ surface, data, timezone }: { surface: "today" | "assistant"; data: WorkspaceBrief; timezone: string }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [completedToday, setCompletedToday] = useState(false);
   const [showAgain, setShowAgain] = useState(false);
@@ -20,7 +21,10 @@ export function BriefExperience({ surface, data }: { surface: "today" | "assista
   const speech = useBriefSpeech(briefText);
   const id = `${surface}-full-brief`;
   const active = ["loading", "playing", "paused"].includes(speech.state);
-  const completionKey = useMemo(() => `fundraising-os:morning-brief:${new Date().toLocaleDateString("en-CA")}`, []);
+  // The user's own local calendar day, not the browser's -- a device set
+  // to a different timezone than the stored profile must never reset (or
+  // fail to reset) "completed today" at the wrong moment.
+  const completionKey = useMemo(() => `fundraising-os:morning-brief:${localDayKey(Math.floor(Date.now() / 1000), timezone)}`, [timezone]);
 
   useEffect(() => {
     if (surface === "today" && window.localStorage.getItem(completionKey) === "completed") setCompletedToday(true);

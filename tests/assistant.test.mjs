@@ -38,9 +38,9 @@ async function run() {
   const speech = await readFile(new URL("../app/components/useBriefSpeech.ts", import.meta.url), "utf8");
   const today = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /<AssistantExperience brief=\{brief\} \/>/);
-  assert.match(today, /<BriefExperience surface="today" data=\{data\} \/>/);
-  assert.match(assistant, /<BriefExperience surface="assistant" data=\{brief\} \/>/);
+  assert.match(page, /<AssistantExperience brief=\{brief\} timezone=\{profile\.timezone\} \/>/);
+  assert.match(today, /<BriefExperience surface="today" data=\{data\} timezone=\{profile\.timezone\} \/>/);
+  assert.match(assistant, /<BriefExperience surface="assistant" data=\{brief\} timezone=\{timezone\} \/>/);
   assert.match(brief, /Read full brief/);
   assert.match(brief, /Collapse full brief/);
   assert.match(brief, /aria-expanded=\{isExpanded\}/);

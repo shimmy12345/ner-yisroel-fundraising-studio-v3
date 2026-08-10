@@ -22,7 +22,7 @@ export default async function AssistantPage() {
           <h1>What can I help with?</h1>
           <p>I use your live donor, gift, interaction, and reminder records.</p>
         </header>
-        <AssistantExperience brief={brief} />
+        <AssistantExperience brief={brief} timezone={profile.timezone} />
       </main>
     </AppShell>
   );

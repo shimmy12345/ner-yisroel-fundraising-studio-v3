@@ -7,6 +7,7 @@ import { WelcomeExperience } from "./onboarding/WelcomeExperience";
 import { requireChatGPTUser } from "./chatgpt-auth";
 import { ensureUserProfile } from "../lib/auth/profile";
 import { loadWorkspaceBrief, type WorkspaceScheduledActivity } from "../lib/workspace/live-data";
+import { timeOfDayGreeting } from "../lib/workspace/local-time";
 import { shouldShowOnboarding } from "../lib/onboarding/status";
 import { getDataMode } from "../lib/workspace/mode";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../lib/navigation/donor-navigation";
@@ -40,7 +41,9 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const profile = await ensureUserProfile(identity);
   const mode = await getDataMode(profile.id);
   const showAll = (await searchParams).priorities === "all";
-  const data = await loadWorkspaceBrief(profile.id, profile.timezone, mode, Math.floor(Date.now() / 1000), showAll ? 50 : 10);
+  const now = Math.floor(Date.now() / 1000);
+  const data = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now, showAll ? 50 : 10);
+  const greeting = timeOfDayGreeting(now, profile.timezone);
   const agendaQueueCount = data.relationshipQueue.overdue.length + data.relationshipQueue.today.length;
   const comingQueueCount = data.relationshipQueue.thisWeek.length + data.relationshipQueue.upcoming.length;
   const agendaIsEmpty = agendaQueueCount === 0 && data.todaySchedule.length === 0;
@@ -48,7 +51,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const visibleUpcomingActivities = showAll ? data.upcomingActivities : data.upcomingActivities.slice(0, agendaIsEmpty ? 5 : 3);
 
   return <AppShell active="today">
-    <header className="page-header today-header"><div><p className="eyebrow today-date"><LocalDate timezone={profile.timezone} /></p><h1>Good morning, {profile.preferredFirstName}.</h1><p className="subhead">Start with today. The most urgent relationship work is already at the top.</p></div></header>
+    <header className="page-header today-header"><div><p className="eyebrow today-date"><LocalDate timezone={profile.timezone} /></p><h1>{greeting}, {profile.preferredFirstName}.</h1><p className="subhead">Start with today. The most urgent relationship work is already at the top.</p></div></header>
 
     <div className={`today-command-grid ${agendaIsEmpty ? "agenda-empty" : ""}`}>
       <section className="today-command-section today-agenda" aria-labelledby="today-agenda-title">
@@ -79,6 +82,6 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       </nav>
     </section>
 
-    <section className="today-brief-section" aria-labelledby="morning-brief-section-title"><div className="command-section-heading"><div><p className="eyebrow">DAILY PREP</p><h2 id="morning-brief-section-title">Morning Brief</h2></div></div><BriefExperience surface="today" data={data} /></section>
+    <section className="today-brief-section" aria-labelledby="morning-brief-section-title"><div className="command-section-heading"><div><p className="eyebrow">DAILY PREP</p><h2 id="morning-brief-section-title">Morning Brief</h2></div></div><BriefExperience surface="today" data={data} timezone={profile.timezone} /></section>
   </AppShell>;
 }

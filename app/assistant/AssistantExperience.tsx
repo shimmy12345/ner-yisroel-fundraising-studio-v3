@@ -15,7 +15,7 @@ const tools: Array<{ task: AssistantTask; icon: string; label: string }> = [
   { task: "executive-summary", icon: "↗", label: "Summarize this month for the president" },
 ];
 
-export function AssistantExperience({ brief }: { brief: WorkspaceBrief }) {
+export function AssistantExperience({ brief, timezone }: { brief: WorkspaceBrief; timezone: string }) {
   const [prompt, setPrompt] = useState("");
   const [state, setState] = useState<SubmissionState>("idle");
   const [result, setResult] = useState<AIResult | null>(null);
@@ -82,7 +82,7 @@ export function AssistantExperience({ brief }: { brief: WorkspaceBrief }) {
 
   return (
     <div className="assistant-experience">
-      <BriefExperience surface="assistant" data={brief} />
+      <BriefExperience surface="assistant" data={brief} timezone={timezone} />
 
       <section className="suggestions" aria-label="Suggested prompts">
         {tools.map((tool) => (
