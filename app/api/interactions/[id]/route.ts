@@ -62,7 +62,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const wasCompleted = isCompletedActivity(existing.source);
   const scheduled = !wasCompleted && occurredAt.getTime() > nowDate.getTime();
   const reminder = reminders.has(body.reminder ?? "none") ? body.reminder ?? "none" : "none";
-  const dueAt = reminderDueAt(reminder, body.customDate, nowDate);
+  const dueAt = reminderDueAt(reminder, body.customDate, nowDate, profile.timezone);
   if (reminder === "custom" && !dueAt) return Response.json({ error: "Choose a custom reminder date" }, { status: 422 });
   const next = extractInteraction(note, body.type, body.subject);
   const old = extraction(existing);

@@ -1,3 +1,5 @@
+import { addCalendarDays, localDateParts, zonedTimeToUtc } from "../workspace/local-time.ts";
+
 export type InteractionKind = "call" | "email" | "meeting" | "visit" | "note" | "personal";
 export type ReminderChoice = "none" | "tomorrow" | "next-week" | "custom";
 
@@ -147,18 +149,30 @@ export function splitInteractionSummary(summary: string) {
   return { subject, note, timelineTitle: subject.trim() || "Interaction Note", timelineNote: (subject.trim() ? note.trim() : firstLine) || "No additional notes recorded." };
 }
 
-export function reminderDueAt(choice: ReminderChoice, customDate: string | undefined, now: Date): Date | null {
+// "tomorrow"/"next-week" are relative to the user's own local calendar day
+// (in `timezone`, not the Cloudflare Worker's UTC runtime clock), and
+// every reminder lands at 9:00 AM local wall-clock time on its target day
+// -- never 9:00 AM UTC. `timezone` defaults to "America/New_York" (this
+// workspace's expected default, matching lib/auth/profile.ts) only when a
+// caller genuinely has no stored profile timezone to pass; ordinary
+// callers should always pass profile.timezone.
+export function reminderDueAt(choice: ReminderChoice, customDate: string | undefined, now: Date, timezone = "America/New_York"): Date | null {
   if (choice === "none") return null;
-  const due = new Date(now);
-  due.setHours(9, 0, 0, 0);
-  if (choice === "tomorrow") due.setDate(due.getDate() + 1);
-  if (choice === "next-week") due.setDate(due.getDate() + 7);
+  const nowSeconds = Math.floor(now.getTime() / 1000);
+  if (choice === "tomorrow") {
+    const target = addCalendarDays(localDateParts(nowSeconds, timezone), 1);
+    return zonedTimeToUtc(target.year, target.month, target.day, 9, 0, timezone);
+  }
+  if (choice === "next-week") {
+    const target = addCalendarDays(localDateParts(nowSeconds, timezone), 7);
+    return zonedTimeToUtc(target.year, target.month, target.day, 9, 0, timezone);
+  }
   if (choice === "custom") {
     if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) return null;
     const [year, month, day] = customDate.split("-").map(Number);
-    due.setFullYear(year, month - 1, day);
+    return zonedTimeToUtc(year, month, day, 9, 0, timezone);
   }
-  return due;
+  return null;
 }
 
 export function extractInteraction(note: string, requestedKind?: InteractionKind, requestedSubject?: string): InteractionExtraction {

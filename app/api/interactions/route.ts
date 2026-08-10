@@ -38,20 +38,20 @@ export async function POST(request: Request) {
   }
   if (body.type && !kinds.has(body.type)) return Response.json({ error: "Invalid interaction type" }, { status: 422 });
 
+  const profile = await ensureUserProfile(user);
+  const userId = profile.id;
   const extracted = extractInteraction(note, body.type, body.subject);
   const capturedAt = new Date();
   const occurredAt = body.occurredAt ? new Date(body.occurredAt) : capturedAt;
   if (!Number.isFinite(occurredAt.getTime())) return Response.json({ error: "Choose a valid interaction date and time" }, { status: 422 });
   const scheduled = occurredAt.getTime() > capturedAt.getTime();
   const reminder = reminders.has(body.reminder ?? "none") ? body.reminder ?? "none" : "none";
-  const dueAt = reminderDueAt(reminder, body.customDate, capturedAt);
+  const dueAt = reminderDueAt(reminder, body.customDate, capturedAt, profile.timezone);
   if (reminder === "custom" && !dueAt) return Response.json({ error: "Choose a custom reminder date" }, { status: 422 });
 
   const occurredAtEpoch = Math.floor(occurredAt.getTime() / 1000);
   const now = Math.floor(capturedAt.getTime() / 1000);
   const interactionId = crypto.randomUUID();
-  const profile = await ensureUserProfile(user);
-  const userId = profile.id;
   const ownedDonor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live'").bind(donorId, userId).first<{ id: string }>();
   if (!ownedDonor) return Response.json({ error: "Donor not found" }, { status: 404 });
   const storedType = extracted.type;

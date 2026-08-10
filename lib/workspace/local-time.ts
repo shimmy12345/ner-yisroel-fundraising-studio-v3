@@ -30,3 +30,55 @@ export function timeOfDayGreeting(epochSeconds: number, timezone: string): TimeO
   if (hour >= 12 && hour < 17) return "Good afternoon";
   return "Good evening";
 }
+
+// Calendar date (year, 1-indexed month, day) in the given timezone, for an
+// absolute Unix timestamp (seconds) -- the numeric form of localDayKey,
+// for callers that need to do calendar arithmetic on it.
+export function localDateParts(epochSeconds: number, timezone: string): { year: number; month: number; day: number } {
+  const [year, month, day] = localDayKey(epochSeconds, timezone).split("-").map(Number);
+  return { year, month, day };
+}
+
+// Adds (or subtracts) whole calendar days to a Y-M-D date, handling
+// month/year rollover. Pure calendar arithmetic -- deliberately anchored
+// to UTC internally so it is never affected by DST (a calendar day is a
+// calendar day regardless of timezone; only the later local-wall-clock ->
+// UTC conversion needs to know about DST).
+export function addCalendarDays(date: { year: number; month: number; day: number }, days: number): { year: number; month: number; day: number } {
+  const anchor = new Date(Date.UTC(date.year, date.month - 1, date.day));
+  anchor.setUTCDate(anchor.getUTCDate() + days);
+  return { year: anchor.getUTCFullYear(), month: anchor.getUTCMonth() + 1, day: anchor.getUTCDate() };
+}
+
+// The timezone's UTC offset, in minutes to ADD to a UTC instant to get its
+// local wall-clock reading (e.g. America/New_York in EDT returns -240;
+// in EST, -300).
+function timezoneOffsetMinutes(epochMs: number, timezone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(new Date(epochMs));
+  const value = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
+  // Reinterpreting the local wall-clock reading as if it were itself UTC
+  // gives an instant whose difference from the true UTC instant is
+  // exactly the timezone's offset at that moment.
+  const asUtc = Date.UTC(value("year"), value("month") - 1, value("day"), value("hour"), value("minute"), value("second"));
+  return (asUtc - epochMs) / 60000;
+}
+
+// Converts a local wall-clock date/time (year, 1-indexed month, day, hour,
+// minute) in the given IANA timezone into the absolute UTC instant it
+// represents. DST-safe: a naive guess (treating the wall-clock fields as
+// if they were UTC) is corrected by the timezone's actual offset, then
+// re-checked once more in case that correction crossed a DST transition
+// (e.g. a "tomorrow at 9am" reminder created the day before, or on the day
+// of, a spring-forward/fall-back change still lands on exactly 9:00 AM
+// local wall-clock time on the target day).
+export function zonedTimeToUtc(year: number, month: number, day: number, hour: number, minute: number, timezone: string): Date {
+  const naiveUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const offset = timezoneOffsetMinutes(naiveUtcMs, timezone);
+  const correctedMs = naiveUtcMs - offset * 60000;
+  const offsetAtCorrected = timezoneOffsetMinutes(correctedMs, timezone);
+  const finalMs = offsetAtCorrected === offset ? correctedMs : naiveUtcMs - offsetAtCorrected * 60000;
+  return new Date(finalMs);
+}
