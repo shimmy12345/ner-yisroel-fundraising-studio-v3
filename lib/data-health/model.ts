@@ -50,13 +50,19 @@ export type DataHealthFacts = {
   schemaComparisonDifferences: string[];
   businessDataRows: number | null;
   // Same set of tables as businessDataRows, minus the app's own
-  // account/configuration tables (users, onboarding_preferences). Used only
-  // by the independent-staging summary's "Business data" check, so the
-  // existing business-data-state check above keeps its original meaning.
+  // account/configuration tables (users, onboarding_preferences). Kept for
+  // the backup-safety gate and rehearsal scripts, which depend on this
+  // exact, audit-inclusive definition -- the independent-staging "Business
+  // data" card itself now displays businessRecordCounts instead (below).
   fundraisingDataRows: number | null;
   // Row count for the app's own account/configuration tables. Used only by
   // the independent-staging summary's "Account setup" check.
   accountConfigurationRows: number | null;
+  // Real fundraising records only -- never import batches, change audits,
+  // or draft-session bookkeeping. Used by the independent-staging "Business
+  // data" card so it never conflates operational metadata with the
+  // donor/gift data it actually exists to report on.
+  businessRecordCounts: { donors: number; givingActivities: number; interactions: number; reminders: number } | null;
   activeDonors: number | null;
   duplicateJlCodes: number | null;
   orphanedGifts: number | null;
@@ -69,7 +75,22 @@ export type DataHealthFacts = {
   invalidGivingRows: number | null;
   duplicateGivingFingerprints: number | null;
   unmatchedJlCodes: number | null;
+  // Real, currently-unresolved payment/pledge decisions inside this owner's
+  // active (status='draft', unexpired) review drafts only -- never derived
+  // from a completed import's frozen report_json. A completed import can
+  // never contribute: the commit route rejects any unresolved payment
+  // decision before writing anything, so "pending" can only exist
+  // pre-commit. Skip and review_later on a non-payment duplicate are
+  // resolved decisions in a different map entirely and are never counted.
   pendingPledgeAssignments: number | null;
+  // Rows explicitly saved with a "review later" decision, summed across
+  // every committed session this owner has (see countReviewLaterDecisions).
+  // Distinct from pendingPledgeAssignments (an active, uncommitted draft)
+  // and from skip (fully resolved, never counted anywhere as pending).
+  savedForLaterReviewRows: number | null;
+  // Count of this owner's still-open (status='draft', unexpired) review
+  // drafts, regardless of what decisions they contain.
+  unresolvedActiveDrafts: number | null;
   failedOrIncompleteImports: number | null;
   lastHouseholdRefreshAt: number | null;
   lastDonationRefreshAt: number | null;
@@ -102,7 +123,18 @@ export type DataHealthReport = {
   };
 };
 
+// Continues to gate production launch readiness specifically -- production
+// is deliberately pinned to the verified 0019 baseline until it is itself
+// migrated forward, a separate decision from what independent staging runs.
 export const EXPECTED_MIGRATION_LEVEL = "0019";
+// The newest migration inferMigrationLevel can currently detect via schema
+// inspection. Kept distinct from EXPECTED_MIGRATION_LEVEL: independent
+// staging intentionally runs ahead of production's pinned baseline, and its
+// "Live schema version" card must compare against what it actually has, not
+// production's separate expectation. 0020_financial_date_only.sql is
+// data-only and has no schema signature, so it is never detectable this way
+// -- 0021 and 0022 both changed import_preview_sessions and are.
+export const LATEST_MIGRATION_LEVEL = "0022";
 export const APP_VERSION = "0.1.0";
 
 export const EXPECTED_MIGRATION_TAGS = [
@@ -259,12 +291,19 @@ function productionReadinessCheck(facts: DataHealthFacts, productionReady: boole
   };
 }
 
-const INDEPENDENT_STAGING_BASELINE_LABEL: Record<DataHealthFacts["productionBaselineState"], string> = {
-  verified: "Verified",
-  "not-applied": "Not yet applied",
-  "hash-mismatch": "Mismatch",
-  unreadable: "Unknown",
-  "not-applicable": "Unknown",
+// production_schema_baseline is a historical, point-in-time stamp -- it is
+// never rewritten automatically when a later migration is applied to this
+// environment's D1. A stale hash here means exactly that (a stamp from
+// before some later migration), never that the live schema is corrupt or
+// unexpected: "Staging ↔ baseline schema" below does the authoritative,
+// always-current structural comparison against the *current* packaged
+// baseline and is what actually proves live-schema integrity.
+const INDEPENDENT_STAGING_BASELINE_STATUS: Record<DataHealthFacts["productionBaselineState"], HealthStatus> = {
+  verified: "healthy",
+  "not-applied": "attention", // a genuine setup gap: the baseline was never applied at all, distinct from a merely stale stamp
+  "hash-mismatch": "info",
+  unreadable: "unavailable",
+  "not-applicable": "unavailable",
 };
 
 // The independent staging Worker/D1 is bootstrapped from the same verified
@@ -276,10 +315,10 @@ const INDEPENDENT_STAGING_BASELINE_LABEL: Record<DataHealthFacts["productionBase
 // environment, which remains classified as "staging" throughout this file.
 function independentStagingSummaryChecks(facts: DataHealthFacts): HealthCheck[] {
   const baselineState = facts.productionBaselineState;
-  const baselineStatus: HealthStatus =
-    baselineState === "verified" ? "healthy"
-    : baselineState === "unreadable" || baselineState === "not-applicable" ? "unavailable"
-    : "critical";
+  const baselineStatus = INDEPENDENT_STAGING_BASELINE_STATUS[baselineState];
+  const stampedAt = facts.productionBaselineVerifiedAt;
+  const counts = facts.businessRecordCounts;
+  const businessTotal = counts ? counts.donors + counts.givingActivities + counts.interactions + counts.reminders : null;
   return [
     {
       id: "independent-staging-environment",
@@ -290,33 +329,41 @@ function independentStagingSummaryChecks(facts: DataHealthFacts): HealthCheck[] 
     },
     {
       id: "independent-staging-baseline",
-      label: "Baseline",
+      label: "Baseline lineage",
       status: baselineStatus,
-      value: INDEPENDENT_STAGING_BASELINE_LABEL[baselineState],
+      value: baselineState === "not-applied" ? "0019 · Not yet applied"
+        : baselineState === "unreadable" || baselineState === "not-applicable" ? "0019 · Unknown"
+        : baselineState === "hash-mismatch" ? `0019 · Stale stamp${stampedAt ? ` (${stampedAt.slice(0, 10)})` : ""}`
+        : `0019 · Verified${stampedAt ? ` · stamped ${stampedAt.slice(0, 10)}` : ""}`,
       explanation:
-        baselineState === "verified" ? "This environment's D1 carries the production_schema_baseline marker and its schema_hash matches the packaged 0019 baseline exactly."
+        baselineState === "verified" ? `production_schema_baseline is a historical stamp confirming this database originated from the verified 0019 baseline${stampedAt ? ` (written ${stampedAt})` : ""}. Its recorded hash currently matches the packaged baseline exactly.`
         : baselineState === "not-applied" ? "The verified 0019 baseline SQL has not been applied to this environment's D1 yet."
-        : baselineState === "hash-mismatch" ? "This environment's baseline marker does not match the packaged 0019 baseline."
+        : baselineState === "hash-mismatch" ? `production_schema_baseline is a historical, point-in-time stamp${stampedAt ? ` written ${stampedAt}` : ""} — it is never rewritten automatically when a later migration is applied. Its hash no longer matches the packaged baseline because migrations have been applied to this environment since it was stamped. This reflects the baseline's age, not a corrupt or unexpected live schema — see "Live schema version" and "Staging ↔ baseline schema" for the current, authoritative checks.`
         : "The baseline marker could not be read. This is not a confirmed failure — the check could not complete.",
       evidence: {
-        expected: "A production_schema_baseline row for id '0019' whose schema_hash equals the packaged baseline's schemaHash.",
+        expected: "A production_schema_baseline row for id '0019', which is a historical stamp rather than a continuously-reverified marker.",
         actual: facts.productionBaselineEvidenceSource,
         evidenceSource: facts.productionBaselineEvidenceSource,
         lastVerifiedAt: facts.productionBaselineVerifiedAt,
-        severity: baselineStatus === "healthy" ? "none" : baselineStatus === "unavailable" ? "medium" : "high",
-        businessDataAtRisk: baselineState === "hash-mismatch",
-        repairStep: baselineState === "verified" ? "None." : "Apply production-baseline/drizzle/0000_production_baseline_0019.sql to this environment's D1, then reload this page to re-verify.",
+        severity: baselineStatus === "healthy" || baselineStatus === "info" ? "none" : baselineStatus === "unavailable" ? "medium" : "high",
+        // A stale stamp is expected drift, not a business-data risk — the
+        // structural comparison (schema-comparison) is what actually
+        // verifies the live schema, and businessDataAtRisk here must never
+        // imply a hash-mismatch alone puts data at risk.
+        businessDataAtRisk: false,
+        repairStep: baselineState === "not-applied" ? "Apply production-baseline/drizzle/0000_production_baseline_0019.sql to this environment's D1, then reload this page to re-verify." : "None. If you want the stamp itself refreshed, that is a separate, explicit maintenance action — not a repair.",
       },
     },
     {
       id: "independent-staging-business-data",
       label: "Business data",
-      status: facts.fundraisingDataRows === null ? "unavailable" : facts.fundraisingDataRows === 0 ? "healthy" : "attention",
-      value: facts.fundraisingDataRows === null ? "Not checked" : facts.fundraisingDataRows === 0 ? "Empty" : `Contains ${facts.fundraisingDataRows.toLocaleString("en-US")} row(s)`,
+      status: businessTotal === null ? "unavailable" : "healthy",
+      value: businessTotal === null ? "Not checked" : businessTotal === 0 ? "Empty" : `${counts!.donors.toLocaleString("en-US")} donor${counts!.donors === 1 ? "" : "s"} · ${counts!.givingActivities.toLocaleString("en-US")} giving activit${counts!.givingActivities === 1 ? "y" : "ies"} · ${counts!.interactions.toLocaleString("en-US")} interaction${counts!.interactions === 1 ? "" : "s"} · ${counts!.reminders.toLocaleString("en-US")} reminder${counts!.reminders === 1 ? "" : "s"}`,
       explanation:
-        facts.fundraisingDataRows === null ? "The application tables could not be counted."
-        : facts.fundraisingDataRows === 0 ? "No donors, gifts, giving activities, interactions, reminders, imports, or related fundraising records are stored in this environment. The owner's own account row is tracked separately under Account setup and is never counted here."
-        : "This environment contains fundraising records — it is expected to remain empty.",
+        businessTotal === null ? "The application tables could not be counted."
+        : businessTotal === 0 ? "No donors, giving activities, interactions, or reminders are stored in this environment. The owner's own account row is tracked separately under Account setup and is never counted here."
+        : "This independent staging environment is intentionally populated with real fundraising test data for staging validation. Import batches, change audits, and draft-review bookkeeping are tracked separately from these business-record counts, not blended into them.",
+      ...(businessTotal !== null && businessTotal > 0 ? { diagnosticLines: [`${counts!.donors.toLocaleString("en-US")} donor(s).`, `${counts!.givingActivities.toLocaleString("en-US")} giving activit${counts!.givingActivities === 1 ? "y" : "ies"}.`, `${counts!.interactions.toLocaleString("en-US")} interaction(s).`, `${counts!.reminders.toLocaleString("en-US")} reminder(s).`] } : {}),
     },
     {
       id: "independent-staging-account-setup",
@@ -354,7 +401,26 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       value: facts.databaseConnected ? "Connected" : "Unavailable",
       explanation: facts.databaseConnected ? "Fundraising OS can read the D1 workspace." : "Fundraising OS could not read D1. No workspace integrity checks were completed.",
     },
-    { id: "live-schema", label: "Live schema version", status: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "healthy" : "critical", value: `${facts.currentMigrationLevel ?? "Unknown"} / ${EXPECTED_MIGRATION_LEVEL}`, explanation: facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL ? "The live D1 schema contains every expected table and column." : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled." },
+    (() => {
+      // Independent staging intentionally runs ahead of production's
+      // pinned 0019 expectation (it has migrations 0021/0022 applied);
+      // comparing it against EXPECTED_MIGRATION_LEVEL would falsely read
+      // as a mismatch. Production and legacy staging keep the original
+      // comparison unchanged.
+      const expected = deploymentEnvironment === "staging-independent" ? LATEST_MIGRATION_LEVEL : EXPECTED_MIGRATION_LEVEL;
+      const matches = facts.schemaReady && facts.currentMigrationLevel === expected;
+      return {
+        id: "live-schema",
+        label: "Live schema version",
+        status: matches ? "healthy" : "critical",
+        value: `${facts.currentMigrationLevel ?? "Unknown"} / ${expected}`,
+        explanation: matches
+          ? deploymentEnvironment === "staging-independent"
+            ? "The live D1 schema contains every expected table and column through migration 0022. Migration 0020 is data-only and has no schema signature, so it cannot be independently verified by schema inspection alone — see \"Staging ↔ baseline schema\" for the authoritative structural comparison."
+            : "The live D1 schema contains every expected table and column."
+          : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled.",
+      };
+    })(),
     deploymentEnvironment === "production"
       ? { id: "staging-migration-history", label: "Production migration history", status: productionBaselineApplied ? "healthy" : "critical", value: productionBaselineApplied ? "Baseline 0019" : "Unverified", explanation: productionBaselineApplied ? "This database was created from the verified 0019 production baseline. Legacy staging history was not copied." : "The production baseline marker or schema hash is missing. Do not load business data." }
       : { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
@@ -404,13 +470,47 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       ...(facts.unmatchedJlCodes !== null && facts.unmatchedJlCodes > 0 ? { actionHref: "/onboarding/import", actionLabel: "Review import report" } : {}),
     },
     {
+      // Scoped to active (status='draft', unexpired) review drafts only --
+      // see countPendingPaymentDecisions. A completed import can never
+      // contribute: the commit route rejects any unresolved payment
+      // decision before writing anything, so "pending" can only exist
+      // pre-commit. Skip and review_later are resolved decisions in a
+      // different decision map and are never counted here.
       id: "pending-pledge-assignments",
       label: "Pending pledge assignments",
       status: facts.pendingPledgeAssignments === null ? "unavailable" : facts.pendingPledgeAssignments > 0 ? "attention" : "healthy",
       value: numberValue(facts.pendingPledgeAssignments),
-      explanation: facts.pendingPledgeAssignments === null ? "Pledge-assignment review could not be checked." : facts.pendingPledgeAssignments > 0 ? "Donation rows from the latest import still require a classification or pledge decision." : "No pledge-assignment decisions are waiting from the latest donation import.",
-      ...(facts.pendingPledgeAssignments !== null && facts.pendingPledgeAssignments > 0 ? { actionHref: "/onboarding/import", actionLabel: "Resolve assignments" } : {}),
+      explanation: facts.pendingPledgeAssignments === null ? "Pledge-assignment review could not be checked." : facts.pendingPledgeAssignments > 0 ? "An active, unfinished review draft has a payment or pledge-assignment decision still marked \"needs review\"." : "No active review draft has an unresolved payment or pledge-assignment decision. A completed import is never counted here — every payment decision is resolved before a commit can succeed.",
+      ...(facts.pendingPledgeAssignments !== null && facts.pendingPledgeAssignments > 0 ? { actionHref: "/onboarding/import", actionLabel: "Resume review" } : {}),
     },
+    (() => {
+      const importReviewValues = [facts.savedForLaterReviewRows, facts.unresolvedActiveDrafts, facts.failedOrIncompleteImports];
+      // Treats a genuinely-unset value the same as null/unavailable, rather
+      // than risking a crash formatting `undefined` -- real usage
+      // (lib/data-health/read.ts) always assigns a number or an explicit
+      // null, so this only matters for incompletely-constructed facts.
+      const checked = importReviewValues.every((value): value is number => typeof value === "number");
+      const safeNumber = (value: number | null | undefined) => (value ?? 0).toLocaleString("en-US");
+      const anyOutstanding = checked && (facts.savedForLaterReviewRows! > 0 || facts.unresolvedActiveDrafts! > 0 || facts.failedOrIncompleteImports! > 0);
+      return {
+        // Distinct from pending-pledge-assignments above: this covers
+        // decisions/imports that are resolved-but-deferred (review later),
+        // still in progress (an open draft), or never reached completion --
+        // never a row the user explicitly chose to Skip, which is a fully
+        // resolved outcome and is never counted anywhere as pending.
+        id: "import-review-state",
+        label: "Import review state",
+        status: !checked ? "unavailable" : anyOutstanding ? "attention" : "healthy",
+        value: !checked ? "Not checked" : `${safeNumber(facts.savedForLaterReviewRows)} saved · ${safeNumber(facts.unresolvedActiveDrafts)} unresolved · ${safeNumber(facts.failedOrIncompleteImports)} failed`,
+        explanation: "Rows explicitly saved for later review, drafts still in progress, and import batches that failed or never completed — tracked independently of each other and of Pending pledge assignments above. A row explicitly marked Skip is fully resolved and is never counted here.",
+        ...(checked ? { diagnosticLines: [
+          `${safeNumber(facts.savedForLaterReviewRows)} row(s) saved for later review.`,
+          `${safeNumber(facts.unresolvedActiveDrafts)} unresolved active draft(s).`,
+          `${safeNumber(facts.failedOrIncompleteImports)} failed or incomplete import(s).`,
+        ] } : {}),
+        ...(anyOutstanding ? { actionHref: "/onboarding/import", actionLabel: "Open Import Center" } : {}),
+      };
+    })(),
     {
       id: "failed-imports",
       label: "Failed or incomplete imports",
@@ -462,11 +562,18 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
   };
 }
 
-export function inferMigrationLevel(tableNames: Iterable<string>, userColumns: Iterable<string>, donorColumns: Iterable<string>, givingColumns: Iterable<string>) {
+export function inferMigrationLevel(tableNames: Iterable<string>, userColumns: Iterable<string>, donorColumns: Iterable<string>, givingColumns: Iterable<string>, importPreviewSessionColumns: Iterable<string> = []) {
   const tables = new Set(tableNames);
   const users = new Set(userColumns);
   const donors = new Set(donorColumns);
   const giving = new Set(givingColumns);
+  const previewSessionColumns = new Set(importPreviewSessionColumns);
+  // 0020_financial_date_only.sql is data-only (it corrects already-stored
+  // date values) and has no schema signature at all -- it can never be
+  // proven from schema inspection, only 0021 and 0022 (both of which
+  // changed import_preview_sessions) can be.
+  if (previewSessionColumns.has("decisions_json") && previewSessionColumns.has("status") && previewSessionColumns.has("progress_resolved")) return "0022";
+  if (tables.has("import_preview_sessions")) return "0021";
   if (tables.has("legacy_test_cleanup_audits")) return "0019";
   if (tables.has("data_health_repair_audits")) return "0018";
   if (tables.has("relationship_queue_dismissals") && tables.has("donor_views")) return "0017";

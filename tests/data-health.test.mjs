@@ -82,7 +82,13 @@ test("fictional integrity failures are detected without exposing donor details",
     orphanedReminders: count(db, ORPHANED_REMINDERS_SQL, owner, owner), orphanedPayments: count(db, ORPHANED_PAYMENTS_SQL, owner, owner, owner),
     brokenMergeRedirects: count(db, BROKEN_MERGE_REDIRECTS_SQL, owner, owner),
     givingSourceTotalCents: Number(giving.source_total_cents), givingLinkedTotalCents: Number(giving.linked_total_cents), invalidGivingRows: Number(giving.invalid_rows),
-    duplicateGivingFingerprints: count(db, DUPLICATE_GIVING_FINGERPRINTS_SQL, owner), unmatchedJlCodes: Number(donation.unmatched_jl_codes), pendingPledgeAssignments: Number(donation.pending_assignments),
+    duplicateGivingFingerprints: count(db, DUPLICATE_GIVING_FINGERPRINTS_SQL, owner), unmatchedJlCodes: Number(donation.unmatched_jl_codes),
+    // Real pending-pledge-assignment state now comes only from active draft
+    // sessions, never from a completed import's report_json (see
+    // countPendingPaymentDecisions) -- this fictional import is already
+    // 'completed', so it must never contribute here regardless of its
+    // stored rowsRequiringReview value.
+    pendingPledgeAssignments: 0, savedForLaterReviewRows: 0, unresolvedActiveDrafts: 0,
     failedOrIncompleteImports: count(db, FAILED_IMPORTS_SQL, owner), lastHouseholdRefreshAt: Number(refresh.last_household_refresh_at), lastDonationRefreshAt: Number(refresh.last_donation_refresh_at), lastBackupAt: Number(backup.created_at),
     appVersion: APP_VERSION, deployedCommit: "fictional123456789",
   };
@@ -91,7 +97,7 @@ test("fictional integrity failures are detected without exposing donor details",
   assert.equal(facts.duplicateGivingFingerprints, 1);
   assert.notEqual(facts.givingSourceTotalCents, facts.givingLinkedTotalCents);
   assert.equal(facts.unmatchedJlCodes, 2);
-  assert.equal(facts.pendingPledgeAssignments, 3);
+  assert.equal(facts.pendingPledgeAssignments, 0, "a completed import (even one whose stored report predates the disposition fix) must never contribute to pending pledge assignments");
   assert.equal(facts.failedOrIncompleteImports, 1);
   const report = buildDataHealthReport(facts, "2026-08-05T12:00:00.000Z");
   assert.equal(report.status, "critical");
@@ -100,7 +106,7 @@ test("fictional integrity failures are detected without exposing donor details",
 });
 
 test("a healthy established workspace receives a clear green result", () => {
-  const report = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:12,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:100,givingLinkedTotalCents:100,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:now,lastDonationRefreshAt:now,lastBackupAt:now,appVersion:APP_VERSION,deployedCommit:"healthy123" });
+  const report = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:12,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:100,givingLinkedTotalCents:100,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,savedForLaterReviewRows:0,unresolvedActiveDrafts:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:now,lastDonationRefreshAt:now,lastBackupAt:now,appVersion:APP_VERSION,deployedCommit:"healthy123" });
   assert.equal(report.status,"healthy");
   assert.match(report.summary,/healthy/i);
 });
@@ -109,7 +115,7 @@ test("six-month edge cases avoid false green results", () => {
   assert.equal(MIGRATION_LEDGER_COMPLETE,false,"the known 0014-0017 journal gap remains visible until deliberately repaired");
   assert.equal(inferMigrationLevel(["donors","data_imports","donor_views","relationship_queue_dismissals","data_health_repair_audits","legacy_test_cleanup_audits"],[],[],[]),"0019");
   assert.equal(schemaIsReady(["donors"],[],[],[]),false,"a partially migrated database never runs deeper checks as zero");
-  const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastBackupAt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
+  const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,savedForLaterReviewRows:0,unresolvedActiveDrafts:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastBackupAt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
   assert.equal(newWorkspace.checks.find((check)=>check.id==="household-refresh").status,"info","a new manual-only workspace is not falsely failed for having no JL refresh");
   assert.equal(newWorkspace.checks.find((check)=>check.id==="backup").status,"info","an empty schema-only database does not need a meaningless backup");
   assert.equal(newWorkspace.checks.find((check)=>check.id==="backup").value,"Not required yet");

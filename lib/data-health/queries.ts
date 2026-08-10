@@ -67,9 +67,17 @@ export const DUPLICATE_GIVING_FINGERPRINTS_SQL = `SELECT COUNT(*) AS count FROM 
   GROUP BY external_source,source_fingerprint HAVING COUNT(*)>1
 )`;
 
+// Deliberately reports only unmatched JL Codes now. This used to also
+// extract results.rowsRequiringReview as "pending_assignments" -- that
+// field is a completed import's frozen, point-in-time review-row count and
+// was never specific to payment/pledge decisions in the first place (see
+// jl-donation-review.ts). A completed import can never have a genuinely
+// pending pledge assignment: the commit route rejects any unresolved
+// payment decision before writing anything. Real pending-assignment state
+// is computed instead from active draft sessions -- see
+// IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL below.
 export const LATEST_DONATION_REVIEW_SQL = `SELECT
-  COALESCE(CASE WHEN json_valid(report_json) THEN json_extract(report_json,'$.results.unmatchedJlCodes') END,0) AS unmatched_jl_codes,
-  COALESCE(CASE WHEN json_valid(report_json) THEN json_extract(report_json,'$.results.rowsRequiringReview') END,0) AS pending_assignments
+  COALESCE(CASE WHEN json_valid(report_json) THEN json_extract(report_json,'$.results.unmatchedJlCodes') END,0) AS unmatched_jl_codes
   FROM data_imports
   WHERE user_id=? AND status='completed' AND json_valid(report_json)
     AND json_extract(report_json,'$.profile')='JL Solutions Donations'
@@ -83,3 +91,26 @@ export const REFRESH_STATE_SQL = `SELECT last_household_refresh_at,last_donation
 
 export const LAST_BACKUP_SQL = `SELECT MAX(created_at) AS created_at FROM workspace_backup_audits
   WHERE user_id=?`;
+
+// Every review-draft session this owner has, regardless of status --
+// callers distinguish "active draft" (status='draft', unexpired -- where a
+// pending payment decision or unresolved review can still exist) from
+// "committed" (where only an explicit review_later choice is still
+// actionable, via countReviewLaterDecisions) themselves in JS, the same way
+// countReviewLaterDecisions/countPendingPaymentDecisions already parse
+// decisions_json rather than querying into it.
+export const IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL = `SELECT status, decisions_json, expires_at
+  FROM import_preview_sessions WHERE owner_user_id=?`;
+
+// Actual fundraising business records -- distinct from BUSINESS_DATA_COUNT_SQL
+// / FUNDRAISING_DATA_COUNT_SQL in production-baseline.ts (which intentionally
+// stay untouched: the backup-safety gate and rehearsal scripts depend on
+// their conservative, audit-inclusive definition). This is used only to
+// display a meaningful breakdown on the independent-staging "Business data"
+// card, which must never conflate donors/gifts with import batches, change
+// audits, or draft-session bookkeeping.
+export const BUSINESS_RECORD_COUNTS_SQL = `SELECT
+  (SELECT COUNT(*) FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL) AS donors,
+  (SELECT COUNT(*) FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND workspace_status='active') AS giving_activities,
+  (SELECT COUNT(*) FROM interactions WHERE user_id=?) AS interactions,
+  (SELECT COUNT(*) FROM recommendations WHERE user_id=?) AS reminders`;

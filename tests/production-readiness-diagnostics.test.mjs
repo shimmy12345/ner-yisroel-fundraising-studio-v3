@@ -41,6 +41,8 @@ function productionFacts(overrides = {}) {
     duplicateGivingFingerprints: 0,
     unmatchedJlCodes: 0,
     pendingPledgeAssignments: 0,
+    savedForLaterReviewRows: 0,
+    unresolvedActiveDrafts: 0,
     failedOrIncompleteImports: 0,
     lastHouseholdRefreshAt: null,
     lastDonationRefreshAt: null,
@@ -67,6 +69,12 @@ function independentStagingFacts(overrides = {}) {
   return {
     ...productionFacts(),
     deploymentEnvironment: "staging-independent",
+    // Independent staging intentionally runs ahead of production's pinned
+    // 0019 expectation -- migrations 0021/0022 are applied here, so its
+    // "Live schema version" card compares against LATEST_MIGRATION_LEVEL
+    // ("0022"), not EXPECTED_MIGRATION_LEVEL.
+    currentMigrationLevel: "0022",
+    businessRecordCounts: { donors: 0, givingActivities: 0, interactions: 0, reminders: 0 },
     ...overrides,
   };
 }
@@ -140,7 +148,7 @@ test("staging never derives production readiness from its own local baseline-mar
 test("independent staging: verified clean baseline, empty business data, and one configured owner render the exact requested summary, with no production-launch wording", () => {
   const report = buildDataHealthReport(independentStagingFacts({ fundraisingDataRows: 0, accountConfigurationRows: 1, activeDonors: 0 }));
   assert.equal(check(report, "independent-staging-environment").value, "Independent Staging");
-  assert.equal(check(report, "independent-staging-baseline").value, "Verified");
+  assert.equal(check(report, "independent-staging-baseline").value, "0019 · Verified · stamped 2026-08-01");
   assert.equal(check(report, "independent-staging-business-data").value, "Empty");
   assert.equal(check(report, "independent-staging-account-setup").value, "1 owner configured");
 
@@ -155,23 +163,33 @@ test("independent staging: verified clean baseline, empty business data, and one
 test("independent staging: an unreadable baseline marker reports Unknown, never Failed, on the independent-staging-specific check", () => {
   const report = buildDataHealthReport(independentStagingFacts({ productionBaselineState: "unreadable", productionBaselineApplied: false }));
   const baseline = check(report, "independent-staging-baseline");
-  assert.equal(baseline.value, "Unknown");
+  assert.equal(baseline.value, "0019 · Unknown");
   assert.equal(baseline.status, "unavailable");
   assert.notEqual(baseline.status, "critical");
 });
 
-test("independent staging: a hash mismatch is reported as Mismatch on the independent-staging-specific check and flags business-data risk", () => {
+test("independent staging: a stale baseline stamp (hash differs from the current packaged manifest) is informational, not a structural failure", () => {
   const report = buildDataHealthReport(independentStagingFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
   const baseline = check(report, "independent-staging-baseline");
-  assert.equal(baseline.value, "Mismatch");
-  assert.equal(baseline.status, "critical");
-  assert.equal(baseline.evidence.businessDataAtRisk, true);
+  assert.equal(baseline.value, "0019 · Stale stamp (2026-08-01)");
+  // A hash-mismatch here only ever means the point-in-time stamp predates a
+  // later migration -- it is expected drift, not a current structural
+  // failure, and must never be presented as business-data risk. The
+  // authoritative current-schema check is "Staging ↔ baseline schema"
+  // (schema-comparison), not this stamp.
+  assert.equal(baseline.status, "info");
+  assert.notEqual(baseline.status, "critical");
+  assert.equal(baseline.evidence.businessDataAtRisk, false);
+  assert.doesNotMatch(baseline.explanation, /may not be what this build expects/i, "must never claim the live schema itself is in doubt -- that is schema-comparison's job");
+  assert.match(baseline.explanation, /expected|drift|not.*corrupt/i);
 });
 
 test("independent staging: the owner's account row alone (no fundraising data) never triggers a business-data warning", () => {
-  // businessDataRows still reflects the raw all-tables count (as computed by
-  // BUSINESS_DATA_COUNT_SQL for the backup-safety gate, unaffected by this
-  // fix) but fundraisingDataRows is what the Business data check reads.
+  // businessDataRows/fundraisingDataRows still reflect the raw all-tables
+  // counts (as computed by BUSINESS_DATA_COUNT_SQL / FUNDRAISING_DATA_COUNT_SQL
+  // for the backup-safety gate, unaffected by this fix) but
+  // businessRecordCounts (donors/giving activities/interactions/reminders
+  // only) is what the Business data check itself reads and displays.
   const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 2, fundraisingDataRows: 0, accountConfigurationRows: 1, activeDonors: 0 }));
   const businessData = check(report, "independent-staging-business-data");
   assert.equal(businessData.value, "Empty");
@@ -181,12 +199,21 @@ test("independent staging: the owner's account row alone (no fundraising data) n
   assert.equal(accountSetup.status, "info");
 });
 
-test("independent staging: adding a fictional donor or gift changes Business data to non-empty", () => {
-  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 3, fundraisingDataRows: 1, accountConfigurationRows: 1, activeDonors: 1 }));
+test("independent staging: adding a fictional donor or gift changes Business data to non-empty, informationally, not as a warning", () => {
+  const report = buildDataHealthReport(independentStagingFacts({ businessDataRows: 3, fundraisingDataRows: 1, accountConfigurationRows: 1, activeDonors: 1, businessRecordCounts: { donors: 1, givingActivities: 0, interactions: 0, reminders: 0 } }));
   const businessData = check(report, "independent-staging-business-data");
   assert.notEqual(businessData.value, "Empty");
-  assert.match(businessData.value, /1 row/);
-  assert.equal(businessData.status, "attention");
+  assert.match(businessData.value, /1 donor/);
+  assert.doesNotMatch(businessData.explanation, /expected to remain empty/i, "the old invariant-violation wording must be gone");
+  assert.match(businessData.explanation, /intentionally populated/i);
+  // Intentionally populated independent staging is expected, current
+  // behavior -- it must never be flagged as a warning merely for having
+  // data (requirement: real fundraising records here are normal, not a
+  // problem to draw attention to).
+  assert.equal(businessData.status, "healthy");
+  // Import batches, change audits, and draft bookkeeping must never be
+  // blended into this business-record count.
+  assert.doesNotMatch(businessData.value, /import|audit|draft/i);
   // Adding fundraising data must not change the separately-tracked account count.
   assert.equal(check(report, "independent-staging-account-setup").value, "1 owner configured");
 });

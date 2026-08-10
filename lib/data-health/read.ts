@@ -2,10 +2,12 @@ import { env } from "cloudflare:workers";
 import {
   ACTIVE_DONORS_SQL,
   BROKEN_MERGE_REDIRECTS_SQL,
+  BUSINESS_RECORD_COUNTS_SQL,
   DUPLICATE_GIVING_FINGERPRINTS_SQL,
   DUPLICATE_JL_CODES_SQL,
   FAILED_IMPORTS_SQL,
   GIVING_RECONCILIATION_SQL,
+  IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL,
   LAST_BACKUP_SQL,
   LATEST_DONATION_REVIEW_SQL,
   ORPHANED_GIFTS_SQL,
@@ -14,6 +16,7 @@ import {
   ORPHANED_REMINDERS_SQL,
   REFRESH_STATE_SQL,
 } from "./queries";
+import { countPendingPaymentDecisions, countReviewLaterDecisions } from "../import/preview-session";
 import {
   APP_VERSION,
   MIGRATION_LEDGER_COMPLETE,
@@ -64,6 +67,7 @@ const emptyFacts = (): DataHealthFacts => ({
   businessDataRows: null,
   fundraisingDataRows: null,
   accountConfigurationRows: null,
+  businessRecordCounts: null,
   activeDonors: null,
   duplicateJlCodes: null,
   orphanedGifts: null,
@@ -77,6 +81,8 @@ const emptyFacts = (): DataHealthFacts => ({
   duplicateGivingFingerprints: null,
   unmatchedJlCodes: null,
   pendingPledgeAssignments: null,
+  savedForLaterReviewRows: null,
+  unresolvedActiveDrafts: null,
   failedOrIncompleteImports: null,
   lastHouseholdRefreshAt: null,
   lastDonationRefreshAt: null,
@@ -101,6 +107,9 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
       env.DB.prepare("PRAGMA table_info('users')"),
       env.DB.prepare("PRAGMA table_info('donors')"),
       env.DB.prepare("PRAGMA table_info('giving_activities')"),
+      // Returns no rows (not an error) if the table doesn't exist yet --
+      // safe on an environment that predates migration 0021.
+      env.DB.prepare("PRAGMA table_info('import_preview_sessions')"),
     ]) as unknown as QueryResult[];
     facts.databaseConnected = number(first(schemaResults[0]).connected) === 1;
     const tableNames = rows(schemaResults[1]).filter((row) => row.type === "table").map((row) => String(row.name ?? ""));
@@ -110,7 +119,8 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     const userColumns = rows(schemaResults[2]).map((row) => String(row.name ?? ""));
     const donorColumns = rows(schemaResults[3]).map((row) => String(row.name ?? ""));
     const givingColumns = rows(schemaResults[4]).map((row) => String(row.name ?? ""));
-    facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns);
+    const importPreviewSessionColumns = rows(schemaResults[5]).map((row) => String(row.name ?? ""));
+    facts.currentMigrationLevel = inferMigrationLevel(tableNames, userColumns, donorColumns, givingColumns, importPreviewSessionColumns);
     facts.schemaReady = schemaIsReady(tableNames, userColumns, donorColumns, givingColumns);
     if (checksLiveBaseline) {
       if (!tableNames.includes("production_schema_baseline")) {
@@ -150,6 +160,32 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     facts.businessDataRows = number((await env.DB.prepare(BUSINESS_DATA_COUNT_SQL).first<{ count?: number }>())?.count, null);
     facts.fundraisingDataRows = number((await env.DB.prepare(FUNDRAISING_DATA_COUNT_SQL).first<{ count?: number }>())?.count, null);
     facts.accountConfigurationRows = number((await env.DB.prepare(ACCOUNT_CONFIGURATION_COUNT_SQL).first<{ count?: number }>())?.count, null);
+    const businessRecordCounts = await env.DB.prepare(BUSINESS_RECORD_COUNTS_SQL).bind(userId, userId, userId, userId).first<{ donors?: number; giving_activities?: number; interactions?: number; reminders?: number }>();
+    facts.businessRecordCounts = businessRecordCounts ? {
+      donors: number(businessRecordCounts.donors) ?? 0,
+      givingActivities: number(businessRecordCounts.giving_activities) ?? 0,
+      interactions: number(businessRecordCounts.interactions) ?? 0,
+      reminders: number(businessRecordCounts.reminders) ?? 0,
+    } : null;
+
+    // Real pending-assignment/import-review-state facts, computed from
+    // active draft sessions rather than a completed import's frozen
+    // report_json. import_preview_sessions may not exist yet on an
+    // environment that predates migration 0021 -- tableNames already told
+    // us that, so this is skipped cleanly rather than throwing.
+    if (tableNames.includes("import_preview_sessions")) {
+      const now = Math.floor(Date.now() / 1000);
+      const sessions = (await env.DB.prepare(IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL).bind(userId).all<{ status: string; decisions_json: string; expires_at: number }>()).results ?? [];
+      const activeDrafts = sessions.filter((session) => session.status === "draft" && session.expires_at > now);
+      facts.unresolvedActiveDrafts = activeDrafts.length;
+      facts.pendingPledgeAssignments = activeDrafts.reduce((sum, session) => sum + countPendingPaymentDecisions(session.decisions_json), 0);
+      const committedSessions = sessions.filter((session) => session.status === "committed");
+      facts.savedForLaterReviewRows = committedSessions.reduce((sum, session) => sum + countReviewLaterDecisions(session.decisions_json), 0);
+    } else {
+      facts.unresolvedActiveDrafts = 0;
+      facts.pendingPledgeAssignments = 0;
+      facts.savedForLaterReviewRows = 0;
+    }
 
     const healthResults = await env.DB.batch([
       env.DB.prepare(ACTIVE_DONORS_SQL).bind(userId),
@@ -182,7 +218,6 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     facts.invalidGivingRows = number(giving.invalid_rows);
     facts.duplicateGivingFingerprints = number(first(healthResults[8]).count);
     facts.unmatchedJlCodes = number(latestDonation.unmatched_jl_codes);
-    facts.pendingPledgeAssignments = number(latestDonation.pending_assignments);
     facts.failedOrIncompleteImports = number(first(healthResults[10]).count);
     facts.lastHouseholdRefreshAt = number(refresh.last_household_refresh_at, null);
     facts.lastDonationRefreshAt = number(refresh.last_donation_refresh_at, null);

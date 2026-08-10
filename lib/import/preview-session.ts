@@ -78,6 +78,26 @@ export function countReviewLaterDecisions(decisionsJson: string): number {
   return count;
 }
 
+// Counts genuinely-unresolved payment/pledge-assignment decisions saved on
+// this session -- "needs_review" is the sentinel PaymentDecisionState uses
+// for "not yet decided" (see ImportExperience.tsx). Deliberately scoped to
+// only the paymentDecisions map: a possible-duplicate row explicitly marked
+// skip or review_later is a resolved decision in a different map entirely
+// and must never be counted here. Callers must only sum this over active
+// (status='draft', unexpired) sessions -- a committed import can never
+// contribute, since the commit route now rejects any unresolved payment
+// assignment before writing anything (see app/api/import/route.ts).
+export function countPendingPaymentDecisions(decisionsJson: string): number {
+  const decisions = parseDraftDecisions(decisionsJson);
+  const paymentDecisions = decisions.paymentDecisions;
+  if (!paymentDecisions || typeof paymentDecisions !== "object") return 0;
+  let count = 0;
+  for (const decision of Object.values(paymentDecisions)) {
+    if (decision && typeof decision === "object" && (decision as { action?: unknown }).action === "needs_review") count += 1;
+  }
+  return count;
+}
+
 // Whether a draft is old/inactive enough to no longer offer for resume,
 // even though the row itself may still physically exist in D1 (cleanup is
 // lazy/opportunistic, not the source of truth for usability).
