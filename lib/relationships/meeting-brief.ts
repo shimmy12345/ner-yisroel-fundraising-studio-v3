@@ -28,7 +28,7 @@ type DonorRow = {
   country: string | null;
 };
 
-type GivingRow = { id: string; activity_date: number | null; paid_cents: number | null; balance_cents: number | null; description: string | null; item_type: string | null };
+type GivingRow = { id: string; activity_date: number | null; paid_cents: number | null; balance_cents: number | null; description: string | null; item_type: string | null; source_campaign: string | null };
 type LegacyGiftRow = { id: string; received_at: number; amount_cents: number; fund: string };
 type InteractionRow = { id: string; type: string; occurred_at: number; summary: string };
 type ReminderRow = { id: string; action: string; reason: string; due_at: number | null };
@@ -43,7 +43,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
   if (!donor) return null;
 
   const [giving, legacyGifts, interactions, reminders] = await Promise.all([
-    env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type
+    env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
         AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
@@ -90,7 +90,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
       occurredAt: gift.activity_date,
       paidCents: gift.paid_cents ?? 0,
       balanceCents: gift.balance_cents ?? 0,
-      description: gift.description || gift.item_type,
+      description: gift.description || gift.item_type || gift.source_campaign,
     })),
     ...legacyGifts.results.map((gift) => ({
       id: gift.id,

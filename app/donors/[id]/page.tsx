@@ -19,8 +19,8 @@ import { donorInitials, numericDonorCode } from "../../../lib/relationships/dono
 export const metadata: Metadata = { title: "Donor relationship" };
 export const dynamic = "force-dynamic";
 type Donor = { id: string; display_name: string; donor_code: string | null; last_name: string | null; email: string | null; phone: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null; primary_first_name: string | null; spouse: string | null; spouse_first_name: string | null; primary_title: string | null; spouse_title: string | null; external_id: string | null; external_source: string | null; contact_note: string | null; relationship_summary: string | null; institutional_memory: string | null; archived_at: number | null; merged_into_donor_id: string | null };
-type Activity = { id: string; donor_id: string; external_source: string; activity_date: number | null; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; item_type: string | null; description: string | null; category: string; workspace_status: string; private_note: string | null; confirmed_by_activity_id: string | null; updated_at: number };
-type PaymentEvent = { id: string; payment_date: number; applied_cents: number; remaining_balance_cents: number | null; pledge_activity_id: string; pledge_description: string | null };
+type Activity = { id: string; donor_id: string; external_source: string; activity_date: number | null; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; item_type: string | null; description: string | null; source_campaign: string | null; category: string; workspace_status: string; private_note: string | null; confirmed_by_activity_id: string | null; updated_at: number };
+type PaymentEvent = { id: string; payment_date: number; applied_cents: number; remaining_balance_cents: number | null; pledge_activity_id: string; pledge_description: string | null; pledge_campaign: string | null };
 type Gift = { id: string; received_at: number; amount_cents: number; fund: string };
 type Interaction = { id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number; status_changed_at: number | null };
 type Recommendation = { id: string; action: string; reason: string; status: string; due_at: number | null; created_at: number; updated_at: number };
@@ -47,14 +47,14 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       ON CONFLICT(user_id,donor_id) DO UPDATE SET viewed_at=excluded.viewed_at`).bind(profile.id, donor.id, viewedAt).run();
   }
   const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult] = await Promise.all([
-    (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>(),
+    (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>(),
     env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>(),
     env.DB.prepare(`SELECT id, type, occurred_at, summary, source, created_at, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND source NOT LIKE 'archived:%' ORDER BY occurred_at DESC LIMIT 500`).bind(...(mode === "demo" ? [id] : [profile.id, id, profile.id])).all<Interaction>(),
     env.DB.prepare(`SELECT id, action, reason, status, due_at, created_at, updated_at FROM recommendations WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND status IN ('open','completed') ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, due_at, updated_at DESC LIMIT 200`).bind(...(mode === "demo" ? [id] : [id, profile.id])).all<Recommendation>(),
     mode === "demo"
       ? Promise.resolve({ results: [] as PaymentEvent[] })
       : env.DB.prepare(`SELECT audit.id, audit.payment_date, audit.applied_cents, audit.remaining_balance_cents,
-          audit.pledge_activity_id, pledge.description AS pledge_description
+          audit.pledge_activity_id, pledge.description AS pledge_description, pledge.source_campaign AS pledge_campaign
         FROM jl_payment_assignment_audits audit
         INNER JOIN data_imports batch ON batch.id = audit.import_id AND batch.user_id = audit.user_id AND batch.status IN ('active','completed')
         INNER JOIN giving_activities pledge ON pledge.id = audit.pledge_activity_id AND pledge.owner_user_id = audit.user_id AND pledge.donor_id = audit.donor_id
