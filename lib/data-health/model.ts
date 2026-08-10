@@ -511,14 +511,12 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
         ...(anyOutstanding ? { actionHref: "/onboarding/import", actionLabel: "Open Import Center" } : {}),
       };
     })(),
-    {
-      id: "failed-imports",
-      label: "Failed or incomplete imports",
-      status: facts.failedOrIncompleteImports === null ? "unavailable" : facts.failedOrIncompleteImports > 0 ? "attention" : "healthy",
-      value: numberValue(facts.failedOrIncompleteImports),
-      explanation: facts.failedOrIncompleteImports === null ? "Import history could not be checked." : facts.failedOrIncompleteImports > 0 ? "One or more imports failed, rolled back, or never reached completion. Completed and intentionally undone batches are not counted." : "No failed or incomplete import batches are recorded.",
-      ...(facts.failedOrIncompleteImports !== null && facts.failedOrIncompleteImports > 0 ? { actionHref: "/onboarding/import", actionLabel: "Review import history" } : {}),
-    },
+    // The standalone "Failed or incomplete imports" card was removed here:
+    // failedOrIncompleteImports is still computed (see
+    // lib/data-health/read.ts, FAILED_IMPORTS_SQL) and still folded into
+    // "Import review state" above -- both its status contribution
+    // (anyOutstanding) and its own diagnosticLines/value line -- so no
+    // alerting was lost, only the duplicate top-level presentation.
     timestampCheck("household-refresh", "Last household refresh", facts.lastHouseholdRefreshAt, hasData, "refresh"),
     timestampCheck("donation-refresh", "Last donation refresh", facts.lastDonationRefreshAt, hasData, "refresh"),
     timestampCheck("backup", "Last successful backup", facts.lastBackupAt, hasData, "backup"),

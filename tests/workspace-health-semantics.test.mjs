@@ -196,6 +196,18 @@ async function run() {
   assert.equal(schemaComparison.status, "critical");
   assert.deepEqual(schemaComparison.diagnosticLines, ["Missing table: import_preview_session_chunks."]);
 
+  // ---- 9. The standalone "Failed or incomplete imports" card is gone --
+  // Import review state is the single user-facing place for it -- but the
+  // underlying fact/query is untouched and a real failed import still
+  // surfaces clearly (alerting is not weakened, only de-duplicated).
+  const failedImportsReport = buildDataHealthReport(baseFacts({ failedOrIncompleteImports: 2 }));
+  assert.equal(check(failedImportsReport, "failed-imports"), undefined, "the redundant standalone card must be removed");
+  const reviewStateWithFailure = check(failedImportsReport, "import-review-state");
+  assert.equal(reviewStateWithFailure.status, "attention", "a failed/incomplete import must still surface as an actionable warning");
+  assert.equal(reviewStateWithFailure.value, "0 saved · 0 unresolved · 2 failed");
+  assert.ok(reviewStateWithFailure.diagnosticLines.some((line) => /2 failed or incomplete import\(s\)/.test(line)));
+  assert.equal(failedImportsReport.status, "attention", "a real failed import must still push the overall report status away from healthy");
+
   process.stdout.write("Workspace Health semantic-cleanup checks passed.\n");
 }
 
