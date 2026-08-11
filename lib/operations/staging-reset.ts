@@ -28,6 +28,17 @@ export const STAGING_RESET_TABLE_ORDER = [
   "gifts",
   "recommendations",
   "relationship_queue_dismissals",
+  // Donor Research (Stage A) -- depend only on `donors`/`users` and each
+  // other. donor_research_finding_sources and donor_research_findings must
+  // precede donor_research_runs (which they reference); donor_research_sources
+  // has no donor_id at all (workspace-scoped, shared across donors) but is
+  // still deleted here, after the join table that references it.
+  "donor_research_finding_sources",
+  "donor_research_findings",
+  "donor_research_identity_candidates",
+  "donor_research_pending_evidence",
+  "donor_research_sources",
+  "donor_research_runs",
   // Depend on `data_imports`, `donors`, and/or `giving_activities`.
   "jl_payment_assignment_audits",
   "jl_payment_assignments",

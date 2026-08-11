@@ -95,6 +95,95 @@ CREATE TABLE `donor_merge_audits` (
   FOREIGN KEY (`archived_donor_id`) REFERENCES `donors`(`id`)
 );
 
+CREATE TABLE `donor_research_finding_sources` (
+  `finding_id` text NOT NULL,
+  `source_id` text NOT NULL,
+  PRIMARY KEY (`finding_id`,`source_id`),
+  FOREIGN KEY (`finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`source_id`) REFERENCES `donor_research_sources`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `donor_research_findings` (
+  `id` text PRIMARY KEY NOT NULL,
+  `first_seen_run_id` text NOT NULL,
+  `last_confirmed_run_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `category` text NOT NULL CHECK (`category` IN ('professional','boards_affiliations','public_philanthropy','recent_mentions','possible_connections','notes_ambiguities')),
+  `claim` text NOT NULL,
+  `related_donor_id` text,
+  `organization_normalized` text,
+  `status` text NOT NULL DEFAULT 'current' CHECK (`status` IN ('current','superseded','removed_not_found','unverified')),
+  `fingerprint` text NOT NULL,
+  `supersedes_finding_id` text,
+  `not_found_streak` integer NOT NULL DEFAULT 0,
+  `notified_at` integer,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`first_seen_run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`last_confirmed_run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`related_donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`supersedes_finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `donor_research_identity_candidates` (
+  `id` text PRIMARY KEY NOT NULL,
+  `run_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `label` text NOT NULL,
+  `status` text NOT NULL DEFAULT 'pending' CHECK (`status` IN ('pending','confirmed','rejected')),
+  `decided_at` integer,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `donor_research_pending_evidence` (
+  `id` text PRIMARY KEY NOT NULL,
+  `run_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `url` text NOT NULL,
+  `title` text NOT NULL,
+  `snippet` text,
+  `published_at` integer,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `donor_research_runs` (
+  `id` text PRIMARY KEY NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `status` text NOT NULL DEFAULT 'open' CHECK (`status` IN ('open','completed','discarded')),
+  `created_at` integer NOT NULL,
+  `completed_at` integer,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `donor_research_sources` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `url` text NOT NULL,
+  `normalized_url` text NOT NULL,
+  `domain` text NOT NULL,
+  `title` text NOT NULL,
+  `publisher` text,
+  `published_at` integer,
+  `retrieved_at` integer NOT NULL,
+  `excerpt` text,
+  `source_tier` text NOT NULL CHECK (`source_tier` IN ('primary_institutional','press_release','reputable_news','event_program','public_search_result')),
+  `discovered_via` text,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `donor_views` (
   `user_id` text NOT NULL,
   `donor_id` text NOT NULL,
@@ -379,6 +468,24 @@ ON `donor_merge_audits` (`archived_donor_id`);
 CREATE INDEX `donor_merge_audits_user_date_idx`
 ON `donor_merge_audits` (`user_id`,`created_at`);
 
+CREATE INDEX `donor_research_finding_sources_source_idx` ON `donor_research_finding_sources` (`source_id`);
+
+CREATE UNIQUE INDEX `donor_research_findings_donor_fingerprint_active_uidx` ON `donor_research_findings` (`donor_id`,`fingerprint`) WHERE `status` IN ('current','unverified');
+
+CREATE INDEX `donor_research_findings_donor_status_category_idx` ON `donor_research_findings` (`donor_id`,`status`,`category`);
+
+CREATE INDEX `donor_research_findings_user_org_idx` ON `donor_research_findings` (`user_id`,`organization_normalized`);
+
+CREATE INDEX `donor_research_identity_candidates_donor_status_idx` ON `donor_research_identity_candidates` (`donor_id`,`status`);
+
+CREATE INDEX `donor_research_pending_evidence_run_idx` ON `donor_research_pending_evidence` (`run_id`);
+
+CREATE INDEX `donor_research_runs_donor_date_idx` ON `donor_research_runs` (`donor_id`,`created_at`);
+
+CREATE INDEX `donor_research_sources_user_domain_idx` ON `donor_research_sources` (`user_id`,`domain`);
+
+CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`);
+
 CREATE INDEX `donor_views_user_date_idx` ON `donor_views` (`user_id`,`viewed_at`);
 
 CREATE INDEX `donors_merged_into_idx`
@@ -457,5 +564,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','59044f26262dbc4473880a73f5d32a17f34d14fa37b6c02c6bef7929aeefabc4',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','47dc605cc6e85dafab8925a9ced8d562a72a8cab1910767552c58c8370adb92b',1785944072);
 PRAGMA optimize;

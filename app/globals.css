@@ -760,3 +760,41 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .morning-brief-complete { grid-template-columns:28px 1fr; }
   .morning-brief-complete button { grid-column:2; justify-self:start; }
 }
+
+/* Donor Research (Stage A) -- restrained, source-first: claim, source,
+   date, nothing numeric. Reuses story-card/capture-form conventions
+   already established elsewhere on this page rather than inventing a new
+   visual language. */
+.donor-research-card .updated { white-space:nowrap; }
+.research-start-button { min-height:40px; padding:10px 16px; border:1px solid var(--green); border-radius:9px; background:var(--green); color:#fff; font-size:13px; font-weight:700; cursor:pointer; }
+.research-start-button:hover { background:#0d4e39; }
+.research-evidence-entry { margin-top:4px; }
+.research-pending-list { margin:0 0 14px; padding:0; list-style:none; display:grid; gap:8px; }
+.research-pending-list li { padding:10px 12px; border:1px solid var(--line); border-radius:9px; background:#fafbf9; }
+.research-pending-list strong, .research-pending-list span { display:block; }
+.research-pending-list span { margin-top:2px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+.research-evidence-form { display:grid; gap:10px; padding:16px; border:1px solid var(--line); border-radius:11px; background:#fafbf9; }
+.research-evidence-form label { display:grid; gap:5px; color:#52625a; font-size:12px; font-weight:650; }
+.research-evidence-form label span { color:var(--muted); font-weight:500; }
+.research-evidence-form input, .research-evidence-form textarea { padding:9px 11px; border:1px solid #d8dfda; border-radius:8px; background:#fff; font:inherit; color:var(--ink); }
+.research-evidence-form textarea { min-height:60px; resize:vertical; }
+.research-evidence-form button { justify-self:start; min-height:38px; padding:9px 14px; border:0; border-radius:8px; background:var(--green); color:#fff; font-weight:700; cursor:pointer; }
+.research-evidence-form button:disabled { background:#c8d1cc; cursor:not-allowed; }
+.research-propose-button { display:block; margin-top:12px; min-height:40px; padding:10px 14px; border:1px solid var(--green); border-radius:9px; background:#fff; color:var(--green); font-weight:700; cursor:pointer; }
+.research-identity-confirm { padding:16px; border:1px solid #dbe7df; border-radius:11px; background:#f6f9f7; }
+.research-tier-row { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:8px; align-items:center; margin-top:10px; }
+.research-tier-row select, .research-tier-row input { padding:8px 10px; border:1px solid #d8dfda; border-radius:7px; background:#fff; font-size:12px; }
+.research-identity-actions { display:flex; gap:10px; margin-top:16px; }
+.research-identity-actions button { min-height:40px; padding:10px 14px; border:1px solid #d5dfd9; border-radius:9px; background:#fff; color:#7b493f; font-weight:700; cursor:pointer; }
+.research-confirm-button { background:var(--green) !important; border-color:var(--green) !important; color:#fff !important; }
+.research-findings { margin-top:16px; display:grid; gap:18px; }
+.research-section h3 { margin:0 0 8px; font-family:Georgia,serif; font-size:15px; font-weight:500; color:#31453c; }
+.research-finding { padding:11px 0; border-top:1px solid #eceee9; }
+.research-claim { margin:0; color:var(--ink); font-size:13px; font-weight:600; }
+.research-unverified-tag { margin-left:8px; padding:2px 7px; border-radius:20px; background:#f7e9df; color:#a25c3a; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.research-source { margin:4px 0 0; color:var(--muted); font-size:11px; }
+.research-source a { color:#45685a; }
+.research-source a:hover { text-decoration:underline; }
+.research-error { margin-top:10px; color:#a1533a; font-size:12px; }
+.research-message { margin-top:10px; color:#37705a; font-size:12px; }
+@media (max-width:760px) { .research-tier-row { grid-template-columns:1fr; } .research-identity-actions { flex-direction:column; } }

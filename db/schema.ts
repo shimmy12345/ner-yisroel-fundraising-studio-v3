@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
@@ -335,3 +336,93 @@ export const recommendations = sqliteTable("recommendations", {
   dueAt: integer("due_at", { mode: "timestamp" }),
   ...timestamps,
 }, (table) => [index("recommendations_user_status_idx").on(table.userId, table.status)]);
+
+// Donor Research (Stage A) -- provider-agnostic, manual-entry only. No
+// external network calls anywhere in this feature yet; see
+// lib/research/manual-provider.ts. Evidence entered before identity
+// confirmation lives only in donorResearchPendingEvidence, never in the
+// shared donorResearchSources pool, so a misidentified donor's evidence
+// can never leak into another donor's research or dedupe/shared-affiliation
+// matching. donorResearchSources is deliberately NOT donor-scoped: the same
+// public page can support findings for multiple donors, which is what makes
+// shared-affiliation evidence traceable.
+export const donorResearchRuns = sqliteTable("donor_research_runs", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  status: text("status", { enum: ["open", "completed", "discarded"] }).notNull().default("open"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  completedAt: integer("completed_at", { mode: "timestamp" }),
+}, (table) => [index("donor_research_runs_donor_date_idx").on(table.donorId, table.createdAt)]);
+
+export const donorResearchPendingEvidence = sqliteTable("donor_research_pending_evidence", {
+  id: text("id").primaryKey(),
+  runId: text("run_id").notNull().references(() => donorResearchRuns.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  url: text("url").notNull(),
+  title: text("title").notNull(),
+  snippet: text("snippet"),
+  publishedAt: integer("published_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("donor_research_pending_evidence_run_idx").on(table.runId)]);
+
+export const donorResearchIdentityCandidates = sqliteTable("donor_research_identity_candidates", {
+  id: text("id").primaryKey(),
+  runId: text("run_id").notNull().references(() => donorResearchRuns.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  label: text("label").notNull(),
+  status: text("status", { enum: ["pending", "confirmed", "rejected"] }).notNull().default("pending"),
+  decidedAt: integer("decided_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("donor_research_identity_candidates_donor_status_idx").on(table.donorId, table.status)]);
+
+export const donorResearchFindings = sqliteTable("donor_research_findings", {
+  id: text("id").primaryKey(),
+  firstSeenRunId: text("first_seen_run_id").notNull().references(() => donorResearchRuns.id),
+  lastConfirmedRunId: text("last_confirmed_run_id").notNull().references(() => donorResearchRuns.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  category: text("category", { enum: ["professional", "boards_affiliations", "public_philanthropy", "recent_mentions", "possible_connections", "notes_ambiguities"] }).notNull(),
+  claim: text("claim").notNull(),
+  relatedDonorId: text("related_donor_id").references(() => donors.id),
+  organizationNormalized: text("organization_normalized"),
+  status: text("status", { enum: ["current", "superseded", "removed_not_found", "unverified"] }).notNull().default("current"),
+  fingerprint: text("fingerprint").notNull(),
+  supersedesFindingId: text("supersedes_finding_id"),
+  notFoundStreak: integer("not_found_streak").notNull().default(0),
+  notifiedAt: integer("notified_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("donor_research_findings_donor_status_category_idx").on(table.donorId, table.status, table.category),
+  uniqueIndex("donor_research_findings_donor_fingerprint_active_uidx").on(table.donorId, table.fingerprint).where(sql`${table.status} IN ('current','unverified')`),
+  index("donor_research_findings_user_org_idx").on(table.userId, table.organizationNormalized),
+]);
+
+export const donorResearchSources = sqliteTable("donor_research_sources", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  url: text("url").notNull(),
+  normalizedUrl: text("normalized_url").notNull(),
+  domain: text("domain").notNull(),
+  title: text("title").notNull(),
+  publisher: text("publisher"),
+  publishedAt: integer("published_at", { mode: "timestamp" }),
+  retrievedAt: integer("retrieved_at", { mode: "timestamp" }).notNull(),
+  excerpt: text("excerpt"),
+  sourceTier: text("source_tier", { enum: ["primary_institutional", "press_release", "reputable_news", "event_program", "public_search_result"] }).notNull(),
+  discoveredVia: text("discovered_via"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("donor_research_sources_user_normalized_url_uidx").on(table.userId, table.normalizedUrl),
+  index("donor_research_sources_user_domain_idx").on(table.userId, table.domain),
+]);
+
+export const donorResearchFindingSources = sqliteTable("donor_research_finding_sources", {
+  findingId: text("finding_id").notNull().references(() => donorResearchFindings.id),
+  sourceId: text("source_id").notNull().references(() => donorResearchSources.id),
+}, (table) => [
+  primaryKey({ columns: [table.findingId, table.sourceId] }),
+  index("donor_research_finding_sources_source_idx").on(table.sourceId),
+]);

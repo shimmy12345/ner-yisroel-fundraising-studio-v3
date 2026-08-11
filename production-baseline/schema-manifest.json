@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "59044f26262dbc4473880a73f5d32a17f34d14fa37b6c02c6bef7929aeefabc4",
+  "schemaHash": "47dc605cc6e85dafab8925a9ced8d562a72a8cab1910767552c58c8370adb92b",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -24,7 +24,8 @@
     "0019_legacy_test_orphan_cleanup.sql",
     "0020_financial_date_only.sql",
     "0021_import_preview_sessions.sql",
-    "0022_import_review_drafts.sql"
+    "0022_import_review_drafts.sql",
+    "0023_donor_research_stage_a.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -787,6 +788,724 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "donor_research_finding_sources",
+        "columns": [
+          {
+            "name": "finding_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "source_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "finding_id",
+            "toTable": "donor_research_findings",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "source_id",
+            "toTable": "donor_research_sources",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_finding_sources_source_idx",
+            "columns": [
+              "source_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_finding_sources_source_idx` ON `donor_research_finding_sources` (`source_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "finding_id",
+              "source_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_research_findings",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "first_seen_run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_confirmed_run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "category",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "claim",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "related_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "organization_normalized",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'current'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "supersedes_finding_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "not_found_streak",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "notified_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "first_seen_run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "last_confirmed_run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "related_donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "supersedes_finding_id",
+            "toTable": "donor_research_findings",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_findings_donor_fingerprint_active_uidx",
+            "columns": [
+              "donor_id",
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_research_findings_donor_fingerprint_active_uidx` ON `donor_research_findings` (`donor_id`,`fingerprint`) WHERE `status` IN ('current','unverified')"
+          },
+          {
+            "name": "donor_research_findings_donor_status_category_idx",
+            "columns": [
+              "donor_id",
+              "status",
+              "category"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_findings_donor_status_category_idx` ON `donor_research_findings` (`donor_id`,`status`,`category`)"
+          },
+          {
+            "name": "donor_research_findings_user_org_idx",
+            "columns": [
+              "user_id",
+              "organization_normalized"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_findings_user_org_idx` ON `donor_research_findings` (`user_id`,`organization_normalized`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`category` IN ('professional','boards_affiliations','public_philanthropy','recent_mentions','possible_connections','notes_ambiguities'))",
+          "CHECK (`status` IN ('current','superseded','removed_not_found','unverified'))"
+        ]
+      },
+      {
+        "name": "donor_research_identity_candidates",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "label",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'pending'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "decided_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_identity_candidates_donor_status_idx",
+            "columns": [
+              "donor_id",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_identity_candidates_donor_status_idx` ON `donor_research_identity_candidates` (`donor_id`,`status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('pending','confirmed','rejected'))"
+        ]
+      },
+      {
+        "name": "donor_research_pending_evidence",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "url",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "title",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "snippet",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "published_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_pending_evidence_run_idx",
+            "columns": [
+              "run_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_pending_evidence_run_idx` ON `donor_research_pending_evidence` (`run_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_research_runs",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'open'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "completed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_runs_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_runs_donor_date_idx` ON `donor_research_runs` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('open','completed','discarded'))"
+        ]
+      },
+      {
+        "name": "donor_research_sources",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "url",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "normalized_url",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "domain",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "title",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "publisher",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "published_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "retrieved_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "excerpt",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_tier",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "discovered_via",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_sources_user_domain_idx",
+            "columns": [
+              "user_id",
+              "domain"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_sources_user_domain_idx` ON `donor_research_sources` (`user_id`,`domain`)"
+          },
+          {
+            "name": "donor_research_sources_user_normalized_url_uidx",
+            "columns": [
+              "user_id",
+              "normalized_url"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`source_tier` IN ('primary_institutional','press_release','reputable_news','event_program','public_search_result'))"
+        ]
       },
       {
         "name": "donor_views",
@@ -3322,6 +4041,36 @@
     },
     {
       "type": "table",
+      "name": "donor_research_finding_sources",
+      "sql": "CREATE TABLE `donor_research_finding_sources` ( `finding_id` text NOT NULL, `source_id` text NOT NULL, PRIMARY KEY (`finding_id`,`source_id`), FOREIGN KEY (`finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`source_id`) REFERENCES `donor_research_sources`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_findings",
+      "sql": "CREATE TABLE `donor_research_findings` ( `id` text PRIMARY KEY NOT NULL, `first_seen_run_id` text NOT NULL, `last_confirmed_run_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `category` text NOT NULL CHECK (`category` IN ('professional','boards_affiliations','public_philanthropy','recent_mentions','possible_connections','notes_ambiguities')), `claim` text NOT NULL, `related_donor_id` text, `organization_normalized` text, `status` text NOT NULL DEFAULT 'current' CHECK (`status` IN ('current','superseded','removed_not_found','unverified')), `fingerprint` text NOT NULL, `supersedes_finding_id` text, `not_found_streak` integer NOT NULL DEFAULT 0, `notified_at` integer, `created_at` integer NOT NULL, FOREIGN KEY (`first_seen_run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`last_confirmed_run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`related_donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`supersedes_finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_identity_candidates",
+      "sql": "CREATE TABLE `donor_research_identity_candidates` ( `id` text PRIMARY KEY NOT NULL, `run_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `label` text NOT NULL, `status` text NOT NULL DEFAULT 'pending' CHECK (`status` IN ('pending','confirmed','rejected')), `decided_at` integer, `created_at` integer NOT NULL, FOREIGN KEY (`run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_pending_evidence",
+      "sql": "CREATE TABLE `donor_research_pending_evidence` ( `id` text PRIMARY KEY NOT NULL, `run_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `url` text NOT NULL, `title` text NOT NULL, `snippet` text, `published_at` integer, `created_at` integer NOT NULL, FOREIGN KEY (`run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_runs",
+      "sql": "CREATE TABLE `donor_research_runs` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `status` text NOT NULL DEFAULT 'open' CHECK (`status` IN ('open','completed','discarded')), `created_at` integer NOT NULL, `completed_at` integer, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_sources",
+      "sql": "CREATE TABLE `donor_research_sources` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `url` text NOT NULL, `normalized_url` text NOT NULL, `domain` text NOT NULL, `title` text NOT NULL, `publisher` text, `published_at` integer, `retrieved_at` integer NOT NULL, `excerpt` text, `source_tier` text NOT NULL CHECK (`source_tier` IN ('primary_institutional','press_release','reputable_news','event_program','public_search_result')), `discovered_via` text, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "donor_views",
       "sql": "CREATE TABLE `donor_views` ( `user_id` text NOT NULL, `donor_id` text NOT NULL, `viewed_at` integer NOT NULL, PRIMARY KEY (`user_id`,`donor_id`), FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -3464,6 +4213,51 @@
       "type": "index",
       "name": "donor_merge_audits_user_date_idx",
       "sql": "CREATE INDEX `donor_merge_audits_user_date_idx` ON `donor_merge_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_finding_sources_source_idx",
+      "sql": "CREATE INDEX `donor_research_finding_sources_source_idx` ON `donor_research_finding_sources` (`source_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_findings_donor_fingerprint_active_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_research_findings_donor_fingerprint_active_uidx` ON `donor_research_findings` (`donor_id`,`fingerprint`) WHERE `status` IN ('current','unverified')"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_findings_donor_status_category_idx",
+      "sql": "CREATE INDEX `donor_research_findings_donor_status_category_idx` ON `donor_research_findings` (`donor_id`,`status`,`category`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_findings_user_org_idx",
+      "sql": "CREATE INDEX `donor_research_findings_user_org_idx` ON `donor_research_findings` (`user_id`,`organization_normalized`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_identity_candidates_donor_status_idx",
+      "sql": "CREATE INDEX `donor_research_identity_candidates_donor_status_idx` ON `donor_research_identity_candidates` (`donor_id`,`status`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_pending_evidence_run_idx",
+      "sql": "CREATE INDEX `donor_research_pending_evidence_run_idx` ON `donor_research_pending_evidence` (`run_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_runs_donor_date_idx",
+      "sql": "CREATE INDEX `donor_research_runs_donor_date_idx` ON `donor_research_runs` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_sources_user_domain_idx",
+      "sql": "CREATE INDEX `donor_research_sources_user_domain_idx` ON `donor_research_sources` (`user_id`,`domain`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_sources_user_normalized_url_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`)"
     },
     {
       "type": "index",

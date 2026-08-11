@@ -15,6 +15,7 @@ import { DonorBackNavigation } from "../../components/DonorNavigation";
 import { donorBackLabel, donorNavigationHref, meetingBriefNavigationHref, safeDonorOrigin, safeInternalReturnPath } from "../../../lib/navigation/donor-navigation";
 import { financialDateLabel } from "../../../lib/financial-date";
 import { donorInitials, numericDonorCode } from "../../../lib/relationships/donor-identity";
+import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
 
 export const metadata: Metadata = { title: "Donor relationship" };
 export const dynamic = "force-dynamic";
@@ -25,6 +26,8 @@ type Gift = { id: string; received_at: number; amount_cents: number; fund: strin
 type Interaction = { id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number; status_changed_at: number | null };
 type Recommendation = { id: string; action: string; reason: string; status: string; due_at: number | null; created_at: number; updated_at: number };
 type ContactAudit = { id: string; action: string; changed_fields: string; created_at: number };
+type FindingRow = { id: string; category: string; claim: string; status: "current" | "unverified"; related_donor_id: string | null };
+type SourceRow = { finding_id: string; url: string; title: string; publisher: string | null; published_at: number | null; source_tier: string };
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const date = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 const dateTime = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(epoch * 1000));
@@ -84,6 +87,36 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   const relationshipContext = sanitizeScheduledRelationshipContext(donor.relationship_summary, donor.institutional_memory, interactionResult.results.map((item) => ({ type: item.type, summary: item.summary, source: item.source, occurredAt: item.occurred_at, createdAt: item.created_at })));
   const donorDirectoryHref = returnTo === "/donors" || returnTo.startsWith("/donors?") ? returnTo : "/donors";
   const donorCode = numericDonorCode({ donorCode: donor.donor_code, externalId: donor.external_id });
+
+  // Donor Research (Stage A): live-mode only, matching every other
+  // write-capable feature on this page. Manual-entry only -- no outbound
+  // network call is made anywhere in loading this section.
+  let researchViewProps: { lastResearchedAt: number | null; openRun: { id: string; pendingEvidence: PendingEvidenceView[]; candidates: IdentityCandidateView[] } | null; findings: ResearchFindingView[] } = { lastResearchedAt: null, openRun: null, findings: [] };
+  if (mode === "live") {
+    const [lastRun, openRunRow, findingRows] = await Promise.all([
+      env.DB.prepare("SELECT completed_at FROM donor_research_runs WHERE donor_id=? AND user_id=? AND status='completed' ORDER BY completed_at DESC LIMIT 1").bind(id, profile.id).first<{ completed_at: number }>(),
+      env.DB.prepare("SELECT id FROM donor_research_runs WHERE donor_id=? AND user_id=? AND status='open' ORDER BY created_at DESC LIMIT 1").bind(id, profile.id).first<{ id: string }>(),
+      env.DB.prepare("SELECT id, category, claim, status, related_donor_id FROM donor_research_findings WHERE donor_id=? AND user_id=? AND status IN ('current','unverified') ORDER BY created_at DESC").bind(id, profile.id).all<FindingRow>(),
+    ]);
+    const findings = findingRows.results;
+    const [openRunDetail, sourceRows, relatedDonorRows] = await Promise.all([
+      openRunRow ? Promise.all([
+        env.DB.prepare("SELECT id, url, title FROM donor_research_pending_evidence WHERE run_id=? ORDER BY created_at").bind(openRunRow.id).all<PendingEvidenceView>(),
+        env.DB.prepare("SELECT id, label, status FROM donor_research_identity_candidates WHERE run_id=? ORDER BY created_at DESC").bind(openRunRow.id).all<IdentityCandidateView>(),
+      ]) : Promise.resolve(null),
+      findings.length ? env.DB.prepare(`SELECT fs.finding_id, s.url, s.title, s.publisher, s.published_at, s.source_tier FROM donor_research_finding_sources fs JOIN donor_research_sources s ON s.id = fs.source_id WHERE fs.finding_id IN (${findings.map(() => "?").join(",")})`).bind(...findings.map((finding) => finding.id)).all<SourceRow>() : Promise.resolve({ results: [] as SourceRow[] }),
+      findings.some((finding) => finding.related_donor_id) ? env.DB.prepare(`SELECT id, display_name FROM donors WHERE id IN (${[...new Set(findings.map((finding) => finding.related_donor_id).filter((value): value is string => Boolean(value)))].map(() => "?").join(",")})`).bind(...[...new Set(findings.map((finding) => finding.related_donor_id).filter((value): value is string => Boolean(value)))]).all<{ id: string; display_name: string }>() : Promise.resolve({ results: [] as Array<{ id: string; display_name: string }> }),
+    ]);
+    const relatedDonorNameById = new Map(relatedDonorRows.results.map((row) => [row.id, row.display_name]));
+    const sourcesByFinding = new Map<string, ResearchSourceView[]>();
+    for (const row of sourceRows.results) sourcesByFinding.set(row.finding_id, [...(sourcesByFinding.get(row.finding_id) ?? []), { url: row.url, title: row.title, publisher: row.publisher, publishedAt: row.published_at, sourceTier: row.source_tier }]);
+    researchViewProps = {
+      lastResearchedAt: lastRun?.completed_at ?? null,
+      openRun: openRunRow && openRunDetail ? { id: openRunRow.id, pendingEvidence: openRunDetail[0].results, candidates: openRunDetail[1].results } : null,
+      findings: findings.map((finding) => ({ id: finding.id, category: finding.category, claim: finding.claim, status: finding.status, relatedDonorName: finding.related_donor_id ? relatedDonorNameById.get(finding.related_donor_id) : null, sources: sourcesByFinding.get(finding.id) ?? [] })),
+    };
+  }
+
   return <AppShell active="donors"><div className="donor-breadcrumb"><a href="/">Workspace</a><span>/</span><a href={donorDirectoryHref}>Donors</a><span>/</span><strong>{donor.display_name}</strong></div>
     <DonorBackNavigation returnTo={returnTo} label={donorBackLabel(origin)} />
     <header className="donor-header"><div className="donor-identity"><div className="avatar donor-avatar">{donorInitials({ displayName: donor.display_name, primaryFirstName: donor.primary_first_name, lastName: donor.last_name })}</div><div><div className="identity-line"><div><h1>{donor.display_name}</h1>{donorCode && <span className="donor-code donor-header-code">{donorCode}</span>}</div>{mode === "demo" ? <span className="relationship-badge">Demo record</span> : <span className="relationship-badge">{donor.external_source === "Manual" ? "Manual" : "JL Solutions"}</span>}</div>{people && <p>{people}</p>}<div className="contact-row">{donor.email && <a href={`mailto:${donor.email}`}>✉ {donor.email}</a>}{donor.phone && <a href={`tel:${donor.phone.replace(/\D/g, "")}`}>☎ {donor.phone}</a>}</div></div></div>{mode === "live" && <div className="header-actions"><a href={`/donors/${encodeURIComponent(id)}/edit`}>Edit Contact Details</a><a href={`/donors/${encodeURIComponent(id)}/resolve-duplicate`}>Resolve Duplicate</a><a href={`/capture?donorId=${encodeURIComponent(id)}`}>＋ Log interaction</a></div>}</header>
@@ -92,6 +125,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     <div className="relationship-grid"><main className="relationship-main">
       <section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP SNAPSHOT</p><h2>{relationshipContext.summary ? "Prepare for the next interaction" : "No relationship snapshot yet"}</h2></div></div><p className="summary">{relationshipContext.summary || "Log a completed interaction to begin a practical snapshot from this household’s actual activity."}</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">NEXT ACTION</p><h3>{next?.action || "No next action set"}</h3><p>{next?.reason || "Add a reminder when the next step becomes clear."}</p></div></div></section>
       <section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>{relationshipContext.memory ? "Recorded relationship context" : "No institutional memory recorded"}</h2></div></div>{relationshipContext.memory && <p className="summary">{relationshipContext.memory}</p>}</section>
+      {mode === "live" && <DonorResearch donorId={id} lastResearchedAt={researchViewProps.lastResearchedAt} openRun={researchViewProps.openRun} findings={researchViewProps.findings} />}
       <section className="story-card timeline unified-relationship-timeline"><div className="card-heading"><div><p className="eyebrow">UNIFIED RELATIONSHIP TIMELINE</p><h2>One chronological story</h2><p>Giving, conversations, reminders, and scheduled work—ordered by when each event happened or is due.</p></div>{mode === "live" && <PendingGiftForm donors={donorDirectoryResult.results} initialDonorId={id} />}</div><UnifiedRelationshipTimeline giving={activities} legacyGifts={legacyGifts} payments={paymentEvents} interactions={interactionResult.results} reminders={recommendationResult.results} donors={donorDirectoryResult.results} timezone={profile.timezone} live={mode === "live"} now={Math.floor(Date.now() / 1000)} /></section>
     </main><aside className="relationship-rail"><section className="detail-card"><div className="detail-heading"><h2>Household</h2></div><dl className="at-a-glance"><div><dt>Members</dt><dd>{people || "Not supplied"}</dd></div><div><dt>{donor.external_source === "Manual" ? "Source" : "JL reference"}</dt><dd>{donor.external_source === "Manual" ? "Manual" : donor.external_id || donor.donor_code || "Not supplied"}</dd></div><div><dt>Last meaningful contact</dt><dd>{completedInteractions[0] ? date(completedInteractions[0].occurred_at, profile.timezone) : "None recorded"}</dd></div></dl></section><section className="detail-card"><div className="detail-heading"><h2>Contact</h2></div><div className="facts contact-facts">{donor.email && <div className="fact"><label>Email</label><a href={`mailto:${donor.email}`}>{donor.email}</a></div>}{donor.phone && <div className="fact"><label>Mobile</label><a href={`tel:${donor.phone.replace(/\D/g, "")}`}>{donor.phone}</a></div>}{donor.home_phone && <div className="fact"><label>Home</label><a href={`tel:${donor.home_phone.replace(/\D/g, "")}`}>{donor.home_phone}</a></div>}{address.length > 0 && <div className="fact"><label>Mailing address</label>{address.map((line) => <p key={line}>{line}</p>)}</div>}{donor.contact_note && <div className="fact"><label>Contact note</label><p>{donor.contact_note}</p></div>}</div></section>{contactAuditResult.results.length > 0 && <section className="detail-card contact-audit"><div className="detail-heading"><h2>Contact history</h2></div>{contactAuditResult.results.map((audit) => { let fields: string[] = []; try { fields = JSON.parse(audit.changed_fields); } catch { fields = []; } return <div key={audit.id}><strong>{audit.action === "created" ? "Contact created" : audit.action === "merged_with_jl" ? "Linked to JL record" : "Contact updated"}</strong><span>{dateTime(audit.created_at, profile.timezone)}</span>{fields.length > 0 && <small>{fields.join(", ")}</small>}</div>; })}</section>}</aside></div>
   </AppShell>;
