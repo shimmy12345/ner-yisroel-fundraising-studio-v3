@@ -38,6 +38,14 @@ function dateLabel(epoch: number, timezone: string) {
   return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric" }).format(new Date(epoch * 1000));
 }
 
+// A confirmed contact date can be many months or years in the past, so
+// (unlike dateLabel's near-term "why" context) this one always includes
+// the year -- "Last confirmed contact: Aug 15" is ambiguous for a contact
+// from 2024; "Last confirmed contact: Aug 15, 2024" is not.
+function dateLabelWithYear(epoch: number, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
+}
+
 function timeParts(epoch: number, timezone: string) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hour: "numeric", minute: "2-digit", hour12: true }).formatToParts(new Date(epoch * 1000));
   return { time: `${parts.find((part) => part.type === "hour")?.value}:${parts.find((part) => part.type === "minute")?.value}`, period: parts.find((part) => part.type === "dayPeriod")?.value ?? "" };
@@ -146,7 +154,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
 
   for (const item of contacts) {
     const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null;
-    if (days == null || days >= 90) ranked.push({ queueId: `contact-gap:${item.id}:${item.last_contact ?? 0}`, rank: 4, sortAt: days == null ? Number.MAX_SAFE_INTEGER : -days, donorId: item.id, name: item.display_name, ...identity(item), label: "Contact gap", signal: "cool", reason: days == null ? "No meaningful contact recorded" : `${days} days since meaningful contact`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}`, dueAt: null, dueLabel: "Review when able" });
+    if (days == null || days >= 90) ranked.push({ queueId: `contact-gap:${item.id}:${item.last_contact ?? 0}`, rank: 4, sortAt: days == null ? Number.MAX_SAFE_INTEGER : -days, donorId: item.id, name: item.display_name, ...identity(item), label: "Contact gap", signal: "cool", reason: days == null ? "No recorded contact history" : `Last confirmed contact: ${dateLabelWithYear(item.last_contact ?? 0, timezone)}`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}`, dueAt: null, dueLabel: "Review when able" });
   }
 
   const activeQueue = dedupeRelationshipQueue(ranked, new Set(dismissals.results.map((item) => item.item_key)));

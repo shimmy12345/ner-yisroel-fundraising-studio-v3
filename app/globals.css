@@ -798,3 +798,20 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .research-error { margin-top:10px; color:#a1533a; font-size:12px; }
 .research-message { margin-top:10px; color:#37705a; font-size:12px; }
 @media (max-width:760px) { .research-tier-row { grid-template-columns:1fr; } .research-identity-actions { flex-direction:column; } }
+
+.monday-import { display:grid; gap:16px; }
+.monday-import-summary dl.import-counts { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin:18px 0 0; padding:0; }
+.monday-import-summary dl.import-counts div { padding:14px; border:1px solid #e2e7e3; border-radius:11px; background:#fafbf9; }
+.monday-import-summary dl.import-counts dt { margin:0 0 4px; color:#7b8781; font-size:11px; }
+.monday-import-summary dl.import-counts dd { margin:0; font-family:Georgia, serif; font-size:22px; font-weight:500; }
+.monday-import-row { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:start; padding:14px 0; border-top:1px solid #eceeeb; }
+.monday-import-row:first-of-type { border-top:0; }
+.monday-import-row-main p { margin:6px 0 4px; color:#4c5f56; font-size:13px; line-height:1.5; }
+.monday-import-row-main small { color:#89928e; font-size:11px; }
+.monday-import-code { margin-left:6px; padding:2px 7px; border-radius:20px; background:#edf1ee; color:#6c7772; font-size:10px; }
+.monday-import-row-actions { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+.monday-import-row-actions label { display:grid; gap:3px; color:#66756e; font-size:10px; font-weight:650; text-transform:uppercase; letter-spacing:.05em; }
+.monday-import-row-actions input[type="date"] { padding:7px 9px; border:1px solid #d8dfda; border-radius:7px; font:inherit; font-size:12px; }
+.monday-import-row-actions button { min-height:36px; padding:8px 12px; border:1px solid #d1dad4; border-radius:8px; background:#fff; color:#365448; font-weight:650; font-size:12px; cursor:pointer; white-space:nowrap; }
+.monday-import-commit-bar { display:flex; justify-content:space-between; align-items:center; gap:16px; position:sticky; bottom:16px; box-shadow:0 16px 40px rgba(33,55,47,.14); }
+@media (max-width:760px) { .monday-import-row { grid-template-columns:1fr; } .monday-import-row-actions { align-items:flex-start; } .monday-import-summary dl.import-counts { grid-template-columns:1fr 1fr; } }

@@ -41,7 +41,8 @@ async function run() {
 
   assert.match(live, /recommendations r JOIN donors/);
   assert.match(live, /giving_activities ga JOIN donors/);
-  assert.match(live, /days since meaningful contact/);
+  assert.match(live, /Last confirmed contact: /);
+  assert.match(live, /No recorded contact history/);
   assert.match(today, /No activities or follow-ups need attention today/);
   assert.match(unifiedTimeline, /No relationship activity yet/);
 
