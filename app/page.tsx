@@ -53,6 +53,19 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   return <AppShell active="today">
     <header className="page-header today-header"><div><p className="eyebrow today-date"><LocalDate timezone={profile.timezone} /></p><h1>{greeting}, {profile.preferredFirstName}.</h1><p className="subhead">Start with today. The most urgent relationship work is already at the top.</p></div></header>
 
+    <section className="today-brief-section" aria-labelledby="morning-brief-section-title"><div className="command-section-heading"><div><p className="eyebrow">DAILY PREP</p><h2 id="morning-brief-section-title">Morning Brief</h2></div></div><BriefExperience surface="today" data={data} timezone={profile.timezone} /></section>
+
+    <section className={`today-actions-section ${agendaIsEmpty && comingIsEmpty ? "emphasized" : ""}`} aria-labelledby="quick-actions-title">
+      <div className="command-section-heading"><div><p className="eyebrow">START SOMETHING</p><h2 id="quick-actions-title">Quick Actions</h2></div></div>
+      <nav className="today-quick-actions" aria-label="Quick actions">
+        <a href="/donors"><span>⌕</span><strong>Search Donor</strong><small>Find any relationship</small></a>
+        <a href="/onboarding/import"><span>⇧</span><strong>Import JL Export</strong><small>Refresh households or gifts</small></a>
+        <a href="/capture?returnTo=%2F"><span>＋</span><strong>Add Interaction</strong><small>Log a call, email, or note</small></a>
+        <a href="/capture?returnTo=%2F"><span>✓</span><strong>Create Reminder</strong><small>Add it with an interaction</small></a>
+        <a href="/settings#data-health"><span>◇</span><strong>Workspace Health</strong><small>Check data integrity</small></a>
+      </nav>
+    </section>
+
     <div className={`today-command-grid ${agendaIsEmpty ? "agenda-empty" : ""}`}>
       <section className="today-command-section today-agenda" aria-labelledby="today-agenda-title">
         <div className="command-section-heading"><div><p className="eyebrow">TODAY</p><h2 id="today-agenda-title">Today's Agenda</h2></div><span className="count">{agendaQueueCount + data.todaySchedule.length}</span></div>
@@ -70,18 +83,5 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
         <p className="future-placeholder"><span aria-hidden="true">○</span> Birthdays and anniversaries will appear here in a future update.</p>
       </section>
     </div>
-
-    <section className={`today-actions-section ${agendaIsEmpty && comingIsEmpty ? "emphasized" : ""}`} aria-labelledby="quick-actions-title">
-      <div className="command-section-heading"><div><p className="eyebrow">START SOMETHING</p><h2 id="quick-actions-title">Quick Actions</h2></div></div>
-      <nav className="today-quick-actions" aria-label="Quick actions">
-        <a href="/donors"><span>⌕</span><strong>Search Donor</strong><small>Find any relationship</small></a>
-        <a href="/onboarding/import"><span>⇧</span><strong>Import JL Export</strong><small>Refresh households or gifts</small></a>
-        <a href="/capture?returnTo=%2F"><span>＋</span><strong>Add Interaction</strong><small>Log a call, email, or note</small></a>
-        <a href="/capture?returnTo=%2F"><span>✓</span><strong>Create Reminder</strong><small>Add it with an interaction</small></a>
-        <a href="/settings#data-health"><span>◇</span><strong>Workspace Health</strong><small>Check data integrity</small></a>
-      </nav>
-    </section>
-
-    <section className="today-brief-section" aria-labelledby="morning-brief-section-title"><div className="command-section-heading"><div><p className="eyebrow">DAILY PREP</p><h2 id="morning-brief-section-title">Morning Brief</h2></div></div><BriefExperience surface="today" data={data} timezone={profile.timezone} /></section>
   </AppShell>;
 }

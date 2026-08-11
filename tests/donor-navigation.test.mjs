@@ -65,7 +65,6 @@ test("all current donor-entry surfaces carry their origin", async () => {
   ]);
   assert.match(directoryExperience, /DonorOriginLink/);
   assert.match(directory, /donorDirectoryReturnPath/);
-  assert.match(search, /rememberDonorOrigin/);
   assert.match(search, /history\.replaceState/);
   assert.match(today, /"today"/);
   assert.match(queue, /queueReturnTo/);

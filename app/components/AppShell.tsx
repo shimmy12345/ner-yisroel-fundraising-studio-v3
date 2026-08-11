@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { getChatGPTUser } from "../chatgpt-auth";
 import { ensureUserProfile, initials } from "../../lib/auth/profile";
+import { MobileMoreMenu } from "./MobileMoreMenu";
 
 export async function AppShell({ children, active }: { children: ReactNode; active: "today" | "donors" | "import" | "assistant" | "help" | "settings" }) {
   const identity = await getChatGPTUser();
@@ -14,6 +15,7 @@ export async function AppShell({ children, active }: { children: ReactNode; acti
         <a className={active === "donors" ? "active" : ""} href="/donors"><span className="nav-icon">◉</span>Donors</a>
         <Link className={active === "import" ? "active" : ""} href="/onboarding/import"><span className="nav-icon">⇧</span>Import</Link>
         <Link className={active === "assistant" ? "active" : ""} href="/assistant"><span className="nav-icon">✦</span>Assistant</Link>
+        <MobileMoreMenu active={active} profile={profile ? { fullName: profile.fullName, roleLabel: profile.jobTitle || profile.organizationName || profile.email, avatarUrl: profile.avatarUrl, initials: initials(profile.fullName) } : null} />
       </nav>
       <div className="sidebar-bottom">
         <Link className={`secondary-link ${active === "help" ? "active" : ""}`} href="/help"><span>?</span>Help & resources</Link>

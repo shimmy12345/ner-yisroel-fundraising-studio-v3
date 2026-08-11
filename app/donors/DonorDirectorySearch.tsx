@@ -2,8 +2,7 @@
 
 import { DonorAutocomplete } from "../capture/DonorAutocomplete";
 import type { DonorSearchRecord } from "../../lib/relationships/donor-search";
-import { donorDirectorySearchPath, donorNavigationHref } from "../../lib/navigation/donor-navigation";
-import { rememberDonorOrigin } from "../components/DonorNavigation";
+import { donorDirectorySearchPath } from "../../lib/navigation/donor-navigation";
 
 export function DonorDirectorySearch({ donors, initialQuery = "", resultCount, totalCount, onSearchChange }: { donors: DonorSearchRecord[]; initialQuery?: string; resultCount: number; totalCount: number; onSearchChange: (query: string, returnPath: string) => void }) {
   return <div className="directory-search shared-directory-search">
@@ -12,17 +11,17 @@ export function DonorDirectorySearch({ donors, initialQuery = "", resultCount, t
       selectedId=""
       initialQuery={initialQuery}
       clearable
+      showResults={false}
       onQueryChange={(query) => {
         const returnPath = donorDirectorySearchPath(`${window.location.pathname}${window.location.search}${window.location.hash}`, query);
         window.history.replaceState(window.history.state, "", returnPath);
         onSearchChange(query, returnPath);
       }}
-      onSelect={(id) => {
-        if (!id) return;
-        const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-        rememberDonorOrigin(returnTo);
-        window.location.assign(donorNavigationHref(id, returnTo, returnTo.includes("?") ? "search" : "donors"));
-      }}
+      // Matching donors are selected from the results list below
+      // (DonorDirectoryExperience / DonorOriginLink), which already
+      // remembers scroll position on click -- this input never renders its
+      // own selectable dropdown, so there is nothing to select here.
+      onSelect={() => {}}
       inputId="directory-donor-search"
       label="Find a household"
       placeholder="Search last name, household, spouse, JL code, email, or phone"

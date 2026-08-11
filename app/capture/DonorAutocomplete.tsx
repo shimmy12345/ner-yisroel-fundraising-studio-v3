@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
 import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
 
-export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone", initialQuery, onQueryChange, clearable = false }: {
+export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "capture-donor-search", label = "Donor", placeholder = "Search name, spouse, JL code, email, or phone", initialQuery, onQueryChange, clearable = false, showResults = true }: {
   donors: DonorSearchRecord[];
   selectedId: string;
   onSelect: (id: string) => void;
@@ -14,6 +14,12 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
   initialQuery?: string;
   onQueryChange?: (query: string) => void;
   clearable?: boolean;
+  // A results area elsewhere on the page (e.g. the donor directory list)
+  // can already show live-filtered matches as the user types. In that
+  // case this dropdown would just be a second copy of the same results,
+  // so callers with their own results surface set this to false and keep
+  // only the input and its clear/keyboard behavior.
+  showResults?: boolean;
 }) {
   const selected = donors.find((donor) => donor.id === selectedId);
   const [query, setQuery] = useState(initialQuery ?? selected?.name ?? "");
@@ -22,6 +28,7 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
   const inputRef = useRef<HTMLInputElement>(null);
   const matches = useMemo(() => searchDonors(donors, query), [donors, query]);
   const listId = `${inputId}-options`;
+  const showDropdown = showResults && open;
 
   function choose(donor: DonorSearchRecord) {
     onSelect(donor.id);
@@ -44,11 +51,11 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
     <input
       ref={inputRef}
       id={inputId}
-      role="combobox"
-      aria-autocomplete="list"
-      aria-expanded={open}
-      aria-controls={listId}
-      aria-activedescendant={open && matches[activeIndex] ? `${inputId}-${matches[activeIndex].id}` : undefined}
+      role={showResults ? "combobox" : undefined}
+      aria-autocomplete={showResults ? "list" : undefined}
+      aria-expanded={showResults ? open : undefined}
+      aria-controls={showResults ? listId : undefined}
+      aria-activedescendant={showDropdown && matches[activeIndex] ? `${inputId}-${matches[activeIndex].id}` : undefined}
       autoComplete="off"
       value={query}
       placeholder={placeholder}
@@ -62,6 +69,10 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
         setActiveIndex(-1);
       }}
       onKeyDown={(event) => {
+        if (!showResults) {
+          if (event.key === "Escape" && !event.nativeEvent.isComposing && clearable && query) { event.preventDefault(); clearQuery(); }
+          return;
+        }
         if (event.key === "ArrowDown") {
           event.preventDefault();
           setOpen(true);
@@ -80,7 +91,7 @@ export function DonorAutocomplete({ donors, selectedId, onSelect, inputId = "cap
       }}
     />
     {clearable && query && <button className="donor-search-clear" type="button" aria-label="Clear donor search" title="Clear search" onMouseDown={(event) => event.preventDefault()} onClick={clearQuery}>&#x2715;</button>}
-    {open && <div className="donor-autocomplete-results" id={listId} role="listbox">
+    {showDropdown && <div className="donor-autocomplete-results" id={listId} role="listbox">
       {matches.length ? matches.map((donor, index) => <button
         type="button"
         role="option"

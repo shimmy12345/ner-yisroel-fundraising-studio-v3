@@ -17,9 +17,9 @@ const styles = await readFile(new URL("../app/globals.css", import.meta.url), "u
 
 for (const action of ["Search Donor", "Import JL Export", "Add Interaction", "Create Reminder", "Workspace Health"]) assert.match(today, new RegExp(action));
 for (const section of ["Today's Agenda", "Coming Up", "Quick Actions", "Morning Brief"]) assert.match(today, new RegExp(section));
+assert.ok(today.indexOf("Morning Brief") < today.indexOf("Quick Actions"), "Morning Brief must be visible near the top, ahead of Quick Actions");
+assert.ok(today.indexOf("Quick Actions") < today.indexOf("Today's Agenda"), "Quick Actions must be visible near the top, ahead of the detailed agenda");
 assert.ok(today.indexOf("Today's Agenda") < today.indexOf("Coming Up"));
-assert.ok(today.indexOf("Coming Up") < today.indexOf("Quick Actions"));
-assert.ok(today.indexOf("Quick Actions") < today.indexOf("Morning Brief"));
 assert.match(today, /returnTo=%2F/);
 assert.match(queueExperience, /priorities=all#\$\{queueAnchor\}/);
 assert.match(today, /showAll \? 50 : 10/);

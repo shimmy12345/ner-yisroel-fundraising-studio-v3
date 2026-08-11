@@ -26,7 +26,6 @@ assert.match(autocomplete, /activeIndex >= 0/);
 assert.match(directory, /<DonorDirectoryExperience/);
 assert.match(directoryExperience, /<DonorDirectorySearch/);
 assert.match(directorySearch, /<DonorAutocomplete/);
-assert.match(directorySearch, /window\.location\.assign/);
 for (const field of ["lastName", "name", "spouse", "code", "email", "phone"]) assert.match(await readFile(new URL("../lib/relationships/donor-search.ts", import.meta.url), "utf8"), new RegExp(`donor\\.${field}`));
 
 assert.match(editPage, /initialActivity=\{/);
