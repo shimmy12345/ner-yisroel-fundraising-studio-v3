@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { buildUnifiedTimeline } from "../lib/relationships/unified-timeline.ts";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -32,41 +31,9 @@ async function run() {
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.nav \{ grid-template-columns: repeat\(5, 1fr\); \}/, "the mobile tab bar must have exactly as many columns as visible tabs (4 primary + More)");
   assert.match(styles, /\.nav-more \{ display:none; \}|\.nav-more, \.nav-more-backdrop, \.nav-more-panel \{ display: none; \}/, "the More trigger and panel must be inert on desktop, where Help/Settings remain reachable via .sidebar-bottom");
 
-  // ---- Donor giving/relationship history: the combined timeline (the
-  // only surface that displays giving records -- see the deliberate
-  // "no separate Giving History heading" rule in
-  // tests/unified-relationship-timeline.test.mjs) shows the 10 most
-  // recent records by default with an explicit expand/collapse control,
-  // and a payment's "linked pledge" link never points at an element that
-  // isn't actually rendered. ----
-  const timelineComponent = await read("app/donors/[id]/UnifiedRelationshipTimeline.tsx");
-  assert.match(timelineComponent, /const RECENT_LIMIT = 10;/);
-  assert.match(timelineComponent, /const visibleSlice = showAll \? visible : visible\.slice\(0, RECENT_LIMIT\);/, "truncation slices the already newest-first-sorted list rather than re-sorting it");
-  assert.match(timelineComponent, /Show all \{visible\.length\}/);
-  assert.match(timelineComponent, /Show recent \{RECENT_LIMIT\}/);
-  assert.match(timelineComponent, /const linkedPledgeVisible = item\.linkedPledgeExists && visibleGivingIds\.has/);
-  assert.match(timelineComponent, /setShowAll\(true\)/);
-  assert.match(timelineComponent, /setFilter\(next\);\s*setShowAll\(false\);/, "switching filters resets to the recent-10 view instead of inheriting an expanded state from a different filter");
-  assert.match(timelineComponent, /href={`#pledge-/, "a visible linked pledge still renders as a real, working anchor");
-  assert.match(timelineComponent, /Linked pledge is unavailable/, "a genuinely orphaned pledge link is still reported honestly, unchanged from before");
-
-  // Pure-logic sanity check: for a donor with far more than 10 giving
-  // records, the same slicing formula used by the component keeps the
-  // newest 10 (buildUnifiedTimeline already sorts newest-first; this is
-  // covered directly in tests/unified-relationship-timeline.test.mjs).
-  // Spaced a day apart (normalizeFinancialDate floors to the calendar day)
-  // so each gift lands on a distinct, strictly increasing date.
-  const manyGifts = Array.from({ length: 25 }, (_, index) => ({
-    id: `gift-${index}`, donor_id: "fictional-donor", external_source: "JL Solutions",
-    activity_date: 1_000_000_000 + index * 100_000, committed_cents: 5_000, paid_cents: 5_000, balance_cents: 0,
-    item_type: "Gift", description: `Gift ${index}`, source_campaign: null, category: "completed_gift",
-    workspace_status: "active", private_note: null, updated_at: 1_000_000_000 + index * 100_000,
-  }));
-  const timeline = buildUnifiedTimeline({ giving: manyGifts, legacyGifts: [], payments: [], interactions: [], reminders: [], now: 2_000_000_000 });
-  assert.equal(timeline.length, 25);
-  assert.equal(timeline[0].key, "giving:gift-24", "newest gift sorts first");
-  const recentTen = timeline.slice(0, 10);
-  assert.deepEqual(recentTen.map((item) => item.key), Array.from({ length: 10 }, (_, index) => `giving:gift-${24 - index}`), "the visible 10 are the 10 most recent, still newest-first");
+  // ---- Donor giving/relationship history: pagination behavior (initial
+  // 10, incremental "Show N more", collapse, filter reset, linked-pledge
+  // navigation) is covered in full by tests/timeline-pagination.test.mjs. ----
 
   // ---- Donor directory result-row layout: fixed avatar column, JL code
   // rendered inline with the household name instead of stacked as its own

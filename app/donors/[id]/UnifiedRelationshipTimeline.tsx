@@ -14,8 +14,9 @@ const dateTime = (epoch: number, timezone: string) => new Intl.DateTimeFormat("e
 const STATUS_LABELS: Record<TimelineStatus, string> = { scheduled: "Scheduled", completed: "Completed", cancelled: "Cancelled", pending: "Pending · unconfirmed", open: "Open", overdue: "Overdue", "needs-review": "Needs review", excluded: "Excluded from totals" };
 // Newest-first history can grow very long for a donor with extensive
 // giving activity. Show the most recent RECENT_LIMIT records by default
-// (per filter) with an explicit expand/collapse control, rather than
-// rendering the entire history inline every time.
+// (per filter), then reveal RECENT_LIMIT more per click -- never jump
+// straight from 10 to everything -- with an explicit collapse back to
+// the initial view once more than RECENT_LIMIT are showing.
 const RECENT_LIMIT = 10;
 
 export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now }: {
@@ -30,18 +31,27 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
   now: number;
 }) {
   const [filter, setFilter] = useState<TimelineFilter>("all");
-  const [showAll, setShowAll] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(RECENT_LIMIT);
   const timeline = useMemo(() => buildUnifiedTimeline({ giving, legacyGifts, payments, interactions, reminders, now }), [giving, legacyGifts, payments, interactions, reminders, now]);
   const counts = useMemo(() => new Map(TIMELINE_FILTERS.map((option) => [option.id, option.id === "all" ? timeline.length : timeline.filter((item) => item.filter === option.id).length])), [timeline]);
+  // All records for the active filter are already in memory (they came
+  // down with the page load) -- "show more" only grows how much of that
+  // already-fetched, already-sorted array is sliced for render. Nothing
+  // is reloaded or refetched.
   const visible = filter === "all" ? timeline : timeline.filter((item) => item.filter === filter);
   const selectedLabel = TIMELINE_FILTERS.find((item) => item.id === filter)?.label ?? "activity";
-  const visibleSlice = showAll ? visible : visible.slice(0, RECENT_LIMIT);
+  const visibleSlice = visible.slice(0, visibleCount);
   const visibleGivingIds = new Set(visibleSlice.filter((item) => item.kind === "giving").map((item) => item.giving.id));
   const hiddenCount = visible.length - visibleSlice.length;
+  const nextBatchSize = Math.min(RECENT_LIMIT, hiddenCount);
 
   function selectFilter(next: TimelineFilter) {
     setFilter(next);
-    setShowAll(false);
+    setVisibleCount(RECENT_LIMIT);
+  }
+
+  function revealThrough(indexInVisible: number) {
+    setVisibleCount((count) => indexInVisible >= 0 ? Math.max(count, indexInVisible + 1) : count + RECENT_LIMIT);
   }
 
   if (!timeline.length) return <div className="unified-timeline-empty"><strong>No relationship activity yet</strong><p>Gifts, conversations, reminders, and scheduled work will appear here in date order.</p></div>;
@@ -69,10 +79,12 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
       if (item.kind === "payment") {
         const linkedPledgeLabel = item.payment.pledge_description ? `Linked pledge: ${item.payment.pledge_description}` : "View linked pledge";
         // The linked pledge may exist but sit outside the currently
-        // truncated slice -- an anchor to it would silently do nothing, so
-        // expand to the full history first instead of rendering a dead link.
+        // revealed slice -- an anchor to it would silently do nothing, so
+        // reveal exactly as far as that record instead of rendering a dead
+        // link (and instead of jumping to show everything).
         const linkedPledgeVisible = item.linkedPledgeExists && visibleGivingIds.has(item.payment.pledge_activity_id);
-        return <article className="timeline-item unified-timeline-item completed pledge-payment-event" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>Payment applied to pledge</h3><span className="event-type">Payment</span>{item.payment.pledge_campaign && <span className="event-campaign">{item.payment.pledge_campaign}</span>}<span className="timeline-status completed">Completed</span></div><p>{money(item.payment.applied_cents)} paid · {money(item.payment.remaining_balance_cents ?? 0)} remaining</p>{linkedPledgeVisible ? <a className="timeline-linked-record" href={`#pledge-${encodeURIComponent(item.payment.pledge_activity_id)}`}>{linkedPledgeLabel}</a> : item.linkedPledgeExists ? <button type="button" className="timeline-linked-record timeline-linked-record-expand" onClick={() => setShowAll(true)}>{linkedPledgeLabel} · Show all to view</button> : <small className="timeline-link-unavailable">Linked pledge is unavailable</small>}</div></article>;
+        const pledgeIndexInVisible = visible.findIndex((entry) => entry.kind === "giving" && entry.giving.id === item.payment.pledge_activity_id);
+        return <article className="timeline-item unified-timeline-item completed pledge-payment-event" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>Payment applied to pledge</h3><span className="event-type">Payment</span>{item.payment.pledge_campaign && <span className="event-campaign">{item.payment.pledge_campaign}</span>}<span className="timeline-status completed">Completed</span></div><p>{money(item.payment.applied_cents)} paid · {money(item.payment.remaining_balance_cents ?? 0)} remaining</p>{linkedPledgeVisible ? <a className="timeline-linked-record" href={`#pledge-${encodeURIComponent(item.payment.pledge_activity_id)}`}>{linkedPledgeLabel}</a> : item.linkedPledgeExists ? <button type="button" className="timeline-linked-record timeline-linked-record-expand" onClick={() => revealThrough(pledgeIndexInVisible)}>{linkedPledgeLabel} · Show more to view</button> : <small className="timeline-link-unavailable">Linked pledge is unavailable</small>}</div></article>;
       }
       if (item.kind === "reminder") return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{dateTime(item.eventAt, timezone)}</strong></time><span className="timeline-dot note">!</span><div className="timeline-content"><div><h3>{item.reminder.action}</h3><span className="event-type">Reminder</span><span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{item.reminder.reason || (item.reminder.status === "completed" ? "Completed reminder" : "No additional context recorded.")}</p>{live && item.reminder.status === "open" && <CompletePriorityButton recommendationId={item.reminder.id} />}</div></article>;
       const activity = item.interaction;
@@ -82,7 +94,7 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
       const scheduled = item.status === "scheduled";
       return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{dateTime(item.eventAt, timezone)}</strong></time><span className="timeline-dot">•</span><div className="timeline-content"><div><h3>{timelineTitle}</h3><span className="event-type">{typeLabel}</span><span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div>{item.plannedAt && item.status === "completed" && <small className="timeline-planned-date">Originally planned for {dateTime(item.plannedAt, timezone)}</small>}<p>{timelineNote}</p>{live && scheduled && <a className="timeline-outcome-link" href={`/interactions/${encodeURIComponent(activity.id)}/outcome`}>Log Outcome</a>}{live && item.status === "cancelled" && <a className="timeline-outcome-link secondary" href={`/interactions/${encodeURIComponent(activity.id)}/outcome`}>Edit or reopen</a>}{live && item.status !== "cancelled" && <ActivityActions activityId={activity.id} editHref={`/interactions/${encodeURIComponent(activity.id)}/edit`} scheduled={scheduled} canCancel={scheduled && activity.occurred_at > now} />}</div></article>;
     })}</div>}
-    {hiddenCount > 0 && <button type="button" className="timeline-more" onClick={() => setShowAll(true)}>Show all {visible.length} {selectedLabel.toLowerCase()} records ({hiddenCount} more)</button>}
-    {showAll && visible.length > RECENT_LIMIT && <button type="button" className="timeline-more" onClick={() => setShowAll(false)}>Show recent {RECENT_LIMIT}</button>}
+    {hiddenCount > 0 && <button type="button" className="timeline-more" onClick={() => setVisibleCount((count) => count + RECENT_LIMIT)}>Show {nextBatchSize} more</button>}
+    {visibleCount > RECENT_LIMIT && <button type="button" className="timeline-more" onClick={() => setVisibleCount(RECENT_LIMIT)}>Show recent {RECENT_LIMIT}</button>}
   </>;
 }

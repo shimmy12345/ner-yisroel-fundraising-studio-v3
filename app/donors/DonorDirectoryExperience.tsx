@@ -51,7 +51,21 @@ export function DonorDirectoryExperience({ relationships, initialQuery, initialR
       const effectiveLastName = effectiveDonorLastName({ name: relationship.display_name, lastName: relationship.last_name });
       const code = numericDonorCode({ donorCode: relationship.donor_code, externalId: relationship.external_id });
       return <DonorOriginLink className="directory-row" href={donorNavigationHref(relationship.id, returnPath, origin)} key={relationship.id}>
-        <span className="directory-avatar">{donorInitials({ displayName: relationship.display_name, primaryFirstName: relationship.primary_first_name, lastName: relationship.last_name })}</span><span className="directory-identity"><span className="directory-identity-name"><strong>{relationship.display_name}</strong>{code && <span className="donor-code">{code}</span>}</span><small>{[`Last name: ${effectiveLastName}`, members, location].filter(Boolean).join(" · ")}</small></span><span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
+        <span className="directory-avatar">{donorInitials({ displayName: relationship.display_name, primaryFirstName: relationship.primary_first_name, lastName: relationship.last_name })}</span>
+        <span className="directory-identity">
+          {/* Household name gets full width to wrap on narrow screens
+              rather than losing surname characters to an ellipsis --
+              wrapping never competes with the JL code for that space.
+              The code itself renders in one of two positions depending on
+              viewport (CSS toggles which is visible; the hidden copy is
+              display:none, so it's never duplicated for assistive tech):
+              inline next to the name on desktop, where a single compact
+              line is the norm, or folded into the secondary metadata line
+              on mobile, where the name may need its own line(s). */}
+          <span className="directory-identity-name"><strong>{relationship.display_name}</strong>{code && <span className="donor-code directory-code-inline">{code}</span>}</span>
+          <small className="directory-identity-meta">{code && <span className="donor-code directory-code-secondary">{code}</span>}<span className="directory-identity-meta-text">{[`Last name: ${effectiveLastName}`, members, location].filter(Boolean).join(" · ")}</span></small>
+        </span>
+        <span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
       </DonorOriginLink>;
     })}</section> : <section className="directory-empty"><h2>No relationships found</h2><p>{searching ? "Try a different household, person, code, email, or phone, or clear the search to see everyone." : "Import your donor data to begin building your relationship workspace."}</p>{!searching && <a href="/onboarding/import">Import donor data</a>}</section>}
   </>;
