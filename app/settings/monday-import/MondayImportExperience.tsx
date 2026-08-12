@@ -22,10 +22,11 @@ type RowDecision =
   | { kind: "undecided" }
   | { kind: "confirm_contact"; actualContactDate: string }
   | { kind: "accept_future_planned"; dueDate: string }
-  | { kind: "create_followup"; dueDate: string };
+  | { kind: "create_followup"; dueDate: string }
+  | { kind: "save_historical_context" };
 
 const DISPOSITION_LABEL: Record<MondayDisposition, string> = {
-  confirm_contact_candidate: "Possible historical contact",
+  confirm_contact_candidate: "Likely completed contact",
   future_planned: "Future planned action",
   historical_planned: "Historical / undated planned action",
   donation_note: "Donation or payment note",
@@ -50,7 +51,7 @@ export function MondayImportExperience() {
   const [decisions, setDecisions] = useState<Record<RowKey, RowDecision>>({});
   const [reviewedKeys, setReviewedKeys] = useState<Set<RowKey>>(new Set());
   const [dismissedGroups, setDismissedGroups] = useState<Set<string>>(new Set());
-  const [result, setResult] = useState<{ confirmedContactCount: number; recommendationCount: number; rejected: Array<{ text: string | undefined; reason: string }> } | null>(null);
+  const [result, setResult] = useState<{ confirmedContactCount: number; recommendationCount: number; historicalContextCount: number; rejected: Array<{ text: string | undefined; reason: string }> } | null>(null);
 
   async function inspectFile(file: File) {
     if (!/\.xlsx$/i.test(file.name)) { setError("Choose an Excel (.xlsx) file exported from Monday.com."); return; }
@@ -110,13 +111,14 @@ export function MondayImportExperience() {
           const base = { code: row.code, subitemIndex: row.subitemIndex, text: row.text, dueDateRaw: row.dueDateRaw };
           if (decision.kind === "confirm_contact") return { ...base, action: "confirm_contact", actualContactDate: decision.actualContactDate };
           if (decision.kind === "accept_future_planned") return { ...base, action: "accept_future_planned", dueDate: decision.dueDate };
-          return { ...base, action: "create_followup", dueDate: decision.dueDate };
+          if (decision.kind === "create_followup") return { ...base, action: "create_followup", dueDate: decision.dueDate };
+          return { ...base, action: "save_historical_context" };
         }),
       };
       const response = await fetch("/api/import/monday/commit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-      const payload = await response.json() as { confirmedContactCount?: number; recommendationCount?: number; rejected?: Array<{ text: string | undefined; reason: string }>; error?: string };
+      const payload = await response.json() as { confirmedContactCount?: number; recommendationCount?: number; historicalContextCount?: number; rejected?: Array<{ text: string | undefined; reason: string }>; error?: string };
       if (!response.ok) throw new Error(payload.error ?? "The import could not be saved.");
-      setResult({ confirmedContactCount: payload.confirmedContactCount ?? 0, recommendationCount: payload.recommendationCount ?? 0, rejected: payload.rejected ?? [] });
+      setResult({ confirmedContactCount: payload.confirmedContactCount ?? 0, recommendationCount: payload.recommendationCount ?? 0, historicalContextCount: payload.historicalContextCount ?? 0, rejected: payload.rejected ?? [] });
       setStep("complete");
     } catch (commitError) {
       setError(commitError instanceof Error ? commitError.message : "The import could not be saved.");
@@ -165,7 +167,7 @@ export function MondayImportExperience() {
     {step !== "upload" && <section className="support-card monday-import-summary">
       <div className="settings-import"><div><h2>{fileName}</h2><p>{rows.length} row{rows.length === 1 ? "" : "s"} loaded. Nothing is written until you approve specific rows and commit.</p></div><button type="button" onClick={startOver}>Start over</button></div>
       <dl className="import-counts">
-        <div><dt>Possible historical contact</dt><dd>{confirmCandidates.length}</dd></div>
+        <div><dt>Likely completed contacts</dt><dd>{confirmCandidates.length}</dd></div>
         <div><dt>Future planned actions</dt><dd>{futurePlanned.length}</dd></div>
         <div><dt>Historical / undated actions</dt><dd>{historicalPlanned.length}</dd></div>
         <div><dt>Donation / payment notes</dt><dd>{donationNotes.length}</dd></div>
@@ -178,12 +180,13 @@ export function MondayImportExperience() {
 
     {step === "preview" && <>
       {confirmCandidates.length > 0 && <section className="support-card">
-        <h3>Possible historical contact</h3>
-        <p>Confirm only if you can verify this contact actually happened. Monday's due date is shown as source context only -- it is never assumed to be the actual contact date.</p>
+        <h3>Likely completed contacts</h3>
+        <p>Confirm only if you can verify this contact actually happened. Monday's due date is shown as source context only -- it is never assumed to be the actual contact date. Not sure? Save it as historical context instead of guessing.</p>
         {confirmCandidates.map((row) => {
           const key = rowKey(row);
           const decision = decisions[key];
           const confirmed = decision?.kind === "confirm_contact";
+          const savedAsContext = decision?.kind === "save_historical_context";
           return <article key={key} className="monday-import-row">
             <div className="monday-import-row-main">
               <strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span>
@@ -193,8 +196,9 @@ export function MondayImportExperience() {
             </div>
             <div className="monday-import-row-actions">
               <label>Actual contact date<input type="date" value={confirmed ? decision.actualContactDate : (row.dueDateIso ?? "")} onChange={(event) => setDecision(key, { kind: "confirm_contact", actualContactDate: event.target.value })} /></label>
-              <button type="button" className={confirmed ? "onboarding-primary" : ""} onClick={() => setDecision(key, { kind: "confirm_contact", actualContactDate: decision?.kind === "confirm_contact" ? decision.actualContactDate : (row.dueDateIso ?? "") })}>{confirmed ? "Confirmed" : "Confirm contact"}</button>
-              {confirmed && <button type="button" onClick={() => setDecision(key, { kind: "undecided" })}>Undo</button>}
+              <button type="button" className={confirmed ? "onboarding-primary" : ""} onClick={() => setDecision(key, { kind: "confirm_contact", actualContactDate: decision?.kind === "confirm_contact" ? decision.actualContactDate : (row.dueDateIso ?? "") })}>{confirmed ? "Confirmed" : "Confirm as interaction"}</button>
+              <button type="button" className={savedAsContext ? "onboarding-primary" : ""} onClick={() => setDecision(key, { kind: "save_historical_context" })}>{savedAsContext ? "Saved as context" : "Save as historical context"}</button>
+              {(confirmed || savedAsContext) && <button type="button" onClick={() => setDecision(key, { kind: "undecided" })}>Undo</button>}
             </div>
           </article>;
         })}
@@ -225,6 +229,7 @@ export function MondayImportExperience() {
           const key = rowKey(row);
           const decision = decisions[key];
           const followUp = decision?.kind === "create_followup";
+          const savedAsContext = decision?.kind === "save_historical_context";
           const reviewed = reviewedKeys.has(key);
           return <article key={key} className="monday-import-row">
             <div className="monday-import-row-main"><strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span><p>{row.text}</p><small>Original Monday due date: {row.dueDateIso ?? "not recorded"}</small></div>
@@ -233,8 +238,9 @@ export function MondayImportExperience() {
                 <label>New due date<input type="date" min={todayIsoDate()} value={decision.dueDate} onChange={(event) => setDecision(key, { kind: "create_followup", dueDate: event.target.value })} /></label>
                 <button type="button" onClick={() => setDecision(key, { kind: "undecided" })}>Undo</button>
               </> : <>
+                <button type="button" className={savedAsContext ? "onboarding-primary" : ""} onClick={() => setDecision(key, { kind: "save_historical_context" })}>{savedAsContext ? "Saved as context" : "Save as historical context"}</button>
                 <button type="button" onClick={() => setDecision(key, { kind: "create_followup", dueDate: "" })}>Create follow-up now</button>
-                <button type="button" className={reviewed ? "onboarding-primary" : ""} onClick={() => toggleReviewed(key)}>{reviewed ? "Reviewed" : "Review later"}</button>
+                {savedAsContext ? <button type="button" onClick={() => setDecision(key, { kind: "undecided" })}>Undo</button> : <button type="button" className={reviewed ? "onboarding-primary" : ""} onClick={() => toggleReviewed(key)}>{reviewed ? "Reviewed" : "Review later"}</button>}
               </>}
             </div>
           </article>;
@@ -259,11 +265,16 @@ export function MondayImportExperience() {
         <p>Not clearly a contact, a plan, or a donation note. Default Ignore -- nothing here can be written.</p>
         {ambiguousRows.map((row) => {
           const key = rowKey(row);
+          const decision = decisions[key];
+          const savedAsContext = decision?.kind === "save_historical_context";
           const reviewed = reviewedKeys.has(key);
-          if (reviewed) return null;
+          if (reviewed && !savedAsContext) return null;
           return <article key={key} className="monday-import-row">
             <div className="monday-import-row-main"><strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span><p>{row.text}</p></div>
-            <div className="monday-import-row-actions"><button type="button" onClick={() => toggleReviewed(key)}>Reviewed</button></div>
+            <div className="monday-import-row-actions">
+              <button type="button" className={savedAsContext ? "onboarding-primary" : ""} onClick={() => setDecision(key, { kind: "save_historical_context" })}>{savedAsContext ? "Saved as context" : "Save as historical context"}</button>
+              {savedAsContext ? <button type="button" onClick={() => setDecision(key, { kind: "undecided" })}>Undo</button> : <button type="button" onClick={() => toggleReviewed(key)}>Reviewed</button>}
+            </div>
           </article>;
         })}
       </section>}
@@ -287,6 +298,7 @@ export function MondayImportExperience() {
       <dl className="import-counts">
         <div><dt>Contacts confirmed</dt><dd>{result.confirmedContactCount}</dd></div>
         <div><dt>Follow-ups created</dt><dd>{result.recommendationCount}</dd></div>
+        <div><dt>Saved as historical context</dt><dd>{result.historicalContextCount}</dd></div>
       </dl>
       {result.rejected.length > 0 && <><p>{result.rejected.length} decision{result.rejected.length === 1 ? "" : "s"} could not be saved:</p><ul>{result.rejected.map((item, index) => <li key={index}>{item.text ?? "(unknown row)"}: {item.reason}</li>)}</ul></>}
       <button type="button" onClick={startOver}>Import another file</button>

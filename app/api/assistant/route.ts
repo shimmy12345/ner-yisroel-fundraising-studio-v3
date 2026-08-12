@@ -11,6 +11,7 @@ type RequestBody = { task?: AssistantTask | "custom"; prompt?: string };
 type DonorRow = { id: string; display_name: string; relationship_summary: string | null; institutional_memory: string | null };
 type InteractionRow = { id: string; summary: string; occurred_at: number };
 type RecommendationRow = { id: string; action: string; reason: string; due_at: number | null };
+type HistoricalContextRow = { text: string };
 const supported = new Set(["custom", "relationship-summary", "meeting-brief", "draft", "next-action", "lapsed-relationships", "executive-summary"]);
 
 export async function POST(request: Request) {
@@ -28,14 +29,19 @@ export async function POST(request: Request) {
     const now = Math.floor(Date.now() / 1000);
     const brief = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now);
     const primaryId = brief.priorities[0]?.donorId ?? brief.gifts[0]?.donorId ?? null;
-    const [donor, interactions, recommendations] = primaryId ? await Promise.all([
+    const [donor, interactions, recommendations, historicalContext] = primaryId ? await Promise.all([
       env.DB.prepare(`SELECT id, display_name, relationship_summary, institutional_memory FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"}`).bind(...(mode === "demo" ? [primaryId] : [primaryId, profile.id])).first<DonorRow>(),
       env.DB.prepare(`SELECT id, summary, occurred_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at)) ORDER BY occurred_at DESC LIMIT 1`).bind(...(mode === "demo" ? [primaryId, now] : [primaryId, profile.id, now])).all<InteractionRow>(),
       env.DB.prepare(`SELECT id, action, reason, due_at FROM recommendations WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND status = 'open' ORDER BY due_at LIMIT 10`).bind(...(mode === "demo" ? [primaryId] : [primaryId, profile.id])).all<RecommendationRow>(),
-    ]) : [null, { results: [] }, { results: [] }];
+      // Text only for the few most recent unconfirmed rows -- kept in its
+      // own query, never joined into the interactions/recommendations
+      // results above, so it can only ever land in the separate
+      // unconfirmedHistoricalContext field below.
+      mode === "demo" ? Promise.resolve({ results: [] as HistoricalContextRow[] }) : env.DB.prepare(`SELECT text FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed' ORDER BY created_at DESC LIMIT 5`).bind(primaryId, profile.id).all<HistoricalContextRow>(),
+    ]) : [null, { results: [] }, { results: [] }, { results: [] }];
     const latest = interactions.results[0];
     const snapshot: AssistantContextSnapshot = {
-      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available." },
+      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => item.text) },
       latestInteraction: latest ? { id: latest.id, summary: latest.summary.replace("\n", ": "), occurredAt: new Date(latest.occurred_at * 1000).toISOString() } : null,
       recommendations: recommendations.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at ? new Date(item.due_at * 1000).toISOString() : null })),
       priorities: brief.priorities.map(({ name, label, reason, why, action }) => ({ name, label, reason, why, action })), meetings: brief.meetings, gifts: brief.gifts.map(({ id, name, amount, detail }) => ({ id, name, amount, detail })),

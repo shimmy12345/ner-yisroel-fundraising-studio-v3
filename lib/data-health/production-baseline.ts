@@ -9,11 +9,11 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 24 as of 0023_donor_research_stage_a.sql — adds the six Donor Research
-// tables, so PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
+// 25 as of 0024_donor_historical_context.sql — adds the donor_historical_context
+// table, so PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
 // stays "0019": that label identifies the single bootstrap file's origin,
 // not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 24;
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 25;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

@@ -8,6 +8,7 @@ const snapshot = {
     name: "Elena & David Chen",
     summary: "Longstanding scholarship partners with rising engagement.",
     memory: "Elena connects through student stories; David asks for outcomes.",
+    unconfirmedHistoricalContext: ["Schedule meeting when in Chicago"],
   },
   latestInteraction: {
     id: "interaction-1",
@@ -77,6 +78,12 @@ async function run() {
   assert.equal(meeting.mode, "rule-based");
   assert.match(meeting.content, /Garden Room/i);
   assert.match(meeting.content, /Next action/i);
+  assert.match(meeting.content, /Unconfirmed historical notes \(not verified, not counted as contact\):\n- Schedule meeting when in Chicago/, "unconfirmed historical context must appear as its own clearly-labeled block");
+  const relationshipSummary = await request("relationship-summary");
+  assert.match(relationshipSummary.content, /Longstanding scholarship partners/);
+  assert.match(relationshipSummary.content, /Unconfirmed historical notes \(not verified, not counted as contact\)/, "relationship-summary must also surface unconfirmed context, never silently merged into the summary text above it");
+  const noUnconfirmed = await new RuleBasedAIService().complete({ task: "relationship-summary", prompt: "", context: { userId: "staging-user", donorId: "elena-chen", interactionIds: [], snapshot: { ...snapshot, donor: { ...snapshot.donor, unconfirmedHistoricalContext: [] } } } });
+  assert.doesNotMatch(noUnconfirmed.content, /Unconfirmed historical notes/, "the block must be omitted entirely when there is nothing unconfirmed, not shown empty");
   const thankYou = await request("draft");
   assert.match(thankYou.content, /\$10,000/);
   assert.match(thankYou.content, /Dear Marcus/);

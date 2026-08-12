@@ -560,6 +560,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .meeting-brief-essential-grid .meeting-brief-card { box-shadow:0 5px 16px rgba(31,54,45,.045); }
 .meeting-brief-last-interaction > strong { display:block; margin-bottom:6px; font-size:16px; }
 .meeting-brief-last-interaction > p { margin:0 0 9px; color:#5e6d65; line-height:1.6; }
+.meeting-unconfirmed-note { margin:10px 0 0; padding:8px 10px; border-radius:8px; background:#fbf1ec; color:#a25c3a; font-size:12px; line-height:1.5; }
 .meeting-topic-list,.meeting-people-list { display:flex; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
 .meeting-topic-list li,.meeting-people-list li { padding:8px 11px; border-radius:999px; background:#edf4ef; color:#365e4b; font-size:13px; font-weight:700; }
 .meeting-commitment-list { display:grid; gap:10px; }
@@ -815,3 +816,13 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .monday-import-row-actions button { min-height:36px; padding:8px 12px; border:1px solid #d1dad4; border-radius:8px; background:#fff; color:#365448; font-weight:650; font-size:12px; cursor:pointer; white-space:nowrap; }
 .monday-import-commit-bar { display:flex; justify-content:space-between; align-items:center; gap:16px; position:sticky; bottom:16px; box-shadow:0 16px 40px rgba(33,55,47,.14); }
 @media (max-width:760px) { .monday-import-row { grid-template-columns:1fr; } .monday-import-row-actions { align-items:flex-start; } .monday-import-summary dl.import-counts { grid-template-columns:1fr 1fr; } }
+
+.historical-context-card summary { cursor:pointer; list-style:none; }
+.historical-context-card summary::-webkit-details-marker { display:none; }
+.historical-context-card summary h2 { display:inline; font-size:15px; }
+.historical-context-lede { margin:8px 0 0; color:#89928e; font-size:8px; line-height:1.5; }
+.historical-context-list { display:grid; gap:10px; margin-top:12px; }
+.historical-context-entry { padding:10px; border:1px solid #eceeeb; border-radius:9px; background:#fafbf9; }
+.historical-context-entry p { margin:0 0 6px; color:#4c5f56; font-size:9px; line-height:1.5; }
+.historical-context-meta { display:flex; flex-wrap:wrap; gap:8px; align-items:center; color:#89928e; font-size:7px; }
+.historical-context-badge { padding:2px 7px; border-radius:20px; background:#f7e9df; color:#a25c3a; font-size:7px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }

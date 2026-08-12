@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "47dc605cc6e85dafab8925a9ced8d562a72a8cab1910767552c58c8370adb92b",
+  "schemaHash": "a0c52062213a9ec37c58e49e3ef6c2958e23ad651c3cc32837ce8e65160a6e35",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -25,7 +25,8 @@
     "0020_financial_date_only.sql",
     "0021_import_preview_sessions.sql",
     "0022_import_review_drafts.sql",
-    "0023_donor_research_stage_a.sql"
+    "0023_donor_research_stage_a.sql",
+    "0024_donor_historical_context.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -649,6 +650,141 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "donor_historical_context",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "text",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_date",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "classification",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'unconfirmed'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_historical_context_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_historical_context_donor_date_idx` ON `donor_historical_context` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": "donor_historical_context_user_fingerprint_uidx",
+            "columns": [
+              "user_id",
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_historical_context_user_fingerprint_uidx` ON `donor_historical_context` (`user_id`,`fingerprint`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('unconfirmed','dismissed'))"
+        ]
       },
       {
         "name": "donor_merge_audits",
@@ -4036,6 +4172,11 @@
     },
     {
       "type": "table",
+      "name": "donor_historical_context",
+      "sql": "CREATE TABLE `donor_historical_context` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `text` text NOT NULL, `source_date` integer, `classification` text NOT NULL, `source` text NOT NULL, `fingerprint` text NOT NULL, `status` text NOT NULL DEFAULT 'unconfirmed' CHECK (`status` IN ('unconfirmed','dismissed')), `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "donor_merge_audits",
       "sql": "CREATE TABLE `donor_merge_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `surviving_donor_id` text NOT NULL, `archived_donor_id` text NOT NULL, `field_choices_json` text NOT NULL, `survivor_before_json` text NOT NULL, `duplicate_before_json` text NOT NULL, `survivor_after_json` text NOT NULL, `moved_counts_json` text NOT NULL, `source` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`), FOREIGN KEY (`surviving_donor_id`) REFERENCES `donors`(`id`), FOREIGN KEY (`archived_donor_id`) REFERENCES `donors`(`id`) )"
     },
@@ -4203,6 +4344,16 @@
       "type": "index",
       "name": "donor_contact_audits_donor_date_idx",
       "sql": "CREATE INDEX `donor_contact_audits_donor_date_idx` ON `donor_contact_audits` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_historical_context_donor_date_idx",
+      "sql": "CREATE INDEX `donor_historical_context_donor_date_idx` ON `donor_historical_context` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_historical_context_user_fingerprint_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_historical_context_user_fingerprint_uidx` ON `donor_historical_context` (`user_id`,`fingerprint`)"
     },
     {
       "type": "index",

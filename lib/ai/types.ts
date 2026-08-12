@@ -12,6 +12,10 @@ export type AssistantContextSnapshot = {
     name: string;
     summary: string;
     memory: string;
+    // Separate from summary/memory on purpose -- these are unconfirmed,
+    // never established relationship fact, and must never be merged into
+    // either field.
+    unconfirmedHistoricalContext: string[];
   };
   latestInteraction: {
     id: string;

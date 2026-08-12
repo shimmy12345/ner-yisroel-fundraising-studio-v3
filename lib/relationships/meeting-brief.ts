@@ -42,7 +42,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContext] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -63,6 +63,10 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
       WHERE r.donor_id = ? AND r.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
         AND r.status = 'open'
       ORDER BY CASE WHEN r.due_at IS NULL THEN 1 ELSE 0 END, r.due_at LIMIT 5`).bind(donorId, userId, userId).all<ReminderRow>(),
+    // Count only, never the row text -- kept completely separate from the
+    // interactions query above so an unconfirmed historical note can never
+    // be surfaced (here or anywhere downstream) as a real contact.
+    env.DB.prepare(`SELECT COUNT(*) AS count FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed'`).bind(donorId, userId).first<{ count: number }>(),
   ]);
 
   const address = [
@@ -102,5 +106,5 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
   ];
   const interactionData: MeetingBriefInteraction[] = interactions.results.map((item) => ({ id: item.id, type: item.type, occurredAt: item.occurred_at, summary: item.summary }));
   const reminderData: MeetingBriefReminder[] = reminders.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at }));
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData);
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, historicalContext?.count ?? 0);
 }

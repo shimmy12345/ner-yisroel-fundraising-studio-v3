@@ -23,6 +23,7 @@ export const STAGING_RESET_TABLE_ORDER = [
   // Depend only on `interactions` or `donors`.
   "activity_status_audits",
   "donor_contact_audits",
+  "donor_historical_context",
   "donor_merge_audits",
   "donor_views",
   "gifts",

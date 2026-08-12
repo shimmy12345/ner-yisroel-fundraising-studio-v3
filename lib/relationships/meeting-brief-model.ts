@@ -48,6 +48,10 @@ export type MeetingBrief = {
   peopleMentioned: string[];
   discussionTopics: Array<{ title: string; detail: string }>;
   followUpActions: Array<{ title: string; detail: string }>;
+  // Count only -- deliberately not the row text. This must never be
+  // confused with lastMeaningfulContact/recentInteractions: it counts
+  // donor_historical_context rows, which are never a logged interaction.
+  unconfirmedHistoricalContextCount: number;
 };
 
 function firstLine(value: string) {
@@ -59,6 +63,7 @@ export function buildMeetingBrief(
   gifts: MeetingBriefGift[],
   interactions: MeetingBriefInteraction[],
   reminders: MeetingBriefReminder[],
+  unconfirmedHistoricalContextCount = 0,
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -112,6 +117,7 @@ export function buildMeetingBrief(
     peopleMentioned,
     discussionTopics,
     followUpActions,
+    unconfirmedHistoricalContextCount,
   };
 }
 import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";

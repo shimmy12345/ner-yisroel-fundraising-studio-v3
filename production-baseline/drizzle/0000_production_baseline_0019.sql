@@ -78,6 +78,22 @@ CREATE TABLE `donor_contact_audits` (
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `donor_historical_context` (
+  `id` text PRIMARY KEY NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `text` text NOT NULL,
+  `source_date` integer,
+  `classification` text NOT NULL,
+  `source` text NOT NULL,
+  `fingerprint` text NOT NULL,
+  `status` text NOT NULL DEFAULT 'unconfirmed' CHECK (`status` IN ('unconfirmed','dismissed')),
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `donor_merge_audits` (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` text NOT NULL,
@@ -462,6 +478,10 @@ CREATE INDEX `donation_import_rollback_audits_user_date_idx` ON `donation_import
 
 CREATE INDEX `donor_contact_audits_donor_date_idx` ON `donor_contact_audits` (`donor_id`,`created_at`);
 
+CREATE INDEX `donor_historical_context_donor_date_idx` ON `donor_historical_context` (`donor_id`,`created_at`);
+
+CREATE UNIQUE INDEX `donor_historical_context_user_fingerprint_uidx` ON `donor_historical_context` (`user_id`,`fingerprint`);
+
 CREATE INDEX `donor_merge_audits_archived_idx`
 ON `donor_merge_audits` (`archived_donor_id`);
 
@@ -564,5 +584,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','47dc605cc6e85dafab8925a9ced8d562a72a8cab1910767552c58c8370adb92b',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a0c52062213a9ec37c58e49e3ef6c2958e23ad651c3cc32837ce8e65160a6e35',1785944072);
 PRAGMA optimize;

@@ -11,6 +11,12 @@ export function classifyAssistantPrompt(prompt: string): AssistantTask {
 }
 const sources = (snapshot: AssistantContextSnapshot) => [...new Set([...(snapshot.latestInteraction ? [snapshot.latestInteraction.id] : []), ...snapshot.recommendations.map((item) => item.id), ...snapshot.gifts.map((item) => item.id)])];
 const result = (title: string, content: string, rationale: string[], sourceIds: string[]): AIResult => ({ mode: "rule-based", title, content, rationale, confidence: 1, sourceIds });
+// Always appended as its own clearly-labeled block, never blended into the
+// summary/memory text above it -- these lines are unverified by
+// construction (donor_historical_context.status is always 'unconfirmed').
+const unconfirmedBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.unconfirmedHistoricalContext.length
+  ? `Unconfirmed historical notes (not verified, not counted as contact):\n${snapshot.donor.unconfirmedHistoricalContext.map((note) => `- ${note}`).join("\n")}`
+  : null;
 
 export class RuleBasedAIService implements AIService {
   async complete(request: AIRequest): Promise<AIResult> {
@@ -18,7 +24,7 @@ export class RuleBasedAIService implements AIService {
     if (request.task === "meeting-brief") {
       const meeting = s.meetings[0];
       if (!meeting) return result("No upcoming donor meeting", "No upcoming donor meeting is recorded in your live workspace. Add a dated meeting reminder to make preparation available here.", ["Checked upcoming live reminders"], sources(s));
-      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.recommendations[0] ? `Next action: ${s.recommendations[0].action}. ${s.recommendations[0].reason}` : "No open next action is recorded."].join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
+      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.recommendations[0] ? `Next action: ${s.recommendations[0].action}. ${s.recommendations[0].reason}` : "No open next action is recorded.", unconfirmedBlock(s)].filter((line): line is string => line !== null).join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
     }
     if (request.task === "draft") {
       const gift = s.gifts[0];
@@ -30,7 +36,7 @@ export class RuleBasedAIService implements AIService {
       return result("Relationships needing contact", items.length ? items.map((item, i) => `${i + 1}. ${item.name} — ${item.reason}. ${item.why}`).join("\n") : "No lapsed relationship appears in the current live priorities.", ["Filtered owner-scoped priorities for contact gaps"], sources(s));
     }
     if (request.task === "executive-summary") return result("Executive fundraising summary", `${s.priorities.length} current priorities, ${s.meetings.length} upcoming meetings, ${s.gifts.length} recent gifts, and ${s.recommendations.length} open next actions are visible in the live workspace.${s.priorities[0] ? ` The first recommended focus is ${s.priorities[0].name}: ${s.priorities[0].reason}.` : " No immediate action is currently ranked."}`, ["Live priorities, reminders, meetings, and gifts"], sources(s));
-    if (request.task === "relationship-summary") return result(`Relationship summary: ${s.donor.name}`, `${s.donor.summary}\n\nInstitutional memory: ${s.donor.memory}\n\n${s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No interaction is recorded."}`, ["Owner-scoped donor and interaction records"], sources(s));
+    if (request.task === "relationship-summary") return result(`Relationship summary: ${s.donor.name}`, [`${s.donor.summary}\n\nInstitutional memory: ${s.donor.memory}\n\n${s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No interaction is recorded."}`, unconfirmedBlock(s)].filter((line): line is string => line !== null).join("\n\n"), ["Owner-scoped donor and interaction records"], sources(s));
     return result("Recommended next actions", s.priorities.length ? s.priorities.slice(0, 3).map((item, i) => `${i + 1}. ${item.action} for ${item.name} — ${item.reason}. ${item.why}`).join("\n") : "No next action can be recommended from the current live workspace.", ["Ranked live reminders, pledges, gifts, and contact gaps"], sources(s));
   }
 }

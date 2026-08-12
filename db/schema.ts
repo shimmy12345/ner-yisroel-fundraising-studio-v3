@@ -337,6 +337,29 @@ export const recommendations = sqliteTable("recommendations", {
   ...timestamps,
 }, (table) => [index("recommendations_user_status_idx").on(table.userId, table.status)]);
 
+// Historical context imported from Monday.com (or any future source) that
+// is genuinely uncertain -- a fundraiser could not confirm it as a real
+// contact, but the raw text is still worth keeping visible. Deliberately
+// separate from interactions/recommendations: status is only ever
+// 'unconfirmed' or 'dismissed', never 'confirmed' -- confirming something
+// means writing a real interactions/recommendations row through the
+// existing confirm/create-followup actions, not flipping a flag here.
+export const donorHistoricalContext = sqliteTable("donor_historical_context", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  text: text("text").notNull(),
+  sourceDate: integer("source_date", { mode: "timestamp" }),
+  classification: text("classification").notNull(),
+  source: text("source").notNull(),
+  fingerprint: text("fingerprint").notNull(),
+  status: text("status", { enum: ["unconfirmed", "dismissed"] }).notNull().default("unconfirmed"),
+  ...timestamps,
+}, (table) => [
+  uniqueIndex("donor_historical_context_user_fingerprint_uidx").on(table.userId, table.fingerprint),
+  index("donor_historical_context_donor_date_idx").on(table.donorId, table.createdAt),
+]);
+
 // Donor Research (Stage A) -- provider-agnostic, manual-entry only. No
 // external network calls anywhere in this feature yet; see
 // lib/research/manual-provider.ts. Evidence entered before identity

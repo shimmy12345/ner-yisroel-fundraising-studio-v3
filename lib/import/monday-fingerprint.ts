@@ -30,3 +30,7 @@ export function mondayInteractionId(fingerprint: string): string {
 export function mondayRecommendationId(fingerprint: string): string {
   return `monday-recommendation-${fingerprint}`;
 }
+
+export function mondayHistoricalContextId(fingerprint: string): string {
+  return `monday-context-${fingerprint}`;
+}

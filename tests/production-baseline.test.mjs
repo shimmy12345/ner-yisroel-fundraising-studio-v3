@@ -137,8 +137,16 @@ test("baseline picks up the schema-changing 0021 and 0022 migrations", () => {
 test("baseline picks up the schema-changing 0023 donor research migration", () => {
   // 0023_donor_research_stage_a.sql adds six new tables (Donor Research
   // Stage A), so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0023_donor_research_stage_a.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 24);
+  assert.ok(manifest.sourceMigrations.includes("0023_donor_research_stage_a.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0024 donor historical context migration", () => {
+  // 0024_donor_historical_context.sql adds the donor_historical_context
+  // table, so the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0024_donor_historical_context.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 25);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

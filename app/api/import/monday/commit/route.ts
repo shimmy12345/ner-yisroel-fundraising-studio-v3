@@ -4,7 +4,7 @@ import { ensureUserProfile } from "../../../../../lib/auth/profile";
 import { getDataMode } from "../../../../../lib/workspace/mode";
 import { numericDonorCode } from "../../../../../lib/relationships/donor-identity";
 import { classifyMondayDisposition } from "../../../../../lib/import/monday-classify";
-import { mondayInteractionId, mondayRecommendationId, mondaySourceFingerprint } from "../../../../../lib/import/monday-fingerprint";
+import { mondayHistoricalContextId, mondayInteractionId, mondayRecommendationId, mondaySourceFingerprint } from "../../../../../lib/import/monday-fingerprint";
 import { excelSerialToIsoDate } from "../../../../../lib/import/monday-workbook";
 import { logger } from "../../../../../lib/logger";
 
@@ -12,21 +12,31 @@ import { logger } from "../../../../../lib/logger";
 // bulk "confirm contact" path anywhere in this file, and no code path
 // here ever touches donors, gifts, giving_activities, or any row this
 // import didn't itself create (every row this route can write carries a
-// deterministic "monday-interaction-"/"monday-recommendation-" id, an ID
-// space crypto.randomUUID() can never coincidentally produce, so an
-// UPDATE here can only ever land on this import's own prior rows).
+// deterministic "monday-interaction-"/"monday-recommendation-"/
+// "monday-context-" id, an ID space crypto.randomUUID() can never
+// coincidentally produce, so an UPDATE here can only ever land on this
+// import's own prior rows).
 // Re-running with the same Monday-source identity (donor code + the
 // subitem's own position + its own text + Monday's own due date --
 // deliberately excluding whatever date the fundraiser confirms) always
 // resolves to the same id, so a corrected date updates the existing row
 // instead of duplicating it.
+//
+// save_historical_context is deliberately narrow: allowed only for
+// confirm_contact_candidate/historical_planned/ambiguous rows (an
+// allow-list, not a deny-list, so a future disposition value defaults to
+// rejected rather than silently writable). donation_note and
+// future_planned can never reach this branch. It never writes
+// interactions or recommendations -- donor_historical_context.status is
+// always 'unconfirmed', never a value that could be mistaken for a
+// completed contact or an open reminder.
 
 type Decision = {
   code?: string;
   subitemIndex?: number;
   text?: string;
   dueDateRaw?: string | null;
-  action?: "confirm_contact" | "accept_future_planned" | "create_followup";
+  action?: "confirm_contact" | "accept_future_planned" | "create_followup" | "save_historical_context";
   actualContactDate?: string;
   dueDate?: string;
 };
@@ -67,7 +77,9 @@ export async function POST(request: Request) {
   const statements = [];
   let confirmedContactCount = 0;
   let recommendationCount = 0;
+  let historicalContextCount = 0;
   const rejected: Array<{ text: string | undefined; reason: string }> = [];
+  const HISTORICAL_CONTEXT_ALLOWED_DISPOSITIONS = new Set(["confirm_contact_candidate", "historical_planned", "ambiguous"]);
 
   for (const decision of decisions) {
     const code = decision.code?.trim();
@@ -85,7 +97,7 @@ export async function POST(request: Request) {
     const fingerprint = mondaySourceFingerprint({ donorCode: code, subitemIndex, text, dueDateRaw: decision.dueDateRaw ?? null });
 
     if (decision.action === "confirm_contact") {
-      if (disposition !== "confirm_contact_candidate") { rejected.push({ text, reason: "This row is not a confirm-contact candidate" }); continue; }
+      if (disposition !== "confirm_contact_candidate") { rejected.push({ text, reason: "This row is not a likely completed contact" }); continue; }
       if (!decision.actualContactDate) { rejected.push({ text, reason: "An actual contact date is required" }); continue; }
       const occurredAt = parseDateToEpochSeconds(decision.actualContactDate);
       if (occurredAt === null) { rejected.push({ text, reason: "Invalid contact date" }); continue; }
@@ -115,12 +127,24 @@ export async function POST(request: Request) {
           .bind(id, donor.id, profile.id, text, reason, 40, "open", dueAt, now, now));
       }
       recommendationCount++;
+    } else if (decision.action === "save_historical_context") {
+      if (!HISTORICAL_CONTEXT_ALLOWED_DISPOSITIONS.has(disposition)) { rejected.push({ text, reason: "This row cannot be saved as historical context" }); continue; }
+      const id = mondayHistoricalContextId(fingerprint);
+      const sourceDate = dueDateIso ? parseDateToEpochSeconds(dueDateIso) : null;
+      const existing = await env.DB.prepare("SELECT id FROM donor_historical_context WHERE id=? AND user_id=?").bind(id, profile.id).first<{ id: string }>();
+      if (existing) {
+        statements.push(env.DB.prepare("UPDATE donor_historical_context SET text=?, source_date=?, classification=?, updated_at=? WHERE id=? AND user_id=?").bind(text, sourceDate, disposition, now, id, profile.id));
+      } else {
+        statements.push(env.DB.prepare("INSERT INTO donor_historical_context (id, donor_id, user_id, text, source_date, classification, source, fingerprint, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+          .bind(id, donor.id, profile.id, text, sourceDate, disposition, "import-monday", fingerprint, "unconfirmed", now, now));
+      }
+      historicalContextCount++;
     } else {
       rejected.push({ text, reason: "Unsupported action" });
     }
   }
 
-  if (statements.length === 0) return Response.json({ confirmedContactCount: 0, recommendationCount: 0, rejected });
+  if (statements.length === 0) return Response.json({ confirmedContactCount: 0, recommendationCount: 0, historicalContextCount: 0, rejected });
 
   try {
     await env.DB.batch(statements);
@@ -128,6 +152,6 @@ export async function POST(request: Request) {
     logger.error("monday_import_commit_failed", error, { userId: profile.id });
     return Response.json({ error: "The import could not be saved. No rows were written." }, { status: 500 });
   }
-  logger.info("monday_import_committed", { userId: profile.id, confirmedContactCount, recommendationCount, rejectedCount: rejected.length });
-  return Response.json({ confirmedContactCount, recommendationCount, rejected });
+  logger.info("monday_import_committed", { userId: profile.id, confirmedContactCount, recommendationCount, historicalContextCount, rejectedCount: rejected.length });
+  return Response.json({ confirmedContactCount, recommendationCount, historicalContextCount, rejected });
 }
