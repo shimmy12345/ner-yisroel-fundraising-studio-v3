@@ -58,13 +58,25 @@ function parseGrid(sheetXml: string, sharedStrings: string[]): Grid {
   return grid;
 }
 
-// Reconstructs donor blocks from the flat grid. Layout (verified against
-// the real export): row 1 title, row 2 group label, row 3 "Name |
-// Subitems | Date of Last Contact | Code" header. Each donor is a header
-// row (Name in col 0, Code in col 3 -- col 1/2 are consistently blank in
-// this export) optionally followed by a "Subitems | Name | Due Date"
-// mini-header and its subitem rows (col 0 blank, task text in col 1, due
-// date in col 2).
+// Reconstructs donor blocks from the flat grid. Layout: row 1 title, row 2
+// group label, row 3 the donor header row -- "Name" and "Code" columns
+// located by their own label text rather than a hardcoded column index.
+// Monday.com has already shifted Code from column D to column E between
+// two real exports of this same report; a hardcoded index silently read
+// an always-blank cell and misclassified every donor (and therefore every
+// subitem under it) as having no code at all. Each donor is a header row
+// (its own Name/Code cells) optionally followed by a "Subitems | Name |
+// Due Date | Status" mini-header and its subitem rows (blank Name column,
+// task text in col 1, due date in col 2 -- unaffected by the Code shift,
+// verified separately against the real export).
+//
+// Parent/subitem hierarchy: a row with a non-blank Name cell (and not the
+// literal "Subitems" mini-header) starts a new donor block and becomes the
+// current parent context; every following row with a blank Name cell is a
+// subitem of that same parent, until the next Name-bearing row replaces
+// it. The mini-header row itself never starts a new donor (it's excluded
+// by name) and never appends a subitem (its own Name cell reads "Name",
+// not blank), so it can't reset or corrupt the current parent context.
 export function parseMondayWorkbook(fileBytes: Uint8Array): MondayDonorBlock[] {
   const files = unzipSync(fileBytes, { filter: (file) => file.name === "xl/worksheets/sheet1.xml" || file.name === "xl/sharedStrings.xml" });
   const decoder = new TextDecoder("utf-8");
@@ -75,21 +87,38 @@ export function parseMondayWorkbook(fileBytes: Uint8Array): MondayDonorBlock[] {
   const grid = parseGrid(sheetXml, sharedStrings);
 
   const rowNumbers = [...grid.keys()].sort((a, b) => a - b);
+
+  // Locate the Name/Code columns by their label text in the donor header
+  // row (rows 1-3 only -- the repeating subitem mini-header further down
+  // also contains the literal text "Name", in a different column, and
+  // must never be mistaken for the top-level header).
+  let nameCol = 0;
+  let codeCol = -1;
+  for (const rowNum of rowNumbers) {
+    if (rowNum > 3) break;
+    for (const [col, value] of grid.get(rowNum)!) {
+      const trimmed = (value ?? "").toString().trim();
+      if (trimmed === "Name") nameCol = col;
+      if (trimmed === "Code") codeCol = col;
+    }
+  }
+  if (codeCol === -1) throw new Error("This file does not look like a Monday.com pipeline export (no \"Code\" column header found).");
+
   const donors: MondayDonorBlock[] = [];
   let current: MondayDonorBlock | null = null;
   for (const rowNum of rowNumbers) {
     if (rowNum <= 3) continue; // title, group label, top-level column header
     const cells = grid.get(rowNum)!;
-    const c0 = (cells.get(0) ?? "").toString().trim();
+    const name = (cells.get(nameCol) ?? "").toString().trim();
+    const code = (cells.get(codeCol) ?? "").toString().trim();
     const c1 = (cells.get(1) ?? "").toString().trim();
     const c2 = (cells.get(2) ?? "").toString().trim();
-    const c3 = (cells.get(3) ?? "").toString().trim();
-    if (c0 === "Subitems" && c1 === "Name") continue; // subitem mini-header
-    if (!c0 && !c1 && !c2 && !c3) continue; // fully blank row
-    if (c0 && c0 !== "Subitems") {
-      current = { name: c0, code: c3 || null, subitems: [] };
+    if (name === "Subitems" && c1 === "Name") continue; // subitem mini-header
+    if (!name && !c1 && !c2 && !code) continue; // fully blank row
+    if (name && name !== "Subitems") {
+      current = { name, code: code || null, subitems: [] };
       donors.push(current);
-    } else if (!c0 && c1 && current) {
+    } else if (!name && c1 && current) {
       current.subitems.push({ text: c1, dueDateRaw: c2 || null, index: current.subitems.length });
     }
   }
