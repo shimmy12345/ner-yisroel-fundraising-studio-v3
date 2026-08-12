@@ -8,6 +8,8 @@ import {
   type MeetingBriefReminder,
 } from "./meeting-brief-model";
 import { importedContextLine } from "./historical-context";
+import { buildRecommendationEvidence } from "./recommendation-evidence";
+import { buildDonorRecommendation } from "./recommendation-rank";
 
 type DonorRow = {
   id: string;
@@ -27,6 +29,8 @@ type DonorRow = {
   state: string | null;
   postal_code: string | null;
   country: string | null;
+  relationship_summary: string | null;
+  institutional_memory: string | null;
 };
 
 type GivingRow = { id: string; activity_date: number | null; paid_cents: number | null; balance_cents: number | null; description: string | null; item_type: string | null; source_campaign: string | null };
@@ -40,7 +44,7 @@ function titled(title: string | null, name: string | null) {
 }
 
 export async function loadMeetingBrief(userId: string, donorId: string, timezone: string, now = Math.floor(Date.now() / 1000)): Promise<MeetingBrief | null> {
-  const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, email, phone, home_phone, address_line_1, city, state, postal_code, country
+  const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, email, phone, home_phone, address_line_1, city, state, postal_code, country, relationship_summary, institutional_memory
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
@@ -112,5 +116,27 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   const reminderData: MeetingBriefReminder[] = reminders.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at }));
   const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
   const unconfirmedHistoricalContext = historicalContextRows.results.map((row) => importedContextLine(row.text, row.source, row.source_date ? dateLabel(row.source_date) : null));
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0);
+
+  // Suggested Action: same shared engine as the donor page/homepage/
+  // Assistant, built from the exact same rows already fetched above.
+  const paidFromActivities = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && item.activity_date !== null).map((item) => ({ amountCents: item.paid_cents!, occurredAt: item.activity_date!, campaign: item.source_campaign, description: item.description || item.item_type }));
+  const paidFromLegacy = legacyGifts.results.map((gift) => ({ amountCents: gift.amount_cents, occurredAt: gift.received_at, campaign: gift.fund as string | null, description: null as string | null }));
+  const mostRecentPaidGiftForEvidence = [...paidFromActivities, ...paidFromLegacy].sort((a, b) => b.occurredAt - a.occurredAt)[0] ?? null;
+  const openPledgeSource = giving.results.find((item) => (item.balance_cents ?? 0) > 0);
+  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: openPledgeSource.activity_date } : null;
+  const latestInteraction = interactions.results[0];
+  const recommendationEvidence = buildRecommendationEvidence({
+    donorId,
+    mostRecentPaidGift: mostRecentPaidGiftForEvidence,
+    openPledge: openPledgeForEvidence,
+    lastCompletedInteraction: latestInteraction ? { type: latestInteraction.type, summary: latestInteraction.summary, occurredAt: latestInteraction.occurred_at } : null,
+    lastContactAt: latestInteraction?.occurred_at ?? null,
+    openReminder: reminders.results[0] ? { action: reminders.results[0].action, reason: reminders.results[0].reason, dueAt: reminders.results[0].due_at } : null,
+    relationshipSummary: donor.relationship_summary,
+    institutionalMemory: donor.institutional_memory,
+    historicalContext: historicalContextRows.results.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
+  }, now);
+  const recommendation = buildDonorRecommendation(recommendationEvidence);
+
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation);
 }

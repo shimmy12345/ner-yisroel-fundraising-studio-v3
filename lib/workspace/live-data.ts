@@ -4,16 +4,21 @@ import { scheduleBucket } from "./scheduled-activity";
 import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, type RelationshipQueueBucket } from "./relationship-queue";
 import { financialDateLabel } from "../financial-date.ts";
 import { donorInitials, numericDonorCode } from "../relationships/donor-identity.ts";
+import { buildRecommendationEvidence } from "../relationships/recommendation-evidence.ts";
+import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
+import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
 type GivingRow = IdentityRow & { id: string; donor_id: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null; updated_at: number };
 type ContactRow = IdentityRow & { id: string; last_contact: number | null; recent_activity: number | null };
-type DonorRow = IdentityRow & { id: string; updated_at: number };
+type DonorRow = IdentityRow & { id: string; updated_at: number; relationship_summary: string | null; institutional_memory: string | null };
 type DonorDateRow = { donor_id: string; value: number | null };
 type ScheduledActivityRow = IdentityRow & { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number; updated_at: number };
 type DonorLinkRow = IdentityRow & { donor_id: string; event_at: number };
 type DismissalRow = { item_key: string };
+type LatestInteractionRow = { donor_id: string; type: string; occurred_at: number; summary: string };
+type HistoricalContextRow = { donor_id: string; text: string; source: string; source_date: number | null };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -36,14 +41,6 @@ function money(cents: number) {
 
 function dateLabel(epoch: number, timezone: string) {
   return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric" }).format(new Date(epoch * 1000));
-}
-
-// A confirmed contact date can be many months or years in the past, so
-// (unlike dateLabel's near-term "why" context) this one always includes
-// the year -- "Last confirmed contact: Aug 15" is ambiguous for a contact
-// from 2024; "Last confirmed contact: Aug 15, 2024" is not.
-function dateLabelWithYear(epoch: number, timezone: string) {
-  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 }
 
 function timeParts(epoch: number, timezone: string) {
@@ -85,7 +82,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -94,7 +91,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
       WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
-    env.DB.prepare(`SELECT d.id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, d.updated_at FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
+    env.DB.prepare(`SELECT d.id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, d.updated_at, d.relationship_summary, d.institutional_memory FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE record_origin = 'sample' AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift') AND donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ? AND record_origin = 'live' AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, i.type, i.occurred_at, i.summary, i.source, i.created_at, i.updated_at
@@ -116,6 +113,26 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
         ) AS event_at
       FROM donors d WHERE ${donorScope}
       ORDER BY event_at DESC, d.display_name COLLATE NOCASE LIMIT 6`).bind(...(demo ? [] : [userId, userId, userId, userId])).all<DonorLinkRow>(),
+    // Latest completed interaction TEXT per donor -- same completed-
+    // interaction filter as lastContacts above (which only has the date),
+    // needed so the shared recommendation engine can build
+    // continue_conversation candidates here too, exactly as the donor
+    // page/Meeting Brief already do.
+    env.DB.prepare(`SELECT i.donor_id, i.type, i.occurred_at, i.summary
+      FROM interactions i JOIN donors d ON d.id = i.donor_id
+      WHERE ${demo ? "d.data_source = 'sample'" : "i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL"}
+        AND i.occurred_at <= ? AND i.source NOT LIKE 'cancelled:%' AND i.source NOT LIKE 'archived:%'
+        AND (i.source LIKE 'capture-completed:%' OR (i.source NOT LIKE 'capture-scheduled:%' AND i.occurred_at <= i.created_at))
+        AND i.occurred_at = (SELECT MAX(i2.occurred_at) FROM interactions i2
+          WHERE i2.donor_id = i.donor_id ${demo ? "" : "AND i2.user_id = i.user_id"}
+            AND i2.occurred_at <= ? AND i2.source NOT LIKE 'cancelled:%' AND i2.source NOT LIKE 'archived:%'
+            AND (i2.source LIKE 'capture-completed:%' OR (i2.source NOT LIKE 'capture-scheduled:%' AND i2.occurred_at <= i2.created_at)))
+      `).bind(...(demo ? [now, now] : [userId, userId, now, now])).all<LatestInteractionRow>(),
+    // Unconfirmed historical context for every in-scope donor -- kept in
+    // its own query, never joined into the interactions results above, so
+    // it can only ever feed the recommendation engine's own
+    // historicalContext field, never masquerade as a completed contact.
+    demo ? Promise.resolve({ results: [] as HistoricalContextRow[] }) : env.DB.prepare(`SELECT donor_id, text, source, source_date FROM donor_historical_context WHERE user_id = ? AND status = 'unconfirmed' ORDER BY donor_id, created_at DESC LIMIT 1000`).bind(userId).all<HistoricalContextRow>(),
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
@@ -140,21 +157,79 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     ranked.push({ queueId: `activity:${item.id}:${item.updated_at}`, rank: isToday ? 1 : 5, sortAt: item.occurred_at, donorId: item.donor_id, name: item.display_name, ...identity(item), label: `${activityTypeLabel(item.type)} ${isToday ? "today" : "scheduled"}`, signal: "warm", reason: item.summary.split("\n")[0] || `Scheduled ${activityTypeLabel(item.type).toLowerCase()}`, why: `Scheduled for ${dateLabel(item.occurred_at, timezone)} at ${time.time} ${time.period}.`, action: item.type === "meeting" ? "Prepare" : "Open", href: item.type === "meeting" ? `/donors/${encodeURIComponent(item.donor_id)}/meeting-brief` : `/donors/${encodeURIComponent(item.donor_id)}`, dueAt: item.occurred_at, dueLabel: `${isToday ? "Today" : dateLabel(item.occurred_at, timezone)} at ${time.time} ${time.period}` });
   }
 
+  // Recent gift / open commitment / contact gap: these three used to be
+  // independent template-generated buckets (a donor could show up in more
+  // than one, with conflicting text). Membership is unchanged -- the same
+  // three thresholds decide which donors qualify -- but each qualifying
+  // donor now gets exactly ONE synthesized suggestion, computed by the
+  // same shared recommendation engine the donor page/Meeting Brief/
+  // Assistant use, so the wording can never disagree across surfaces.
   const recentGiftByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) {
     const recent = isRecentPastEvent(item.activity_date, now, 30);
     const contactedAfterGift = (contactByDonor.get(item.donor_id) ?? 0) >= (item.activity_date ?? 0);
     if ((item.paid_cents ?? 0) > 0 && recent && !contactedAfterGift && !recentGiftByDonor.has(item.donor_id)) recentGiftByDonor.set(item.donor_id, item);
   }
-  for (const item of recentGiftByDonor.values()) ranked.push({ queueId: `gift:${item.id}:${item.updated_at}`, rank: 2, sortAt: -(item.activity_date ?? 0), donorId: item.donor_id, name: item.display_name, ...identity(item), label: "Recent gift", signal: "warm", reason: `${money(item.paid_cents ?? 0)} gift needs acknowledgment`, why: `${item.description || item.item_type || "Paid gift"} was recorded ${item.activity_date ? financialDateLabel(item.activity_date) : "recently"}. No interaction is recorded after the gift.`, action: "Follow up", href: `/capture?donorId=${encodeURIComponent(item.donor_id)}&returnTo=%2F`, dueAt: now, dueLabel: "Suggested today" });
+  const openPledgeByDonor = new Map<string, GivingRow>();
+  for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openPledgeByDonor.has(item.donor_id)) openPledgeByDonor.set(item.donor_id, item);
+  const contactGapDonorIds = new Set(contacts.filter((item) => { const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null; return days == null || days >= 90; }).map((item) => item.id));
+  const suggestionDonorIds = new Set<string>([...recentGiftByDonor.keys(), ...openPledgeByDonor.keys(), ...contactGapDonorIds]);
 
-  const openByDonor = new Map<string, GivingRow>();
-  for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openByDonor.has(item.donor_id)) openByDonor.set(item.donor_id, item);
-  for (const item of openByDonor.values()) ranked.push({ queueId: `commitment:${item.id}:${item.updated_at}`, rank: 3, sortAt: item.activity_date ?? 0, donorId: item.donor_id, name: item.display_name, ...identity(item), label: "Open commitment", signal: "warm", reason: `${money(item.balance_cents ?? 0)} remains open`, why: `${item.description || item.item_type || "Commitment"}${item.activity_date ? ` from ${financialDateLabel(item.activity_date)}` : ""}.`, action: "Review", href: `/donors/${encodeURIComponent(item.donor_id)}`, dueAt: null, dueLabel: "No due date recorded" });
+  const reminderByDonor = new Map(reminders.results.map((item) => [item.donor_id, item]));
+  const donorById = new Map(donors.results.map((item) => [item.id, item]));
+  const latestInteractionByDonor = new Map(latestInteractions.results.map((item) => [item.donor_id, item]));
+  const historicalContextByDonor = new Map<string, HistoricalContextRow[]>();
+  for (const row of historicalContextRows.results) {
+    if (!historicalContextByDonor.has(row.donor_id)) historicalContextByDonor.set(row.donor_id, []);
+    historicalContextByDonor.get(row.donor_id)!.push(row);
+  }
+  const suggestionHrefByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "capture" };
+  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
+  const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
 
-  for (const item of contacts) {
-    const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null;
-    if (days == null || days >= 90) ranked.push({ queueId: `contact-gap:${item.id}:${item.last_contact ?? 0}`, rank: 4, sortAt: days == null ? Number.MAX_SAFE_INTEGER : -days, donorId: item.id, name: item.display_name, ...identity(item), label: "Contact gap", signal: "cool", reason: days == null ? "No recorded contact history" : `Last confirmed contact: ${dateLabelWithYear(item.last_contact ?? 0, timezone)}`, why: item.recent_activity ? `Workspace activity was last recorded ${dateLabel(item.recent_activity, timezone)}.` : "No recent activity is available.", action: "Review", href: `/donors/${encodeURIComponent(item.id)}`, dueAt: null, dueLabel: "Review when able" });
+  for (const donorId of suggestionDonorIds) {
+    const donorRow = donorById.get(donorId);
+    if (!donorRow) continue;
+    const gift = recentGiftByDonor.get(donorId);
+    const pledge = openPledgeByDonor.get(donorId);
+    const reminder = reminderByDonor.get(donorId);
+    const lastInteractionRow = latestInteractionByDonor.get(donorId);
+    const evidence = buildRecommendationEvidence({
+      donorId,
+      mostRecentPaidGift: gift ? { amountCents: gift.paid_cents ?? 0, occurredAt: gift.activity_date!, campaign: null, description: gift.description || gift.item_type } : null,
+      openPledge: pledge ? { balanceCents: pledge.balance_cents ?? 0, campaign: null, description: pledge.description || pledge.item_type, activityDate: pledge.activity_date } : null,
+      lastCompletedInteraction: lastInteractionRow ? { type: lastInteractionRow.type, summary: lastInteractionRow.summary, occurredAt: lastInteractionRow.occurred_at } : null,
+      lastContactAt: contactByDonor.get(donorId) ?? null,
+      openReminder: reminder ? { action: reminder.action, reason: reminder.reason, dueAt: reminder.due_at } : null,
+      relationshipSummary: donorRow.relationship_summary,
+      institutionalMemory: donorRow.institutional_memory,
+      historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
+    }, now);
+    const recommendation = buildDonorRecommendation(evidence);
+    if (!recommendation) continue;
+    // A donor whose open reminder is itself the winning suggestion is
+    // already shown by the reminder loop above -- never a second,
+    // duplicate card for the same donor.
+    if (recommendation.kind === "honor_reminder") continue;
+    const sortAt = recommendation.kind === "acknowledge_gift" ? -(gift?.activity_date ?? 0)
+      : recommendation.kind === "follow_up_pledge" ? (pledge?.activity_date ?? 0)
+      : -(evidence.contact.daysSinceLastContact ?? Number.MAX_SAFE_INTEGER);
+    ranked.push({
+      queueId: `recommendation:${donorId}:${recommendation.kind}`,
+      donorId,
+      name: donorRow.display_name,
+      ...identity(donorRow),
+      label: suggestionLabelByKind[recommendation.kind] ?? "Relationship opportunity",
+      signal: recommendation.kind === "acknowledge_gift" || recommendation.kind === "follow_up_pledge" ? "warm" : recommendation.confidence === "low" ? "cool" : "warm",
+      reason: recommendation.action,
+      why: recommendation.why,
+      action: suggestionHrefByKind[recommendation.kind] === "capture" ? "Follow up" : "Review",
+      href: suggestionHrefByKind[recommendation.kind] === "capture" ? `/capture?donorId=${encodeURIComponent(donorId)}&returnTo=%2F` : `/donors/${encodeURIComponent(donorId)}`,
+      dueAt: recommendation.kind === "acknowledge_gift" ? now : null,
+      dueLabel: recommendation.timing ?? (recommendation.kind === "acknowledge_gift" ? "Suggested today" : "No due date recorded"),
+      rank: suggestionRankByKind[recommendation.kind] ?? 4,
+      sortAt,
+    });
   }
 
   const activeQueue = dedupeRelationshipQueue(ranked, new Set(dismissals.results.map((item) => item.item_key)));

@@ -319,6 +319,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .next-action h3 { font-size: 18px; line-height: 1.35; }
 .next-action > div > p:not(.eyebrow) { font-size: 14px; line-height: 1.65; }
 .next-action > a { padding: 11px 13px; font-size: 12px; }
+.recommendation-evidence, .recommendation-meta { margin-top: 6px; color: #89928e; font-size: 12.5px; line-height: 1.5; }
 .recommendation-why span { font-size: 11px; }
 .recommendation-why p { font-size: 12px; line-height: 1.6; }
 .quiet-button { font-size: 12px; }

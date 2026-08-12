@@ -132,7 +132,7 @@ async function run() {
   assert.match(help, /separate JL Solutions donation export/);
   assert.match(settings, /Open Import Center/);
   assert.match(unifiedTimeline, /No relationship activity yet/);
-  assert.match(donorPage, /No next action set/);
+  assert.match(donorPage, /No suggested action available/);
   assert.doesNotMatch(experience, /api\/assistant|openai|anthropic/i);
 
   process.stdout.write("Onboarding import checks passed.\n");

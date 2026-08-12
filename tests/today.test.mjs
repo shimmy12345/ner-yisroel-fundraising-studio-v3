@@ -14,6 +14,7 @@ const relationshipRead = await readFile(new URL("../lib/relationships/read.ts", 
 const appShell = await readFile(new URL("../app/components/AppShell.tsx", import.meta.url), "utf8");
 const briefExperience = await readFile(new URL("../app/components/BriefExperience.tsx", import.meta.url), "utf8");
 const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+const recommendationCandidates = await readFile(new URL("../lib/relationships/recommendation-candidates.ts", import.meta.url), "utf8");
 
 for (const action of ["Search Donor", "Import JL Export", "Add Interaction", "Create Reminder", "Workspace Health"]) assert.match(today, new RegExp(action));
 for (const section of ["Today's Agenda", "Coming Up", "Quick Actions", "Morning Brief"]) assert.match(today, new RegExp(section));
@@ -41,10 +42,12 @@ assert.match(styles, /grid-template-columns:minmax\(0,1\.35fr\)/);
 assert.match(styles, /@media \(max-width:760px\)[\s\S]*today-actions-section \.today-quick-actions \{ grid-template-columns:1fr 1fr/);
 
 assert.match(liveData, /Overdue follow-up/);
-assert.match(liveData, /gift needs acknowledgment/);
 assert.match(liveData, /Open commitment/);
 assert.match(liveData, /Contact gap/);
-assert.match(liveData, /No interaction is recorded after the gift/);
+// Recent-gift/open-commitment/contact-gap wording itself now comes from
+// the shared recommendation engine (see tests/recommendation-engine.test.mjs
+// for the wording coverage), not duplicated in live-data.ts.
+assert.match(recommendationCandidates, /no completed interaction has been logged since/);
 assert.match(liveData, /i\.user_id = \? AND d\.owner_user_id = \? AND d\.data_source = 'live'/);
 assert.match(liveData, /ga\.owner_user_id = \? AND ga\.record_origin = 'live'/);
 assert.match(liveData, /capture-scheduled:%/);

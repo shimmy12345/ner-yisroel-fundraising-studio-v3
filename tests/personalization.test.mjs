@@ -41,8 +41,13 @@ async function run() {
 
   assert.match(live, /recommendations r JOIN donors/);
   assert.match(live, /giving_activities ga JOIN donors/);
-  assert.match(live, /Last confirmed contact: /);
-  assert.match(live, /No recorded contact history/);
+  // Contact-gap wording itself now lives in the shared recommendation
+  // engine (lib/relationships/recommendation-candidates.ts), not
+  // duplicated here -- see tests/recommendation-engine.test.mjs for the
+  // wording coverage. This just proves live-data.ts is actually wired to
+  // that shared engine rather than re-deriving its own text.
+  assert.match(live, /buildRecommendationEvidence\(/);
+  assert.match(live, /buildDonorRecommendation\(/);
   assert.match(today, /No activities or follow-ups need attention today/);
   assert.match(unifiedTimeline, /No relationship activity yet/);
 

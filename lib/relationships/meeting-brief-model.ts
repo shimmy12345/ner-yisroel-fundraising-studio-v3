@@ -1,3 +1,5 @@
+import type { DonorRecommendation } from "./recommendation-rank.ts";
+
 export type MeetingBriefDonor = {
   id: string;
   displayName: string;
@@ -54,6 +56,12 @@ export type MeetingBrief = {
   // donor_historical_context rows, which are never a logged interaction.
   unconfirmedHistoricalContext: string[];
   unconfirmedHistoricalContextCount: number;
+  // The one canonical, evidence-driven suggestion for this donor --
+  // computed by lib/relationships/recommendation-rank.ts from the exact
+  // same evidence every other surface (donor profile, homepage/Today,
+  // Assistant) reads, so this can never disagree with them. null only
+  // when there is genuinely no evidence to suggest anything.
+  recommendation: DonorRecommendation | null;
 };
 
 function firstLine(value: string) {
@@ -67,6 +75,7 @@ export function buildMeetingBrief(
   reminders: MeetingBriefReminder[],
   unconfirmedHistoricalContext: string[] = [],
   unconfirmedHistoricalContextCount = unconfirmedHistoricalContext.length,
+  recommendation: DonorRecommendation | null = null,
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -122,6 +131,7 @@ export function buildMeetingBrief(
     followUpActions,
     unconfirmedHistoricalContext,
     unconfirmedHistoricalContextCount,
+    recommendation,
   };
 }
 import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";

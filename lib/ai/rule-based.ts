@@ -25,7 +25,12 @@ export class RuleBasedAIService implements AIService {
     if (request.task === "meeting-brief") {
       const meeting = s.meetings[0];
       if (!meeting) return result("No upcoming donor meeting", "No upcoming donor meeting is recorded in your live workspace. Add a dated meeting reminder to make preparation available here.", ["Checked upcoming live reminders"], sources(s));
-      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.recommendations[0] ? `Next action: ${s.recommendations[0].action}. ${s.recommendations[0].reason}` : "No open next action is recorded.", unconfirmedBlock(s)].filter((line): line is string => line !== null).join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
+      // Suggested action comes straight from the shared recommendation
+      // engine (lib/relationships/recommendation-rank.ts) via
+      // s.donor.recommendation -- never re-derived from s.recommendations
+      // here, so this can never disagree with the actual Meeting Brief
+      // page or donor profile for the same donor.
+      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.donor.recommendation ? `Suggested action: ${s.donor.recommendation.action} ${s.donor.recommendation.why}` : "No suggested action is available.", unconfirmedBlock(s)].filter((line): line is string => line !== null).join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
     }
     if (request.task === "draft") {
       const gift = s.gifts[0];

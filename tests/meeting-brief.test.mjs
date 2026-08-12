@@ -60,8 +60,11 @@ assert.match(loader, /r\.donor_id = \? AND r\.user_id = \? AND d\.owner_user_id 
 assert.doesNotMatch(loader, /data_source = 'sample'/);
 assert.match(page, /Log Meeting Outcome/);
 assert.match(page, /type=meeting/);
-for (const section of ["LAST INTERACTION", "RECENT DISCUSSION TOPICS", "OPEN COMMITMENTS", "LAST GIFT", "PEOPLE MENTIONED", "SUGGESTED PREPARATION"]) assert.match(page, new RegExp(section));
-assert.doesNotMatch(page, /LIVE DATA|authenticated relationship record|data-backed|implementation|confidence|classification/i);
+for (const section of ["SUGGESTED ACTION", "LAST INTERACTION", "RECENT DISCUSSION TOPICS", "OPEN COMMITMENTS", "LAST GIFT", "PEOPLE MENTIONED", "SUGGESTED PREPARATION"]) assert.match(page, new RegExp(section));
+// "confidence" is deliberately allowed here (unlike the other internal-
+// jargon terms below) -- it's one of the five required Suggested Action
+// fields (action/why/evidence/confidence/timing), not implementation detail.
+assert.doesNotMatch(page, /LIVE DATA|authenticated relationship record|data-backed|implementation|classification/i);
 assert.match(donorPage, /Prepare for Meeting/);
 assert.match(today, /activity\.prepareHref/);
 assert.match(today, />Prepare</);

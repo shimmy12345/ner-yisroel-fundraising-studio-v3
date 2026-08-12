@@ -9,6 +9,7 @@ const snapshot = {
     summary: "Longstanding scholarship partners with rising engagement.",
     memory: "Elena connects through student stories; David asks for outcomes.",
     unconfirmedHistoricalContext: ["Schedule meeting when in Chicago"],
+    recommendation: { action: "Send scholarship outcomes", why: "Committed during the last call and no completed interaction has followed it.", evidence: ["Open reminder: \"Send scholarship outcomes\""], confidence: "high", timing: "Due Aug 1, 2026", kind: "honor_reminder" },
   },
   latestInteraction: {
     id: "interaction-1",
@@ -77,7 +78,7 @@ async function run() {
   const meeting = await request("meeting-brief");
   assert.equal(meeting.mode, "rule-based");
   assert.match(meeting.content, /Garden Room/i);
-  assert.match(meeting.content, /Next action/i);
+  assert.match(meeting.content, /Suggested action: Send scholarship outcomes/, "meeting-brief must surface the canonical recommendation, not a re-derived one");
   assert.match(meeting.content, /Imported context \(not verified, not counted as contact\):\n- Schedule meeting when in Chicago/, "unconfirmed historical context must appear as its own clearly-labeled block");
   const relationshipSummary = await request("relationship-summary");
   assert.match(relationshipSummary.content, /Longstanding scholarship partners/);

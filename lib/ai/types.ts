@@ -1,3 +1,5 @@
+import type { DonorRecommendation } from "../relationships/recommendation-rank.ts";
+
 export type AssistantTask =
   | "relationship-summary"
   | "meeting-brief"
@@ -16,6 +18,11 @@ export type AssistantContextSnapshot = {
     // never established relationship fact, and must never be merged into
     // either field.
     unconfirmedHistoricalContext: string[];
+    // The one canonical, evidence-driven recommendation for this donor --
+    // the exact same value lib/relationships/meeting-brief.ts and the
+    // homepage/Today queue compute, never re-derived here. null only when
+    // there's genuinely no evidence to suggest anything (or in demo mode).
+    recommendation: DonorRecommendation | null;
   };
   latestInteraction: {
     id: string;

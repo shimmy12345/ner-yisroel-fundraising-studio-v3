@@ -5,6 +5,7 @@ import { loadWorkspaceBrief } from "../../../lib/workspace/live-data";
 import { classifyAssistantPrompt, RuleBasedAIService } from "../../../lib/ai/rule-based";
 import type { AssistantContextSnapshot, AssistantTask } from "../../../lib/ai/types";
 import { importedContextLine } from "../../../lib/relationships/historical-context";
+import { loadMeetingBrief } from "../../../lib/relationships/meeting-brief";
 import { logger } from "../../../lib/logger";
 import { getDataMode } from "../../../lib/workspace/mode";
 
@@ -30,6 +31,12 @@ export async function POST(request: Request) {
     const now = Math.floor(Date.now() / 1000);
     const brief = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now);
     const primaryId = brief.priorities[0]?.donorId ?? brief.gifts[0]?.donorId ?? null;
+    // The canonical, evidence-driven recommendation for the primary donor
+    // -- reuses lib/relationships/meeting-brief.ts's own loader so this can
+    // never diverge from what the actual Meeting Brief page shows for the
+    // same donor. Live mode only; demo mode has no owner-scoped donor rows
+    // for it to read.
+    const primaryRecommendation = mode === "live" && primaryId ? (await loadMeetingBrief(profile.id, primaryId, profile.timezone, now))?.recommendation ?? null : null;
     const [donor, interactions, recommendations, historicalContext] = primaryId ? await Promise.all([
       env.DB.prepare(`SELECT id, display_name, relationship_summary, institutional_memory FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"}`).bind(...(mode === "demo" ? [primaryId] : [primaryId, profile.id])).first<DonorRow>(),
       env.DB.prepare(`SELECT id, summary, occurred_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at)) ORDER BY occurred_at DESC LIMIT 1`).bind(...(mode === "demo" ? [primaryId, now] : [primaryId, profile.id, now])).all<InteractionRow>(),
@@ -43,7 +50,7 @@ export async function POST(request: Request) {
     const latest = interactions.results[0];
     const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: profile.timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
     const snapshot: AssistantContextSnapshot = {
-      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)) },
+      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation },
       latestInteraction: latest ? { id: latest.id, summary: latest.summary.replace("\n", ": "), occurredAt: new Date(latest.occurred_at * 1000).toISOString() } : null,
       recommendations: recommendations.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at ? new Date(item.due_at * 1000).toISOString() : null })),
       priorities: brief.priorities.map(({ name, label, reason, why, action }) => ({ name, label, reason, why, action })), meetings: brief.meetings, gifts: brief.gifts.map(({ id, name, amount, detail }) => ({ id, name, amount, detail })),
