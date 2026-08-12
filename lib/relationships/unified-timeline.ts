@@ -8,8 +8,11 @@ export type TimelineStatus = "scheduled" | "completed" | "cancelled" | "pending"
 export type TimelineGiving = { id: string; donor_id: string; external_source: string; activity_date: number | null; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; item_type: string | null; description: string | null; source_campaign: string | null; category: string; workspace_status: string; private_note: string | null; updated_at: number };
 export type TimelineLegacyGift = { id: string; received_at: number; amount_cents: number; fund: string };
 export type TimelinePayment = { id: string; payment_date: number; applied_cents: number; remaining_balance_cents: number | null; pledge_activity_id: string; pledge_description: string | null; pledge_campaign: string | null };
-export type TimelineInteraction = { id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number; status_changed_at?: number | null };
-export type TimelineReminder = { id: string; action: string; reason: string; status: string; due_at: number | null; created_at: number; updated_at: number };
+// D1's raw driver (not the drizzle query builder) returns SQLite integer
+// booleans as plain 0/1, not real booleans -- these stay `number` to match
+// every row this component reads.
+export type TimelineInteraction = { id: string; type: string; occurred_at: number; occurred_at_date_only?: number; summary: string; source: string; created_at: number; status_changed_at?: number | null };
+export type TimelineReminder = { id: string; action: string; reason: string; status: string; due_at: number | null; due_at_date_only?: number; created_at: number; updated_at: number };
 
 export type UnifiedTimelineItem =
   | { key: string; kind: "giving"; filter: "gifts" | "pledges"; status: TimelineStatus; eventAt: number; giving: TimelineGiving }

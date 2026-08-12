@@ -12,10 +12,11 @@ export function classifyAssistantPrompt(prompt: string): AssistantTask {
 const sources = (snapshot: AssistantContextSnapshot) => [...new Set([...(snapshot.latestInteraction ? [snapshot.latestInteraction.id] : []), ...snapshot.recommendations.map((item) => item.id), ...snapshot.gifts.map((item) => item.id)])];
 const result = (title: string, content: string, rationale: string[], sourceIds: string[]): AIResult => ({ mode: "rule-based", title, content, rationale, confidence: 1, sourceIds });
 // Always appended as its own clearly-labeled block, never blended into the
-// summary/memory text above it -- these lines are unverified by
-// construction (donor_historical_context.status is always 'unconfirmed').
+// summary/memory text above it -- each line already states its own
+// uncertainty (lib/relationships/historical-context.ts), and
+// donor_historical_context.status is always 'unconfirmed' by construction.
 const unconfirmedBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.unconfirmedHistoricalContext.length
-  ? `Unconfirmed historical notes (not verified, not counted as contact):\n${snapshot.donor.unconfirmedHistoricalContext.map((note) => `- ${note}`).join("\n")}`
+  ? `Imported context (not verified, not counted as contact):\n${snapshot.donor.unconfirmedHistoricalContext.map((line) => `- ${line}`).join("\n")}`
   : null;
 
 export class RuleBasedAIService implements AIService {

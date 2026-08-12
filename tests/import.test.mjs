@@ -130,7 +130,7 @@ async function run() {
   assert.match(route, /source_snapshot/);
   assert.doesNotMatch(route, /console\.(log|info).*rows|logger\..*email/i);
   assert.match(help, /separate JL Solutions donation export/);
-  assert.match(settings, /Open data import/);
+  assert.match(settings, /Open Import Center/);
   assert.match(unifiedTimeline, /No relationship activity yet/);
   assert.match(donorPage, /No next action set/);
   assert.doesNotMatch(experience, /api\/assistant|openai|anthropic/i);

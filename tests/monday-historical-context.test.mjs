@@ -11,12 +11,17 @@ import { mondayHistoricalContextId, mondayInteractionId, mondayRecommendationId,
 
 async function run() {
   const commit = await readFile(new URL("../app/api/import/monday/commit/route.ts", import.meta.url), "utf8");
-  const ui = await readFile(new URL("../app/settings/monday-import/MondayImportExperience.tsx", import.meta.url), "utf8");
+  const ui = await readFile(new URL("../app/onboarding/import/monday/MondayImportExperience.tsx", import.meta.url), "utf8");
   const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
   const relationshipRead = await readFile(new URL("../lib/relationships/read.ts", import.meta.url), "utf8");
   const meetingBrief = await readFile(new URL("../lib/relationships/meeting-brief.ts", import.meta.url), "utf8");
   const migration = await readFile(new URL("../drizzle/0024_donor_historical_context.sql", import.meta.url), "utf8");
+  const datePrecisionMigration = await readFile(new URL("../drizzle/0025_date_only_precision.sql", import.meta.url), "utf8");
   const schema = await readFile(new URL("../db/schema.ts", import.meta.url), "utf8");
+  const timeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
+  const importCenter = await readFile(new URL("../app/onboarding/import/ImportExperience.tsx", import.meta.url), "utf8");
+  const importCenterPage = await readFile(new URL("../app/onboarding/import/monday/page.tsx", import.meta.url), "utf8");
+  const settingsRedirect = await readFile(new URL("../app/settings/monday-import/page.tsx", import.meta.url), "utf8");
 
   // --- 1 & 10: idempotency / no duplicate on re-import -- pure, executed ---
   const input = { donorCode: "M001", subitemIndex: 2, text: "Ask him to join the Sarei Alafim", dueDateRaw: null };
@@ -67,6 +72,23 @@ async function run() {
   const confirmContactBranch = commit.slice(confirmContactStart, confirmContactEnd);
   assert.doesNotMatch(confirmContactBranch, /donor_historical_context/, "confirming a real contact must never also write historical context");
 
+  // --- 4 (relationship-snapshot fix): a row explicitly confirmed as an
+  // interaction must feed the same relationship-intelligence pipeline a
+  // normal capture-and-accept does, via the same pure extractInteraction()
+  // function -- never a Monday-specific summary generator -- and only when
+  // it's actually the donor's most recent completed contact, so an old
+  // imported row can never regress a fresher genuine snapshot. ---
+  assert.match(confirmContactBranch, /extractInteraction\(text, "note"\)/, "confirm_contact must reuse the exact same extraction pipeline a normal capture accept uses");
+  assert.match(confirmContactBranch, /MAX\(occurred_at\) AS value FROM interactions WHERE donor_id=\? AND user_id=\? AND id!=\?/, "must compare against the donor's other completed interactions before touching the snapshot");
+  assert.match(confirmContactBranch, /if \(occurredAt >= latestOther\)/, "the snapshot must only be updated when this confirmed row is the most recent completed contact");
+  assert.match(confirmContactBranch, /UPDATE donors SET relationship_summary=\?, institutional_memory=\?, relationship_health=\?, updated_at=\? WHERE id=\? AND owner_user_id=\? AND data_source='live'/);
+  // Date-only precision: confirm_contact always marks the interaction it
+  // writes as date-only (Monday supplies a calendar date, never a time).
+  assert.match(commit, /UPDATE interactions SET occurred_at=\?, occurred_at_date_only=1, summary=\?, updated_at=\? WHERE id=\? AND user_id=\?/);
+  assert.match(commit, /INSERT INTO interactions \(id, donor_id, user_id, type, occurred_at, occurred_at_date_only, summary, source, created_at, updated_at\) VALUES \(\?,\?,\?,\?,\?,1,\?,\?,\?,\?\)/);
+  assert.match(commit, /UPDATE recommendations SET action=\?, reason=\?, due_at=\?, due_at_date_only=1, status='open', updated_at=\? WHERE id=\? AND user_id=\?/);
+  assert.match(commit, /INSERT INTO recommendations \(id, donor_id, user_id, action, reason, score, status, due_at, due_at_date_only, created_at, updated_at\) VALUES \(\?,\?,\?,\?,\?,\?,\?,\?,1,\?,\?\)/);
+
   // --- 2: must not affect last-contact anywhere it is computed ---
   assert.doesNotMatch(relationshipRead, /donor_historical_context/, "the last-contact/relationship-updates read path must never reference historical context");
   // meeting-brief.ts DOES reference the table, but only for a COUNT, in a
@@ -75,12 +97,41 @@ async function run() {
   assert.doesNotMatch(meetingBriefInteractionQuery, /donor_historical_context/, "the interactions query that drives last-contact must never reference historical context");
   assert.match(meetingBrief, /SELECT COUNT\(\*\) AS count FROM donor_historical_context WHERE donor_id = \? AND user_id = \? AND status = 'unconfirmed'/);
 
-  // --- 6: donor profile displays it separately from the timeline ---
-  assert.match(donorPage, /Historical context \(\{historicalContextRows\.length\}\)/);
-  assert.match(donorPage, /Unconfirmed/);
+  // --- 6/9: donor profile folds it into the Relationship Snapshot card as
+  // a collapsed disclosure (never a separate top-level box the fundraiser
+  // has to remember to check), still structurally separate from the
+  // interaction timeline, and states its own uncertainty rather than using
+  // an alarming "review queue" badge. ---
+  assert.match(donorPage, /Imported context \(\{historicalContextRows\.length\}\)/);
+  assert.doesNotMatch(donorPage, /historical-context-card/, "the old standalone aside box must be gone");
+  assert.match(donorPage, /Completion was never confirmed/, "each entry must state its own uncertainty in place of an alarming badge");
+  assert.doesNotMatch(donorPage, />Unconfirmed</, "the old bare 'Unconfirmed' badge wording must be gone");
+  const summaryCardStart = donorPage.indexOf('className="story-card ai-summary-card"');
+  const summaryCardEnd = donorPage.indexOf("</section>", summaryCardStart);
+  const summaryCard = donorPage.slice(summaryCardStart, summaryCardEnd);
+  assert.match(summaryCard, /historicalContextRows\.length > 0/, "the historical-context disclosure must live inside the Relationship Snapshot card");
   const timelineInvocation = /<UnifiedRelationshipTimeline .*?\/>/.exec(donorPage)?.[0] ?? "";
   assert.ok(timelineInvocation.length > 0, "the timeline component invocation must be found");
   assert.doesNotMatch(timelineInvocation, /historicalContextRows/, "historical context rows must never be passed into the interaction timeline");
+
+  // --- 3: date-only Monday records must never display an invented time.
+  // Interactions/reminders keep a real dateTime() everywhere else; only a
+  // row explicitly flagged occurred_at_date_only/due_at_date_only renders
+  // date-only, and that flag is never inferred from the clock value. ---
+  assert.match(timeline, /eventDate\(item\.eventAt, timezone, item\.reminder\.due_at_date_only\)/);
+  assert.match(timeline, /eventDate\(item\.eventAt, timezone, activity\.occurred_at_date_only\)/);
+  assert.match(timeline, /dateOnlyFlag \? dateOnly\(epoch, timezone\) : dateTime\(epoch, timezone\)/, "the date-only flag, not the clock value, must decide which formatter runs");
+  assert.match(datePrecisionMigration, /ALTER TABLE `interactions` ADD COLUMN `occurred_at_date_only` integer DEFAULT 0 NOT NULL/);
+  assert.match(datePrecisionMigration, /ALTER TABLE `recommendations` ADD COLUMN `due_at_date_only` integer DEFAULT 0 NOT NULL/);
+  assert.match(schema, /occurredAtDateOnly: integer\("occurred_at_date_only", \{ mode: "boolean" \}\)\.notNull\(\)\.default\(false\)/);
+  assert.match(schema, /dueAtDateOnly: integer\("due_at_date_only", \{ mode: "boolean" \}\)\.notNull\(\)\.default\(false\)/);
+
+  // --- 10: Monday.com import lives in the Import Center, not hidden under
+  // Settings -- the old route still resolves (a redirect), so no existing
+  // bookmark breaks, but there is exactly one canonical UI. ---
+  assert.match(importCenter, /href="\/onboarding\/import\/monday"/, "the Import Center landing must link to the Monday.com import");
+  assert.match(importCenterPage, /active="import"/, "the relocated Monday page must render inside the Import Center's own nav section");
+  assert.match(settingsRedirect, /redirect\("\/onboarding\/import\/monday"\)/, "the old Settings route must redirect rather than host a second copy of the UI");
 
   // --- schema: preserves exact text, source date, provenance,
   // classification, deterministic fingerprint; status is never 'confirmed' ---

@@ -7,6 +7,7 @@ import {
   type MeetingBriefInteraction,
   type MeetingBriefReminder,
 } from "./meeting-brief-model";
+import { importedContextLine } from "./historical-context";
 
 type DonorRow = {
   id: string;
@@ -32,17 +33,18 @@ type GivingRow = { id: string; activity_date: number | null; paid_cents: number 
 type LegacyGiftRow = { id: string; received_at: number; amount_cents: number; fund: string };
 type InteractionRow = { id: string; type: string; occurred_at: number; summary: string };
 type ReminderRow = { id: string; action: string; reason: string; due_at: number | null };
+type HistoricalContextRow = { text: string; source: string; source_date: number | null };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
 }
 
-export async function loadMeetingBrief(userId: string, donorId: string, now = Math.floor(Date.now() / 1000)): Promise<MeetingBrief | null> {
+export async function loadMeetingBrief(userId: string, donorId: string, timezone: string, now = Math.floor(Date.now() / 1000)): Promise<MeetingBrief | null> {
   const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, external_id, last_name, primary_first_name, spouse_first_name, primary_title, spouse_title, email, phone, home_phone, address_line_1, city, state, postal_code, country
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContext] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -63,9 +65,11 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
       WHERE r.donor_id = ? AND r.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
         AND r.status = 'open'
       ORDER BY CASE WHEN r.due_at IS NULL THEN 1 ELSE 0 END, r.due_at LIMIT 5`).bind(donorId, userId, userId).all<ReminderRow>(),
-    // Count only, never the row text -- kept completely separate from the
-    // interactions query above so an unconfirmed historical note can never
-    // be surfaced (here or anywhere downstream) as a real contact.
+    // Kept completely separate from the interactions query above -- this
+    // can only ever land in unconfirmedHistoricalContext below, never in
+    // lastMeaningfulContact/recentInteractions, so it can never be
+    // surfaced as a real contact.
+    env.DB.prepare(`SELECT text, source, source_date FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed' ORDER BY created_at DESC LIMIT 3`).bind(donorId, userId).all<HistoricalContextRow>(),
     env.DB.prepare(`SELECT COUNT(*) AS count FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed'`).bind(donorId, userId).first<{ count: number }>(),
   ]);
 
@@ -106,5 +110,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, now = Ma
   ];
   const interactionData: MeetingBriefInteraction[] = interactions.results.map((item) => ({ id: item.id, type: item.type, occurredAt: item.occurred_at, summary: item.summary }));
   const reminderData: MeetingBriefReminder[] = reminders.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at }));
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData, historicalContext?.count ?? 0);
+  const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
+  const unconfirmedHistoricalContext = historicalContextRows.results.map((row) => importedContextLine(row.text, row.source, row.source_date ? dateLabel(row.source_date) : null));
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0);
 }

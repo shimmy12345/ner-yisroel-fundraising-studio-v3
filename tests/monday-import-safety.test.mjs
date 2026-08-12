@@ -12,7 +12,7 @@ import { readFile } from "node:fs/promises";
 async function run() {
   const preview = await readFile(new URL("../app/api/import/monday/preview/route.ts", import.meta.url), "utf8");
   const commit = await readFile(new URL("../app/api/import/monday/commit/route.ts", import.meta.url), "utf8");
-  const ui = await readFile(new URL("../app/settings/monday-import/MondayImportExperience.tsx", import.meta.url), "utf8");
+  const ui = await readFile(new URL("../app/onboarding/import/monday/MondayImportExperience.tsx", import.meta.url), "utf8");
 
   // Both routes are gated to the live workspace only.
   assert.match(preview, /mode !== "live"/);
@@ -45,8 +45,18 @@ async function run() {
     assert.doesNotMatch(code, /\bgifts\b/i, "must never reference the gifts table");
     assert.doesNotMatch(code, /giving_activities/i, "must never reference giving_activities");
     assert.doesNotMatch(code, /\bcampaigns\b/i, "must never reference campaigns");
-    assert.doesNotMatch(code, /UPDATE donors|INSERT INTO donors/i, "must never write donor identity");
+    assert.doesNotMatch(code, /INSERT INTO donors/i, "must never create a donor row");
     assert.doesNotMatch(code, /DELETE FROM/i, "must never delete anything");
+  }
+  // The one exception is confirm_contact feeding the same relationship-
+  // snapshot fields a normal captured-and-accepted interaction feeds
+  // (app/api/interactions/route.ts) -- never donor identity fields like
+  // display_name, email, donor_code, or external_id.
+  const donorUpdateMatch = /UPDATE donors SET ([^"]+) WHERE id=\? AND owner_user_id=\? AND data_source='live'/.exec(commit);
+  assert.ok(donorUpdateMatch, "the commit route's donors UPDATE statement must exist and be readable");
+  assert.equal(donorUpdateMatch[1].trim(), "relationship_summary=?, institutional_memory=?, relationship_health=?, updated_at=?", "confirm_contact may only ever touch these four donor columns");
+  for (const identityField of ["display_name", "email", "donor_code", "external_id", "phone", "address_line_1"]) {
+    assert.doesNotMatch(commit, new RegExp(`UPDATE donors SET[^;]*\\b${identityField}\\b`), `confirm_contact must never touch donor identity field ${identityField}`);
   }
 
   // Idempotent upsert: both interactions and recommendations are written

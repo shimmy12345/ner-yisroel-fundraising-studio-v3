@@ -6,16 +6,22 @@ import { numericDonorCode } from "../../../../../lib/relationships/donor-identit
 import { classifyMondayDisposition } from "../../../../../lib/import/monday-classify";
 import { mondayHistoricalContextId, mondayInteractionId, mondayRecommendationId, mondaySourceFingerprint } from "../../../../../lib/import/monday-fingerprint";
 import { excelSerialToIsoDate } from "../../../../../lib/import/monday-workbook";
+import { extractInteraction } from "../../../../../lib/capture/interaction";
 import { logger } from "../../../../../lib/logger";
 
 // Writes only what was explicitly, individually approved -- there is no
 // bulk "confirm contact" path anywhere in this file, and no code path
-// here ever touches donors, gifts, giving_activities, or any row this
-// import didn't itself create (every row this route can write carries a
+// here ever touches gifts, giving_activities, or any row this import
+// didn't itself create (every row this route can write carries a
 // deterministic "monday-interaction-"/"monday-recommendation-"/
 // "monday-context-" id, an ID space crypto.randomUUID() can never
 // coincidentally produce, so an UPDATE here can only ever land on this
-// import's own prior rows).
+// import's own prior rows). confirm_contact is the one exception that
+// touches donors: it feeds relationship_summary/institutional_memory
+// through the exact same extractInteraction() pure function a normal
+// capture-and-accept does (see app/api/interactions/route.ts), guarded so
+// an old imported row can never overwrite a fresher genuine snapshot --
+// never a Monday-specific write path, never anything gift/giving-related.
 // Re-running with the same Monday-source identity (donor code + the
 // subitem's own position + its own text + Monday's own due date --
 // deliberately excluding whatever date the fundraiser confirms) always
@@ -79,6 +85,13 @@ export async function POST(request: Request) {
   let recommendationCount = 0;
   let historicalContextCount = 0;
   const rejected: Array<{ text: string | undefined; reason: string }> = [];
+  // Tracks, within this single commit request, the latest occurred_at a
+  // confirmed Monday contact has already claimed per donor -- a D1 read
+  // can't see another statement queued earlier in the same batch that
+  // hasn't executed yet, so two confirmed rows for the same donor in one
+  // request must still be compared against each other, not just against
+  // what's already on disk.
+  const donorLatestConfirmedInBatch = new Map<string, number>();
   const HISTORICAL_CONTEXT_ALLOWED_DISPOSITIONS = new Set(["confirm_contact_candidate", "historical_planned", "ambiguous"]);
 
   for (const decision of decisions) {
@@ -105,12 +118,31 @@ export async function POST(request: Request) {
       const summary = `${text}\nImported from Monday.com pipeline export. Source due date: ${dueDateIso ?? "not recorded"}.`;
       const existing = await env.DB.prepare("SELECT id FROM interactions WHERE id=? AND user_id=?").bind(id, profile.id).first<{ id: string }>();
       if (existing) {
-        statements.push(env.DB.prepare("UPDATE interactions SET occurred_at=?, summary=?, updated_at=? WHERE id=? AND user_id=?").bind(occurredAt, summary, now, id, profile.id));
+        statements.push(env.DB.prepare("UPDATE interactions SET occurred_at=?, occurred_at_date_only=1, summary=?, updated_at=? WHERE id=? AND user_id=?").bind(occurredAt, summary, now, id, profile.id));
       } else {
-        statements.push(env.DB.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        statements.push(env.DB.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, occurred_at_date_only, summary, source, created_at, updated_at) VALUES (?,?,?,?,?,1,?,?,?,?)")
           .bind(id, donor.id, profile.id, "note", occurredAt, summary, "import-monday:confirmed", now, now));
       }
       confirmedContactCount++;
+
+      // A row explicitly confirmed here is no longer uncertain -- it must
+      // satisfy the same completed-interaction contract a normal capture
+      // does, including feeding the Relationship Snapshot the same way
+      // app/api/interactions/route.ts does when its own AI-suggested
+      // snapshot is accepted. Only update the snapshot when this is
+      // actually the donor's most recent completed contact, so importing
+      // an old historical row can never regress a fresher, genuinely
+      // captured one.
+      const latestOtherRow = await env.DB.prepare(
+        `SELECT MAX(occurred_at) AS value FROM interactions WHERE donor_id=? AND user_id=? AND id!=? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))`,
+      ).bind(donor.id, profile.id, id).first<{ value: number | null }>();
+      const latestOther = Math.max(latestOtherRow?.value ?? 0, donorLatestConfirmedInBatch.get(donor.id) ?? 0);
+      if (occurredAt >= latestOther) {
+        const extracted = extractInteraction(text, "note");
+        statements.push(env.DB.prepare("UPDATE donors SET relationship_summary=?, institutional_memory=?, relationship_health=?, updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live'")
+          .bind(extracted.relationshipSummary, extracted.memory, 86, now, donor.id, profile.id));
+      }
+      donorLatestConfirmedInBatch.set(donor.id, Math.max(occurredAt, donorLatestConfirmedInBatch.get(donor.id) ?? 0));
     } else if (decision.action === "accept_future_planned" || decision.action === "create_followup") {
       if (decision.action === "accept_future_planned" && disposition !== "future_planned") { rejected.push({ text, reason: "This row is not a future planned-action candidate" }); continue; }
       if (decision.action === "create_followup" && disposition !== "historical_planned") { rejected.push({ text, reason: "Create-follow-up only applies to historical/undated planned actions" }); continue; }
@@ -121,9 +153,9 @@ export async function POST(request: Request) {
       const reason = `Historical Monday task: "${text}" (originally due ${dueDateIso ?? "no date recorded"}).`;
       const existing = await env.DB.prepare("SELECT id FROM recommendations WHERE id=? AND user_id=?").bind(id, profile.id).first<{ id: string }>();
       if (existing) {
-        statements.push(env.DB.prepare("UPDATE recommendations SET action=?, reason=?, due_at=?, status='open', updated_at=? WHERE id=? AND user_id=?").bind(text, reason, dueAt, now, id, profile.id));
+        statements.push(env.DB.prepare("UPDATE recommendations SET action=?, reason=?, due_at=?, due_at_date_only=1, status='open', updated_at=? WHERE id=? AND user_id=?").bind(text, reason, dueAt, now, id, profile.id));
       } else {
-        statements.push(env.DB.prepare("INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        statements.push(env.DB.prepare("INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, due_at_date_only, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)")
           .bind(id, donor.id, profile.id, text, reason, 40, "open", dueAt, now, now));
       }
       recommendationCount++;

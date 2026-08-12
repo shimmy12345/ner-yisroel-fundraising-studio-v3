@@ -341,7 +341,7 @@ CREATE TABLE `interactions` (
   `summary` text NOT NULL,
   `source` text DEFAULT 'manual' NOT NULL,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL,
+  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
@@ -422,7 +422,7 @@ CREATE TABLE `recommendations` (
   `status` text DEFAULT 'open' NOT NULL,
   `due_at` integer,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL,
+  `updated_at` integer NOT NULL, `due_at_date_only` integer DEFAULT 0 NOT NULL,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
@@ -584,5 +584,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a0c52062213a9ec37c58e49e3ef6c2958e23ad651c3cc32837ce8e65160a6e35',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','9534af163bb1b3ca805962ace6e09b5238f4b143e19421018600f55743c3f114',1785944072);
 PRAGMA optimize;

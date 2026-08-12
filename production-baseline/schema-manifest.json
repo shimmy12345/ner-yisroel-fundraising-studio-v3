@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "a0c52062213a9ec37c58e49e3ef6c2958e23ad651c3cc32837ce8e65160a6e35",
+  "schemaHash": "9534af163bb1b3ca805962ace6e09b5238f4b143e19421018600f55743c3f114",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -26,7 +26,8 @@
     "0021_import_preview_sessions.sql",
     "0022_import_review_drafts.sql",
     "0023_donor_research_stage_a.sql",
-    "0024_donor_historical_context.sql"
+    "0024_donor_historical_context.sql",
+    "0025_date_only_precision.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -3105,6 +3106,13 @@
             "notNull": true,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "occurred_at_date_only",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -3751,6 +3759,13 @@
             "notNull": true,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "due_at_date_only",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -4263,7 +4278,7 @@
     {
       "type": "table",
       "name": "interactions",
-      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -4293,7 +4308,7 @@
     {
       "type": "table",
       "name": "recommendations",
-      "sql": "CREATE TABLE `recommendations` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `reason` text NOT NULL, `score` integer NOT NULL, `status` text DEFAULT 'open' NOT NULL, `due_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `recommendations` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `reason` text NOT NULL, `score` integer NOT NULL, `status` text DEFAULT 'open' NOT NULL, `due_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `due_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",

@@ -110,6 +110,11 @@ export const interactions = sqliteTable("interactions", {
   userId: text("user_id").notNull().references(() => users.id),
   type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift"] }).notNull(),
   occurredAt: integer("occurred_at", { mode: "timestamp" }).notNull(),
+  // True only for Monday.com-imported rows, where the source supplied a
+  // calendar date and nothing else -- occurredAt is anchored at UTC noon,
+  // not a real captured time. Every other interaction keeps a genuine
+  // wall-clock moment and this stays false.
+  occurredAtDateOnly: integer("occurred_at_date_only", { mode: "boolean" }).notNull().default(false),
   summary: text("summary").notNull(),
   source: text("source").notNull().default("manual"),
   ...timestamps,
@@ -334,6 +339,9 @@ export const recommendations = sqliteTable("recommendations", {
   score: integer("score").notNull(),
   status: text("status", { enum: ["open", "completed", "dismissed"] }).notNull().default("open"),
   dueAt: integer("due_at", { mode: "timestamp" }),
+  // Same date-only convention as interactions.occurredAtDateOnly, for
+  // Monday.com-imported reminders whose due date has no real time.
+  dueAtDateOnly: integer("due_at_date_only", { mode: "boolean" }).notNull().default(false),
   ...timestamps,
 }, (table) => [index("recommendations_user_status_idx").on(table.userId, table.status)]);
 

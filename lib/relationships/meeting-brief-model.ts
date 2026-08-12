@@ -48,9 +48,11 @@ export type MeetingBrief = {
   peopleMentioned: string[];
   discussionTopics: Array<{ title: string; detail: string }>;
   followUpActions: Array<{ title: string; detail: string }>;
-  // Count only -- deliberately not the row text. This must never be
-  // confused with lastMeaningfulContact/recentInteractions: it counts
+  // Already-formatted, uncertainty-stating lines (lib/relationships/
+  // historical-context.ts), capped for a compact brief. Must never be
+  // confused with lastMeaningfulContact/recentInteractions: this surfaces
   // donor_historical_context rows, which are never a logged interaction.
+  unconfirmedHistoricalContext: string[];
   unconfirmedHistoricalContextCount: number;
 };
 
@@ -63,7 +65,8 @@ export function buildMeetingBrief(
   gifts: MeetingBriefGift[],
   interactions: MeetingBriefInteraction[],
   reminders: MeetingBriefReminder[],
-  unconfirmedHistoricalContextCount = 0,
+  unconfirmedHistoricalContext: string[] = [],
+  unconfirmedHistoricalContextCount = unconfirmedHistoricalContext.length,
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -117,6 +120,7 @@ export function buildMeetingBrief(
     peopleMentioned,
     discussionTopics,
     followUpActions,
+    unconfirmedHistoricalContext,
     unconfirmedHistoricalContextCount,
   };
 }

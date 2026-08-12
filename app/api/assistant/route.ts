@@ -4,6 +4,7 @@ import { ensureUserProfile } from "../../../lib/auth/profile";
 import { loadWorkspaceBrief } from "../../../lib/workspace/live-data";
 import { classifyAssistantPrompt, RuleBasedAIService } from "../../../lib/ai/rule-based";
 import type { AssistantContextSnapshot, AssistantTask } from "../../../lib/ai/types";
+import { importedContextLine } from "../../../lib/relationships/historical-context";
 import { logger } from "../../../lib/logger";
 import { getDataMode } from "../../../lib/workspace/mode";
 
@@ -11,7 +12,7 @@ type RequestBody = { task?: AssistantTask | "custom"; prompt?: string };
 type DonorRow = { id: string; display_name: string; relationship_summary: string | null; institutional_memory: string | null };
 type InteractionRow = { id: string; summary: string; occurred_at: number };
 type RecommendationRow = { id: string; action: string; reason: string; due_at: number | null };
-type HistoricalContextRow = { text: string };
+type HistoricalContextRow = { text: string; source: string; source_date: number | null };
 const supported = new Set(["custom", "relationship-summary", "meeting-brief", "draft", "next-action", "lapsed-relationships", "executive-summary"]);
 
 export async function POST(request: Request) {
@@ -37,11 +38,12 @@ export async function POST(request: Request) {
       // own query, never joined into the interactions/recommendations
       // results above, so it can only ever land in the separate
       // unconfirmedHistoricalContext field below.
-      mode === "demo" ? Promise.resolve({ results: [] as HistoricalContextRow[] }) : env.DB.prepare(`SELECT text FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed' ORDER BY created_at DESC LIMIT 5`).bind(primaryId, profile.id).all<HistoricalContextRow>(),
+      mode === "demo" ? Promise.resolve({ results: [] as HistoricalContextRow[] }) : env.DB.prepare(`SELECT text, source, source_date FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed' ORDER BY created_at DESC LIMIT 5`).bind(primaryId, profile.id).all<HistoricalContextRow>(),
     ]) : [null, { results: [] }, { results: [] }, { results: [] }];
     const latest = interactions.results[0];
+    const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: profile.timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
     const snapshot: AssistantContextSnapshot = {
-      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => item.text) },
+      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)) },
       latestInteraction: latest ? { id: latest.id, summary: latest.summary.replace("\n", ": "), occurredAt: new Date(latest.occurred_at * 1000).toISOString() } : null,
       recommendations: recommendations.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at ? new Date(item.due_at * 1000).toISOString() : null })),
       priorities: brief.priorities.map(({ name, label, reason, why, action }) => ({ name, label, reason, why, action })), meetings: brief.meetings, gifts: brief.gifts.map(({ id, name, amount, detail }) => ({ id, name, amount, detail })),

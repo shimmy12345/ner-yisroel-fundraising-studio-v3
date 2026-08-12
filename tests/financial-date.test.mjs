@@ -48,7 +48,14 @@ assert.deepEqual({ ...db.prepare("SELECT payment_date,applied_cents,pledge_activ
 
 const timelineComponent = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 assert.match(timelineComponent, /financialDateLabel\(item\.eventAt\)/);
-assert.match(timelineComponent, /dateTime\(item\.eventAt, timezone\)/, "calls, meetings, reminders, and scheduled work keep true date/time rendering");
+// Calls, meetings, reminders, and scheduled work keep true date/time
+// rendering by default -- eventDate() only drops to a bare date when the
+// row is explicitly flagged occurred_at_date_only/due_at_date_only (a
+// Monday.com import with no real time), never for a genuinely captured or
+// scheduled interaction/reminder.
+assert.match(timelineComponent, /const eventDate = \(epoch: number, timezone: string, dateOnlyFlag: number \| undefined\) => dateOnlyFlag \? dateOnly\(epoch, timezone\) : dateTime\(epoch, timezone\);/);
+assert.match(timelineComponent, /eventDate\(item\.eventAt, timezone, item\.reminder\.due_at_date_only\)/);
+assert.match(timelineComponent, /eventDate\(item\.eventAt, timezone, activity\.occurred_at_date_only\)/);
 assert.doesNotMatch(timelineComponent, /kind === "payment"[^;]+dateTime\(/s, "payments never display a time");
 
 process.stdout.write("Financial date-only checks passed.\n");
