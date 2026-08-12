@@ -41,6 +41,17 @@ function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Monday's own Status column, shown as a hint only -- it never pre-selects
+// a decision or affects classification. "Done" means the Monday task was
+// closed out, which is useful context but not proof this exact row's text
+// describes something that actually happened; the fundraiser still makes
+// that call themselves.
+function mondayStatusLabel(status: string | null) {
+  if (!status) return "No status recorded in Monday";
+  if (status === "Done") return "✓ Marked Done in Monday";
+  return `Monday status: ${status}`;
+}
+
 export function MondayImportExperience() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<Step>("upload");
@@ -193,6 +204,7 @@ export function MondayImportExperience() {
               {row.match.status === "matched" && row.match.nameConflict && <span className="capture-error">Name does not obviously match {row.match.fosDisplayName} -- verify before confirming.</span>}
               <p>{row.text}</p>
               <small>Monday due date: {row.dueDateIso ?? "not recorded"}</small>
+              <small className="monday-import-status">{mondayStatusLabel(row.status)}</small>
             </div>
             <div className="monday-import-row-actions">
               <label>Actual contact date<input type="date" value={confirmed ? decision.actualContactDate : (row.dueDateIso ?? "")} onChange={(event) => setDecision(key, { kind: "confirm_contact", actualContactDate: event.target.value })} /></label>
@@ -232,7 +244,7 @@ export function MondayImportExperience() {
           const savedAsContext = decision?.kind === "save_historical_context";
           const reviewed = reviewedKeys.has(key);
           return <article key={key} className="monday-import-row">
-            <div className="monday-import-row-main"><strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span><p>{row.text}</p><small>Original Monday due date: {row.dueDateIso ?? "not recorded"}</small></div>
+            <div className="monday-import-row-main"><strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span><p>{row.text}</p><small>Original Monday due date: {row.dueDateIso ?? "not recorded"}</small><small className="monday-import-status">{mondayStatusLabel(row.status)}</small></div>
             <div className="monday-import-row-actions">
               {followUp ? <>
                 <label>New due date<input type="date" min={todayIsoDate()} value={decision.dueDate} onChange={(event) => setDecision(key, { kind: "create_followup", dueDate: event.target.value })} /></label>
@@ -270,7 +282,7 @@ export function MondayImportExperience() {
           const reviewed = reviewedKeys.has(key);
           if (reviewed && !savedAsContext) return null;
           return <article key={key} className="monday-import-row">
-            <div className="monday-import-row-main"><strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span><p>{row.text}</p></div>
+            <div className="monday-import-row-main"><strong>{row.mondayDonorName}</strong> <span className="monday-import-code">{row.code}</span><p>{row.text}</p><small className="monday-import-status">{mondayStatusLabel(row.status)}</small></div>
             <div className="monday-import-row-actions">
               <button type="button" className={savedAsContext ? "onboarding-primary" : ""} onClick={() => setDecision(key, { kind: "save_historical_context" })}>{savedAsContext ? "Saved as context" : "Save as historical context"}</button>
               {savedAsContext ? <button type="button" onClick={() => setDecision(key, { kind: "undecided" })}>Undo</button> : <button type="button" onClick={() => toggleReviewed(key)}>Reviewed</button>}

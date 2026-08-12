@@ -2,7 +2,8 @@ import { unzipSync } from "fflate";
 
 // Parses a Monday.com "Pipeline" export (.xlsx) into donor blocks: a donor
 // header row (Name, Code) followed by zero or more subitem rows (task
-// text, Monday's own Due Date). No network, no filesystem -- xlsx is a
+// text, Monday's own Due Date, Monday's own Status). No network, no
+// filesystem -- xlsx is a
 // zip of XML, unzipped in memory (fflate, already a dependency) and read
 // with a direct cell-by-cell scan rather than a <row>-wrapper regex --
 // the latter was tried first against the real export and silently
@@ -10,7 +11,12 @@ import { unzipSync } from "fflate";
 // this against the actual workbook). Scanning every <c> element directly
 // avoids that class of bug entirely.
 
-export type MondaySubitem = { text: string; dueDateRaw: string | null; index: number };
+// status is Monday's own "Done"/blank Status column on the subitem row --
+// carried through as raw, unclassified signal only. It never drives
+// disposition or matching, and never causes anything to be written
+// automatically; it's shown to the fundraiser so they don't have to guess
+// whether a row actually happened.
+export type MondaySubitem = { text: string; dueDateRaw: string | null; status: string | null; index: number };
 export type MondayDonorBlock = { name: string; code: string | null; subitems: MondaySubitem[] };
 
 function decodeXmlEntities(value: string) {
@@ -113,13 +119,14 @@ export function parseMondayWorkbook(fileBytes: Uint8Array): MondayDonorBlock[] {
     const code = (cells.get(codeCol) ?? "").toString().trim();
     const c1 = (cells.get(1) ?? "").toString().trim();
     const c2 = (cells.get(2) ?? "").toString().trim();
+    const c3 = (cells.get(3) ?? "").toString().trim(); // subitem Status column ("Subitems | Name | Due Date | Status")
     if (name === "Subitems" && c1 === "Name") continue; // subitem mini-header
     if (!name && !c1 && !c2 && !code) continue; // fully blank row
     if (name && name !== "Subitems") {
       current = { name, code: code || null, subitems: [] };
       donors.push(current);
     } else if (!name && c1 && current) {
-      current.subitems.push({ text: c1, dueDateRaw: c2 || null, index: current.subitems.length });
+      current.subitems.push({ text: c1, dueDateRaw: c2 || null, status: c3 || null, index: current.subitems.length });
     }
   }
   return donors;

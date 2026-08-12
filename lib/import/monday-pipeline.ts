@@ -23,6 +23,11 @@ export type MondayPreviewRow = {
   subitemIndex: number;
   dueDateRaw: string | null;
   dueDateIso: string | null;
+  // Monday's own Status column (e.g. "Done"), carried straight through --
+  // never consulted by classifyMondayDisposition and never affects
+  // matching. Shown to the fundraiser as a hint; it cannot pre-select or
+  // trigger a write on its own.
+  status: string | null;
   disposition: MondayDisposition;
   fingerprint: string | null;
 };
@@ -56,7 +61,7 @@ export function buildMondayPreview(donorBlocks: MondayDonorBlock[], lookup: Mond
       const dueDateIso = excelSerialToIsoDate(subitem.dueDateRaw);
       const disposition = classifyMondayDisposition(subitem.text, dueDateIso, todayIso);
       const fingerprint = block.code ? mondaySourceFingerprint({ donorCode: block.code, subitemIndex: subitem.index, text: subitem.text, dueDateRaw: subitem.dueDateRaw }) : null;
-      rows.push({ mondayDonorName: block.name, code: block.code, match, text: subitem.text, subitemIndex: subitem.index, dueDateRaw: subitem.dueDateRaw, dueDateIso, disposition, fingerprint });
+      rows.push({ mondayDonorName: block.name, code: block.code, match, text: subitem.text, subitemIndex: subitem.index, dueDateRaw: subitem.dueDateRaw, dueDateIso, status: subitem.status, disposition, fingerprint });
     }
   }
   return rows;

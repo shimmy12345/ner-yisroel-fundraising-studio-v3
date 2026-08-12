@@ -85,6 +85,24 @@ async function run() {
   assert.match(commit, /reason = `Historical Monday task: "\$\{text\}" \(originally due \$\{dueDateIso/);
   assert.match(ui, /setDecision\(key, \{ kind: "create_followup", dueDate: "" \}\)/, "Create follow-up now must start from a blank date, never the old Monday due date");
 
+  // Monday's own Status column ("Done"/blank) is display-only: shown as a
+  // hint next to a row, but it must never pre-select a decision, never
+  // appear inside a setDecision(...) call, and never be sent to the write
+  // route at all -- the commit route has no field for it. Every reference
+  // to a row's status must go through the display-only formatter, never
+  // read directly to drive a decision or a conditional write path.
+  const rowStatusUsages = ui.match(/row\.status\b/g) ?? [];
+  assert.ok(rowStatusUsages.length > 0, "the UI must actually read row.status somewhere, to prove this check isn't vacuous");
+  const rowStatusAsFormatterArg = ui.match(/mondayStatusLabel\(row\.status\)/g) ?? [];
+  assert.equal(rowStatusUsages.length, rowStatusAsFormatterArg.length, "every use of row.status must be an argument to the display-only formatter, never a condition driving setDecision or the commit body");
+  const commitBodyMatch = /const base = \{([^}]+)\}/.exec(ui);
+  assert.ok(commitBodyMatch, "the commit request body builder must exist and be readable");
+  assert.doesNotMatch(commitBodyMatch[1], /status/i, "the commit request body must never include Monday's Status column");
+  // recommendations.status ('open'/'completed'/'dismissed') is an
+  // unrelated, pre-existing SQL column -- the check here is specifically
+  // that the incoming Decision payload is never read for a "status" field.
+  assert.doesNotMatch(commit, /decision\.status/, "the commit route must never read a Status field off the incoming decision");
+
   console.log("Monday import: route and UI safety checks passed.");
 }
 

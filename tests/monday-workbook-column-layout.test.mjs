@@ -117,6 +117,26 @@ async function run() {
   assert.equal(singleDonor.subitems.length, 2, "a repeated mini-header row must never be read as a donor row or as a subitem");
   assert.deepEqual(singleDonor.subitems.map((item) => item.text), ["Before mini-header repeats", "After a repeated mini-header"]);
 
+  // --- 6: Monday's own Status column ("Done"/blank) is captured verbatim
+  // and carried through to the preview row, purely as display signal --
+  // never consulted by classification or matching. ---
+  const statusRows =
+    HEADER_ROWS +
+    donorRow(4, "Krull, Micky", "47130") +
+    miniHeaderRow(5) +
+    subitemRow(6, "Schedule qualification visit", null, "Done") +
+    subitemRow(7, "Schedule qualification visit", null, "");
+  const [statusDonor] = parseMondayWorkbook(xlsxBytes(statusRows));
+  assert.equal(statusDonor.subitems[0].status, "Done");
+  assert.equal(statusDonor.subitems[1].status, null, "a blank Status cell must stay null, never default to some other value");
+  const statusPreviewRows = buildMondayPreview([statusDonor], new Map([["47130", { id: "donor-1", displayName: "Krull, Micky" }]]), "2026-08-12");
+  assert.equal(statusPreviewRows[0].status, "Done");
+  assert.equal(statusPreviewRows[1].status, null);
+  // Two rows with identical text/date and different Status must still
+  // classify identically -- status is never an input to disposition.
+  assert.equal(statusPreviewRows[0].text, statusPreviewRows[1].text);
+  assert.equal(statusPreviewRows[0].disposition, statusPreviewRows[1].disposition, "status must never influence disposition classification");
+
   console.log("Monday workbook column-layout checks passed.");
 }
 
