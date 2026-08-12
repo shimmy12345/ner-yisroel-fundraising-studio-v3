@@ -3,8 +3,48 @@
 import { useState } from "react";
 import { DonorAutocomplete } from "../../capture/DonorAutocomplete";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
+import { GIFT_ACKNOWLEDGMENT_ACTION_LABELS, GIFT_ACKNOWLEDGMENT_LABELS, GIFT_ACKNOWLEDGMENT_STATUSES, type GiftAcknowledgmentStatus, type GiftSource } from "../../../lib/giving/acknowledgment";
 
 type Activity = { id: string; donorId: string; externalSource: string; workspaceStatus: string; privateNote: string | null; updatedAt: number };
+
+// Lightweight "Mark thank-you sent" control -- deliberately never touches
+// interactions, recommendations, or relationship_summary/institutional_memory.
+// It only ever writes a new gift_acknowledgments row (never an UPDATE), so
+// a later status change never erases the record of what was marked
+// before. Reused wherever a paid gift is shown: the giving timeline, the
+// donor page's Suggested Action card, and the homepage/Today queue.
+export function GiftAcknowledgmentActions({ giftSource, giftId, initialStatus, compact }: { giftSource: GiftSource; giftId: string; initialStatus: GiftAcknowledgmentStatus | null; compact?: boolean }) {
+  const [status, setStatus] = useState<GiftAcknowledgmentStatus | null>(initialStatus);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState<GiftAcknowledgmentStatus | null>(null);
+  const [error, setError] = useState("");
+
+  async function mark(next: GiftAcknowledgmentStatus) {
+    if (saving) return;
+    setSaving(next); setError("");
+    try {
+      const response = await fetch("/api/giving/acknowledge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ giftSource, giftId, status: next }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "The acknowledgment could not be saved.");
+      setStatus(next);
+      setEditing(false);
+      window.setTimeout(() => window.location.reload(), 350);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "The acknowledgment could not be saved.");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  if (status && !editing) {
+    return <div className="gift-acknowledgment gift-acknowledgment-set"><span className="gift-acknowledgment-status">{GIFT_ACKNOWLEDGMENT_LABELS[status]}</span><button type="button" className="gift-acknowledgment-change" onClick={() => setEditing(true)}>Change</button></div>;
+  }
+  return <div className={`gift-acknowledgment ${compact ? "gift-acknowledgment-compact" : ""}`}>
+    {GIFT_ACKNOWLEDGMENT_STATUSES.map((option) => <button key={option} type="button" disabled={saving !== null} onClick={() => void mark(option)}>{saving === option ? "Saving…" : GIFT_ACKNOWLEDGMENT_ACTION_LABELS[option]}</button>)}
+    {status && editing && <button type="button" onClick={() => setEditing(false)}>Cancel</button>}
+    {error && <p className="giving-action-error" role="alert">{error}</p>}
+  </div>;
+}
 
 export function GivingRecordActions({ activity, donors }: { activity: Activity; donors: DonorSearchRecord[] }) {
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");

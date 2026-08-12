@@ -10,6 +10,7 @@ import {
 import { importedContextLine } from "./historical-context";
 import { buildRecommendationEvidence } from "./recommendation-evidence";
 import { buildDonorRecommendation } from "./recommendation-rank";
+import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment";
 
 type DonorRow = {
   id: string;
@@ -38,6 +39,7 @@ type LegacyGiftRow = { id: string; received_at: number; amount_cents: number; fu
 type InteractionRow = { id: string; type: string; occurred_at: number; summary: string };
 type ReminderRow = { id: string; action: string; reason: string; due_at: number | null };
 type HistoricalContextRow = { text: string; source: string; source_date: number | null };
+type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
@@ -48,7 +50,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -75,6 +77,9 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     // surfaced as a real contact.
     env.DB.prepare(`SELECT text, source, source_date FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed' ORDER BY created_at DESC LIMIT 3`).bind(donorId, userId).all<HistoricalContextRow>(),
     env.DB.prepare(`SELECT COUNT(*) AS count FROM donor_historical_context WHERE donor_id = ? AND user_id = ? AND status = 'unconfirmed'`).bind(donorId, userId).first<{ count: number }>(),
+    // Newest row per (gift_source, gift_id) is "current status"; every
+    // earlier mark stays in the table, never overwritten.
+    env.DB.prepare(`SELECT gift_source, gift_id, status FROM gift_acknowledgments WHERE donor_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 2000`).bind(donorId, userId).all<AcknowledgmentRow>(),
   ]);
 
   const address = [
@@ -119,8 +124,9 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
 
   // Suggested Action: same shared engine as the donor page/homepage/
   // Assistant, built from the exact same rows already fetched above.
-  const paidFromActivities = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && item.activity_date !== null).map((item) => ({ amountCents: item.paid_cents!, occurredAt: item.activity_date!, campaign: item.source_campaign, description: item.description || item.item_type }));
-  const paidFromLegacy = legacyGifts.results.map((gift) => ({ amountCents: gift.amount_cents, occurredAt: gift.received_at, campaign: gift.fund as string | null, description: null as string | null }));
+  const acknowledgmentByGift = new Set(acknowledgments.results.map((row) => `${row.gift_source}:${row.gift_id}`));
+  const paidFromActivities = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && item.activity_date !== null).map((item) => ({ giftSource: "giving_activity" as GiftSource, giftId: item.id, amountCents: item.paid_cents!, occurredAt: item.activity_date!, campaign: item.source_campaign, description: item.description || item.item_type, acknowledged: acknowledgmentByGift.has(`giving_activity:${item.id}`) }));
+  const paidFromLegacy = legacyGifts.results.map((gift) => ({ giftSource: "gift" as GiftSource, giftId: gift.id, amountCents: gift.amount_cents, occurredAt: gift.received_at, campaign: gift.fund as string | null, description: null as string | null, acknowledged: acknowledgmentByGift.has(`gift:${gift.id}`) }));
   const mostRecentPaidGiftForEvidence = [...paidFromActivities, ...paidFromLegacy].sort((a, b) => b.occurredAt - a.occurredAt)[0] ?? null;
   const openPledgeSource = giving.results.find((item) => (item.balance_cents ?? 0) > 0);
   const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: openPledgeSource.activity_date } : null;

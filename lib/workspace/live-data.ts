@@ -7,6 +7,7 @@ import { donorInitials, numericDonorCode } from "../relationships/donor-identity
 import { buildRecommendationEvidence } from "../relationships/recommendation-evidence.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
+import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -19,8 +20,9 @@ type DonorLinkRow = IdentityRow & { donor_id: string; event_at: number };
 type DismissalRow = { item_key: string };
 type LatestInteractionRow = { donor_id: string; type: string; occurred_at: number; summary: string };
 type HistoricalContextRow = { donor_id: string; text: string; source: string; source_date: number | null };
+type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 
-export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket };
+export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
 export type WorkspaceScheduledActivity = { id: string; donorId: string; type: string; typeLabel: string; time: string; period: string; date: string; donorName: string; donorCode: string | null; initials: string; subject: string; note: string; prepareHref: string | null; openHref: string; editHref: string; logOutcomeHref: string | null; canCancel: boolean };
 export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; donorCode: string | null; amount: string; detail: string };
@@ -82,7 +84,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -133,6 +135,9 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // it can only ever feed the recommendation engine's own
     // historicalContext field, never masquerade as a completed contact.
     demo ? Promise.resolve({ results: [] as HistoricalContextRow[] }) : env.DB.prepare(`SELECT donor_id, text, source, source_date FROM donor_historical_context WHERE user_id = ? AND status = 'unconfirmed' ORDER BY donor_id, created_at DESC LIMIT 1000`).bind(userId).all<HistoricalContextRow>(),
+    // Newest row per (gift_source, gift_id) is "current status"; a JL
+    // re-import never references this table, so it survives every refresh.
+    demo ? Promise.resolve({ results: [] as AcknowledgmentRow[] }) : env.DB.prepare(`SELECT gift_source, gift_id, status FROM gift_acknowledgments WHERE user_id = ? ORDER BY created_at DESC LIMIT 5000`).bind(userId).all<AcknowledgmentRow>(),
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
@@ -186,6 +191,10 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const suggestionHrefByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "capture" };
   const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
   const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
+  // live-data.ts's own "recent gift" bucket only ever draws from
+  // giving_activities (never the legacy gifts table -- see GivingRow),
+  // so gift_source is always "giving_activity" here.
+  const acknowledgedGivingActivityIds = new Set(acknowledgments.results.filter((row) => row.gift_source === "giving_activity").map((row) => row.gift_id));
 
   for (const donorId of suggestionDonorIds) {
     const donorRow = donorById.get(donorId);
@@ -196,7 +205,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     const lastInteractionRow = latestInteractionByDonor.get(donorId);
     const evidence = buildRecommendationEvidence({
       donorId,
-      mostRecentPaidGift: gift ? { amountCents: gift.paid_cents ?? 0, occurredAt: gift.activity_date!, campaign: null, description: gift.description || gift.item_type } : null,
+      mostRecentPaidGift: gift ? { giftSource: "giving_activity", giftId: gift.id, amountCents: gift.paid_cents ?? 0, occurredAt: gift.activity_date!, campaign: null, description: gift.description || gift.item_type, acknowledged: acknowledgedGivingActivityIds.has(gift.id) } : null,
       openPledge: pledge ? { balanceCents: pledge.balance_cents ?? 0, campaign: null, description: pledge.description || pledge.item_type, activityDate: pledge.activity_date } : null,
       lastCompletedInteraction: lastInteractionRow ? { type: lastInteractionRow.type, summary: lastInteractionRow.summary, occurredAt: lastInteractionRow.occurred_at } : null,
       lastContactAt: contactByDonor.get(donorId) ?? null,
@@ -229,6 +238,8 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       dueLabel: recommendation.timing ?? (recommendation.kind === "acknowledge_gift" ? "Suggested today" : "No due date recorded"),
       rank: suggestionRankByKind[recommendation.kind] ?? 4,
       sortAt,
+      giftSource: recommendation.giftSource,
+      giftId: recommendation.giftId,
     });
   }
 

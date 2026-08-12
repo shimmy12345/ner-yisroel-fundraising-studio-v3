@@ -20,12 +20,28 @@ const emptyInput = {
   historicalContext: [],
 };
 
+// A "new gift" defaults to unacknowledged unless explicitly overridden --
+// this matches the gift_acknowledgments table's own design: absence of any
+// row for a gift IS "not yet acknowledged", never inferred from anything else.
+const gift = (overrides = {}) => ({ giftSource: "giving_activity", giftId: "activity-1", amountCents: 5000, occurredAt: daysAgo(10), campaign: "Fund", description: null, acknowledged: false, ...overrides });
+
 async function run() {
   // --- evidence builder: derived fields ---
-  const withGift = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: { amountCents: 5000, occurredAt: daysAgo(10), campaign: "Fund", description: null }, lastContactAt: daysAgo(3) }, NOW);
-  assert.equal(withGift.giving.acknowledgedSinceGift, true, "contact after the gift date must count as acknowledged");
-  const withUnacknowledgedGift = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: { amountCents: 5000, occurredAt: daysAgo(3), campaign: "Fund", description: null }, lastContactAt: daysAgo(10) }, NOW);
-  assert.equal(withUnacknowledgedGift.giving.acknowledgedSinceGift, false, "contact before the gift date must not count as acknowledged");
+  // 1. A new/unmarked gift is unacknowledged by default.
+  const withUnacknowledgedGift = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: false }), lastContactAt: daysAgo(3) }, NOW);
+  assert.equal(withUnacknowledgedGift.giving.mostRecentPaidGift.acknowledged, false);
+  // An unrelated interaction after the gift date must NOT, by itself,
+  // count as acknowledgment -- only the explicit flag does. This is the
+  // exact behavior the old date-comparison inference used to get wrong.
+  const withGiftAndLaterInteraction = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: false }), lastContactAt: daysAgo(1) }, NOW);
+  assert.ok(generateCandidates(withGiftAndLaterInteraction).find((c) => c.kind === "acknowledge_gift"), "a later, unrelated interaction must never silently count as a thank-you");
+  // 2/3/4. Marking any of the three statuses (thank_you_sent/
+  // thank_you_call/no_acknowledgment_needed) suppresses the candidate --
+  // the evidence layer only cares about the boolean, not which status;
+  // tests/gift-acknowledgment-safety.test.mjs covers that the API route
+  // itself accepts and stores all three distinct values.
+  const markedAcknowledged = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: true }) }, NOW);
+  assert.equal(generateCandidates(markedAcknowledged).find((c) => c.kind === "acknowledge_gift"), undefined, "any acknowledgment status must suppress the recommendation");
   const withPledge = buildRecommendationEvidence({ ...emptyInput, openPledge: { balanceCents: 1000, campaign: null, description: null, activityDate: daysAgo(45) } }, NOW);
   assert.equal(withPledge.giving.openPledge.ageDays, 45);
   const withReminder = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: daysAgo(2) } }, NOW);
@@ -39,7 +55,6 @@ async function run() {
   assert.equal(generateCandidates(buildRecommendationEvidence(emptyInput, NOW)).find((c) => c.kind === "honor_reminder"), undefined);
   assert.ok(generateCandidates(withReminder).find((c) => c.kind === "honor_reminder"), "an open reminder must generate honor_reminder");
   assert.ok(generateCandidates(withUnacknowledgedGift).find((c) => c.kind === "acknowledge_gift"), "an unacknowledged paid gift must generate acknowledge_gift");
-  assert.equal(generateCandidates(withGift).find((c) => c.kind === "acknowledge_gift"), undefined, "an already-acknowledged gift must not generate acknowledge_gift");
   assert.ok(generateCandidates(withPledge).find((c) => c.kind === "follow_up_pledge"));
   const gapEvidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(120) }, NOW);
   assert.ok(generateCandidates(gapEvidence).find((c) => c.kind === "reconnect_contact_gap"));
@@ -58,7 +73,7 @@ async function run() {
 
   // --- hard constraint 1: reminder suppresses the next-touchpoint family,
   // never the money-stewardship family ---
-  const reminderPlusGift = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, mostRecentPaidGift: { amountCents: 1000, occurredAt: daysAgo(3), campaign: null, description: null }, lastContactAt: daysAgo(10) }, NOW);
+  const reminderPlusGift = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, mostRecentPaidGift: gift({ amountCents: 1000, occurredAt: daysAgo(3) }), lastContactAt: daysAgo(10) }, NOW);
   const reminderPlusGap = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, lastContactAt: daysAgo(200) }, NOW);
   const afterReminderWithGift = buildDonorRecommendation(reminderPlusGift);
   assert.ok(["honor_reminder", "acknowledge_gift"].includes(afterReminderWithGift.kind), "a reminder must not eliminate a competing gift-acknowledgment candidate");
@@ -98,7 +113,7 @@ async function run() {
   // describing a similar opportunity when both are present.
   const confirmedBeatsHistorical = buildRecommendationEvidence({
     ...emptyInput,
-    mostRecentPaidGift: { amountCents: 1000, occurredAt: daysAgo(2), campaign: null, description: null },
+    mostRecentPaidGift: gift({ amountCents: 1000, occurredAt: daysAgo(2) }),
     lastContactAt: daysAgo(20),
     historicalContext: [{ text: "Solicit for $10k", source: "import-monday", sourceDate: daysAgo(300) }],
   }, NOW);
@@ -108,11 +123,26 @@ async function run() {
   // Case 1: recent gift vs. aging pledge -- recency+specificity wins over raw staleness.
   const case1 = buildRecommendationEvidence({
     ...emptyInput,
-    mostRecentPaidGift: { amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign", description: null },
+    mostRecentPaidGift: gift({ amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign" }),
     openPledge: { balanceCents: 800000, campaign: "Annual Campaign", description: null, activityDate: daysAgo(200) },
     lastContactAt: daysAgo(200),
   }, NOW);
-  assert.equal(buildDonorRecommendation(case1).kind, "acknowledge_gift");
+  const case1Result = buildDonorRecommendation(case1);
+  assert.equal(case1Result.kind, "acknowledge_gift");
+  // 5. The recommendation carries the exact gift identity, so a caller
+  // can wire a direct "Mark thank-you sent" action without re-deriving it.
+  assert.equal(case1Result.giftSource, "giving_activity");
+  assert.equal(case1Result.giftId, "activity-1");
+  // Once that specific gift is marked acknowledged, the recommendation
+  // for this donor must disappear entirely (assuming nothing else
+  // qualifies) -- proving suppression is keyed to the correct gift, not
+  // just "some gift exists".
+  const case1Acknowledged = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign", acknowledged: true }), openPledge: case1.giving.openPledge, lastContactAt: daysAgo(200) }, NOW);
+  assert.equal(buildDonorRecommendation(case1Acknowledged).kind, "follow_up_pledge", "acknowledging the gift must remove it from contention, leaving the next-best candidate");
+  // 10. Acknowledgment on a DIFFERENT gift (different giftId) must never
+  // suppress this one -- status is tied to the specific gift, not the donor.
+  const differentGiftAcknowledged = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign", giftId: "activity-2", acknowledged: false }) }, NOW);
+  assert.ok(generateCandidates(differentGiftAcknowledged).find((c) => c.kind === "acknowledge_gift" && c.giftId === "activity-2"), "acknowledging one gift must never affect a different gift's own state");
 
   // Case 2: unconfirmed historical solicitation predating an open pledge -- vetoed.
   const case2 = buildRecommendationEvidence({

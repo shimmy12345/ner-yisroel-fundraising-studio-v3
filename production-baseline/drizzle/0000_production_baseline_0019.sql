@@ -225,6 +225,19 @@ CREATE TABLE `donors` (
   `updated_at` integer NOT NULL
 , `donor_code` text, `spouse` text, `address` text, `external_source` text, `external_id` text, `last_name` text, `primary_first_name` text, `spouse_first_name` text, `primary_title` text, `spouse_title` text, `alternate_mobile_phone` text, `home_phone` text, `address_line_1` text, `city` text, `state` text, `postal_code` text, `country` text, `source_snapshot` text, `owner_user_id` text REFERENCES `users`(`id`), `data_source` text DEFAULT 'live' NOT NULL, `contact_note` text, `archived_at` integer, `merged_into_donor_id` text REFERENCES `donors`(`id`));
 
+CREATE TABLE `gift_acknowledgments` (
+  `id` text PRIMARY KEY NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `gift_source` text NOT NULL CHECK (`gift_source` IN ('giving_activity','gift')),
+  `gift_id` text NOT NULL,
+  `status` text NOT NULL CHECK (`status` IN ('thank_you_sent','thank_you_call','no_acknowledgment_needed')),
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `gifts` (
   `id` text PRIMARY KEY NOT NULL,
   `donor_id` text NOT NULL,
@@ -520,6 +533,10 @@ CREATE UNIQUE INDEX `donors_owner_external_source_id_unique` ON `donors` (`owner
 
 CREATE INDEX `donors_owner_mode_name_idx` ON `donors` (`owner_user_id`,`data_source`,`display_name`);
 
+CREATE INDEX `gift_acknowledgments_donor_idx` ON `gift_acknowledgments` (`donor_id`,`created_at`);
+
+CREATE INDEX `gift_acknowledgments_gift_idx` ON `gift_acknowledgments` (`user_id`,`gift_source`,`gift_id`,`created_at`);
+
 CREATE INDEX `gifts_donor_date_idx` ON `gifts` (`donor_id`,`received_at`);
 
 CREATE INDEX `giving_activities_donor_date_idx` ON `giving_activities` (`donor_id`,`activity_date`);
@@ -584,5 +601,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','9534af163bb1b3ca805962ace6e09b5238f4b143e19421018600f55743c3f114',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','286506e53624dc64dd9b0b399d076e582c5107162b1da475b8a64a5fb2def4d9',1785944072);
 PRAGMA optimize;

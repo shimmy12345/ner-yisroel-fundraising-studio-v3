@@ -3,11 +3,12 @@
 import { useMemo, useState } from "react";
 import { ActivityActions } from "../../components/ActivityActions";
 import { CompletePriorityButton } from "../../components/CompletePriorityButton";
-import { GivingRecordActions } from "./GivingManagement";
+import { GiftAcknowledgmentActions, GivingRecordActions } from "./GivingManagement";
 import { buildUnifiedTimeline, TIMELINE_FILTERS, type TimelineFilter, type TimelineGiving, type TimelineInteraction, type TimelineLegacyGift, type TimelinePayment, type TimelineReminder, type TimelineStatus } from "../../../lib/relationships/unified-timeline";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { financialDateLabel } from "../../../lib/financial-date";
 import { splitInteractionSummary } from "../../../lib/capture/interaction";
+import type { GiftAcknowledgmentStatus } from "../../../lib/giving/acknowledgment";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const dateOnly = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
@@ -25,7 +26,7 @@ const STATUS_LABELS: Record<TimelineStatus, string> = { scheduled: "Scheduled", 
 // the initial view once more than RECENT_LIMIT are showing.
 const RECENT_LIMIT = 10;
 
-export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now }: {
+export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now, acknowledgments = {} }: {
   giving: TimelineGiving[];
   legacyGifts: TimelineLegacyGift[];
   payments: TimelinePayment[];
@@ -35,6 +36,10 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
   timezone: string;
   live: boolean;
   now: number;
+  // Keyed "giving_activity:<id>" / "gift:<id>" -- current acknowledgment
+  // status per paid gift, so the timeline's "Mark thank-you sent" control
+  // reflects what's already been marked instead of always starting blank.
+  acknowledgments?: Record<string, GiftAcknowledgmentStatus>;
 }) {
   const [filter, setFilter] = useState<TimelineFilter>("all");
   const [visibleCount, setVisibleCount] = useState(RECENT_LIMIT);
@@ -79,9 +84,9 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
         // "Gift"/"Pledge" label exactly as before, with no empty
         // placeholder.
         const title = activity.description || activity.item_type || activity.source_campaign || (item.filter === "pledges" ? "Pledge" : "Gift");
-        return <article id={`pledge-${activity.id}`} className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{activity.activity_date ? financialDateLabel(item.eventAt) : "Date not recorded"}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{title}</h3><span className="event-type">{item.filter === "pledges" ? "Pledge" : "Gift"}</span>{activity.source_campaign && <span className="event-campaign">{activity.source_campaign}</span>}<span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{money(amount)} committed{(activity.paid_cents ?? 0) > 0 ? ` · ${money(activity.paid_cents ?? 0)} paid` : ""}{(activity.balance_cents ?? 0) > 0 ? ` · ${money(activity.balance_cents ?? 0)} open` : ""}</p>{live && <GivingRecordActions activity={{ id: activity.id, donorId: activity.donor_id, externalSource: activity.external_source, workspaceStatus: activity.workspace_status, privateNote: activity.private_note, updatedAt: activity.updated_at }} donors={donors} />}</div></article>;
+        return <article id={`pledge-${activity.id}`} className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{activity.activity_date ? financialDateLabel(item.eventAt) : "Date not recorded"}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{title}</h3><span className="event-type">{item.filter === "pledges" ? "Pledge" : "Gift"}</span>{activity.source_campaign && <span className="event-campaign">{activity.source_campaign}</span>}<span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{money(amount)} committed{(activity.paid_cents ?? 0) > 0 ? ` · ${money(activity.paid_cents ?? 0)} paid` : ""}{(activity.balance_cents ?? 0) > 0 ? ` · ${money(activity.balance_cents ?? 0)} open` : ""}</p>{live && (activity.paid_cents ?? 0) > 0 && <GiftAcknowledgmentActions giftSource="giving_activity" giftId={activity.id} initialStatus={acknowledgments[`giving_activity:${activity.id}`] ?? null} compact />}{live && <GivingRecordActions activity={{ id: activity.id, donorId: activity.donor_id, externalSource: activity.external_source, workspaceStatus: activity.workspace_status, privateNote: activity.private_note, updatedAt: activity.updated_at }} donors={donors} />}</div></article>;
       }
-      if (item.kind === "legacy-gift") return <article className="timeline-item unified-timeline-item completed" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{item.gift.fund || "Gift"}</h3><span className="event-type">Gift</span><span className="timeline-status completed">Completed</span></div><p>{money(item.gift.amount_cents)} paid</p></div></article>;
+      if (item.kind === "legacy-gift") return <article className="timeline-item unified-timeline-item completed" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{item.gift.fund || "Gift"}</h3><span className="event-type">Gift</span><span className="timeline-status completed">Completed</span></div><p>{money(item.gift.amount_cents)} paid</p>{live && <GiftAcknowledgmentActions giftSource="gift" giftId={item.gift.id} initialStatus={acknowledgments[`gift:${item.gift.id}`] ?? null} compact />}</div></article>;
       if (item.kind === "payment") {
         const linkedPledgeLabel = item.payment.pledge_description ? `Linked pledge: ${item.payment.pledge_description}` : "View linked pledge";
         // The linked pledge may exist but sit outside the currently

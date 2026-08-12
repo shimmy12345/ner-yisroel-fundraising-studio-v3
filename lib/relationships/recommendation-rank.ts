@@ -1,5 +1,6 @@
 import type { RecommendationEvidence } from "./recommendation-evidence.ts";
 import { generateCandidates, type EvidenceCertainty, type RecommendationCandidate, type RecommendationCandidateKind } from "./recommendation-candidates.ts";
+import type { GiftSource } from "../giving/acknowledgment.ts";
 
 export type DonorRecommendation = {
   action: string;
@@ -11,6 +12,11 @@ export type DonorRecommendation = {
   // per surface (e.g. the homepage queue), without re-deriving what kind
   // of action this is from the text itself.
   kind: RecommendationCandidateKind;
+  // Only set when kind === "acknowledge_gift" -- lets a surface wire a
+  // direct one-click "Mark thank-you sent" action to the exact gift this
+  // recommendation is about.
+  giftSource?: GiftSource;
+  giftId?: string;
 };
 
 // honor_reminder answers "what's the next relationship touchpoint" -- so do
@@ -92,5 +98,5 @@ export function buildDonorRecommendation(evidence: RecommendationEvidence): Dono
   });
 
   const winner = ranked[0];
-  return { action: winner.action, why: winner.why, evidence: winner.evidence, confidence: winner.confidence, timing: winner.timing, kind: winner.kind };
+  return { action: winner.action, why: winner.why, evidence: winner.evidence, confidence: winner.confidence, timing: winner.timing, kind: winner.kind, giftSource: winner.giftSource, giftId: winner.giftId };
 }

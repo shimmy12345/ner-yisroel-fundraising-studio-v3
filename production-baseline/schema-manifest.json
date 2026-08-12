@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "9534af163bb1b3ca805962ace6e09b5238f4b143e19421018600f55743c3f114",
+  "schemaHash": "286506e53624dc64dd9b0b399d076e582c5107162b1da475b8a64a5fb2def4d9",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -27,7 +27,8 @@
     "0022_import_review_drafts.sql",
     "0023_donor_research_stage_a.sql",
     "0024_donor_historical_context.sql",
-    "0025_date_only_precision.sql"
+    "0025_date_only_precision.sql",
+    "0026_gift_acknowledgments.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -2053,6 +2054,123 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "gift_acknowledgments",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "gift_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "gift_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "gift_acknowledgments_donor_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `gift_acknowledgments_donor_idx` ON `gift_acknowledgments` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": "gift_acknowledgments_gift_idx",
+            "columns": [
+              "user_id",
+              "gift_source",
+              "gift_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `gift_acknowledgments_gift_idx` ON `gift_acknowledgments` (`user_id`,`gift_source`,`gift_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`gift_source` IN ('giving_activity','gift'))",
+          "CHECK (`status` IN ('thank_you_sent','thank_you_call','no_acknowledgment_needed'))"
+        ]
       },
       {
         "name": "gifts",
@@ -4237,6 +4355,11 @@
     },
     {
       "type": "table",
+      "name": "gift_acknowledgments",
+      "sql": "CREATE TABLE `gift_acknowledgments` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `gift_source` text NOT NULL CHECK (`gift_source` IN ('giving_activity','gift')), `gift_id` text NOT NULL, `status` text NOT NULL CHECK (`status` IN ('thank_you_sent','thank_you_call','no_acknowledgment_needed')), `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "gifts",
       "sql": "CREATE TABLE `gifts` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `amount_cents` integer NOT NULL, `fund` text NOT NULL, `received_at` integer NOT NULL, `acknowledged_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `note` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -4454,6 +4577,16 @@
       "type": "index",
       "name": "donors_owner_mode_name_idx",
       "sql": "CREATE INDEX `donors_owner_mode_name_idx` ON `donors` (`owner_user_id`,`data_source`,`display_name`)"
+    },
+    {
+      "type": "index",
+      "name": "gift_acknowledgments_donor_idx",
+      "sql": "CREATE INDEX `gift_acknowledgments_donor_idx` ON `gift_acknowledgments` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "gift_acknowledgments_gift_idx",
+      "sql": "CREATE INDEX `gift_acknowledgments_gift_idx` ON `gift_acknowledgments` (`user_id`,`gift_source`,`gift_id`,`created_at`)"
     },
     {
       "type": "index",

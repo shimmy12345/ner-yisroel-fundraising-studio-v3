@@ -26,6 +26,7 @@ export const STAGING_RESET_TABLE_ORDER = [
   "donor_historical_context",
   "donor_merge_audits",
   "donor_views",
+  "gift_acknowledgments",
   "gifts",
   "recommendations",
   "relationship_queue_dismissals",

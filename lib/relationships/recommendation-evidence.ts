@@ -7,6 +7,8 @@
 // lib/relationships/recommendation-candidates.ts and recommendation-rank.ts
 // never read a table directly.
 
+import type { GiftSource } from "../giving/acknowledgment.ts";
+
 export type RecommendationEvidenceInput = {
   donorId: string;
   // The most recent PAID gift/activity -- drives acknowledge_gift. Always
@@ -14,7 +16,14 @@ export type RecommendationEvidenceInput = {
   // donor_historical_context: a Monday "donation note" is deliberately
   // never importable as historical context in the first place, and this
   // field structurally cannot be populated from anything else.
-  mostRecentPaidGift: { amountCents: number; occurredAt: number; campaign: string | null; description: string | null } | null;
+  // `acknowledged` is the explicit gift_acknowledgments state for this
+  // exact gift -- the only signal that suppresses acknowledge_gift.
+  // Deliberately NOT inferred from "some interaction happened after the
+  // gift date": a routine thank-you is often sent without logging a full
+  // interaction, and an unrelated interaction is not evidence the gift was
+  // acknowledged. If the caller has no acknowledgment lookup available,
+  // pass false -- that's the safe default (never silently suppress).
+  mostRecentPaidGift: { giftSource: GiftSource; giftId: string; amountCents: number; occurredAt: number; campaign: string | null; description: string | null; acknowledged: boolean } | null;
   // An open (unpaid) pledge balance -- drives follow_up_pledge and gates
   // solicit. Same provenance constraint as above.
   openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null } | null;
@@ -42,8 +51,7 @@ export type RecommendationEvidenceInput = {
 export type RecommendationEvidence = {
   donorId: string;
   giving: {
-    mostRecentPaidGift: { amountCents: number; occurredAt: number; campaign: string | null; description: string | null } | null;
-    acknowledgedSinceGift: boolean;
+    mostRecentPaidGift: { giftSource: GiftSource; giftId: string; amountCents: number; occurredAt: number; campaign: string | null; description: string | null; acknowledged: boolean } | null;
     openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; ageDays: number | null } | null;
   };
   contact: {
@@ -60,15 +68,10 @@ const DAY_SECONDS = 86400;
 const daysBetween = (laterEpoch: number, earlierEpoch: number) => Math.max(0, Math.floor((laterEpoch - earlierEpoch) / DAY_SECONDS));
 
 export function buildRecommendationEvidence(input: RecommendationEvidenceInput, now: number): RecommendationEvidence {
-  const acknowledgedSinceGift = input.mostRecentPaidGift
-    ? (input.lastContactAt ?? 0) >= input.mostRecentPaidGift.occurredAt
-    : false;
-
   return {
     donorId: input.donorId,
     giving: {
       mostRecentPaidGift: input.mostRecentPaidGift,
-      acknowledgedSinceGift,
       openPledge: input.openPledge
         ? { ...input.openPledge, ageDays: input.openPledge.activityDate !== null ? daysBetween(now, input.openPledge.activityDate) : null }
         : null,

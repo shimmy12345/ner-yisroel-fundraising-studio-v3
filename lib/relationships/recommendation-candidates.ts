@@ -1,4 +1,5 @@
 import type { RecommendationEvidence } from "./recommendation-evidence.ts";
+import type { GiftSource } from "../giving/acknowledgment.ts";
 
 // Plausible next-action candidates generated from one donor's evidence.
 // Each generator only fires on its own precondition, so a candidate simply
@@ -44,6 +45,11 @@ export type RecommendationCandidate = {
   // recommendation-rank.ts compare "does this evidence postdate the open
   // pledge" without re-parsing evidence[] strings.
   supportingDate: number | null;
+  // Only set for acknowledge_gift -- lets a caller wire a direct one-click
+  // "Mark thank-you sent" action to the exact gift this candidate is
+  // about, without re-deriving which gift that was.
+  giftSource?: GiftSource;
+  giftId?: string;
 };
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
@@ -74,14 +80,18 @@ function honorReminderCandidate(evidence: RecommendationEvidence): Recommendatio
 
 function acknowledgeGiftCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const gift = evidence.giving.mostRecentPaidGift;
-  if (!gift || evidence.giving.acknowledgedSinceGift) return null;
+  // acknowledged is the explicit gift_acknowledgments state -- never
+  // inferred from "some interaction happened after the gift date". A
+  // routine thank-you is often sent without logging a full interaction,
+  // and an unrelated interaction is not evidence a thank-you was sent.
+  if (!gift || gift.acknowledged) return null;
   const daysAgo = Math.max(0, Math.floor((evidence.now - gift.occurredAt) / 86400));
   const descriptionSuffix = gift.description ? ` (${gift.description})` : "";
   return {
     kind: "acknowledge_gift",
     action: `Send a personal thank-you for the recent ${money(gift.amountCents)} ${gift.campaign ? `gift to ${gift.campaign}` : "gift"}.`,
-    why: `A paid gift was recorded ${daysAgo === 0 ? "today" : `${daysAgo} day${daysAgo === 1 ? "" : "s"} ago`} and no completed interaction has been logged since.`,
-    evidence: [`${money(gift.amountCents)} paid${gift.campaign ? `, ${gift.campaign}` : ""}, ${dateLabel(gift.occurredAt)}${descriptionSuffix}; no interaction recorded after that date.`],
+    why: `A paid gift was recorded ${daysAgo === 0 ? "today" : `${daysAgo} day${daysAgo === 1 ? "" : "s"} ago`} and has not been marked acknowledged yet.`,
+    evidence: [`${money(gift.amountCents)} paid${gift.campaign ? `, ${gift.campaign}` : ""}, ${dateLabel(gift.occurredAt)}${descriptionSuffix}; no thank-you recorded for this gift.`],
     confidence: "high",
     timing: daysAgo <= 14 ? "Within the next few days, while the gift is recent" : null,
     certainty: "confirmed",
@@ -89,6 +99,8 @@ function acknowledgeGiftCandidate(evidence: RecommendationEvidence): Recommendat
     recency: recencyScore(daysAgo, 30),
     urgency: recencyScore(daysAgo, 14),
     supportingDate: gift.occurredAt,
+    giftSource: gift.giftSource,
+    giftId: gift.giftId,
   };
 }
 

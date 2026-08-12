@@ -153,8 +153,16 @@ test("baseline picks up the schema-changing 0024 donor historical context migrat
 test("baseline picks up the schema-changing 0025 date-only precision migration", () => {
   // 0025_date_only_precision.sql adds occurred_at_date_only/due_at_date_only
   // columns, so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0025_date_only_precision.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 26);
+  assert.ok(manifest.sourceMigrations.includes("0025_date_only_precision.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0026 gift acknowledgments migration", () => {
+  // 0026_gift_acknowledgments.sql adds the gift_acknowledgments table, so
+  // the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0026_gift_acknowledgments.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 27);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

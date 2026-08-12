@@ -47,7 +47,7 @@ assert.match(liveData, /Contact gap/);
 // Recent-gift/open-commitment/contact-gap wording itself now comes from
 // the shared recommendation engine (see tests/recommendation-engine.test.mjs
 // for the wording coverage), not duplicated in live-data.ts.
-assert.match(recommendationCandidates, /no completed interaction has been logged since/);
+assert.match(recommendationCandidates, /has not been marked acknowledged yet/);
 assert.match(liveData, /i\.user_id = \? AND d\.owner_user_id = \? AND d\.data_source = 'live'/);
 assert.match(liveData, /ga\.owner_user_id = \? AND ga\.record_origin = 'live'/);
 assert.match(liveData, /capture-scheduled:%/);

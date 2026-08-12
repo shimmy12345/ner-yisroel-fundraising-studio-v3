@@ -368,6 +368,29 @@ export const donorHistoricalContext = sqliteTable("donor_historical_context", {
   index("donor_historical_context_donor_date_idx").on(table.donorId, table.createdAt),
 ]);
 
+// Lightweight, append-only "Mark thank-you sent" tracking for a paid
+// gift/giving activity -- deliberately not a column on giving_activities/
+// gifts (a JL re-import's own UPDATE never references this table, so
+// acknowledgment state survives every re-import with no special-casing)
+// and deliberately not an interactions row (never counts as a completed
+// relationship interaction, never changes last-contact, never generates
+// relationship_summary/institutional_memory). Never UPDATEd -- a later
+// status change is a new row, so the record of what was marked before is
+// never destroyed; current status is the most recent row for a given
+// (giftSource, giftId).
+export const giftAcknowledgments = sqliteTable("gift_acknowledgments", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  giftSource: text("gift_source", { enum: ["giving_activity", "gift"] }).notNull(),
+  giftId: text("gift_id").notNull(),
+  status: text("status", { enum: ["thank_you_sent", "thank_you_call", "no_acknowledgment_needed"] }).notNull(),
+  ...timestamps,
+}, (table) => [
+  index("gift_acknowledgments_gift_idx").on(table.userId, table.giftSource, table.giftId, table.createdAt),
+  index("gift_acknowledgments_donor_idx").on(table.donorId, table.createdAt),
+]);
+
 // Donor Research (Stage A) -- provider-agnostic, manual-entry only. No
 // external network calls anywhere in this feature yet; see
 // lib/research/manual-provider.ts. Evidence entered before identity
