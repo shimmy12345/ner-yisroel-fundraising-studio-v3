@@ -10,6 +10,7 @@ import type { RecommendationCandidateKind } from "../relationships/recommendatio
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS } from "./suggestion-candidates.ts";
+import { buildYahrtzeitRelationshipDateEvents, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -23,7 +24,7 @@ type DismissalRow = { item_key: string };
 type LatestInteractionRow = { donor_id: string; type: string; occurred_at: number; summary: string };
 type HistoricalContextRow = { donor_id: string; text: string; source: string; source_date: number | null };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
-type YahrtzeitRow = { donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
+type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -31,7 +32,7 @@ export type WorkspaceScheduledActivity = { id: string; donorId: string; type: st
 export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; donorCode: string | null; amount: string; detail: string };
 export type WorkspaceDonorLink = { donorId: string; name: string; initials: string; donorCode: string | null; detail: string; href: string };
 export type WorkspaceMorningBrief = { meetingsToday: number; overdueFollowUps: number; recentGifts: number; upcomingReminders: number; suggestedPriority: WorkspacePriority | null };
-export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; relationshipQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; morningBrief: WorkspaceMorningBrief; recentlyViewed: WorkspaceDonorLink[]; recentlyUpdated: WorkspaceDonorLink[]; todaySchedule: WorkspaceScheduledActivity[]; upcomingActivities: WorkspaceScheduledActivity[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; generatedAt: number };
+export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; relationshipQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; morningBrief: WorkspaceMorningBrief; recentlyViewed: WorkspaceDonorLink[]; recentlyUpdated: WorkspaceDonorLink[]; todaySchedule: WorkspaceScheduledActivity[]; upcomingActivities: WorkspaceScheduledActivity[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; upcomingRelationshipDates: WorkspaceRelationshipDateEvent[]; generatedAt: number };
 
 function identity(item: IdentityRow) {
   return {
@@ -144,7 +145,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // Every in-scope donor's yahrtzeits -- feeds yahrtzeit_outreach the
     // same way historicalContextRows feeds solicit/relationship_opportunity
     // above. Never joined into interactions/recommendations.
-    demo ? Promise.resolve({ results: [] as YahrtzeitRow[] }) : env.DB.prepare(`SELECT donor_id, deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day FROM yahrtzeits WHERE user_id = ? LIMIT 5000`).bind(userId).all<YahrtzeitRow>(),
+    demo ? Promise.resolve({ results: [] as YahrtzeitRow[] }) : env.DB.prepare(`SELECT id, donor_id, deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day FROM yahrtzeits WHERE user_id = ? LIMIT 5000`).bind(userId).all<YahrtzeitRow>(),
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
@@ -213,7 +214,9 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     historicalContextByDonor.get(row.donor_id)!.push(row);
   }
   const suggestionHrefByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "capture" };
-  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap", yahrtzeit_outreach: "Upcoming yahrtzeit" };
+  // yahrtzeit_outreach has no entry here -- it's excluded from this ranked
+  // path entirely (see the continue below) and never looks this map up.
+  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
   const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
   // live-data.ts's own "recent gift" bucket only ever draws from
   // giving_activities (never the legacy gifts table -- see GivingRow),
@@ -245,9 +248,21 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // already shown by the reminder loop above -- never a second,
     // duplicate card for the same donor.
     if (recommendation.kind === "honor_reminder") continue;
+    // yahrtzeit_outreach never competes for a homepage slot through this
+    // ranked/relationshipQueue path -- it must not need to beat a gift
+    // acknowledgment, pledge follow-up, or contact-gap candidate to be
+    // visible on the homepage. It's surfaced unconditionally instead via
+    // upcomingRelationshipDates below (Coming Up), built directly from the
+    // same lead-window fact, independent of this ranking. Suppressing it
+    // here only prevents a duplicate Coming Up card; the candidate itself
+    // is untouched and still used for the donor's Suggested Action
+    // elsewhere (donor profile, Meeting Brief, Assistant).
+    if (recommendation.kind === "yahrtzeit_outreach") continue;
+    // yahrtzeit_outreach is excluded above, so it never reaches this
+    // branch -- its Coming Up placement/sorting is entirely handled by
+    // upcomingRelationshipDates instead.
     const sortAt = recommendation.kind === "acknowledge_gift" ? -(gift?.activity_date ?? 0)
       : recommendation.kind === "follow_up_pledge" ? (pledge?.activity_date ?? 0)
-      : recommendation.kind === "yahrtzeit_outreach" ? Math.min(...evidence.yahrtzeits.map((item) => item.nextOccurrenceAt), Number.MAX_SAFE_INTEGER)
       : -(evidence.contact.daysSinceLastContact ?? Number.MAX_SAFE_INTEGER);
     ranked.push({
       queueId: `recommendation:${donorId}:${recommendation.kind}`,
@@ -283,6 +298,19 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const donorLinks = (rows: DonorLinkRow[], verb: string): WorkspaceDonorLink[] => rows.map((item) => ({ donorId: item.donor_id, name: item.display_name, ...identity(item), detail: `${verb} ${dateLabel(item.event_at, timezone)}`, href: `/donors/${encodeURIComponent(item.donor_id)}` }));
   const recentlyViewed = donorLinks(recentViews.results, "Viewed");
   const recentlyUpdated = donorLinks(recentUpdates.results.filter((item) => item.event_at > 0), "Updated");
+
+  // Coming Up's date-driven relationship events: built directly from the
+  // yahrtzeit rows already fetched above, independent of the
+  // suggestionDonorIds/ranked path -- every donor with a yahrtzeit inside
+  // its lead window gets an event here, whether or not they were even
+  // selected into the bounded recommendation pool for other reasons.
+  const identityByDonor = new Map(donors.results.map((item) => [item.id, { donorName: item.display_name, ...identity(item) }]));
+  const upcomingRelationshipDates = buildYahrtzeitRelationshipDateEvents(
+    yahrtzeitRows.results.map((row) => ({ id: row.id, donorId: row.donor_id, deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
+    identityByDonor,
+    timezone,
+    now,
+  );
   const morningBrief: WorkspaceMorningBrief = {
     meetingsToday: todaySchedule.filter((item) => item.type === "meeting").length,
     overdueFollowUps: reminders.results.filter((item) => item.due_at != null && dayKey(item.due_at, timezone) < todayKey).length,
@@ -293,5 +321,5 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const scheduledCount = todaySchedule.length + upcomingActivities.length;
   const overview = deduped.length || gifts.length || scheduledCount ? `${deduped.length} relationship priorit${deduped.length === 1 ? "y" : "ies"}, ${scheduledCount} scheduled activit${scheduledCount === 1 ? "y" : "ies"}, and ${gifts.length} recent gift${gifts.length === 1 ? "" : "s"} are visible from your live workspace.` : "Your live workspace has no time-sensitive priorities yet. Import data or log an interaction to build today's brief.";
   const recommendation = deduped[0] ? `Start with ${deduped[0].name}: ${deduped[0].reason}.` : "No recommended action is available until your workspace contains a due reminder, open pledge, recent gift, or relationship activity.";
-  return { overview, recommendation, priorities: deduped, priorityCount: allPriorities.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, generatedAt: now };
+  return { overview, recommendation, priorities: deduped, priorityCount: allPriorities.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, upcomingRelationshipDates, generatedAt: now };
 }

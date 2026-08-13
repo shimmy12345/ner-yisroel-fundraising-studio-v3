@@ -7,6 +7,7 @@ import { WelcomeExperience } from "./onboarding/WelcomeExperience";
 import { requireChatGPTUser } from "./chatgpt-auth";
 import { ensureUserProfile } from "../lib/auth/profile";
 import { loadWorkspaceBrief, type WorkspaceScheduledActivity } from "../lib/workspace/live-data";
+import type { WorkspaceRelationshipDateEvent } from "../lib/workspace/relationship-date-events";
 import { timeOfDayGreeting } from "../lib/workspace/local-time";
 import { shouldShowOnboarding } from "../lib/onboarding/status";
 import { getDataMode } from "../lib/workspace/mode";
@@ -35,6 +36,27 @@ function ScheduledActivityCard({ activity, live, upcoming = false }: { activity:
   </article>;
 }
 
+// Date-driven relationship events (currently yahrtzeits; birthdays and
+// anniversaries plug into the same WorkspaceRelationshipDateEvent shape
+// later without another homepage change). Deliberately unconditional --
+// this list is never filtered by, or competing against, the canonical
+// recommendation ranking; it's a direct read of "is this date inside its
+// lead window," nothing more. Rendering it never writes anything.
+function RelationshipDateEventCard({ event }: { event: WorkspaceRelationshipDateEvent }) {
+  const openHref = donorNavigationHref(event.donorId, "/#coming-up-title", "today");
+  return <article className="meeting today-meeting-card relationship-date-event-card">
+    <div className="meeting-time"><strong>{event.dateLabel}</strong></div>
+    <div className="meeting-line" />
+    <div className="mini-avatar scheduled-donor-avatar">{event.initials}</div>
+    <div>
+      <div className="scheduled-activity-heading"><span className="event-type">{event.label}</span><h3><a href={openHref}>{event.donorName}</a></h3>{event.donorCode && <span className="donor-code">{event.donorCode}</span>}</div>
+      <p>{event.detail}</p>
+      {event.ambiguous && <small className="capture-error">A future occurrence falls in a leap year -- the date shown is valid as recorded, but the specific recurrence needs review.</small>}
+      <div className="meeting-links"><a href={openHref}>Open donor</a></div>
+    </div>
+  </article>;
+}
+
 export default async function TodayPage({ searchParams }: { searchParams: Promise<{ priorities?: string }> }) {
   if (await shouldShowOnboarding()) return <WelcomeExperience />;
   const identity = await requireChatGPTUser("/");
@@ -47,7 +69,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const agendaQueueCount = data.relationshipQueue.overdue.length + data.relationshipQueue.today.length;
   const comingQueueCount = data.relationshipQueue.thisWeek.length + data.relationshipQueue.upcoming.length;
   const agendaIsEmpty = agendaQueueCount === 0 && data.todaySchedule.length === 0;
-  const comingIsEmpty = comingQueueCount === 0 && data.upcomingActivities.length === 0;
+  const comingIsEmpty = comingQueueCount === 0 && data.upcomingActivities.length === 0 && data.upcomingRelationshipDates.length === 0;
   const visibleUpcomingActivities = showAll ? data.upcomingActivities : data.upcomingActivities.slice(0, agendaIsEmpty ? 5 : 3);
 
   return <AppShell active="today">
@@ -75,11 +97,12 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       </section>
 
       <section className="today-command-section today-coming-up" aria-labelledby="coming-up-title">
-        <div className="command-section-heading"><div><p className="eyebrow">NEXT</p><h2 id="coming-up-title">Coming Up</h2></div><span className="count">{comingQueueCount + data.upcomingActivities.length}</span></div>
+        <div className="command-section-heading"><div><p className="eyebrow">NEXT</p><h2 id="coming-up-title">Coming Up</h2></div><span className="count">{comingQueueCount + data.upcomingActivities.length + data.upcomingRelationshipDates.length}</span></div>
+        {data.upcomingRelationshipDates.length ? <div className="today-meeting-list command-activity-list">{data.upcomingRelationshipDates.map((event) => <RelationshipDateEventCard event={event} key={event.id} />)}</div> : null}
         {visibleUpcomingActivities.length ? <div className="today-meeting-list command-activity-list">{visibleUpcomingActivities.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} upcoming key={item.id} />)}</div> : null}
         {comingQueueCount ? <RelationshipQueueExperience scope="coming" initialQueue={data.relationshipQueue} priorityCount={data.priorityCount} showAll={showAll} expanded={showAll || agendaIsEmpty} /> : null}
         {!showAll && data.upcomingActivities.length > visibleUpcomingActivities.length && <a className="view-all-link command-view-all" href="/?priorities=all#coming-up-title">View all upcoming activities</a>}
-        {comingIsEmpty && <p className="command-empty">No meetings, reminders, or commitments are coming up.</p>}
+        {comingIsEmpty && <p className="command-empty">No meetings, reminders, commitments, or relationship dates are coming up.</p>}
         <p className="future-placeholder"><span aria-hidden="true">○</span> Birthdays and anniversaries will appear here in a future update.</p>
       </section>
     </div>
