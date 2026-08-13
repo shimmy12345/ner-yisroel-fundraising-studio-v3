@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { parseYahrtzeitWorkbook } from "../../../../lib/import/yahrtzeit-workbook.ts";
 import type { YahrtzeitWorkbookRow } from "../../../../lib/import/yahrtzeit-workbook.ts";
-import type { YahrtzeitPreviewRow } from "../../../../lib/import/yahrtzeit-pipeline.ts";
+import type { YahrtzeitPreviewRow, YahrtzeitReviewReason } from "../../../../lib/import/yahrtzeit-pipeline.ts";
 
 type Step = "upload" | "preview" | "committing" | "complete";
 
@@ -39,6 +39,14 @@ export function YahrtzeitImportExperience() {
   const [rawRows, setRawRows] = useState<YahrtzeitWorkbookRow[]>([]);
   const [rows, setRows] = useState<YahrtzeitPreviewRow[]>([]);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  // Rows where the fundraiser clicked "Import as-is" on a content-quality
+  // warning (currently only malformed_hebrew_name) -- the value itself is
+  // never touched; this only unlocks the row for import and gets recorded
+  // as an explicit acknowledgment at commit time. Distinct from a
+  // structurally invalid Hebrew date, which has no such override anywhere
+  // in this UI -- those rows are never matched-and-flagged in the first
+  // place, they simply fail canCommit.
+  const [acceptedAsIs, setAcceptedAsIs] = useState<Set<number>>(new Set());
   const [editingRow, setEditingRow] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [revalidating, setRevalidating] = useState(false);
@@ -93,6 +101,22 @@ export function YahrtzeitImportExperience() {
     setEditValue(row.deceasedNameHebrew ?? "");
   }
 
+  // "Import as-is": an explicit, single click that keeps the value exactly
+  // as parsed from the workbook (never re-typed, trimmed, or otherwise
+  // touched here) and unlocks the row for import. The acknowledgment
+  // itself -- which specific warning was accepted -- travels to the
+  // commit route in acceptedReviewReasons and is recorded in
+  // yahrtzeit_changes, never silently dropped.
+  function acceptAsIs(rowNumber: number) {
+    setAcceptedAsIs((current) => new Set(current).add(rowNumber));
+    setExcluded((current) => { const next = new Set(current); next.delete(`${rowNumber}`); return next; });
+  }
+
+  function undoAcceptAsIs(rowNumber: number) {
+    setAcceptedAsIs((current) => { const next = new Set(current); next.delete(rowNumber); return next; });
+    setExcluded((current) => new Set(current).add(`${rowNumber}`));
+  }
+
   async function saveCorrection(rowNumber: number) {
     setRevalidating(true);
     setError("");
@@ -108,6 +132,10 @@ export function YahrtzeitImportExperience() {
       if (corrected && !corrected.reviewReasons.includes("malformed_hebrew_name")) {
         setExcluded((current) => { const next = new Set(current); next.delete(`${rowNumber}`); return next; });
       }
+      // A fix supersedes a prior "Import as-is" acknowledgment for this
+      // row -- the value has changed, so the old acknowledgment no longer
+      // describes what's about to be saved.
+      setAcceptedAsIs((current) => { const next = new Set(current); next.delete(rowNumber); return next; });
       setEditingRow(null);
     } catch (revalidateError) {
       setError(revalidateError instanceof Error ? revalidateError.message : "The correction could not be checked.");
@@ -133,9 +161,16 @@ export function YahrtzeitImportExperience() {
       const body = {
         rows: rawRows.filter((row) => includedRowNumbers.has(row.rowNumber)).map((row) => {
           const original = originalByRow.get(row.rowNumber);
-          return original && original.deceasedNameHebrew !== row.deceasedNameHebrew
+          const withProvenance = original && original.deceasedNameHebrew !== row.deceasedNameHebrew
             ? { ...row, originalDeceasedNameHebrew: original.deceasedNameHebrew }
             : row;
+          // acceptedReviewReasons only ever names the single warning type
+          // this row currently has (malformed_hebrew_name) -- the commit
+          // route independently re-checks that the warning is genuinely
+          // still present before recording any acknowledgment.
+          return acceptedAsIs.has(row.rowNumber)
+            ? { ...withProvenance, acceptedReviewReasons: ["malformed_hebrew_name"] as YahrtzeitReviewReason[] }
+            : withProvenance;
         }),
       };
       const response = await fetch("/api/import/yahrtzeit/commit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -156,6 +191,7 @@ export function YahrtzeitImportExperience() {
     setRawRows([]);
     setRows([]);
     setExcluded(new Set());
+    setAcceptedAsIs(new Set());
     setEditingRow(null);
     setResult(null);
     setError("");
@@ -193,6 +229,14 @@ export function YahrtzeitImportExperience() {
           const malformedName = row.reviewReasons.includes("malformed_hebrew_name");
           const ambiguousRecurrence = row.reviewReasons.includes("ambiguous_recurrence");
           const isEditing = editingRow === row.rowNumber;
+          const acceptedThisRow = acceptedAsIs.has(row.rowNumber);
+          // A content-quality warning (the value is technically valid
+          // text, just flagged for a human to look at) can be unlocked
+          // either by fixing it or by explicitly importing it as
+          // recorded. It is never auto-included the way an ambiguous
+          // recurrence is -- garbled-looking data needs one of these two
+          // deliberate actions first.
+          const lockedByWarning = malformedName && !acceptedThisRow;
           return <article key={key} className="yahrtzeit-review-row">
             <div className="yahrtzeit-review-row-main">
               <strong>{row.matchedDonorName}</strong> <span className="monday-import-code">{row.donorCode}</span>
@@ -200,7 +244,13 @@ export function YahrtzeitImportExperience() {
 
               {malformedName && !isEditing && <div className="yahrtzeit-review-reason">
                 <p><strong>Hebrew name needs review.</strong> The workbook's Hebrew-name field appears to contain English text: “{row.deceasedNameHebrew}”.</p>
-                <button type="button" onClick={() => startEditing(row)}>Fix name</button>
+                {acceptedThisRow && <p className="yahrtzeit-review-accepted">✓ Importing this value exactly as recorded in the workbook.</p>}
+                <div className="yahrtzeit-review-reason-actions">
+                  <button type="button" onClick={() => startEditing(row)}>Fix name</button>
+                  {acceptedThisRow
+                    ? <button type="button" onClick={() => undoAcceptAsIs(row.rowNumber)}>Undo</button>
+                    : <button type="button" onClick={() => acceptAsIs(row.rowNumber)}>Import as-is</button>}
+                </div>
               </div>}
               {malformedName && isEditing && <div className="yahrtzeit-review-reason">
                 <label>Corrected Hebrew name
@@ -218,7 +268,7 @@ export function YahrtzeitImportExperience() {
               </div>}
             </div>
             {!isEditing && <div className="yahrtzeit-review-row-actions">
-              <label><input type="checkbox" checked={included} disabled={malformedName} onChange={() => toggleExcluded(key)} /> {malformedName ? "Fix the name to enable import" : "Include in this import"}</label>
+              <label><input type="checkbox" checked={included && !lockedByWarning} disabled={lockedByWarning} onChange={() => toggleExcluded(key)} /> {lockedByWarning ? "Fix the name or import as-is to enable" : "Include in this import"}</label>
             </div>}
           </article>;
         })}

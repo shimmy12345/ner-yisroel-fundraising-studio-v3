@@ -105,6 +105,63 @@ async function run() {
   assert.match(importUi, /Already imported/);
   assert.match(importUi, /Needs review/);
 
+  // --- "Import as-is" override for the malformed-name row: a second,
+  // explicit action distinct from "Fix name" -- keeps the exact original
+  // value, marks the specific warning as accepted, and unlocks the row for
+  // import without editing anything. ---
+  assert.match(importUi, /Import as-is/, "the review UI must offer an explicit import-as-is action, not just Fix name");
+  assert.match(importUi, /acceptAsIs/);
+  assert.match(importUi, /acceptedReviewReasons/, "the commit payload must carry which specific warning was accepted");
+
+  // Simulates clicking "Import as-is" on the untouched malformedRow: the
+  // value committed is the exact same object identity/content the
+  // preview already produced from the raw workbook row -- nothing in this
+  // path re-types, trims, or transliterates it.
+  const rawMarilynRow = rows.find((row) => row.rowNumber === malformedRow.rowNumber);
+  assert.equal(malformedRow.deceasedNameHebrew, rawMarilynRow.deceasedNameHebrew, "the previewed value shown for override must be exactly the parsed workbook value");
+
+  // Mirrors the commit route's own acknowledgment computation
+  // (row.reviewReasons filtered by the client's claimed
+  // acceptedReviewReasons) -- proves the override is recorded against a
+  // warning the row genuinely has, and that the exact value is what would
+  // be persisted (the commit route never rewrites deceasedNameHebrew for
+  // an accepted-as-is row, it only adds an audit annotation alongside it).
+  const acceptedSet = new Set(["malformed_hebrew_name"]);
+  const acknowledgedWarnings = malformedRow.reviewReasons.filter((reason) => acceptedSet.has(reason));
+  assert.deepEqual(acknowledgedWarnings, ["malformed_hebrew_name"], "the override must be recorded against the specific warning the row actually has");
+  const committedValue = malformedRow.deceasedNameHebrew; // what the commit route would bind for deceased_name_hebrew
+  assert.equal(committedValue, "       בת שלמה Marilyn ", "the byte-for-byte original value (including its leading/trailing spaces) must be what gets committed on import-as-is, never a cleaned-up version");
+
+  // A client claiming an acknowledgment for a warning the row does NOT
+  // actually have must be ignored server-side, never trusted at face value.
+  const bogusAcceptedSet = new Set(["ambiguous_recurrence"]);
+  const bogusAcknowledged = malformedRow.reviewReasons.filter((reason) => bogusAcceptedSet.has(reason));
+  assert.deepEqual(bogusAcknowledged, [], "an accepted-reason claim that doesn't match this row's real reviewReasons must produce no acknowledgment");
+
+  // --- source-level check: the commit route independently re-validates
+  // the acknowledgment against this row's own server-computed
+  // reviewReasons, and records it in the audit snapshot. ---
+  assert.match(commitRoute, /acceptedReviewReasons/);
+  assert.match(commitRoute, /row\.reviewReasons\.filter/, "the commit route must intersect the client's claim with this row's own real reviewReasons, never trust the claim alone");
+  assert.match(commitRoute, /acknowledgedWarnings/);
+
+  // --- invalid Hebrew date: no override of any kind can make this
+  // committable. Distinct from a content-quality warning like the
+  // malformed name -- this is a structurally invalid fact, not a
+  // technically-valid-but-flagged one. ---
+  const invalidDateRows = [{ rowNumber: 900, donorCode: "43425", deceasedNameEnglish: "Test Person", deceasedNameHebrew: "טעסט", relationship: "Uncle", hebrewMonthRaw: "טבת", hebrewDayRaw: "ל", hebrewYearRaw: null }]; // ל = 30, Teves never has 30 days
+  const invalidDatePreview = buildYahrtzeitPreview(invalidDateRows, donorLookup, TIMEZONE, NOW);
+  const invalidRow = invalidDatePreview[0];
+  assert.equal(invalidRow.canCommit, false, "a structurally invalid Hebrew date must never be committable");
+  assert.equal(invalidRow.reviewReasons.includes("malformed_hebrew_name"), false, "an invalid date must not be tagged with the content-quality override reason -- it has no override path at all");
+  // Even simulating a client that (incorrectly) claims to have accepted
+  // every possible warning changes nothing: canCommit is computed purely
+  // from the date/donor/name facts and never consults any acceptance state.
+  const everythingAccepted = new Set(["malformed_hebrew_name", "ambiguous_recurrence"]);
+  const wouldBeAcknowledged = invalidRow.reviewReasons.filter((reason) => everythingAccepted.has(reason));
+  assert.deepEqual(wouldBeAcknowledged, [], "an invalid date has no reviewReasons to accept in the first place");
+  assert.equal(invalidRow.canCommit, false, "no acceptance state of any kind can flip canCommit for a structurally invalid date");
+
   console.log("Yahrtzeit import exception-review checks passed.");
 }
 

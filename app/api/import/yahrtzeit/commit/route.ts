@@ -3,7 +3,7 @@ import { getChatGPTUser } from "../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../lib/auth/profile";
 import { getDataMode } from "../../../../../lib/workspace/mode";
 import { numericDonorCode } from "../../../../../lib/relationships/donor-identity";
-import { buildYahrtzeitPreview, type YahrtzeitDonorLookup } from "../../../../../lib/import/yahrtzeit-pipeline.ts";
+import { buildYahrtzeitPreview, type YahrtzeitDonorLookup, type YahrtzeitReviewReason } from "../../../../../lib/import/yahrtzeit-pipeline.ts";
 import type { YahrtzeitWorkbookRow } from "../../../../../lib/import/yahrtzeit-workbook.ts";
 import { logger } from "../../../../../lib/logger";
 
@@ -25,6 +25,16 @@ type IncomingRow = YahrtzeitWorkbookRow & {
   // provenance in the audit snapshot, never written to the live record
   // itself.
   originalDeceasedNameHebrew?: string | null;
+  // Set by the review UI's "Import as-is" action -- the fundraiser saw a
+  // content-quality warning (e.g. the malformed-Hebrew-name flag) and
+  // explicitly chose to keep the value exactly as recorded rather than
+  // fix it. Re-validated against this row's own server-computed
+  // reviewReasons below -- a client claiming an acknowledgment for a
+  // warning the row doesn't actually have is simply ignored, never
+  // trusted at face value. This never affects canCommit (a
+  // content-quality warning never blocked commit in the first place) --
+  // it only produces an audit record of the deliberate choice.
+  acceptedReviewReasons?: YahrtzeitReviewReason[];
 };
 type Body = { rows?: IncomingRow[] };
 type DonorRow = { id: string; display_name: string; donor_code: string | null; external_id: string | null };
@@ -53,6 +63,7 @@ export async function POST(request: Request) {
   const preview = buildYahrtzeitPreview(body.rows, lookup, profile.timezone, now);
 
   const originalHebrewNameByRow = new Map(body.rows.map((row) => [row.rowNumber, row.originalDeceasedNameHebrew ?? null]));
+  const acceptedReasonsByRow = new Map(body.rows.map((row) => [row.rowNumber, new Set(row.acceptedReviewReasons ?? [])]));
   const statements = [];
   const rejected: Array<{ rowNumber: number; reason: string }> = [];
   let createdCount = 0;
@@ -72,10 +83,15 @@ export async function POST(request: Request) {
     // record itself (see lib/import/yahrtzeit-workbook.ts's parser, which
     // is the only other place the raw value would otherwise be visible).
     const correctedFromWorkbookValue = originalHebrewName !== null && originalHebrewName !== row.deceasedNameHebrew ? originalHebrewName : undefined;
+    // Only a warning this row's own server-recomputed reviewReasons
+    // actually carries can be recorded as acknowledged -- the client's
+    // claim is a UI convenience, never the source of truth.
+    const acknowledgedWarnings = row.reviewReasons.filter((reason) => acceptedReasonsByRow.get(row.rowNumber)?.has(reason));
     const after = {
       deceasedNameEnglish: row.deceasedNameEnglish, deceasedNameHebrew: row.deceasedNameHebrew, relationship: row.relationship ?? "",
       hebrewMonth: row.hebrewMonth, hebrewDay: row.hebrewDay, hebrewYear: row.hebrewYear,
       ...(correctedFromWorkbookValue !== undefined ? { deceasedNameHebrewAsImported: correctedFromWorkbookValue } : {}),
+      ...(acknowledgedWarnings.length > 0 ? { acknowledgedWarnings } : {}),
     };
     if (existing) {
       const before = {
