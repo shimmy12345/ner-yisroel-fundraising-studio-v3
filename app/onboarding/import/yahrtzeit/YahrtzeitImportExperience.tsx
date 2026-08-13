@@ -15,8 +15,14 @@ function rowKey(row: YahrtzeitPreviewRow) {
 function occurrenceLabel(row: YahrtzeitPreviewRow) {
   if (!row.occurrence) return "—";
   const date = new Date(row.occurrence.primary.gregorianEpoch * 1000);
-  const formatted = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(date);
-  return row.occurrence.ambiguous ? `${formatted} (needs review)` : formatted;
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(date);
+}
+
+async function fetchPreview(rows: YahrtzeitWorkbookRow[]): Promise<YahrtzeitPreviewRow[]> {
+  const response = await fetch("/api/import/yahrtzeit/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows }) });
+  const payload = await response.json() as { rows?: YahrtzeitPreviewRow[]; error?: string };
+  if (!response.ok || !payload.rows) throw new Error(payload.error ?? "The preview could not be prepared.");
+  return payload.rows;
 }
 
 export function YahrtzeitImportExperience() {
@@ -25,10 +31,18 @@ export function YahrtzeitImportExperience() {
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
+  // originalRawRows is frozen at parse time -- the source of truth for
+  // "what did the workbook actually say" (provenance). rawRows is the
+  // working copy the review UI edits in place (e.g. a corrected Hebrew
+  // name) and what gets re-sent for revalidation/commit.
+  const [originalRawRows, setOriginalRawRows] = useState<YahrtzeitWorkbookRow[]>([]);
   const [rawRows, setRawRows] = useState<YahrtzeitWorkbookRow[]>([]);
   const [rows, setRows] = useState<YahrtzeitPreviewRow[]>([]);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
-  const [result, setResult] = useState<{ createdCount: number; updatedCount: number; rejected: Array<{ rowNumber: number; reason: string }> } | null>(null);
+  const [editingRow, setEditingRow] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [revalidating, setRevalidating] = useState(false);
+  const [result, setResult] = useState<{ createdCount: number; updatedCount: number; unchangedCount: number; rejected: Array<{ rowNumber: number; reason: string }> } | null>(null);
 
   async function inspectFile(file: File) {
     if (!/\.xlsx$/i.test(file.name)) { setError("Choose an Excel (.xlsx) file."); return; }
@@ -40,13 +54,18 @@ export function YahrtzeitImportExperience() {
       const parsed = parseYahrtzeitWorkbook(new Uint8Array(buffer));
       if (parsed.length === 0) throw new Error("No rows were found in that file.");
       setFileName(file.name);
-      setStatusMessage("Matching donors against your live workspace…");
-      const response = await fetch("/api/import/yahrtzeit/preview", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows: parsed }) });
-      const payload = await response.json() as { rows?: YahrtzeitPreviewRow[]; error?: string };
-      if (!response.ok || !payload.rows) throw new Error(payload.error ?? "The preview could not be prepared.");
+      setStatusMessage("Matching donors and checking for already-imported records…");
+      const preview = await fetchPreview(parsed);
+      setOriginalRawRows(parsed);
       setRawRows(parsed);
-      setRows(payload.rows);
-      setExcluded(new Set(payload.rows.filter((row) => !row.canCommit).map(rowKey)));
+      setRows(preview);
+      // Ready rows are included by default. Rows needing review are
+      // included by default too UNLESS the issue is a malformed Hebrew
+      // name -- garbled data shouldn't go in silently; every other review
+      // reason (an ambiguous future recurrence, most notably) describes a
+      // completely valid source fact, so there's no reason to withhold it.
+      setExcluded(new Set(preview.filter((row) => row.status === "needs_review" && row.reviewReasons.includes("malformed_hebrew_name")).map(rowKey)));
+      setEditingRow(null);
       setResult(null);
       setStep("preview");
       setStatusMessage("");
@@ -69,19 +88,60 @@ export function YahrtzeitImportExperience() {
     });
   }
 
-  const includedRows = rows.filter((row) => row.canCommit && !excluded.has(rowKey(row)));
+  function startEditing(row: YahrtzeitPreviewRow) {
+    setEditingRow(row.rowNumber);
+    setEditValue(row.deceasedNameHebrew ?? "");
+  }
+
+  async function saveCorrection(rowNumber: number) {
+    setRevalidating(true);
+    setError("");
+    try {
+      const nextRawRows = rawRows.map((row) => row.rowNumber === rowNumber ? { ...row, deceasedNameHebrew: editValue } : row);
+      const preview = await fetchPreview(nextRawRows);
+      setRawRows(nextRawRows);
+      setRows(preview);
+      // If the correction resolved the malformed-name issue, the row is
+      // no longer excluded by default -- surface it as ready to import
+      // without an extra click.
+      const corrected = preview.find((row) => row.rowNumber === rowNumber);
+      if (corrected && !corrected.reviewReasons.includes("malformed_hebrew_name")) {
+        setExcluded((current) => { const next = new Set(current); next.delete(`${rowNumber}`); return next; });
+      }
+      setEditingRow(null);
+    } catch (revalidateError) {
+      setError(revalidateError instanceof Error ? revalidateError.message : "The correction could not be checked.");
+    } finally {
+      setRevalidating(false);
+    }
+  }
+
+  const readyRows = rows.filter((row) => row.status === "ready");
+  const needsReviewRows = rows.filter((row) => row.status === "needs_review");
+  const alreadyImportedRows = rows.filter((row) => row.status === "already_imported");
+  const unmatchedRows = rows.filter((row) => row.status === "unmatched");
+  const actionableRows = [...readyRows, ...needsReviewRows];
+  const includedRows = actionableRows.filter((row) => !excluded.has(rowKey(row)));
 
   async function commit() {
     if (includedRows.length === 0 || step === "committing") return;
     setStep("committing");
     setError("");
     try {
+      const originalByRow = new Map(originalRawRows.map((row) => [row.rowNumber, row]));
       const includedRowNumbers = new Set(includedRows.map((row) => row.rowNumber));
-      const body = { rows: rawRows.filter((row) => includedRowNumbers.has(row.rowNumber)) };
+      const body = {
+        rows: rawRows.filter((row) => includedRowNumbers.has(row.rowNumber)).map((row) => {
+          const original = originalByRow.get(row.rowNumber);
+          return original && original.deceasedNameHebrew !== row.deceasedNameHebrew
+            ? { ...row, originalDeceasedNameHebrew: original.deceasedNameHebrew }
+            : row;
+        }),
+      };
       const response = await fetch("/api/import/yahrtzeit/commit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-      const payload = await response.json() as { createdCount?: number; updatedCount?: number; rejected?: Array<{ rowNumber: number; reason: string }>; error?: string };
+      const payload = await response.json() as { createdCount?: number; updatedCount?: number; unchangedCount?: number; rejected?: Array<{ rowNumber: number; reason: string }>; error?: string };
       if (!response.ok) throw new Error(payload.error ?? "The import could not be saved.");
-      setResult({ createdCount: payload.createdCount ?? 0, updatedCount: payload.updatedCount ?? 0, rejected: payload.rejected ?? [] });
+      setResult({ createdCount: payload.createdCount ?? 0, updatedCount: payload.updatedCount ?? 0, unchangedCount: payload.unchangedCount ?? 0, rejected: payload.rejected ?? [] });
       setStep("complete");
     } catch (commitError) {
       setError(commitError instanceof Error ? commitError.message : "The import could not be saved.");
@@ -92,18 +152,16 @@ export function YahrtzeitImportExperience() {
   function startOver() {
     setStep("upload");
     setFileName("");
+    setOriginalRawRows([]);
     setRawRows([]);
     setRows([]);
     setExcluded(new Set());
+    setEditingRow(null);
     setResult(null);
     setError("");
     setStatusMessage("");
     if (inputRef.current) inputRef.current.value = "";
   }
-
-  const matchedRows = rows.filter((row) => row.matchedDonorId);
-  const unmatchedRows = rows.filter((row) => !row.matchedDonorId);
-  const needsReviewRows = matchedRows.filter((row) => row.issues.length > 0 || row.occurrence?.ambiguous);
 
   return <div className="monday-import">
     {step === "upload" && <section className="support-card">
@@ -117,36 +175,90 @@ export function YahrtzeitImportExperience() {
     {step !== "upload" && <section className="support-card monday-import-summary">
       <div className="settings-import"><div><h2>{fileName}</h2><p>{rows.length} row{rows.length === 1 ? "" : "s"} loaded. Nothing is written until you commit.</p></div><button type="button" onClick={startOver}>Start over</button></div>
       <dl className="import-counts">
-        <div><dt>Matched donor codes</dt><dd>{matchedRows.length}</dd></div>
+        <div><dt>Already imported</dt><dd>{alreadyImportedRows.length}</dd></div>
+        <div><dt>Ready to import</dt><dd>{readyRows.length}</dd></div>
+        <div><dt>Needs review</dt><dd>{needsReviewRows.length}</dd></div>
         <div><dt>Unmatched donor codes</dt><dd>{unmatchedRows.length}</dd></div>
-        <div><dt>Flagged for review</dt><dd>{needsReviewRows.length}</dd></div>
       </dl>
       {error && <p className="capture-error" role="alert">{error}</p>}
     </section>}
 
     {step === "preview" && <>
-      <section className="support-card">
-        <h3>Matched rows</h3>
-        <p>Every row below is matched to a donor by exact Code. Uncheck any row you don't want imported. Rows flagged for review are still shown with the best calculated date, but the flag means a person should confirm it -- not an automated ruling.</p>
+      {needsReviewRows.length > 0 && <section className="support-card yahrtzeit-needs-review">
+        <h3>Needs review ({needsReviewRows.length})</h3>
+        <p>These rows are matched to a donor and can still be imported -- a flag here means a person should look once, not that the row is invalid.</p>
+        {needsReviewRows.map((row) => {
+          const key = rowKey(row);
+          const included = !excluded.has(key);
+          const malformedName = row.reviewReasons.includes("malformed_hebrew_name");
+          const ambiguousRecurrence = row.reviewReasons.includes("ambiguous_recurrence");
+          const isEditing = editingRow === row.rowNumber;
+          return <article key={key} className="yahrtzeit-review-row">
+            <div className="yahrtzeit-review-row-main">
+              <strong>{row.matchedDonorName}</strong> <span className="monday-import-code">{row.donorCode}</span>
+              <p>{row.deceasedNameEnglish ?? "—"} · {row.relationship ?? "—"} · {row.hebrewDay ?? "?"} {row.hebrewMonth ?? "?"}{row.hebrewYear ? ` ${row.hebrewYear}` : ""} · Next occurrence {occurrenceLabel(row)}</p>
+
+              {malformedName && !isEditing && <div className="yahrtzeit-review-reason">
+                <p><strong>Hebrew name needs review.</strong> The workbook's Hebrew-name field appears to contain English text: “{row.deceasedNameHebrew}”.</p>
+                <button type="button" onClick={() => startEditing(row)}>Fix name</button>
+              </div>}
+              {malformedName && isEditing && <div className="yahrtzeit-review-reason">
+                <label>Corrected Hebrew name
+                  <input type="text" value={editValue} onChange={(event) => setEditValue(event.target.value)} dir="rtl" />
+                </label>
+                <div className="yahrtzeit-review-reason-actions">
+                  <button type="button" className="onboarding-primary" disabled={revalidating} onClick={() => void saveCorrection(row.rowNumber)}>{revalidating ? "Checking…" : "Save & revalidate"}</button>
+                  <button type="button" disabled={revalidating} onClick={() => setEditingRow(null)}>Cancel</button>
+                </div>
+                <small>Original workbook value is kept as provenance once imported, even after this correction.</small>
+              </div>}
+
+              {ambiguousRecurrence && <div className="yahrtzeit-review-reason">
+                <p><strong>Future recurrence needs review -- the source date itself is valid.</strong> {row.hebrewDay} {row.hebrewMonth} is a real, unambiguous Hebrew date as recorded. The only open question is which future occurrence: a leap Hebrew year has two Adars (Adar I and Adar II), and this yahrtzeit's own leap-year placement hasn't been confirmed. Importing keeps {row.hebrewDay} {row.hebrewMonth} as the canonical fact -- Fundraising OS will keep flagging the specific leap-year occurrence for review rather than silently picking Adar I or Adar II.</p>
+              </div>}
+            </div>
+            {!isEditing && <div className="yahrtzeit-review-row-actions">
+              <label><input type="checkbox" checked={included} disabled={malformedName} onChange={() => toggleExcluded(key)} /> {malformedName ? "Fix the name to enable import" : "Include in this import"}</label>
+            </div>}
+          </article>;
+        })}
+      </section>}
+
+      {readyRows.length > 0 && <section className="support-card">
+        <h3>Ready to import ({readyRows.length})</h3>
         <table className="yahrtzeit-import-table">
-          <thead><tr><th></th><th>Donor</th><th>Deceased</th><th>Relationship</th><th>Hebrew date</th><th>Next occurrence</th><th>Notes</th></tr></thead>
+          <thead><tr><th></th><th>Donor</th><th>Deceased</th><th>Relationship</th><th>Hebrew date</th><th>Next occurrence</th></tr></thead>
           <tbody>
-            {matchedRows.map((row) => {
+            {readyRows.map((row) => {
               const key = rowKey(row);
-              const included = row.canCommit && !excluded.has(key);
-              return <tr key={key} className={row.issues.length > 0 ? "yahrtzeit-import-row-flagged" : ""}>
-                <td><input type="checkbox" checked={included} disabled={!row.canCommit} onChange={() => toggleExcluded(key)} /></td>
+              const included = !excluded.has(key);
+              return <tr key={key}>
+                <td><input type="checkbox" checked={included} onChange={() => toggleExcluded(key)} /></td>
                 <td>{row.matchedDonorName} <span className="monday-import-code">{row.donorCode}</span></td>
                 <td>{row.deceasedNameEnglish ?? "—"}{row.deceasedNameHebrew ? ` (${row.deceasedNameHebrew})` : ""}</td>
                 <td>{row.relationship ?? "—"}</td>
                 <td>{row.hebrewDay ?? "?"} {row.hebrewMonth ?? "?"}{row.hebrewYear ? ` ${row.hebrewYear}` : ""}</td>
                 <td>{occurrenceLabel(row)}</td>
-                <td>{row.issues.length > 0 ? <span className="capture-error">{row.issues.join(" ")}</span> : ""}</td>
               </tr>;
             })}
           </tbody>
         </table>
-      </section>
+      </section>}
+
+      {alreadyImportedRows.length > 0 && <section className="support-card yahrtzeit-already-imported">
+        <h3>Already imported ({alreadyImportedRows.length})</h3>
+        <p>These rows match a yahrtzeit already saved for this donor (matched by donor, Hebrew date, and deceased name) -- shown for confirmation only. Re-committing this file will not change or duplicate them.</p>
+        <table className="yahrtzeit-import-table">
+          <thead><tr><th>Donor</th><th>Deceased</th><th>Hebrew date</th></tr></thead>
+          <tbody>
+            {alreadyImportedRows.map((row) => <tr key={rowKey(row)}>
+              <td>{row.matchedDonorName} <span className="monday-import-code">{row.donorCode}</span></td>
+              <td>{row.deceasedNameEnglish ?? "—"}</td>
+              <td>{row.hebrewDay ?? "?"} {row.hebrewMonth ?? "?"}{row.hebrewYear ? ` ${row.hebrewYear}` : ""}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </section>}
 
       {unmatchedRows.length > 0 && <section className="support-card">
         <h3>Unresolved donors</h3>

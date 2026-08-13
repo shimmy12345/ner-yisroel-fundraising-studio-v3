@@ -3,7 +3,7 @@ import { getChatGPTUser } from "../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../lib/auth/profile";
 import { getDataMode } from "../../../../../lib/workspace/mode";
 import { numericDonorCode } from "../../../../../lib/relationships/donor-identity";
-import { buildYahrtzeitPreview, type YahrtzeitDonorLookup } from "../../../../../lib/import/yahrtzeit-pipeline.ts";
+import { buildYahrtzeitPreview, type YahrtzeitDonorLookup, type YahrtzeitExistingLookup } from "../../../../../lib/import/yahrtzeit-pipeline.ts";
 import type { YahrtzeitWorkbookRow } from "../../../../../lib/import/yahrtzeit-workbook.ts";
 import { logger } from "../../../../../lib/logger";
 
@@ -14,6 +14,7 @@ import { logger } from "../../../../../lib/logger";
 // owner's live donor records, exact match only. Read-only -- preview only.
 type Body = { rows?: YahrtzeitWorkbookRow[] };
 type DonorRow = { id: string; display_name: string; donor_code: string | null; external_id: string | null };
+type ExistingYahrtzeitRow = { id: string; fingerprint: string };
 
 export async function POST(request: Request) {
   const identity = await getChatGPTUser();
@@ -34,9 +35,16 @@ export async function POST(request: Request) {
       const code = numericDonorCode({ donorCode: row.donor_code, externalId: row.external_id });
       if (code) lookup.set(code, { donorId: row.id, donorName: row.display_name });
     }
+    // Re-uploading the same (or a refreshed) workbook must show which rows
+    // are already imported, not just re-present all of them as if fresh --
+    // this is the only place "already imported" status can come from,
+    // since the pure pipeline has no D1 access of its own.
+    const existingRows = await env.DB.prepare("SELECT id, fingerprint FROM yahrtzeits WHERE user_id=?").bind(profile.id).all<ExistingYahrtzeitRow>();
+    const existingFingerprints: YahrtzeitExistingLookup = new Map(existingRows.results.map((row) => [row.fingerprint, row.id]));
+
     const now = Math.floor(Date.now() / 1000);
-    const preview = buildYahrtzeitPreview(body.rows, lookup, profile.timezone, now);
-    logger.info("yahrtzeit_import_previewed", { userId: profile.id, rowCount: preview.length, matchedCount: preview.filter((row) => row.matchedDonorId).length });
+    const preview = buildYahrtzeitPreview(body.rows, lookup, profile.timezone, now, existingFingerprints);
+    logger.info("yahrtzeit_import_previewed", { userId: profile.id, rowCount: preview.length, matchedCount: preview.filter((row) => row.matchedDonorId).length, alreadyImportedCount: preview.filter((row) => row.status === "already_imported").length });
     return Response.json({ rows: preview });
   } catch (error) {
     logger.error("yahrtzeit_import_preview_failed", error, { userId: profile.id });

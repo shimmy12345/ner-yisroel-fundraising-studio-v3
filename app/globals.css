@@ -834,7 +834,19 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .yahrtzeit-import-table { width:100%; border-collapse:collapse; font-size:12.5px; }
 .yahrtzeit-import-table th { text-align:left; padding:8px 10px; color:#7b8781; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #e2e7e3; }
 .yahrtzeit-import-table td { padding:9px 10px; border-bottom:1px solid #eceeeb; vertical-align:top; }
-.yahrtzeit-import-row-flagged td { background:#fdf9f2; }
+
+.yahrtzeit-needs-review { border:1px solid #eddca3; background:#fffaf0; }
+.yahrtzeit-review-row { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; padding:14px 0; border-top:1px solid #f0e4c0; }
+.yahrtzeit-review-row:first-of-type { border-top:0; }
+.yahrtzeit-review-row-main p { margin:6px 0; color:#4c5f56; font-size:13px; }
+.yahrtzeit-review-reason { margin-top:10px; padding:10px 12px; border-radius:9px; background:#fff; border:1px solid #eceeeb; }
+.yahrtzeit-review-reason p { margin:0 0 8px; }
+.yahrtzeit-review-reason label { display:grid; gap:4px; font-size:12px; font-weight:600; color:#4c5f56; margin-bottom:8px; }
+.yahrtzeit-review-reason input[type="text"] { padding:8px 10px; border:1px solid #d8dfda; border-radius:7px; font:inherit; font-size:13px; }
+.yahrtzeit-review-reason-actions { display:flex; gap:8px; }
+.yahrtzeit-review-reason small { display:block; margin-top:8px; color:#89928e; }
+.yahrtzeit-review-row-actions { flex-shrink:0; white-space:nowrap; }
+.yahrtzeit-already-imported { opacity:.85; }
 
 .historical-context-disclosure { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); }
 .historical-context-disclosure summary { cursor:pointer; list-style:none; font-weight:700; font-size:15px; color:#233029; }
