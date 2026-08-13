@@ -1,0 +1,62 @@
+[
+  {
+    "rowNumber": 2,
+    "donorCode": "43425",
+    "deceasedNameEnglish": "Mattil Tzirel Bas Moshe",
+    "deceasedNameHebrew": "מטיל צירל בת משה",
+    "relationship": "Mother",
+    "hebrewMonthRaw": "תשרי",
+    "hebrewDayRaw": "ב",
+    "hebrewYearRaw": "תשעא"
+  },
+  {
+    "rowNumber": 3,
+    "donorCode": "43425",
+    "deceasedNameEnglish": "Yoel Eliezer Ben Yisroel Avraham",
+    "deceasedNameHebrew": "יואל אליעזר בן ישראל אברהם",
+    "relationship": "Father",
+    "hebrewMonthRaw": "טבת",
+    "hebrewDayRaw": "טז",
+    "hebrewYearRaw": "תשעד"
+  },
+  {
+    "rowNumber": 5,
+    "donorCode": "49134",
+    "deceasedNameEnglish": "Shaul Ben Shlomo",
+    "deceasedNameHebrew": "שאול בן שלמה",
+    "relationship": "Uncle",
+    "hebrewMonthRaw": "שבט",
+    "hebrewDayRaw": "טז",
+    "hebrewYearRaw": "תשפא"
+  },
+  {
+    "rowNumber": 13,
+    "donorCode": "49134",
+    "deceasedNameEnglish": "Ettil Bryna Bas Chaim",
+    "deceasedNameHebrew": "עטיל בריינא בת חיים",
+    "relationship": "Grandmother",
+    "hebrewMonthRaw": "אב",
+    "hebrewDayRaw": "ז",
+    "hebrewYearRaw": null
+  },
+  {
+    "rowNumber": 16,
+    "donorCode": "49134",
+    "deceasedNameEnglish": "Marilyn Bas Shlomo",
+    "deceasedNameHebrew": "       בת שלמה Marilyn ",
+    "relationship": "Aunt",
+    "hebrewMonthRaw": "אב",
+    "hebrewDayRaw": "כח",
+    "hebrewYearRaw": "תשעג"
+  },
+  {
+    "rowNumber": 17,
+    "donorCode": "999999",
+    "deceasedNameEnglish": "Someone Unrelated",
+    "deceasedNameHebrew": "מישהו",
+    "relationship": "Brother",
+    "hebrewMonthRaw": "סיון",
+    "hebrewDayRaw": "יא",
+    "hebrewYearRaw": "תשפ"
+  }
+]

@@ -30,6 +30,10 @@ export const STAGING_RESET_TABLE_ORDER = [
   "gifts",
   "recommendations",
   "relationship_queue_dismissals",
+  // yahrtzeit_changes references yahrtzeit_id (not FK-enforced, so a
+  // deletion's audit row can outlive it), so it's deleted first.
+  "yahrtzeit_changes",
+  "yahrtzeits",
   // Donor Research (Stage A) -- depend only on `donors`/`users` and each
   // other. donor_research_finding_sources and donor_research_findings must
   // precede donor_research_runs (which they reference); donor_research_sources

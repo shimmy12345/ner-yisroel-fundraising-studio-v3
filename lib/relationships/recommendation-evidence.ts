@@ -8,6 +8,7 @@
 // never read a table directly.
 
 import type { GiftSource } from "../giving/acknowledgment.ts";
+import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
 
 export type RecommendationEvidenceInput = {
   donorId: string;
@@ -46,6 +47,22 @@ export type RecommendationEvidenceInput = {
   // openReminder -- see recommendation-candidates.ts for the structural
   // enforcement of "never assume an old planned Monday action happened."
   historicalContext: Array<{ text: string; source: string; sourceDate: number | null }>;
+  // Family yahrtzeits -- background context, never an interaction, never a
+  // confirmed-contact signal. Raw Hebrew month/day only; the current-year
+  // Gregorian occurrence is computed here (see below), not stored anywhere,
+  // so it advances automatically once a given year's date passes.
+  yahrtzeits: Array<{ deceasedNameEnglish: string; deceasedNameHebrew: string | null; relationship: string; hebrewMonth: HebrewMonthName; hebrewDay: number }>;
+};
+
+export type YahrtzeitEvidence = {
+  deceasedNameEnglish: string;
+  deceasedNameHebrew: string | null;
+  relationship: string;
+  hebrewLabel: string;
+  nextOccurrenceAt: number;
+  daysUntil: number;
+  ambiguous: boolean;
+  ambiguityNote: string | null;
 };
 
 export type RecommendationEvidence = {
@@ -61,13 +78,27 @@ export type RecommendationEvidence = {
   reminder: { action: string; reason: string; dueAt: number | null; isOverdue: boolean } | null;
   narrative: { relationshipSummary: string | null; institutionalMemory: string | null };
   historicalContext: Array<{ text: string; source: string; sourceDate: number | null }>;
+  yahrtzeits: YahrtzeitEvidence[];
   now: number;
 };
 
 const DAY_SECONDS = 86400;
 const daysBetween = (laterEpoch: number, earlierEpoch: number) => Math.max(0, Math.floor((laterEpoch - earlierEpoch) / DAY_SECONDS));
 
-export function buildRecommendationEvidence(input: RecommendationEvidenceInput, now: number): RecommendationEvidence {
+export function buildRecommendationEvidence(input: RecommendationEvidenceInput, now: number, timezone: string): RecommendationEvidence {
+  const yahrtzeits: YahrtzeitEvidence[] = input.yahrtzeits.map((item) => {
+    const occurrence = nextYahrtzeitOccurrence(item.hebrewMonth, item.hebrewDay, timezone, now);
+    return {
+      deceasedNameEnglish: item.deceasedNameEnglish,
+      deceasedNameHebrew: item.deceasedNameHebrew,
+      relationship: item.relationship,
+      hebrewLabel: occurrence.primary.hebrewLabel,
+      nextOccurrenceAt: occurrence.primary.gregorianEpoch,
+      daysUntil: daysBetween(occurrence.primary.gregorianEpoch, now),
+      ambiguous: occurrence.ambiguous,
+      ambiguityNote: occurrence.ambiguityNote,
+    };
+  });
   return {
     donorId: input.donorId,
     giving: {
@@ -87,6 +118,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
       : null,
     narrative: { relationshipSummary: input.relationshipSummary, institutionalMemory: input.institutionalMemory },
     historicalContext: input.historicalContext,
+    yahrtzeits,
     now,
   };
 }

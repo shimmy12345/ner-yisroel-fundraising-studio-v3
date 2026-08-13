@@ -161,8 +161,16 @@ test("baseline picks up the schema-changing 0025 date-only precision migration",
 test("baseline picks up the schema-changing 0026 gift acknowledgments migration", () => {
   // 0026_gift_acknowledgments.sql adds the gift_acknowledgments table, so
   // the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0026_gift_acknowledgments.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 27);
+  assert.ok(manifest.sourceMigrations.includes("0026_gift_acknowledgments.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0027 yahrtzeits migration", () => {
+  // 0027_yahrtzeits.sql adds the yahrtzeits/yahrtzeit_changes tables, so
+  // the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0027_yahrtzeits.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 28);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

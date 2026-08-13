@@ -37,6 +37,17 @@ export type MeetingBriefReminder = {
   dueAt: number | null;
 };
 
+// Family background, not a logged interaction -- always shown regardless of
+// how far away the date is (awareness), distinct from the separate,
+// lead-window-gated yahrtzeit_outreach recommendation (action urgency).
+export type MeetingBriefYahrtzeit = {
+  deceasedNameEnglish: string;
+  deceasedNameHebrew: string | null;
+  relationship: string;
+  hebrewLabel: string;
+  nextOccurrenceLabel: string;
+};
+
 export type MeetingBrief = {
   donor: MeetingBriefDonor;
   lifetimePaidCents: number;
@@ -62,6 +73,10 @@ export type MeetingBrief = {
   // Assistant) reads, so this can never disagree with them. null only
   // when there is genuinely no evidence to suggest anything.
   recommendation: DonorRecommendation | null;
+  // Always populated when the donor has any recorded yahrtzeits, regardless
+  // of the recommendation's lead window -- family background context is
+  // never conditional on urgency the way the suggested action is.
+  familyYahrtzeits: MeetingBriefYahrtzeit[];
 };
 
 function firstLine(value: string) {
@@ -76,6 +91,7 @@ export function buildMeetingBrief(
   unconfirmedHistoricalContext: string[] = [],
   unconfirmedHistoricalContextCount = unconfirmedHistoricalContext.length,
   recommendation: DonorRecommendation | null = null,
+  familyYahrtzeits: MeetingBriefYahrtzeit[] = [],
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -132,6 +148,7 @@ export function buildMeetingBrief(
     unconfirmedHistoricalContext,
     unconfirmedHistoricalContextCount,
     recommendation,
+    familyYahrtzeits,
   };
 }
 import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";

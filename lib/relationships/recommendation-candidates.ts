@@ -15,7 +15,8 @@ export type RecommendationCandidateKind =
   | "continue_conversation"
   | "relationship_opportunity"
   | "solicit"
-  | "reconnect_contact_gap";
+  | "reconnect_contact_gap"
+  | "yahrtzeit_outreach";
 
 // confirmed: a real interactions/recommendations/giving_activities row.
 // narrative: donors.relationship_summary/institutional_memory -- human-
@@ -224,6 +225,38 @@ function reconnectContactGapCandidate(evidence: RecommendationEvidence): Recomme
   };
 }
 
+// Awareness (the Yahrtzeits section on the donor profile/Meeting Brief) is
+// unconditional -- every recorded yahrtzeit is always shown there,
+// regardless of how far away it is. This candidate is the separate "is it
+// worth actively suggesting outreach right now" question: it only exists
+// at all within a two-week lead window, and its score ramps up smoothly as
+// the date approaches (via recency/urgency, same as every other candidate
+// here) rather than flipping on at a fixed cutoff. Only the single
+// soonest-upcoming yahrtzeit is considered -- consistent with every other
+// "most relevant fact" field in this evidence (mostRecentPaidGift,
+// openPledge, lastCompletedInteraction all pick one, not a list).
+const YAHRTZEIT_LEAD_WINDOW_DAYS = 14;
+
+function yahrtzeitOutreachCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
+  const soonest = [...evidence.yahrtzeits].sort((a, b) => a.daysUntil - b.daysUntil)[0];
+  if (!soonest || soonest.daysUntil > YAHRTZEIT_LEAD_WINDOW_DAYS) return null;
+  const englishDate = dateLabel(soonest.nextOccurrenceAt);
+  const nameSuffix = soonest.deceasedNameHebrew ? ` (${soonest.deceasedNameHebrew})` : "";
+  return {
+    kind: "yahrtzeit_outreach",
+    action: `Reach out ahead of ${soonest.deceasedNameEnglish}'s yahrtzeit (${soonest.relationship.toLowerCase()}) on ${soonest.hebrewLabel}.`,
+    why: soonest.daysUntil === 0 ? "The yahrtzeit is today." : `The yahrtzeit is in ${soonest.daysUntil} day${soonest.daysUntil === 1 ? "" : "s"}, on ${englishDate}.`,
+    evidence: [`${soonest.relationship}: ${soonest.deceasedNameEnglish}${nameSuffix} — ${soonest.hebrewLabel}, next occurrence ${englishDate}.${soonest.ambiguous ? ` ${soonest.ambiguityNote}` : ""}`],
+    confidence: soonest.ambiguous ? "medium" : "high",
+    timing: englishDate,
+    certainty: "confirmed",
+    specificity: 0.85,
+    recency: recencyScore(soonest.daysUntil, 30),
+    urgency: recencyScore(soonest.daysUntil, YAHRTZEIT_LEAD_WINDOW_DAYS),
+    supportingDate: soonest.nextOccurrenceAt,
+  };
+}
+
 export function generateCandidates(evidence: RecommendationEvidence): RecommendationCandidate[] {
   return [
     honorReminderCandidate(evidence),
@@ -233,5 +266,6 @@ export function generateCandidates(evidence: RecommendationEvidence): Recommenda
     relationshipOpportunityCandidate(evidence),
     solicitCandidate(evidence),
     reconnectContactGapCandidate(evidence),
+    yahrtzeitOutreachCandidate(evidence),
   ].filter((candidate): candidate is RecommendationCandidate => candidate !== null);
 }

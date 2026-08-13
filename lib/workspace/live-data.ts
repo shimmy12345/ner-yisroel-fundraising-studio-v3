@@ -8,6 +8,7 @@ import { buildRecommendationEvidence } from "../relationships/recommendation-evi
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
+import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -21,6 +22,7 @@ type DismissalRow = { item_key: string };
 type LatestInteractionRow = { donor_id: string; type: string; occurred_at: number; summary: string };
 type HistoricalContextRow = { donor_id: string; text: string; source: string; source_date: number | null };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
+type YahrtzeitRow = { donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -84,7 +86,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -138,6 +140,10 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // Newest row per (gift_source, gift_id) is "current status"; a JL
     // re-import never references this table, so it survives every refresh.
     demo ? Promise.resolve({ results: [] as AcknowledgmentRow[] }) : env.DB.prepare(`SELECT gift_source, gift_id, status FROM gift_acknowledgments WHERE user_id = ? ORDER BY created_at DESC LIMIT 5000`).bind(userId).all<AcknowledgmentRow>(),
+    // Every in-scope donor's yahrtzeits -- feeds yahrtzeit_outreach the
+    // same way historicalContextRows feeds solicit/relationship_opportunity
+    // above. Never joined into interactions/recommendations.
+    demo ? Promise.resolve({ results: [] as YahrtzeitRow[] }) : env.DB.prepare(`SELECT donor_id, deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day FROM yahrtzeits WHERE user_id = ? LIMIT 5000`).bind(userId).all<YahrtzeitRow>(),
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
@@ -178,7 +184,18 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const openPledgeByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openPledgeByDonor.has(item.donor_id)) openPledgeByDonor.set(item.donor_id, item);
   const contactGapDonorIds = new Set(contacts.filter((item) => { const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null; return days == null || days >= 90; }).map((item) => item.id));
-  const suggestionDonorIds = new Set<string>([...recentGiftByDonor.keys(), ...openPledgeByDonor.keys(), ...contactGapDonorIds]);
+  const yahrtzeitsByDonor = new Map<string, YahrtzeitRow[]>();
+  for (const row of yahrtzeitRows.results) {
+    if (!yahrtzeitsByDonor.has(row.donor_id)) yahrtzeitsByDonor.set(row.donor_id, []);
+    yahrtzeitsByDonor.get(row.donor_id)!.push(row);
+  }
+  // Membership here is over-inclusive on purpose -- a donor whose only
+  // yahrtzeit is months away still enters the shared per-donor loop below,
+  // but buildDonorRecommendation naturally returns null for them (outside
+  // yahrtzeit_outreach's lead window, nothing else qualifying), and the
+  // loop already skips a null recommendation. Simpler than precomputing
+  // "is the soonest one within the window" twice.
+  const suggestionDonorIds = new Set<string>([...recentGiftByDonor.keys(), ...openPledgeByDonor.keys(), ...contactGapDonorIds, ...yahrtzeitsByDonor.keys()]);
 
   const reminderByDonor = new Map(reminders.results.map((item) => [item.donor_id, item]));
   const donorById = new Map(donors.results.map((item) => [item.id, item]));
@@ -189,7 +206,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     historicalContextByDonor.get(row.donor_id)!.push(row);
   }
   const suggestionHrefByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "capture" };
-  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
+  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap", yahrtzeit_outreach: "Upcoming yahrtzeit" };
   const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
   // live-data.ts's own "recent gift" bucket only ever draws from
   // giving_activities (never the legacy gifts table -- see GivingRow),
@@ -213,7 +230,8 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       relationshipSummary: donorRow.relationship_summary,
       institutionalMemory: donorRow.institutional_memory,
       historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
-    }, now);
+      yahrtzeits: (yahrtzeitsByDonor.get(donorId) ?? []).map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
+    }, now, timezone);
     const recommendation = buildDonorRecommendation(evidence);
     if (!recommendation) continue;
     // A donor whose open reminder is itself the winning suggestion is
@@ -222,6 +240,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     if (recommendation.kind === "honor_reminder") continue;
     const sortAt = recommendation.kind === "acknowledge_gift" ? -(gift?.activity_date ?? 0)
       : recommendation.kind === "follow_up_pledge" ? (pledge?.activity_date ?? 0)
+      : recommendation.kind === "yahrtzeit_outreach" ? Math.min(...evidence.yahrtzeits.map((item) => item.nextOccurrenceAt), Number.MAX_SAFE_INTEGER)
       : -(evidence.contact.daysSinceLastContact ?? Number.MAX_SAFE_INTEGER);
     ranked.push({
       queueId: `recommendation:${donorId}:${recommendation.kind}`,

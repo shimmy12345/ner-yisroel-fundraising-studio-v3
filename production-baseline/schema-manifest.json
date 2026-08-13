@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "286506e53624dc64dd9b0b399d076e582c5107162b1da475b8a64a5fb2def4d9",
+  "schemaHash": "1b90a44af8b32f7fb55af6038de5c07582f918e66571a0754c506b883b6f0e8f",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -28,7 +28,8 @@
     "0023_donor_research_stage_a.sql",
     "0024_donor_historical_context.sql",
     "0025_date_only_precision.sql",
-    "0026_gift_acknowledgments.sql"
+    "0026_gift_acknowledgments.sql",
+    "0027_yahrtzeits.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -4274,6 +4275,282 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "yahrtzeit_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "yahrtzeit_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "yahrtzeit_changes_yahrtzeit_idx",
+            "columns": [
+              "yahrtzeit_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `yahrtzeit_changes_yahrtzeit_idx` ON `yahrtzeit_changes` (`yahrtzeit_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','updated','deleted'))"
+        ]
+      },
+      {
+        "name": "yahrtzeits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "deceased_name_english",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "deceased_name_hebrew",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "relationship",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "hebrew_month",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "hebrew_day",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "hebrew_year",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_donor_code",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "yahrtzeits_donor_idx",
+            "columns": [
+              "donor_id",
+              "hebrew_month",
+              "hebrew_day"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `yahrtzeits_donor_idx` ON `yahrtzeits` (`donor_id`,`hebrew_month`,`hebrew_day`)"
+          },
+          {
+            "name": "yahrtzeits_fingerprint_idx",
+            "columns": [
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `yahrtzeits_fingerprint_idx` ON `yahrtzeits` (`fingerprint`)"
+          },
+          {
+            "name": "yahrtzeits_user_idx",
+            "columns": [
+              "user_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `yahrtzeits_user_idx` ON `yahrtzeits` (`user_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`source` IN ('manual','import-yahrtzeit-workbook'))"
+        ]
       }
     ]
   },
@@ -4452,6 +4729,16 @@
       "type": "table",
       "name": "workspace_backup_audits",
       "sql": "CREATE TABLE `workspace_backup_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `purpose` text NOT NULL, `import_id` text, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "yahrtzeit_changes",
+      "sql": "CREATE TABLE `yahrtzeit_changes` ( `id` text PRIMARY KEY NOT NULL, `yahrtzeit_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','deleted')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text, `created_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "yahrtzeits",
+      "sql": "CREATE TABLE `yahrtzeits` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `deceased_name_english` text NOT NULL, `deceased_name_hebrew` text, `relationship` text NOT NULL, `hebrew_month` text NOT NULL, `hebrew_day` integer NOT NULL, `hebrew_year` integer, `source` text NOT NULL CHECK (`source` IN ('manual','import-yahrtzeit-workbook')), `source_donor_code` text, `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "index",
@@ -4727,6 +5014,26 @@
       "type": "index",
       "name": "workspace_backup_audits_user_import_idx",
       "sql": "CREATE INDEX `workspace_backup_audits_user_import_idx` ON `workspace_backup_audits` (`user_id`,`import_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeit_changes_yahrtzeit_idx",
+      "sql": "CREATE INDEX `yahrtzeit_changes_yahrtzeit_idx` ON `yahrtzeit_changes` (`yahrtzeit_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeits_donor_idx",
+      "sql": "CREATE INDEX `yahrtzeits_donor_idx` ON `yahrtzeits` (`donor_id`,`hebrew_month`,`hebrew_day`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeits_fingerprint_idx",
+      "sql": "CREATE UNIQUE INDEX `yahrtzeits_fingerprint_idx` ON `yahrtzeits` (`fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeits_user_idx",
+      "sql": "CREATE INDEX `yahrtzeits_user_idx` ON `yahrtzeits` (`user_id`)"
     }
   ]
 }

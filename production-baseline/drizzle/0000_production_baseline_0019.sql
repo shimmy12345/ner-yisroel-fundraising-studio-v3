@@ -479,6 +479,39 @@ CREATE TABLE `workspace_backup_audits` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `yahrtzeit_changes` (
+  `id` text PRIMARY KEY NOT NULL,
+  `yahrtzeit_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `action` text NOT NULL CHECK (`action` IN ('created','updated','deleted')),
+  `changed_fields` text NOT NULL,
+  `before_json` text,
+  `after_json` text,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `yahrtzeits` (
+  `id` text PRIMARY KEY NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `deceased_name_english` text NOT NULL,
+  `deceased_name_hebrew` text,
+  `relationship` text NOT NULL,
+  `hebrew_month` text NOT NULL,
+  `hebrew_day` integer NOT NULL,
+  `hebrew_year` integer,
+  `source` text NOT NULL CHECK (`source` IN ('manual','import-yahrtzeit-workbook')),
+  `source_donor_code` text,
+  `fingerprint` text NOT NULL,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE INDEX `activity_status_audits_interaction_date_idx` ON `activity_status_audits` (`interaction_id`,`created_at`);
 
 CREATE INDEX `data_imports_user_date_idx` ON `data_imports` (`user_id`,`created_at`);
@@ -596,10 +629,18 @@ CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
 
 CREATE INDEX `workspace_backup_audits_user_import_idx` ON `workspace_backup_audits` (`user_id`,`import_id`,`created_at`);
 
+CREATE INDEX `yahrtzeit_changes_yahrtzeit_idx` ON `yahrtzeit_changes` (`yahrtzeit_id`,`created_at`);
+
+CREATE INDEX `yahrtzeits_donor_idx` ON `yahrtzeits` (`donor_id`,`hebrew_month`,`hebrew_day`);
+
+CREATE UNIQUE INDEX `yahrtzeits_fingerprint_idx` ON `yahrtzeits` (`fingerprint`);
+
+CREATE INDEX `yahrtzeits_user_idx` ON `yahrtzeits` (`user_id`);
+
 CREATE TABLE `production_schema_baseline` (
   `id` text PRIMARY KEY NOT NULL CHECK (`id` = '0019'),
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','286506e53624dc64dd9b0b399d076e582c5107162b1da475b8a64a5fb2def4d9',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','1b90a44af8b32f7fb55af6038de5c07582f918e66571a0754c506b883b6f0e8f',1785944072);
 PRAGMA optimize;

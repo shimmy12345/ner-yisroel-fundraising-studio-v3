@@ -694,6 +694,10 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
               <div><p className="eyebrow">ALSO AVAILABLE</p><h2>Monday.com Historical Context</h2><p>Bring uncertain historical contact and future planned actions in from a Monday.com pipeline export. Parsed, classified, and committed separately -- nothing here touches JL gifts or pledges.</p></div>
               <a className="onboarding-primary" href="/onboarding/import/monday">Open Monday.com import →</a>
             </section>
+            <section className="import-other-sources" aria-label="Other import sources">
+              <div><p className="eyebrow">ALSO AVAILABLE</p><h2>Yahrtzeits</h2><p>Bring donor relatives' yahrtzeits in from a workbook, matched by donor Code only. Never touches gifts, pledges, interactions, or Last Contact.</p></div>
+              <a className="onboarding-primary" href="/onboarding/import/yahrtzeit">Open yahrtzeit import →</a>
+            </section>
             <section className="jl-refresh-overview" aria-label="JL refresh status">
               <div><p className="eyebrow">NEXT REFRESH</p><h2>Use the most recent export you have.</h2><p>Fundraising OS checks overlapping rows, keeps your relationship history, and shows every proposed change before writing.</p></div>
               <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{refreshOverview.suggestedRangeStart ? `${dateLabel(refreshOverview.suggestedRangeStart)} – ${dateLabel(refreshOverview.suggestedRangeEnd)}` : `Most recent available range through ${dateLabel(refreshOverview.suggestedRangeEnd)}`}</dd></div></dl>

@@ -10,6 +10,7 @@ const snapshot = {
     memory: "Elena connects through student stories; David asks for outcomes.",
     unconfirmedHistoricalContext: ["Schedule meeting when in Chicago"],
     recommendation: { action: "Send scholarship outcomes", why: "Committed during the last call and no completed interaction has followed it.", evidence: ["Open reminder: \"Send scholarship outcomes\""], confidence: "high", timing: "Due Aug 1, 2026", kind: "honor_reminder" },
+    familyYahrtzeits: [],
   },
   latestInteraction: {
     id: "interaction-1",

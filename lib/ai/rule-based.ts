@@ -18,6 +18,12 @@ const result = (title: string, content: string, rationale: string[], sourceIds: 
 const unconfirmedBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.unconfirmedHistoricalContext.length
   ? `Imported context (not verified, not counted as contact):\n${snapshot.donor.unconfirmedHistoricalContext.map((line) => `- ${line}`).join("\n")}`
   : null;
+// Family background, never an interaction and never implying outreach
+// occurred -- always shown when present, independent of whether
+// yahrtzeit_outreach happens to be the winning suggested action right now.
+const familyContextBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.familyYahrtzeits.length
+  ? `Family context: ${snapshot.donor.familyYahrtzeits.join(" ")}`
+  : null;
 
 export class RuleBasedAIService implements AIService {
   async complete(request: AIRequest): Promise<AIResult> {
@@ -30,7 +36,7 @@ export class RuleBasedAIService implements AIService {
       // s.donor.recommendation -- never re-derived from s.recommendations
       // here, so this can never disagree with the actual Meeting Brief
       // page or donor profile for the same donor.
-      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.donor.recommendation ? `Suggested action: ${s.donor.recommendation.action} ${s.donor.recommendation.why}` : "No suggested action is available.", unconfirmedBlock(s)].filter((line): line is string => line !== null).join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
+      return result(`Meeting preparation: ${meeting.title}`, [`${meeting.time} ${meeting.period} · ${meeting.detail}`, `Relationship context: ${s.donor.summary}`, `Institutional memory: ${s.donor.memory}`, s.latestInteraction ? `Latest interaction: ${s.latestInteraction.summary}` : "No prior interaction is recorded.", s.donor.recommendation ? `Suggested action: ${s.donor.recommendation.action} ${s.donor.recommendation.why}` : "No suggested action is available.", familyContextBlock(s), unconfirmedBlock(s)].filter((line): line is string => line !== null).join("\n\n"), ["Upcoming reminder", "Owner-scoped relationship record", "Latest interaction"], sources(s));
     }
     if (request.task === "draft") {
       const gift = s.gifts[0];

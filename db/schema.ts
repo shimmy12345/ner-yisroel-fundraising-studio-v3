@@ -391,6 +391,48 @@ export const giftAcknowledgments = sqliteTable("gift_acknowledgments", {
   index("gift_acknowledgments_donor_idx").on(table.donorId, table.createdAt),
 ]);
 
+// A donor's relatives' yahrtzeits. The Hebrew date (hebrewMonth/hebrewDay/
+// hebrewYear) is canonical and permanent; the Gregorian occurrence is never
+// stored -- it's recalculated for the relevant year on every read (see
+// lib/calendar/hebrew-date.ts). Editable/deletable, unlike the append-only
+// audit tables above -- this row IS the maintained fact, not an event log;
+// its own edit history lives in yahrtzeitChanges. fingerprint gives Monday-
+// import-style idempotent re-upload.
+export const yahrtzeits = sqliteTable("yahrtzeits", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  deceasedNameEnglish: text("deceased_name_english").notNull(),
+  deceasedNameHebrew: text("deceased_name_hebrew"),
+  relationship: text("relationship").notNull(),
+  hebrewMonth: text("hebrew_month").notNull(),
+  hebrewDay: integer("hebrew_day").notNull(),
+  hebrewYear: integer("hebrew_year"),
+  source: text("source", { enum: ["manual", "import-yahrtzeit-workbook"] }).notNull(),
+  sourceDonorCode: text("source_donor_code"),
+  fingerprint: text("fingerprint").notNull(),
+  ...timestamps,
+}, (table) => [
+  uniqueIndex("yahrtzeits_fingerprint_idx").on(table.fingerprint),
+  index("yahrtzeits_donor_idx").on(table.donorId, table.hebrewMonth, table.hebrewDay),
+  index("yahrtzeits_user_idx").on(table.userId),
+]);
+
+// Append-only create/update/delete history for yahrtzeits, matching
+// donorContactAudits' shape. yahrtzeitId is deliberately not a foreign key
+// -- a deletion's audit row must outlive the yahrtzeits row it describes.
+export const yahrtzeitChanges = sqliteTable("yahrtzeit_changes", {
+  id: text("id").primaryKey(),
+  yahrtzeitId: text("yahrtzeit_id").notNull(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  action: text("action", { enum: ["created", "updated", "deleted"] }).notNull(),
+  changedFields: text("changed_fields", { mode: "json" }).$type<string[]>().notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("yahrtzeit_changes_yahrtzeit_idx").on(table.yahrtzeitId, table.createdAt)]);
+
 // Donor Research (Stage A) -- provider-agnostic, manual-entry only. No
 // external network calls anywhere in this feature yet; see
 // lib/research/manual-provider.ts. Evidence entered before identity

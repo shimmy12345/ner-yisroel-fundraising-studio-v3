@@ -6,11 +6,13 @@ import {
   type MeetingBriefGift,
   type MeetingBriefInteraction,
   type MeetingBriefReminder,
+  type MeetingBriefYahrtzeit,
 } from "./meeting-brief-model";
 import { importedContextLine } from "./historical-context";
 import { buildRecommendationEvidence } from "./recommendation-evidence";
 import { buildDonorRecommendation } from "./recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment";
+import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
 
 type DonorRow = {
   id: string;
@@ -40,6 +42,7 @@ type InteractionRow = { id: string; type: string; occurred_at: number; summary: 
 type ReminderRow = { id: string; action: string; reason: string; due_at: number | null };
 type HistoricalContextRow = { text: string; source: string; source_date: number | null };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
+type YahrtzeitRow = { deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
@@ -50,7 +53,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -80,6 +83,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     // Newest row per (gift_source, gift_id) is "current status"; every
     // earlier mark stays in the table, never overwritten.
     env.DB.prepare(`SELECT gift_source, gift_id, status FROM gift_acknowledgments WHERE donor_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 2000`).bind(donorId, userId).all<AcknowledgmentRow>(),
+    env.DB.prepare(`SELECT deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day FROM yahrtzeits WHERE donor_id = ? AND user_id = ?`).bind(donorId, userId).all<YahrtzeitRow>(),
   ]);
 
   const address = [
@@ -122,6 +126,21 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
   const unconfirmedHistoricalContext = historicalContextRows.results.map((row) => importedContextLine(row.text, row.source, row.source_date ? dateLabel(row.source_date) : null));
 
+  // Family yahrtzeits: always surfaced for awareness (never gated by the
+  // separate yahrtzeit_outreach recommendation's lead window) -- background
+  // context, never a logged interaction.
+  const yahrtzeitEvidenceInput = yahrtzeitRows.results.map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day }));
+  const familyYahrtzeits: MeetingBriefYahrtzeit[] = yahrtzeitEvidenceInput.map((item) => {
+    const occurrence = nextYahrtzeitOccurrence(item.hebrewMonth, item.hebrewDay, timezone, now);
+    return {
+      deceasedNameEnglish: item.deceasedNameEnglish,
+      deceasedNameHebrew: item.deceasedNameHebrew,
+      relationship: item.relationship,
+      hebrewLabel: occurrence.primary.hebrewLabel,
+      nextOccurrenceLabel: dateLabel(occurrence.primary.gregorianEpoch),
+    };
+  });
+
   // Suggested Action: same shared engine as the donor page/homepage/
   // Assistant, built from the exact same rows already fetched above.
   const acknowledgmentByGift = new Set(acknowledgments.results.map((row) => `${row.gift_source}:${row.gift_id}`));
@@ -141,8 +160,9 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     relationshipSummary: donor.relationship_summary,
     institutionalMemory: donor.institutional_memory,
     historicalContext: historicalContextRows.results.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
-  }, now);
+    yahrtzeits: yahrtzeitEvidenceInput,
+  }, now, timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
 
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation);
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyYahrtzeits);
 }
