@@ -26,6 +26,13 @@ import { YAHRTZEIT_LEAD_WINDOW_DAYS } from "../relationships/recommendation-cand
 
 export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary";
 
+// Fields are kept granular (rather than one concatenated "detail" string) so
+// the compact Coming Up row can give each piece of information -- donor,
+// relationship, deceased name, Hebrew date -- its own visual weight instead
+// of flattening them into a single paragraph. A future birthday/anniversary
+// builder would populate the same shape (relationshipPhrase e.g. "Mother's
+// birthday", provenanceName left null when there's nothing analogous to a
+// deceased name).
 export type WorkspaceRelationshipDateEvent = {
   id: string;
   type: RelationshipDateEventType;
@@ -34,7 +41,10 @@ export type WorkspaceRelationshipDateEvent = {
   initials: string;
   donorCode: string | null;
   label: string;
-  detail: string;
+  relationshipPhrase: string;
+  hebrewDateLabel: string;
+  provenanceName: string | null;
+  provenanceNameHebrew: string | null;
   dateLabel: string;
   dateEpoch: number;
   ambiguous: boolean;
@@ -56,6 +66,30 @@ function daysUntil(laterEpoch: number, earlierEpoch: number): number {
   return Math.max(0, Math.floor((laterEpoch - earlierEpoch) / 86400));
 }
 
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// Only a short, plain word/phrase (letters, spaces, apostrophes, hyphens) is
+// safe to turn into possessive display grammar. Free-text relationship
+// values that don't match (blank, punctuation-heavy, unexpectedly long) fall
+// back to the noun alone -- "Yahrtzeit" rather than a broken phrase -- since
+// this is display-only and must never presume to correct or reject the
+// stored value itself.
+const SAFE_POSSESSIVE_SUBJECT = /^[A-Za-z][A-Za-z '-]*$/;
+
+// Natural possessive phrasing for display only, e.g. possessivePhrase("Mother",
+// "yahrtzeit") -> "Mother's yahrtzeit". Never writes back to or normalizes
+// the stored relationship value -- callers still pass the raw text through
+// unchanged wherever it's needed (audit history, exports, etc.).
+export function possessivePhrase(subject: string, noun: string): string {
+  const trimmed = subject.trim();
+  if (!trimmed || trimmed.length > 24 || !SAFE_POSSESSIVE_SUBJECT.test(trimmed)) return capitalize(noun);
+  const normalized = capitalize(trimmed.toLowerCase());
+  const possessive = normalized.endsWith("s") ? `${normalized}'` : `${normalized}'s`;
+  return `${possessive} ${noun}`;
+}
+
 // Donors without an identity in identityByDonor (e.g. archived, or a data
 // inconsistency) are silently skipped rather than surfaced with missing
 // fields -- Coming Up never shows a card it can't fully populate.
@@ -71,7 +105,6 @@ export function buildYahrtzeitRelationshipDateEvents(
     if (!identity) continue;
     const occurrence = nextYahrtzeitOccurrence(row.hebrewMonth, row.hebrewDay, timezone, now);
     if (daysUntil(occurrence.primary.gregorianEpoch, now) > YAHRTZEIT_LEAD_WINDOW_DAYS) continue;
-    const nameSuffix = row.deceasedNameHebrew ? ` (${row.deceasedNameHebrew})` : "";
     events.push({
       id: `yahrtzeit:${row.id}`,
       type: "yahrtzeit",
@@ -80,7 +113,10 @@ export function buildYahrtzeitRelationshipDateEvents(
       initials: identity.initials,
       donorCode: identity.donorCode,
       label: "Yahrtzeit",
-      detail: `${row.relationship}: ${row.deceasedNameEnglish}${nameSuffix} — ${occurrence.primary.hebrewLabel}`,
+      relationshipPhrase: possessivePhrase(row.relationship, "yahrtzeit"),
+      hebrewDateLabel: occurrence.primary.hebrewLabel,
+      provenanceName: row.deceasedNameEnglish,
+      provenanceNameHebrew: row.deceasedNameHebrew,
       dateLabel: new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(occurrence.primary.gregorianEpoch * 1000)),
       dateEpoch: occurrence.primary.gregorianEpoch,
       ambiguous: occurrence.ambiguous,

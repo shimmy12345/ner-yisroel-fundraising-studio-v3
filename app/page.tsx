@@ -38,21 +38,37 @@ function ScheduledActivityCard({ activity, live, upcoming = false }: { activity:
 
 // Date-driven relationship events (currently yahrtzeits; birthdays and
 // anniversaries plug into the same WorkspaceRelationshipDateEvent shape
-// later without another homepage change). Deliberately unconditional --
+// later, rendered by this same row -- nothing here is yahrtzeit-specific
+// except the copy the event itself supplies). Deliberately unconditional --
 // this list is never filtered by, or competing against, the canonical
 // recommendation ranking; it's a direct read of "is this date inside its
 // lead window," nothing more. Rendering it never writes anything.
-function RelationshipDateEventCard({ event }: { event: WorkspaceRelationshipDateEvent }) {
+//
+// Compact by design: a single row, not a card, so a handful of events read
+// like a calendar rather than a second priority list. The provenance name
+// (e.g. deceased name) is intentionally the lowest-priority line -- it stays
+// on its own truncated line even when it happens to repeat the relationship
+// text verbatim (e.g. relationship "Mother", deceased name "mother"), since
+// those are two independent fields, not a duplicate render.
+function RelationshipDateEventRow({ event }: { event: WorkspaceRelationshipDateEvent }) {
   const openHref = donorNavigationHref(event.donorId, "/#coming-up-title", "today");
-  return <article className="meeting today-meeting-card relationship-date-event-card">
-    <div className="meeting-time"><strong>{event.dateLabel}</strong></div>
-    <div className="meeting-line" />
-    <div className="mini-avatar scheduled-donor-avatar">{event.initials}</div>
-    <div>
-      <div className="scheduled-activity-heading"><span className="event-type">{event.label}</span><h3><a href={openHref}>{event.donorName}</a></h3>{event.donorCode && <span className="donor-code">{event.donorCode}</span>}</div>
-      <p>{event.detail}</p>
+  return <article className="relationship-date-row">
+    <div className="relationship-date-row-date">{event.dateLabel}</div>
+    <div className="relationship-date-row-body">
+      <div className="relationship-date-row-heading">
+        <a href={openHref}>{event.donorName}</a>
+        {event.donorCode && <span className="donor-code">{event.donorCode}</span>}
+      </div>
+      <p className="relationship-date-row-meaning">
+        <span className="event-type">{event.label}</span>
+        {event.relationshipPhrase} · {event.hebrewDateLabel}
+      </p>
+      {event.provenanceName && <p className="relationship-date-row-provenance">
+        Deceased: {event.provenanceName}
+        {event.provenanceNameHebrew && <> · <bdi dir="rtl">{event.provenanceNameHebrew}</bdi></>}
+      </p>}
       {event.ambiguous && <small className="capture-error">A future occurrence falls in a leap year -- the date shown is valid as recorded, but the specific recurrence needs review.</small>}
-      <div className="meeting-links"><a href={openHref}>Open donor</a></div>
+      <a className="relationship-date-row-action" href={openHref}>Open donor →</a>
     </div>
   </article>;
 }
@@ -98,7 +114,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
 
       <section className="today-command-section today-coming-up" aria-labelledby="coming-up-title">
         <div className="command-section-heading"><div><p className="eyebrow">NEXT</p><h2 id="coming-up-title">Coming Up</h2></div><span className="count">{comingQueueCount + data.upcomingActivities.length + data.upcomingRelationshipDates.length}</span></div>
-        {data.upcomingRelationshipDates.length ? <div className="today-meeting-list command-activity-list">{data.upcomingRelationshipDates.map((event) => <RelationshipDateEventCard event={event} key={event.id} />)}</div> : null}
+        {data.upcomingRelationshipDates.length ? <div className="relationship-date-list">{data.upcomingRelationshipDates.map((event) => <RelationshipDateEventRow event={event} key={event.id} />)}</div> : null}
         {visibleUpcomingActivities.length ? <div className="today-meeting-list command-activity-list">{visibleUpcomingActivities.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} upcoming key={item.id} />)}</div> : null}
         {comingQueueCount ? <RelationshipQueueExperience scope="coming" initialQueue={data.relationshipQueue} priorityCount={data.priorityCount} showAll={showAll} expanded={showAll || agendaIsEmpty} /> : null}
         {!showAll && data.upcomingActivities.length > visibleUpcomingActivities.length && <a className="view-all-link command-view-all" href="/?priorities=all#coming-up-title">View all upcoming activities</a>}

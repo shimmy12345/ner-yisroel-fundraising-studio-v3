@@ -721,6 +721,26 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .command-activity-list .scheduled-donor-avatar { width:28px; height:28px; }
 .command-activity-list .scheduled-activity-card p { display:none; }
 .command-activity-list .meeting-links { margin-top:5px; }
+/* Compact relationship-date rows (Coming Up: upcoming yahrtzeits, later
+   birthdays/anniversaries) -- a calendar-style list, not stacked priority
+   cards. Two columns only (date, body) at every width so nothing has to
+   squeeze a third column at the narrow Coming Up panel width seen with the
+   sidebar layout (~330-450px); "Open donor" lives as the last line inside
+   the body instead of a side column. */
+.relationship-date-list { margin-bottom:11px; border:1px solid #e6ece8; border-radius:10px; background:#fff; overflow:hidden; }
+.relationship-date-row { display:grid; grid-template-columns:44px minmax(0,1fr); gap:10px; padding:9px 11px; border-bottom:1px solid #eef1ee; }
+.relationship-date-row:last-child { border-bottom:0; }
+.relationship-date-row-date { padding-top:1px; color:#4d6659; font-size:11px; font-weight:700; line-height:1.3; }
+.relationship-date-row-body { min-width:0; }
+.relationship-date-row-heading { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 8px; min-width:0; }
+.relationship-date-row-heading a { min-width:0; color:var(--ink); font-size:13px; font-weight:650; text-decoration:none; line-height:1.3; }
+.relationship-date-row-heading a:hover { text-decoration:underline; }
+.relationship-date-row-heading .donor-code { margin:0; font-size:9px; }
+.relationship-date-row-meaning { display:flex; align-items:center; gap:6px; overflow:hidden; margin:2px 0 0; color:#57675f; font-size:11px; line-height:1.4; white-space:nowrap; text-overflow:ellipsis; }
+.relationship-date-row-meaning .event-type { flex:0 0 auto; }
+.relationship-date-row-provenance { overflow:hidden; margin:2px 0 0; color:#96a09a; font-size:10px; line-height:1.4; white-space:nowrap; text-overflow:ellipsis; }
+.relationship-date-row-action { display:inline-block; margin-top:4px; color:#37705a; font-size:10px; font-weight:650; text-decoration:none; }
+.relationship-date-row-action:hover { text-decoration:underline; }
 .command-queue .relationship-queue-groups { gap:9px; }
 .command-queue .relationship-queue-group { margin:0; }
 .command-queue .relationship-queue-group > header { margin:0 0 6px; padding:0; }
@@ -773,6 +793,8 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .today-actions-section .today-quick-actions a:last-child { grid-column:1 / -1; }
   .morning-brief-complete { grid-template-columns:28px 1fr; }
   .morning-brief-complete button { grid-column:2; justify-self:start; }
+  .relationship-date-row { grid-template-columns:38px minmax(0,1fr); gap:8px; padding:8px 10px; }
+  .relationship-date-row-date { font-size:10px; }
 }
 
 /* Donor Research (Stage A) -- restrained, source-first: claim, source,
