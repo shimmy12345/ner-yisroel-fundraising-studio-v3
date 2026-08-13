@@ -235,7 +235,10 @@ function reconnectContactGapCandidate(evidence: RecommendationEvidence): Recomme
 // soonest-upcoming yahrtzeit is considered -- consistent with every other
 // "most relevant fact" field in this evidence (mostRecentPaidGift,
 // openPledge, lastCompletedInteraction all pick one, not a list).
-const YAHRTZEIT_LEAD_WINDOW_DAYS = 14;
+// Exported so lib/workspace/suggestion-candidates.ts can pre-filter which
+// donors are even worth full evidence-building for, using the exact same
+// window this candidate itself gates on -- never a duplicated magic number.
+export const YAHRTZEIT_LEAD_WINDOW_DAYS = 14;
 
 function yahrtzeitOutreachCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const soonest = [...evidence.yahrtzeits].sort((a, b) => a.daysUntil - b.daysUntil)[0];

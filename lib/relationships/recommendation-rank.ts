@@ -44,7 +44,11 @@ function certaintyMultiplier(certainty: EvidenceCertainty): number {
   return 0.55; // unconfirmed_historical
 }
 
-function score(candidate: RecommendationCandidate): number {
+// Exported so tests can assert against the real, exact scoring formula
+// (e.g. tests/suggestion-candidates.test.mjs's monotonicity invariant for
+// reconnect_contact_gap) rather than a duplicated copy of these weights
+// that could silently drift out of sync with the real one.
+export function score(candidate: RecommendationCandidate): number {
   return certaintyMultiplier(candidate.certainty) * (0.35 * candidate.specificity + 0.35 * candidate.recency + 0.30 * candidate.urgency);
 }
 

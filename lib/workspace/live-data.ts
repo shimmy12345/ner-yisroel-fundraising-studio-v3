@@ -9,6 +9,7 @@ import { buildDonorRecommendation } from "../relationships/recommendation-rank.t
 import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
+import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS } from "./suggestion-candidates.ts";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -183,19 +184,25 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   }
   const openPledgeByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openPledgeByDonor.has(item.donor_id)) openPledgeByDonor.set(item.donor_id, item);
-  const contactGapDonorIds = new Set(contacts.filter((item) => { const days = item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null; return days == null || days >= 90; }).map((item) => item.id));
   const yahrtzeitsByDonor = new Map<string, YahrtzeitRow[]>();
   for (const row of yahrtzeitRows.results) {
     if (!yahrtzeitsByDonor.has(row.donor_id)) yahrtzeitsByDonor.set(row.donor_id, []);
     yahrtzeitsByDonor.get(row.donor_id)!.push(row);
   }
-  // Membership here is over-inclusive on purpose -- a donor whose only
-  // yahrtzeit is months away still enters the shared per-donor loop below,
-  // but buildDonorRecommendation naturally returns null for them (outside
-  // yahrtzeit_outreach's lead window, nothing else qualifying), and the
-  // loop already skips a null recommendation. Simpler than precomputing
-  // "is the soonest one within the window" twice.
-  const suggestionDonorIds = new Set<string>([...recentGiftByDonor.keys(), ...openPledgeByDonor.keys(), ...contactGapDonorIds, ...yahrtzeitsByDonor.keys()]);
+  // At real scale, "no recent contact" is most of the donor roster (247 of
+  // 248 in the incident that prompted this bound), so it's the only
+  // category below that's bounded -- every donor with a real gift, pledge,
+  // or a yahrtzeit actually inside its own lead window is kept in full,
+  // unbounded. See lib/workspace/suggestion-candidates.ts for the
+  // monotonicity argument this bound relies on.
+  const suggestionDonorIds = selectSuggestionDonorIds({
+    giftDonorIds: recentGiftByDonor.keys(),
+    pledgeDonorIds: openPledgeByDonor.keys(),
+    yahrtzeitRows: yahrtzeitRows.results.map((row) => ({ donorId: row.donor_id, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
+    contactGapCandidates: contacts.map((item) => ({ donorId: item.id, daysSinceLastContact: item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null })),
+    timezone,
+    now,
+  });
 
   const reminderByDonor = new Map(reminders.results.map((item) => [item.donor_id, item]));
   const donorById = new Map(donors.results.map((item) => [item.id, item]));
@@ -264,7 +271,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
 
   const activeQueue = dedupeRelationshipQueue(ranked, new Set(dismissals.results.map((item) => item.item_key)));
   const allPriorities: WorkspacePriority[] = activeQueue.map(({ rank: _rank, sortAt: _sortAt, ...item }) => ({ ...item, bucket: relationshipQueueBucket(item.dueAt, now, timezone) }));
-  const deduped = allPriorities.slice(0, Math.max(5, Math.min(priorityLimit, 50)));
+  const deduped = allPriorities.slice(0, Math.max(5, Math.min(priorityLimit, HOMEPAGE_MAX_RESULTS)));
   const relationshipQueue = groupRelationshipQueue(deduped.map((item, index) => ({ ...item, rank: index, sortAt: item.dueAt ?? Number.MAX_SAFE_INTEGER })), now, timezone);
 
   const scheduled = scheduledActivities.results.map((item) => ({ row: item, activity: scheduledActivity(item, timezone, now) }));
