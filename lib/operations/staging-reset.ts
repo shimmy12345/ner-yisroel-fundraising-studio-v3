@@ -34,6 +34,9 @@ export const STAGING_RESET_TABLE_ORDER = [
   // deletion's audit row can outlive it), so it's deleted first.
   "yahrtzeit_changes",
   "yahrtzeits",
+  // Same reasoning as yahrtzeit_changes/yahrtzeits above.
+  "important_date_changes",
+  "important_dates",
   // Donor Research (Stage A) -- depend only on `donors`/`users` and each
   // other. donor_research_finding_sources and donor_research_findings must
   // precede donor_research_runs (which they reference); donor_research_sources

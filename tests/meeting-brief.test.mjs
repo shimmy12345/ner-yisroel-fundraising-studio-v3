@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { buildMeetingBrief } from "../lib/relationships/meeting-brief-model.ts";
+import { buildMeetingBrief, familyDateLine } from "../lib/relationships/meeting-brief-model.ts";
 
 const donor = {
   id: "donor-a",
@@ -69,5 +69,31 @@ assert.match(donorPage, /Prepare for Meeting/);
 assert.match(today, /activity\.prepareHref/);
 assert.match(today, />Prepare</);
 assert.match(capturePage, /allowedKinds\.has\(requestedParams\.type/);
+
+// --- familyImportantDates: one unified collection, type-specific fields
+// preserved (Hebrew date, deceased name, relationship, ambiguity), never
+// implying outreach already occurred. ---
+const yahrtzeitLine = familyDateLine({ type: "yahrtzeit", deceasedNameEnglish: "Sarah Cohen", deceasedNameHebrew: "שרה", personName: null, relationship: "Mother", shortLabel: "5 Elul", nextOccurrenceLabel: "Aug 18, 2026", ambiguous: false, ambiguityNote: null });
+assert.equal(yahrtzeitLine, "Mother's yahrtzeit is 5 Elul; next occurrence Aug 18, 2026.");
+const birthdayLine = familyDateLine({ type: "birthday", deceasedNameEnglish: null, deceasedNameHebrew: null, personName: "David Cohen", relationship: "Donor", shortLabel: "Aug 24", nextOccurrenceLabel: "Aug 24, 2026", ambiguous: false, ambiguityNote: null });
+assert.equal(birthdayLine, "David Cohen's Birthday: Aug 24; next occurrence Aug 24, 2026.");
+const anniversaryLine = familyDateLine({ type: "anniversary", deceasedNameEnglish: null, deceasedNameHebrew: null, personName: null, relationship: null, shortLabel: "Jun 12", nextOccurrenceLabel: "Jun 12, 2027", ambiguous: false, ambiguityNote: null });
+assert.equal(anniversaryLine, "Wedding anniversary: Jun 12; next occurrence Jun 12, 2027.");
+// Never describes an upcoming date as if outreach already happened.
+for (const line of [yahrtzeitLine, birthdayLine, anniversaryLine]) assert.doesNotMatch(line, /\b(sent|reached out|contacted|called|wished)\b/i);
+// Ambiguity note (Feb 29 fallback / Adar leap year) is surfaced, never hidden.
+const ambiguousBirthdayLine = familyDateLine({ type: "birthday", deceasedNameEnglish: null, deceasedNameHebrew: null, personName: "Leap Person", relationship: null, shortLabel: "Feb 28", nextOccurrenceLabel: "Feb 28, 2027", ambiguous: true, ambiguityNote: "Recorded as Feb 29; 2027 isn't a leap year, so Feb 28 is shown." });
+assert.match(ambiguousBirthdayLine, /isn't a leap year/);
+
+// familyImportantDates passes through buildMeetingBrief unchanged, holding
+// a mix of all three types with type-specific fields intact.
+const mixedDates = [
+  { type: "yahrtzeit", deceasedNameEnglish: "Sarah Cohen", deceasedNameHebrew: "שרה", personName: null, relationship: "Mother", shortLabel: "5 Elul", nextOccurrenceLabel: "Aug 18, 2026", ambiguous: false, ambiguityNote: null },
+  { type: "birthday", deceasedNameEnglish: null, deceasedNameHebrew: null, personName: "David Cohen", relationship: "Donor", shortLabel: "Aug 24", nextOccurrenceLabel: "Aug 24, 2026", ambiguous: false, ambiguityNote: null },
+  { type: "anniversary", deceasedNameEnglish: null, deceasedNameHebrew: null, personName: null, relationship: null, shortLabel: "Jun 12", nextOccurrenceLabel: "Jun 12, 2027", ambiguous: false, ambiguityNote: null },
+];
+const briefWithDates = buildMeetingBrief(donor, [], [], [], [], 0, null, mixedDates);
+assert.equal(briefWithDates.familyImportantDates.length, 3);
+assert.deepEqual(briefWithDates.familyImportantDates, mixedDates, "familyImportantDates must pass through unchanged -- yahrtzeit-specific fields (Hebrew date, deceased name) must survive alongside birthday/anniversary entries");
 
 process.stdout.write("Meeting brief checks passed.\n");

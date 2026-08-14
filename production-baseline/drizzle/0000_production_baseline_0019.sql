@@ -345,6 +345,39 @@ CREATE TABLE `import_preview_sessions` (
   FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `important_date_changes` (
+  `id` text PRIMARY KEY NOT NULL,
+  `important_date_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `action` text NOT NULL CHECK (`action` IN ('created','updated','deleted')),
+  `changed_fields` text NOT NULL,
+  `before_json` text,
+  `after_json` text,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `important_dates` (
+  `id` text PRIMARY KEY NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `type` text NOT NULL CHECK (`type` IN ('birthday','anniversary')),
+  `person_name` text,
+  `relationship` text,
+  `month` integer NOT NULL,
+  `day` integer NOT NULL,
+  `year` integer,
+  `notes` text,
+  `source` text NOT NULL CHECK (`source` IN ('manual')),
+  `fingerprint` text NOT NULL,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `interactions` (
   `id` text PRIMARY KEY NOT NULL,
   `donor_id` text NOT NULL,
@@ -609,6 +642,14 @@ CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sess
 
 CREATE INDEX `import_preview_sessions_owner_status_idx` ON `import_preview_sessions` (`owner_user_id`,`status`,`expires_at`);
 
+CREATE INDEX `important_date_changes_important_date_idx` ON `important_date_changes` (`important_date_id`,`created_at`);
+
+CREATE INDEX `important_dates_donor_idx` ON `important_dates` (`donor_id`,`type`,`month`,`day`);
+
+CREATE UNIQUE INDEX `important_dates_fingerprint_idx` ON `important_dates` (`fingerprint`);
+
+CREATE INDEX `important_dates_user_idx` ON `important_dates` (`user_id`);
+
 CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`);
 
 CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`);
@@ -642,5 +683,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','1b90a44af8b32f7fb55af6038de5c07582f918e66571a0754c506b883b6f0e8f',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','eb966e352b8314efc364591be18a8e2677bcca04905dd4fb9bb1c8613b81d151',1785944072);
 PRAGMA optimize;

@@ -6,6 +6,7 @@ import { classifyAssistantPrompt, RuleBasedAIService } from "../../../lib/ai/rul
 import type { AssistantContextSnapshot, AssistantTask } from "../../../lib/ai/types";
 import { importedContextLine } from "../../../lib/relationships/historical-context";
 import { loadMeetingBrief } from "../../../lib/relationships/meeting-brief";
+import { familyDateLine } from "../../../lib/relationships/meeting-brief-model";
 import { logger } from "../../../lib/logger";
 import { getDataMode } from "../../../lib/workspace/mode";
 
@@ -38,7 +39,7 @@ export async function POST(request: Request) {
     // for it to read.
     const primaryMeetingBrief = mode === "live" && primaryId ? await loadMeetingBrief(profile.id, primaryId, profile.timezone, now) : null;
     const primaryRecommendation = primaryMeetingBrief?.recommendation ?? null;
-    const familyYahrtzeits = (primaryMeetingBrief?.familyYahrtzeits ?? []).map((item) => `${item.relationship}'s yahrtzeit is ${item.hebrewLabel}; next occurrence ${item.nextOccurrenceLabel}.`);
+    const familyImportantDates = (primaryMeetingBrief?.familyImportantDates ?? []).map(familyDateLine);
     const [donor, interactions, recommendations, historicalContext] = primaryId ? await Promise.all([
       env.DB.prepare(`SELECT id, display_name, relationship_summary, institutional_memory FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"}`).bind(...(mode === "demo" ? [primaryId] : [primaryId, profile.id])).first<DonorRow>(),
       env.DB.prepare(`SELECT id, summary, occurred_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at)) ORDER BY occurred_at DESC LIMIT 1`).bind(...(mode === "demo" ? [primaryId, now] : [primaryId, profile.id, now])).all<InteractionRow>(),
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
     const latest = interactions.results[0];
     const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: profile.timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
     const snapshot: AssistantContextSnapshot = {
-      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyYahrtzeits },
+      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyImportantDates },
       latestInteraction: latest ? { id: latest.id, summary: latest.summary.replace("\n", ": "), occurredAt: new Date(latest.occurred_at * 1000).toISOString() } : null,
       recommendations: recommendations.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at ? new Date(item.due_at * 1000).toISOString() : null })),
       priorities: brief.priorities.map(({ name, label, reason, why, action }) => ({ name, label, reason, why, action })), meetings: brief.meetings, gifts: brief.gifts.map(({ id, name, amount, detail }) => ({ id, name, amount, detail })),

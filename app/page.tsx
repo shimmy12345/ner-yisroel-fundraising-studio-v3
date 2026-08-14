@@ -61,7 +61,7 @@ function RelationshipDateEventRow({ event }: { event: WorkspaceRelationshipDateE
       </div>
       <p className="relationship-date-row-meaning">
         <span className="event-type">{event.label}</span>
-        {event.relationshipPhrase} · {event.hebrewDateLabel}
+        {event.relationshipPhrase}{event.secondaryDateLabel ? ` · ${event.secondaryDateLabel}` : ""}
       </p>
       {event.provenanceName && <p className="relationship-date-row-provenance">
         Deceased: {event.provenanceName}

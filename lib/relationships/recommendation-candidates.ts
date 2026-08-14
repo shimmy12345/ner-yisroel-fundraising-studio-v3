@@ -16,7 +16,9 @@ export type RecommendationCandidateKind =
   | "relationship_opportunity"
   | "solicit"
   | "reconnect_contact_gap"
-  | "yahrtzeit_outreach";
+  | "yahrtzeit_outreach"
+  | "birthday_outreach"
+  | "anniversary_outreach";
 
 // confirmed: a real interactions/recommendations/giving_activities row.
 // narrative: donors.relationship_summary/institutional_memory -- human-
@@ -235,14 +237,18 @@ function reconnectContactGapCandidate(evidence: RecommendationEvidence): Recomme
 // soonest-upcoming yahrtzeit is considered -- consistent with every other
 // "most relevant fact" field in this evidence (mostRecentPaidGift,
 // openPledge, lastCompletedInteraction all pick one, not a list).
-// Exported so lib/workspace/suggestion-candidates.ts can pre-filter which
-// donors are even worth full evidence-building for, using the exact same
-// window this candidate itself gates on -- never a duplicated magic number.
-export const YAHRTZEIT_LEAD_WINDOW_DAYS = 14;
+// Exported so lib/workspace/suggestion-candidates.ts and
+// lib/workspace/relationship-date-events.ts can pre-filter/gate on the
+// exact same window every relationship-date outreach candidate (yahrtzeit,
+// birthday, anniversary) uses -- never a duplicated magic number. Shared
+// across all three date types deliberately: Coming Up is meant to feel like
+// one relationship calendar with one consistent "how far ahead" horizon,
+// not a different lead time per type.
+export const RELATIONSHIP_DATE_LEAD_WINDOW_DAYS = 14;
 
 function yahrtzeitOutreachCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const soonest = [...evidence.yahrtzeits].sort((a, b) => a.daysUntil - b.daysUntil)[0];
-  if (!soonest || soonest.daysUntil > YAHRTZEIT_LEAD_WINDOW_DAYS) return null;
+  if (!soonest || soonest.daysUntil > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) return null;
   const englishDate = dateLabel(soonest.nextOccurrenceAt);
   const nameSuffix = soonest.deceasedNameHebrew ? ` (${soonest.deceasedNameHebrew})` : "";
   return {
@@ -255,7 +261,55 @@ function yahrtzeitOutreachCandidate(evidence: RecommendationEvidence): Recommend
     certainty: "confirmed",
     specificity: 0.85,
     recency: recencyScore(soonest.daysUntil, 30),
-    urgency: recencyScore(soonest.daysUntil, YAHRTZEIT_LEAD_WINDOW_DAYS),
+    urgency: recencyScore(soonest.daysUntil, RELATIONSHIP_DATE_LEAD_WINDOW_DAYS),
+    supportingDate: soonest.nextOccurrenceAt,
+  };
+}
+
+// Same awareness-vs-urgency split as yahrtzeitOutreachCandidate above: the
+// donor-profile/Meeting Brief "Important Dates" list shows every recorded
+// birthday unconditionally; this candidate is the separate "is it worth
+// actively suggesting outreach right now" question, gated by the same
+// shared lead window and scored the same way.
+function birthdayOutreachCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
+  const birthdays = evidence.importantDates.filter((item) => item.type === "birthday");
+  const soonest = [...birthdays].sort((a, b) => a.daysUntil - b.daysUntil)[0];
+  if (!soonest || soonest.daysUntil > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) return null;
+  const englishDate = dateLabel(soonest.nextOccurrenceAt);
+  const who = soonest.personName ?? "them";
+  const ageNote = soonest.derivedYears !== null ? ` ${who} is turning ${soonest.derivedYears}.` : "";
+  return {
+    kind: "birthday_outreach",
+    action: `Reach out to wish ${who} a happy birthday on ${soonest.label}.`,
+    why: (soonest.daysUntil === 0 ? "The birthday is today." : `The birthday is in ${soonest.daysUntil} day${soonest.daysUntil === 1 ? "" : "s"}, on ${englishDate}.`) + ageNote,
+    evidence: [`${who}'s birthday is ${soonest.label}, next occurrence ${englishDate}.${ageNote}${soonest.ambiguous ? ` ${soonest.ambiguityNote}` : ""}`],
+    confidence: soonest.ambiguous ? "medium" : "high",
+    timing: englishDate,
+    certainty: "confirmed",
+    specificity: 0.85,
+    recency: recencyScore(soonest.daysUntil, 30),
+    urgency: recencyScore(soonest.daysUntil, RELATIONSHIP_DATE_LEAD_WINDOW_DAYS),
+    supportingDate: soonest.nextOccurrenceAt,
+  };
+}
+
+function anniversaryOutreachCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
+  const anniversaries = evidence.importantDates.filter((item) => item.type === "anniversary");
+  const soonest = [...anniversaries].sort((a, b) => a.daysUntil - b.daysUntil)[0];
+  if (!soonest || soonest.daysUntil > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) return null;
+  const englishDate = dateLabel(soonest.nextOccurrenceAt);
+  const yearsNote = soonest.derivedYears !== null ? ` This will be ${soonest.derivedYears} year${soonest.derivedYears === 1 ? "" : "s"} married.` : "";
+  return {
+    kind: "anniversary_outreach",
+    action: `Send a note ahead of their wedding anniversary on ${soonest.label}.`,
+    why: (soonest.daysUntil === 0 ? "The anniversary is today." : `The anniversary is in ${soonest.daysUntil} day${soonest.daysUntil === 1 ? "" : "s"}, on ${englishDate}.`) + yearsNote,
+    evidence: [`Wedding anniversary: ${soonest.label}, next occurrence ${englishDate}.${yearsNote}${soonest.ambiguous ? ` ${soonest.ambiguityNote}` : ""}`],
+    confidence: soonest.ambiguous ? "medium" : "high",
+    timing: englishDate,
+    certainty: "confirmed",
+    specificity: 0.85,
+    recency: recencyScore(soonest.daysUntil, 30),
+    urgency: recencyScore(soonest.daysUntil, RELATIONSHIP_DATE_LEAD_WINDOW_DAYS),
     supportingDate: soonest.nextOccurrenceAt,
   };
 }
@@ -270,5 +324,7 @@ export function generateCandidates(evidence: RecommendationEvidence): Recommenda
     solicitCandidate(evidence),
     reconnectContactGapCandidate(evidence),
     yahrtzeitOutreachCandidate(evidence),
+    birthdayOutreachCandidate(evidence),
+    anniversaryOutreachCandidate(evidence),
   ].filter((candidate): candidate is RecommendationCandidate => candidate !== null);
 }

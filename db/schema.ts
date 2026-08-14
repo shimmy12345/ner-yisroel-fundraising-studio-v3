@@ -433,6 +433,55 @@ export const yahrtzeitChanges = sqliteTable("yahrtzeit_changes", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [index("yahrtzeit_changes_yahrtzeit_idx").on(table.yahrtzeitId, table.createdAt)]);
 
+// Birthday and Anniversary -- Gregorian-recurring relationship dates.
+// Deliberately a separate table from yahrtzeits rather than a merged
+// "important dates" table: the two Gregorian types share identical
+// recurrence semantics (month/day/optional year, Feb 29 policy) with each
+// other but not with yahrtzeit's Hebrew-calendar fields, so sharing a table
+// with yahrtzeit would mean either weakening its Hebrew-specific columns or
+// carrying permanently-null Gregorian columns on every yahrtzeit row (and
+// vice versa) for no benefit -- yahrtzeit data is never migrated here.
+// personName is required for type='birthday' (whose birthday), NULL for
+// type='anniversary' (a household-level fact, not a specific person's).
+// The Gregorian occurrence itself is never stored, same convention as
+// yahrtzeits' Hebrew occurrence -- recalculated on every read (see
+// lib/calendar/gregorian-recurring-date.ts) so it advances automatically.
+export const importantDates = sqliteTable("important_dates", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  type: text("type", { enum: ["birthday", "anniversary"] }).notNull(),
+  personName: text("person_name"),
+  relationship: text("relationship"),
+  month: integer("month").notNull(),
+  day: integer("day").notNull(),
+  year: integer("year"),
+  notes: text("notes"),
+  source: text("source", { enum: ["manual"] }).notNull(),
+  fingerprint: text("fingerprint").notNull(),
+  ...timestamps,
+}, (table) => [
+  uniqueIndex("important_dates_fingerprint_idx").on(table.fingerprint),
+  index("important_dates_donor_idx").on(table.donorId, table.type, table.month, table.day),
+  index("important_dates_user_idx").on(table.userId),
+]);
+
+// Append-only create/update/delete history for important_dates, matching
+// yahrtzeitChanges' shape exactly. importantDateId is deliberately not a
+// foreign key -- a deletion's audit row must outlive the important_dates
+// row it describes.
+export const importantDateChanges = sqliteTable("important_date_changes", {
+  id: text("id").primaryKey(),
+  importantDateId: text("important_date_id").notNull(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  action: text("action", { enum: ["created", "updated", "deleted"] }).notNull(),
+  changedFields: text("changed_fields", { mode: "json" }).$type<string[]>().notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("important_date_changes_important_date_idx").on(table.importantDateId, table.createdAt)]);
+
 // Donor Research (Stage A) -- provider-agnostic, manual-entry only. No
 // external network calls anywhere in this feature yet; see
 // lib/research/manual-provider.ts. Evidence entered before identity

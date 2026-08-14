@@ -36,6 +36,7 @@ const emptyInput = {
   institutionalMemory: null,
   historicalContext: [],
   yahrtzeits: [],
+  importantDates: [],
 };
 
 function reconnectCandidateFor(daysSinceContact) {
@@ -112,10 +113,12 @@ async function run() {
     const giftDonorId = `donor-${totalDonors - 1}`;
     const pledgeDonorId = `donor-${totalDonors - 2}`;
     const yahrtzeitDonorId = `donor-${totalDonors - 3}`;
-    // Make sure these three are NOT already stale-enough to land in the
+    const birthdayDonorId = `donor-${totalDonors - 6}`;
+    const anniversaryDonorId = `donor-${totalDonors - 7}`;
+    // Make sure these five are NOT already stale-enough to land in the
     // bounded pool on their own merits -- give them recent contact, so
     // the only reason they'd be selected is their real evidence.
-    for (const id of [giftDonorId, pledgeDonorId, yahrtzeitDonorId]) {
+    for (const id of [giftDonorId, pledgeDonorId, yahrtzeitDonorId, birthdayDonorId, anniversaryDonorId]) {
       const row = contactGapCandidates.find((c) => c.donorId === id);
       row.daysSinceLastContact = 5;
     }
@@ -125,7 +128,12 @@ async function run() {
       pledgeDonorIds: [pledgeDonorId],
       // 3 days out -- inside the 14-day lead window.
       yahrtzeitRows: [{ donorId: yahrtzeitDonorId, hebrewMonth: "Elul", hebrewDay: 3 }],
-      giftDonorId, pledgeDonorId, yahrtzeitDonorId,
+      // Aug 16/17 relative to NOW (Aug 13, 2026) -- 3/4 days out, inside window.
+      importantDateRows: [
+        { donorId: birthdayDonorId, month: 8, day: 16 },
+        { donorId: anniversaryDonorId, month: 8, day: 17 },
+      ],
+      giftDonorId, pledgeDonorId, yahrtzeitDonorId, birthdayDonorId, anniversaryDonorId,
     };
   }
 
@@ -135,6 +143,7 @@ async function run() {
       giftDonorIds: fixture.giftDonorIds,
       pledgeDonorIds: fixture.pledgeDonorIds,
       yahrtzeitRows: fixture.yahrtzeitRows,
+      importantDateRows: fixture.importantDateRows,
       contactGapCandidates: fixture.contactGapCandidates,
       timezone: TIMEZONE,
       now: NOW,
@@ -142,13 +151,17 @@ async function run() {
 
     // Bounded: nowhere near the full donor count, and does not grow
     // proportionally with it.
-    assert.ok(selected.size <= CONTACT_GAP_POOL_SIZE + 3, `selected pool (${selected.size}) must stay bounded near CONTACT_GAP_POOL_SIZE regardless of ${totalDonors} total donors`);
+    // Tolerance covers the 5 non-contact-gap donors unioned in on top of the
+    // bounded contact-gap set: gift, pledge, yahrtzeit, birthday, anniversary.
+    assert.ok(selected.size <= CONTACT_GAP_POOL_SIZE + 5, `selected pool (${selected.size}) must stay bounded near CONTACT_GAP_POOL_SIZE regardless of ${totalDonors} total donors`);
     assert.ok(selected.size < totalDonors, "the bounded pool must be meaningfully smaller than the full donor set at real scale");
 
     // Every urgent-evidence donor survives, despite being placed last.
     assert.ok(selected.has(fixture.giftDonorId), `gift donor must be selected at ${totalDonors} donors`);
     assert.ok(selected.has(fixture.pledgeDonorId), `pledge donor must be selected at ${totalDonors} donors`);
     assert.ok(selected.has(fixture.yahrtzeitDonorId), `within-window yahrtzeit donor must be selected at ${totalDonors} donors`);
+    assert.ok(selected.has(fixture.birthdayDonorId), `within-window birthday donor must be selected at ${totalDonors} donors`);
+    assert.ok(selected.has(fixture.anniversaryDonorId), `within-window anniversary donor must be selected at ${totalDonors} donors`);
 
     // The stalest donors ARE represented (proving the bound is by
     // staleness, not by donor-id ordering or array position). Computed
@@ -186,6 +199,21 @@ async function run() {
     });
     assert.equal(selectedWithDistant.has(distantYahrtzeitDonorId), false, "a yahrtzeit far outside the lead window must not pull its donor into the bounded pool");
 
+    // Same check for an out-of-window birthday.
+    const distantBirthdayDonorId = `donor-${totalDonors - 8}`;
+    const distantBirthdayRow = fixture.contactGapCandidates.find((c) => c.donorId === distantBirthdayDonorId);
+    distantBirthdayRow.daysSinceLastContact = 5;
+    const selectedWithDistantBirthday = selectSuggestionDonorIds({
+      giftDonorIds: fixture.giftDonorIds,
+      pledgeDonorIds: fixture.pledgeDonorIds,
+      yahrtzeitRows: fixture.yahrtzeitRows,
+      importantDateRows: [...fixture.importantDateRows, { donorId: distantBirthdayDonorId, month: 1, day: 1 }], // months away relative to NOW
+      contactGapCandidates: fixture.contactGapCandidates,
+      timezone: TIMEZONE,
+      now: NOW,
+    });
+    assert.equal(selectedWithDistantBirthday.has(distantBirthdayDonorId), false, "a birthday far outside the lead window must not pull its donor into the bounded pool");
+
     // --- end-to-end: run the real canonical engine on the bounded set and
     // confirm the urgent donors' recommendations come out correctly. This
     // is the strongest available proof that bounding candidate selection
@@ -213,6 +241,22 @@ async function run() {
       yahrtzeits: [{ deceasedNameEnglish: "Test Person", deceasedNameHebrew: null, relationship: "Mother", hebrewMonth: "Elul", hebrewDay: 3 }],
     }, NOW, TIMEZONE);
     assert.equal(buildDonorRecommendation(yahrtzeitEvidence).kind, "yahrtzeit_outreach");
+
+    const birthdayEvidence = buildRecommendationEvidence({
+      ...emptyInput,
+      donorId: fixture.birthdayDonorId,
+      lastContactAt: daysAgo(5),
+      importantDates: [{ type: "birthday", personName: "Test Person", relationship: null, month: 8, day: 16, year: null }],
+    }, NOW, TIMEZONE);
+    assert.equal(buildDonorRecommendation(birthdayEvidence).kind, "birthday_outreach");
+
+    const anniversaryEvidence = buildRecommendationEvidence({
+      ...emptyInput,
+      donorId: fixture.anniversaryDonorId,
+      lastContactAt: daysAgo(5),
+      importantDates: [{ type: "anniversary", personName: null, relationship: null, month: 8, day: 17, year: null }],
+    }, NOW, TIMEZONE);
+    assert.equal(buildDonorRecommendation(anniversaryEvidence).kind, "anniversary_outreach");
 
     console.log(`Scale fixture (${totalDonors} donors): bounded pool size ${selected.size}, all urgent-evidence donors preserved.`);
   }

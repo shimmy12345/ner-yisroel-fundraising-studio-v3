@@ -6,12 +6,12 @@
 // scale (see tests/suggestion-candidates.test.mjs).
 //
 // Every category except "no recent contact" is kept in full, unbounded:
-// a real paid gift, a real open pledge, and a yahrtzeit actually inside
-// its own lead window are all driven by real, rare events -- their count
-// scales with donor *activity*, not with total donor count. Only the
-// contact-gap bucket scales with the size of the donor base itself (at
-// real scale, most of the roster has no recent contact), so it's the only
-// one that needs bounding.
+// a real paid gift, a real open pledge, and a yahrtzeit/birthday/
+// anniversary actually inside its own lead window are all driven by real,
+// rare events -- their count scales with donor *activity*, not with total
+// donor count. Only the contact-gap bucket scales with the size of the
+// donor base itself (at real scale, most of the roster has no recent
+// contact), so it's the only one that needs bounding.
 //
 // Open reminders are deliberately NOT part of this selection at all --
 // lib/workspace/live-data.ts's separate, unconditional reminder loop
@@ -20,7 +20,8 @@
 // untouched by this module.
 
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
-import { YAHRTZEIT_LEAD_WINDOW_DAYS } from "../relationships/recommendation-candidates.ts";
+import { nextGregorianRecurrence } from "../calendar/gregorian-recurring-date.ts";
+import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendation-candidates.ts";
 
 // The hard ceiling live-data.ts ever displays on the homepage
 // (`Math.min(priorityLimit, 50)`). The contact-gap pool size below is
@@ -43,6 +44,7 @@ export const CONTACT_GAP_POOL_SIZE = HOMEPAGE_MAX_RESULTS * CONTACT_GAP_POOL_HEA
 
 export type ContactGapCandidate = { donorId: string; daysSinceLastContact: number | null };
 export type YahrtzeitCandidateRow = { donorId: string; hebrewMonth: HebrewMonthName; hebrewDay: number };
+export type ImportantDateCandidateRow = { donorId: string; month: number; day: number };
 
 // Mirrors recommendation-evidence.ts's own daysBetween exactly (not
 // imported, to avoid coupling this module to that one's internals for a
@@ -78,6 +80,7 @@ export function selectSuggestionDonorIds(input: {
   giftDonorIds: Iterable<string>;
   pledgeDonorIds: Iterable<string>;
   yahrtzeitRows: YahrtzeitCandidateRow[];
+  importantDateRows?: ImportantDateCandidateRow[];
   contactGapCandidates: ContactGapCandidate[];
   timezone: string;
   now: number;
@@ -98,7 +101,23 @@ export function selectSuggestionDonorIds(input: {
       const occurrence = nextYahrtzeitOccurrence(row.hebrewMonth, row.hebrewDay, input.timezone, input.now);
       return daysBetween(occurrence.primary.gregorianEpoch, input.now);
     }));
-    if (soonestDaysUntil <= YAHRTZEIT_LEAD_WINDOW_DAYS) selected.add(donorId);
+    if (soonestDaysUntil <= RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) selected.add(donorId);
+  }
+
+  // Birthday/anniversary donors within their own lead window are kept
+  // unbounded for the exact same reason as yahrtzeit above: driven by real,
+  // rare per-donor events, not by total donor count.
+  const importantDatesByDonor = new Map<string, ImportantDateCandidateRow[]>();
+  for (const row of input.importantDateRows ?? []) {
+    if (!importantDatesByDonor.has(row.donorId)) importantDatesByDonor.set(row.donorId, []);
+    importantDatesByDonor.get(row.donorId)!.push(row);
+  }
+  for (const [donorId, rows] of importantDatesByDonor) {
+    const soonestDaysUntil = Math.min(...rows.map((row) => {
+      const occurrence = nextGregorianRecurrence(row.month, row.day, input.timezone, input.now);
+      return daysBetween(occurrence.primary.gregorianEpoch, input.now);
+    }));
+    if (soonestDaysUntil <= RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) selected.add(donorId);
   }
 
   // Comparing by subtraction (b - a) breaks here: two never-contacted

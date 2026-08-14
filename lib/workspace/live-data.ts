@@ -10,7 +10,8 @@ import type { RecommendationCandidateKind } from "../relationships/recommendatio
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS } from "./suggestion-candidates.ts";
-import { buildYahrtzeitRelationshipDateEvents, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
+import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
+import type { ImportantDateType } from "../important-dates/validation.ts";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -25,6 +26,7 @@ type LatestInteractionRow = { donor_id: string; type: string; occurred_at: numbe
 type HistoricalContextRow = { donor_id: string; text: string; source: string; source_date: number | null };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
+type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -88,7 +90,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -146,6 +148,11 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // same way historicalContextRows feeds solicit/relationship_opportunity
     // above. Never joined into interactions/recommendations.
     demo ? Promise.resolve({ results: [] as YahrtzeitRow[] }) : env.DB.prepare(`SELECT id, donor_id, deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day FROM yahrtzeits WHERE user_id = ? LIMIT 5000`).bind(userId).all<YahrtzeitRow>(),
+    // Every in-scope donor's birthdays/anniversaries -- same cheap,
+    // unbounded-by-donor-count fetch as yahrtzeitRows above, feeding
+    // birthday_outreach/anniversary_outreach the same way. Never joined
+    // into interactions/recommendations.
+    demo ? Promise.resolve({ results: [] as ImportantDateRow[] }) : env.DB.prepare(`SELECT id, donor_id, type, person_name, relationship, month, day, year FROM important_dates WHERE user_id = ? LIMIT 5000`).bind(userId).all<ImportantDateRow>(),
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
@@ -190,16 +197,22 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     if (!yahrtzeitsByDonor.has(row.donor_id)) yahrtzeitsByDonor.set(row.donor_id, []);
     yahrtzeitsByDonor.get(row.donor_id)!.push(row);
   }
+  const importantDatesByDonor = new Map<string, ImportantDateRow[]>();
+  for (const row of importantDateRows.results) {
+    if (!importantDatesByDonor.has(row.donor_id)) importantDatesByDonor.set(row.donor_id, []);
+    importantDatesByDonor.get(row.donor_id)!.push(row);
+  }
   // At real scale, "no recent contact" is most of the donor roster (247 of
   // 248 in the incident that prompted this bound), so it's the only
   // category below that's bounded -- every donor with a real gift, pledge,
-  // or a yahrtzeit actually inside its own lead window is kept in full,
-  // unbounded. See lib/workspace/suggestion-candidates.ts for the
-  // monotonicity argument this bound relies on.
+  // or a yahrtzeit/birthday/anniversary actually inside its own lead window
+  // is kept in full, unbounded. See lib/workspace/suggestion-candidates.ts
+  // for the monotonicity argument this bound relies on.
   const suggestionDonorIds = selectSuggestionDonorIds({
     giftDonorIds: recentGiftByDonor.keys(),
     pledgeDonorIds: openPledgeByDonor.keys(),
     yahrtzeitRows: yahrtzeitRows.results.map((row) => ({ donorId: row.donor_id, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
+    importantDateRows: importantDateRows.results.map((row) => ({ donorId: row.donor_id, month: row.month, day: row.day })),
     contactGapCandidates: contacts.map((item) => ({ donorId: item.id, daysSinceLastContact: item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null })),
     timezone,
     now,
@@ -214,8 +227,9 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     historicalContextByDonor.get(row.donor_id)!.push(row);
   }
   const suggestionHrefByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "capture" };
-  // yahrtzeit_outreach has no entry here -- it's excluded from this ranked
-  // path entirely (see the continue below) and never looks this map up.
+  // yahrtzeit_outreach/birthday_outreach/anniversary_outreach have no entry
+  // here -- they're excluded from this ranked path entirely (see the
+  // continue below) and never look this map up.
   const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
   const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
   // live-data.ts's own "recent gift" bucket only ever draws from
@@ -241,6 +255,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       institutionalMemory: donorRow.institutional_memory,
       historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
       yahrtzeits: (yahrtzeitsByDonor.get(donorId) ?? []).map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
+      importantDates: (importantDatesByDonor.get(donorId) ?? []).map((row) => ({ type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
     }, now, timezone);
     const recommendation = buildDonorRecommendation(evidence);
     if (!recommendation) continue;
@@ -248,18 +263,20 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // already shown by the reminder loop above -- never a second,
     // duplicate card for the same donor.
     if (recommendation.kind === "honor_reminder") continue;
-    // yahrtzeit_outreach never competes for a homepage slot through this
-    // ranked/relationshipQueue path -- it must not need to beat a gift
+    // No relationship-date outreach candidate (yahrtzeit, birthday,
+    // anniversary) ever competes for a homepage slot through this ranked/
+    // relationshipQueue path -- none of them need to beat a gift
     // acknowledgment, pledge follow-up, or contact-gap candidate to be
-    // visible on the homepage. It's surfaced unconditionally instead via
+    // visible on the homepage. Each is surfaced unconditionally instead via
     // upcomingRelationshipDates below (Coming Up), built directly from the
-    // same lead-window fact, independent of this ranking. Suppressing it
-    // here only prevents a duplicate Coming Up card; the candidate itself
-    // is untouched and still used for the donor's Suggested Action
-    // elsewhere (donor profile, Meeting Brief, Assistant).
-    if (recommendation.kind === "yahrtzeit_outreach") continue;
-    // yahrtzeit_outreach is excluded above, so it never reaches this
-    // branch -- its Coming Up placement/sorting is entirely handled by
+    // same lead-window fact, independent of this ranking. Suppressing them
+    // here only prevents a duplicate Coming Up card; the candidates
+    // themselves are untouched and still used for the donor's Suggested
+    // Action elsewhere (donor profile, Meeting Brief, Assistant).
+    if (recommendation.kind === "yahrtzeit_outreach" || recommendation.kind === "birthday_outreach" || recommendation.kind === "anniversary_outreach") continue;
+    // yahrtzeit_outreach/birthday_outreach/anniversary_outreach are all
+    // excluded above, so none of them ever reach this branch -- their
+    // Coming Up placement/sorting is entirely handled by
     // upcomingRelationshipDates instead.
     const sortAt = recommendation.kind === "acknowledge_gift" ? -(gift?.activity_date ?? 0)
       : recommendation.kind === "follow_up_pledge" ? (pledge?.activity_date ?? 0)
@@ -300,17 +317,28 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const recentlyUpdated = donorLinks(recentUpdates.results.filter((item) => item.event_at > 0), "Updated");
 
   // Coming Up's date-driven relationship events: built directly from the
-  // yahrtzeit rows already fetched above, independent of the
-  // suggestionDonorIds/ranked path -- every donor with a yahrtzeit inside
-  // its lead window gets an event here, whether or not they were even
-  // selected into the bounded recommendation pool for other reasons.
+  // yahrtzeit/important-date rows already fetched above, independent of the
+  // suggestionDonorIds/ranked path -- every donor with a relationship date
+  // inside its lead window gets an event here, whether or not they were
+  // even selected into the bounded recommendation pool for other reasons.
+  // The two builders are concatenated and re-sorted together so Yahrtzeit,
+  // Birthday, and Anniversary events interleave in one chronological list
+  // -- including when two fall on the exact same date, both remain.
   const identityByDonor = new Map(donors.results.map((item) => [item.id, { donorName: item.display_name, ...identity(item) }]));
-  const upcomingRelationshipDates = buildYahrtzeitRelationshipDateEvents(
-    yahrtzeitRows.results.map((row) => ({ id: row.id, donorId: row.donor_id, deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
-    identityByDonor,
-    timezone,
-    now,
-  );
+  const upcomingRelationshipDates = [
+    ...buildYahrtzeitRelationshipDateEvents(
+      yahrtzeitRows.results.map((row) => ({ id: row.id, donorId: row.donor_id, deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
+      identityByDonor,
+      timezone,
+      now,
+    ),
+    ...buildImportantDateRelationshipEvents(
+      importantDateRows.results.map((row) => ({ id: row.id, donorId: row.donor_id, type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
+      identityByDonor,
+      timezone,
+      now,
+    ),
+  ].sort((a, b) => a.dateEpoch - b.dateEpoch);
   const morningBrief: WorkspaceMorningBrief = {
     meetingsToday: todaySchedule.filter((item) => item.type === "meeting").length,
     overdueFollowUps: reminders.results.filter((item) => item.due_at != null && dayKey(item.due_at, timezone) < todayKey).length,

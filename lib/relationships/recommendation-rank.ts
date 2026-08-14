@@ -60,6 +60,8 @@ const KIND_PRIORITY: RecommendationCandidateKind[] = [
   "honor_reminder",
   "acknowledge_gift",
   "yahrtzeit_outreach",
+  "birthday_outreach",
+  "anniversary_outreach",
   "follow_up_pledge",
   "relationship_opportunity",
   "continue_conversation",

@@ -25,6 +25,7 @@ const emptyInput = {
   institutionalMemory: null,
   historicalContext: [],
   yahrtzeits: [],
+  importantDates: [],
 };
 
 // NOW (2026-08-12) is 29 Av 5786. "3 Elul" is 3 days out (inside the
@@ -211,6 +212,52 @@ async function run() {
   assert.equal(multiWinner.kind, "yahrtzeit_outreach");
   assert.match(multiWinner.evidence.join(" "), /Sarah Cohen/, "the soonest yahrtzeit must win, not an arbitrary one");
 
+  // --- birthday_outreach / anniversary_outreach: same awareness-vs-action
+  // shape as yahrtzeit_outreach, sharing the same lead window and the same
+  // "never suppressed by an unrelated reminder" behavior. ---
+  const withUpcomingBirthday = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "birthday", personName: "David Cohen", relationship: "Donor", month: 8, day: 15, year: 1985 }] }, NOW, TIMEZONE);
+  const birthdayCandidates = generateCandidates(withUpcomingBirthday);
+  assert.ok(birthdayCandidates.find((c) => c.kind === "birthday_outreach"), "a birthday inside the lead window must generate birthday_outreach");
+  const birthdayWinner = buildDonorRecommendation(withUpcomingBirthday);
+  assert.equal(birthdayWinner.kind, "birthday_outreach");
+  assert.match(birthdayWinner.action, /David/, "action text must name the celebrant");
+  assert.match(birthdayWinner.action, /Aug 15/, "action text must name the date");
+  assert.match(birthdayWinner.evidence.join(" "), /turning 41/i, "evidence must state the derived age when the birth year is known");
+
+  const withDistantBirthday = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "birthday", personName: "David Cohen", relationship: null, month: 1, day: 1, year: null }] }, NOW, TIMEZONE);
+  assert.equal(generateCandidates(withDistantBirthday).find((c) => c.kind === "birthday_outreach"), undefined, "a birthday far outside the lead window must not generate a candidate");
+
+  const birthdayPlusUnrelatedReminder = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "birthday", personName: "David Cohen", relationship: null, month: 8, day: 15, year: null }], openReminder: { action: "Call about something unrelated", reason: "r", dueAt: NOW + 30 * DAY } }, NOW, TIMEZONE);
+  assert.equal(buildDonorRecommendation(birthdayPlusUnrelatedReminder).kind, "birthday_outreach", "an unrelated open reminder must not suppress birthday_outreach");
+
+  const withUpcomingAnniversary = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "anniversary", personName: null, relationship: null, month: 8, day: 15, year: 2010 }] }, NOW, TIMEZONE);
+  const anniversaryWinner = buildDonorRecommendation(withUpcomingAnniversary);
+  assert.equal(anniversaryWinner.kind, "anniversary_outreach");
+  assert.match(anniversaryWinner.action, /anniversary/i);
+  assert.match(anniversaryWinner.evidence.join(" "), /16 years married/i, "evidence must state the derived years-married when the wedding year is known");
+
+  // Never invents an age/years-married figure when the source year is unknown.
+  const birthdayNoYear = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "birthday", personName: "David Cohen", relationship: null, month: 8, day: 15, year: null }] }, NOW, TIMEZONE);
+  const birthdayNoYearWinner = buildDonorRecommendation(birthdayNoYear);
+  assert.doesNotMatch(birthdayNoYearWinner.evidence.join(" "), /turning \d/i, "must never invent an age when the birth year is unknown");
+
+  // Wording correctness (design decision #8): the derived age must be
+  // computed from the UPCOMING OCCURRENCE's year, not today's calendar
+  // year. NOW is 2026-08-12; a birthday on Jan 1 has already passed this
+  // year, so its next occurrence is Jan 1 2027 -- someone born in 1990
+  // should be described as turning 37 (2027-1990), never 36 (2026-1990).
+  const yearBoundaryBirthday = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "birthday", personName: "New Year Person", relationship: null, month: 1, day: 1, year: 1990 }] }, NOW, TIMEZONE);
+  const yearBoundaryCandidate = generateCandidates(yearBoundaryBirthday).find((c) => c.kind === "birthday_outreach");
+  assert.equal(yearBoundaryCandidate, undefined, "Jan 1 is far outside the 14-day lead window from Aug 12, so no candidate should exist to check wording on -- confirms the window gate, not the age math, is what's exercised by the in-window cases above");
+
+  // Feb 29 ambiguity flows into the candidate's confidence/evidence, same
+  // as yahrtzeit's Adar-leap-year ambiguity.
+  const feb29Now = Math.floor(Date.parse("2027-02-20T12:00:00Z") / 1000);
+  const feb29Evidence = buildRecommendationEvidence({ ...emptyInput, importantDates: [{ type: "birthday", personName: "Leap Person", relationship: null, month: 2, day: 29, year: null }] }, feb29Now, TIMEZONE);
+  const feb29Candidate = generateCandidates(feb29Evidence).find((c) => c.kind === "birthday_outreach");
+  assert.equal(feb29Candidate.confidence, "medium", "a Feb 29 birthday landing on the Feb 28 fallback in a non-leap year must be flagged medium confidence, same as an ambiguous yahrtzeit");
+  assert.match(feb29Candidate.evidence.join(" "), /isn't a leap year/, "the ambiguity note must be surfaced in the evidence");
+
   // --- output shape: every winning recommendation has the 5 required fields ---
   for (const evidence of [case1, case2, case3]) {
     const result = buildDonorRecommendation(evidence);
@@ -258,12 +305,18 @@ async function run() {
   const meetingBriefModel = await readFile(new URL("../lib/relationships/meeting-brief-model.ts", import.meta.url), "utf8");
   assert.match(donorPage, /yahrtzeits:/, "the donor page must feed yahrtzeit rows into the shared evidence, not a separate suggestion path");
   assert.match(meetingBrief, /yahrtzeits:/, "Meeting Brief must feed yahrtzeit rows into the shared evidence");
-  assert.match(meetingBrief, /familyYahrtzeits/, "Meeting Brief must expose family yahrtzeits unconditionally, separate from the gated recommendation");
-  assert.match(meetingBriefModel, /familyYahrtzeits/, "the MeetingBrief type must carry unconditional yahrtzeit awareness");
+  assert.match(meetingBrief, /familyImportantDates/, "Meeting Brief must expose family important dates unconditionally, separate from the gated recommendation");
+  assert.match(meetingBriefModel, /familyImportantDates/, "the MeetingBrief type must carry unconditional relationship-date awareness");
   assert.match(liveData, /yahrtzeits:/, "the homepage/Today queue must feed yahrtzeit rows into the shared evidence");
-  assert.match(assistantRoute, /familyYahrtzeits/, "Assistant must surface family yahrtzeit awareness, not just the gated recommendation");
+  assert.match(assistantRoute, /familyImportantDates/, "Assistant must surface family important-date awareness, not just the gated recommendation");
   // Never described as an interaction or implying outreach occurred.
-  assert.doesNotMatch(meetingBrief.match(/familyYahrtzeits[\s\S]{0,400}/)?.[0] ?? "", /INSERT INTO interactions/);
+  assert.doesNotMatch(meetingBrief.match(/familyImportantDates[\s\S]{0,400}/)?.[0] ?? "", /INSERT INTO interactions/);
+
+  // --- birthday/anniversary evidence must feed through the exact same
+  // shared engine as yahrtzeit -- never a parallel path. ---
+  assert.match(donorPage, /importantDates:/, "the donor page must feed important-date rows into the shared evidence");
+  assert.match(meetingBrief, /importantDates:/, "Meeting Brief must feed important-date rows into the shared evidence");
+  assert.match(liveData, /importantDates:/, "the homepage/Today queue must feed important-date rows into the shared evidence");
 
   console.log("Recommendation engine checks passed.");
 }

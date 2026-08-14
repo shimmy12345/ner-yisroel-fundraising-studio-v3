@@ -9,6 +9,8 @@
 
 import type { GiftSource } from "../giving/acknowledgment.ts";
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
+import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
+import type { ImportantDateType } from "../important-dates/validation.ts";
 
 export type RecommendationEvidenceInput = {
   donorId: string;
@@ -52,6 +54,11 @@ export type RecommendationEvidenceInput = {
   // Gregorian occurrence is computed here (see below), not stored anywhere,
   // so it advances automatically once a given year's date passes.
   yahrtzeits: Array<{ deceasedNameEnglish: string; deceasedNameHebrew: string | null; relationship: string; hebrewMonth: HebrewMonthName; hebrewDay: number }>;
+  // Birthdays/anniversaries -- same "background context, never a contact
+  // signal" status as yahrtzeits above, computed the same way: raw
+  // Gregorian month/day/year only, the current occurrence recalculated
+  // here (see lib/calendar/gregorian-recurring-date.ts), never stored.
+  importantDates: Array<{ type: ImportantDateType; personName: string | null; relationship: string | null; month: number; day: number; year: number | null }>;
 };
 
 export type YahrtzeitEvidence = {
@@ -61,6 +68,23 @@ export type YahrtzeitEvidence = {
   hebrewLabel: string;
   nextOccurrenceAt: number;
   daysUntil: number;
+  ambiguous: boolean;
+  ambiguityNote: string | null;
+};
+
+export type ImportantDateEvidence = {
+  type: ImportantDateType;
+  personName: string | null;
+  relationship: string | null;
+  label: string;
+  nextOccurrenceAt: number;
+  daysUntil: number;
+  // Age (birthday) or years married (anniversary), derived from the
+  // Gregorian YEAR THE UPCOMING OCCURRENCE FALLS IN -- never from today's
+  // calendar year -- so it always matches the specific occurrence being
+  // displayed, including when that occurrence has already rolled into next
+  // calendar year. Never stored; null when the source year is unknown.
+  derivedYears: number | null;
   ambiguous: boolean;
   ambiguityNote: string | null;
 };
@@ -79,6 +103,7 @@ export type RecommendationEvidence = {
   narrative: { relationshipSummary: string | null; institutionalMemory: string | null };
   historicalContext: Array<{ text: string; source: string; sourceDate: number | null }>;
   yahrtzeits: YahrtzeitEvidence[];
+  importantDates: ImportantDateEvidence[];
   now: number;
 };
 
@@ -95,6 +120,20 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
       hebrewLabel: occurrence.primary.hebrewLabel,
       nextOccurrenceAt: occurrence.primary.gregorianEpoch,
       daysUntil: daysBetween(occurrence.primary.gregorianEpoch, now),
+      ambiguous: occurrence.ambiguous,
+      ambiguityNote: occurrence.ambiguityNote,
+    };
+  });
+  const importantDates: ImportantDateEvidence[] = input.importantDates.map((item) => {
+    const occurrence = nextGregorianRecurrence(item.month, item.day, timezone, now);
+    return {
+      type: item.type,
+      personName: item.personName,
+      relationship: item.relationship,
+      label: occurrence.primary.label,
+      nextOccurrenceAt: occurrence.primary.gregorianEpoch,
+      daysUntil: daysBetween(occurrence.primary.gregorianEpoch, now),
+      derivedYears: item.year !== null ? yearsSinceForOccurrence(occurrence.primary.year, item.year) : null,
       ambiguous: occurrence.ambiguous,
       ambiguityNote: occurrence.ambiguityNote,
     };
@@ -119,6 +158,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
     narrative: { relationshipSummary: input.relationshipSummary, institutionalMemory: input.institutionalMemory },
     historicalContext: input.historicalContext,
     yahrtzeits,
+    importantDates,
     now,
   };
 }

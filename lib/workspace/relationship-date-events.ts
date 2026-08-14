@@ -22,7 +22,9 @@
 // here.
 
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
-import { YAHRTZEIT_LEAD_WINDOW_DAYS } from "../relationships/recommendation-candidates.ts";
+import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
+import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendation-candidates.ts";
+import type { ImportantDateType } from "../important-dates/validation.ts";
 
 export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary";
 
@@ -42,7 +44,14 @@ export type WorkspaceRelationshipDateEvent = {
   donorCode: string | null;
   label: string;
   relationshipPhrase: string;
-  hebrewDateLabel: string;
+  // Yahrtzeit's Hebrew date ("5 Elul") -- the only relationship-date type
+  // with a second calendar system alongside the Gregorian one. Birthday/
+  // anniversary have nothing to put here UNLESS a source year is known, in
+  // which case it carries a display-only derived count ("Turning 45",
+  // "25 years married") computed fresh from the occurrence's own year (see
+  // lib/calendar/gregorian-recurring-date.ts) -- never stored. Null when
+  // neither applies.
+  secondaryDateLabel: string | null;
   provenanceName: string | null;
   provenanceNameHebrew: string | null;
   dateLabel: string;
@@ -70,22 +79,34 @@ function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-// Only a short, plain word/phrase (letters, spaces, apostrophes, hyphens) is
-// safe to turn into possessive display grammar. Free-text relationship
-// values that don't match (blank, punctuation-heavy, unexpectedly long) fall
-// back to the noun alone -- "Yahrtzeit" rather than a broken phrase -- since
-// this is display-only and must never presume to correct or reject the
-// stored value itself.
+// Capitalizes each space-separated word (not just the string's first
+// character) so a full person name ("David Cohen") displays correctly, not
+// just a single relationship word ("Mother") -- both are valid subjects for
+// possessivePhrase below.
+function titleCaseWords(text: string): string {
+  return text.split(" ").map(capitalize).join(" ");
+}
+
+// Only a plain word/phrase (letters, spaces, apostrophes, hyphens) is safe
+// to turn into possessive display grammar. Free-text values that don't
+// match (blank, punctuation-heavy, absurdly long) fall back to the noun
+// alone -- "Yahrtzeit"/"Birthday" rather than a broken phrase -- since this
+// is display-only and must never presume to correct or reject the stored
+// value itself. The length cap is generous enough for a real full person
+// name (birthday's personName), not just a short relationship word.
 const SAFE_POSSESSIVE_SUBJECT = /^[A-Za-z][A-Za-z '-]*$/;
+const MAX_POSSESSIVE_SUBJECT_LENGTH = 60;
 
 // Natural possessive phrasing for display only, e.g. possessivePhrase("Mother",
-// "yahrtzeit") -> "Mother's yahrtzeit". Never writes back to or normalizes
-// the stored relationship value -- callers still pass the raw text through
-// unchanged wherever it's needed (audit history, exports, etc.).
+// "yahrtzeit") -> "Mother's yahrtzeit", or possessivePhrase("David Cohen",
+// "birthday") -> "David Cohen's birthday". Never writes back to or
+// normalizes the stored relationship/name value -- callers still pass the
+// raw text through unchanged wherever it's needed (audit history, exports,
+// etc.).
 export function possessivePhrase(subject: string, noun: string): string {
   const trimmed = subject.trim();
-  if (!trimmed || trimmed.length > 24 || !SAFE_POSSESSIVE_SUBJECT.test(trimmed)) return capitalize(noun);
-  const normalized = capitalize(trimmed.toLowerCase());
+  if (!trimmed || trimmed.length > MAX_POSSESSIVE_SUBJECT_LENGTH || !SAFE_POSSESSIVE_SUBJECT.test(trimmed)) return capitalize(noun);
+  const normalized = titleCaseWords(trimmed.toLowerCase());
   const possessive = normalized.endsWith("s") ? `${normalized}'` : `${normalized}'s`;
   return `${possessive} ${noun}`;
 }
@@ -104,7 +125,7 @@ export function buildYahrtzeitRelationshipDateEvents(
     const identity = identityByDonor.get(row.donorId);
     if (!identity) continue;
     const occurrence = nextYahrtzeitOccurrence(row.hebrewMonth, row.hebrewDay, timezone, now);
-    if (daysUntil(occurrence.primary.gregorianEpoch, now) > YAHRTZEIT_LEAD_WINDOW_DAYS) continue;
+    if (daysUntil(occurrence.primary.gregorianEpoch, now) > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) continue;
     events.push({
       id: `yahrtzeit:${row.id}`,
       type: "yahrtzeit",
@@ -114,9 +135,62 @@ export function buildYahrtzeitRelationshipDateEvents(
       donorCode: identity.donorCode,
       label: "Yahrtzeit",
       relationshipPhrase: possessivePhrase(row.relationship, "yahrtzeit"),
-      hebrewDateLabel: occurrence.primary.hebrewLabel,
+      secondaryDateLabel: occurrence.primary.hebrewLabel,
       provenanceName: row.deceasedNameEnglish,
       provenanceNameHebrew: row.deceasedNameHebrew,
+      dateLabel: new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(occurrence.primary.gregorianEpoch * 1000)),
+      dateEpoch: occurrence.primary.gregorianEpoch,
+      ambiguous: occurrence.ambiguous,
+    });
+  }
+  return events.sort((a, b) => a.dateEpoch - b.dateEpoch);
+}
+
+export type ImportantDateEventRow = {
+  id: string;
+  donorId: string;
+  type: ImportantDateType;
+  personName: string | null;
+  relationship: string | null;
+  month: number;
+  day: number;
+  year: number | null;
+};
+
+// Birthday/Anniversary builder -- the same generic shape as
+// buildYahrtzeitRelationshipDateEvents above, so Coming Up renders both
+// through the exact same RelationshipDateEventRow with no per-type
+// branching. provenanceName is deliberately left null for both: the
+// celebrant/household is already named in relationshipPhrase ("Shimmy's
+// birthday" / "Wedding anniversary"), so a second "who this is about" line
+// would only repeat it -- unlike yahrtzeit, where the deceased's name is
+// genuinely separate information from the relationship label.
+export function buildImportantDateRelationshipEvents(
+  rows: ImportantDateEventRow[],
+  identityByDonor: Map<string, DonorIdentityForEvent>,
+  timezone: string,
+  now: number,
+): WorkspaceRelationshipDateEvent[] {
+  const events: WorkspaceRelationshipDateEvent[] = [];
+  for (const row of rows) {
+    const identity = identityByDonor.get(row.donorId);
+    if (!identity) continue;
+    const occurrence = nextGregorianRecurrence(row.month, row.day, timezone, now);
+    if (daysUntil(occurrence.primary.gregorianEpoch, now) > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) continue;
+    const isBirthday = row.type === "birthday";
+    const derivedYears = row.year !== null ? yearsSinceForOccurrence(occurrence.primary.year, row.year) : null;
+    events.push({
+      id: `important-date:${row.id}`,
+      type: row.type,
+      donorId: row.donorId,
+      donorName: identity.donorName,
+      initials: identity.initials,
+      donorCode: identity.donorCode,
+      label: isBirthday ? "Birthday" : "Anniversary",
+      relationshipPhrase: isBirthday ? possessivePhrase(row.personName ?? "", "birthday") : "Wedding anniversary",
+      secondaryDateLabel: derivedYears === null ? null : isBirthday ? `Turning ${derivedYears}` : `${derivedYears} year${derivedYears === 1 ? "" : "s"} married`,
+      provenanceName: null,
+      provenanceNameHebrew: null,
       dateLabel: new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(occurrence.primary.gregorianEpoch * 1000)),
       dateEpoch: occurrence.primary.gregorianEpoch,
       ambiguous: occurrence.ambiguous,

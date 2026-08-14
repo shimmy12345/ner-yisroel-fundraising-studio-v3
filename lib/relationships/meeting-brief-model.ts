@@ -39,14 +39,43 @@ export type MeetingBriefReminder = {
 
 // Family background, not a logged interaction -- always shown regardless of
 // how far away the date is (awareness), distinct from the separate,
-// lead-window-gated yahrtzeit_outreach recommendation (action urgency).
-export type MeetingBriefYahrtzeit = {
-  deceasedNameEnglish: string;
+// lead-window-gated yahrtzeit_outreach/birthday_outreach/anniversary_outreach
+// recommendations (action urgency). One unified collection across all three
+// relationship-date types rather than three parallel arrays -- Meeting
+// Brief/Assistant context should read as one coherent family picture -- but
+// yahrtzeit-specific facts (deceased name, Hebrew date, relationship,
+// recurrence ambiguity) are kept as their own fields rather than flattened
+// away: null on a birthday/anniversary row, populated on a yahrtzeit row.
+export type MeetingBriefFamilyDate = {
+  type: "yahrtzeit" | "birthday" | "anniversary";
+  deceasedNameEnglish: string | null;
   deceasedNameHebrew: string | null;
-  relationship: string;
-  hebrewLabel: string;
+  personName: string | null;
+  relationship: string | null;
+  // "5 Elul" for yahrtzeit, "Aug 24" for birthday/anniversary -- the
+  // recorded date's own short label, independent of which year it next
+  // falls in (see nextOccurrenceLabel).
+  shortLabel: string;
   nextOccurrenceLabel: string;
+  ambiguous: boolean;
+  ambiguityNote: string | null;
 };
+
+// One shared line-formatter so the donor-profile Meeting Brief page and the
+// Assistant's pre-formatted context lines can never phrase the same fact
+// differently. Always describes an UPCOMING date -- never implies outreach
+// already happened.
+export function familyDateLine(item: MeetingBriefFamilyDate): string {
+  const ambiguitySuffix = item.ambiguous && item.ambiguityNote ? ` ${item.ambiguityNote}` : "";
+  if (item.type === "yahrtzeit") {
+    return `${item.relationship}'s yahrtzeit is ${item.shortLabel}; next occurrence ${item.nextOccurrenceLabel}.${ambiguitySuffix}`;
+  }
+  if (item.type === "birthday") {
+    const who = item.personName ? `${item.personName}'s ` : "";
+    return `${who}Birthday: ${item.shortLabel}; next occurrence ${item.nextOccurrenceLabel}.${ambiguitySuffix}`;
+  }
+  return `Wedding anniversary: ${item.shortLabel}; next occurrence ${item.nextOccurrenceLabel}.${ambiguitySuffix}`;
+}
 
 export type MeetingBrief = {
   donor: MeetingBriefDonor;
@@ -73,10 +102,11 @@ export type MeetingBrief = {
   // Assistant) reads, so this can never disagree with them. null only
   // when there is genuinely no evidence to suggest anything.
   recommendation: DonorRecommendation | null;
-  // Always populated when the donor has any recorded yahrtzeits, regardless
-  // of the recommendation's lead window -- family background context is
-  // never conditional on urgency the way the suggested action is.
-  familyYahrtzeits: MeetingBriefYahrtzeit[];
+  // Always populated when the donor has any recorded yahrtzeits/birthdays/
+  // anniversaries, regardless of the recommendation's lead window -- family
+  // background context is never conditional on urgency the way the
+  // suggested action is.
+  familyImportantDates: MeetingBriefFamilyDate[];
 };
 
 function firstLine(value: string) {
@@ -91,7 +121,7 @@ export function buildMeetingBrief(
   unconfirmedHistoricalContext: string[] = [],
   unconfirmedHistoricalContextCount = unconfirmedHistoricalContext.length,
   recommendation: DonorRecommendation | null = null,
-  familyYahrtzeits: MeetingBriefYahrtzeit[] = [],
+  familyImportantDates: MeetingBriefFamilyDate[] = [],
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -148,7 +178,7 @@ export function buildMeetingBrief(
     unconfirmedHistoricalContext,
     unconfirmedHistoricalContextCount,
     recommendation,
-    familyYahrtzeits,
+    familyImportantDates,
   };
 }
 import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";

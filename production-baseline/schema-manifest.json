@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "1b90a44af8b32f7fb55af6038de5c07582f918e66571a0754c506b883b6f0e8f",
+  "schemaHash": "eb966e352b8314efc364591be18a8e2677bcca04905dd4fb9bb1c8613b81d151",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -29,7 +29,8 @@
     "0024_donor_historical_context.sql",
     "0025_date_only_precision.sql",
     "0026_gift_acknowledgments.sql",
-    "0027_yahrtzeits.sql"
+    "0027_yahrtzeits.sql",
+    "0028_important_dates.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -3161,6 +3162,284 @@
         "checks": []
       },
       {
+        "name": "important_date_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "important_date_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "important_date_changes_important_date_idx",
+            "columns": [
+              "important_date_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `important_date_changes_important_date_idx` ON `important_date_changes` (`important_date_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','updated','deleted'))"
+        ]
+      },
+      {
+        "name": "important_dates",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "person_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "relationship",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "month",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "day",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "year",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "notes",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "important_dates_donor_idx",
+            "columns": [
+              "donor_id",
+              "type",
+              "month",
+              "day"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `important_dates_donor_idx` ON `important_dates` (`donor_id`,`type`,`month`,`day`)"
+          },
+          {
+            "name": "important_dates_fingerprint_idx",
+            "columns": [
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `important_dates_fingerprint_idx` ON `important_dates` (`fingerprint`)"
+          },
+          {
+            "name": "important_dates_user_idx",
+            "columns": [
+              "user_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `important_dates_user_idx` ON `important_dates` (`user_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`source` IN ('manual'))",
+          "CHECK (`type` IN ('birthday','anniversary'))"
+        ]
+      },
+      {
         "name": "interactions",
         "columns": [
           {
@@ -4677,6 +4956,16 @@
     },
     {
       "type": "table",
+      "name": "important_date_changes",
+      "sql": "CREATE TABLE `important_date_changes` ( `id` text PRIMARY KEY NOT NULL, `important_date_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','deleted')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text, `created_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "important_dates",
+      "sql": "CREATE TABLE `important_dates` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('birthday','anniversary')), `person_name` text, `relationship` text, `month` integer NOT NULL, `day` integer NOT NULL, `year` integer, `notes` text, `source` text NOT NULL CHECK (`source` IN ('manual')), `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "interactions",
       "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -4964,6 +5253,26 @@
       "type": "index",
       "name": "import_preview_sessions_owner_status_idx",
       "sql": "CREATE INDEX `import_preview_sessions_owner_status_idx` ON `import_preview_sessions` (`owner_user_id`,`status`,`expires_at`)"
+    },
+    {
+      "type": "index",
+      "name": "important_date_changes_important_date_idx",
+      "sql": "CREATE INDEX `important_date_changes_important_date_idx` ON `important_date_changes` (`important_date_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "important_dates_donor_idx",
+      "sql": "CREATE INDEX `important_dates_donor_idx` ON `important_dates` (`donor_id`,`type`,`month`,`day`)"
+    },
+    {
+      "type": "index",
+      "name": "important_dates_fingerprint_idx",
+      "sql": "CREATE UNIQUE INDEX `important_dates_fingerprint_idx` ON `important_dates` (`fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "important_dates_user_idx",
+      "sql": "CREATE INDEX `important_dates_user_idx` ON `important_dates` (`user_id`)"
     },
     {
       "type": "index",

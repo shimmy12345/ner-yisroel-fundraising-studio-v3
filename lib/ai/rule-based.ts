@@ -18,11 +18,12 @@ const result = (title: string, content: string, rationale: string[], sourceIds: 
 const unconfirmedBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.unconfirmedHistoricalContext.length
   ? `Imported context (not verified, not counted as contact):\n${snapshot.donor.unconfirmedHistoricalContext.map((line) => `- ${line}`).join("\n")}`
   : null;
-// Family background, never an interaction and never implying outreach
-// occurred -- always shown when present, independent of whether
-// yahrtzeit_outreach happens to be the winning suggested action right now.
-const familyContextBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.familyYahrtzeits.length
-  ? `Family context: ${snapshot.donor.familyYahrtzeits.join(" ")}`
+// Family background (Yahrtzeit, Birthday, Anniversary), never an
+// interaction and never implying outreach occurred -- always shown when
+// present, independent of whether one of the relationship-date outreach
+// candidates happens to be the winning suggested action right now.
+const familyContextBlock = (snapshot: AssistantContextSnapshot) => snapshot.donor.familyImportantDates.length
+  ? `Family context: ${snapshot.donor.familyImportantDates.join(" ")}`
   : null;
 
 export class RuleBasedAIService implements AIService {

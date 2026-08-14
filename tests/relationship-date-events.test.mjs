@@ -26,7 +26,8 @@ async function run() {
   assert.equal(possessivePhrase("", "yahrtzeit"), "Yahrtzeit", "blank relationship text falls back to the neutral noun, not broken grammar");
   assert.equal(possessivePhrase("N/A", "yahrtzeit"), "Yahrtzeit", "punctuation-bearing free text falls back rather than producing \"N/A's yahrtzeit\"");
   assert.equal(possessivePhrase("2nd cousin", "yahrtzeit"), "Yahrtzeit", "text that doesn't start with a letter falls back to neutral phrasing");
-  assert.equal(possessivePhrase("a".repeat(30), "yahrtzeit"), "Yahrtzeit", "unexpectedly long relationship text falls back rather than producing an unwieldy phrase");
+  assert.equal(possessivePhrase("David Cohen", "birthday"), "David Cohen's birthday", "a multi-word subject (a full person name) must have every word capitalized, not just the first");
+  assert.equal(possessivePhrase("a".repeat(80), "yahrtzeit"), "Yahrtzeit", "absurdly long text still falls back rather than producing an unwieldy phrase, even though the cap is generous enough for a real full name");
 
   // --- within-window yahrtzeit produces a fully-populated event with
   // granular, independent fields (not one flattened string). ---
@@ -44,7 +45,7 @@ async function run() {
   assert.equal(event.donorCode, "43425");
   assert.equal(event.label, "Yahrtzeit");
   assert.equal(event.relationshipPhrase, "Mother's yahrtzeit", "relationship must be rendered as natural possessive phrasing");
-  assert.equal(event.hebrewDateLabel, "3 Elul", "the Hebrew date must be its own field, not folded into another string");
+  assert.equal(event.secondaryDateLabel, "3 Elul", "the Hebrew date must be its own field, not folded into another string");
   assert.equal(event.provenanceName, "Mattil Tzirel Bas Moshe", "the deceased's name must remain available as its own field");
   assert.equal(event.provenanceNameHebrew, "מטיל צירל בת משה");
   assert.ok(event.dateEpoch > NOW, "the Gregorian occurrence must be in the future relative to now");
@@ -132,7 +133,7 @@ async function run() {
   // the ranked/relationshipQueue path entirely, and Coming Up is built
   // from a separate, unconditional path instead. ---
   const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
-  assert.match(liveData, /if \(recommendation\.kind === "yahrtzeit_outreach"\) continue;/, "yahrtzeit_outreach must be excluded from the ranked homepage path, so it never has to beat other candidates to appear in Coming Up");
+  assert.match(liveData, /if \(recommendation\.kind === "yahrtzeit_outreach" \|\| recommendation\.kind === "birthday_outreach" \|\| recommendation\.kind === "anniversary_outreach"\) continue;/, "yahrtzeit_outreach/birthday_outreach/anniversary_outreach must all be excluded from the ranked homepage path, so none of them ever has to beat other candidates to appear in Coming Up");
   assert.match(liveData, /buildYahrtzeitRelationshipDateEvents/, "the homepage must build Coming Up events through the dedicated, unconditional path");
   assert.match(liveData, /upcomingRelationshipDates/, "WorkspaceBrief must expose the Coming Up events separately from the ranked priorities");
 

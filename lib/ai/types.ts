@@ -23,11 +23,13 @@ export type AssistantContextSnapshot = {
     // homepage/Today queue compute, never re-derived here. null only when
     // there's genuinely no evidence to suggest anything (or in demo mode).
     recommendation: DonorRecommendation | null;
-    // Pre-formatted family-yahrtzeit lines, always present regardless of
-    // how far away the date is -- background context, never implying
-    // outreach occurred. Separate from recommendation, which only reflects
-    // yahrtzeit_outreach when it's the winning candidate within its lead window.
-    familyYahrtzeits: string[];
+    // Pre-formatted family-important-date lines (Yahrtzeit, Birthday,
+    // Anniversary), always present regardless of how far away the date is
+    // -- background context, never implying outreach occurred. Separate
+    // from recommendation, which only reflects yahrtzeit_outreach/
+    // birthday_outreach/anniversary_outreach when one of them is the
+    // winning candidate within its lead window.
+    familyImportantDates: string[];
   };
   latestInteraction: {
     id: string;
