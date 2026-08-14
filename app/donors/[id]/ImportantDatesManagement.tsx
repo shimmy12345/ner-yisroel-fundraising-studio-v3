@@ -262,7 +262,7 @@ export function ImportantDatesManagement({ donorId, timezone, items }: { donorId
       return <ManagedDateRow key={item.id} item={item} timezone={timezone} onEdit={() => setEditingId(item.id)} onDelete={() => void remove(item)} deleting={deletingId === item.id} />;
     })}
     {error && <p className="capture-error" role="alert">{error}</p>}
-    {adding === null && <button type="button" onClick={() => setAdding("choose")}>+ Add important date</button>}
+    {adding === null && <button type="button" className="secondary-button add-important-date-button" onClick={() => setAdding("choose")}>+ Add important date</button>}
     {adding === "choose" && <div className="yahrtzeit-form">
       <p>What kind of date?</p>
       <div className="yahrtzeit-form-actions">

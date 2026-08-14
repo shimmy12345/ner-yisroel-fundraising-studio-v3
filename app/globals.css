@@ -525,7 +525,9 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .activity-status-completed { background:#e4f1e8; color:#246342; }
 .outcome-confirmation { margin:20px 0; padding:20px; border:1px solid #a9cbb6; border-radius:12px; background:#f0f8f3; }
 .outcome-confirmation h2 { margin:0 0 6px; }.outcome-confirmation > div { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }
-.outcome-confirmation a, .outcome-confirmation button, .secondary-button { min-height:40px; padding:9px 13px; border:1px solid #b7c9bd; border-radius:8px; background:#fff; color:#315f4b; font-weight:750; text-decoration:none; }
+.outcome-confirmation a, .outcome-confirmation button, .secondary-button { min-height:40px; padding:9px 13px; border:1px solid #b7c9bd; border-radius:8px; background:#fff; color:#315f4b; font-weight:750; text-decoration:none; cursor:pointer; }
+.outcome-confirmation a:hover, .outcome-confirmation button:hover, .secondary-button:hover { background:#f2f7f4; border-color:#8fa89a; }
+.add-important-date-button { display:inline-flex; width:fit-content; margin-top:4px; font-size:13px; }
 .outcome-follow-up-fields select, .outcome-follow-up-fields textarea { width:100%; }
 .outcome-audit { margin-top:24px; padding:22px; border:1px solid #dbe4de; border-radius:12px; background:#fff; }
 .outcome-audit ol { margin:14px 0 0; padding:0; list-style:none; }.outcome-audit li { display:flex; justify-content:space-between; gap:18px; padding:10px 0; border-top:1px solid #edf1ee; }.outcome-audit li span { color:#68766e; }
