@@ -1,0 +1,5348 @@
+{
+  "baselineLevel": "0019",
+  "schemaHash": "eb966e352b8314efc364591be18a8e2677bcca04905dd4fb9bb1c8613b81d151",
+  "sourceMigrations": [
+    "0000_foundation.sql",
+    "0001_staging_sample_data.sql",
+    "0002_onboarding_import.sql",
+    "0003_jl_donation_import.sql",
+    "0004_personalization_live_data.sql",
+    "0005_verification_data_integrity.sql",
+    "0006_activity_status_audit.sql",
+    "0007_incremental_jl_refresh.sql",
+    "0008_manual_pledge_payment_assignment.sql",
+    "0009_donation_import_rollback_audit.sql",
+    "0010_manual_pledge_assignment_audit.sql",
+    "0011_reimport_and_payment_timeline.sql",
+    "0012_donor_contact_management.sql",
+    "0013_household_refresh_integrity.sql",
+    "0014_donor_merge_resolution.sql",
+    "0015_household_import_review_mode.sql",
+    "0016_lightweight_donation_management.sql",
+    "0017_today_relationship_queue.sql",
+    "0018_data_health_repairs.sql",
+    "0019_legacy_test_orphan_cleanup.sql",
+    "0020_financial_date_only.sql",
+    "0021_import_preview_sessions.sql",
+    "0022_import_review_drafts.sql",
+    "0023_donor_research_stage_a.sql",
+    "0024_donor_historical_context.sql",
+    "0025_date_only_precision.sql",
+    "0026_gift_acknowledgments.sql",
+    "0027_yahrtzeits.sql",
+    "0028_important_dates.sql"
+  ],
+  "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
+  "topology": {
+    "tables": [
+      {
+        "name": "activity_status_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "interaction_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "from_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "to_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_occurred_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_occurred_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_summary",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_summary",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "follow_up_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "undone_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "interaction_id",
+            "toTable": "interactions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "activity_status_audits_interaction_date_idx",
+            "columns": [
+              "interaction_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `activity_status_audits_interaction_date_idx` ON `activity_status_audits` (`interaction_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "data_health_repair_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "record_type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "record_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_state_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_state_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reason",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_data_health_repairs_user_date",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_data_health_repairs_user_date` ON `data_health_repair_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": "idx_data_health_repairs_user_record",
+            "columns": [
+              "user_id",
+              "record_type",
+              "record_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_data_health_repairs_user_record` ON `data_health_repair_audits` (`user_id`,`record_type`,`record_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('reattach','move_to_survivor','archive','dismiss_false_positive'))",
+          "CHECK (`record_type` IN ('interaction','reminder'))"
+        ]
+      },
+      {
+        "name": "data_imports",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "file_name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "file_hash",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "update_existing",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "report_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "completed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "data_imports_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `data_imports_user_date_idx` ON `data_imports` (`user_id`,`created_at`)"
+          },
+          {
+            "name": "data_imports_user_file_hash_status_idx",
+            "columns": [
+              "user_id",
+              "file_hash",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `data_imports_user_file_hash_status_idx` ON `data_imports` (`user_id`,`file_hash`,`status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donation_import_rollback_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "backup_confirmed",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "preview_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_gifts",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "restored_pledges",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "restored_balances",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "restored_statuses",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "import_id",
+            "toTable": "data_imports",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donation_import_rollback_audits_import_idx",
+            "columns": [
+              "import_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donation_import_rollback_audits_import_idx` ON `donation_import_rollback_audits` (`import_id`)"
+          },
+          {
+            "name": "donation_import_rollback_audits_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donation_import_rollback_audits_user_date_idx` ON `donation_import_rollback_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_contact_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_contact_audits_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_contact_audits_donor_date_idx` ON `donor_contact_audits` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_historical_context",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "text",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_date",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "classification",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'unconfirmed'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_historical_context_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_historical_context_donor_date_idx` ON `donor_historical_context` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": "donor_historical_context_user_fingerprint_uidx",
+            "columns": [
+              "user_id",
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_historical_context_user_fingerprint_uidx` ON `donor_historical_context` (`user_id`,`fingerprint`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('unconfirmed','dismissed'))"
+        ]
+      },
+      {
+        "name": "donor_merge_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "surviving_donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "archived_donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "field_choices_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "survivor_before_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "duplicate_before_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "survivor_after_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "moved_counts_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "archived_donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "surviving_donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_merge_audits_archived_idx",
+            "columns": [
+              "archived_donor_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_merge_audits_archived_idx` ON `donor_merge_audits` (`archived_donor_id`)"
+          },
+          {
+            "name": "donor_merge_audits_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_merge_audits_user_date_idx` ON `donor_merge_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_research_finding_sources",
+        "columns": [
+          {
+            "name": "finding_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "source_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "finding_id",
+            "toTable": "donor_research_findings",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "source_id",
+            "toTable": "donor_research_sources",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_finding_sources_source_idx",
+            "columns": [
+              "source_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_finding_sources_source_idx` ON `donor_research_finding_sources` (`source_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "finding_id",
+              "source_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_research_findings",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "first_seen_run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_confirmed_run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "category",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "claim",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "related_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "organization_normalized",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'current'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "supersedes_finding_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "not_found_streak",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "notified_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "first_seen_run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "last_confirmed_run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "related_donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "supersedes_finding_id",
+            "toTable": "donor_research_findings",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_findings_donor_fingerprint_active_uidx",
+            "columns": [
+              "donor_id",
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_research_findings_donor_fingerprint_active_uidx` ON `donor_research_findings` (`donor_id`,`fingerprint`) WHERE `status` IN ('current','unverified')"
+          },
+          {
+            "name": "donor_research_findings_donor_status_category_idx",
+            "columns": [
+              "donor_id",
+              "status",
+              "category"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_findings_donor_status_category_idx` ON `donor_research_findings` (`donor_id`,`status`,`category`)"
+          },
+          {
+            "name": "donor_research_findings_user_org_idx",
+            "columns": [
+              "user_id",
+              "organization_normalized"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_findings_user_org_idx` ON `donor_research_findings` (`user_id`,`organization_normalized`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`category` IN ('professional','boards_affiliations','public_philanthropy','recent_mentions','possible_connections','notes_ambiguities'))",
+          "CHECK (`status` IN ('current','superseded','removed_not_found','unverified'))"
+        ]
+      },
+      {
+        "name": "donor_research_identity_candidates",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "label",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'pending'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "decided_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_identity_candidates_donor_status_idx",
+            "columns": [
+              "donor_id",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_identity_candidates_donor_status_idx` ON `donor_research_identity_candidates` (`donor_id`,`status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('pending','confirmed','rejected'))"
+        ]
+      },
+      {
+        "name": "donor_research_pending_evidence",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "run_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "url",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "title",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "snippet",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "published_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "run_id",
+            "toTable": "donor_research_runs",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_pending_evidence_run_idx",
+            "columns": [
+              "run_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_pending_evidence_run_idx` ON `donor_research_pending_evidence` (`run_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donor_research_runs",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'open'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "completed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_runs_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_runs_donor_date_idx` ON `donor_research_runs` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('open','completed','discarded'))"
+        ]
+      },
+      {
+        "name": "donor_research_sources",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "url",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "normalized_url",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "domain",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "title",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "publisher",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "published_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "retrieved_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "excerpt",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_tier",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "discovered_via",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_research_sources_user_domain_idx",
+            "columns": [
+              "user_id",
+              "domain"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_research_sources_user_domain_idx` ON `donor_research_sources` (`user_id`,`domain`)"
+          },
+          {
+            "name": "donor_research_sources_user_normalized_url_uidx",
+            "columns": [
+              "user_id",
+              "normalized_url"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`source_tier` IN ('primary_institutional','press_release','reputable_news','event_program','public_search_result'))"
+        ]
+      },
+      {
+        "name": "donor_views",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "viewed_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_views_user_date_idx",
+            "columns": [
+              "user_id",
+              "viewed_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_views_user_date_idx` ON `donor_views` (`user_id`,`viewed_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "user_id",
+              "donor_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "donors",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "display_name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "email",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "phone",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "location",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "relationship_summary",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "institutional_memory",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "relationship_health",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "preferred_communication",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "interests",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "family",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_code",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "spouse",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "address",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "external_source",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "external_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "primary_first_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "spouse_first_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "primary_title",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "spouse_title",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "alternate_mobile_phone",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "home_phone",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "address_line_1",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "city",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "state",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "postal_code",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "country",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_snapshot",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "owner_user_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "data_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'live'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "contact_note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "archived_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "merged_into_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "merged_into_donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "owner_user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donors_merged_into_idx",
+            "columns": [
+              "merged_into_donor_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donors_merged_into_idx` ON `donors` (`merged_into_donor_id`)"
+          },
+          {
+            "name": "donors_owner_active_idx",
+            "columns": [
+              "owner_user_id",
+              "data_source",
+              "archived_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donors_owner_active_idx` ON `donors` (`owner_user_id`,`data_source`,`archived_at`)"
+          },
+          {
+            "name": "donors_owner_donor_code_unique",
+            "columns": [
+              "owner_user_id",
+              "donor_code"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donors_owner_donor_code_unique` ON `donors` (`owner_user_id`,`donor_code`)"
+          },
+          {
+            "name": "donors_owner_external_source_id_unique",
+            "columns": [
+              "owner_user_id",
+              "external_source",
+              "external_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donors_owner_external_source_id_unique` ON `donors` (`owner_user_id`,`external_source`,`external_id`)"
+          },
+          {
+            "name": "donors_owner_mode_name_idx",
+            "columns": [
+              "owner_user_id",
+              "data_source",
+              "display_name"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donors_owner_mode_name_idx` ON `donors` (`owner_user_id`,`data_source`,`display_name`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "gift_acknowledgments",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "gift_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "gift_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "gift_acknowledgments_donor_idx",
+            "columns": [
+              "donor_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `gift_acknowledgments_donor_idx` ON `gift_acknowledgments` (`donor_id`,`created_at`)"
+          },
+          {
+            "name": "gift_acknowledgments_gift_idx",
+            "columns": [
+              "user_id",
+              "gift_source",
+              "gift_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `gift_acknowledgments_gift_idx` ON `gift_acknowledgments` (`user_id`,`gift_source`,`gift_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`gift_source` IN ('giving_activity','gift'))",
+          "CHECK (`status` IN ('thank_you_sent','thank_you_call','no_acknowledgment_needed'))"
+        ]
+      },
+      {
+        "name": "gifts",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "amount_cents",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fund",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "received_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "acknowledged_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "gifts_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "received_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `gifts_donor_date_idx` ON `gifts` (`donor_id`,`received_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "giving_activities",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "external_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "external_household_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "activity_date",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "committed_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "paid_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "balance_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "item_type",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "description",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_campaign",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "category",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_snapshot",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "owner_user_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "record_origin",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'live'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "workspace_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'active'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "private_note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "confirmed_by_activity_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "owner_user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "giving_activities_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "activity_date"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `giving_activities_donor_date_idx` ON `giving_activities` (`donor_id`,`activity_date`)"
+          },
+          {
+            "name": "giving_activities_owner_date_idx",
+            "columns": [
+              "owner_user_id",
+              "activity_date"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `giving_activities_owner_date_idx` ON `giving_activities` (`owner_user_id`,`activity_date`)"
+          },
+          {
+            "name": "giving_activities_owner_origin_date_idx",
+            "columns": [
+              "owner_user_id",
+              "record_origin",
+              "activity_date"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `giving_activities_owner_origin_date_idx` ON `giving_activities` (`owner_user_id`,`record_origin`,`activity_date`)"
+          },
+          {
+            "name": "giving_activities_owner_source_fingerprint_unique",
+            "columns": [
+              "owner_user_id",
+              "external_source",
+              "source_fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `giving_activities_owner_source_fingerprint_unique` ON `giving_activities` (`owner_user_id`,`external_source`,`source_fingerprint`)"
+          },
+          {
+            "name": "idx_giving_activities_owner_workspace_status_date",
+            "columns": [
+              "owner_user_id",
+              "workspace_status",
+              "activity_date"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_giving_activities_owner_workspace_status_date` ON `giving_activities` (`owner_user_id`,`workspace_status`,`activity_date`)"
+          },
+          {
+            "name": "idx_giving_activities_pending_match",
+            "columns": [
+              "owner_user_id",
+              "donor_id",
+              "category",
+              "workspace_status",
+              "committed_cents",
+              "activity_date"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_giving_activities_pending_match` ON `giving_activities` (`owner_user_id`,`donor_id`,`category`,`workspace_status`,`committed_cents`,`activity_date`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`workspace_status` IN ('active','hidden','duplicate','needs_review','invalid','merged'))"
+        ]
+      },
+      {
+        "name": "giving_activity_import_changes",
+        "columns": [
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "source_fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "change_type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "import_id",
+            "toTable": "data_imports",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": null,
+            "columns": [
+              "import_id",
+              "source_fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "giving_activity_management_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "activity_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_donor_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_status",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_status",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "undone_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_giving_management_audit_activity_date",
+            "columns": [
+              "activity_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_giving_management_audit_activity_date` ON `giving_activity_management_audits` (`activity_id`,`created_at`)"
+          },
+          {
+            "name": "idx_giving_management_audit_import",
+            "columns": [
+              "import_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_giving_management_audit_import` ON `giving_activity_management_audits` (`import_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "household_import_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "change_type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "import_id",
+            "toTable": "data_imports",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "household_import_changes_batch_donor_idx",
+            "columns": [
+              "import_id",
+              "donor_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `household_import_changes_batch_donor_idx` ON `household_import_changes` (`import_id`,`donor_id`)"
+          },
+          {
+            "name": "household_import_changes_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `household_import_changes_user_date_idx` ON `household_import_changes` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "household_import_rollback_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "backup_confirmed",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "preview_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_donors",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "restored_donors",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "preserved_later_edits",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "import_id",
+            "toTable": "data_imports",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "household_import_rollback_audits_import_idx",
+            "columns": [
+              "import_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `household_import_rollback_audits_import_idx` ON `household_import_rollback_audits` (`import_id`)"
+          },
+          {
+            "name": "household_import_rollback_audits_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `household_import_rollback_audits_user_date_idx` ON `household_import_rollback_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "import_preview_session_chunks",
+        "columns": [
+          {
+            "name": "session_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "chunk_index",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "rows_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "session_id",
+            "toTable": "import_preview_sessions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": null,
+            "columns": [
+              "session_id",
+              "chunk_index"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "import_preview_sessions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "owner_user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "file_hash",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "file_name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "mapping_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "force_type",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "row_count",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "expires_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "decisions_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'{}'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'draft'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "progress_resolved",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "progress_total",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "owner_user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "import_preview_sessions_owner_expires_idx",
+            "columns": [
+              "owner_user_id",
+              "expires_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sessions` (`owner_user_id`,`expires_at`)"
+          },
+          {
+            "name": "import_preview_sessions_owner_status_idx",
+            "columns": [
+              "owner_user_id",
+              "status",
+              "expires_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `import_preview_sessions_owner_status_idx` ON `import_preview_sessions` (`owner_user_id`,`status`,`expires_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "important_date_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "important_date_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "important_date_changes_important_date_idx",
+            "columns": [
+              "important_date_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `important_date_changes_important_date_idx` ON `important_date_changes` (`important_date_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','updated','deleted'))"
+        ]
+      },
+      {
+        "name": "important_dates",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "person_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "relationship",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "month",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "day",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "year",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "notes",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "important_dates_donor_idx",
+            "columns": [
+              "donor_id",
+              "type",
+              "month",
+              "day"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `important_dates_donor_idx` ON `important_dates` (`donor_id`,`type`,`month`,`day`)"
+          },
+          {
+            "name": "important_dates_fingerprint_idx",
+            "columns": [
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `important_dates_fingerprint_idx` ON `important_dates` (`fingerprint`)"
+          },
+          {
+            "name": "important_dates_user_idx",
+            "columns": [
+              "user_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `important_dates_user_idx` ON `important_dates` (`user_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`source` IN ('manual'))",
+          "CHECK (`type` IN ('birthday','anniversary'))"
+        ]
+      },
+      {
+        "name": "interactions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "occurred_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "summary",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'manual'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "occurred_at_date_only",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "interactions_donor_date_idx",
+            "columns": [
+              "donor_id",
+              "occurred_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "jl_payment_assignment_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "payment_fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "pledge_activity_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "decision_type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "payment_cents",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "applied_cents",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "new_gift_cents",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "overpayment_action",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_paid_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_paid_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_balance_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_balance_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "previous_status",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_status",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "payment_date",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "remaining_balance_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "import_id",
+            "toTable": "data_imports",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "pledge_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "jl_payment_assignment_audits_import_payment_idx",
+            "columns": [
+              "import_id",
+              "payment_fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`)"
+          },
+          {
+            "name": "jl_payment_assignment_audits_pledge_idx",
+            "columns": [
+              "pledge_activity_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `jl_payment_assignment_audits_pledge_idx` ON `jl_payment_assignment_audits` (`pledge_activity_id`,`created_at`)"
+          },
+          {
+            "name": "jl_payment_assignment_audits_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `jl_payment_assignment_audits_user_date_idx` ON `jl_payment_assignment_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`decision_type` IN ('apply_to_pledge', 'new_gift'))",
+          "CHECK (`overpayment_action` IS NULL OR `overpayment_action` = 'split_remainder_new_gift')"
+        ]
+      },
+      {
+        "name": "jl_payment_assignments",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "payment_fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "decision_type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "pledge_activity_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "applied_import_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "pledge_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "jl_payment_assignments_pledge_idx",
+            "columns": [
+              "pledge_activity_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "user_id",
+              "payment_fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`decision_type` IN ('apply_to_pledge', 'new_gift'))"
+        ]
+      },
+      {
+        "name": "jl_refresh_state",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "last_household_refresh_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_donation_refresh_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_donation_range_start",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_donation_range_end",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": null,
+            "columns": [
+              "user_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "legacy_test_cleanup_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "preview_hash",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "records_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "archived_interactions",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "archived_reminders",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_legacy_test_cleanup_user_date",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `idx_legacy_test_cleanup_user_date` ON `legacy_test_cleanup_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "onboarding_preferences",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "sample_data_acknowledged",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "data_mode",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'live'",
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": null,
+            "columns": [
+              "user_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "recommendations",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reason",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "score",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'open'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "due_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "due_at_date_only",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "recommendations_user_status_idx",
+            "columns": [
+              "user_id",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `recommendations_user_status_idx` ON `recommendations` (`user_id`,`status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "relationship_queue_dismissals",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "item_key",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "dismissed_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "relationship_queue_dismissals_user_date_idx",
+            "columns": [
+              "user_id",
+              "dismissed_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `relationship_queue_dismissals_user_date_idx` ON `relationship_queue_dismissals` (`user_id`,`dismissed_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "user_id",
+              "item_key"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "sample_cleanup_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "backup_confirmed",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_donors",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_gifts",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_interactions",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_recommendations",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "sample_cleanup_audits_user_date_idx",
+            "columns": [
+              "user_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `sample_cleanup_audits_user_date_idx` ON `sample_cleanup_audits` (`user_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "users",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "email",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "preferred_first_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "organization_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "job_title",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "timezone",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'America/New_York'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "avatar_url",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "household_import_review_mode",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'auto_unchanged'",
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [],
+        "indexes": [
+          {
+            "name": "users_email_unique",
+            "columns": [
+              "email"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "workspace_backup_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "purpose",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "import_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "workspace_backup_audits_user_import_idx",
+            "columns": [
+              "user_id",
+              "import_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `workspace_backup_audits_user_import_idx` ON `workspace_backup_audits` (`user_id`,`import_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "yahrtzeit_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "yahrtzeit_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "yahrtzeit_changes_yahrtzeit_idx",
+            "columns": [
+              "yahrtzeit_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `yahrtzeit_changes_yahrtzeit_idx` ON `yahrtzeit_changes` (`yahrtzeit_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','updated','deleted'))"
+        ]
+      },
+      {
+        "name": "yahrtzeits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "deceased_name_english",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "deceased_name_hebrew",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "relationship",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "hebrew_month",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "hebrew_day",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "hebrew_year",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_donor_code",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "yahrtzeits_donor_idx",
+            "columns": [
+              "donor_id",
+              "hebrew_month",
+              "hebrew_day"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `yahrtzeits_donor_idx` ON `yahrtzeits` (`donor_id`,`hebrew_month`,`hebrew_day`)"
+          },
+          {
+            "name": "yahrtzeits_fingerprint_idx",
+            "columns": [
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `yahrtzeits_fingerprint_idx` ON `yahrtzeits` (`fingerprint`)"
+          },
+          {
+            "name": "yahrtzeits_user_idx",
+            "columns": [
+              "user_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `yahrtzeits_user_idx` ON `yahrtzeits` (`user_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`source` IN ('manual','import-yahrtzeit-workbook'))"
+        ]
+      }
+    ]
+  },
+  "ddlTopology": [
+    {
+      "type": "table",
+      "name": "activity_status_audits",
+      "sql": "CREATE TABLE `activity_status_audits` ( `id` text PRIMARY KEY NOT NULL, `interaction_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `from_status` text NOT NULL, `to_status` text NOT NULL, `previous_source` text NOT NULL, `next_source` text NOT NULL, `previous_occurred_at` integer NOT NULL, `next_occurred_at` integer NOT NULL, `previous_summary` text NOT NULL, `next_summary` text NOT NULL, `follow_up_id` text, `created_at` integer NOT NULL, `undone_at` integer, FOREIGN KEY (`interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "data_health_repair_audits",
+      "sql": "CREATE TABLE `data_health_repair_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `record_type` text NOT NULL CHECK (`record_type` IN ('interaction','reminder')), `record_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('reattach','move_to_survivor','archive','dismiss_false_positive')), `previous_donor_id` text, `next_donor_id` text, `previous_state_json` text NOT NULL, `next_state_json` text NOT NULL, `reason` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "data_imports",
+      "sql": "CREATE TABLE `data_imports` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `file_name` text NOT NULL, `file_hash` text NOT NULL, `status` text NOT NULL, `update_existing` integer DEFAULT 0 NOT NULL, `report_json` text NOT NULL, `created_at` integer NOT NULL, `completed_at` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donation_import_rollback_audits",
+      "sql": "CREATE TABLE `donation_import_rollback_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `import_id` text NOT NULL, `backup_confirmed` integer NOT NULL, `preview_json` text NOT NULL, `removed_gifts` integer NOT NULL, `restored_pledges` integer NOT NULL, `restored_balances` integer NOT NULL, `restored_statuses` integer NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_contact_audits",
+      "sql": "CREATE TABLE `donor_contact_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `action` text NOT NULL, `changed_fields` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_historical_context",
+      "sql": "CREATE TABLE `donor_historical_context` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `text` text NOT NULL, `source_date` integer, `classification` text NOT NULL, `source` text NOT NULL, `fingerprint` text NOT NULL, `status` text NOT NULL DEFAULT 'unconfirmed' CHECK (`status` IN ('unconfirmed','dismissed')), `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_merge_audits",
+      "sql": "CREATE TABLE `donor_merge_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `surviving_donor_id` text NOT NULL, `archived_donor_id` text NOT NULL, `field_choices_json` text NOT NULL, `survivor_before_json` text NOT NULL, `duplicate_before_json` text NOT NULL, `survivor_after_json` text NOT NULL, `moved_counts_json` text NOT NULL, `source` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`), FOREIGN KEY (`surviving_donor_id`) REFERENCES `donors`(`id`), FOREIGN KEY (`archived_donor_id`) REFERENCES `donors`(`id`) )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_finding_sources",
+      "sql": "CREATE TABLE `donor_research_finding_sources` ( `finding_id` text NOT NULL, `source_id` text NOT NULL, PRIMARY KEY (`finding_id`,`source_id`), FOREIGN KEY (`finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`source_id`) REFERENCES `donor_research_sources`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_findings",
+      "sql": "CREATE TABLE `donor_research_findings` ( `id` text PRIMARY KEY NOT NULL, `first_seen_run_id` text NOT NULL, `last_confirmed_run_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `category` text NOT NULL CHECK (`category` IN ('professional','boards_affiliations','public_philanthropy','recent_mentions','possible_connections','notes_ambiguities')), `claim` text NOT NULL, `related_donor_id` text, `organization_normalized` text, `status` text NOT NULL DEFAULT 'current' CHECK (`status` IN ('current','superseded','removed_not_found','unverified')), `fingerprint` text NOT NULL, `supersedes_finding_id` text, `not_found_streak` integer NOT NULL DEFAULT 0, `notified_at` integer, `created_at` integer NOT NULL, FOREIGN KEY (`first_seen_run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`last_confirmed_run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`related_donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`supersedes_finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_identity_candidates",
+      "sql": "CREATE TABLE `donor_research_identity_candidates` ( `id` text PRIMARY KEY NOT NULL, `run_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `label` text NOT NULL, `status` text NOT NULL DEFAULT 'pending' CHECK (`status` IN ('pending','confirmed','rejected')), `decided_at` integer, `created_at` integer NOT NULL, FOREIGN KEY (`run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_pending_evidence",
+      "sql": "CREATE TABLE `donor_research_pending_evidence` ( `id` text PRIMARY KEY NOT NULL, `run_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `url` text NOT NULL, `title` text NOT NULL, `snippet` text, `published_at` integer, `created_at` integer NOT NULL, FOREIGN KEY (`run_id`) REFERENCES `donor_research_runs`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_runs",
+      "sql": "CREATE TABLE `donor_research_runs` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `status` text NOT NULL DEFAULT 'open' CHECK (`status` IN ('open','completed','discarded')), `created_at` integer NOT NULL, `completed_at` integer, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_research_sources",
+      "sql": "CREATE TABLE `donor_research_sources` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `url` text NOT NULL, `normalized_url` text NOT NULL, `domain` text NOT NULL, `title` text NOT NULL, `publisher` text, `published_at` integer, `retrieved_at` integer NOT NULL, `excerpt` text, `source_tier` text NOT NULL CHECK (`source_tier` IN ('primary_institutional','press_release','reputable_news','event_program','public_search_result')), `discovered_via` text, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donor_views",
+      "sql": "CREATE TABLE `donor_views` ( `user_id` text NOT NULL, `donor_id` text NOT NULL, `viewed_at` integer NOT NULL, PRIMARY KEY (`user_id`,`donor_id`), FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "donors",
+      "sql": "CREATE TABLE `donors` ( `id` text PRIMARY KEY NOT NULL, `display_name` text NOT NULL, `email` text, `phone` text, `location` text, `relationship_summary` text, `institutional_memory` text, `relationship_health` integer, `preferred_communication` text, `interests` text, `family` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL , `donor_code` text, `spouse` text, `address` text, `external_source` text, `external_id` text, `last_name` text, `primary_first_name` text, `spouse_first_name` text, `primary_title` text, `spouse_title` text, `alternate_mobile_phone` text, `home_phone` text, `address_line_1` text, `city` text, `state` text, `postal_code` text, `country` text, `source_snapshot` text, `owner_user_id` text REFERENCES `users`(`id`), `data_source` text DEFAULT 'live' NOT NULL, `contact_note` text, `archived_at` integer, `merged_into_donor_id` text REFERENCES `donors`(`id`))"
+    },
+    {
+      "type": "table",
+      "name": "gift_acknowledgments",
+      "sql": "CREATE TABLE `gift_acknowledgments` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `gift_source` text NOT NULL CHECK (`gift_source` IN ('giving_activity','gift')), `gift_id` text NOT NULL, `status` text NOT NULL CHECK (`status` IN ('thank_you_sent','thank_you_call','no_acknowledgment_needed')), `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "gifts",
+      "sql": "CREATE TABLE `gifts` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `amount_cents` integer NOT NULL, `fund` text NOT NULL, `received_at` integer NOT NULL, `acknowledged_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `note` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "giving_activities",
+      "sql": "CREATE TABLE `giving_activities` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `external_source` text NOT NULL, `external_household_id` text NOT NULL, `source_fingerprint` text NOT NULL, `activity_date` integer, `committed_cents` integer, `paid_cents` integer, `balance_cents` integer, `item_type` text, `description` text, `source_campaign` text, `category` text NOT NULL, `source_snapshot` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `owner_user_id` text REFERENCES `users`(`id`), `record_origin` text DEFAULT 'live' NOT NULL, `workspace_status` text NOT NULL DEFAULT 'active' CHECK (`workspace_status` IN ('active','hidden','duplicate','needs_review','invalid','merged')), `private_note` text, `confirmed_by_activity_id` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "giving_activity_import_changes",
+      "sql": "CREATE TABLE `giving_activity_import_changes` ( `import_id` text NOT NULL, `source_fingerprint` text NOT NULL, `change_type` text NOT NULL, `previous_json` text, `created_at` integer NOT NULL, PRIMARY KEY (`import_id`,`source_fingerprint`), FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "giving_activity_management_audits",
+      "sql": "CREATE TABLE `giving_activity_management_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `activity_id` text NOT NULL, `import_id` text, `action` text NOT NULL, `previous_donor_id` text, `next_donor_id` text, `previous_status` text, `next_status` text, `previous_note` text, `next_note` text, `created_at` integer NOT NULL, `undone_at` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "household_import_changes",
+      "sql": "CREATE TABLE `household_import_changes` ( `id` text PRIMARY KEY NOT NULL, `import_id` text NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `change_type` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "household_import_rollback_audits",
+      "sql": "CREATE TABLE `household_import_rollback_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `import_id` text NOT NULL, `backup_confirmed` integer NOT NULL, `preview_json` text NOT NULL, `removed_donors` integer NOT NULL, `restored_donors` integer NOT NULL, `preserved_later_edits` integer NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "import_preview_session_chunks",
+      "sql": "CREATE TABLE `import_preview_session_chunks` ( `session_id` text NOT NULL, `chunk_index` integer NOT NULL, `rows_json` text NOT NULL, PRIMARY KEY (`session_id`,`chunk_index`), FOREIGN KEY (`session_id`) REFERENCES `import_preview_sessions`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "import_preview_sessions",
+      "sql": "CREATE TABLE `import_preview_sessions` ( `id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL, `file_hash` text NOT NULL, `file_name` text NOT NULL, `mapping_json` text NOT NULL, `force_type` text, `row_count` integer NOT NULL, `created_at` integer NOT NULL, `expires_at` integer NOT NULL, `decisions_json` text NOT NULL DEFAULT '{}', `status` text NOT NULL DEFAULT 'draft', `updated_at` integer NOT NULL DEFAULT 0, `progress_resolved` integer NOT NULL DEFAULT 0, `progress_total` integer NOT NULL DEFAULT 0, FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "important_date_changes",
+      "sql": "CREATE TABLE `important_date_changes` ( `id` text PRIMARY KEY NOT NULL, `important_date_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','deleted')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text, `created_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "important_dates",
+      "sql": "CREATE TABLE `important_dates` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('birthday','anniversary')), `person_name` text, `relationship` text, `month` integer NOT NULL, `day` integer NOT NULL, `year` integer, `notes` text, `source` text NOT NULL CHECK (`source` IN ('manual')), `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "interactions",
+      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "jl_payment_assignment_audits",
+      "sql": "CREATE TABLE `jl_payment_assignment_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `import_id` text NOT NULL, `payment_fingerprint` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text, `decision_type` text NOT NULL CHECK (`decision_type` IN ('apply_to_pledge', 'new_gift')), `payment_cents` integer NOT NULL, `applied_cents` integer NOT NULL, `new_gift_cents` integer NOT NULL, `overpayment_action` text CHECK (`overpayment_action` IS NULL OR `overpayment_action` = 'split_remainder_new_gift'), `previous_paid_cents` integer, `next_paid_cents` integer, `previous_balance_cents` integer, `next_balance_cents` integer, `previous_status` text, `next_status` text, `created_at` integer NOT NULL, `payment_date` integer, `remaining_balance_cents` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "jl_payment_assignments",
+      "sql": "CREATE TABLE `jl_payment_assignments` ( `user_id` text NOT NULL, `payment_fingerprint` text NOT NULL, `decision_type` text NOT NULL CHECK (`decision_type` IN ('apply_to_pledge', 'new_gift')), `pledge_activity_id` text, `applied_import_id` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, PRIMARY KEY (`user_id`, `payment_fingerprint`), FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "jl_refresh_state",
+      "sql": "CREATE TABLE `jl_refresh_state` ( `user_id` text PRIMARY KEY NOT NULL, `last_household_refresh_at` integer, `last_donation_refresh_at` integer, `last_donation_range_start` integer, `last_donation_range_end` integer, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "legacy_test_cleanup_audits",
+      "sql": "CREATE TABLE `legacy_test_cleanup_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `preview_hash` text NOT NULL, `records_json` text NOT NULL, `archived_interactions` integer NOT NULL, `archived_reminders` integer NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "onboarding_preferences",
+      "sql": "CREATE TABLE `onboarding_preferences` ( `user_id` text PRIMARY KEY NOT NULL, `sample_data_acknowledged` integer DEFAULT 0 NOT NULL, `updated_at` integer NOT NULL, `data_mode` text DEFAULT 'live' NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "recommendations",
+      "sql": "CREATE TABLE `recommendations` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `reason` text NOT NULL, `score` integer NOT NULL, `status` text DEFAULT 'open' NOT NULL, `due_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `due_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "relationship_queue_dismissals",
+      "sql": "CREATE TABLE `relationship_queue_dismissals` ( `user_id` text NOT NULL, `item_key` text NOT NULL, `donor_id` text NOT NULL, `dismissed_at` integer NOT NULL, PRIMARY KEY (`user_id`,`item_key`), FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "sample_cleanup_audits",
+      "sql": "CREATE TABLE `sample_cleanup_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `backup_confirmed` integer NOT NULL, `removed_donors` integer NOT NULL, `removed_gifts` integer NOT NULL, `removed_interactions` integer NOT NULL, `removed_recommendations` integer NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "users",
+      "sql": "CREATE TABLE `users` ( `id` text PRIMARY KEY NOT NULL, `email` text NOT NULL, `name` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL , `preferred_first_name` text, `organization_name` text, `job_title` text, `timezone` text DEFAULT 'America/New_York' NOT NULL, `avatar_url` text, `household_import_review_mode` text NOT NULL DEFAULT 'auto_unchanged')"
+    },
+    {
+      "type": "table",
+      "name": "workspace_backup_audits",
+      "sql": "CREATE TABLE `workspace_backup_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `purpose` text NOT NULL, `import_id` text, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "yahrtzeit_changes",
+      "sql": "CREATE TABLE `yahrtzeit_changes` ( `id` text PRIMARY KEY NOT NULL, `yahrtzeit_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','deleted')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text, `created_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "yahrtzeits",
+      "sql": "CREATE TABLE `yahrtzeits` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `deceased_name_english` text NOT NULL, `deceased_name_hebrew` text, `relationship` text NOT NULL, `hebrew_month` text NOT NULL, `hebrew_day` integer NOT NULL, `hebrew_year` integer, `source` text NOT NULL CHECK (`source` IN ('manual','import-yahrtzeit-workbook')), `source_donor_code` text, `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "index",
+      "name": "activity_status_audits_interaction_date_idx",
+      "sql": "CREATE INDEX `activity_status_audits_interaction_date_idx` ON `activity_status_audits` (`interaction_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "data_imports_user_date_idx",
+      "sql": "CREATE INDEX `data_imports_user_date_idx` ON `data_imports` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "data_imports_user_file_hash_status_idx",
+      "sql": "CREATE INDEX `data_imports_user_file_hash_status_idx` ON `data_imports` (`user_id`,`file_hash`,`status`)"
+    },
+    {
+      "type": "index",
+      "name": "donation_import_rollback_audits_import_idx",
+      "sql": "CREATE UNIQUE INDEX `donation_import_rollback_audits_import_idx` ON `donation_import_rollback_audits` (`import_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donation_import_rollback_audits_user_date_idx",
+      "sql": "CREATE INDEX `donation_import_rollback_audits_user_date_idx` ON `donation_import_rollback_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_contact_audits_donor_date_idx",
+      "sql": "CREATE INDEX `donor_contact_audits_donor_date_idx` ON `donor_contact_audits` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_historical_context_donor_date_idx",
+      "sql": "CREATE INDEX `donor_historical_context_donor_date_idx` ON `donor_historical_context` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_historical_context_user_fingerprint_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_historical_context_user_fingerprint_uidx` ON `donor_historical_context` (`user_id`,`fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_merge_audits_archived_idx",
+      "sql": "CREATE INDEX `donor_merge_audits_archived_idx` ON `donor_merge_audits` (`archived_donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_merge_audits_user_date_idx",
+      "sql": "CREATE INDEX `donor_merge_audits_user_date_idx` ON `donor_merge_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_finding_sources_source_idx",
+      "sql": "CREATE INDEX `donor_research_finding_sources_source_idx` ON `donor_research_finding_sources` (`source_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_findings_donor_fingerprint_active_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_research_findings_donor_fingerprint_active_uidx` ON `donor_research_findings` (`donor_id`,`fingerprint`) WHERE `status` IN ('current','unverified')"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_findings_donor_status_category_idx",
+      "sql": "CREATE INDEX `donor_research_findings_donor_status_category_idx` ON `donor_research_findings` (`donor_id`,`status`,`category`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_findings_user_org_idx",
+      "sql": "CREATE INDEX `donor_research_findings_user_org_idx` ON `donor_research_findings` (`user_id`,`organization_normalized`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_identity_candidates_donor_status_idx",
+      "sql": "CREATE INDEX `donor_research_identity_candidates_donor_status_idx` ON `donor_research_identity_candidates` (`donor_id`,`status`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_pending_evidence_run_idx",
+      "sql": "CREATE INDEX `donor_research_pending_evidence_run_idx` ON `donor_research_pending_evidence` (`run_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_runs_donor_date_idx",
+      "sql": "CREATE INDEX `donor_research_runs_donor_date_idx` ON `donor_research_runs` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_sources_user_domain_idx",
+      "sql": "CREATE INDEX `donor_research_sources_user_domain_idx` ON `donor_research_sources` (`user_id`,`domain`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_research_sources_user_normalized_url_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_views_user_date_idx",
+      "sql": "CREATE INDEX `donor_views_user_date_idx` ON `donor_views` (`user_id`,`viewed_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donors_merged_into_idx",
+      "sql": "CREATE INDEX `donors_merged_into_idx` ON `donors` (`merged_into_donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donors_owner_active_idx",
+      "sql": "CREATE INDEX `donors_owner_active_idx` ON `donors` (`owner_user_id`,`data_source`,`archived_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donors_owner_donor_code_unique",
+      "sql": "CREATE UNIQUE INDEX `donors_owner_donor_code_unique` ON `donors` (`owner_user_id`,`donor_code`)"
+    },
+    {
+      "type": "index",
+      "name": "donors_owner_external_source_id_unique",
+      "sql": "CREATE UNIQUE INDEX `donors_owner_external_source_id_unique` ON `donors` (`owner_user_id`,`external_source`,`external_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donors_owner_mode_name_idx",
+      "sql": "CREATE INDEX `donors_owner_mode_name_idx` ON `donors` (`owner_user_id`,`data_source`,`display_name`)"
+    },
+    {
+      "type": "index",
+      "name": "gift_acknowledgments_donor_idx",
+      "sql": "CREATE INDEX `gift_acknowledgments_donor_idx` ON `gift_acknowledgments` (`donor_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "gift_acknowledgments_gift_idx",
+      "sql": "CREATE INDEX `gift_acknowledgments_gift_idx` ON `gift_acknowledgments` (`user_id`,`gift_source`,`gift_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "gifts_donor_date_idx",
+      "sql": "CREATE INDEX `gifts_donor_date_idx` ON `gifts` (`donor_id`,`received_at`)"
+    },
+    {
+      "type": "index",
+      "name": "giving_activities_donor_date_idx",
+      "sql": "CREATE INDEX `giving_activities_donor_date_idx` ON `giving_activities` (`donor_id`,`activity_date`)"
+    },
+    {
+      "type": "index",
+      "name": "giving_activities_owner_date_idx",
+      "sql": "CREATE INDEX `giving_activities_owner_date_idx` ON `giving_activities` (`owner_user_id`,`activity_date`)"
+    },
+    {
+      "type": "index",
+      "name": "giving_activities_owner_origin_date_idx",
+      "sql": "CREATE INDEX `giving_activities_owner_origin_date_idx` ON `giving_activities` (`owner_user_id`,`record_origin`,`activity_date`)"
+    },
+    {
+      "type": "index",
+      "name": "giving_activities_owner_source_fingerprint_unique",
+      "sql": "CREATE UNIQUE INDEX `giving_activities_owner_source_fingerprint_unique` ON `giving_activities` (`owner_user_id`,`external_source`,`source_fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "household_import_changes_batch_donor_idx",
+      "sql": "CREATE UNIQUE INDEX `household_import_changes_batch_donor_idx` ON `household_import_changes` (`import_id`,`donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "household_import_changes_user_date_idx",
+      "sql": "CREATE INDEX `household_import_changes_user_date_idx` ON `household_import_changes` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "household_import_rollback_audits_import_idx",
+      "sql": "CREATE UNIQUE INDEX `household_import_rollback_audits_import_idx` ON `household_import_rollback_audits` (`import_id`)"
+    },
+    {
+      "type": "index",
+      "name": "household_import_rollback_audits_user_date_idx",
+      "sql": "CREATE INDEX `household_import_rollback_audits_user_date_idx` ON `household_import_rollback_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_data_health_repairs_user_date",
+      "sql": "CREATE INDEX `idx_data_health_repairs_user_date` ON `data_health_repair_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_data_health_repairs_user_record",
+      "sql": "CREATE INDEX `idx_data_health_repairs_user_record` ON `data_health_repair_audits` (`user_id`,`record_type`,`record_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_giving_activities_owner_workspace_status_date",
+      "sql": "CREATE INDEX `idx_giving_activities_owner_workspace_status_date` ON `giving_activities` (`owner_user_id`,`workspace_status`,`activity_date`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_giving_activities_pending_match",
+      "sql": "CREATE INDEX `idx_giving_activities_pending_match` ON `giving_activities` (`owner_user_id`,`donor_id`,`category`,`workspace_status`,`committed_cents`,`activity_date`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_giving_management_audit_activity_date",
+      "sql": "CREATE INDEX `idx_giving_management_audit_activity_date` ON `giving_activity_management_audits` (`activity_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_giving_management_audit_import",
+      "sql": "CREATE INDEX `idx_giving_management_audit_import` ON `giving_activity_management_audits` (`import_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "idx_legacy_test_cleanup_user_date",
+      "sql": "CREATE INDEX `idx_legacy_test_cleanup_user_date` ON `legacy_test_cleanup_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "import_preview_sessions_owner_expires_idx",
+      "sql": "CREATE INDEX `import_preview_sessions_owner_expires_idx` ON `import_preview_sessions` (`owner_user_id`,`expires_at`)"
+    },
+    {
+      "type": "index",
+      "name": "import_preview_sessions_owner_status_idx",
+      "sql": "CREATE INDEX `import_preview_sessions_owner_status_idx` ON `import_preview_sessions` (`owner_user_id`,`status`,`expires_at`)"
+    },
+    {
+      "type": "index",
+      "name": "important_date_changes_important_date_idx",
+      "sql": "CREATE INDEX `important_date_changes_important_date_idx` ON `important_date_changes` (`important_date_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "important_dates_donor_idx",
+      "sql": "CREATE INDEX `important_dates_donor_idx` ON `important_dates` (`donor_id`,`type`,`month`,`day`)"
+    },
+    {
+      "type": "index",
+      "name": "important_dates_fingerprint_idx",
+      "sql": "CREATE UNIQUE INDEX `important_dates_fingerprint_idx` ON `important_dates` (`fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "important_dates_user_idx",
+      "sql": "CREATE INDEX `important_dates_user_idx` ON `important_dates` (`user_id`)"
+    },
+    {
+      "type": "index",
+      "name": "interactions_donor_date_idx",
+      "sql": "CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`)"
+    },
+    {
+      "type": "index",
+      "name": "jl_payment_assignment_audits_import_payment_idx",
+      "sql": "CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "jl_payment_assignment_audits_pledge_idx",
+      "sql": "CREATE INDEX `jl_payment_assignment_audits_pledge_idx` ON `jl_payment_assignment_audits` (`pledge_activity_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "jl_payment_assignment_audits_user_date_idx",
+      "sql": "CREATE INDEX `jl_payment_assignment_audits_user_date_idx` ON `jl_payment_assignment_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "jl_payment_assignments_pledge_idx",
+      "sql": "CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`)"
+    },
+    {
+      "type": "index",
+      "name": "recommendations_user_status_idx",
+      "sql": "CREATE INDEX `recommendations_user_status_idx` ON `recommendations` (`user_id`,`status`)"
+    },
+    {
+      "type": "index",
+      "name": "relationship_queue_dismissals_user_date_idx",
+      "sql": "CREATE INDEX `relationship_queue_dismissals_user_date_idx` ON `relationship_queue_dismissals` (`user_id`,`dismissed_at`)"
+    },
+    {
+      "type": "index",
+      "name": "sample_cleanup_audits_user_date_idx",
+      "sql": "CREATE INDEX `sample_cleanup_audits_user_date_idx` ON `sample_cleanup_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "users_email_unique",
+      "sql": "CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`)"
+    },
+    {
+      "type": "index",
+      "name": "workspace_backup_audits_user_import_idx",
+      "sql": "CREATE INDEX `workspace_backup_audits_user_import_idx` ON `workspace_backup_audits` (`user_id`,`import_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeit_changes_yahrtzeit_idx",
+      "sql": "CREATE INDEX `yahrtzeit_changes_yahrtzeit_idx` ON `yahrtzeit_changes` (`yahrtzeit_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeits_donor_idx",
+      "sql": "CREATE INDEX `yahrtzeits_donor_idx` ON `yahrtzeits` (`donor_id`,`hebrew_month`,`hebrew_day`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeits_fingerprint_idx",
+      "sql": "CREATE UNIQUE INDEX `yahrtzeits_fingerprint_idx` ON `yahrtzeits` (`fingerprint`)"
+    },
+    {
+      "type": "index",
+      "name": "yahrtzeits_user_idx",
+      "sql": "CREATE INDEX `yahrtzeits_user_idx` ON `yahrtzeits` (`user_id`)"
+    }
+  ]
+}
