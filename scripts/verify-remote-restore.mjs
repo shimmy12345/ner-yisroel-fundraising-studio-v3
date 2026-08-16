@@ -24,8 +24,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { planD1Restore } from "../lib/operations/d1-restore-order.ts";
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -39,6 +41,38 @@ function wrangler(args, { allowFailure = false } = {}) {
   const result = spawnSync("npx", ["--yes", "wrangler@4.92.0", ...args], { cwd: root, encoding: "utf8", env: process.env });
   if (result.status !== 0 && !allowFailure) throw new Error(`wrangler ${args.join(" ")} failed:\n${(result.stderr || result.stdout || "").trim()}`);
   return result;
+}
+
+// D1's remote bulk Import pipeline (what `wrangler d1 execute --remote
+// --file=...` uses for anything beyond a trivial size) has an observed,
+// undocumented failure mode: "statement too long: SQLITE_TOOBIG" on a
+// restore step whose content is nowhere near any actual size limit
+// (confirmed empirically 2026-08-16 -- a 162KB statement restores fine
+// early in a sequence but fails identically, byte-for-byte, when it is
+// not among the first few Import calls against a fresh scratch database;
+// per-statement size, total file size, total database size, and pacing
+// with up to 90s delays between calls were all ruled out as the cause).
+// This is a genuine, reported-but-unresolved Cloudflare platform
+// limitation, not something this script's ordering/scoping logic can fix
+// -- retrying (ideally against a fresh scratch database, i.e. re-running
+// this whole script, but at minimum retrying the individual failing step)
+// is the only mitigation found to date. This wrapper retries ONLY this
+// specific error signature, a bounded number of times, and still throws
+// (failing the workflow loudly, per its whole purpose) if every attempt
+// fails -- it must never be widened to swallow other errors.
+function wranglerRestoreStepWithRetry(args, { attempts = 3, delayMs = 10_000 } = {}) {
+  let lastResult;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    lastResult = spawnSync("npx", ["--yes", "wrangler@4.92.0", ...args], { cwd: root, encoding: "utf8", env: process.env });
+    if (lastResult.status === 0) return lastResult;
+    const message = (lastResult.stderr || lastResult.stdout || "");
+    if (!/SQLITE_TOOBIG|statement too long/i.test(message)) break;
+    if (attempt < attempts) {
+      console.log(`Restore step hit the known SQLITE_TOOBIG platform quirk (attempt ${attempt}/${attempts}) -- retrying in ${delayMs / 1000}s...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+  throw new Error(`wrangler ${args.join(" ")} failed after retries:\n${(lastResult.stderr || lastResult.stdout || "").trim()}`);
 }
 
 function wranglerJson(args) {
@@ -56,6 +90,18 @@ function wranglerJson(args) {
   throw new Error(`Could not find JSON in wrangler output for: ${args.join(" ")}\n${result.stdout}`);
 }
 
+const restorePlan = planD1Restore(fs.readFileSync(backupPath, "utf8"));
+if (restorePlan.skippedTables.length > 0) {
+  console.log(`Note: skipping DATA restore for ${restorePlan.skippedTables.join(", ")} (see D1_RESTORE_SKIP_DATA_TABLES in lib/operations/d1-restore-order.ts -- schema for these tables is still restored and verified).`);
+}
+
+const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "fundraising-os-restore-verify-"));
+function writeTempSql(name, sql) {
+  const tempPath = path.join(tempDirectory, name);
+  fs.writeFileSync(tempPath, sql);
+  return tempPath;
+}
+
 let scratchDatabaseId = null;
 try {
   console.log(`Creating scratch database ${scratchDatabaseName}...`);
@@ -65,8 +111,27 @@ try {
   scratchDatabaseId = idMatch[1];
   console.log(`Created ${scratchDatabaseName} (${scratchDatabaseId}).`);
 
-  console.log("Restoring backup into scratch database...");
-  wrangler(["d1", "execute", scratchDatabaseName, "--remote", "--file", backupPath, "--yes"]);
+  // Restored as separate requests -- schema first, then one request per
+  // table in dependency order, then query-planner stats -- rather than one
+  // combined file. Confirmed empirically against a real export: a single
+  // `wrangler d1 execute --remote --file=...` covering the whole database
+  // failed with "statement too long: SQLITE_TOOBIG" even with no
+  // individual statement over 162KB, while every individual table
+  // (including the largest, a 4.36MB/5171-row table) restored cleanly on
+  // its own. See D1RestorePlan's doc comment in
+  // lib/operations/d1-restore-order.ts for the full account.
+  console.log("Restoring schema...");
+  wranglerRestoreStepWithRetry(["d1", "execute", scratchDatabaseName, "--remote", "--file", writeTempSql("schema.sql", restorePlan.schemaSql), "--yes"]);
+
+  for (const { table, sql } of restorePlan.dataSteps) {
+    console.log(`Restoring data for "${table}" (${sql.length} bytes)...`);
+    wranglerRestoreStepWithRetry(["d1", "execute", scratchDatabaseName, "--remote", "--file", writeTempSql(`data-${table}.sql`, sql), "--yes"]);
+  }
+
+  if (restorePlan.trailingStatsSql) {
+    console.log("Restoring query-planner statistics (best-effort -- these are planner hints, not data, so a failure here does not affect integrity and must not fail verification)...");
+    wrangler(["d1", "execute", scratchDatabaseName, "--remote", "--file", writeTempSql("stats.sql", restorePlan.trailingStatsSql), "--yes"], { allowFailure: true });
+  }
 
   console.log("Running PRAGMA integrity_check...");
   const integrity = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA integrity_check;"]);
@@ -106,4 +171,5 @@ try {
       console.log("Scratch database deleted.");
     }
   }
+  fs.rmSync(tempDirectory, { recursive: true, force: true });
 }
