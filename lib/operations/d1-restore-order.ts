@@ -78,6 +78,112 @@ export const D1_RESTORE_DATA_ORDER: readonly string[] = [
 // reasoning, not by loosening the fail-loud "unknown table" check below.
 export const D1_RESTORE_SKIP_DATA_TABLES: readonly string[] = ["import_preview_sessions", "import_preview_session_chunks"];
 
+// A third, independent restore-blocking problem, found while tracking
+// down why `data_imports` (real audit/history data -- must never be
+// skipped) still failed after the ordering fix and the per-table split
+// above (2026-08-16). Binary-searched empirically against a fresh
+// throwaway scratch database for each size tested (eliminating sequence-
+// position as a variable): a single INSERT statement with its values
+// written as literal SQL text fails with "statement too long:
+// SQLITE_TOOBIG" somewhere between 100,000 and 102,400 bytes, regardless
+// of which table it targets or where in the restore sequence it runs --
+// confirmed with synthetic statements of exact known sizes, not just the
+// real data_imports row. This is D1's bulk Import pipeline enforcing a
+// hard SQL-TEXT-length ceiling per statement, unrelated to the total
+// amount of data in the row.
+//
+// The fix is not a bigger/smaller chunk of statements -- no amount of
+// regrouping helps a single statement that is already too big alone.
+// Confirmed empirically: the D1 HTTP query API
+// (POST .../d1/database/{id}/query with a JSON body of
+// {sql, params}) accepts a PARAMETERIZED statement whose SQL TEXT is tiny
+// (placeholders only) with a 300KB value passed in `params` -- nearly 2x
+// the real data_imports row's size and well past the inline-literal
+// ceiling -- with no error. The limit is specifically on inline SQL TEXT
+// length, not on parameter/row data size. parameterizeInsertStatement
+// below converts a single-row INSERT statement into exactly this shape;
+// scripts/verify-remote-restore.mjs uses it only for statements at or
+// above this threshold, calling the D1 HTTP API directly for those and
+// leaving every normal-sized statement on the already-proven
+// `wrangler d1 execute --file` path unchanged.
+export const D1_SAFE_STATEMENT_BYTES = 65536;
+
+// Splits the inner content of a SQL "VALUES(...)" or column-list "(...)"
+// clause into its top-level comma-separated expressions, respecting
+// single-quoted string literals (where '' is an escaped quote, not the
+// end of the string) and parenthesized sub-expressions (e.g. a function
+// call like replace('a','b',char(10))) so commas inside either are never
+// mistaken for tuple separators. Never modifies the substrings it splits
+// out -- reassembling them with "," reproduces the input exactly.
+export function splitTopLevelSqlValues(inner: string): string[] {
+  const values: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let current = "";
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (inString) {
+      current += ch;
+      if (ch === "'") {
+        if (inner[i + 1] === "'") { current += "'"; i++; }
+        else inString = false;
+      }
+      continue;
+    }
+    if (ch === "'") { inString = true; current += ch; continue; }
+    if (ch === "(") { depth++; current += ch; continue; }
+    if (ch === ")") { depth--; current += ch; continue; }
+    if (ch === "," && depth === 0) { values.push(current.trim()); current = ""; continue; }
+    current += ch;
+  }
+  if (current.trim() !== "") values.push(current.trim());
+  return values;
+}
+
+export type ClassifiedSqlValue = { kind: "string" | "number" | "null"; value: string | number | null } | { kind: "other" };
+
+// Classifies a single top-level VALUES expression as a plain literal
+// (safely bindable as a parameter) or "other" (a function call or other
+// expression -- e.g. replace('a','b',char(10)), seen in real exports for
+// text fields with embedded newlines -- which cannot be represented as a
+// single bound parameter and must stay as inline SQL text).
+export function classifySqlValueExpression(expr: string): ClassifiedSqlValue {
+  const trimmed = expr.trim();
+  if (/^null$/i.test(trimmed)) return { kind: "null", value: null };
+  if (/^-?\d+$/.test(trimmed)) return { kind: "number", value: Number(trimmed) };
+  if (/^-?\d+\.\d+([eE][-+]?\d+)?$/.test(trimmed)) return { kind: "number", value: Number(trimmed) };
+  if (/^'(?:[^']|'')*'$/.test(trimmed)) return { kind: "string", value: trimmed.slice(1, -1).replace(/''/g, "'") };
+  return { kind: "other" };
+}
+
+// Converts a single-row INSERT statement, exactly as `wrangler d1 export`
+// emits it (`INSERT INTO "table" (col,...) VALUES(v,...);`), into a
+// parameterized statement: SQL text with "?" placeholders (tiny,
+// regardless of how large the original values were) plus a `params`
+// array carrying the actual values, safe to send to the D1 HTTP query
+// API's {sql, params} body. Returns null -- never guesses -- if the
+// statement is not a single-row INSERT this parser recognizes, or if any
+// value is not a plain literal (a number, a quoted string, or NULL) it
+// can safely bind as a parameter. The caller must fail loudly on null,
+// never fall back to sending the original oversized statement as-is.
+export function parameterizeInsertStatement(statementSql: string): { sql: string; params: Array<string | number | null> } | null {
+  const trimmed = statementSql.trim().replace(/;\s*$/, "");
+  const match = trimmed.match(/^INSERT INTO ("[^"]+")\s*\(([^)]*)\)\s*VALUES\((.*)\)$/s);
+  if (!match) return null;
+  const [, tableRef, columnList, valuesInner] = match;
+  const columns = splitTopLevelSqlValues(columnList);
+  const values = splitTopLevelSqlValues(valuesInner);
+  if (values.length === 0 || values.length !== columns.length) return null;
+  const params: Array<string | number | null> = [];
+  for (const value of values) {
+    const classified = classifySqlValueExpression(value);
+    if (classified.kind === "other") return null;
+    params.push(classified.value);
+  }
+  const placeholders = values.map(() => "?").join(",");
+  return { sql: `INSERT INTO ${tableRef} (${columnList}) VALUES(${placeholders})`, params };
+}
+
 export type ParsedRestoreStatements = {
   // PRAGMA lines and anything else that precedes the first CREATE/INSERT
   // statement, in original order. Applied first, unchanged.
@@ -199,40 +305,57 @@ export function reorderD1ExportForRestore(sqlText: string, order: readonly strin
   return [...parsed.preamble, ...parsed.schema, ...orderedInserts, ...parsed.trailingStats].join("\n") + "\n";
 }
 
+// A single restore step for one table. "file" steps bundle every
+// normal-sized statement for that table into one SQL blob meant for
+// `wrangler d1 execute --file=...`; "statement" steps are one individual
+// pre-parameterized oversized INSERT meant for the D1 HTTP query API
+// (POST .../d1/database/{id}/query with {sql, params} -- see
+// D1_SAFE_STATEMENT_BYTES's doc comment for why). A table with both
+// normal and oversized rows produces one of each kind, consecutively.
+export type D1RestoreStep =
+  | { table: string; kind: "file"; sql: string }
+  | { table: string; kind: "statement"; sql: string; params: Array<string | number | null> };
+
 export type D1RestorePlan = {
   // PRAGMA preamble + every CREATE statement, applied first as one file.
   schemaSql: string;
-  // One entry per table with data, in dependency-safe order, each meant
-  // to be applied as its OWN separate `wrangler d1 execute --file=...`
-  // invocation rather than concatenated into one file.
+  // One or two entries per table with data (a "file" step for its
+  // normal-sized rows, a "statement" step for each oversized row), in
+  // dependency-safe table order -- critically, ALL of a table's steps
+  // (file and statement) appear together, at that table's position in
+  // the order, before moving on to the next table. This matters: an
+  // earlier, broken version of this plan put every oversized statement
+  // in its own list restored only after all tables' normal-sized data --
+  // which silently reintroduced a dependency-order bug, just one level
+  // down (confirmed empirically 2026-08-16: giving_activity_import_changes,
+  // a child of data_imports, failed its foreign-key check because
+  // data_imports' one oversized row -- deferred to "later" -- hadn't been
+  // restored yet even though every *other* row of every *other* table
+  // had). Interleaving file/statement steps per table by construction, as
+  // this array does, is what actually fixes that.
   //
-  // Why per-table, not one combined file: confirmed empirically
-  // 2026-08-16 against fundraising-os-staging-db's real nightly export --
-  // restoring the fully reordered, correctly-scoped 6.99MB export as a
-  // single `wrangler d1 execute --remote --file=...` still failed with
-  // "statement too long: SQLITE_TOOBIG", even though no individual
-  // statement in that file exceeds 162KB (confirmed by re-parsing the
-  // exact file that failed). Restoring the largest real table alone
-  // (giving_activities, 4.36MB across 5171 INSERT statements) succeeded.
-  // D1's remote bulk Import pipeline (POST .../import with action "init"
-  // then "ingest", used internally for any `--remote --file` of
-  // nontrivial size) evidently has some per-request or per-internal-batch
-  // ceiling that a single large combined file can cross for reasons not
-  // reproducible from statement size alone -- restoring one table's data
-  // per request sidesteps needing to understand that undocumented
-  // behavior further, and keeps any future failure attributable to one
-  // specific table instead of an opaque whole-file error.
-  dataSteps: Array<{ table: string; sql: string }>;
+  // Why file-based per-table steps at all, not one combined file: see
+  // git history / commit message for the empirical account (a single
+  // `wrangler d1 execute --remote --file=...` covering the whole database
+  // failed with "statement too long: SQLITE_TOOBIG" even with no
+  // individual statement over 162KB; every individual table, including
+  // the largest at 4.36MB/5171 rows, restored cleanly on its own).
+  steps: D1RestoreStep[];
   // ANALYZE / sqlite_stat1, applied last as one file (optional -- these
   // are query-planner hints, not data; a restore is still fully correct
   // without them).
   trailingStatsSql: string;
   // Tables with real INSERT data in the export that were deliberately
-  // left out of dataSteps -- see D1_RESTORE_SKIP_DATA_TABLES.
+  // left out of steps -- see D1_RESTORE_SKIP_DATA_TABLES.
   skippedTables: string[];
 };
 
-export function planD1Restore(sqlText: string, order: readonly string[] = D1_RESTORE_DATA_ORDER, skipDataForTables: readonly string[] = D1_RESTORE_SKIP_DATA_TABLES): D1RestorePlan {
+export function planD1Restore(
+  sqlText: string,
+  order: readonly string[] = D1_RESTORE_DATA_ORDER,
+  skipDataForTables: readonly string[] = D1_RESTORE_SKIP_DATA_TABLES,
+  safeStatementBytes: number = D1_SAFE_STATEMENT_BYTES,
+): D1RestorePlan {
   const parsed = parseRestoreStatements(sqlText);
   if (parsed.unrecognized.length > 0) {
     throw new Error(`planD1Restore encountered ${parsed.unrecognized.length} statement(s) it does not recognize (not PRAGMA, CREATE, INSERT, or ANALYZE) -- refusing to guess where they belong:\n${parsed.unrecognized.map((statement) => statement.slice(0, 120)).join("\n")}`);
@@ -243,13 +366,34 @@ export function planD1Restore(sqlText: string, order: readonly string[] = D1_RES
   if (unknownTables.length > 0) {
     throw new Error(`planD1Restore found INSERT statements for table(s) not present in the dependency order: ${unknownTables.join(", ")}. Add them to D1_RESTORE_DATA_ORDER (lib/operations/d1-restore-order.ts) with the correct dependency position before restoring.`);
   }
-  const dataSteps = order
-    .filter((table) => !skip.has(table) && (parsed.insertsByTable.get(table)?.length ?? 0) > 0)
-    .map((table) => ({ table, sql: parsed.insertsByTable.get(table)!.join("\n") + "\n" }));
+  const steps: D1RestoreStep[] = [];
+  for (const table of order) {
+    if (skip.has(table)) continue;
+    const statements = parsed.insertsByTable.get(table) ?? [];
+    if (statements.length === 0) continue;
+    const small: string[] = [];
+    const oversized: Array<{ sql: string; params: Array<string | number | null> }> = [];
+    for (const statement of statements) {
+      if (statement.length < safeStatementBytes) { small.push(statement); continue; }
+      const parameterized = parameterizeInsertStatement(statement);
+      if (!parameterized) {
+        throw new Error(`planD1Restore found an oversized statement (${statement.length} bytes) for table "${table}" that could not be safely parameterized (not a recognized single-row INSERT, or contains a non-literal value expression). Refusing to guess -- this statement cannot be restored via either path:\n${statement.slice(0, 200)}...`);
+      }
+      oversized.push(parameterized);
+    }
+    // File step first, then this table's oversized statement(s) -- order
+    // between these two within the SAME table never matters for foreign
+    // keys (nothing in this schema has a row referencing another row of
+    // its own table via a required, immediately-checked foreign key), but
+    // BOTH must appear here, together, at this table's position, not
+    // deferred to after every other table.
+    if (small.length > 0) steps.push({ table, kind: "file", sql: small.join("\n") + "\n" });
+    for (const statement of oversized) steps.push({ table, kind: "statement", ...statement });
+  }
   const skippedTables = order.filter((table) => skip.has(table) && (parsed.insertsByTable.get(table)?.length ?? 0) > 0);
   return {
     schemaSql: [...parsed.preamble, ...parsed.schema].join("\n") + "\n",
-    dataSteps,
+    steps,
     trailingStatsSql: parsed.trailingStats.length > 0 ? parsed.trailingStats.join("\n") + "\n" : "",
     skippedTables,
   };
