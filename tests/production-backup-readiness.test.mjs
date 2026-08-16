@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { buildSchemaOnlyBackup } from "../lib/operations/schema-backup.ts";
-import { BUSINESS_DATA_COUNT_SQL, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { WORKSPACE_BACKUP_EXCLUDED_TABLES, WORKSPACE_BACKUP_TABLES, verifyWorkspaceBackupCoverage } from "../lib/operations/workspace-backup.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
@@ -48,4 +49,37 @@ test("backup, encryption, restore, and access operations remain explicit and fai
   assert.match(protect, /Protect-CmsMessage/);
   assert.match(restore, /--local/);
   for (const phrase of ["Stop writes", "Restore safely", "Verify integrity", "Reopen access", "Corrupt or incomplete backup", "Wrong environment", "Compromised owner account"]) assert.match(recovery, new RegExp(phrase, "i"));
+});
+
+// --- The app-level /api/import/backup export is explicitly partial, never
+// a full database backup -- an audit proved it silently omitted ~20 real
+// fundraising tables (yahrtzeits, important_dates, gift_acknowledgments,
+// donor_historical_context among them). Every fundraising table must now
+// be consciously classified as either included or deliberately excluded;
+// this test fails the moment a new table is added to the schema without
+// that classification, so the coverage claim can never silently drift out
+// of sync again the way it already did once. ---
+test("the workspace-backup route's table coverage stays synchronized with the authoritative fundraising-table list", () => {
+  const coverage = verifyWorkspaceBackupCoverage();
+  assert.deepEqual(coverage.unclassified, [], "every fundraising table must be listed in WORKSPACE_BACKUP_TABLES or WORKSPACE_BACKUP_EXCLUDED_TABLES");
+  assert.deepEqual(coverage.stale, [], "WORKSPACE_BACKUP_TABLES/WORKSPACE_BACKUP_EXCLUDED_TABLES must not reference a table that no longer exists");
+  assert.equal(coverage.inSync, true);
+  // Real donor-facing data (not just audit trails) must be classified
+  // somewhere -- proves the specific gap the audit found is now accounted
+  // for, one way or the other, rather than merely "some list is complete".
+  for (const table of ["yahrtzeits", "important_dates", "gift_acknowledgments", "donor_historical_context"]) {
+    assert.ok(FUNDRAISING_DATA_TABLES.includes(table), `sanity check: "${table}" must actually be a real fundraising table for this test to mean anything`);
+    assert.ok(WORKSPACE_BACKUP_TABLES.includes(table) || WORKSPACE_BACKUP_EXCLUDED_TABLES.includes(table), `"${table}" must be explicitly classified, not silently dropped`);
+  }
+});
+
+test("the workspace-backup route honestly labels itself as a partial export, not a full backup", () => {
+  const route = read("app/api/import/backup/route.ts");
+  const settings = read("app/settings/page.tsx");
+  assert.match(route, /coverage:\s*"partial"/);
+  assert.match(route, /WORKSPACE_BACKUP_TABLES/);
+  assert.match(route, /WORKSPACE_BACKUP_EXCLUDED_TABLES/);
+  assert.doesNotMatch(route, /"fundraising-os-d1-backup-v1"/, "the old, unqualified 'D1 backup' format tag must not come back");
+  assert.doesNotMatch(settings, />Download current D1 backup</, "Settings must not call this a full D1 backup");
+  assert.match(settings, /partial workspace export/i);
 });

@@ -4,10 +4,44 @@ This is the one-page recovery process for the approved owner. Production is priv
 
 ## Routine protection
 
-1. **Before the first import:** open the private production `/health` page and choose **Download schema-only production backup**.
-2. **After real data exists:** use Settings → **Download current D1 backup** after every import or merge session and at least weekly.
-3. Encrypt every downloaded `.sql` or `.json` with `protect-backup.ps1`, using the organization’s public recovery certificate. Store the `.p7m` file and its manifest outside the Worker project in an owner-only backup location. Keep the private recovery key offline with a second authorized custodian.
-4. Retain eight weekly backups and twelve month-end backups. Rehearse one restore monthly and record the date and checksum. Never delete the last known-good backup after a failed export.
+Backups are now **automatic** — see docs/DEPLOYMENT.md's "Automated D1
+backup (GitHub Actions + R2)" section for the full architecture. Nothing
+below requires the owner to remember to run anything on a schedule.
+
+1. **Nightly, automatically:** a GitHub Actions workflow exports the
+   entire `fundraising-os-staging-db`, encrypts it, and uploads it to a
+   dedicated R2 bucket the deployed application itself cannot read, write,
+   or delete from. Retention: 90 days of daily backups (R2 lifecycle rule
+   on the bucket, comfortably above the 60-day minimum), plus a
+   never-expiring `latest/` pointer.
+2. **Monthly, automatically:** a second GitHub Actions workflow restores
+   the latest backup into a throwaway D1 database, runs a full integrity
+   and schema check, and deletes the scratch database — proving the
+   backup is actually restorable, not just that the export step succeeded.
+   Check the Actions tab for this repository if you want to confirm the
+   last run's result.
+3. **A pre-2026-08-16 manual export exists and predates this pipeline:**
+   `staging-before-real-import-2026-08-06.sql`, taken by hand with
+   `wrangler d1 export` before the first real donor data was imported. It
+   was never recorded in `workspace_backup_audits` because that table only
+   logs `/api/import/backup` (the in-app, partial-export route) — a manual
+   `wrangler d1 export` doesn't touch the app at all. Do not read
+   `workspace_backup_audits` being empty as "no backup has ever existed";
+   read it as "the in-app export route has never been used." Keep that
+   file wherever it was originally saved, alongside (not instead of) the
+   automated R2 backups.
+4. **Do not rely on `Settings → Download partial workspace export`** for
+   real protection — it is explicitly a partial, human-readable export
+   (see `lib/operations/workspace-backup.ts` for exactly which tables it
+   omits), useful for a quick look, not a backup. The automated pipeline
+   above is the actual backup.
+5. If the automated pipeline is ever disabled or the Cloudflare/GitHub
+   setup it depends on changes, fall back to the manual procedure it
+   replaced: `wrangler d1 export --remote`, encrypt with
+   `protect-backup.ps1` using the organization's public recovery
+   certificate, store the `.p7m` file and its manifest outside the Worker
+   project in an owner-only backup location, and rehearse a restore
+   monthly until automation is restored.
 
 ## Recovery
 

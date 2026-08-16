@@ -141,19 +141,171 @@ could silently target the wrong environment. Do not add one.
 
 ## Backup procedure
 
-Application-level backups (inside the running app, for real workspace data):
+**The authoritative full backup is automated** — see "Automated D1 backup
+(GitHub Actions + R2)" below. Everything in this section is secondary to
+that: useful for a quick look, a pre-rollback safety snapshot, or manual
+disaster recovery, but none of it is a substitute for the automated
+pipeline.
+
+Application-level exports (inside the running app, for real workspace
+data):
 
 - `pnpm db:baseline:generate` / `pnpm db:baseline:rehearse` — regenerate and
   rehearse the packaged clean-baseline artifact (schema only, no data).
-- `/api/import/backup` — authenticated, full live workspace backup
-  (encrypted; see `lib/operations/schema-backup.ts` and
-  `tests/production-backup-readiness.test.mjs`).
+- `/api/import/backup` — authenticated, owner-scoped **partial** JSON
+  export. An audit (2026-08-16) proved this route silently omitted ~20 of
+  33 fundraising tables — including real donor-facing data added after it
+  was first written (`yahrtzeits`, `important_dates`, `gift_acknowledgments`,
+  `donor_historical_context`). It is not, and has never been, a full
+  backup, despite historically being labeled "the D1 backup" in this doc
+  and in Settings. It now says so explicitly in its own response payload
+  (`coverage: "partial"`, `tablesIncluded`/`tablesExcluded`) — see
+  `lib/operations/workspace-backup.ts` for the exact, tested table
+  classification and `tests/production-backup-readiness.test.mjs`'s
+  `verifyWorkspaceBackupCoverage` check, which fails CI if a new
+  fundraising table is ever added to the schema without being classified
+  as included or deliberately excluded here. It remains in use as the
+  pre-rollback safety snapshot (`app/api/import/rollback`,
+  `app/api/import/household-rollback`) and as a quick manual download from
+  Settings — just not as anyone's real backup.
 - `/api/operations/schema-backup` — schema-only backup, gated by
   `BUSINESS_DATA_COUNT_SQL`: it refuses to run if any business data exists,
   to prevent a schema-only export from being mistaken for a full backup.
 
 For a raw, database-level backup/restore of `fundraising-os-staging-db`
 itself (independent of the app), see the runbook below.
+
+## Automated D1 backup (GitHub Actions + R2)
+
+Nightly, fully automated, whole-database backup with monthly automated
+restore verification. Implemented 2026-08-16 after an audit found zero
+independent backups had ever actually been taken (`workspace_backup_audits`
+was empty) and no scheduled backup mechanism existed at all.
+
+**Important distinction to preserve:** `workspace_backup_audits` being
+empty means the in-app `/api/import/backup` route had never been invoked —
+it does **not** mean no backup of any kind ever existed. A manual
+`wrangler d1 export` was taken before the first real-data import:
+`staging-before-real-import-2026-08-06.sql`. That file predates this
+automated pipeline and lives wherever it was originally saved (outside
+this repository, per the "do not commit backups to source control" rule
+below) — it was never tracked by `workspace_backup_audits` because that
+table only records `/api/import/backup` invocations, not raw `wrangler d1
+export` runs.
+
+### Architecture
+
+- **`.github/workflows/d1-backup-nightly.yml`** — every night (`0 8 * * *`
+  UTC, plus manual `workflow_dispatch`): `wrangler d1 export --remote` the
+  entire `fundraising-os-staging-db` (schema + every row in every table,
+  no per-table enumeration to keep in sync), gzip it, GPG-encrypt it
+  (AES256, symmetric passphrase), shred the plaintext, and upload the
+  ciphertext to a dedicated R2 bucket under `daily/<name>-<timestamp>.sql.gz.gpg`
+  and (overwriting each run) `latest/<name>.sql.gz.gpg`.
+- **`.github/workflows/d1-restore-verify-monthly.yml`** — on the 1st of
+  every month (`0 9 1 * *` UTC, plus manual `workflow_dispatch`):
+  downloads `latest/...`, decrypts it, and runs
+  `scripts/verify-remote-restore.mjs`, which restores it into a brand-new
+  throwaway remote D1 database, runs `PRAGMA integrity_check`, `PRAGMA
+  foreign_key_check`, a full schema comparison against the verified
+  production baseline, and a per-table row-count check across every
+  fundraising table — then always deletes the scratch database, including
+  on failure. Any check failing fails the workflow (no `continue-on-error`
+  anywhere in this pipeline).
+- **Isolation from the deployed app**: `wrangler.staging.jsonc` has no
+  `r2_buckets` binding and never should
+  (`tests/backup-automation.test.mjs` asserts this). The deployed Worker
+  has no credential capable of reading, writing, or deleting anything in
+  the backup bucket — a bug or full compromise of the application itself
+  cannot reach these backups. All backup credentials live only in GitHub
+  Actions secrets.
+- **Credential separation**: the nightly job's R2 credential is scoped to
+  Object Read & Write on the backup bucket only (it needs to write, and
+  reads its own upload back to verify it, but cannot delete anything —
+  retention is handled by an R2 lifecycle rule, not by this workflow
+  issuing deletes). The monthly verification job uses a **separate**,
+  Object Read-only R2 credential — it cannot write or delete backups even
+  if compromised. Both are distinct from the Cloudflare API token used for
+  D1 operations, which cannot touch R2 at all.
+- **Nothing is ever committed to this repository.** Backups exist only in
+  R2. `tests/backup-automation.test.mjs` asserts neither workflow contains
+  a `git add`/`git commit`/`git push` of any backup artifact.
+
+### One-time setup (manual — dashboard/CLI actions the owner must do)
+
+1. **Enable R2** for this Cloudflare account: dashboard → R2 → follow the
+   one-time enablement prompt. This cannot be done via `wrangler` or the
+   API from outside the dashboard.
+2. **Create the backup bucket** (once R2 is enabled):
+   ```
+   wrangler r2 bucket create fundraising-os-staging-backups
+   ```
+3. **Set the retention lifecycle rule** (once, requires the bucket-admin
+   level of R2 access — use your own logged-in `wrangler` session, not
+   either of the narrow CI credentials below):
+   ```
+   wrangler r2 bucket lifecycle add fundraising-os-staging-backups daily-expiry daily/ --expire-days 90
+   ```
+   This expires objects under the `daily/` prefix after 90 days (comfortably
+   above the required 60-day minimum); the `latest/` pointer has no
+   lifecycle rule and is never auto-deleted.
+4. **Create a Cloudflare API token** (dashboard → My Profile → API
+   Tokens → Create Token → Custom Token): permission `Account → D1 →
+   Edit`, resource scoped to this one account. (Cloudflare does not offer
+   a narrower, export-only D1 permission — Edit is the finest grain
+   available. This token cannot touch R2, Workers, DNS, or anything
+   outside D1.) Save as GitHub secret `CLOUDFLARE_D1_API_TOKEN`.
+5. **Create two R2 API tokens** (dashboard → R2 → Manage API Tokens),
+   both scoped to the `fundraising-os-staging-backups` bucket only:
+   - One with **Object Read & Write** permission → its Access Key ID /
+     Secret Access Key become GitHub secrets
+     `R2_BACKUP_WRITE_ACCESS_KEY_ID` / `R2_BACKUP_WRITE_SECRET_ACCESS_KEY`.
+   - One with **Object Read only** permission → its Access Key ID /
+     Secret Access Key become GitHub secrets
+     `R2_BACKUP_READ_ACCESS_KEY_ID` / `R2_BACKUP_READ_SECRET_ACCESS_KEY`.
+6. **Generate the encryption passphrase** — a long random value, e.g.
+   `openssl rand -base64 48`. Save it as GitHub secret
+   `BACKUP_ENCRYPTION_PASSPHRASE`, and **also** store a second copy
+   somewhere durable outside GitHub (the organization's password manager)
+   — this passphrase is required for real disaster recovery, not just the
+   automated verification job, and GitHub secrets cannot be read back once
+   set.
+7. **Add the account ID and bucket name**: GitHub secret
+   `CLOUDFLARE_ACCOUNT_ID` (from `wrangler whoami`), and repository
+   **variable** (Settings → Secrets and variables → Actions → Variables,
+   not Secrets — it isn't sensitive) `R2_BACKUP_BUCKET` =
+   `fundraising-os-staging-backups`.
+8. **First run**: trigger both workflows manually
+   (Actions tab → select workflow → "Run workflow") once all of the above
+   is in place, and confirm both succeed, before relying on the schedule
+   alone.
+
+### Recovering from an automated backup
+
+```bash
+# 1. Download the backup you want (latest, or a specific dated one) from R2:
+aws s3api get-object \
+  --endpoint-url https://<ACCOUNT_ID>.r2.cloudflarestorage.com \
+  --bucket fundraising-os-staging-backups \
+  --key latest/fundraising-os-staging-db.sql.gz.gpg \
+  downloaded.sql.gz.gpg
+# (requires AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY set to either R2 credential above)
+
+# 2. Decrypt and decompress:
+gpg --decrypt --output downloaded.sql.gz downloaded.sql.gz.gpg   # prompts for the passphrase
+gunzip downloaded.sql.gz
+
+# 3. Follow "Restoring from a SQL export file" below -- this file has the
+#    same shape and the same "no existing schema" caveat as a plain
+#    `wrangler d1 export` output, because that's exactly what it is.
+```
+
+For "undo the last N minutes/hours/days" on the live database, D1 Time
+Travel (below) is almost always the better tool — it needs no download or
+decryption step. Reach for an R2 backup specifically when Time Travel
+can't help: the database itself was deleted, you need a point further back
+than 30 days, or you need to verify/inspect a point-in-time copy without
+touching the live database at all.
 
 ## D1 backup and restore runbook (independent staging)
 

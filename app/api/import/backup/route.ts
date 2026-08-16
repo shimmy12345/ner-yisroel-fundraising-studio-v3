@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { logger } from "../../../../lib/logger";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
+import { WORKSPACE_BACKUP_EXCLUDED_TABLES, WORKSPACE_BACKUP_TABLES } from "../../../../lib/operations/workspace-backup";
 
 export async function GET(request: Request) {
   const user = await getChatGPTUser();
@@ -42,7 +43,15 @@ export async function GET(request: Request) {
     const backupId = crypto.randomUUID();
     const payload = JSON.stringify({
       exportedAt: new Date().toISOString(),
-      format: "fundraising-os-d1-backup-v1",
+      format: "fundraising-os-workspace-export-partial-v2",
+      // This is a partial, owner-scoped JSON export -- not a full database
+      // backup. See lib/operations/workspace-backup.ts for exactly which
+      // tables are (and are deliberately not) included, and
+      // docs/DEPLOYMENT.md for the authoritative full backup (the nightly
+      // wrangler d1 export -> R2 pipeline, which needs no per-table list).
+      coverage: "partial",
+      tablesIncluded: WORKSPACE_BACKUP_TABLES,
+      tablesExcluded: WORKSPACE_BACKUP_EXCLUDED_TABLES,
       donors: donors.results,
       gifts: gifts.results,
       givingActivities: givingActivities.results,
@@ -67,7 +76,7 @@ export async function GET(request: Request) {
     return new Response(payload, {
       headers: {
         "content-type": "application/json; charset=utf-8",
-        "content-disposition": `attachment; filename="fundraising-os-backup-${stamp}.json"`,
+        "content-disposition": `attachment; filename="fundraising-os-partial-workspace-export-${stamp}.json"`,
         "cache-control": "no-store",
         "x-workspace-backup-id": backupId,
       },
