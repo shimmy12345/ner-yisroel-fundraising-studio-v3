@@ -26,7 +26,14 @@ assert.match(queueExperience, /priorities=all#\$\{queueAnchor\}/);
 assert.match(today, /showAll \? 50 : 10/);
 assert.match(today, /No activities or follow-ups need attention today/);
 assert.match(today, /agendaIsEmpty.*comingIsEmpty/);
-assert.match(today, /Birthdays and anniversaries will appear here in a future update/);
+// The old "Birthdays and anniversaries will appear here in a future update"
+// placeholder is obsolete now that important dates are implemented and must
+// never come back -- comingIsEmpty's existing message already covers an
+// empty relationship-date list as part of its broader "nothing coming up"
+// wording, so no separate empty-state copy is needed here.
+assert.doesNotMatch(today, /future update/i);
+assert.doesNotMatch(styles, /future-placeholder/);
+assert.match(today, /No meetings, reminders, commitments, or relationship dates are coming up/);
 assert.match(today, /activity\.typeLabel/);
 assert.match(today, /activity\.donorName/);
 assert.match(today, /activity\.subject/);

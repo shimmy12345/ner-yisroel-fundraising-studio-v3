@@ -2,7 +2,15 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 
-const validKey = /^(reminder|activity|gift|commitment|contact-gap):[^:]{1,180}:[^:]{1,80}$/;
+// Must match every queueId shape live-data.ts actually generates: reminders
+// and scheduled activities keep their own prefixes, and every recommendation-
+// engine-sourced suggestion (acknowledge_gift, follow_up_pledge,
+// continue_conversation, relationship_opportunity, solicit,
+// reconnect_contact_gap) shares a single "recommendation" prefix -- see
+// `queueId: \`recommendation:${donorId}:${recommendation.kind}\`` in
+// lib/workspace/live-data.ts. The old gift/commitment/contact-gap prefixes
+// were replaced by that unification and are no longer generated anywhere.
+const validKey = /^(reminder|activity|recommendation):[^:]{1,180}:[^:]{1,80}$/;
 
 export async function POST(request: Request) {
   return updateDismissal(request, "dismiss");

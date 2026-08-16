@@ -119,7 +119,6 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
         {comingQueueCount ? <RelationshipQueueExperience scope="coming" initialQueue={data.relationshipQueue} priorityCount={data.priorityCount} showAll={showAll} expanded={showAll || agendaIsEmpty} /> : null}
         {!showAll && data.upcomingActivities.length > visibleUpcomingActivities.length && <a className="view-all-link command-view-all" href="/?priorities=all#coming-up-title">View all upcoming activities</a>}
         {comingIsEmpty && <p className="command-empty">No meetings, reminders, commitments, or relationship dates are coming up.</p>}
-        <p className="future-placeholder"><span aria-hidden="true">○</span> Birthdays and anniversaries will appear here in a future update.</p>
       </section>
     </div>
   </AppShell>;
