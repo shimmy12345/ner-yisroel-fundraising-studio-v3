@@ -99,10 +99,16 @@ h1 { margin-bottom: 7px; font-family: Georgia, serif; font-size: clamp(30px, 3vw
 .priority-card:last-child { border-bottom: 0; }
 .priority-rank { color: #acb2ae; font-family: Georgia, serif; font-size: 14px; text-align: center; }
 .avatar { width: 40px; height: 40px; font-size: 11px; }
-.priority-heading { display: flex; align-items: center; gap: 8px; }
-.priority-main h3, .meeting h3, .gift-row h3 { margin: 0; font-size: 13px; font-weight: 650; }
+/* flex-wrap lets the status badge drop to its own line instead of
+   squeezing the name column down to its longest-word width -- the name
+   wrapper has no fixed basis, so it always gets first claim on whatever
+   width the card actually has, at any container size (mobile, the
+   sidebar-narrow desktop Coming Up column, or a cramped tablet layout). */
+.priority-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.priority-heading > div:first-child { min-width: 0; flex: 1 1 auto; }
+.priority-main h3, .meeting h3, .gift-row h3 { margin: 0; font-size: 13px; font-weight: 650; overflow-wrap: break-word; }
 .priority-main > p { margin: 4px 0 7px; color: #7e8883; font-size: 11px; }
-.signal { padding: 3px 7px; border-radius: 20px; font-size: 8px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+.signal { flex: 0 0 auto; padding: 3px 7px; border-radius: 20px; font-size: 8px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
 .signal.warm { color: #337457; background: #e6f2eb; }.signal.urgent { color: #a25c3a; background: #f7e9df; }.signal.steady { color: #66746e; background: #edf0ed; }
 .why { display: flex; gap: 5px; color: #78857f; font-size: 9px; line-height: 1.4; }
 .spark { color: #498069; }
@@ -747,16 +753,27 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .command-queue .relationship-queue-group > header h3 { font-size:12px; }
 .command-queue .relationship-queue-group > header p { display:none; }
 .command-queue .priority-list { box-shadow:none; border-radius:10px; }
-.command-queue .priority-card { grid-template-columns:34px minmax(0,1fr) auto; gap:9px; padding:10px 11px; }
+/* One card layout for every width the Today/Coming Up cards actually
+   render at -- full-width mobile, the ~330-450px sidebar-narrow desktop
+   Coming Up column, and a tablet viewport whose persistent nav sidebar
+   leaves a similarly cramped content width. Actions live in their own
+   full-width row below the content instead of a 3rd grid column sized to
+   its own max-content width, which used to claim its full ~150px+ no
+   matter how little room the card actually had, starving the name/reason
+   column first. This also fixes it once for both Today's Agenda and
+   Coming Up, since both always render through this same command-queue
+   wrapper. */
+.command-queue .priority-card { grid-template-columns:34px minmax(0,1fr); align-items:start; gap:4px 9px; padding:11px 12px; }
 .command-queue .avatar { width:34px; height:34px; }
 .command-queue .priority-heading { align-items:flex-start; }
 .command-queue .priority-main > p { margin:3px 0; font-size:12px; line-height:1.35; }
 .command-queue .why { display:none; }
 .command-queue .priority-main time { color:#89938e; font-size:10px; }
 .command-queue .signal { font-size:8px; }
-.command-queue .priority-actions { display:flex; min-width:0; align-items:center; gap:5px; }
-.command-queue .action-button,.command-queue .complete-priority-button,.command-queue .dismiss-queue-button { min-width:0; min-height:32px; padding:6px 8px; font-size:10px; }
-.command-queue .dismiss-queue-button { max-width:78px; }
+.command-queue .priority-actions { grid-column:2; display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; width:100%; margin-top:2px; }
+.command-queue .priority-actions > * { flex:1 1 128px; }
+.command-queue .gift-acknowledgment { flex-basis:100%; margin-top:0; }
+.command-queue .action-button,.command-queue .complete-priority-button,.command-queue .dismiss-queue-button { min-width:0; min-height:40px; padding:8px 11px; font-size:11px; }
 .command-queue .queue-view-all,.command-view-all { display:inline-flex; margin-top:10px; }
 .today-actions-section { margin-bottom:22px; padding:17px 19px 19px; }
 .today-actions-section.emphasized { border-color:#aac2b5; background:#f8fbf9; box-shadow:0 8px 24px rgba(31,76,58,.08); }
@@ -785,9 +802,6 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .today-command-grid { gap:12px; margin-bottom:16px; }
   .today-command-section,.today-actions-section,.today-brief-section { padding:15px; }
   .command-section-heading h2 { font-size:21px; }
-  .command-queue .priority-card { grid-template-columns:32px minmax(0,1fr); }
-  .command-queue .priority-actions { grid-column:2; display:grid; grid-template-columns:1fr 1fr; width:100%; }
-  .command-queue .dismiss-queue-button { max-width:none; }
   .today-actions-section .today-quick-actions { grid-template-columns:1fr 1fr; overflow:visible; }
   .today-actions-section .today-quick-actions a { min-height:68px; }
   .today-actions-section .today-quick-actions a:last-child { grid-column:1 / -1; }
