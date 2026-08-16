@@ -1,0 +1,121 @@
+# Nightly, fully automated backup of fundraising-os-staging-db.
+#
+# Independent of everything the deployed Worker can do: this workflow runs
+# entirely outside the application, using credentials the Worker itself
+# never has access to (see wrangler.staging.jsonc -- no R2 binding exists
+# there, and never should). A bug or compromise in the deployed app cannot
+# reach these backups.
+#
+# What it does:
+#   1. wrangler d1 export -- a full, raw SQL export of the entire remote
+#      database (schema + every row in every table). Not the app-level
+#      partial JSON export (/api/import/backup) -- this is the whole thing.
+#   2. gzip + GPG-encrypt (AES256, symmetric) the export. The plaintext
+#      export never leaves the runner and is shredded immediately after.
+#   3. Upload to a dedicated R2 bucket via R2's S3-compatible API, using a
+#      credential scoped to Object Read & Write on that one bucket only --
+#      it cannot touch D1, the Worker, or any other R2 bucket.
+#   4. Retention is enforced by an R2 lifecycle rule on the `daily/` prefix
+#      (set up once outside this workflow -- see docs/DEPLOYMENT.md), not
+#      by this workflow deleting anything itself.
+#
+# See docs/DEPLOYMENT.md's "Automated D1 backup (GitHub Actions + R2)"
+# section for the required repository secrets and the one-time R2/Cloudflare
+# setup this workflow depends on.
+name: D1 nightly backup
+
+on:
+  schedule:
+    # 08:00 UTC daily. Cron schedules on GitHub Actions are best-effort and
+    # can be delayed under platform load -- treat "nightly" as "at least
+    # once a day", not an exact clock guarantee.
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-nightly-backup
+  cancel-in-progress: false
+
+env:
+  DATABASE_NAME: fundraising-os-staging-db
+  WRANGLER_VERSION: "4.92.0"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Export D1 database (full, raw SQL)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@${WRANGLER_VERSION} d1 export "${DATABASE_NAME}" --remote -y --output=export.sql
+
+      - name: Verify the export before trusting it
+        run: |
+          set -euo pipefail
+          test -s export.sql
+          head -c 64 export.sql | grep -q 'PRAGMA defer_foreign_keys=TRUE;' \
+            || { echo "::error::Export does not start with the expected PRAGMA line -- refusing to back up a possibly-corrupt export."; exit 1; }
+          echo "Export looks structurally sane: $(wc -l < export.sql) lines, $(wc -c < export.sql) bytes."
+
+      - name: Compress and encrypt (plaintext never leaves this step)
+        env:
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          gzip -c export.sql > export.sql.gz
+          PASSFILE="$(mktemp)"
+          printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase-file "${PASSFILE}" \
+            --output export.sql.gz.gpg export.sql.gz
+          shred -u "${PASSFILE}" export.sql export.sql.gz
+          test -s export.sql.gz.gpg
+
+      - name: Compute timestamp
+        id: stamp
+        run: echo "value=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dated backup to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_WRITE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          KEY="daily/${DATABASE_NAME}-${{ steps.stamp.outputs.value }}.sql.gz.gpg"
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" \
+            --bucket "${BUCKET}" \
+            --key "${KEY}" \
+            --body export.sql.gz.gpg \
+            --content-type application/octet-stream
+          echo "Uploaded ${KEY}"
+
+      - name: Update the 'latest' pointer (never expires, always overwritten)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_WRITE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" \
+            --bucket "${BUCKET}" \
+            --key "latest/${DATABASE_NAME}.sql.gz.gpg" \
+            --body export.sql.gz.gpg \
+            --content-type application/octet-stream
+
+      - name: Clean up local plaintext/ciphertext
+        if: always()
+        run: rm -f export.sql export.sql.gz export.sql.gz.gpg

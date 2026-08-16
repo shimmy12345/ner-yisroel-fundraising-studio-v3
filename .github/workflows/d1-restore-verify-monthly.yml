@@ -1,0 +1,93 @@
+# Monthly, fully automated proof that the latest nightly backup actually
+# restores and is intact -- a backup nobody has ever restored is a
+# hypothesis, not a backup. This workflow:
+#   1. Downloads the most recent encrypted backup from R2 (read-only
+#      credential -- cannot write or delete anything in the bucket).
+#   2. Decrypts and decompresses it.
+#   3. Restores it into a brand-new, throwaway remote D1 database (never
+#      the real fundraising-os-staging-db).
+#   4. Runs PRAGMA integrity_check, PRAGMA foreign_key_check, a full schema
+#      comparison against the verified production baseline, and a
+#      per-table row-count sanity check across every fundraising table.
+#   5. Deletes the scratch database, always -- including when a check
+#      fails, via scripts/verify-remote-restore.mjs's try/finally.
+#
+# Any failure fails this job (red X + whatever notification settings this
+# repository/org has configured for Actions failures) -- there is no
+# soft-fail path. See docs/DEPLOYMENT.md's "Automated D1 backup" section
+# for the required secrets and one-time setup.
+name: D1 monthly restore verification
+
+on:
+  schedule:
+    # 09:00 UTC on the 1st of every month -- after the nightly backup job,
+    # never before it.
+    - cron: "0 9 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-monthly-restore-verify
+  cancel-in-progress: false
+
+env:
+  DATABASE_NAME: fundraising-os-staging-db
+  WRANGLER_VERSION: "4.92.0"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install AWS CLI (R2's S3-compatible client)
+        run: |
+          set -euo pipefail
+          command -v aws >/dev/null 2>&1 || pip install --quiet awscli
+
+      - name: Download latest backup from R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          aws s3api get-object \
+            --endpoint-url "${ENDPOINT_URL}" \
+            --bucket "${BUCKET}" \
+            --key "latest/${DATABASE_NAME}.sql.gz.gpg" \
+            latest.sql.gz.gpg
+          test -s latest.sql.gz.gpg
+
+      - name: Decrypt and decompress
+        env:
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          PASSFILE="$(mktemp)"
+          printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"
+          gpg --batch --yes --decrypt --passphrase-file "${PASSFILE}" --output latest.sql.gz latest.sql.gz.gpg
+          gunzip -c latest.sql.gz > latest.sql
+          shred -u "${PASSFILE}" latest.sql.gz.gpg latest.sql.gz
+          test -s latest.sql
+          head -c 64 latest.sql | grep -q 'PRAGMA defer_foreign_keys=TRUE;' \
+            || { echo "::error::Decrypted backup does not start with the expected PRAGMA line -- refusing to restore a possibly-corrupt file."; exit 1; }
+
+      - name: Restore into a scratch D1 database and run every integrity check
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/verify-remote-restore.mjs -- latest.sql
+
+      - name: Clean up local files
+        if: always()
+        run: rm -f latest.sql.gz.gpg latest.sql.gz latest.sql
