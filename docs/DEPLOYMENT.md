@@ -444,10 +444,24 @@ schedule accordingly.
 Verifying the restore succeeded:
 - Re-run `wrangler d1 execute fundraising-os-staging-db --remote --command
   "SELECT id, schema_hash FROM production_schema_baseline;"` and confirm
-  the row matches `production-baseline/schema-manifest.json`'s
-  `schemaHash`.
-- Load `/settings` as the owner and confirm Workspace Health's
-  `independent-staging-baseline` check reads **Verified**.
+  the row matches whatever value was recorded **at the bookmark/timestamp
+  you restored to** (e.g. from your own pre-restore note, or a backup
+  taken at that time) -- not necessarily today's
+  `production-baseline/schema-manifest.json` `schemaHash`. This row is a
+  write-once historical stamp, never rewritten when a later migration is
+  applied; restoring to a point before a schema-affecting migration will
+  correctly reproduce that older value, which legitimately differs from
+  today's packaged hash. A mismatch against the bookmark's own value means
+  the restore itself is suspect; a mismatch against only today's hash does
+  not.
+- Load `/settings` as the owner and check Workspace Health's live
+  **"Staging ↔ baseline schema"** comparison -- that is the authoritative,
+  always-current structural check (it never reads
+  `production_schema_baseline`). If restoring to a point at or after the
+  most recent schema-affecting migration, `independent-staging-baseline`
+  should also read **Verified**; if restoring to an older point on
+  purpose, expect it to read **Stale stamp** instead, which reflects the
+  baseline's age, not a corrupt or unexpected live schema.
 - Spot-check row counts on the tables you expected the restore to affect.
 
 **Alternative: restoring from a SQL export file.** Only viable against a

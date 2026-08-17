@@ -26,6 +26,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
+import { findInsertedRow } from "../lib/operations/d1-backup-rows.ts";
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -34,6 +35,7 @@ if (!process.env.CLOUDFLARE_API_TOKEN || !process.env.CLOUDFLARE_ACCOUNT_ID) thr
 
 const root = path.resolve(import.meta.dirname, "..");
 const scratchDatabaseName = `fundraising-os-restore-verify-${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z").toLowerCase()}-${Math.random().toString(36).slice(2, 8)}`;
+const backupSql = fs.readFileSync(backupPath, "utf8");
 
 function wrangler(args, { allowFailure = false } = {}) {
   const result = spawnSync("npx", ["--yes", "wrangler@4.92.0", ...args], { cwd: root, encoding: "utf8", env: process.env });
@@ -77,12 +79,44 @@ try {
   const foreignKeyViolations = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA foreign_key_check;"]);
   assert.deepEqual(foreignKeyViolations?.[0]?.results ?? [], [], `Restored database has foreign-key violations: ${JSON.stringify(foreignKeyViolations)}`);
 
-  console.log("Validating schema against the verified production baseline...");
+  // CURRENT STRUCTURAL INTEGRITY: a strict, independent, table-by-table and
+  // index-by-index DDL comparison between the restored database's ACTUAL
+  // live schema and the packaged manifest (production-baseline/schema-manifest.json).
+  // This check does not read production_schema_baseline at all, so it can
+  // never be satisfied or defeated by that row's value -- see below for why
+  // that is a deliberate, separate concern.
+  console.log("Validating restored schema against the current packaged manifest...");
   const schemaRows = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name;"])?.[0]?.results ?? [];
   const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows));
   assert.equal(schemaComparison.matches, true, `Restored schema does not match the production baseline: ${schemaComparison.differences.join(" ")}`);
-  const baselineMarker = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT schema_hash FROM production_schema_baseline WHERE id='0019';"])?.[0]?.results?.[0];
-  assert.equal(baselineMarker?.schema_hash, PRODUCTION_BASELINE_HASH, "Restored production_schema_baseline row does not match the current schema hash.");
+
+  // BACKUP FIDELITY for production_schema_baseline (id '0019'): this row is
+  // a write-once historical lineage stamp, not a continuously-reverified
+  // marker -- nothing re-stamps it as later migrations land, and
+  // PRODUCTION_BASELINE_HASH itself changes with every schema-affecting
+  // migration (see lib/data-health/production-baseline.ts). Restoring an
+  // older, still-valid backup will faithfully reproduce whatever hash was
+  // stamped at that backup's time, which will legitimately differ from
+  // today's packaged hash once migrations have landed since -- that must
+  // never by itself fail restore verification (ported from the proven fix
+  // on main, commit a9685bac34db: the old code asserted the restored
+  // marker equalled today's PRODUCTION_BASELINE_HASH, which made this
+  // check fail permanently on every future restore the moment a single
+  // migration landed after whichever one last stamped the row -- even on a
+  // perfectly correct backup and restore). The only thing a restore can
+  // meaningfully prove about this row is that the BACKUP's own value
+  // survived the restore intact.
+  console.log("Validating production_schema_baseline backup fidelity (restored marker must match the SOURCE BACKUP's own marker, not today's packaged hash)...");
+  const sourceBaselineRow = findInsertedRow(backupSql, "production_schema_baseline", "id", "0019");
+  assert.ok(sourceBaselineRow, `Source backup has no production_schema_baseline row for id "0019" -- cannot verify backup fidelity for this table.`);
+  const restoredBaselineRow = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT schema_hash FROM production_schema_baseline WHERE id='0019';"])?.[0]?.results?.[0];
+  assert.equal(
+    restoredBaselineRow?.schema_hash,
+    sourceBaselineRow.schema_hash,
+    `Restored production_schema_baseline row does not match the SOURCE BACKUP's own marker (backup fidelity failure): restored="${restoredBaselineRow?.schema_hash}" backup="${sourceBaselineRow.schema_hash}".`,
+  );
+  const stampedCurrent = restoredBaselineRow.schema_hash === PRODUCTION_BASELINE_HASH;
+  console.log(`production_schema_baseline backup fidelity OK (schema_hash=${restoredBaselineRow.schema_hash}${stampedCurrent ? ", also matches today's packaged hash" : " -- an older but faithfully-restored historical stamp relative to today's packaged hash " + PRODUCTION_BASELINE_HASH + ", which is expected and does not indicate a problem; current structural integrity was already verified independently above"}).`);
 
   console.log("Validating every fundraising table is present and queryable (basic row integrity)...");
   const rowCounts = {};
