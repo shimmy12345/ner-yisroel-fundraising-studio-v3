@@ -29,8 +29,8 @@ export function MobileMoreMenu({ active, profile }: { active: "today" | "donors"
       <button type="button" className="nav-more-backdrop" aria-label="Close menu" onClick={() => setOpen(false)} />
       <nav className="nav-more-panel" aria-label="More navigation">
         <Link href="/help" onClick={() => setOpen(false)} className={active === "help" ? "active" : ""}><span>?</span>Help & resources</Link>
-        <Link href="/settings" onClick={() => setOpen(false)} className={active === "settings" ? "active" : ""}><span>⚙</span>Settings</Link>
-        {profile && <Link className="nav-more-profile" href="/settings" onClick={() => setOpen(false)}>
+        <Link href="/settings" onClick={() => setOpen(false)} className={active === "settings" ? "active" : ""} prefetch={false}><span>⚙</span>Settings</Link>
+        {profile && <Link className="nav-more-profile" href="/settings" onClick={() => setOpen(false)} prefetch={false}>
           <div className="profile-avatar">{profile.avatarUrl ? <img src={profile.avatarUrl} alt="" /> : profile.initials}</div>
           <div><strong>{profile.fullName}</strong><span>{profile.roleLabel}</span></div>
         </Link>}
