@@ -457,7 +457,10 @@ export const importantDates = sqliteTable("important_dates", {
   day: integer("day").notNull(),
   year: integer("year"),
   notes: text("notes"),
-  source: text("source", { enum: ["manual"] }).notNull(),
+  // 'import-dob' is a Date of Birth spreadsheet import (donor's own
+  // birthday, matched strictly by donor code -- see lib/import/dob-
+  // pipeline.ts). Never used to disguise an imported row as hand-entered.
+  source: text("source", { enum: ["manual", "import-dob"] }).notNull(),
   fingerprint: text("fingerprint").notNull(),
   ...timestamps,
 }, (table) => [

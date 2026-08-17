@@ -177,8 +177,17 @@ test("baseline picks up the schema-changing 0027 yahrtzeits migration", () => {
 test("baseline picks up the schema-changing 0028 important dates migration", () => {
   // 0028_important_dates.sql adds the important_dates/important_date_changes
   // tables (Birthday/Anniversary), so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0028_important_dates.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 29);
+  assert.ok(manifest.sourceMigrations.includes("0028_important_dates.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0029 date of birth import migration", () => {
+  // 0029_important_dates_dob_source.sql widens important_dates.source's
+  // CHECK constraint to accept 'import-dob' alongside 'manual' (a table
+  // rebuild, not a new table), so the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0029_important_dates_dob_source.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 30);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

@@ -359,7 +359,7 @@ CREATE TABLE `important_date_changes` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
-CREATE TABLE `important_dates` (
+CREATE TABLE "important_dates" (
   `id` text PRIMARY KEY NOT NULL,
   `donor_id` text NOT NULL,
   `user_id` text NOT NULL,
@@ -370,7 +370,7 @@ CREATE TABLE `important_dates` (
   `day` integer NOT NULL,
   `year` integer,
   `notes` text,
-  `source` text NOT NULL CHECK (`source` IN ('manual')),
+  `source` text NOT NULL CHECK (`source` IN ('manual','import-dob')),
   `fingerprint` text NOT NULL,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
@@ -683,5 +683,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','eb966e352b8314efc364591be18a8e2677bcca04905dd4fb9bb1c8613b81d151',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','c691e68f87ea3f40335e0036036ec554ba2b74ef7ecf3bee6cd0dec64502fccc',1785944072);
 PRAGMA optimize;

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "eb966e352b8314efc364591be18a8e2677bcca04905dd4fb9bb1c8613b81d151",
+  "schemaHash": "c691e68f87ea3f40335e0036036ec554ba2b74ef7ecf3bee6cd0dec64502fccc",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -30,7 +30,8 @@
     "0025_date_only_precision.sql",
     "0026_gift_acknowledgments.sql",
     "0027_yahrtzeits.sql",
-    "0028_important_dates.sql"
+    "0028_important_dates.sql",
+    "0029_important_dates_dob_source.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -3435,7 +3436,7 @@
           }
         ],
         "checks": [
-          "CHECK (`source` IN ('manual'))",
+          "CHECK (`source` IN ('manual','import-dob'))",
           "CHECK (`type` IN ('birthday','anniversary'))"
         ]
       },
@@ -4962,7 +4963,7 @@
     {
       "type": "table",
       "name": "important_dates",
-      "sql": "CREATE TABLE `important_dates` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('birthday','anniversary')), `person_name` text, `relationship` text, `month` integer NOT NULL, `day` integer NOT NULL, `year` integer, `notes` text, `source` text NOT NULL CHECK (`source` IN ('manual')), `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE \"important_dates\" ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('birthday','anniversary')), `person_name` text, `relationship` text, `month` integer NOT NULL, `day` integer NOT NULL, `year` integer, `notes` text, `source` text NOT NULL CHECK (`source` IN ('manual','import-dob')), `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
