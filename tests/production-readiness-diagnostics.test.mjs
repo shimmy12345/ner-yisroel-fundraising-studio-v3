@@ -46,7 +46,7 @@ function productionFacts(overrides = {}) {
     failedOrIncompleteImports: 0,
     lastHouseholdRefreshAt: null,
     lastDonationRefreshAt: null,
-    lastBackupAt: null,
+    lastManualExportAt: null,
     appVersion: APP_VERSION,
     deployedCommit: "prod123",
     ...overrides,
@@ -75,6 +75,17 @@ function independentStagingFacts(overrides = {}) {
     // ("0022"), not EXPECTED_MIGRATION_LEVEL.
     currentMigrationLevel: "0022",
     businessRecordCounts: { donors: 0, givingActivities: 0, interactions: 0, reminders: 0 },
+    // Automated backup / restore verification only render on
+    // staging-independent -- default to a healthy, reachable status here
+    // so tests unrelated to this pipeline (e.g. deployed-commit metadata)
+    // aren't incidentally affected by it. See
+    // tests/workspace-health-semantics.test.mjs for this pipeline's own
+    // freshness/attempt-floors-status/unavailable-state coverage.
+    backupStatusReachable: true,
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date().toISOString(), backupObjectKey: "daily/fundraising-os-staging-db-example.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: new Date().toISOString(), attemptStatus: "success", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date().toISOString(), verifiedBackupObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: new Date().toISOString(), attemptStatus: "success", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
     ...overrides,
   };
 }

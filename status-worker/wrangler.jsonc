@@ -1,0 +1,28 @@
+{
+  // Dedicated, minimal status-reporting Worker for the D1 backup/restore
+  // pipeline. Deliberately deployed and configured separately from the
+  // main "fundraising-os-staging" Worker (worker/index.ts /
+  // wrangler.staging.jsonc):
+  //   - No `routes` and `workers_dev: false` -- this Worker has no public
+  //     URL at all. It is reachable only via a Service Binding from
+  //     another Worker; see wrangler.staging.jsonc's `services` entry.
+  //   - Its only binding is read access to the status-metadata bucket
+  //     below, never the separate bucket the nightly/monthly workflows
+  //     write actual encrypted backup content to. R2 bucket bindings do
+  //     not have a platform-enforced read-only mode -- the enforcement here is
+  //     that this Worker's own source code (status-worker/src/index.ts)
+  //     only ever calls `.get()`, never `.put()`/`.delete()`/`.list()` --
+  //     see tests/status-worker.test.mjs, which fails if that ever
+  //     changes.
+  "name": "fundraising-os-backup-status",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-06",
+  "workers_dev": false,
+  "r2_buckets": [
+    {
+      "binding": "STATUS_BUCKET",
+      "bucket_name": "fundraising-os-backup-status"
+    }
+  ],
+  "observability": { "enabled": true }
+}

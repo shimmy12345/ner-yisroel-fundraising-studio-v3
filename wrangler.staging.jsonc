@@ -20,6 +20,19 @@
       "database_id": "6c18396c-0a8f-4f2c-ba83-ea809ec10289"
     }
   ],
+  // Worker-to-Worker binding only -- NOT an R2 binding. This Worker never
+  // gains any R2 credential, binding, or code path to the backup pipeline's
+  // storage; it can only call the dedicated status-worker's own fetch
+  // handler (status-worker/, deployed and configured separately), which in
+  // turn holds the only R2 access -- and only to a status-metadata bucket,
+  // never the real backup bucket. See tests/backup-automation.test.mjs's
+  // no-R2-binding guardrail for this file, which must never trip.
+  "services": [
+    {
+      "binding": "STATUS_WORKER",
+      "service": "fundraising-os-backup-status"
+    }
+  ],
   "vars": {
     // The Cloudflare Access team domain for the Zero Trust org protecting
     // this Worker.

@@ -218,7 +218,12 @@ export` runs.
   has no credential capable of reading, writing, or deleting anything in
   the backup bucket — a bug or full compromise of the application itself
   cannot reach these backups. All backup credentials live only in GitHub
-  Actions secrets.
+  Actions secrets. Workspace Health's "Automated backup"/"Restore
+  verification" status (below) does not change this: it reaches a
+  separate, dedicated status-worker over a Worker-to-Worker **service
+  binding** (`STATUS_WORKER` — not an R2 binding, and not this bucket),
+  which itself only has read access to a different bucket containing
+  non-secret status metadata, never backup content.
 - **Credential separation**: the nightly job's R2 credential is scoped to
   Object Read & Write on the backup bucket only (it needs to write, and
   reads its own upload back to verify it, but cannot delete anything —
@@ -279,6 +284,76 @@ export` runs.
    (Actions tab → select workflow → "Run workflow") once all of the above
    is in place, and confirm both succeed, before relying on the schedule
    alone.
+
+### Backup/restore status reporting (Workspace Health)
+
+Workspace Health's "Automated backup" and "Restore verification" cards
+read from a small, dedicated status pipeline — deliberately separate
+infrastructure from the backup pipeline above, so a compromise of one
+credential can never touch the other:
+
+- **`status-worker/`** — a minimal, standalone Cloudflare Worker
+  (`fundraising-os-backup-status`), deployed and configured independently
+  of the main app. Its only binding is **read-only** access (by its own
+  code never calling `.put()`/`.delete()`/`.list()` —
+  `tests/status-worker.test.mjs` and `tests/backup-automation.test.mjs`
+  both fail if that ever changes) to a **separate** R2 bucket
+  (`fundraising-os-backup-status`) containing only four small JSON
+  objects (`backup-latest-success.json`, `backup-latest-attempt.json`,
+  `restore-latest-success.json`, `restore-latest-attempt.json`) — never
+  backup content. It has `workers_dev: false` and no `routes`: there is
+  no public URL for it at all. It exposes exactly one route, `GET
+  /status`, returning all four objects combined; any other path or method
+  is rejected before R2 is ever touched.
+- **The main app** (`wrangler.staging.jsonc`) reaches it only via a
+  Worker-to-Worker **service binding** (`"services": [{"binding":
+  "STATUS_WORKER", "service": "fundraising-os-backup-status"}]`) — not an
+  R2 binding, not a credential of any kind. Because there is no public URL
+  to call, there is nothing to authenticate: only a Worker explicitly
+  wired to this binding at deploy time can reach it.
+- **Both GitHub Actions workflows** publish status as an *additive*,
+  best-effort final step (`continue-on-error: true`, `if: always()`) using
+  their own separately-scoped **write** R2 credential — distinct from both
+  the backup bucket's write and read credentials above, so a leaked
+  status-write credential can never touch real backup content. A failure
+  in this step is logged (`::warning::`) but can never fail the workflow
+  or be mistaken for a failed backup/restore — see
+  `tests/backup-automation.test.mjs`'s guardrail proving
+  `continue-on-error` appears nowhere except this one step in each
+  workflow.
+
+Setup (in addition to steps 1-8 above):
+
+9. **Create the status bucket** (the bucket and the status-worker itself
+   have already been created/deployed as part of this rollout — this step
+   documents how, for future reference or a fresh environment):
+   ```
+   wrangler r2 bucket create fundraising-os-backup-status
+   ```
+10. **Deploy the status-worker**:
+    ```
+    cd status-worker && wrangler deploy
+    ```
+11. **Create one R2 API token** (dashboard → R2 → Manage API Tokens),
+    scoped to the `fundraising-os-backup-status` bucket only, with
+    **Object Read & Write** permission. Its Access Key ID / Secret Access
+    Key become GitHub secrets `R2_STATUS_WRITE_ACCESS_KEY_ID` /
+    `R2_STATUS_WRITE_SECRET_ACCESS_KEY`. (One shared write credential for
+    both workflows is intentional — its blast radius is already minimal,
+    scoped to four small non-secret JSON objects, and creating a second
+    identical-scope token would add setup complexity without a
+    meaningfully smaller blast radius.)
+12. **Add the bucket name as a repository variable** (Settings → Secrets
+    and variables → Actions → Variables, not Secrets): `R2_STATUS_BUCKET`
+    = `fundraising-os-backup-status`.
+13. **Redeploy the main app** (`pnpm run build:staging-independent &&
+    wrangler deploy --config wrangler.staging.jsonc`) so its new
+    `STATUS_WORKER` service binding takes effect — already done as part of
+    this rollout; needed again only if the status-worker is ever
+    recreated under a different name.
+14. **First run**: trigger both workflows manually and confirm Workspace
+    Health's new cards populate correctly before relying on the schedule
+    alone (see "First run" above — this can be done in the same pass).
 
 ### Recovering from an automated backup
 

@@ -28,5 +28,13 @@ declare module "cloudflare:workers" {
     TEAM_DOMAIN?: string;
     POLICY_AUD?: string;
     STAGING_OWNER_EMAIL?: string;
+    // Worker-to-Worker service binding to the dedicated status-worker
+    // (status-worker/) -- NOT an R2 binding. This is the only way this
+    // Worker can learn the backup/restore-verification pipeline's status;
+    // it has no R2 credential or binding of its own. Absent wherever the
+    // status-worker has not been deployed/bound (e.g. legacy staging,
+    // local dev) -- callers must treat that as "unavailable", never
+    // "healthy".
+    STATUS_WORKER?: Fetcher;
   };
 }

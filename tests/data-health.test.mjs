@@ -89,7 +89,12 @@ test("fictional integrity failures are detected without exposing donor details",
     // 'completed', so it must never contribute here regardless of its
     // stored rowsRequiringReview value.
     pendingPledgeAssignments: 0, savedForLaterReviewRows: 0, unresolvedActiveDrafts: 0,
-    failedOrIncompleteImports: count(db, FAILED_IMPORTS_SQL, owner), lastHouseholdRefreshAt: Number(refresh.last_household_refresh_at), lastDonationRefreshAt: Number(refresh.last_donation_refresh_at), lastBackupAt: Number(backup.created_at),
+    failedOrIncompleteImports: count(db, FAILED_IMPORTS_SQL, owner), lastHouseholdRefreshAt: Number(refresh.last_household_refresh_at), lastDonationRefreshAt: Number(refresh.last_donation_refresh_at), lastManualExportAt: Number(backup.created_at),
+    backupStatusReachable: true,
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: "2026-08-05T04:00:00.000Z", backupObjectKey: "daily/fundraising-os-staging-db-20260805T040000Z.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: "2026-08-05T04:00:00.000Z", attemptStatus: "success", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: "2026-08-01T09:00:00.000Z", verifiedBackupObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: "2026-08-01T09:00:00.000Z", attemptStatus: "success", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
     appVersion: APP_VERSION, deployedCommit: "fictional123456789",
   };
   assert.deepEqual({ duplicates: facts.duplicateJlCodes, gifts: facts.orphanedGifts, interactions: facts.orphanedInteractions, reminders: facts.orphanedReminders, payments: facts.orphanedPayments, redirects: facts.brokenMergeRedirects }, { duplicates: 1, gifts: 1, interactions: 1, reminders: 1, payments: 1, redirects: 1 });
@@ -105,20 +110,33 @@ test("fictional integrity failures are detected without exposing donor details",
   assert.doesNotMatch(JSON.stringify(report), /active-a|active-b|fictional annual|\$|donorName|display_name/);
 });
 
+const healthyBackupStatusFacts = {
+  backupStatusReachable: true,
+  backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: "2026-08-05T04:00:00.000Z", backupObjectKey: "daily/fundraising-os-staging-db-20260805T040000Z.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+  backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: "2026-08-05T04:00:00.000Z", attemptStatus: "success", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+  restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: "2026-08-01T09:00:00.000Z", verifiedBackupObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+  restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: "2026-08-01T09:00:00.000Z", attemptStatus: "success", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+};
+
 test("a healthy established workspace receives a clear green result", () => {
-  const report = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:12,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:100,givingLinkedTotalCents:100,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,savedForLaterReviewRows:0,unresolvedActiveDrafts:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:now,lastDonationRefreshAt:now,lastBackupAt:now,appVersion:APP_VERSION,deployedCommit:"healthy123" });
+  const report = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:12,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:100,givingLinkedTotalCents:100,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,savedForLaterReviewRows:0,unresolvedActiveDrafts:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:now,lastDonationRefreshAt:now,lastManualExportAt:now,...healthyBackupStatusFacts,appVersion:APP_VERSION,deployedCommit:"healthy123" }, "2026-08-05T12:00:00.000Z");
   assert.equal(report.status,"healthy");
   assert.match(report.summary,/healthy/i);
+  // Automated backup / restore verification only render on
+  // staging-independent (see tests/workspace-health-semantics.test.mjs for
+  // their full behavior); this plain-"staging" fixture correctly has
+  // neither card, and their absence must not affect this report's status.
+  assert.equal(report.checks.find((check)=>check.id==="automated-backup"), undefined);
 });
 
 test("six-month edge cases avoid false green results", () => {
   assert.equal(MIGRATION_LEDGER_COMPLETE,false,"the known 0014-0017 journal gap remains visible until deliberately repaired");
   assert.equal(inferMigrationLevel(["donors","data_imports","donor_views","relationship_queue_dismissals","data_health_repair_audits","legacy_test_cleanup_audits"],[],[],[]),"0019");
   assert.equal(schemaIsReady(["donors"],[],[],[]),false,"a partially migrated database never runs deeper checks as zero");
-  const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,savedForLaterReviewRows:0,unresolvedActiveDrafts:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastBackupAt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
+  const newWorkspace = buildDataHealthReport({ databaseConnected:true,schemaReady:true,currentMigrationLevel:"0019",migrationLedgerComplete:true,journalMigrationLevel:"0019",remoteMigrationLevel:"0019",remoteMigrationTable:"d1_migrations",remoteMigrationHistoryComplete:true,remoteMigrationHistoryConsistent:true,remoteMigrationDiagnosticLines:[],productionBaselineLevel:"0019",productionBaselineVerified:true,schemaMatchesBaseline:true,schemaComparisonDifferences:[],activeDonors:0,duplicateJlCodes:0,orphanedGifts:0,orphanedInteractions:0,orphanedReminders:0,orphanedPayments:0,brokenMergeRedirects:0,givingSourceTotalCents:0,givingLinkedTotalCents:0,invalidGivingRows:0,duplicateGivingFingerprints:0,unmatchedJlCodes:0,pendingPledgeAssignments:0,savedForLaterReviewRows:0,unresolvedActiveDrafts:0,failedOrIncompleteImports:0,lastHouseholdRefreshAt:null,lastDonationRefreshAt:null,lastManualExportAt:null,backupStatusReachable:true,backupSuccess:null,backupAttempt:null,restoreSuccess:null,restoreAttempt:null,appVersion:APP_VERSION,deployedCommit:"new123" });
   assert.equal(newWorkspace.checks.find((check)=>check.id==="household-refresh").status,"info","a new manual-only workspace is not falsely failed for having no JL refresh");
-  assert.equal(newWorkspace.checks.find((check)=>check.id==="backup").status,"info","an empty schema-only database does not need a meaningless backup");
-  assert.equal(newWorkspace.checks.find((check)=>check.id==="backup").value,"Not required yet");
+  assert.equal(newWorkspace.checks.find((check)=>check.id==="manual-export").status,"info","the manual export card is informational only, never alarming");
+  assert.equal(newWorkspace.checks.find((check)=>check.id==="manual-export").value,"No manual export yet");
   assert.equal(reconcileRemoteMigrationTags(EXPECTED_MIGRATION_TAGS).complete, true);
   assert.equal(reconcileRemoteMigrationTags([...EXPECTED_MIGRATION_TAGS, EXPECTED_MIGRATION_TAGS.at(-1)]).consistent, false, "duplicate remote rows block readiness");
   assert.equal(reconcileRemoteMigrationTags(EXPECTED_MIGRATION_TAGS.filter((tag) => !tag.startsWith("0016_"))).consistent, false, "a remote history gap blocks readiness");
@@ -129,7 +147,11 @@ test("route and interface are authenticated, owner scoped, honest, and actionabl
   const route=read("app/api/health/route.ts"), healthPage=read("app/health/page.tsx"), loader=read("lib/data-health/read.ts"), queries=read("lib/data-health/queries.ts"), ui=read("app/settings/DataHealthDashboard.tsx"), settings=read("app/settings/page.tsx"), backup=read("app/api/import/backup/route.ts"), vite=read("vite.config.ts");
   assert.match(route,/getChatGPTUser/); assert.match(route,/Authentication required/); assert.match(route,/loadDataHealth\(userIdForEmail\(identity\.email\)\)/); assert.doesNotMatch(route,/ensureUserProfile/); assert.match(route,/cache-control/);
   assert.match(loader,/env\.DB\.batch/); assert.match(loader,/schemaIsReady/); assert.match(queries,/owner_user_id=\?/); assert.doesNotMatch(queries,/display_name|donor_name/);
-  for(const label of ["Database connection","Live schema version","Staging migration history","Production rehearsal baseline","Staging ↔ baseline schema","Production launch readiness","Production data state","Active donors","Duplicate active JL Codes","Orphaned gifts","Orphaned interactions","Orphaned reminders","Orphaned pledge payments","Broken merge redirects","Giving-total reconciliation","Unmatched JL Codes","Pending pledge assignments","Failed or incomplete imports","Last household refresh","Last donation refresh","Last successful backup","Deployed version"]) assert.match(read("lib/data-health/model.ts"),new RegExp(label));
+  for(const label of ["Database connection","Live schema version","Staging migration history","Production rehearsal baseline","Staging ↔ baseline schema","Production launch readiness","Production data state","Active donors","Duplicate active JL Codes","Orphaned gifts","Orphaned interactions","Orphaned reminders","Orphaned pledge payments","Broken merge redirects","Giving-total reconciliation","Unmatched JL Codes","Pending pledge assignments","Failed or incomplete imports","Last household refresh","Last donation refresh","Automated backup","Restore verification","Manual workspace export","Deployed version"]) assert.match(read("lib/data-health/model.ts"),new RegExp(label));
+  // "Backup succeeded" and "restore verification succeeded" must remain
+  // two independent facts, never merged into one card or one fetch that
+  // conflates them -- see lib/data-health/model.ts's pipelineStatusCheck.
+  assert.match(read("lib/data-health/model.ts"),/backupSuccess/); assert.match(read("lib/data-health/model.ts"),/restoreSuccess/);
   assert.match(ui,/Run health check/); assert.match(ui,/state === "loading"/); assert.match(ui,/setState\("success"\)/); assert.match(ui,/setState\("error"\)/); assert.match(ui,/Names, amounts, and source rows are never shown/); assert.match(settings,/Data Health/);
   assert.match(healthPage,/requireChatGPTUser/); assert.match(healthPage,/userIdForEmail/); assert.doesNotMatch(healthPage,/ensureUserProfile/);
   assert.match(ui,/useEffect\(\(\) => setUseLocalTime\(true\)/,"timestamps must keep server and first client render deterministic before switching to local time");

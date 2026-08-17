@@ -44,11 +44,9 @@ for (const workflow of [nightly, monthly]) {
 
 // --- Monthly restore verification: separate, read-only R2 credential;
 // always restores into a throwaway database, never the real one; always
-// cleans up, even on failure; fails the job (no continue-on-error) on any
-// integrity problem. ---
+// cleans up, even on failure; fails the job on any integrity problem. ---
 assert.match(monthly, /R2_BACKUP_READ_ACCESS_KEY_ID/);
 assert.doesNotMatch(monthly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the monthly verification job must not hold write access to the backup bucket");
-assert.doesNotMatch(monthly, /continue-on-error/, "a failed integrity check must fail the workflow, not be swallowed");
 assert.match(monthly, /verify-remote-restore\.mjs/);
 assert.match(verifyScript, /d1", "create"/);
 assert.doesNotMatch(verifyScript, /fundraising-os-staging-db/, "the scratch database must never reuse the real database's name");
@@ -58,6 +56,56 @@ assert.match(verifyScript, /PRAGMA integrity_check/);
 assert.match(verifyScript, /PRAGMA foreign_key_check/);
 assert.match(verifyScript, /compareSchemaObjects/, "restore verification must validate schema, not just that SQL executed without error");
 assert.match(verifyScript, /FUNDRAISING_DATA_TABLES/, "restore verification must check every fundraising table is present and queryable, not a hand-picked subset");
+
+// --- Status publication (backup/restore-verification status objects for
+// Workspace Health) is additive and must never weaken either workflow's
+// real failure semantics. continue-on-error may appear ONLY within the
+// dedicated "Publish ... status" step -- never on any step that does real
+// export/encrypt/upload/restore/verification work. This narrows (does not
+// loosen) the original guardrail above: a failed integrity check must
+// still fail the workflow; only the separate, best-effort status write
+// may swallow its own failure. ---
+for (const [workflow, label] of [[nightly, "nightly"], [monthly, "monthly"]]) {
+  // Split at the comment block preceding the status-publish step, not at
+  // the step's own `name:` line -- the comment block itself legitimately
+  // discusses continue-on-error in prose, so it must be excluded from the
+  // "before" half too, or this guardrail would trip on its own commentary.
+  const publishStepIndex = workflow.indexOf("Additive, best-effort status reporting");
+  assert.ok(publishStepIndex > 0, `${label} workflow must have a status-publish step`);
+  const beforePublish = workflow.slice(0, publishStepIndex);
+  const fromPublish = workflow.slice(publishStepIndex);
+  assert.doesNotMatch(beforePublish, /continue-on-error/, `${label}: no real backup/restore/verification step may use continue-on-error`);
+  assert.match(fromPublish, /continue-on-error: true/, `${label}: the status-publish step itself must use continue-on-error so publication failure can never fail the job`);
+  assert.match(fromPublish, /if: always\(\)/, `${label}: status must be published regardless of whether the real work succeeded or failed`);
+}
+
+// --- Status objects are written with a credential distinct from both the
+// backup bucket's write and read credentials -- a leaked status-write
+// credential must never grant any access to real backup content. ---
+for (const workflow of [nightly, monthly]) {
+  assert.match(workflow, /R2_STATUS_WRITE_ACCESS_KEY_ID/, "status publication must use its own, separately-scoped credential");
+}
+assert.doesNotMatch(nightly.split("Publish backup status")[0], /R2_STATUS_WRITE_ACCESS_KEY_ID/, "the status-write credential must not appear before the status-publish step in the nightly workflow");
+assert.doesNotMatch(monthly.split("Publish restore-verification status")[0], /R2_STATUS_WRITE_ACCESS_KEY_ID/, "the status-write credential must not appear before the status-publish step in the monthly workflow");
+
+// --- The status-worker (and only the status-worker) may hold read access
+// to the status bucket; it must never gain any credential or binding
+// reaching the real backup bucket, and the main app must never gain any
+// R2 binding at all (see the r2_buckets guardrail above, unchanged). ---
+const statusWorkerSrc = await readFile(new URL("../status-worker/src/index.ts", import.meta.url), "utf8");
+const statusWorkerConfig = await readFile(new URL("../status-worker/wrangler.jsonc", import.meta.url), "utf8");
+assert.doesNotMatch(statusWorkerConfig, /fundraising-os-staging-backups/, "the status-worker must never be bound to the real backup bucket");
+assert.match(statusWorkerConfig, /workers_dev.*false/, "the status-worker must have no public URL of its own -- reachable only via a service binding");
+assert.doesNotMatch(statusWorkerConfig, /"routes"/, "the status-worker must not be given a public route");
+assert.doesNotMatch(statusWorkerSrc, /\.put\(|\.delete\(|\.list\(/, "the status-worker's own code must never call R2 write/delete/list -- read-only by construction, not just by binding scope");
+assert.match(statusWorkerSrc, /pathname !== "\/status"/, "the status-worker must reject any path other than the one fixed status route -- never a passthrough to arbitrary keys");
+assert.match(statusWorkerSrc, /method !== "GET"/, "the status-worker must reject non-GET requests");
+
+// --- The main app gets a Worker-to-Worker service binding to the
+// status-worker -- never an R2 binding, never a credential of its own. ---
+assert.match(wranglerStaging, /"services"/, "the main Worker must reach the status-worker only via a service binding");
+assert.match(wranglerStaging, /STATUS_WORKER/);
+assert.doesNotMatch(wranglerStaging, /AWS_ACCESS_KEY_ID|R2_STATUS|R2_BACKUP/, "the main Worker must never hold any R2 credential, status or backup");
 
 // --- The runbook must actually document the one-time setup this pipeline
 // depends on, including a retention window of at least 60 days. ---
@@ -71,5 +119,13 @@ assert.match(deployment, /R2_BACKUP_WRITE_ACCESS_KEY_ID/);
 assert.match(deployment, /R2_BACKUP_READ_ACCESS_KEY_ID/);
 assert.match(deployment, /BACKUP_ENCRYPTION_PASSPHRASE/);
 assert.match(deployment, /staging-before-real-import-2026-08-06\.sql/, "the pre-existing manual export must stay documented, distinct from workspace_backup_audits' zero rows");
+
+// --- Status-reporting setup must be documented with its own, distinct
+// credential and bucket -- never reusing the backup bucket's names. ---
+assert.match(deployment, /Backup\/restore status reporting/i);
+assert.match(deployment, /R2_STATUS_WRITE_ACCESS_KEY_ID/);
+assert.match(deployment, /R2_STATUS_BUCKET/);
+assert.match(deployment, /fundraising-os-backup-status/);
+assert.doesNotMatch(deployment.split("Backup/restore status reporting")[1] ?? "", /R2_BACKUP_WRITE_SECRET_ACCESS_KEY|R2_BACKUP_READ_SECRET_ACCESS_KEY/, "the status-reporting section must document its own credentials, not point back at the backup bucket's");
 
 process.stdout.write("Backup automation checks passed.\n");

@@ -24,6 +24,20 @@ export type HealthCheck = {
   evidence?: HealthEvidence;
 };
 
+// Shapes written by the D1 backup/restore-verification GitHub Actions
+// workflows to the dedicated status bucket, and read back through the
+// status-worker (status-worker/) -- see docs/DEPLOYMENT.md's "Backup/
+// restore status reporting". Deliberately non-secret: timestamps, an
+// object key, and a workflow-run URL, never backup content. Each field is
+// independently optional/absent because these are four separately-written
+// objects, not one atomically-updated record -- a partial read (e.g. the
+// attempt object updated but not yet the success object) must never crash
+// or be treated as complete.
+export type BackupSuccessStatus = { schemaVersion: number; databaseName: string; completedAt: string; backupObjectKey: string; workflowRunId: string; workflowRunUrl: string };
+export type BackupAttemptStatus = { schemaVersion: number; databaseName: string; attemptAt: string; attemptStatus: string; workflowRunId: string; workflowRunUrl: string };
+export type RestoreSuccessStatus = { schemaVersion: number; databaseName: string; completedAt: string; verifiedBackupObjectKey: string; workflowRunId: string; workflowRunUrl: string };
+export type RestoreAttemptStatus = BackupAttemptStatus;
+
 export type DataHealthFacts = {
   deploymentEnvironment: "staging" | "production" | "staging-independent";
   databaseConnected: boolean;
@@ -94,7 +108,20 @@ export type DataHealthFacts = {
   failedOrIncompleteImports: number | null;
   lastHouseholdRefreshAt: number | null;
   lastDonationRefreshAt: number | null;
-  lastBackupAt: number | null;
+  // The in-app, owner-scoped, PARTIAL manual export (app/api/import/backup)
+  // -- informational only, never this workspace's real backup protection.
+  // See lib/operations/workspace-backup.ts for exactly which tables it
+  // covers. Kept distinct from the automated/restore status below, which
+  // are whole-database, environment-wide facts, not per-owner ones.
+  lastManualExportAt: number | null;
+  // Whether the status-worker fetch itself succeeded and returned a
+  // well-formed response -- false means "we don't know", never "unhealthy"
+  // and never "healthy". See lib/data-health/read.ts.
+  backupStatusReachable: boolean;
+  backupSuccess: BackupSuccessStatus | null;
+  backupAttempt: BackupAttemptStatus | null;
+  restoreSuccess: RestoreSuccessStatus | null;
+  restoreAttempt: RestoreAttemptStatus | null;
   appVersion: string;
   deployedCommit: string | null;
 };
@@ -208,21 +235,159 @@ function countCheck(
   };
 }
 
-function timestampCheck(id: string, label: string, timestamp: number | null, hasData: boolean, kind: "refresh" | "backup"): HealthCheck {
+function timestampCheck(id: string, label: string, timestamp: number | null, hasData: boolean, kind: "refresh"): HealthCheck {
   if (timestamp) {
     const date = new Date(timestamp * 1000);
-    if (Number.isFinite(date.getTime())) return { id, label, status: "healthy", value: date.toISOString(), explanation: kind === "backup" ? "A successful workspace backup is recorded." : "A successful JL refresh is recorded." };
+    if (Number.isFinite(date.getTime())) return { id, label, status: "healthy", value: date.toISOString(), explanation: "A successful JL refresh is recorded." };
   }
-  if (!hasData && kind === "refresh") return { id, label, status: "info", value: "Not yet", explanation: "No JL refresh is expected in a new or manual-only workspace." };
-  if (!hasData && kind === "backup") return { id, label, status: "info", value: "Not required yet", explanation: "This database contains schema only. Create the first backup before loading or creating business data." };
+  if (!hasData) return { id, label, status: "info", value: "Not yet", explanation: "No JL refresh is expected in a new or manual-only workspace." };
   return {
     id,
     label,
     status: "attention",
     value: "Not recorded",
-    explanation: kind === "backup" ? "Download a current workspace backup before high-risk imports or repairs." : "No successful refresh has been recorded for this live workspace.",
-    actionHref: kind === "backup" ? "/api/import/backup" : "/onboarding/import",
-    actionLabel: kind === "backup" ? "Download backup" : "Open data import",
+    explanation: "No successful refresh has been recorded for this live workspace.",
+    actionHref: "/onboarding/import",
+    actionLabel: "Open data import",
+  };
+}
+
+// The in-app manual/partial export (app/api/import/backup) is
+// deliberately NEVER "attention"/"critical" here, regardless of age or
+// absence -- it is a convenience download and a pre-rollback safety
+// snapshot, not this workspace's real backup protection (that's the
+// Automated backup / Restore verification cards below). Its absence must
+// never look alarming.
+function manualExportCheck(timestamp: number | null): HealthCheck {
+  if (timestamp) {
+    const date = new Date(timestamp * 1000);
+    if (Number.isFinite(date.getTime())) {
+      return {
+        id: "manual-export",
+        label: "Manual workspace export",
+        status: "info",
+        value: date.toISOString(),
+        explanation: "A partial, owner-scoped JSON export was downloaded. This is a convenience download and pre-rollback safety snapshot -- not this workspace's real backup protection, which comes from the automated nightly backup below.",
+        actionHref: "/api/import/backup",
+        actionLabel: "Download partial export",
+      };
+    }
+  }
+  return {
+    id: "manual-export",
+    label: "Manual workspace export",
+    status: "info",
+    value: "No manual export yet",
+    explanation: "Not required -- this workspace's real backup protection comes from the automated nightly backup below, not this partial (17 of 33 tables), owner-scoped convenience download.",
+    actionHref: "/api/import/backup",
+    actionLabel: "Download partial export",
+  };
+}
+
+// Freshness thresholds, tied explicitly to each pipeline's own schedule
+// (see .github/workflows/*.yml):
+//   - Nightly backup (`0 8 * * *`, ~24h cadence): healthy under 36h (24h +
+//     12h grace for GitHub's own best-effort scheduling delay), attention
+//     36-72h (one cycle clearly missed), critical over 72h.
+//   - Monthly restore verification (`0 9 1 * *`, ~28-31 day cadence,
+//     always after that day's backup): healthy under 40 days (one full
+//     month + ~9-12 days grace for the longest calendar month plus
+//     scheduling slack), attention 40-60 days, critical over 60 days
+//     (roughly two missed cycles).
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+export const BACKUP_FRESHNESS_HEALTHY_MS = 36 * HOUR_MS;
+export const BACKUP_FRESHNESS_CRITICAL_MS = 72 * HOUR_MS;
+export const RESTORE_FRESHNESS_HEALTHY_MS = 40 * DAY_MS;
+export const RESTORE_FRESHNESS_CRITICAL_MS = 60 * DAY_MS;
+
+export function freshnessStatus(ageMs: number, healthyBelowMs: number, criticalAboveMs: number): "healthy" | "attention" | "critical" {
+  if (ageMs < healthyBelowMs) return "healthy";
+  if (ageMs > criticalAboveMs) return "critical";
+  return "attention";
+}
+
+type PipelineStatusParams = {
+  id: string;
+  label: string;
+  reachable: boolean;
+  success: { completedAt: string; objectKeyLabel: string; objectKey: string; workflowRunUrl: string } | null;
+  attempt: { attemptAt: string; attemptStatus: string; workflowRunUrl: string } | null;
+  healthyBelowMs: number;
+  criticalAboveMs: number;
+  now: number;
+  neverRunExplanation: string;
+};
+
+// Shared logic for the "Automated backup" and "Restore verification"
+// cards -- the only two checks in this file backed by the status-worker
+// rather than a live D1 query. Deliberately never lets an unreachable or
+// malformed status response render as "healthy": both feed into the
+// "unavailable" branch below, matching this report's existing Unknown-
+// state convention (see HealthStatus's doc comment).
+function pipelineStatusCheck(params: PipelineStatusParams): HealthCheck {
+  const evidenceSource = "The dedicated status-worker's /status endpoint (read-only access to a status-metadata-only R2 bucket, never the real backup bucket).";
+  if (!params.reachable) {
+    return {
+      id: params.id,
+      label: params.label,
+      status: "unavailable",
+      value: "Unknown",
+      explanation: "Backup/restore status could not be read right now. This does not mean anything failed -- it means this specific check could not complete.",
+      evidence: { expected: "A reachable status-worker response.", actual: "The status-worker request failed, was unreachable, or returned a malformed response.", evidenceSource, lastVerifiedAt: null, severity: "medium", businessDataAtRisk: false, repairStep: "Re-run the health check. If this persists, verify the status-worker service binding and its own deployment." },
+    };
+  }
+  const successDate = params.success ? new Date(params.success.completedAt) : null;
+  const successValid = successDate && Number.isFinite(successDate.getTime());
+  if (!successValid) {
+    if (params.attempt) {
+      return {
+        id: params.id,
+        label: params.label,
+        status: "critical",
+        value: "Never succeeded",
+        explanation: `The most recent attempt (${params.attempt.attemptAt}) did not succeed, and no successful run has ever been recorded.`,
+        evidence: { expected: "At least one successful run recorded.", actual: `Most recent attempt status: "${params.attempt.attemptStatus}".`, evidenceSource, lastVerifiedAt: params.attempt.attemptAt, severity: "high", businessDataAtRisk: true, repairStep: `Check the workflow run: ${params.attempt.workflowRunUrl}` },
+      };
+    }
+    return {
+      id: params.id,
+      label: params.label,
+      status: "info",
+      value: "Never run",
+      explanation: params.neverRunExplanation,
+      evidence: { expected: "At least one successful run recorded.", actual: "No run has been recorded yet.", evidenceSource, lastVerifiedAt: null, severity: "none", businessDataAtRisk: false, repairStep: "None -- this is expected before the pipeline's first scheduled run." },
+    };
+  }
+  const ageMs = params.now - successDate.getTime();
+  let status = freshnessStatus(ageMs, params.healthyBelowMs, params.criticalAboveMs);
+  // Attempt-floors-status rule: a known-failed most-recent attempt (newer
+  // than the last recorded success) always floors the card at "attention",
+  // even while the last success is still within its healthy window --
+  // otherwise a failure from the most recent run stays invisible until
+  // the age-based threshold alone catches up, up to 36h/40d later.
+  const attemptIsNewerFailure = params.attempt && params.attempt.attemptStatus !== "success" && new Date(params.attempt.attemptAt).getTime() > successDate.getTime();
+  if (attemptIsNewerFailure && status === "healthy") status = "attention";
+  const success = params.success!;
+  return {
+    id: params.id,
+    label: params.label,
+    status,
+    value: success.completedAt,
+    explanation: attemptIsNewerFailure
+      ? `The most recent attempt (${params.attempt!.attemptAt}) failed. The last known-good run completed ${success.completedAt} (${success.objectKeyLabel}: ${success.objectKey}).`
+      : status === "healthy"
+        ? `Completed successfully ${success.completedAt} (${success.objectKeyLabel}: ${success.objectKey}).`
+        : `The last successful run was ${success.completedAt}, which is longer ago than expected for this pipeline's schedule.`,
+    evidence: {
+      expected: `A successful run within the last ${Math.round(params.healthyBelowMs / HOUR_MS)}h.`,
+      actual: `Last success: ${success.completedAt}${attemptIsNewerFailure ? `; most recent attempt (${params.attempt!.attemptAt}) failed` : ""}.`,
+      evidenceSource,
+      lastVerifiedAt: success.completedAt,
+      severity: status === "healthy" ? "none" : status === "attention" ? "medium" : "high",
+      businessDataAtRisk: status === "critical",
+      repairStep: status === "healthy" ? "None." : `Check the workflow run: ${(attemptIsNewerFailure ? params.attempt!.workflowRunUrl : success.workflowRunUrl)}`,
+    },
   };
 }
 
@@ -313,7 +478,7 @@ const INDEPENDENT_STAGING_BASELINE_STATUS: Record<DataHealthFacts["productionBas
 // productionBaselineCheck/productionReadinessCheck so that wording can never
 // leak between the two. Also distinct from the legacy ChatGPT Sites staging
 // environment, which remains classified as "staging" throughout this file.
-function independentStagingSummaryChecks(facts: DataHealthFacts): HealthCheck[] {
+function independentStagingSummaryChecks(facts: DataHealthFacts, now: number): HealthCheck[] {
   const baselineState = facts.productionBaselineState;
   const baselineStatus = INDEPENDENT_STAGING_BASELINE_STATUS[baselineState];
   const stampedAt = facts.productionBaselineVerifiedAt;
@@ -372,11 +537,43 @@ function independentStagingSummaryChecks(facts: DataHealthFacts): HealthCheck[] 
       value: facts.accountConfigurationRows === null ? "Not checked" : facts.accountConfigurationRows === 0 ? "No owner configured yet" : `${facts.accountConfigurationRows} owner${facts.accountConfigurationRows === 1 ? "" : "s"} configured`,
       explanation: "The number of app-account rows in this environment, created automatically the first time an owner authenticates. This is account/configuration state, not fundraising business data, and is never counted toward Business data above.",
     },
+    // Automated backup / restore verification are scoped to this
+    // environment specifically -- the nightly/monthly D1 pipeline backs up
+    // fundraising-os-staging-db (this environment's own database), and the
+    // status-worker service binding is only wired up here. Not shown on
+    // production or legacy staging, which have no such binding and would
+    // otherwise show a permanently confusing "unavailable" for a pipeline
+    // that was never meant to cover them.
+    pipelineStatusCheck({
+      id: "automated-backup",
+      label: "Automated backup",
+      reachable: facts.backupStatusReachable,
+      success: facts.backupSuccess ? { completedAt: facts.backupSuccess.completedAt, objectKeyLabel: "object", objectKey: facts.backupSuccess.backupObjectKey, workflowRunUrl: facts.backupSuccess.workflowRunUrl } : null,
+      attempt: facts.backupAttempt ? { attemptAt: facts.backupAttempt.attemptAt, attemptStatus: facts.backupAttempt.attemptStatus, workflowRunUrl: facts.backupAttempt.workflowRunUrl } : null,
+      healthyBelowMs: BACKUP_FRESHNESS_HEALTHY_MS,
+      criticalAboveMs: BACKUP_FRESHNESS_CRITICAL_MS,
+      now,
+      neverRunExplanation: "No automated backup run has been recorded yet. This is expected before the nightly workflow's first scheduled run.",
+    }),
+    pipelineStatusCheck({
+      id: "restore-verification",
+      label: "Restore verification",
+      reachable: facts.backupStatusReachable,
+      success: facts.restoreSuccess ? { completedAt: facts.restoreSuccess.completedAt, objectKeyLabel: "verified object", objectKey: facts.restoreSuccess.verifiedBackupObjectKey, workflowRunUrl: facts.restoreSuccess.workflowRunUrl } : null,
+      attempt: facts.restoreAttempt ? { attemptAt: facts.restoreAttempt.attemptAt, attemptStatus: facts.restoreAttempt.attemptStatus, workflowRunUrl: facts.restoreAttempt.workflowRunUrl } : null,
+      healthyBelowMs: RESTORE_FRESHNESS_HEALTHY_MS,
+      criticalAboveMs: RESTORE_FRESHNESS_CRITICAL_MS,
+      now,
+      neverRunExplanation: "No restore-verification run has been recorded yet. This is expected before the monthly workflow's first scheduled run. A backup existing is not the same as a backup being provably restorable.",
+    }),
   ];
 }
 
 export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Date().toISOString()): DataHealthReport {
   const deploymentEnvironment = facts.deploymentEnvironment ?? "staging";
+  // Derived from checkedAt (not a fresh Date.now() call) so freshness
+  // classification is deterministic and testable against a fixed clock.
+  const now = Date.parse(checkedAt);
   const productionBaselineApplied = deploymentEnvironment === "production" ? facts.productionBaselineState === "verified" : true;
   const businessDataRows = facts.businessDataRows ?? facts.activeDonors;
   const hasData = (facts.activeDonors ?? 0) > 0;
@@ -393,7 +590,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     ...(!relationshipIntegrityHealthy ? ["One or more relationship-data integrity checks (duplicates, orphans, broken merge redirects) have not passed."] : []),
   ] : [];
   const checks: HealthCheck[] = [
-    ...(deploymentEnvironment === "staging-independent" ? independentStagingSummaryChecks(facts) : []),
+    ...(deploymentEnvironment === "staging-independent" ? independentStagingSummaryChecks(facts, now) : []),
     {
       id: "database",
       label: "Database connection",
@@ -519,7 +716,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
     // alerting was lost, only the duplicate top-level presentation.
     timestampCheck("household-refresh", "Last household refresh", facts.lastHouseholdRefreshAt, hasData, "refresh"),
     timestampCheck("donation-refresh", "Last donation refresh", facts.lastDonationRefreshAt, hasData, "refresh"),
-    timestampCheck("backup", "Last successful backup", facts.lastBackupAt, hasData, "backup"),
+    manualExportCheck(facts.lastManualExportAt),
     {
       id: "release",
       label: "Deployed version",

@@ -14,6 +14,12 @@ import { countPendingPaymentDecisions, countReviewLaterDecisions } from "../lib/
 // unresolved payment decisions inside an active, unexpired draft.
 
 const now = 1_786_000_000;
+// buildDataHealthReport in this file is always called without an explicit
+// checkedAt (it defaults to the real wall clock), so the backup/restore
+// status fixtures below use "right now" rather than a fixed date -- any
+// fixed past date would eventually make these tests flake as real time
+// passes it by whatever freshness window it started inside.
+const rightNow = () => new Date().toISOString();
 
 function baseFacts(overrides = {}) {
   return {
@@ -58,7 +64,12 @@ function baseFacts(overrides = {}) {
     failedOrIncompleteImports: 0,
     lastHouseholdRefreshAt: now,
     lastDonationRefreshAt: now,
-    lastBackupAt: now,
+    lastManualExportAt: now,
+    backupStatusReachable: true,
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: rightNow(), backupObjectKey: "daily/fundraising-os-staging-db-example.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: rightNow(), attemptStatus: "success", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: rightNow(), verifiedBackupObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: rightNow(), attemptStatus: "success", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
     appVersion: APP_VERSION,
     deployedCommit: "abcdef1234567890",
     ...overrides,
@@ -207,6 +218,84 @@ async function run() {
   assert.equal(reviewStateWithFailure.value, "0 saved · 0 unresolved · 2 failed");
   assert.ok(reviewStateWithFailure.diagnosticLines.some((line) => /2 failed or incomplete import\(s\)/.test(line)));
   assert.equal(failedImportsReport.status, "attention", "a real failed import must still push the overall report status away from healthy");
+
+  // ---- 10. Automated backup / restore verification / manual export are
+  // three independent cards, never merged into one ambiguous fact. ----
+  const cleanReport = buildDataHealthReport(baseFacts());
+  assert.equal(check(cleanReport, "automated-backup").status, "healthy");
+  assert.equal(check(cleanReport, "restore-verification").status, "healthy");
+  // "Backup succeeded" and "restore verification succeeded" are not the
+  // same fact: a card must exist for each, independently.
+  assert.notEqual(check(cleanReport, "automated-backup"), undefined);
+  assert.notEqual(check(cleanReport, "restore-verification"), undefined);
+
+  // Unreachable status must never render as healthy -- it is Unknown, a
+  // third state distinct from both healthy and failed.
+  const unreachableReport = buildDataHealthReport(baseFacts({ backupStatusReachable: false, backupSuccess: null, backupAttempt: null, restoreSuccess: null, restoreAttempt: null }));
+  assert.equal(check(unreachableReport, "automated-backup").status, "unavailable");
+  assert.equal(check(unreachableReport, "restore-verification").status, "unavailable");
+  assert.notEqual(check(unreachableReport, "automated-backup").status, "healthy");
+
+  // Attempt-floors-status: the last SUCCESS is still fresh, but the most
+  // recent ATTEMPT (newer than that success) failed -- the card must not
+  // read healthy just because the age-based clock hasn't caught up yet.
+  const oldSuccessAt = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h ago -- healthy on age alone
+  const newerFailedAttemptAt = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30m ago -- newer than the success
+  const flooredReport = buildDataHealthReport(baseFacts({
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: oldSuccessAt, backupObjectKey: "daily/x.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: newerFailedAttemptAt, attemptStatus: "failure", workflowRunId: "3", workflowRunUrl: "https://github.com/example/repo/actions/runs/3" },
+  }));
+  assert.equal(check(flooredReport, "automated-backup").status, "attention", "a known-failed most-recent attempt must floor the card at attention even while the last success is still within its healthy window");
+  assert.match(check(flooredReport, "automated-backup").explanation, /most recent attempt/i);
+
+  // An OLDER failed attempt (superseded by a later success) must not
+  // floor anything -- only the MOST RECENT attempt matters.
+  const supersededReport = buildDataHealthReport(baseFacts({
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: rightNow(), backupObjectKey: "daily/x.sql.gz.gpg", workflowRunId: "4", workflowRunUrl: "https://github.com/example/repo/actions/runs/4" },
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), attemptStatus: "failure", workflowRunId: "3", workflowRunUrl: "https://github.com/example/repo/actions/runs/3" },
+  }));
+  assert.equal(check(supersededReport, "automated-backup").status, "healthy", "a failed attempt older than the most recent success must not floor the card -- it has already been superseded");
+
+  // Freshness thresholds: attention band and critical band, backup side.
+  const attentionAgeBackup = buildDataHealthReport(baseFacts({
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(), backupObjectKey: "daily/x.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    backupAttempt: null,
+  }));
+  assert.equal(check(attentionAgeBackup, "automated-backup").status, "attention", "48h old is inside the 36-72h attention band");
+  const criticalAgeBackup = buildDataHealthReport(baseFacts({
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date(Date.now() - 96 * 60 * 60 * 1000).toISOString(), backupObjectKey: "daily/x.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    backupAttempt: null,
+  }));
+  assert.equal(check(criticalAgeBackup, "automated-backup").status, "critical", "96h old is past the 72h critical threshold");
+
+  // Freshness thresholds, restore-verification side (day-scale).
+  const attentionAgeRestore = buildDataHealthReport(baseFacts({
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date(Date.now() - 50 * 24 * 60 * 60 * 1000).toISOString(), verifiedBackupObjectKey: "latest/x.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    restoreAttempt: null,
+  }));
+  assert.equal(check(attentionAgeRestore, "restore-verification").status, "attention", "50 days old is inside the 40-60 day attention band");
+  const criticalAgeRestore = buildDataHealthReport(baseFacts({
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date(Date.now() - 65 * 24 * 60 * 60 * 1000).toISOString(), verifiedBackupObjectKey: "latest/x.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    restoreAttempt: null,
+  }));
+  assert.equal(check(criticalAgeRestore, "restore-verification").status, "critical", "65 days old is past the 60-day critical threshold");
+
+  // A pipeline that has attempted but never once succeeded is worse than
+  // one that simply hasn't run yet -- must read critical, not info.
+  const neverSucceededReport = buildDataHealthReport(baseFacts({
+    backupSuccess: null,
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: rightNow(), attemptStatus: "failure", workflowRunId: "5", workflowRunUrl: "https://github.com/example/repo/actions/runs/5" },
+  }));
+  assert.equal(check(neverSucceededReport, "automated-backup").status, "critical");
+  assert.equal(check(neverSucceededReport, "automated-backup").value, "Never succeeded");
+
+  // Manual export: absence must never look alarming, regardless of
+  // whether the workspace has real business data.
+  const noManualExportReport = buildDataHealthReport(baseFacts({ lastManualExportAt: null, activeDonors: 12 }));
+  const manualExportCard = check(noManualExportReport, "manual-export");
+  assert.equal(manualExportCard.status, "info", "a missing manual/partial export must never be attention or critical -- the automated backup is this workspace's real protection");
+  assert.notEqual(manualExportCard.status, "attention");
+  assert.notEqual(manualExportCard.status, "critical");
 
   process.stdout.write("Workspace Health semantic-cleanup checks passed.\n");
 }

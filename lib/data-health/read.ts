@@ -26,14 +26,68 @@ import {
   migrationLevelFromTags,
   reconcileRemoteMigrationTags,
   schemaIsReady,
+  type BackupAttemptStatus,
+  type BackupSuccessStatus,
   type DataHealthFacts,
   type DataHealthReport,
+  type RestoreAttemptStatus,
+  type RestoreSuccessStatus,
 } from "./model";
 import { readRemoteMigrationHistory } from "./remote-migrations";
 import { ACCOUNT_CONFIGURATION_COUNT_SQL, BUSINESS_DATA_COUNT_SQL, FUNDRAISING_DATA_COUNT_SQL, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_LEVEL, PRODUCTION_BASELINE_VERIFIED, compareSchemaObjects, stagingSchemaObjects } from "./production-baseline";
 import { deploymentEnvironment } from "../environment";
 
 type QueryResult = { results?: Array<Record<string, unknown>> };
+
+// Validates the shape of a status object read back from the status-worker
+// without trusting it -- this is data from outside this process (via a
+// service binding, but still: a separate deployable with its own release
+// cycle). Never guesses a partially-valid object into a used one; an
+// object missing/mistyping any required field is treated as absent, the
+// same as if it had never been read at all.
+const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+function asBackupSuccess(value: unknown): BackupSuccessStatus | null {
+  const v = value as Record<string, unknown> | null;
+  if (!v || !isNonEmptyString(v.databaseName) || !isNonEmptyString(v.completedAt) || !isNonEmptyString(v.backupObjectKey) || !isNonEmptyString(v.workflowRunUrl)) return null;
+  return { schemaVersion: Number(v.schemaVersion) || 1, databaseName: v.databaseName, completedAt: v.completedAt, backupObjectKey: v.backupObjectKey, workflowRunId: String(v.workflowRunId ?? ""), workflowRunUrl: v.workflowRunUrl };
+}
+function asBackupAttempt(value: unknown): BackupAttemptStatus | null {
+  const v = value as Record<string, unknown> | null;
+  if (!v || !isNonEmptyString(v.databaseName) || !isNonEmptyString(v.attemptAt) || !isNonEmptyString(v.attemptStatus) || !isNonEmptyString(v.workflowRunUrl)) return null;
+  return { schemaVersion: Number(v.schemaVersion) || 1, databaseName: v.databaseName, attemptAt: v.attemptAt, attemptStatus: v.attemptStatus, workflowRunId: String(v.workflowRunId ?? ""), workflowRunUrl: v.workflowRunUrl };
+}
+function asRestoreSuccess(value: unknown): RestoreSuccessStatus | null {
+  const v = value as Record<string, unknown> | null;
+  if (!v || !isNonEmptyString(v.databaseName) || !isNonEmptyString(v.completedAt) || !isNonEmptyString(v.verifiedBackupObjectKey) || !isNonEmptyString(v.workflowRunUrl)) return null;
+  return { schemaVersion: Number(v.schemaVersion) || 1, databaseName: v.databaseName, completedAt: v.completedAt, verifiedBackupObjectKey: v.verifiedBackupObjectKey, workflowRunId: String(v.workflowRunId ?? ""), workflowRunUrl: v.workflowRunUrl };
+}
+const asRestoreAttempt: (value: unknown) => RestoreAttemptStatus | null = asBackupAttempt;
+
+// Fetches the four backup/restore status objects from the dedicated
+// status-worker (Worker-to-Worker service binding -- see
+// wrangler.staging.jsonc's `services` entry and status-worker/). Never
+// throws: any failure (binding absent, network error, non-200, malformed
+// JSON) is reported as "unreachable", never as "healthy" and never
+// re-thrown into the caller's own broader D1-failure handling -- a status-
+// worker problem must not take down the rest of the health report.
+async function fetchBackupStatus(): Promise<Pick<DataHealthFacts, "backupStatusReachable" | "backupSuccess" | "backupAttempt" | "restoreSuccess" | "restoreAttempt">> {
+  const unreachable = { backupStatusReachable: false, backupSuccess: null, backupAttempt: null, restoreSuccess: null, restoreAttempt: null };
+  if (!env.STATUS_WORKER) return unreachable;
+  try {
+    const response = await env.STATUS_WORKER.fetch(new Request("https://status-worker.internal/status"));
+    if (!response.ok) return unreachable;
+    const body = (await response.json()) as { backup?: { success?: unknown; attempt?: unknown }; restore?: { success?: unknown; attempt?: unknown } };
+    return {
+      backupStatusReachable: true,
+      backupSuccess: asBackupSuccess(body?.backup?.success),
+      backupAttempt: asBackupAttempt(body?.backup?.attempt),
+      restoreSuccess: asRestoreSuccess(body?.restore?.success),
+      restoreAttempt: asRestoreAttempt(body?.restore?.attempt),
+    };
+  } catch {
+    return unreachable;
+  }
+}
 
 const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRAISING_OS_COMMIT__.trim()
   ? __FUNDRAISING_OS_COMMIT__.trim()
@@ -86,7 +140,12 @@ const emptyFacts = (): DataHealthFacts => ({
   failedOrIncompleteImports: null,
   lastHouseholdRefreshAt: null,
   lastDonationRefreshAt: null,
-  lastBackupAt: null,
+  lastManualExportAt: null,
+  backupStatusReachable: false,
+  backupSuccess: null,
+  backupAttempt: null,
+  restoreSuccess: null,
+  restoreAttempt: null,
   appVersion: APP_VERSION,
   deployedCommit,
 });
@@ -100,6 +159,11 @@ const number = (value: unknown, fallback: number | null = 0) => {
 
 export async function loadDataHealth(userId: string): Promise<DataHealthReport> {
   const facts = emptyFacts();
+  // Independent of the D1-backed facts below and of each other's success:
+  // fetched first, outside the main try/catch, so a status-worker problem
+  // can never suppress the rest of this report (nor vice versa -- a D1
+  // problem below must not discard an already-fetched backup status).
+  Object.assign(facts, await fetchBackupStatus());
   try {
     const schemaResults = await env.DB.batch([
       env.DB.prepare("SELECT 1 AS connected"),
@@ -221,7 +285,7 @@ export async function loadDataHealth(userId: string): Promise<DataHealthReport> 
     facts.failedOrIncompleteImports = number(first(healthResults[10]).count);
     facts.lastHouseholdRefreshAt = number(refresh.last_household_refresh_at, null);
     facts.lastDonationRefreshAt = number(refresh.last_donation_refresh_at, null);
-    facts.lastBackupAt = number(first(healthResults[12]).created_at, null);
+    facts.lastManualExportAt = number(first(healthResults[12]).created_at, null);
     return buildDataHealthReport(facts);
   } catch {
     return buildDataHealthReport(facts);
