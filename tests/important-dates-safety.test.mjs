@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { nextGregorianRecurrence } from "../lib/calendar/gregorian-recurring-date.ts";
+import { nextYahrtzeitOccurrence } from "../lib/calendar/hebrew-date.ts";
 
 // Same convention as tests/gift-acknowledgment-safety.test.mjs and
 // tests/monday-import-safety.test.mjs: the important-dates routes touch
@@ -67,6 +69,56 @@ async function run() {
   // the route/validation layer forces it to null, not just the UI. ---
   const validation = await readFile(new URL("../lib/important-dates/validation.ts", import.meta.url), "utf8");
   assert.match(validation, /type === "birthday" \? \(personNameRaw \|\| null\) : null/, "personName must be forced to null for anniversary at the validation layer, not merely omitted by the UI");
+
+  // --- ImportantDatesManagement.tsx: occurrence/recurrence must be
+  // computed exactly once per item, never repeatedly inside the sort
+  // comparator (O(N log N)) and never a second time per rendered row. ---
+  const management = await readFile(new URL("../app/donors/[id]/ImportantDatesManagement.tsx", import.meta.url), "utf8");
+  const occurrenceCallSites = (management.match(/itemOccurrence\(/g) ?? []).length;
+  assert.equal(occurrenceCallSites, 2, "itemOccurrence must appear exactly twice in the file -- its own definition, and the single call site inside .map() -- never inside the sort comparator, never a second time in ManagedDateRow");
+  assert.match(management, /\.map\(\(item\) => \(\{ item, occurrence: itemOccurrence\(item, timezone\) \}\)\)/, "occurrence must be computed once per item via .map(), before sorting");
+  assert.doesNotMatch(management, /\.sort\(\(a, b\) => \{[\s\S]{0,200}itemOccurrence/, "itemOccurrence must never be called inside the sort comparator");
+  assert.doesNotMatch(management, /function ManagedDateRow[\s\S]{0,300}itemOccurrence\(/, "ManagedDateRow must receive occurrence as a prop, never recompute it itself");
+  // Must recalculate whenever items/timezone actually change (useMemo's
+  // dependency array) -- never a stale cache surviving past a later
+  // add/edit/delete.
+  assert.match(management, /useMemo\(\(\) => \{[\s\S]*?\}, \[items, timezone\]\)/, "occurrence/sort computation must be a useMemo keyed on items and timezone");
+
+  // Hard-reload replaced with a scoped refresh (Part 4 UX cleanup, not a
+  // resource-limit fix -- see the route's own render-cost comment).
+  assert.doesNotMatch(management.replace(/^\s*\/\/.*$/gm, ""), /window\.location\.reload\(\)/, "the add/edit/delete flows must no longer force a full hard page reload");
+  assert.match(management, /useRouter/, "must use next/navigation's useRouter for a scoped refresh");
+  const refreshCallSites = (management.replace(/^\s*\/\/.*$/gm, "").match(/router\.refresh\(\)/g) ?? []).length;
+  assert.equal(refreshCallSites, 3, "add, edit, and delete must each trigger exactly one scoped refresh (doneAdding/doneEditing/remove)");
+
+  // --- Sort-order regression: a representative multi-item, multi-type
+  // fixture (yahrtzeit + birthday + anniversary + one item with no valid
+  // date) must sort into the same chronological order the component's own
+  // comparator produces, using the real recurrence functions -- never a
+  // reimplementation of the calendar math. ---
+  const TIMEZONE = "America/New_York";
+  const NOW = Math.floor(Date.parse("2026-08-13T12:00:00Z") / 1000);
+  const fixtureItems = [
+    { id: "far-yahrtzeit", kind: "yahrtzeit", hebrewMonth: "Kislev", hebrewDay: 10 }, // ~Nov 20, farthest out
+    { id: "near-birthday", kind: "birthday", month: 8, day: 20, year: null }, // 7 days out
+    { id: "mid-anniversary", kind: "anniversary", month: 9, day: 1, year: null }, // ~3 weeks out
+    { id: "invalid-date", kind: "birthday", month: 13, day: 40, year: null }, // no valid occurrence -- must sort last
+  ];
+  function occurrenceEpoch(item) {
+    try {
+      const occurrence = item.kind === "yahrtzeit"
+        ? nextYahrtzeitOccurrence(item.hebrewMonth, item.hebrewDay, TIMEZONE, NOW)
+        : nextGregorianRecurrence(item.month, item.day, TIMEZONE, NOW);
+      return occurrence.primary.gregorianEpoch;
+    } catch {
+      return null;
+    }
+  }
+  // Mirrors the component's own useMemo exactly: compute once per item,
+  // then sort by the cached epoch (missing/invalid dates sort last).
+  const withOccurrence = fixtureItems.map((item) => ({ item, epoch: occurrenceEpoch(item) }));
+  const sortedFixture = [...withOccurrence].sort((a, b) => (a.epoch ?? Number.MAX_SAFE_INTEGER) - (b.epoch ?? Number.MAX_SAFE_INTEGER));
+  assert.deepEqual(sortedFixture.map((entry) => entry.item.id), ["near-birthday", "mid-anniversary", "far-yahrtzeit", "invalid-date"], "mixed yahrtzeit/birthday/anniversary items, plus one with no valid occurrence, must sort into chronological order with invalid dates last");
 
   console.log("Important-date safety checks passed.");
 }

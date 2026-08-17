@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { HEBREW_MONTHS, isPlausibleHebrewDate, nextYahrtzeitOccurrence, type HebrewMonthName } from "../../../lib/calendar/hebrew-date.ts";
 import { isPlausibleGregorianDate, nextGregorianRecurrence, yearsSinceForOccurrence } from "../../../lib/calendar/gregorian-recurring-date.ts";
 
@@ -198,8 +199,9 @@ function itemOccurrence(item: ManagedDateItem, timezone: string) {
   return item.kind === "yahrtzeit" ? yahrtzeitOccurrenceLabel(item.hebrewMonth, item.hebrewDay, timezone) : gregorianOccurrenceLabel(item.month, item.day, item.year, timezone);
 }
 
-function ManagedDateRow({ item, timezone, onEdit, onDelete, deleting }: { item: ManagedDateItem; timezone: string; onEdit: () => void; onDelete: () => void; deleting: boolean }) {
-  const occurrence = itemOccurrence(item, timezone);
+type ItemOccurrence = ReturnType<typeof itemOccurrence>;
+
+function ManagedDateRow({ item, occurrence, onEdit, onDelete, deleting }: { item: ManagedDateItem; occurrence: ItemOccurrence; onEdit: () => void; onDelete: () => void; deleting: boolean }) {
   const eyebrow = item.kind === "yahrtzeit" ? item.relationship : item.kind === "birthday" ? "Birthday" : "Anniversary";
   const name = item.kind === "yahrtzeit"
     ? `${item.deceasedNameEnglish}${item.deceasedNameHebrew ? ` · ${item.deceasedNameHebrew}` : ""}`
@@ -226,16 +228,40 @@ function ManagedDateRow({ item, timezone, onEdit, onDelete, deleting }: { item: 
 }
 
 export function ImportantDatesManagement({ donorId, timezone, items }: { donorId: string; timezone: string; items: ManagedDateItem[] }) {
+  const router = useRouter();
   const [adding, setAdding] = useState<AddState>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
-  const sorted = [...items].sort((a, b) => {
-    const aEpoch = itemOccurrence(a, timezone)?.epoch ?? Number.MAX_SAFE_INTEGER;
-    const bEpoch = itemOccurrence(b, timezone)?.epoch ?? Number.MAX_SAFE_INTEGER;
-    return aEpoch - bEpoch;
-  });
+  // UX cleanup, independent of the Error 1102 investigation: a scoped
+  // router.refresh() re-renders this route's server data in place (no
+  // full document navigation, no re-fetch/re-parse of already-loaded JS/
+  // CSS, no scroll-position or unrelated-disclosure-state reset elsewhere
+  // on the page) instead of window.location.reload()'s full hard reload.
+  // It triggers the exact same server-side render (same D1 queries, same
+  // recommendation-evidence computation) as a reload's GET would -- this
+  // is not a resource-limit fix, only a lighter browser-side navigation.
+  // Local form/list state that a full reload used to reset for free by
+  // remounting everything must be reset explicitly here instead.
+  function doneEditing() {
+    setEditingId(null);
+    router.refresh();
+  }
+  function doneAdding() {
+    setAdding(null);
+    router.refresh();
+  }
+
+  // Each item's occurrence is calculated exactly once per item here, then
+  // reused for both sorting and rendering below -- never recomputed inside
+  // the sort comparator (which would run it O(N log N) times) or a second
+  // time per row. Recalculated fresh whenever items/timezone actually
+  // change (useMemo's dependency array), never a stale cross-render cache.
+  const sorted = useMemo(() => {
+    const withOccurrence = items.map((item) => ({ item, occurrence: itemOccurrence(item, timezone) }));
+    return withOccurrence.sort((a, b) => (a.occurrence?.epoch ?? Number.MAX_SAFE_INTEGER) - (b.occurrence?.epoch ?? Number.MAX_SAFE_INTEGER));
+  }, [items, timezone]);
 
   async function remove(item: ManagedDateItem) {
     setDeletingId(item.id); setError("");
@@ -244,7 +270,8 @@ export function ImportantDatesManagement({ donorId, timezone, items }: { donorId
       const response = await fetch(url, { method: "DELETE" });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error || "The record could not be deleted.");
-      window.location.reload();
+      setDeletingId(null);
+      router.refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The record could not be deleted.");
       setDeletingId(null);
@@ -253,13 +280,13 @@ export function ImportantDatesManagement({ donorId, timezone, items }: { donorId
 
   return <div className="yahrtzeit-management">
     {sorted.length === 0 && adding === null && <p className="yahrtzeit-empty">No important dates recorded for this donor yet.</p>}
-    {sorted.map((item) => {
+    {sorted.map(({ item, occurrence }) => {
       if (editingId === item.id) {
         return item.kind === "yahrtzeit"
-          ? <YahrtzeitForm key={item.id} donorId={donorId} timezone={timezone} initial={yahrtzeitToFormState(item)} itemId={item.id} onDone={() => window.location.reload()} onCancel={() => setEditingId(null)} />
-          : <ImportantDateForm key={item.id} donorId={donorId} timezone={timezone} type={item.kind} initial={importantDateToFormState(item)} itemId={item.id} onDone={() => window.location.reload()} onCancel={() => setEditingId(null)} />;
+          ? <YahrtzeitForm key={item.id} donorId={donorId} timezone={timezone} initial={yahrtzeitToFormState(item)} itemId={item.id} onDone={doneEditing} onCancel={() => setEditingId(null)} />
+          : <ImportantDateForm key={item.id} donorId={donorId} timezone={timezone} type={item.kind} initial={importantDateToFormState(item)} itemId={item.id} onDone={doneEditing} onCancel={() => setEditingId(null)} />;
       }
-      return <ManagedDateRow key={item.id} item={item} timezone={timezone} onEdit={() => setEditingId(item.id)} onDelete={() => void remove(item)} deleting={deletingId === item.id} />;
+      return <ManagedDateRow key={item.id} item={item} occurrence={occurrence} onEdit={() => setEditingId(item.id)} onDelete={() => void remove(item)} deleting={deletingId === item.id} />;
     })}
     {error && <p className="capture-error" role="alert">{error}</p>}
     {adding === null && <button type="button" className="secondary-button add-important-date-button" onClick={() => setAdding("choose")}>+ Add important date</button>}
@@ -272,7 +299,7 @@ export function ImportantDatesManagement({ donorId, timezone, items }: { donorId
         <button type="button" onClick={() => setAdding(null)}>Cancel</button>
       </div>
     </div>}
-    {adding === "yahrtzeit" && <YahrtzeitForm donorId={donorId} timezone={timezone} initial={EMPTY_YAHRTZEIT_FORM} onDone={() => window.location.reload()} onCancel={() => setAdding(null)} />}
-    {(adding === "birthday" || adding === "anniversary") && <ImportantDateForm donorId={donorId} timezone={timezone} type={adding} initial={EMPTY_IMPORTANT_DATE_FORM} onDone={() => window.location.reload()} onCancel={() => setAdding(null)} />}
+    {adding === "yahrtzeit" && <YahrtzeitForm donorId={donorId} timezone={timezone} initial={EMPTY_YAHRTZEIT_FORM} onDone={doneAdding} onCancel={() => setAdding(null)} />}
+    {(adding === "birthday" || adding === "anniversary") && <ImportantDateForm donorId={donorId} timezone={timezone} type={adding} initial={EMPTY_IMPORTANT_DATE_FORM} onDone={doneAdding} onCancel={() => setAdding(null)} />}
   </div>;
 }

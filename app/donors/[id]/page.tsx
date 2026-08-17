@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { headers } from "next/headers";
 import { env } from "cloudflare:workers";
+import { logger } from "../../../lib/logger";
 import { AppShell } from "../../components/AppShell";
 import { requireChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
@@ -43,7 +45,30 @@ const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "curren
 const date = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 const dateTime = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(epoch * 1000));
 
+// Temporary diagnostic instrumentation for Error 1102 investigation on this
+// route (see incident 2026-08-17 18:56:41 UTC). Wraps an already-issued D1
+// promise to record elapsed ms and row count into `marks` -- never a new
+// query, never SQL/result content, only timings/counts. Safe to delete
+// once the next incident has been diagnosed with real evidence.
+function timedAll<T>(marks: Record<string, number>, key: string, promise: Promise<{ results: T[] }>): Promise<{ results: T[] }> {
+  const start = Date.now();
+  return promise.then((result) => {
+    marks[`${key}Ms`] = Date.now() - start;
+    marks[`${key}Rows`] = result.results.length;
+    return result;
+  });
+}
+
 export default async function DonorPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ from?: string; origin?: string }> }) {
+  const renderStart = Date.now();
+  const marks: Record<string, number> = {};
+  let d1Calls = 0;
+  // cf-ray is Cloudflare's own per-request identifier, set on the incoming
+  // Request before it ever reaches this Worker -- reading it here (the same
+  // next/headers API app/chatgpt-auth.ts already uses for other headers)
+  // lets a future incident's screenshot Ray ID be matched directly against
+  // this log line, with no separate correlation mechanism invented.
+  const cfRay = (await headers()).get("cf-ray");
   const { id } = await params;
   const requestedNavigation = await searchParams;
   const returnTo = safeInternalReturnPath(requestedNavigation.from, "/donors");
@@ -52,20 +77,26 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   const identity = await requireChatGPTUser(currentHref);
   const profile = await ensureUserProfile(identity);
   const mode = await getDataMode(profile.id);
+  const donorLookupStart = Date.now();
   const donor = await env.DB.prepare(`SELECT id, display_name, donor_code, last_name, email, phone, home_phone, address_line_1, city, state, postal_code, country, primary_first_name, spouse, spouse_first_name, primary_title, spouse_title, external_id, external_source, contact_note, relationship_summary, institutional_memory, archived_at, merged_into_donor_id FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"} LIMIT 1`).bind(...(mode === "demo" ? [id] : [id, profile.id])).first<Donor>();
+  marks.donorLookupMs = Date.now() - donorLookupStart;
+  d1Calls += 1;
   if (!donor) notFound();
   if (mode === "live" && donor.archived_at && donor.merged_into_donor_id) redirect(donorNavigationHref(donor.merged_into_donor_id, returnTo, origin));
   if (mode === "live" && !donor.archived_at) {
+    const donorViewsStart = Date.now();
     const viewedAt = Math.floor(Date.now() / 1000);
     await env.DB.prepare(`INSERT INTO donor_views (user_id,donor_id,viewed_at) VALUES (?,?,?)
       ON CONFLICT(user_id,donor_id) DO UPDATE SET viewed_at=excluded.viewed_at`).bind(profile.id, donor.id, viewedAt).run();
+    marks.donorViewsMs = Date.now() - donorViewsStart;
+    d1Calls += 1;
   }
   const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult] = await Promise.all([
-    (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>(),
-    env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>(),
-    env.DB.prepare(`SELECT id, type, occurred_at, occurred_at_date_only, summary, source, created_at, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND source NOT LIKE 'archived:%' ORDER BY occurred_at DESC LIMIT 500`).bind(...(mode === "demo" ? [id] : [profile.id, id, profile.id])).all<Interaction>(),
-    env.DB.prepare(`SELECT id, action, reason, status, due_at, due_at_date_only, created_at, updated_at FROM recommendations WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND status IN ('open','completed') ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, due_at, updated_at DESC LIMIT 200`).bind(...(mode === "demo" ? [id] : [id, profile.id])).all<Recommendation>(),
-    mode === "demo"
+    timedAll(marks, "giving", (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>()),
+    timedAll(marks, "gifts", env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>()),
+    timedAll(marks, "interactions", env.DB.prepare(`SELECT id, type, occurred_at, occurred_at_date_only, summary, source, created_at, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND source NOT LIKE 'archived:%' ORDER BY occurred_at DESC LIMIT 500`).bind(...(mode === "demo" ? [id] : [profile.id, id, profile.id])).all<Interaction>()),
+    timedAll(marks, "reminders", env.DB.prepare(`SELECT id, action, reason, status, due_at, due_at_date_only, created_at, updated_at FROM recommendations WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND status IN ('open','completed') ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END, due_at, updated_at DESC LIMIT 200`).bind(...(mode === "demo" ? [id] : [id, profile.id])).all<Recommendation>()),
+    timedAll(marks, "paymentEvents", mode === "demo"
       ? Promise.resolve({ results: [] as PaymentEvent[] })
       : env.DB.prepare(`SELECT audit.id, audit.payment_date, audit.applied_cents, audit.remaining_balance_cents,
           audit.pledge_activity_id, pledge.description AS pledge_description, pledge.source_campaign AS pledge_campaign
@@ -74,14 +105,15 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
         INNER JOIN giving_activities pledge ON pledge.id = audit.pledge_activity_id AND pledge.owner_user_id = audit.user_id AND pledge.donor_id = audit.donor_id
         WHERE audit.user_id = ? AND audit.donor_id = ? AND audit.decision_type = 'apply_to_pledge'
           AND audit.applied_cents > 0 AND audit.payment_date IS NOT NULL
-        ORDER BY audit.payment_date DESC, audit.created_at DESC`).bind(profile.id, id).all<PaymentEvent>(),
-    mode === "demo" ? Promise.resolve({ results: [] as ContactAudit[] }) : env.DB.prepare("SELECT id,action,changed_fields,created_at FROM donor_contact_audits WHERE donor_id=? AND user_id=? ORDER BY created_at DESC LIMIT 5").bind(id, profile.id).all<ContactAudit>(),
-    mode === "demo" ? Promise.resolve({ results: [] as DonorSearchRecord[] }) : env.DB.prepare(`SELECT id,display_name AS name,primary_first_name AS primaryFirstName,last_name AS lastName,COALESCE(spouse,spouse_first_name) AS spouse,COALESCE(external_id,donor_code) AS code,email,COALESCE(phone,alternate_mobile_phone,home_phone) AS phone FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL ORDER BY COALESCE(NULLIF(last_name,''),display_name) COLLATE NOCASE,display_name COLLATE NOCASE LIMIT 1000`).bind(profile.id).all<DonorSearchRecord>(),
+        ORDER BY audit.payment_date DESC, audit.created_at DESC`).bind(profile.id, id).all<PaymentEvent>()),
+    timedAll(marks, "contactAudits", mode === "demo" ? Promise.resolve({ results: [] as ContactAudit[] }) : env.DB.prepare("SELECT id,action,changed_fields,created_at FROM donor_contact_audits WHERE donor_id=? AND user_id=? ORDER BY created_at DESC LIMIT 5").bind(id, profile.id).all<ContactAudit>()),
+    timedAll(marks, "donorDirectory", mode === "demo" ? Promise.resolve({ results: [] as DonorSearchRecord[] }) : env.DB.prepare(`SELECT id,display_name AS name,primary_first_name AS primaryFirstName,last_name AS lastName,COALESCE(spouse,spouse_first_name) AS spouse,COALESCE(external_id,donor_code) AS code,email,COALESCE(phone,alternate_mobile_phone,home_phone) AS phone FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL ORDER BY COALESCE(NULLIF(last_name,''),display_name) COLLATE NOCASE,display_name COLLATE NOCASE LIMIT 1000`).bind(profile.id).all<DonorSearchRecord>()),
     // Every acknowledgment event for this donor's gifts, newest first --
     // never joined into giving_activities/gifts; "current status" is
     // computed client-side as the first (newest) row per (source, id).
-    mode === "demo" ? Promise.resolve({ results: [] as AcknowledgmentRow[] }) : env.DB.prepare("SELECT gift_source, gift_id, status, created_at FROM gift_acknowledgments WHERE donor_id=? AND user_id=? ORDER BY created_at DESC LIMIT 2000").bind(id, profile.id).all<AcknowledgmentRow>(),
+    timedAll(marks, "acknowledgments", mode === "demo" ? Promise.resolve({ results: [] as AcknowledgmentRow[] }) : env.DB.prepare("SELECT gift_source, gift_id, status, created_at FROM gift_acknowledgments WHERE donor_id=? AND user_id=? ORDER BY created_at DESC LIMIT 2000").bind(id, profile.id).all<AcknowledgmentRow>()),
   ]);
+  d1Calls += 4 + (mode === "live" ? 4 : 0);
   const activities = activityResult.results;
   const countedActivities = activities.filter(countsInGivingTotals);
   const paymentEvents = paymentEventResult.results;
@@ -107,6 +139,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // write-capable feature on this page. Manual-entry only -- no outbound
   // network call is made anywhere in loading this section.
   let researchViewProps: { lastResearchedAt: number | null; openRun: { id: string; pendingEvidence: PendingEvidenceView[]; candidates: IdentityCandidateView[] } | null; findings: ResearchFindingView[] } = { lastResearchedAt: null, openRun: null, findings: [] };
+  const donorResearchStart = Date.now();
   if (mode === "live") {
     const [lastRun, openRunRow, findingRows] = await Promise.all([
       env.DB.prepare("SELECT completed_at FROM donor_research_runs WHERE donor_id=? AND user_id=? AND status='completed' ORDER BY completed_at DESC LIMIT 1").bind(id, profile.id).first<{ completed_at: number }>(),
@@ -130,7 +163,9 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       openRun: openRunRow && openRunDetail ? { id: openRunRow.id, pendingEvidence: openRunDetail[0].results, candidates: openRunDetail[1].results } : null,
       findings: findings.map((finding) => ({ id: finding.id, category: finding.category, claim: finding.claim, status: finding.status, relatedDonorName: finding.related_donor_id ? relatedDonorNameById.get(finding.related_donor_id) : null, sources: sourcesByFinding.get(finding.id) ?? [] })),
     };
+    d1Calls += 3 + (openRunRow ? 2 : 0) + (findings.length ? 1 : 0) + (findings.some((finding) => finding.related_donor_id) ? 1 : 0);
   }
+  marks.donorResearchMs = Date.now() - donorResearchStart;
 
   // Historical context: never queried by any interaction/recommendation
   // read path on this page (completedInteractions, next, recommendationResult
@@ -138,20 +173,32 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // kept structurally separate so it can never be mistaken for confirmed
   // relationship history. Only 'unconfirmed' rows are shown; there is no
   // 'confirmed' status to filter for (see db/schema.ts).
+  const historicalContextStart = Date.now();
   const historicalContextRows = mode === "live"
     ? (await env.DB.prepare("SELECT id, text, source_date, classification, source, created_at FROM donor_historical_context WHERE donor_id=? AND user_id=? AND status='unconfirmed' ORDER BY created_at DESC LIMIT 200").bind(id, profile.id).all<HistoricalContextRow>()).results
     : [];
+  marks.historicalContextMs = Date.now() - historicalContextStart;
+  marks.historicalContextRows = historicalContextRows.length;
+  if (mode === "live") d1Calls += 1;
 
   // Yahrtzeits: family background context, never an interaction, never
   // counted toward Last Contact, never part of relationship_summary/
   // institutional_memory generation -- kept structurally separate exactly
   // like historical context above.
+  const yahrtzeitsStart = Date.now();
   const yahrtzeitRows = mode === "live"
     ? (await env.DB.prepare("SELECT id, deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day, hebrew_year FROM yahrtzeits WHERE donor_id=? AND user_id=? ORDER BY hebrew_month, hebrew_day").bind(id, profile.id).all<YahrtzeitRow>()).results
     : [];
+  marks.yahrtzeitsMs = Date.now() - yahrtzeitsStart;
+  marks.yahrtzeitsRows = yahrtzeitRows.length;
+  if (mode === "live") d1Calls += 1;
+  const importantDatesStart = Date.now();
   const importantDateRows = mode === "live"
     ? (await env.DB.prepare("SELECT id, type, person_name, relationship, month, day, year, notes FROM important_dates WHERE donor_id=? AND user_id=? ORDER BY month, day").bind(id, profile.id).all<ImportantDateRow>()).results
     : [];
+  marks.importantDatesMs = Date.now() - importantDatesStart;
+  marks.importantDatesRows = importantDateRows.length;
+  if (mode === "live") d1Calls += 1;
   const managedDateItems: ManagedDateItem[] = [
     ...yahrtzeitRows.map((row): ManagedDateItem => ({
       id: row.id,
@@ -194,6 +241,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   const openPledgeSource = countedActivities.find((item) => (item.balance_cents ?? 0) > 0);
   const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: openPledgeSource.activity_date } : null;
   const lastCompletedInteractionForEvidence = completedInteractions[0] ? { type: completedInteractions[0].type, summary: completedInteractions[0].summary, occurredAt: completedInteractions[0].occurred_at } : null;
+  const evidenceStart = Date.now();
   const recommendationEvidence = buildRecommendationEvidence({
     donorId: id,
     mostRecentPaidGift: mostRecentPaidGiftForEvidence,
@@ -208,6 +256,20 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     importantDates: importantDateRows.map((row) => ({ type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
   }, Math.floor(Date.now() / 1000), profile.timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
+  marks.evidenceMs = Date.now() - evidenceStart;
+
+  // Single compact structured log line, timings/counts only -- no donor
+  // name, email, phone, gift/interaction/note content, or query SQL.
+  // donorId is truncated to 8 chars: enough to match a future screenshot's
+  // Ray ID/donor ID against this line without logging the full identifier.
+  logger.info("donor_page_render", {
+    donorId: donor.id.slice(0, 8),
+    mode,
+    cfRay,
+    d1Calls,
+    totalMs: Date.now() - renderStart,
+    ...marks,
+  });
 
   return <AppShell active="donors"><div className="donor-breadcrumb"><a href="/">Workspace</a><span>/</span><a href={donorDirectoryHref}>Donors</a><span>/</span><strong>{donor.display_name}</strong></div>
     <DonorBackNavigation returnTo={returnTo} label={donorBackLabel(origin)} />

@@ -113,6 +113,49 @@ assert.match(rescheduleButton, /\/reschedule`/, "the button must post to the res
 assert.match(rescheduleButton, /type="date"/, "Reschedule must collect a date only, never a time");
 assert.doesNotMatch(rescheduleButton, /type="datetime-local"|type="time"/, "Reschedule must never collect a time of day");
 
+// Temporary Error 1102 diagnostic instrumentation on the donor page: one
+// compact structured log line per request, timings/counts only. Extracts
+// the exact object literal passed to logger.info(...) and checks it both
+// positively (donorId is truncated, never the raw column) and negatively
+// (no sensitive donor field ever appears inside that specific call).
+assert.equal((donorPage.match(/logger\.info\(/g) ?? []).length, 1, "the donor page must emit exactly one structured log line, not many noisy console.log calls");
+assert.equal((donorPage.match(/console\.(log|info)\(/g) ?? []).length, 0, "the donor page must log only through the shared logger, never a bare console call");
+const donorPageLogCall = /logger\.info\("donor_page_render", \{([\s\S]*?)\n {2}\}\);/.exec(donorPage);
+assert.ok(donorPageLogCall, "the donor_page_render structured log call must exist and be readable as a single block");
+const logCallBody = donorPageLogCall[1];
+assert.match(logCallBody, /donorId: donor\.id\.slice\(0, 8\)/, "donorId must be truncated, never the full identifier");
+for (const sensitive of ["display_name", "donor.email", "donor.phone", "home_phone", "address_line_1", "contact_note", "relationship_summary", "institutional_memory", ".summary", ".description", ".text\b", "SELECT ", "INSERT ", "UPDATE "]) {
+  assert.doesNotMatch(logCallBody, new RegExp(sensitive), `the structured log call must never include ${sensitive}`);
+}
+// Every explicitly-named field inside the call must be a timing/count or
+// one of the four identifying fields -- never a raw value pulled from a
+// query result row. (Shorthand properties like `mode,`/`cfRay,` have no
+// colon; `...marks,` is a spread and matches neither pattern here.)
+const loggedKeys = [...logCallBody.matchAll(/^\s*(\w+)(?::|,)/gm)].map((match) => match[1]);
+assert.deepEqual(loggedKeys, ["donorId", "mode", "cfRay", "d1Calls", "totalMs"], "the log call must explicitly name exactly these five identifying/summary fields, plus the ...marks spread");
+// Every render phase the task asked for must actually be instrumented,
+// either via a direct marks.xxxMs assignment or via timedAll(marks,
+// "xxx", ...) (which sets `${key}Ms`/`${key}Rows` through bracket
+// notation, so it's checked by call-site name here instead).
+const directMarkKeys = [...donorPage.matchAll(/marks\.(\w+)\s*=/g)].map((match) => match[1]);
+for (const key of directMarkKeys) assert.match(key, /Ms$|Rows$/, `marks field "${key}" must be a timing (*Ms) or a count (*Rows), never a raw value`);
+const timedAllKeys = [...donorPage.matchAll(/timedAll\(marks, "(\w+)"/g)].map((match) => match[1]);
+for (const phase of ["donorLookup", "donorViews", "donorResearch", "historicalContext", "yahrtzeits", "importantDates", "evidence"]) {
+  assert.ok(directMarkKeys.includes(`${phase}Ms`), `${phase} must be timed (marks.${phase}Ms)`);
+}
+for (const phase of ["giving", "gifts", "interactions", "reminders", "paymentEvents", "contactAudits", "donorDirectory", "acknowledgments"]) {
+  assert.ok(timedAllKeys.includes(phase), `${phase} must be timed via timedAll(marks, "${phase}", ...)`);
+}
+// cf-ray correlation: the same next/headers API this app already uses
+// elsewhere (app/chatgpt-auth.ts) for other request headers -- not an
+// invented mechanism.
+assert.match(donorPage, /headers\(\)\)\.get\("cf-ray"\)/, "the donor page must read cf-ray via next/headers, matching the app's existing header-access pattern");
+// Instrumentation must only wrap already-issued promises, never add a new
+// D1 statement of its own -- 21 env.DB.prepare(...) call sites, exactly
+// matching the pre-instrumentation count on origin/feature/independent-
+// cloudflare-sandbox (verified directly via the same regex, not assumed).
+assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 21, "instrumentation must not add or remove any D1 query call sites");
+
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);
 assert.match(capturePage, /requestedParams\.returnTo === "\/"/);
