@@ -71,8 +71,18 @@ export function inferSubject(note: string, kind: InteractionKind): string {
 const sentenceList = (note: string) => note.trim().split(/(?:[.!?]+\s+|[\r\n]+)/).map((item) => item.trim()).filter(Boolean);
 const concise = (value: string, max = 180) => value.length <= max ? value : `${value.slice(0, max - 1).trim()}…`;
 
+// Proven false positive (staging incident): a Monday.com-imported note
+// reading "Solicited for a plaque ($5k)" -- a genuine, correctly-captured
+// note whose first word is a common fundraising CRM disposition verb, not
+// a person -- was extracted as "People mentioned: Solicited." This regex
+// has no way to tell "capitalized because it's a proper noun" from
+// "capitalized only because it opens a sentence", so common donor-pipeline
+// status/action verbs that could plausibly start a note are excluded here,
+// the same way Called/Emailed/Discussed/Shared already are below.
+const CRM_STATUS_VERBS = ["Solicited", "Declined", "Confirmed", "Pending", "Requested", "Reviewed", "Completed", "Cancelled", "Rescheduled", "Postponed", "Attended", "Contacted", "Reached", "Scheduled", "Reminded", "Thanked", "Updated", "Approved", "Rejected", "Received", "Processed"];
+
 function mentionedPeople(note: string) {
-  const ignored = new Set(["Called", "Emailed", "Meeting", "Coffee", "Lunch", "Dinner", "Visited", "Discussed", "Shared", "Send", "Follow", "The", "This", "She", "He", "They", "We", "I"]);
+  const ignored = new Set(["Called", "Emailed", "Meeting", "Coffee", "Lunch", "Dinner", "Visited", "Discussed", "Shared", "Send", "Follow", "The", "This", "She", "He", "They", "We", "I", ...CRM_STATUS_VERBS]);
   const names = note.match(/\b\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*)*/gu) ?? [];
   return [...new Set(names.map((name) => name.trim().replace(/[’']s$/u, "")).filter((name) => !ignored.has(name) && !/\b(?:Foundation|University|College|School|Yeshiva|Synagogue|Congregation|Hospital|Inc|LLC)\b/u.test(name)))].slice(0, 5);
 }

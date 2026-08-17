@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { buildRecommendationEvidence } from "../lib/relationships/recommendation-evidence.ts";
 import { generateCandidates } from "../lib/relationships/recommendation-candidates.ts";
-import { buildDonorRecommendation } from "../lib/relationships/recommendation-rank.ts";
+import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../lib/relationships/recommendation-rank.ts";
 import { buildUnifiedTimeline } from "../lib/relationships/unified-timeline.ts";
 
 // Noon UTC, not midnight -- midnight UTC on this date is still the
@@ -346,6 +346,84 @@ async function run() {
   assert.match(donorPage, /importantDates:/, "the donor page must feed important-date rows into the shared evidence");
   assert.match(meetingBrief, /importantDates:/, "Meeting Brief must feed important-date rows into the shared evidence");
   assert.match(liveData, /importantDates:/, "the homepage/Today queue must feed important-date rows into the shared evidence");
+
+  // --- Suggested Action summary-card presentation (donor page KPI card) ---
+  // Real staging text (verbatim, from the exact donor whose imported note
+  // was "Solicited for a plaque ($5k)") -- proves the fix against the
+  // exact problematic recommendation, not a synthetic approximation.
+  const verboseNarrative = "Latest discussion topics: Relationship update.\nPeople mentioned: Solicited.\nRecommended next action: Review this note before the next interaction.";
+  const verboseEvidence = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: verboseNarrative }, NOW, TIMEZONE);
+  const verboseRecommendation = buildDonorRecommendation(verboseEvidence);
+  assert.ok(verboseRecommendation, "sanity: the narrative-only fixture must actually produce a recommendation");
+  assert.equal(verboseRecommendation.kind, "relationship_opportunity");
+  // The full action/evidence fields are UNCHANGED -- the detail view still
+  // gets the complete text; nothing was deleted from the recommendation engine.
+  assert.match(verboseRecommendation.action, /Latest discussion topics:/);
+  assert.match(verboseRecommendation.action, /People mentioned: Solicited/);
+  assert.match(verboseRecommendation.evidence.join(" "), /relationship_summary\/institutional_memory:/);
+
+  const verboseSummary = summarizeRecommendationForSnapshot(verboseRecommendation);
+  // 1. No raw evidence-label strings leak into the summary card.
+  for (const label of ["Latest discussion topics:", "People mentioned:", "Recommended next action:"]) {
+    assert.doesNotMatch(verboseSummary.headline, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `summary headline must never include the raw evidence label "${label}"`);
+    assert.ok(!verboseSummary.supporting || !verboseSummary.supporting.includes(label), `summary supporting text must never include the raw evidence label "${label}"`);
+  }
+  // 2. Verbose evidence still produces a concise summary card.
+  assert.ok(verboseSummary.headline.length <= 100, "the summary headline must stay short even when the underlying recommendation text is a multi-line dump");
+  assert.ok(!verboseSummary.headline.includes("\n"), "the summary headline must never be multi-line");
+  assert.equal(verboseSummary.headline, "Review before next outreach");
+  assert.equal(verboseSummary.supporting, "Recent relationship notes are available.");
+
+  // A second, independently-verbose narrative (long free text, no fixed
+  // labels) proves the concise headline isn't merely a special case of
+  // this one exact string -- every relationship_opportunity gets the same
+  // fixed, short summary regardless of the underlying note's length.
+  const longNarrative = "A".repeat(500);
+  const longEvidence = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: longNarrative }, NOW, TIMEZONE);
+  const longRecommendation = buildDonorRecommendation(longEvidence);
+  const longSummary = summarizeRecommendationForSnapshot(longRecommendation);
+  assert.ok(longSummary.headline.length <= 100, "an arbitrarily long narrative must still produce a short summary headline");
+  assert.equal(longSummary.headline, "Review before next outreach");
+
+  // 3. Detailed evidence remains available in its intended detailed view:
+  // the RELATIONSHIP SNAPSHOT story card's own SUGGESTED ACTION block
+  // still renders the full action/why/evidence, separate from the KPI card.
+  assert.match(donorPage, /recommendationSummary\?\.headline \|\| "None available"/, "the KPI card must render the concise summary, not the raw action");
+  assert.match(donorPage, /<h3>\{recommendation\?\.action \|\| "No suggested action available"\}<\/h3>/, "the detail block must still render the full action text");
+  assert.match(donorPage, /recommendation\.evidence\.join\(" "\)/, "the detail block must still render the full evidence");
+  assert.match(donorPage, /summarizeRecommendationForSnapshot/, "the donor page must use the shared summary function, not its own ad hoc truncation");
+
+  // 4/5. Dated urgency and "No dated urgency" both still display correctly
+  // -- unchanged by this fix, since `timing` is read directly from
+  // `recommendation`, never from the new summary object.
+  assert.match(donorPage, /<span>\{recommendation\?\.timing \|\| "No dated urgency"\}<\/span>/, "the timing/urgency span must be untouched by the summary-card fix");
+  const timedRecommendation = { action: "Reach out ahead of Sarah's yahrtzeit.", why: "w", evidence: ["e"], confidence: "high", timing: "Aug 20, 2026", kind: "yahrtzeit_outreach" };
+  assert.equal(summarizeRecommendationForSnapshot(timedRecommendation).headline, "Reach out ahead of Sarah's yahrtzeit.", "a non-narrative kind's already-concise action is reused as the headline as-is");
+
+  // --- non-narrative kinds keep their existing concise action verbatim ---
+  for (const kind of ["honor_reminder", "acknowledge_gift", "follow_up_pledge", "reconnect_contact_gap", "birthday_outreach", "anniversary_outreach"]) {
+    const shortRecommendation = { action: "A short recommended action.", why: "w", evidence: ["e"], confidence: "medium", timing: null, kind };
+    assert.equal(summarizeRecommendationForSnapshot(shortRecommendation).headline, "A short recommended action.");
+    assert.equal(summarizeRecommendationForSnapshot(shortRecommendation).supporting, null);
+  }
+
+  // --- the length backstop only ever applies to a free-text-derived
+  // action long enough to matter -- covers item C (must not become
+  // extremely tall) even for kinds with no fixed template. ---
+  const veryLongAction = `Follow up: ${"word ".repeat(40)}`.trim();
+  const backstopped = summarizeRecommendationForSnapshot({ action: veryLongAction, why: "w", evidence: ["e"], confidence: "low", timing: null, kind: "honor_reminder" });
+  assert.ok(backstopped.headline.length < veryLongAction.length, "an unusually long free-text action must be shortened for the summary card");
+  assert.match(backstopped.headline, /…$/, "a shortened headline must be marked as truncated");
+
+  // --- solicit gets its own fixed, confidence-aware headline, and never
+  // leaks the imported note text it's built from. ---
+  const solicitLow = { action: "Consider a solicitation ask; an imported note references one, but this was never confirmed: \"Ask for annual gift\"", why: "w", evidence: ["e"], confidence: "low", timing: null, kind: "solicit" };
+  const solicitLowSummary = summarizeRecommendationForSnapshot(solicitLow);
+  assert.equal(solicitLowSummary.headline, "Consider a solicitation ask");
+  assert.doesNotMatch(solicitLowSummary.supporting ?? "", /Ask for annual gift/);
+  assert.match(solicitLowSummary.supporting ?? "", /not yet confirmed/);
+  const solicitMedium = { ...solicitLow, confidence: "medium" };
+  assert.doesNotMatch(summarizeRecommendationForSnapshot(solicitMedium).supporting ?? "", /not yet confirmed/);
 
   console.log("Recommendation engine checks passed.");
 }

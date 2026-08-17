@@ -107,3 +107,51 @@ export function buildDonorRecommendation(evidence: RecommendationEvidence): Dono
   const winner = ranked[0];
   return { action: winner.action, why: winner.why, evidence: winner.evidence, confidence: winner.confidence, timing: winner.timing, kind: winner.kind, giftSource: winner.giftSource, giftId: winner.giftId };
 }
+
+// --- Snapshot-card presentation ---
+// The donor page's top "Suggested action" KPI card (same row as "Lifetime
+// paid"/"Most recent paid gift") is a narrow, single-line-budget slot --
+// never the place for full recommendation reasoning or embedded raw
+// evidence text. The detailed action/why/evidence/confidence already have
+// their own home in the RELATIONSHIP SNAPSHOT story card's "SUGGESTED
+// ACTION" block, which this never touches. This never re-derives or
+// overrides which recommendation won (buildDonorRecommendation above is
+// untouched) -- it only chooses how much of the ALREADY-CHOSEN winner's
+// text is safe to show in a narrow card.
+export type RecommendationSnapshotSummary = { headline: string; supporting: string | null };
+
+const SNAPSHOT_HEADLINE_MAX = 100;
+function conciseSnapshotText(value: string, max = SNAPSHOT_HEADLINE_MAX): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= max) return singleLine;
+  const truncated = singleLine.slice(0, max);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return `${(lastSpace > max * 0.6 ? truncated.slice(0, lastSpace) : truncated).trim()}…`;
+}
+
+// relationship_opportunity and solicit build their full `action` by
+// embedding the donor's entire relationship_summary/institutional_memory
+// (itself a multi-line dump: topics, people, organizations, commitments,
+// next action -- see lib/capture/interaction.ts's actionableRelationship-
+// Snapshot) or an imported note verbatim -- exactly right for the detail
+// view, where a fundraiser needs the actual text to act on it, wrong for
+// a narrow KPI card. Those two kinds get a fixed, kind-aware headline
+// instead of their `action` field. Every other kind's `action` is already
+// a single, bounded, purpose-built sentence, so it's reused as-is, through
+// the same length backstop, in case a free-text-derived field (a user-
+// authored reminder, an interaction subject line) happens to run long --
+// semantic selection is the real fix; the backstop is only insurance.
+export function summarizeRecommendationForSnapshot(recommendation: DonorRecommendation): RecommendationSnapshotSummary {
+  if (recommendation.kind === "relationship_opportunity") {
+    return { headline: "Review before next outreach", supporting: "Recent relationship notes are available." };
+  }
+  if (recommendation.kind === "solicit") {
+    return {
+      headline: "Consider a solicitation ask",
+      supporting: recommendation.confidence === "low"
+        ? "An imported note references a possible ask, not yet confirmed."
+        : "Relationship notes describe a possible solicitation opportunity.",
+    };
+  }
+  return { headline: conciseSnapshotText(recommendation.action), supporting: null };
+}

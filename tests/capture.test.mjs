@@ -28,6 +28,20 @@ assert.match(extracted.relationshipSummary, /People mentioned: Elena, Maya/);
 assert.match(extracted.relationshipSummary, /Commitments:/);
 assert.match(extracted.relationshipSummary, /Recommended next action:/);
 assert.doesNotMatch(extracted.relationshipSummary, /sentiment|confidence|classification|extraction/i);
+
+// Regression (proven staging bug): a genuine, correctly-captured note
+// whose first word is a common fundraising CRM status/disposition verb
+// must never be misread as a mentioned person. The real imported note was
+// "Solicited for a plaque ($5k)"; naive capitalized-word matching had no
+// way to tell "capitalized because it's a proper noun" from "capitalized
+// only because it opens a sentence".
+for (const statusNote of ["Solicited for a plaque ($5k)", "Declined the invitation this year.", "Confirmed attendance for the gala."]) {
+  const statusExtraction = extractInteraction(statusNote);
+  assert.doesNotMatch(statusExtraction.relationshipSummary, /People mentioned:/, `a sentence-initial CRM status verb in "${statusNote}" must never be presented as a mentioned person`);
+}
+// Genuine names must still be captured -- already proven above (Elena,
+// Maya) and unaffected by this fix, since it only adds entries to the
+// existing ignore-list, never changes what counts as a name candidate.
 assert.deepEqual(splitInteractionSummary("\nFirst line of the note\nSecond line"), { subject: "", note: "First line of the note\nSecond line", timelineTitle: "Interaction Note", timelineNote: "First line of the note" });
 assert.deepEqual(splitInteractionSummary("Stewardship call\nFirst line\nSecond line"), { subject: "Stewardship call", note: "First line\nSecond line", timelineTitle: "Stewardship call", timelineNote: "First line\nSecond line" });
 assert.equal(sanitizeRelationshipSnapshot("Latest meeting: Campus visit. No positive or negative sentiment was inferred."), "Latest meeting: Campus visit.");
