@@ -166,12 +166,12 @@ export function classifySqlValueExpression(expr: string): ClassifiedSqlValue {
 // value is not a plain literal (a number, a quoted string, or NULL) it
 // can safely bind as a parameter. The caller must fail loudly on null,
 // never fall back to sending the original oversized statement as-is.
-export function parameterizeInsertStatement(statementSql: string): { sql: string; params: Array<string | number | null> } | null {
+export function parameterizeInsertStatement(statementSql: string): { sql: string; columns: string[]; params: Array<string | number | null> } | null {
   const trimmed = statementSql.trim().replace(/;\s*$/, "");
   const match = trimmed.match(/^INSERT INTO ("[^"]+")\s*\(([^)]*)\)\s*VALUES\((.*)\)$/s);
   if (!match) return null;
   const [, tableRef, columnList, valuesInner] = match;
-  const columns = splitTopLevelSqlValues(columnList);
+  const columns = splitTopLevelSqlValues(columnList).map((column) => column.replace(/^"|"$/g, ""));
   const values = splitTopLevelSqlValues(valuesInner);
   if (values.length === 0 || values.length !== columns.length) return null;
   const params: Array<string | number | null> = [];
@@ -181,7 +181,36 @@ export function parameterizeInsertStatement(statementSql: string): { sql: string
     params.push(classified.value);
   }
   const placeholders = values.map(() => "?").join(",");
-  return { sql: `INSERT INTO ${tableRef} (${columnList}) VALUES(${placeholders})`, params };
+  return { sql: `INSERT INTO ${tableRef} (${columnList}) VALUES(${placeholders})`, columns, params };
+}
+
+// Extracts a single row's column values from an export's raw SQL text --
+// e.g. reading a specific marker row (like production_schema_baseline's
+// id='0019' row) directly out of a SOURCE BACKUP FILE, independent of and
+// prior to any restore. Used to verify BACKUP FIDELITY (does the restored
+// database faithfully reproduce a specific row from the backup) as
+// distinct from CURRENT STRUCTURAL INTEGRITY (does the restored schema
+// match today's packaged manifest -- see compareSchemaObjects in
+// lib/data-health/production-baseline.ts) -- these are two different
+// questions and must not be conflated (see verify-remote-restore.mjs's
+// production_schema_baseline handling for the case this was built for).
+// Returns null if the table has no INSERT with a matching value in
+// whereColumn (never guesses or returns a partial/best-effort row).
+export function findInsertedRow(
+  sqlText: string,
+  table: string,
+  whereColumn: string,
+  whereValue: string | number | null,
+): Record<string, string | number | null> | null {
+  const statements = parseRestoreStatements(sqlText).insertsByTable.get(table) ?? [];
+  for (const statement of statements) {
+    const parsed = parameterizeInsertStatement(statement);
+    if (!parsed) continue;
+    const row: Record<string, string | number | null> = {};
+    parsed.columns.forEach((column, index) => { row[column] = parsed.params[index]; });
+    if (row[whereColumn] === whereValue) return row;
+  }
+  return null;
 }
 
 export type ParsedRestoreStatements = {

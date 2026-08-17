@@ -24,6 +24,23 @@
 // instead of inline text. See D1_SAFE_STATEMENT_BYTES and
 // parameterizeInsertStatement's doc comments for the full account.
 //
+// Verification is deliberately split into independent checks that must
+// never be conflated (see 2026-08-16 fix for the bug where they were):
+//   - Backup fidelity for production_schema_baseline: the restored id
+//     '0019' row must match the SOURCE BACKUP's own value for that row.
+//     This is a write-once historical lineage stamp, not continuously
+//     re-stamped as later migrations land, so it is expected to differ
+//     from today's packaged schema hash and that must never fail this
+//     check by itself.
+//   - Current structural integrity + migration readiness: the restored
+//     database's actual live DDL (independent of production_schema_baseline)
+//     must match PRODUCTION_BASELINE_OBJECTS, the manifest's ddlTopology --
+//     itself regenerated from every current source migration. This check
+//     remains strict and must fail on any real missing/differing
+//     table/column/index.
+//   - Data integrity: PRAGMA quick_check, PRAGMA foreign_key_check, and a
+//     row-count sanity check across every FUNDRAISING_DATA_TABLES table.
+//
 // Usage: node scripts/verify-remote-restore.mjs -- <decrypted-backup.sql>
 // Requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the
 // environment (the same variables `wrangler` itself reads for
@@ -37,7 +54,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
-import { planD1Restore } from "../lib/operations/d1-restore-order.ts";
+import { findInsertedRow, planD1Restore } from "../lib/operations/d1-restore-order.ts";
 
 const backupArgument = process.argv.slice(2).find((argument) => argument !== "--");
 const backupPath = backupArgument ? path.resolve(backupArgument) : null;
@@ -117,7 +134,8 @@ function wranglerJson(args) {
   throw new Error(`Could not find JSON in wrangler output for: ${args.join(" ")}\n${result.stdout}`);
 }
 
-const restorePlan = planD1Restore(fs.readFileSync(backupPath, "utf8"));
+const backupSql = fs.readFileSync(backupPath, "utf8");
+const restorePlan = planD1Restore(backupSql);
 if (restorePlan.skippedTables.length > 0) {
   console.log(`Note: skipping DATA restore for ${restorePlan.skippedTables.join(", ")} (see D1_RESTORE_SKIP_DATA_TABLES in lib/operations/d1-restore-order.ts -- schema for these tables is still restored and verified).`);
 }
@@ -201,12 +219,53 @@ try {
   const foreignKeyViolations = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "PRAGMA foreign_key_check;"]);
   assert.deepEqual(foreignKeyViolations?.[0]?.results ?? [], [], `Restored database has foreign-key violations: ${JSON.stringify(foreignKeyViolations)}`);
 
-  console.log("Validating schema against the verified production baseline...");
+  // CURRENT STRUCTURAL INTEGRITY + MIGRATION/SCHEMA READINESS: a strict,
+  // independent, table-by-table and index-by-index DDL comparison between
+  // the restored database's ACTUAL live schema and PRODUCTION_BASELINE_OBJECTS
+  // -- the ddlTopology in production-baseline/schema-manifest.json, which is
+  // itself regenerated from all 29 current source migrations (0000 through
+  // 0028 as of this writing; see PRODUCTION_BASELINE_SOURCE_MIGRATIONS).
+  // A full match here already proves both properties at once: the restored
+  // schema is structurally correct (every table/column/index today's
+  // manifest expects is present, verbatim) AND every migration through the
+  // current one has taken effect (there is no separate migrations-tracking
+  // table in this schema to check independently -- confirmed 2026-08-16 by
+  // inspecting a real export: no d1_migrations/__drizzle_migrations/etc.
+  // table exists here). This check does not read production_schema_baseline
+  // at all, so it can never be satisfied or defeated by that row's value --
+  // see below for why that is a deliberate, separate concern.
+  console.log("Validating restored schema against the current packaged manifest (structural integrity + migration readiness)...");
   const schemaRows = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name;"])?.[0]?.results ?? [];
   const schemaComparison = compareSchemaObjects(stagingSchemaObjects(schemaRows));
   assert.equal(schemaComparison.matches, true, `Restored schema does not match the production baseline: ${schemaComparison.differences.join(" ")}`);
-  const baselineMarker = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT schema_hash FROM production_schema_baseline WHERE id='0019';"])?.[0]?.results?.[0];
-  assert.equal(baselineMarker?.schema_hash, PRODUCTION_BASELINE_HASH, "Restored production_schema_baseline row does not match the current schema hash.");
+
+  // BACKUP FIDELITY for production_schema_baseline (id '0019'): this row is
+  // a write-once historical lineage stamp, not a continuously-reverified
+  // marker. Its "0019" id names the bootstrap event that first created the
+  // table; its schema_hash records whatever PRODUCTION_BASELINE_HASH was AT
+  // THAT TIME, and nothing in this codebase re-stamps it as later migrations
+  // land (confirmed 2026-08-16: PRODUCTION_BASELINE_HASH itself changes with
+  // every schema-affecting migration -- see the PRODUCTION_BASELINE_VERIFIED
+  // comment in lib/data-health/production-baseline.ts -- while this row's
+  // value does not; the real, untouched fundraising-os-staging-db already
+  // carries a schema_hash that predates several migrations applied since).
+  // So the only thing a restore can meaningfully prove about this row is
+  // that the BACKUP's own value survived the restore intact -- comparing it
+  // against TODAY's packaged hash instead was a semantic bug: it made this
+  // assertion fail permanently, on every future restore, the moment a
+  // single migration landed after whichever one last stamped it, even
+  // though the backup and the restore were both perfectly correct.
+  console.log("Validating production_schema_baseline backup fidelity (restored marker must match the SOURCE BACKUP's own marker, not today's packaged hash)...");
+  const sourceBaselineRow = findInsertedRow(backupSql, "production_schema_baseline", "id", "0019");
+  assert.ok(sourceBaselineRow, `Source backup has no production_schema_baseline row for id "0019" -- cannot verify backup fidelity for this table.`);
+  const restoredBaselineRow = wranglerJson(["d1", "execute", scratchDatabaseName, "--remote", "--command", "SELECT schema_hash FROM production_schema_baseline WHERE id='0019';"])?.[0]?.results?.[0];
+  assert.equal(
+    restoredBaselineRow?.schema_hash,
+    sourceBaselineRow.schema_hash,
+    `Restored production_schema_baseline row does not match the SOURCE BACKUP's own marker (backup fidelity failure): restored="${restoredBaselineRow?.schema_hash}" backup="${sourceBaselineRow.schema_hash}".`,
+  );
+  const stampedCurrent = restoredBaselineRow.schema_hash === PRODUCTION_BASELINE_HASH;
+  console.log(`production_schema_baseline backup fidelity OK (schema_hash=${restoredBaselineRow.schema_hash}${stampedCurrent ? ", also matches today's packaged hash" : " -- a stale historical stamp relative to today's packaged hash " + PRODUCTION_BASELINE_HASH + ", which is expected and does not indicate a problem; current structural integrity was already verified independently above"}).`);
 
   console.log("Validating every fundraising table is present and queryable (basic row integrity)...");
   const rowCounts = {};

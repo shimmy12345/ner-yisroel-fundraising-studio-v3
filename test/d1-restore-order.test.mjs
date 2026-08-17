@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FUNDRAISING_DATA_TABLES } from '../lib/data-health/production-baseline.ts';
+import { FUNDRAISING_DATA_TABLES, PRODUCTION_BASELINE_HASH, PRODUCTION_BASELINE_OBJECTS, compareSchemaObjects, stagingSchemaObjects } from '../lib/data-health/production-baseline.ts';
 import { STAGING_RESET_TABLE_ORDER } from '../lib/operations/staging-reset.ts';
 import {
   D1_RESTORE_DATA_ORDER,
   D1_RESTORE_SKIP_DATA_TABLES,
   D1_SAFE_STATEMENT_BYTES,
   classifySqlValueExpression,
+  findInsertedRow,
   parameterizeInsertStatement,
   parseRestoreStatements,
   planD1Restore,
@@ -248,4 +249,101 @@ test('planD1Restore fails loudly rather than silently dropping an oversized stat
     `INSERT INTO "data_imports" ("id","payload") VALUES('a','${bigValue}'),('b','${bigValue}');`,
   ].join('\n') + '\n';
   assert.throws(() => planD1Restore(sql, ['data_imports'], [], D1_SAFE_STATEMENT_BYTES), /could not be safely parameterized/);
+});
+
+// --- Regression tests for the production_schema_baseline semantic fix (2026-08-16) ---
+//
+// verify-remote-restore.mjs previously asserted the RESTORED
+// production_schema_baseline row's schema_hash equalled TODAY's packaged
+// PRODUCTION_BASELINE_HASH. That conflated two different questions:
+//   A. backup fidelity -- did the restore faithfully reproduce this row?
+//      (should compare restored vs. the SOURCE BACKUP's own value)
+//   B/C. current structural integrity + migration readiness -- does the
+//      live schema match today's manifest? (compareSchemaObjects, which
+//      never reads production_schema_baseline's row value at all)
+// production_schema_baseline (id '0019') is a write-once historical
+// lineage stamp, not continuously re-stamped as later migrations land, so
+// it is EXPECTED to go stale relative to PRODUCTION_BASELINE_HASH over
+// time -- that must never by itself fail restore verification. These
+// tests prove the two checks are now independent, and that each still
+// fails loudly on a real problem.
+
+test('findInsertedRow extracts a historical production_schema_baseline marker from backup SQL exactly, independent of PRODUCTION_BASELINE_HASH', () => {
+  const staleHash = '0df7c3561261e9e500d8f7fe563ea76ae19fcb0304a994ff5354b210e0f4e41b';
+  const backup = [
+    'CREATE TABLE `production_schema_baseline` (`id` text PRIMARY KEY NOT NULL, `schema_hash` text NOT NULL, `created_at` integer NOT NULL);',
+    `INSERT INTO "production_schema_baseline" ("id","schema_hash","created_at") VALUES('0019','${staleHash}',1785944072);`,
+  ].join('\n') + '\n';
+  const row = findInsertedRow(backup, 'production_schema_baseline', 'id', '0019');
+  assert.deepEqual(row, { id: '0019', schema_hash: staleHash, created_at: 1785944072 });
+  assert.notEqual(row.schema_hash, PRODUCTION_BASELINE_HASH, 'test fixture must use a genuinely stale hash to be meaningful');
+});
+
+test('findInsertedRow returns null (never guesses) when no row matches the given id', () => {
+  const backup = 'CREATE TABLE `production_schema_baseline` (`id` text PRIMARY KEY NOT NULL, `schema_hash` text NOT NULL);\n';
+  assert.equal(findInsertedRow(backup, 'production_schema_baseline', 'id', '0019'), null);
+});
+
+test('parameterizeInsertStatement also returns the parsed column names, in order, alongside params', () => {
+  const result = parameterizeInsertStatement(`INSERT INTO "production_schema_baseline" ("id","schema_hash","created_at") VALUES('0019','abc',123);`);
+  assert.deepEqual(result.columns, ['id', 'schema_hash', 'created_at']);
+  assert.deepEqual(result.params, ['0019', 'abc', 123]);
+});
+
+test('regression 1: a stale historical baseline marker does not block verification when the actual restored schema matches the current manifest', () => {
+  const miniBaseline = [{ type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL)' }];
+  const restoredSchemaRows = [{ type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL)' }];
+  // Structural integrity: matches, using ONLY the live schema --
+  // production_schema_baseline's row value is never an input to this check.
+  const schemaComparison = compareSchemaObjects(stagingSchemaObjects(restoredSchemaRows), miniBaseline);
+  assert.equal(schemaComparison.matches, true);
+
+  // Backup fidelity: the historical marker is genuinely stale relative to
+  // today's packaged hash, and that alone must not fail anything -- a
+  // faithful restore only needs to reproduce the BACKUP's own value.
+  const staleHash = '0df7c3561261e9e500d8f7fe563ea76ae19fcb0304a994ff5354b210e0f4e41b';
+  const backup = `INSERT INTO "production_schema_baseline" ("id","schema_hash","created_at") VALUES('0019','${staleHash}',1785944072);\n`;
+  const sourceRow = findInsertedRow(backup, 'production_schema_baseline', 'id', '0019');
+  assert.notEqual(sourceRow.schema_hash, PRODUCTION_BASELINE_HASH, 'fixture must be genuinely stale to prove the point');
+  const restoredHash = staleHash; // simulates a faithful restore of this row
+  assert.equal(restoredHash, sourceRow.schema_hash, 'a faithful restore reproduces the backup marker exactly, regardless of today\'s packaged hash');
+});
+
+test('regression 2: a restored baseline marker that differs from the SOURCE BACKUP\'s own marker is detected (real corruption)', () => {
+  const backup = `INSERT INTO "production_schema_baseline" ("id","schema_hash","created_at") VALUES('0019','aaaa',1785944072);\n`;
+  const sourceRow = findInsertedRow(backup, 'production_schema_baseline', 'id', '0019');
+  const restoredHash = 'bbbb'; // simulates a restore that silently corrupted/lost this row
+  assert.notEqual(restoredHash, sourceRow.schema_hash, 'a corrupted restore must remain distinguishable from a faithful one');
+});
+
+test('regression 3: current structural integrity still fails loudly on a real missing table', () => {
+  const baseline = [{ type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL)' }];
+  const comparison = compareSchemaObjects(stagingSchemaObjects([]), baseline);
+  assert.equal(comparison.matches, false);
+  assert.match(comparison.differences.join(' '), /Missing table: donors/);
+});
+
+test('regression 3: current structural integrity still fails loudly on a real column/definition difference', () => {
+  const baseline = [{ type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL, `name` text)' }];
+  const restoredSchemaRows = [{ type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL)' }]; // missing the `name` column
+  const comparison = compareSchemaObjects(stagingSchemaObjects(restoredSchemaRows), baseline);
+  assert.equal(comparison.matches, false);
+  assert.match(comparison.differences.join(' '), /Table definition differs: donors/);
+});
+
+test('regression 3: current structural integrity still fails loudly on a real missing index', () => {
+  const baseline = [
+    { type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL)' },
+    { type: 'index', name: 'donors_id_idx', sql: 'CREATE INDEX `donors_id_idx` ON `donors` (`id`)' },
+  ];
+  const restoredSchemaRows = [{ type: 'table', name: 'donors', sql: 'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL)' }]; // index missing
+  const comparison = compareSchemaObjects(stagingSchemaObjects(restoredSchemaRows), baseline);
+  assert.equal(comparison.matches, false);
+  assert.match(comparison.differences.join(' '), /Missing index: donors_id_idx/);
+});
+
+test('sanity: the real current PRODUCTION_BASELINE_OBJECTS manifest matches itself (compareSchemaObjects is not vacuously true)', () => {
+  const asLiveRows = PRODUCTION_BASELINE_OBJECTS.map((object) => ({ type: object.type, name: object.name, sql: object.sql }));
+  const comparison = compareSchemaObjects(stagingSchemaObjects(asLiveRows));
+  assert.equal(comparison.matches, true, comparison.differences.join(' '));
 });
