@@ -4,12 +4,14 @@ import { useMemo, useState } from "react";
 import { ActivityActions } from "../../components/ActivityActions";
 import { CompletePriorityButton } from "../../components/CompletePriorityButton";
 import { DismissPriorityButton } from "../../components/DismissPriorityButton";
+import { RescheduleButton } from "../../components/RescheduleButton";
 import { GiftAcknowledgmentActions, GivingRecordActions } from "./GivingManagement";
 import { buildUnifiedTimeline, TIMELINE_FILTERS, type TimelineFilter, type TimelineGiving, type TimelineInteraction, type TimelineLegacyGift, type TimelinePayment, type TimelineReminder, type TimelineStatus } from "../../../lib/relationships/unified-timeline";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { financialDateLabel } from "../../../lib/financial-date";
 import { splitInteractionSummary } from "../../../lib/capture/interaction";
 import type { GiftAcknowledgmentStatus } from "../../../lib/giving/acknowledgment";
+import { localDayKey } from "../../../lib/workspace/local-time";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const dateOnly = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
@@ -98,7 +100,7 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
         const pledgeIndexInVisible = visible.findIndex((entry) => entry.kind === "giving" && entry.giving.id === item.payment.pledge_activity_id);
         return <article className="timeline-item unified-timeline-item completed pledge-payment-event" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>Payment applied to pledge</h3><span className="event-type">Payment</span>{item.payment.pledge_campaign && <span className="event-campaign">{item.payment.pledge_campaign}</span>}<span className="timeline-status completed">Completed</span></div><p>{money(item.payment.applied_cents)} paid · {money(item.payment.remaining_balance_cents ?? 0)} remaining</p>{linkedPledgeVisible ? <a className="timeline-linked-record" href={`#pledge-${encodeURIComponent(item.payment.pledge_activity_id)}`}>{linkedPledgeLabel}</a> : item.linkedPledgeExists ? <button type="button" className="timeline-linked-record timeline-linked-record-expand" onClick={() => revealThrough(pledgeIndexInVisible)}>{linkedPledgeLabel} · Show more to view</button> : <small className="timeline-link-unavailable">Linked pledge is unavailable</small>}</div></article>;
       }
-      if (item.kind === "reminder") return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{eventDate(item.eventAt, timezone, item.reminder.due_at_date_only)}</strong></time><span className="timeline-dot note">!</span><div className="timeline-content"><div><h3>{item.reminder.action}</h3><span className="event-type">Reminder</span><span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{item.reminder.reason || (item.reminder.status === "completed" ? "Completed reminder" : "No additional context recorded.")}</p>{live && item.reminder.status === "open" && <><CompletePriorityButton recommendationId={item.reminder.id} /><DismissPriorityButton recommendationId={item.reminder.id} /></>}</div></article>;
+      if (item.kind === "reminder") return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{eventDate(item.eventAt, timezone, item.reminder.due_at_date_only)}</strong></time><span className="timeline-dot note">!</span><div className="timeline-content"><div><h3>{item.reminder.action}</h3><span className="event-type">Reminder</span><span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{item.reminder.reason || (item.reminder.status === "completed" ? "Completed reminder" : "No additional context recorded.")}</p>{live && item.reminder.status === "open" && <div className="reminder-actions"><CompletePriorityButton recommendationId={item.reminder.id} />{item.reminder.due_at !== null && <RescheduleButton recommendationId={item.reminder.id} currentDueDate={localDayKey(item.reminder.due_at, timezone)} />}<DismissPriorityButton recommendationId={item.reminder.id} /></div>}</div></article>;
       const activity = item.interaction;
       const { timelineTitle, timelineNote } = splitInteractionSummary(activity.summary);
       const followUp = activity.source.includes("followup:");

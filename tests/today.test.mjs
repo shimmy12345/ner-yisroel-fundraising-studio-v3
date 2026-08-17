@@ -8,6 +8,8 @@ const completion = await readFile(new URL("../app/api/recommendations/[id]/compl
 const completeButton = await readFile(new URL("../app/components/CompletePriorityButton.tsx", import.meta.url), "utf8");
 const dismissal = await readFile(new URL("../app/api/recommendations/[id]/dismiss/route.ts", import.meta.url), "utf8");
 const dismissButton = await readFile(new URL("../app/components/DismissPriorityButton.tsx", import.meta.url), "utf8");
+const reschedule = await readFile(new URL("../app/api/recommendations/[id]/reschedule/route.ts", import.meta.url), "utf8");
+const rescheduleButton = await readFile(new URL("../app/components/RescheduleButton.tsx", import.meta.url), "utf8");
 const capturePage = await readFile(new URL("../app/capture/page.tsx", import.meta.url), "utf8");
 const capture = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
@@ -86,6 +88,31 @@ assert.doesNotMatch(dismissal.replace(/^\s*\/\/.*$/gm, ""), /fetch\(/, "Dismiss 
 assert.doesNotMatch(dismissal, /UPDATE interactions|UPDATE donors|UPDATE donor_historical_context/, "Dismiss must only ever write the recommendations table");
 assert.doesNotMatch(dismissButton, /window\.location\.reload\(\)/);
 assert.match(dismissButton, /\/dismiss`/, "the button must post to the dismiss route, not complete");
+
+// Reschedule mirrors Complete/Dismiss's authorization shape exactly (same
+// auth check, same owner/status WHERE guard), but must ONLY ever write
+// due_at/due_at_date_only -- never action, reason (so Monday provenance
+// text is never touched), status (so it can never masquerade as
+// complete/dismiss), or donor_id, and it must never INSERT (no duplicate
+// recommendation) or touch any other table.
+assert.match(reschedule, /getChatGPTUser\(\)/, "Reschedule must require authentication, same as Complete/Dismiss");
+assert.match(reschedule, /id = \? AND user_id = \? AND status = 'open'/, "Reschedule must only ever mutate the caller's own open recommendation, same guard shape as Complete/Dismiss");
+assert.match(reschedule, /owner_user_id = \? AND data_source = 'live'/);
+const rescheduleSet = /SET ([^"]+)\n\s*WHERE/.exec(reschedule);
+assert.ok(rescheduleSet, "the reschedule route's UPDATE statement must exist and be readable");
+assert.equal(rescheduleSet[1].trim(), "due_at = ?, due_at_date_only = 1, updated_at = ?", "Reschedule may only ever touch due_at/due_at_date_only/updated_at -- never action, reason, status, or donor_id");
+assert.doesNotMatch(reschedule, /INSERT INTO/, "Reschedule must never create a new recommendation row -- same id, no duplicate");
+assert.doesNotMatch(reschedule, /crypto\.randomUUID/, "Reschedule must update the existing row by its own id, never mint a new one");
+assert.doesNotMatch(reschedule.replace(/^\s*\/\/.*$/gm, ""), /fetch\(/, "Reschedule must never call the Monday.com API");
+assert.doesNotMatch(reschedule, /UPDATE interactions|INSERT INTO interactions|UPDATE donors|UPDATE giving_activities|UPDATE gifts/, "Reschedule must never touch interactions, donors, or giving/pledge data");
+// Always date-only: the UI only ever collects a calendar date, never a
+// time, so a guessed time-of-day must never be invented here.
+assert.doesNotMatch(reschedule, /getHours|setHours|zonedTimeToUtc/i, "Reschedule must never construct a time-of-day -- date-only, UTC-noon anchor only");
+assert.doesNotMatch(rescheduleButton, /window\.location\.reload\(\)/);
+assert.match(rescheduleButton, /\/reschedule`/, "the button must post to the reschedule route");
+assert.match(rescheduleButton, /type="date"/, "Reschedule must collect a date only, never a time");
+assert.doesNotMatch(rescheduleButton, /type="datetime-local"|type="time"/, "Reschedule must never collect a time of day");
+
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);
 assert.match(capturePage, /requestedParams\.returnTo === "\/"/);

@@ -74,6 +74,27 @@ const overdueDefaultTz = buildUnifiedTimeline({
 });
 assert.equal(overdueDefaultTz.find((item) => item.key === "reminder:r-default-tz").status, "scheduled", "the default (UTC) timezone must still use calendar-day comparison, not raw-instant comparison");
 
+// --- a Reschedule-produced due date must participate correctly in the
+// same yesterday/today/tomorrow overdue logic -- using the exact same
+// UTC-noon date-only anchor formula app/api/recommendations/[id]/
+// reschedule/route.ts writes (Date.UTC(y, m-1, d, 12, 0, 0)), not an
+// abstract equivalent, so this proves the real write path integrates
+// correctly, not just the comparison function in isolation. ---
+const rescheduleAnchor = (y, m, d) => Date.UTC(y, m, d, 12, 0, 0) / 1000;
+const rescheduleCases = [
+  [rescheduleAnchor(2026, 7, 16), "overdue", "rescheduled to yesterday (local) -> overdue"],
+  [rescheduleAnchor(2026, 7, 17), "scheduled", "rescheduled to today (local) -> not overdue"],
+  [rescheduleAnchor(2026, 7, 18), "scheduled", "rescheduled to tomorrow (local) -> not overdue"],
+];
+for (const [dueAt, expectedStatus, description] of rescheduleCases) {
+  const timeline = buildUnifiedTimeline({
+    giving: [], legacyGifts: [], payments: [], interactions: [],
+    reminders: [{ id: "r-rescheduled", action: "Follow up", reason: "Imported from Monday · originally due Aug 17, 2026", status: "open", due_at: dueAt, due_at_date_only: 1, created_at: dueTodayUtcNoon, updated_at: sameLocalDayAfterNoon }],
+    now: sameLocalDayAfterNoon, timezone: nyTz,
+  });
+  assert.equal(timeline.find((item) => item.key === "reminder:r-rescheduled").status, expectedStatus, description);
+}
+
 const page = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
 const component = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const interactionHelper = await readFile(new URL("../lib/capture/interaction.ts", import.meta.url), "utf8");
@@ -87,7 +108,8 @@ assert.match(component, /Edit or reopen/);
 assert.match(component, /GivingRecordActions/);
 assert.match(component, /CompletePriorityButton/);
 assert.match(component, /DismissPriorityButton/);
-assert.match(component, /item\.reminder\.status === "open" && <><CompletePriorityButton recommendationId=\{item\.reminder\.id\} \/><DismissPriorityButton recommendationId=\{item\.reminder\.id\} \/><\/>/, "Complete and Dismiss must both be exposed for the same open reminder, not just Complete");
+assert.match(component, /RescheduleButton/);
+assert.match(component, /item\.reminder\.status === "open" && <div className="reminder-actions"><CompletePriorityButton recommendationId=\{item\.reminder\.id\} \/>\{item\.reminder\.due_at !== null && <RescheduleButton recommendationId=\{item\.reminder\.id\} currentDueDate=\{localDayKey\(item\.reminder\.due_at, timezone\)\} \/>\}<DismissPriorityButton recommendationId=\{item\.reminder\.id\} \/><\/div>/, "Complete, Reschedule, and Dismiss must all be gated on the exact same open-status condition, so Reschedule can never appear on a completed or dismissed reminder");
 assert.match(component, /No relationship activity yet/);
 assert.match(component, /splitInteractionSummary/);
 assert.match(interactionHelper, /Interaction Note/);
