@@ -18,6 +18,20 @@
 #   4. Retention is enforced by an R2 lifecycle rule on the `daily/` prefix
 #      (set up once outside this workflow -- see docs/DEPLOYMENT.md), not
 #      by this workflow deleting anything itself.
+#   5. Additively, and only after all of the above: publishes a tiny,
+#      non-secret status JSON (timestamp, outcome, object key -- never
+#      backup content) to a SEPARATE, dedicated status bucket
+#      (fundraising-os-backup-status), using its own separately-scoped
+#      write credential -- distinct from the R2_BACKUP_WRITE_* credential
+#      above, so a leaked status-write credential can never touch real
+#      backup content. A failure in this step is logged (::warning::) but
+#      is deliberately configured to never fail the job -- status
+#      publication must never turn a successful backup into a failed
+#      workflow run. Conversely, when the real backup fails, this step
+#      still records that failure in the status artifact (via
+#      ${{ job.status }}) without masking or altering the job's own
+#      failure -- the earlier steps' own outcome, unaffected by this
+#      step's own error handling, is what still fails this job.
 #
 # See docs/DEPLOYMENT.md's "Automated D1 backup (GitHub Actions + R2)"
 # section for the required repository secrets and the one-time R2/Cloudflare
@@ -119,3 +133,46 @@ jobs:
       - name: Clean up local plaintext/ciphertext
         if: always()
         run: rm -f export.sql export.sql.gz export.sql.gz.gpg
+
+      # Additive, best-effort status reporting -- deliberately separate
+      # from and after every real backup step above, writing only to the
+      # dedicated status bucket (never the backup bucket) with its own,
+      # separately-scoped write credential. `continue-on-error: true` is
+      # load-bearing: a failure here must never turn a successful backup
+      # into a failed workflow run. On failure, whatever status object
+      # already exists there simply ages past its freshness threshold
+      # rather than being overwritten with a false success.
+      - name: Publish backup status (best-effort; must never fail this job)
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATUS_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATUS_WRITE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BACKUP_OBJECT_KEY="daily/${DATABASE_NAME}-${{ steps.stamp.outputs.value }}.sql.gz.gpg"
+          jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg status "${JOB_STATUS}" \
+                --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+            '{schemaVersion: 1, databaseName: $db, attemptAt: $at, attemptStatus: $status, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+            > attempt.json
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+            --key "backup-latest-attempt.json" --body attempt.json --content-type application/json \
+            || echo "::warning::Failed to publish backup-latest-attempt.json -- the backup itself is unaffected."
+          if [ "${JOB_STATUS}" = "success" ]; then
+            jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg key "${BACKUP_OBJECT_KEY}" \
+                  --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+              '{schemaVersion: 1, databaseName: $db, completedAt: $at, backupObjectKey: $key, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+              > success.json
+            aws s3api put-object \
+              --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+              --key "backup-latest-success.json" --body success.json --content-type application/json \
+              || echo "::warning::Failed to publish backup-latest-success.json -- the backup itself succeeded and is unaffected."
+          fi
+          rm -f attempt.json success.json

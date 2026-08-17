@@ -11,11 +11,23 @@
 #      per-table row-count sanity check across every fundraising table.
 #   5. Deletes the scratch database, always -- including when a check
 #      fails, via scripts/verify-remote-restore.mjs's try/finally.
+#   6. Additively, and only after all of the above: publishes a tiny,
+#      non-secret status JSON (timestamp, outcome, which backup object was
+#      verified -- never restored content) to a SEPARATE, dedicated status
+#      bucket (fundraising-os-backup-status), using its own separately-
+#      scoped write credential. This job still holds no write access to
+#      the real backup bucket -- only the existing R2_BACKUP_READ_*
+#      credential above, unchanged. This step does not read or alter
+#      anything computed by scripts/verify-remote-restore.mjs; it only
+#      records whether step 3-5's own outcome was success or failure, via
+#      ${{ job.status }}. A failure in this status-publish step is logged
+#      (::warning::) but is deliberately configured to never fail the job.
 #
-# Any failure fails this job (red X + whatever notification settings this
-# repository/org has configured for Actions failures) -- there is no
-# soft-fail path. See docs/DEPLOYMENT.md's "Automated D1 backup" section
-# for the required secrets and one-time setup.
+# Any failure in steps 1-5 fails this job (red X + whatever notification
+# settings this repository/org has configured for Actions failures) --
+# there is no soft-fail path for the real restore/verification work. See
+# docs/DEPLOYMENT.md's "Automated D1 backup" section for the required
+# secrets and one-time setup.
 name: D1 monthly restore verification
 
 on:
@@ -91,3 +103,49 @@ jobs:
       - name: Clean up local files
         if: always()
         run: rm -f latest.sql.gz.gpg latest.sql.gz latest.sql
+
+      # Additive, best-effort status reporting -- deliberately separate
+      # from and after every real verification step above, writing only
+      # to the dedicated status bucket (never the backup bucket) with its
+      # own, separately-scoped write credential. `continue-on-error: true`
+      # is load-bearing: a failure here must never turn a genuinely
+      # successful restore verification into a failed workflow run. This
+      # does not read or alter anything computed by
+      # scripts/verify-remote-restore.mjs -- it only records whether the
+      # "Restore into a scratch D1 database and run every integrity check"
+      # step above succeeded, via ${{ job.status }}, which by this point
+      # in the job accurately reflects that step's own outcome.
+      - name: Publish restore-verification status (best-effort; must never fail this job)
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATUS_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATUS_WRITE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERIFIED_KEY="latest/${DATABASE_NAME}.sql.gz.gpg"
+          jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg status "${JOB_STATUS}" \
+                --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+            '{schemaVersion: 1, databaseName: $db, attemptAt: $at, attemptStatus: $status, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+            > attempt.json
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+            --key "restore-latest-attempt.json" --body attempt.json --content-type application/json \
+            || echo "::warning::Failed to publish restore-latest-attempt.json -- restore verification's own result is unaffected."
+          if [ "${JOB_STATUS}" = "success" ]; then
+            jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg key "${VERIFIED_KEY}" \
+                  --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+              '{schemaVersion: 1, databaseName: $db, completedAt: $at, verifiedBackupObjectKey: $key, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+              > success.json
+            aws s3api put-object \
+              --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+              --key "restore-latest-success.json" --body success.json --content-type application/json \
+              || echo "::warning::Failed to publish restore-latest-success.json -- restore verification itself succeeded and is unaffected."
+          fi
+          rm -f attempt.json success.json
