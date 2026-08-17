@@ -8,8 +8,14 @@ import { formatTimestamp } from "./dataHealthFormat";
 
 const icons: Record<HealthStatus, string> = { healthy: "✓", attention: "!", critical: "×", info: "i", unavailable: "—" };
 
+// "backup" was this dashboard's original single "Last successful backup"
+// card, before it was split into three (2026-08-17): "automated-backup"
+// and "restore-verification" now carry a raw ISO completedAt value on
+// success, and "manual-export" (the renamed former "backup" card) still
+// does too. Non-timestamp values on these same ids ("Never run", "Unknown",
+// etc.) are left alone by the trailing check.value.includes("T") guard.
 function displayValue(check: HealthCheck, useLocalTime: boolean) {
-  if (!["household-refresh", "donation-refresh", "backup"].includes(check.id) || !check.value.includes("T")) return check.value;
+  if (!["household-refresh", "donation-refresh", "automated-backup", "restore-verification", "manual-export"].includes(check.id) || !check.value.includes("T")) return check.value;
   return formatTimestamp(check.value, useLocalTime);
 }
 
