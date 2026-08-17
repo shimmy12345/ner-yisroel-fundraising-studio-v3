@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { ActivityActions } from "../../components/ActivityActions";
 import { CompletePriorityButton } from "../../components/CompletePriorityButton";
+import { DismissPriorityButton } from "../../components/DismissPriorityButton";
 import { GiftAcknowledgmentActions, GivingRecordActions } from "./GivingManagement";
 import { buildUnifiedTimeline, TIMELINE_FILTERS, type TimelineFilter, type TimelineGiving, type TimelineInteraction, type TimelineLegacyGift, type TimelinePayment, type TimelineReminder, type TimelineStatus } from "../../../lib/relationships/unified-timeline";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
@@ -43,7 +44,7 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
 }) {
   const [filter, setFilter] = useState<TimelineFilter>("all");
   const [visibleCount, setVisibleCount] = useState(RECENT_LIMIT);
-  const timeline = useMemo(() => buildUnifiedTimeline({ giving, legacyGifts, payments, interactions, reminders, now }), [giving, legacyGifts, payments, interactions, reminders, now]);
+  const timeline = useMemo(() => buildUnifiedTimeline({ giving, legacyGifts, payments, interactions, reminders, now, timezone }), [giving, legacyGifts, payments, interactions, reminders, now, timezone]);
   const counts = useMemo(() => new Map(TIMELINE_FILTERS.map((option) => [option.id, option.id === "all" ? timeline.length : timeline.filter((item) => item.filter === option.id).length])), [timeline]);
   // All records for the active filter are already in memory (they came
   // down with the page load) -- "show more" only grows how much of that
@@ -97,7 +98,7 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
         const pledgeIndexInVisible = visible.findIndex((entry) => entry.kind === "giving" && entry.giving.id === item.payment.pledge_activity_id);
         return <article className="timeline-item unified-timeline-item completed pledge-payment-event" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>Payment applied to pledge</h3><span className="event-type">Payment</span>{item.payment.pledge_campaign && <span className="event-campaign">{item.payment.pledge_campaign}</span>}<span className="timeline-status completed">Completed</span></div><p>{money(item.payment.applied_cents)} paid · {money(item.payment.remaining_balance_cents ?? 0)} remaining</p>{linkedPledgeVisible ? <a className="timeline-linked-record" href={`#pledge-${encodeURIComponent(item.payment.pledge_activity_id)}`}>{linkedPledgeLabel}</a> : item.linkedPledgeExists ? <button type="button" className="timeline-linked-record timeline-linked-record-expand" onClick={() => revealThrough(pledgeIndexInVisible)}>{linkedPledgeLabel} · Show more to view</button> : <small className="timeline-link-unavailable">Linked pledge is unavailable</small>}</div></article>;
       }
-      if (item.kind === "reminder") return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{eventDate(item.eventAt, timezone, item.reminder.due_at_date_only)}</strong></time><span className="timeline-dot note">!</span><div className="timeline-content"><div><h3>{item.reminder.action}</h3><span className="event-type">Reminder</span><span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{item.reminder.reason || (item.reminder.status === "completed" ? "Completed reminder" : "No additional context recorded.")}</p>{live && item.reminder.status === "open" && <CompletePriorityButton recommendationId={item.reminder.id} />}</div></article>;
+      if (item.kind === "reminder") return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{eventDate(item.eventAt, timezone, item.reminder.due_at_date_only)}</strong></time><span className="timeline-dot note">!</span><div className="timeline-content"><div><h3>{item.reminder.action}</h3><span className="event-type">Reminder</span><span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{item.reminder.reason || (item.reminder.status === "completed" ? "Completed reminder" : "No additional context recorded.")}</p>{live && item.reminder.status === "open" && <><CompletePriorityButton recommendationId={item.reminder.id} /><DismissPriorityButton recommendationId={item.reminder.id} /></>}</div></article>;
       const activity = item.interaction;
       const { timelineTitle, timelineNote } = splitInteractionSummary(activity.summary);
       const followUp = activity.source.includes("followup:");

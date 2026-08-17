@@ -38,6 +38,42 @@ assert.equal(timeline.find((item) => item.key === "payment:orphan-payment").link
 assert.equal(giving.filter(countsInGivingTotals).reduce((sum, item) => sum + (item.paid_cents ?? 0), 0), 32_500, "payment timeline events and merged pending gifts never add to giving totals");
 for (const filter of ["gifts", "pledges", "payments", "calls", "emails", "meetings", "reminders"]) assert.ok(TIMELINE_FILTERS.some((item) => item.id === filter));
 
+// --- overdue must be a calendar-day (not raw-instant) comparison ---
+// A reminder due today, anchored at UTC noon (exactly how the Monday
+// import stores a date-only due date), must stay "not overdue" even once
+// "now" is well past that UTC-noon instant, as long as the local calendar
+// date hasn't advanced. America/New_York is behind UTC, so 15:00 UTC is
+// still 11:00 local on the same day.
+const nyTz = "America/New_York";
+const dueTodayUtcNoon = Date.UTC(2026, 7, 17, 12, 0, 0) / 1000;
+const sameLocalDayAfterNoon = Date.UTC(2026, 7, 17, 15, 0, 0) / 1000;
+const overdueTimeline = buildUnifiedTimeline({
+  giving: [], legacyGifts: [], payments: [], interactions: [],
+  reminders: [{ id: "r-due-today", action: "Follow up", reason: "r", status: "open", due_at: dueTodayUtcNoon, created_at: dueTodayUtcNoon, updated_at: dueTodayUtcNoon }],
+  now: sameLocalDayAfterNoon, timezone: nyTz,
+});
+assert.equal(overdueTimeline.find((item) => item.key === "reminder:r-due-today").status, "scheduled", "a date-only reminder anchored at UTC noon must not read as overdue merely because that UTC instant has passed");
+
+// A reminder due yesterday (local calendar day) must read as overdue.
+const dueYesterday = Date.UTC(2026, 7, 16, 12, 0, 0) / 1000;
+const overdueYesterdayTimeline = buildUnifiedTimeline({
+  giving: [], legacyGifts: [], payments: [], interactions: [],
+  reminders: [{ id: "r-due-yesterday", action: "Follow up", reason: "r", status: "open", due_at: dueYesterday, created_at: dueYesterday, updated_at: dueYesterday }],
+  now: sameLocalDayAfterNoon, timezone: nyTz,
+});
+assert.equal(overdueYesterdayTimeline.find((item) => item.key === "reminder:r-due-yesterday").status, "overdue", "a reminder due on an earlier local calendar day must read as overdue");
+
+// Without a timezone (default UTC), the same UTC-noon-anchored due date
+// compared against a same-UTC-day "now" must also read as not overdue --
+// confirms the optional `timezone` param defaults sanely for existing
+// call sites that never pass one.
+const overdueDefaultTz = buildUnifiedTimeline({
+  giving: [], legacyGifts: [], payments: [], interactions: [],
+  reminders: [{ id: "r-default-tz", action: "Follow up", reason: "r", status: "open", due_at: dueTodayUtcNoon, created_at: dueTodayUtcNoon, updated_at: dueTodayUtcNoon }],
+  now: sameLocalDayAfterNoon,
+});
+assert.equal(overdueDefaultTz.find((item) => item.key === "reminder:r-default-tz").status, "scheduled", "the default (UTC) timezone must still use calendar-day comparison, not raw-instant comparison");
+
 const page = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
 const component = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const interactionHelper = await readFile(new URL("../lib/capture/interaction.ts", import.meta.url), "utf8");
@@ -50,6 +86,8 @@ assert.match(component, /Log Outcome/);
 assert.match(component, /Edit or reopen/);
 assert.match(component, /GivingRecordActions/);
 assert.match(component, /CompletePriorityButton/);
+assert.match(component, /DismissPriorityButton/);
+assert.match(component, /item\.reminder\.status === "open" && <><CompletePriorityButton recommendationId=\{item\.reminder\.id\} \/><DismissPriorityButton recommendationId=\{item\.reminder\.id\} \/><\/>/, "Complete and Dismiss must both be exposed for the same open reminder, not just Complete");
 assert.match(component, /No relationship activity yet/);
 assert.match(component, /splitInteractionSummary/);
 assert.match(interactionHelper, /Interaction Note/);

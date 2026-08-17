@@ -11,6 +11,7 @@ import type { GiftSource } from "../giving/acknowledgment.ts";
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
+import { localDayKey } from "../workspace/local-time.ts";
 
 export type RecommendationEvidenceInput = {
   donorId: string;
@@ -152,8 +153,14 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
         : null,
       daysSinceLastContact: input.lastContactAt !== null ? daysBetween(now, input.lastContactAt) : null,
     },
+    // Calendar-day (not raw-instant) comparison, matching
+    // lib/relationships/unified-timeline.ts and the already-proven pattern
+    // in lib/workspace/live-data.ts / lib/workspace/relationship-queue.ts
+    // -- a reminder due today must not read as overdue merely because
+    // "now" has passed its stored due_at instant (e.g. a Monday.com-
+    // imported date-only value anchored at UTC noon).
     reminder: input.openReminder
-      ? { ...input.openReminder, isOverdue: input.openReminder.dueAt !== null && input.openReminder.dueAt < now }
+      ? { ...input.openReminder, isOverdue: input.openReminder.dueAt !== null && localDayKey(input.openReminder.dueAt, timezone) < localDayKey(now, timezone) }
       : null,
     narrative: { relationshipSummary: input.relationshipSummary, institutionalMemory: input.institutionalMemory },
     historicalContext: input.historicalContext,

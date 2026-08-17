@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { buildRecommendationEvidence } from "../lib/relationships/recommendation-evidence.ts";
 import { generateCandidates } from "../lib/relationships/recommendation-candidates.ts";
 import { buildDonorRecommendation } from "../lib/relationships/recommendation-rank.ts";
+import { buildUnifiedTimeline } from "../lib/relationships/unified-timeline.ts";
 
 // Noon UTC, not midnight -- midnight UTC on this date is still the
 // previous evening in America/New_York (used below for yahrtzeit
@@ -63,6 +64,34 @@ async function run() {
   assert.equal(withReminder.reminder.isOverdue, true, "a due date in the past must be overdue");
   const withFutureReminder = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: NOW + 5 * DAY } }, NOW, TIMEZONE);
   assert.equal(withFutureReminder.reminder.isOverdue, false);
+
+  // --- overdue semantics: calendar-day, not raw-instant -- and unified
+  // timeline / recommendation evidence must always agree ---
+  // Each case: [dueAt, now, timezone, expectedOverdue, description].
+  // America/New_York is behind UTC; Asia/Jerusalem is ahead of UTC -- using
+  // both proves the fix reads the LOCAL calendar day, never the UTC one.
+  const overdueBoundaryCases = [
+    [Date.UTC(2026, 7, 16, 12, 0, 0) / 1000, Date.UTC(2026, 7, 17, 15, 0, 0) / 1000, "America/New_York", true, "due yesterday (local) -> overdue"],
+    [Date.UTC(2026, 7, 17, 12, 0, 0) / 1000, Date.UTC(2026, 7, 17, 15, 0, 0) / 1000, "America/New_York", false, "due today, UTC-noon anchor, checked after that instant has passed -> not overdue"],
+    [Date.UTC(2026, 7, 18, 12, 0, 0) / 1000, Date.UTC(2026, 7, 17, 15, 0, 0) / 1000, "America/New_York", false, "due tomorrow (local) -> not overdue"],
+    [Date.UTC(2026, 7, 17, 12, 0, 0) / 1000, Date.UTC(2026, 7, 18, 3, 30, 0) / 1000, "America/New_York", false, "due today, checked at 23:30 local (immediately before local midnight) -> not overdue"],
+    [Date.UTC(2026, 7, 17, 12, 0, 0) / 1000, Date.UTC(2026, 7, 18, 4, 30, 0) / 1000, "America/New_York", true, "same due date, checked at 00:30 local the next day (just after local midnight) -> overdue"],
+    [Date.UTC(2026, 7, 17, 10, 0, 0) / 1000, Date.UTC(2026, 7, 17, 22, 0, 0) / 1000, "Asia/Jerusalem", true, "UTC calendar date identical for due date and now (both Aug 17 UTC), but local dates differ (Aug 17 vs Aug 18 in Jerusalem) -> overdue"],
+  ];
+  for (const [dueAt, now, timezone, expected, description] of overdueBoundaryCases) {
+    const evidence = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Follow up", reason: "r", dueAt } }, now, timezone);
+    assert.equal(evidence.reminder.isOverdue, expected, `recommendation-evidence: ${description}`);
+
+    const timeline = buildUnifiedTimeline({
+      giving: [], legacyGifts: [], payments: [], interactions: [],
+      reminders: [{ id: "boundary-reminder", action: "Follow up", reason: "r", status: "open", due_at: dueAt, created_at: dueAt, updated_at: dueAt }],
+      now, timezone,
+    });
+    const timelineOverdue = timeline.find((item) => item.key === "reminder:boundary-reminder").status === "overdue";
+    assert.equal(timelineOverdue, expected, `unified-timeline: ${description}`);
+    assert.equal(timelineOverdue, evidence.reminder.isOverdue, `unified timeline and recommendation evidence must agree: ${description}`);
+  }
+
   const noContactEver = buildRecommendationEvidence(emptyInput, NOW, TIMEZONE);
   assert.equal(noContactEver.contact.daysSinceLastContact, null);
 

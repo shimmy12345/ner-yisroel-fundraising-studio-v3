@@ -1,6 +1,7 @@
 import { appearsInGivingTimeline } from "../giving/management.ts";
 import { activityStatus, completedPlannedAt, isNoResponseActivity } from "../workspace/scheduled-activity.ts";
 import { normalizeFinancialDate } from "../financial-date.ts";
+import { localDayKey } from "../workspace/local-time.ts";
 
 export type TimelineFilter = "all" | "gifts" | "pledges" | "payments" | "calls" | "emails" | "meetings" | "notes" | "reminders" | "other";
 export type TimelineStatus = "scheduled" | "completed" | "cancelled" | "pending" | "open" | "overdue" | "needs-review" | "excluded";
@@ -47,11 +48,25 @@ export function buildUnifiedTimeline(input: {
   interactions: TimelineInteraction[];
   reminders: TimelineReminder[];
   now: number;
+  // Optional (defaults to UTC) so call sites that never exercise the
+  // overdue/date boundary (most existing tests) don't need to change.
+  // The one real caller (UnifiedRelationshipTimeline.tsx) always passes
+  // the donor's/owner's actual profile timezone, which it already has.
+  timezone?: string;
 }) {
   const interactionIds = new Set(input.interactions.map((item) => item.id));
   const givingIds = new Set(input.giving.map((item) => item.id));
   const seenPaymentIds = new Set<string>();
   const items: UnifiedTimelineItem[] = [];
+  // Calendar-day (not raw-instant) overdue comparison, matching the same
+  // timezone-aware pattern already proven in lib/workspace/live-data.ts
+  // and lib/workspace/relationship-queue.ts: a reminder due on a given
+  // local calendar day stays "due today" for that entire day, regardless
+  // of what time within that day due_at is anchored to (e.g. a
+  // Monday.com-imported date-only value stored at UTC noon). It becomes
+  // overdue only once the local calendar date has actually advanced past
+  // it -- never mid-day.
+  const todayKey = localDayKey(input.now, input.timezone ?? "UTC");
 
   for (const giving of input.giving.filter(appearsInGivingTimeline)) {
     items.push({ key: `giving:${giving.id}`, kind: "giving", filter: givingFilter(giving), status: givingStatus(giving), eventAt: giving.activity_date === null ? -1 : normalizeFinancialDate(giving.activity_date), giving });
@@ -72,7 +87,8 @@ export function buildUnifiedTimeline(input: {
     if (reminder.status === "dismissed" || (reminder.id.startsWith("activity-") && interactionIds.has(reminder.id.slice("activity-".length)))) continue;
     const completed = reminder.status === "completed";
     const eventAt = completed ? reminder.updated_at : reminder.due_at ?? reminder.created_at;
-    items.push({ key: `reminder:${reminder.id}`, kind: "reminder", filter: "reminders", status: completed ? "completed" : reminder.due_at !== null && reminder.due_at < input.now ? "overdue" : "scheduled", eventAt, reminder });
+    const overdue = !completed && reminder.due_at !== null && localDayKey(reminder.due_at, input.timezone ?? "UTC") < todayKey;
+    items.push({ key: `reminder:${reminder.id}`, kind: "reminder", filter: "reminders", status: completed ? "completed" : overdue ? "overdue" : "scheduled", eventAt, reminder });
   }
   return items.sort((a, b) => b.eventAt - a.eventAt || a.key.localeCompare(b.key));
 }

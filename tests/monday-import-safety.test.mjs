@@ -81,8 +81,15 @@ async function run() {
   // Historical/undated planned actions never carry the old Monday date
   // forward silently -- "Create follow-up now" always starts from a blank
   // date, and Monday's original date is preserved as provenance in the
-  // recommendation's reason text, never reused as the new due date.
-  assert.match(commit, /reason = `Historical Monday task: "\$\{text\}" \(originally due \$\{dueDateIso/);
+  // recommendation's reason text, never reused as the new due date. The
+  // task itself must never be described as "historical" -- an
+  // accept_future_planned row is a live, not-yet-due follow-up -- so the
+  // reason is provenance-only text derived from dueDateIso (the original
+  // Monday date), while `action` (asserted separately below) carries the
+  // actual task text.
+  assert.match(commit, /dueDateLabel = dueDateIso/, "the provenance label must be derived from the original Monday due date, never the new decision.dueDate");
+  assert.match(commit, /reason = `Imported from Monday\$\{dueDateLabel/);
+  assert.doesNotMatch(commit, /Historical Monday task/, "the task text must never be described as historical");
   assert.match(ui, /setDecision\(key, \{ kind: "create_followup", dueDate: "" \}\)/, "Create follow-up now must start from a blank date, never the old Monday due date");
 
   // Monday's own Status column ("Done"/blank) is display-only: shown as a

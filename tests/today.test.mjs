@@ -6,6 +6,8 @@ const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.
 const queueExperience = await readFile(new URL("../app/components/RelationshipQueueExperience.tsx", import.meta.url), "utf8");
 const completion = await readFile(new URL("../app/api/recommendations/[id]/complete/route.ts", import.meta.url), "utf8");
 const completeButton = await readFile(new URL("../app/components/CompletePriorityButton.tsx", import.meta.url), "utf8");
+const dismissal = await readFile(new URL("../app/api/recommendations/[id]/dismiss/route.ts", import.meta.url), "utf8");
+const dismissButton = await readFile(new URL("../app/components/DismissPriorityButton.tsx", import.meta.url), "utf8");
 const capturePage = await readFile(new URL("../app/capture/page.tsx", import.meta.url), "utf8");
 const capture = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
 const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
@@ -71,6 +73,19 @@ assert.doesNotMatch(completeButton, /window\.location\.reload\(\)/);
 assert.match(completeButton, /onOptimisticComplete/);
 assert.match(queueExperience, /completeOptimistically/);
 assert.match(queueExperience, /restoreFailedCompletion/);
+
+// Dismiss mirrors Complete's authorization shape exactly: same owner/status
+// WHERE guard, same auth check, and it must never touch Monday.com at all
+// (no fetch/API call, no write to any monday-* source table -- local D1
+// status flip only).
+assert.match(dismissal, /getChatGPTUser\(\)/, "Dismiss must require authentication, same as Complete");
+assert.match(dismissal, /status = 'dismissed'/);
+assert.match(dismissal, /id = \? AND user_id = \? AND status = 'open'/, "Dismiss must only ever mutate the caller's own open recommendation, same guard shape as Complete");
+assert.match(dismissal, /owner_user_id = \? AND data_source = 'live'/);
+assert.doesNotMatch(dismissal.replace(/^\s*\/\/.*$/gm, ""), /fetch\(/, "Dismiss must never call the Monday.com API");
+assert.doesNotMatch(dismissal, /UPDATE interactions|UPDATE donors|UPDATE donor_historical_context/, "Dismiss must only ever write the recommendations table");
+assert.doesNotMatch(dismissButton, /window\.location\.reload\(\)/);
+assert.match(dismissButton, /\/dismiss`/, "the button must post to the dismiss route, not complete");
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);
 assert.match(capturePage, /requestedParams\.returnTo === "\/"/);

@@ -150,7 +150,17 @@ export async function POST(request: Request) {
       const dueAt = parseDateToEpochSeconds(decision.dueDate);
       if (dueAt === null) { rejected.push({ text, reason: "Invalid due date" }); continue; }
       const id = mondayRecommendationId(fingerprint);
-      const reason = `Historical Monday task: "${text}" (originally due ${dueDateIso ?? "no date recorded"}).`;
+      // action already carries the actual task text (see the INSERT below);
+      // reason is provenance only -- it must never re-describe the task
+      // itself as "historical", since accept_future_planned rows are a
+      // live, not-yet-due follow-up, not a stale record. Formatted from
+      // dueDateIso (a plain YYYY-MM-DD string) using an explicit UTC
+      // timeZone so the displayed date can never shift by a day relative
+      // to the actual Monday-recorded date.
+      const dueDateLabel = dueDateIso
+        ? new Date(`${dueDateIso}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })
+        : null;
+      const reason = `Imported from Monday${dueDateLabel ? ` · originally due ${dueDateLabel}` : ""}`;
       const existing = await env.DB.prepare("SELECT id FROM recommendations WHERE id=? AND user_id=?").bind(id, profile.id).first<{ id: string }>();
       if (existing) {
         statements.push(env.DB.prepare("UPDATE recommendations SET action=?, reason=?, due_at=?, due_at_date_only=1, status='open', updated_at=? WHERE id=? AND user_id=?").bind(text, reason, dueAt, now, id, profile.id));
