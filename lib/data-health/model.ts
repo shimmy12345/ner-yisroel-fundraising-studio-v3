@@ -35,7 +35,17 @@ export type HealthCheck = {
 // or be treated as complete.
 export type BackupSuccessStatus = { schemaVersion: number; databaseName: string; completedAt: string; backupObjectKey: string; workflowRunId: string; workflowRunUrl: string };
 export type BackupAttemptStatus = { schemaVersion: number; databaseName: string; attemptAt: string; attemptStatus: string; workflowRunId: string; workflowRunUrl: string };
-export type RestoreSuccessStatus = { schemaVersion: number; databaseName: string; completedAt: string; verifiedBackupObjectKey: string; workflowRunId: string; workflowRunUrl: string };
+// verifiedLatestObjectKey is always the mutable latest/ pointer name (what
+// the restore-verify workflow's job is conceptually certifying: that the
+// backup pipeline's output is restorable). verifiedBackupObjectKey/
+// verifiedBackupCompletedAt identify the SPECIFIC immutable dated daily/...
+// object actually downloaded and restored during that run -- present only
+// when the workflow could establish that identity with certainty (see
+// .github/workflows/d1-restore-verify-monthly.yml's "Determine which
+// immutable backup..." step). null on either field means identity could
+// not be established for this run; callers must never fabricate a date in
+// that case (see restoreVerificationCheck below).
+export type RestoreSuccessStatus = { schemaVersion: number; databaseName: string; completedAt: string; verifiedLatestObjectKey: string; verifiedBackupObjectKey: string | null; verifiedBackupCompletedAt: string | null; workflowRunId: string; workflowRunUrl: string };
 export type RestoreAttemptStatus = BackupAttemptStatus;
 
 export type DataHealthFacts = {
@@ -256,7 +266,7 @@ function timestampCheck(id: string, label: string, timestamp: number | null, has
 // deliberately NEVER "attention"/"critical" here, regardless of age or
 // absence -- it is a convenience download and a pre-rollback safety
 // snapshot, not this workspace's real backup protection (that's the
-// Automated backup / Restore verification cards below). Its absence must
+// Automated backup / Monthly restore test cards below). Its absence must
 // never look alarming.
 function manualExportCheck(timestamp: number | null): HealthCheck {
   if (timestamp) {
@@ -319,11 +329,14 @@ type PipelineStatusParams = {
   neverRunExplanation: string;
 };
 
-// Shared logic for the "Automated backup" and "Restore verification"
-// cards -- the only two checks in this file backed by the status-worker
-// rather than a live D1 query. Deliberately never lets an unreachable or
-// malformed status response render as "healthy": both feed into the
-// "unavailable" branch below, matching this report's existing Unknown-
+// Backing logic for the "Automated backup" card -- one of two checks in
+// this file backed by the status-worker rather than a live D1 query (the
+// other, "Monthly restore test", has its own dedicated
+// restoreVerificationCheck below: its copy must distinguish two different
+// dates and honestly handle an unidentifiable tested backup in a way this
+// shared, generic shape can't express). Deliberately never lets an
+// unreachable or malformed status response render as "healthy": both feed
+// into the "unavailable" branch below, matching this report's existing Unknown-
 // state convention (see HealthStatus's doc comment).
 function pipelineStatusCheck(params: PipelineStatusParams): HealthCheck {
   const evidenceSource = "The dedicated status-worker's /status endpoint (read-only access to a status-metadata-only R2 bucket, never the real backup bucket).";
@@ -387,6 +400,94 @@ function pipelineStatusCheck(params: PipelineStatusParams): HealthCheck {
       severity: status === "healthy" ? "none" : status === "attention" ? "medium" : "high",
       businessDataAtRisk: status === "critical",
       repairStep: status === "healthy" ? "None." : `Check the workflow run: ${(attemptIsNewerFailure ? params.attempt!.workflowRunUrl : success.workflowRunUrl)}`,
+    },
+  };
+}
+
+function humanDate(iso: string): string {
+  const parsed = new Date(iso);
+  if (!Number.isFinite(parsed.getTime())) return iso;
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(parsed);
+}
+
+// Dedicated "Monthly restore test" check -- deliberately NOT built on
+// pipelineStatusCheck, because its copy must honestly distinguish two
+// different dates (when THIS restore-test run completed vs. which specific
+// dated backup it actually tested) and must never claim a specific backup
+// was verified when identity could not be established (see Part 4 of the
+// backup/restore investigation this implements). Freshness thresholds and
+// the attempt-floors-status rule are otherwise unchanged from
+// pipelineStatusCheck's shared logic: a newer nightly backup existing is
+// explicitly NOT evaluated here at all (this function never reads
+// facts.backupSuccess) -- restore testing is monthly by design, not
+// per-backup, so a fresher nightly backup must never by itself downgrade
+// this check.
+function restoreVerificationCheck(facts: DataHealthFacts, now: number): HealthCheck {
+  const id = "restore-verification";
+  const label = "Monthly restore test";
+  const evidenceSource = "The dedicated status-worker's /status endpoint (read-only access to a status-metadata-only R2 bucket, never the real backup bucket).";
+  const cadenceNote = "Restore testing runs monthly.";
+  if (!facts.backupStatusReachable) {
+    return {
+      id, label, status: "unavailable", value: "Unknown",
+      explanation: "Backup/restore status could not be read right now. This does not mean anything failed -- it means this specific check could not complete.",
+      evidence: { expected: "A reachable status-worker response.", actual: "The status-worker request failed, was unreachable, or returned a malformed response.", evidenceSource, lastVerifiedAt: null, severity: "medium", businessDataAtRisk: false, repairStep: "Re-run the health check. If this persists, verify the status-worker service binding and its own deployment." },
+    };
+  }
+  const maybeSuccess = facts.restoreSuccess;
+  const attempt = facts.restoreAttempt;
+  const successDate = maybeSuccess ? new Date(maybeSuccess.completedAt) : null;
+  const successValid = successDate && Number.isFinite(successDate.getTime());
+  if (!maybeSuccess || !successValid) {
+    if (attempt) {
+      return {
+        id, label, status: "critical", value: "Never succeeded",
+        explanation: `The most recent monthly restore test (${attempt.attemptAt}) did not succeed, and no successful restore test has ever been recorded.`,
+        evidence: { expected: "At least one successful restore test recorded.", actual: `Most recent attempt status: "${attempt.attemptStatus}".`, evidenceSource, lastVerifiedAt: attempt.attemptAt, severity: "high", businessDataAtRisk: true, repairStep: `Check the workflow run: ${attempt.workflowRunUrl}` },
+      };
+    }
+    return {
+      id, label, status: "info", value: "Never run",
+      explanation: `No monthly restore test has been recorded yet. This is expected before the monthly workflow's first scheduled run. A backup existing is not the same as a backup being provably restorable.`,
+      evidence: { expected: "At least one successful restore test recorded.", actual: "No restore test has been recorded yet.", evidenceSource, lastVerifiedAt: null, severity: "none", businessDataAtRisk: false, repairStep: "None -- this is expected before the pipeline's first scheduled run." },
+    };
+  }
+  const success = maybeSuccess;
+  const ageMs = now - successDate.getTime();
+  let status = freshnessStatus(ageMs, RESTORE_FRESHNESS_HEALTHY_MS, RESTORE_FRESHNESS_CRITICAL_MS);
+  // Same attempt-floors-status rule as pipelineStatusCheck: a known-failed
+  // most-recent attempt (newer than the last recorded success) always
+  // floors this card at "attention", even while the last success is still
+  // within its healthy window.
+  const attemptIsNewerFailure = Boolean(attempt) && attempt!.attemptStatus !== "success" && new Date(attempt!.attemptAt).getTime() > successDate.getTime();
+  if (attemptIsNewerFailure && status === "healthy") status = "attention";
+
+  // Honest provenance: only ever names a specific backup date when the
+  // workflow could prove it (see RestoreSuccessStatus's doc comment) --
+  // never guessed from the restore test's own completedAt, which is a
+  // different date (when the TEST ran, not what it tested).
+  const testedBackupPhrase = success.verifiedBackupCompletedAt
+    ? `the ${humanDate(success.verifiedBackupCompletedAt)} backup`
+    : "the latest backup at the time (its exact backup date could not be confirmed for this run)";
+
+  const explanation = attemptIsNewerFailure
+    ? `The most recent monthly restore test (${attempt!.attemptAt}) failed. The last known-good test successfully restored and verified ${testedBackupPhrase}, completed ${success.completedAt}. ${cadenceNote}`
+    : status === "healthy"
+      ? `Successfully restored and verified ${testedBackupPhrase}. ${cadenceNote}`
+      : `The last successful restore test verified ${testedBackupPhrase} and completed ${success.completedAt}, which is longer ago than expected for this monthly pipeline. ${cadenceNote}`;
+
+  return {
+    id, label, status,
+    value: success.completedAt,
+    explanation,
+    evidence: {
+      expected: `A successful restore test within the last ${Math.round(RESTORE_FRESHNESS_HEALTHY_MS / DAY_MS)} days.`,
+      actual: `Last successful restore test: ${success.completedAt}, verifying ${success.verifiedBackupObjectKey ?? "an unidentified backup object"}${attemptIsNewerFailure ? `; most recent attempt (${attempt!.attemptAt}) failed` : ""}.`,
+      evidenceSource,
+      lastVerifiedAt: success.completedAt,
+      severity: status === "healthy" ? "none" : status === "attention" ? "medium" : "high",
+      businessDataAtRisk: status === "critical",
+      repairStep: status === "healthy" ? "None." : `Check the workflow run: ${attemptIsNewerFailure ? attempt!.workflowRunUrl : success.workflowRunUrl}`,
     },
   };
 }
@@ -555,17 +656,7 @@ function independentStagingSummaryChecks(facts: DataHealthFacts, now: number): H
       now,
       neverRunExplanation: "No automated backup run has been recorded yet. This is expected before the nightly workflow's first scheduled run.",
     }),
-    pipelineStatusCheck({
-      id: "restore-verification",
-      label: "Restore verification",
-      reachable: facts.backupStatusReachable,
-      success: facts.restoreSuccess ? { completedAt: facts.restoreSuccess.completedAt, objectKeyLabel: "verified object", objectKey: facts.restoreSuccess.verifiedBackupObjectKey, workflowRunUrl: facts.restoreSuccess.workflowRunUrl } : null,
-      attempt: facts.restoreAttempt ? { attemptAt: facts.restoreAttempt.attemptAt, attemptStatus: facts.restoreAttempt.attemptStatus, workflowRunUrl: facts.restoreAttempt.workflowRunUrl } : null,
-      healthyBelowMs: RESTORE_FRESHNESS_HEALTHY_MS,
-      criticalAboveMs: RESTORE_FRESHNESS_CRITICAL_MS,
-      now,
-      neverRunExplanation: "No restore-verification run has been recorded yet. This is expected before the monthly workflow's first scheduled run. A backup existing is not the same as a backup being provably restorable.",
-    }),
+    restoreVerificationCheck(facts, now),
   ];
 }
 

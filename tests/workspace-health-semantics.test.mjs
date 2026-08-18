@@ -280,6 +280,78 @@ async function run() {
   }));
   assert.equal(check(criticalAgeRestore, "restore-verification").status, "critical", "65 days old is past the 60-day critical threshold");
 
+  // ---- 11. Regression coverage for the backup/restore-provenance fix:
+  // restore-verification now carries the SPECIFIC immutable dated backup
+  // it actually tested (verifiedBackupObjectKey/verifiedBackupCompletedAt),
+  // distinct from both the restore test's own completedAt and any newer
+  // nightly backup that may exist -- see .github/workflows/
+  // d1-restore-verify-monthly.yml and lib/data-health/model.ts's
+  // restoreVerificationCheck. ----
+  const identityKnownAt = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(); // the restore TEST itself ran 5h ago
+  const testedBackupAt = "2026-08-17T08:32:36.000Z"; // the SPECIFIC dated backup it restored -- a genuinely different date
+  const identityKnownReport = buildDataHealthReport(baseFacts({
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: identityKnownAt, verifiedLatestObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", verifiedBackupObjectKey: "daily/fundraising-os-staging-db-20260817T083236Z.sql.gz.gpg", verifiedBackupCompletedAt: testedBackupAt, workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+  }));
+  const identityKnownCheck = check(identityKnownReport, "restore-verification");
+  assert.equal(identityKnownCheck.status, "healthy");
+  assert.equal(identityKnownCheck.label, "Monthly restore test", "the card must be relabeled so it can never be read as 'every backup is restore-tested'");
+  assert.equal(identityKnownCheck.value, identityKnownAt, "the card's value is the restore TEST's own completion time, not the tested backup's date");
+  assert.match(identityKnownCheck.explanation, /Aug 17, 2026/, "the explanation must name the specific dated backup that was actually tested");
+  assert.match(identityKnownCheck.explanation, /Restore testing runs monthly/, "must always clarify the cadence so a healthy card is never mistaken for per-backup coverage");
+  assert.match(identityKnownCheck.evidence.actual, /daily\/fundraising-os-staging-db-20260817T083236Z\.sql\.gz\.gpg/, "evidence must cite the exact dated object key that was tested");
+
+  // ---- 12. Three genuinely separate, independently-readable facts --
+  // latest nightly backup timestamp, monthly restore-test timestamp, and
+  // the tested backup's own identity/date -- never collapsed into one. ----
+  const backupOwnAt = "2026-08-18T08:24:44.000Z";
+  const threeDatesReport = buildDataHealthReport(baseFacts({
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: backupOwnAt, backupObjectKey: "daily/fundraising-os-staging-db-20260818T082441Z.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: identityKnownAt, verifiedLatestObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", verifiedBackupObjectKey: "daily/fundraising-os-staging-db-20260817T083236Z.sql.gz.gpg", verifiedBackupCompletedAt: testedBackupAt, workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+  }), "2026-08-18T09:00:00.000Z");
+  const backupCard = check(threeDatesReport, "automated-backup");
+  const restoreCard = check(threeDatesReport, "restore-verification");
+  assert.equal(backupCard.value, backupOwnAt, "the backup card's own timestamp is independent");
+  assert.equal(restoreCard.value, identityKnownAt, "the restore card's own timestamp (when the TEST ran) is independent of both the backup's and the tested backup's dates");
+  assert.match(restoreCard.explanation, /Aug 17, 2026/, "the tested-backup identity/date is a third, separately-stated fact");
+  assert.notEqual(backupCard.value, restoreCard.value, "all three dates in play (backup completedAt, restore-test completedAt, tested-backup completedAt) must be distinguishable, not merged");
+
+  // ---- 13. A newer nightly backup than the last restore-tested backup
+  // does NOT by itself downgrade restore health -- this is normal under
+  // the nightly/monthly architecture, not a fault. Mirrors the real
+  // Aug 18 backup / Aug 17 restore-test case exactly. ----
+  const realExampleReport = buildDataHealthReport(baseFacts({
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: "2026-08-18T08:24:44.000Z", backupObjectKey: "daily/fundraising-os-staging-db-20260818T082441Z.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: "2026-08-17T15:49:05.000Z", verifiedLatestObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", verifiedBackupObjectKey: "daily/fundraising-os-staging-db-20260817T083236Z.sql.gz.gpg", verifiedBackupCompletedAt: "2026-08-17T08:32:36.000Z", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+  }), "2026-08-18T09:10:00.000Z");
+  assert.equal(check(realExampleReport, "automated-backup").status, "healthy", "the Aug 18 backup, hours old, is healthy on its own freshness clock");
+  assert.equal(check(realExampleReport, "restore-verification").status, "healthy", "the Aug 17 restore test, well under 40 days old, is healthy on its own freshness clock -- a fresher nightly backup existing must never downgrade it");
+  assert.match(check(realExampleReport, "restore-verification").explanation, /Aug 17, 2026/, "explanation still honestly names the Aug 17 backup as what was actually tested, not the newer Aug 18 one");
+
+  // ---- 14. The failed-attempt-floors-status rule applies to
+  // restore-verification too, not just automated-backup. ----
+  const restoreOldSuccessAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(); // 5 days ago -- healthy on age alone
+  const restoreNewerFailedAttemptAt = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h ago -- newer than the success
+  const restoreFlooredReport = buildDataHealthReport(baseFacts({
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: restoreOldSuccessAt, verifiedLatestObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", verifiedBackupObjectKey: "daily/x.sql.gz.gpg", verifiedBackupCompletedAt: restoreOldSuccessAt, workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: restoreNewerFailedAttemptAt, attemptStatus: "failure", workflowRunId: "6", workflowRunUrl: "https://github.com/example/repo/actions/runs/6" },
+  }));
+  assert.equal(check(restoreFlooredReport, "restore-verification").status, "attention", "a known-failed most-recent restore attempt must floor the card at attention even while the last success is still within its healthy window");
+  assert.match(check(restoreFlooredReport, "restore-verification").explanation, /most recent monthly restore test/i);
+
+  // ---- 15. A restore success with unestablished tested-backup identity
+  // (both fields null -- e.g. backup-latest-success.json was unreadable
+  // when the workflow ran) must never be presented as a known dated
+  // backup: no fabricated date anywhere in the explanation, and evidence
+  // must never cite a specific object key it has no proof of. ----
+  const unknownIdentityReport = buildDataHealthReport(baseFacts({
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: rightNow(), verifiedLatestObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", verifiedBackupObjectKey: null, verifiedBackupCompletedAt: null, workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+  }));
+  const unknownIdentityCheck = check(unknownIdentityReport, "restore-verification");
+  assert.equal(unknownIdentityCheck.status, "healthy", "an unknown tested-backup identity does not itself make the restore test unsuccessful");
+  assert.doesNotMatch(unknownIdentityCheck.explanation, /\b(19|20)\d{2}\b/, "must never state any year/date as if it were the confirmed tested-backup date when identity is unknown");
+  assert.match(unknownIdentityCheck.explanation, /could not be confirmed/i, "must explicitly say the tested backup's identity is unconfirmed, never silently omit the caveat");
+  assert.doesNotMatch(unknownIdentityCheck.evidence.actual, /daily\//, "evidence must never cite a specific dated object key it doesn't actually have proof of");
+
   // A pipeline that has attempted but never once succeeded is worse than
   // one that simply hasn't run yet -- must read critical, not info.
   const neverSucceededReport = buildDataHealthReport(baseFacts({

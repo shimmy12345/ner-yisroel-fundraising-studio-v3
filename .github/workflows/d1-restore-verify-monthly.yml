@@ -1,8 +1,41 @@
-# Monthly, fully automated proof that the latest nightly backup actually
+# Monthly, fully automated proof that the backup pipeline's output actually
 # restores and is intact -- a backup nobody has ever restored is a
-# hypothesis, not a backup. This workflow:
-#   1. Downloads the most recent encrypted backup from R2 (read-only
-#      credential -- cannot write or delete anything in the bucket).
+# hypothesis, not a backup. This is a periodic spot-check of the PIPELINE,
+# not a per-backup gate: it does not run after every nightly backup, and a
+# newer nightly backup existing than the one most recently restore-tested
+# is normal, expected, and not itself a problem (see docs/DEPLOYMENT.md).
+# This workflow:
+#   0. Best-effort: reads the backup pipeline's own most recent
+#      backup-latest-success.json (from the status bucket, using this job's
+#      existing read+write status credential -- no new credential) to learn
+#      the exact, immutable, dated daily/... object the backup pipeline most
+#      recently produced. If this can't be read or doesn't parse, this step
+#      never fails the job -- it only means the tested-backup identity is
+#      recorded as unknown for this run (see step 1 and Part 4 below).
+#
+#      Race-condition note: `latest/...` is a MUTABLE pointer, overwritten
+#      by every nightly backup run (a separate concurrency group from this
+#      workflow, so the two CAN run concurrently -- e.g. a manually
+#      triggered backup while a manually triggered restore-verify is
+#      in flight). Downloading `latest/...` directly and separately trusting
+#      whatever backup-latest-success.json said moments earlier would be
+#      unsound: nothing would guarantee they still describe the same bytes.
+#      This workflow avoids that race entirely by downloading the SPECIFIC
+#      IMMUTABLE dated `daily/...` object named in backup-latest-success.json
+#      (retained 90 days, never overwritten) instead of `latest/...` --
+#      whatever step 0 names is guaranteed to still be exactly that object
+#      when step 1 downloads it, no matter what any concurrent backup run
+#      does to the `latest/` pointer in the meantime. Under the *scheduled*
+#      path this race is already very unlikely (the monthly cron fires at
+#      09:00 UTC, hours after the 08:00 UTC nightly backup normally
+#      completes), but manual `workflow_dispatch` runs of either workflow
+#      make no such timing guarantee, so the dated-object approach is used
+#      unconditionally, not just as a scheduled-path optimization.
+#   1. Downloads that dated object if step 0 established its identity;
+#      otherwise falls back to downloading `latest/...` directly (read-only
+#      credential -- cannot write or delete anything in the bucket), still
+#      proving the pipeline produces a restorable backup even though this
+#      run can't name which dated backup it was.
 #   2. Decrypts and decompresses it.
 #   3. Restores it into a brand-new, throwaway remote D1 database (never
 #      the real fundraising-os-staging-db).
@@ -19,12 +52,17 @@
 #      status-worker/ and docs/DEPLOYMENT.md's "Backup/restore status
 #      reporting" section. A failure in this step is logged but never
 #      fails the job -- it must never be possible for status publication
-#      to turn a successful restore verification into a failed one.
+#      to turn a successful restore verification into a failed one. When
+#      the tested-backup identity is unknown (step 0/1 fallback), the
+#      published success record says so explicitly (null fields) rather
+#      than fabricating a date -- see lib/data-health/model.ts's
+#      restoreVerificationCheck, which is the only place this is displayed.
 #
 # Any failure in steps 1-5 fails this job (red X + whatever notification
 # settings this repository/org has configured for Actions failures) --
-# there is no soft-fail path. See docs/DEPLOYMENT.md's "Automated D1
-# backup" section for the required secrets and one-time setup.
+# there is no soft-fail path. Step 0 is the only best-effort exception,
+# by design (see above). See docs/DEPLOYMENT.md's "Automated D1 backup"
+# section for the required secrets and one-time setup.
 name: D1 monthly restore verification
 
 on:
@@ -61,21 +99,84 @@ jobs:
           set -euo pipefail
           command -v aws >/dev/null 2>&1 || pip install --quiet awscli
 
-      - name: Download latest backup from R2
+      - name: Determine which immutable backup was actually most recently published
+        id: identity
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATUS_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATUS_WRITE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET }}
+        run: |
+          set -uo pipefail
+          # Best-effort provenance lookup -- see the header comment's race-
+          # condition note. Reuses this job's existing status-bucket
+          # credential (already Read & Write on that bucket for the publish
+          # step below); no new secret. Never fatal: a failure here only
+          # means step "Download the backup object to verify" falls back to
+          # latest/ with the tested-backup identity recorded as unknown.
+          echo "known=false" >> "$GITHUB_OUTPUT"
+          if aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" --key "backup-latest-success.json" backup-success.json; then
+            KEY="$(jq -r '.backupObjectKey // empty' backup-success.json)"
+            AT="$(jq -r '.completedAt // empty' backup-success.json)"
+            DB="$(jq -r '.databaseName // empty' backup-success.json)"
+            if [ -n "${KEY}" ] && [ -n "${AT}" ] && [ "${DB}" = "${DATABASE_NAME}" ]; then
+              {
+                echo "known=true"
+                echo "key=${KEY}"
+                echo "at=${AT}"
+              } >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::backup-latest-success.json was readable but missing or mismatched fields -- falling back to latest/ with unknown tested-backup identity."
+            fi
+          else
+            echo "::warning::Could not read backup-latest-success.json -- falling back to latest/ with unknown tested-backup identity."
+          fi
+          rm -f backup-success.json
+
+      - name: Download the backup object to verify
+        id: download
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
           BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+          IDENTITY_KNOWN: ${{ steps.identity.outputs.known }}
+          IDENTITY_KEY: ${{ steps.identity.outputs.key }}
+          IDENTITY_AT: ${{ steps.identity.outputs.at }}
         run: |
-          set -euo pipefail
-          aws s3api get-object \
-            --endpoint-url "${ENDPOINT_URL}" \
-            --bucket "${BUCKET}" \
-            --key "latest/${DATABASE_NAME}.sql.gz.gpg" \
-            latest.sql.gz.gpg
-          test -s latest.sql.gz.gpg
+          set -uo pipefail
+          # Prefers the specific immutable dated object identified above
+          # (guarantees identity -- see the header comment). Only falls
+          # back to the mutable latest/ pointer when that identity could
+          # not be established or that specific object could not be
+          # downloaded; the fallback still proves the pipeline produces a
+          # restorable backup, just without a provable dated identity.
+          DOWNLOADED=false
+          KNOWN=false
+          if [ "${IDENTITY_KNOWN}" = "true" ]; then
+            if aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "${IDENTITY_KEY}" latest.sql.gz.gpg; then
+              DOWNLOADED=true
+              KNOWN=true
+            else
+              echo "::warning::Could not download the specific dated backup object (${IDENTITY_KEY}) -- falling back to latest/ with unknown tested-backup identity."
+            fi
+          fi
+          if [ "${DOWNLOADED}" != "true" ]; then
+            if ! aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "latest/${DATABASE_NAME}.sql.gz.gpg" latest.sql.gz.gpg; then
+              echo "::error::Could not download any backup object (neither the specific dated object nor latest/) -- nothing to restore-test."
+              exit 1
+            fi
+          fi
+          test -s latest.sql.gz.gpg || { echo "::error::Downloaded backup object is empty."; exit 1; }
+          {
+            echo "known=${KNOWN}"
+            if [ "${KNOWN}" = "true" ]; then
+              echo "key=${IDENTITY_KEY}"
+              echo "at=${IDENTITY_AT}"
+            fi
+          } >> "$GITHUB_OUTPUT"
 
       - name: Decrypt and decompress
         env:
@@ -124,10 +225,13 @@ jobs:
           STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET }}
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TESTED_KNOWN: ${{ steps.download.outputs.known }}
+          TESTED_KEY: ${{ steps.download.outputs.key }}
+          TESTED_AT: ${{ steps.download.outputs.at }}
         run: |
           set -uo pipefail
           COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          VERIFIED_KEY="latest/${DATABASE_NAME}.sql.gz.gpg"
+          LATEST_KEY="latest/${DATABASE_NAME}.sql.gz.gpg"
           jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg status "${JOB_STATUS}" \
                 --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
             '{schemaVersion: 1, databaseName: $db, attemptAt: $at, attemptStatus: $status, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
@@ -137,10 +241,26 @@ jobs:
             --key "restore-latest-attempt.json" --body attempt.json --content-type application/json \
             || echo "::warning::Failed to publish restore-latest-attempt.json -- restore verification's own result is unaffected."
           if [ "${JOB_STATUS}" = "success" ]; then
-            jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg key "${VERIFIED_KEY}" \
-                  --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
-              '{schemaVersion: 1, databaseName: $db, completedAt: $at, verifiedBackupObjectKey: $key, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
-              > success.json
+            # verifiedLatestObjectKey is always known (what this run
+            # targeted, conceptually). verifiedBackupObjectKey/
+            # verifiedBackupCompletedAt are the SPECIFIC immutable dated
+            # object actually restored -- present only when "Download the
+            # backup object to verify" established that identity with
+            # certainty; explicit JSON null otherwise, never a guess, so
+            # Workspace Health can never present an unknown backup as a
+            # known dated one (see lib/data-health/model.ts).
+            if [ "${TESTED_KNOWN}" = "true" ]; then
+              jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg latestKey "${LATEST_KEY}" \
+                    --arg backupKey "${TESTED_KEY}" --arg backupAt "${TESTED_AT}" \
+                    --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+                '{schemaVersion: 1, databaseName: $db, completedAt: $at, verifiedLatestObjectKey: $latestKey, verifiedBackupObjectKey: $backupKey, verifiedBackupCompletedAt: $backupAt, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+                > success.json
+            else
+              jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg latestKey "${LATEST_KEY}" \
+                    --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+                '{schemaVersion: 1, databaseName: $db, completedAt: $at, verifiedLatestObjectKey: $latestKey, verifiedBackupObjectKey: null, verifiedBackupCompletedAt: null, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+                > success.json
+            fi
             aws s3api put-object \
               --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
               --key "restore-latest-success.json" --body success.json --content-type application/json \

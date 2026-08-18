@@ -203,23 +203,39 @@ export` runs.
   ciphertext to a dedicated R2 bucket under `daily/<name>-<timestamp>.sql.gz.gpg`
   and (overwriting each run) `latest/<name>.sql.gz.gpg`.
 - **`.github/workflows/d1-restore-verify-monthly.yml`** — on the 1st of
-  every month (`0 9 1 * *` UTC, plus manual `workflow_dispatch`):
-  downloads `latest/...`, decrypts it, and runs
-  `scripts/verify-remote-restore.mjs`, which restores it into a brand-new
-  throwaway remote D1 database, runs `PRAGMA integrity_check`, `PRAGMA
-  foreign_key_check`, a full schema comparison against the verified
-  production baseline, and a per-table row-count check across every
-  fundraising table — then always deletes the scratch database, including
-  on failure. Any check failing fails the workflow (no `continue-on-error`
-  anywhere in this pipeline).
+  every month (`0 9 1 * *` UTC, plus manual `workflow_dispatch`): a
+  periodic spot-check of the *backup pipeline*, not a per-backup gate — it
+  does not run after every nightly backup, and a newer nightly backup
+  existing than the one most recently restore-tested is normal and
+  expected. First reads `backup-latest-success.json` (best-effort, using
+  its own status-bucket credential — see the status-reporting section
+  below) to learn the exact, immutable, dated `daily/...` object the backup
+  pipeline most recently produced, then downloads and restores *that
+  specific object* rather than the mutable `latest/...` pointer — this
+  avoids a real race (a concurrent nightly backup run could overwrite
+  `latest/...` between reading the metadata and downloading it) and lets
+  the published result truthfully name which dated backup was tested. If
+  that identity can't be established (unreadable/malformed metadata, or
+  the specific object fails to download), falls back to downloading
+  `latest/...` directly — still proving the pipeline produces a restorable
+  backup, just without a provable dated identity for that run. Either way,
+  runs `scripts/verify-remote-restore.mjs`, which restores the downloaded
+  object into a brand-new throwaway remote D1 database, runs `PRAGMA
+  integrity_check`, `PRAGMA foreign_key_check`, a full schema comparison
+  against the verified production baseline, and a per-table row-count
+  check across every fundraising table — then always deletes the scratch
+  database, including on failure. Any failure in the real download/decrypt/
+  restore/verify steps fails the workflow (no `continue-on-error` there);
+  only the best-effort identity lookup and the final status-publish step
+  may fail without failing the job.
 - **Isolation from the deployed app**: `wrangler.staging.jsonc` has no
   `r2_buckets` binding and never should
   (`tests/backup-automation.test.mjs` asserts this). The deployed Worker
   has no credential capable of reading, writing, or deleting anything in
   the backup bucket — a bug or full compromise of the application itself
   cannot reach these backups. All backup credentials live only in GitHub
-  Actions secrets. Workspace Health's "Automated backup"/"Restore
-  verification" status (below) does not change this: it reaches a
+  Actions secrets. Workspace Health's "Automated backup"/"Monthly restore
+  test" status (below) does not change this: it reaches a
   separate, dedicated status-worker over a Worker-to-Worker **service
   binding** (`STATUS_WORKER` — not an R2 binding, and not this bucket),
   which itself only has read access to a different bucket containing
@@ -287,7 +303,7 @@ export` runs.
 
 ### Backup/restore status reporting (Workspace Health)
 
-Workspace Health's "Automated backup" and "Restore verification" cards
+Workspace Health's "Automated backup" and "Monthly restore test" cards
 read from a small, dedicated status pipeline — deliberately separate
 infrastructure from the backup pipeline above, so a compromise of one
 credential can never touch the other:
@@ -301,7 +317,13 @@ credential can never touch the other:
   (`fundraising-os-backup-status`) containing only four small JSON
   objects (`backup-latest-success.json`, `backup-latest-attempt.json`,
   `restore-latest-success.json`, `restore-latest-attempt.json`) — never
-  backup content. It has `workers_dev: false` and no `routes`: there is
+  backup content. `restore-latest-success.json` additionally carries
+  `verifiedLatestObjectKey` (the `latest/...` pointer name, always known)
+  and `verifiedBackupObjectKey`/`verifiedBackupCompletedAt` (the specific
+  immutable dated backup actually restored, or explicit JSON `null` on
+  both when that identity couldn't be established for that run — see
+  `lib/data-health/model.ts`'s `restoreVerificationCheck`, which never
+  presents a `null` identity as a known dated backup). It has `workers_dev: false` and no `routes`: there is
   no public URL for it at all. It exposes exactly one route, `GET
   /status`, returning all four objects combined; any other path or method
   is rejected before R2 is ever touched.

@@ -56,10 +56,27 @@ function asBackupAttempt(value: unknown): BackupAttemptStatus | null {
   if (!v || !isNonEmptyString(v.databaseName) || !isNonEmptyString(v.attemptAt) || !isNonEmptyString(v.attemptStatus) || !isNonEmptyString(v.workflowRunUrl)) return null;
   return { schemaVersion: Number(v.schemaVersion) || 1, databaseName: v.databaseName, attemptAt: v.attemptAt, attemptStatus: v.attemptStatus, workflowRunId: String(v.workflowRunId ?? ""), workflowRunUrl: v.workflowRunUrl };
 }
+// verifiedLatestObjectKey is required (the workflow always knows which
+// pointer it targeted). verifiedBackupObjectKey/verifiedBackupCompletedAt
+// are each independently optional -- a status object that omits them, or
+// sets them to something other than a non-empty string, is read as
+// "identity unknown for this run" (both null) rather than rejecting the
+// whole object or guessing a partial identity from just one of the two
+// fields.
 function asRestoreSuccess(value: unknown): RestoreSuccessStatus | null {
   const v = value as Record<string, unknown> | null;
-  if (!v || !isNonEmptyString(v.databaseName) || !isNonEmptyString(v.completedAt) || !isNonEmptyString(v.verifiedBackupObjectKey) || !isNonEmptyString(v.workflowRunUrl)) return null;
-  return { schemaVersion: Number(v.schemaVersion) || 1, databaseName: v.databaseName, completedAt: v.completedAt, verifiedBackupObjectKey: v.verifiedBackupObjectKey, workflowRunId: String(v.workflowRunId ?? ""), workflowRunUrl: v.workflowRunUrl };
+  if (!v || !isNonEmptyString(v.databaseName) || !isNonEmptyString(v.completedAt) || !isNonEmptyString(v.verifiedLatestObjectKey) || !isNonEmptyString(v.workflowRunUrl)) return null;
+  const identityKnown = isNonEmptyString(v.verifiedBackupObjectKey) && isNonEmptyString(v.verifiedBackupCompletedAt);
+  return {
+    schemaVersion: Number(v.schemaVersion) || 1,
+    databaseName: v.databaseName,
+    completedAt: v.completedAt,
+    verifiedLatestObjectKey: v.verifiedLatestObjectKey,
+    verifiedBackupObjectKey: identityKnown ? (v.verifiedBackupObjectKey as string) : null,
+    verifiedBackupCompletedAt: identityKnown ? (v.verifiedBackupCompletedAt as string) : null,
+    workflowRunId: String(v.workflowRunId ?? ""),
+    workflowRunUrl: v.workflowRunUrl,
+  };
 }
 const asRestoreAttempt: (value: unknown) => RestoreAttemptStatus | null = asBackupAttempt;
 
