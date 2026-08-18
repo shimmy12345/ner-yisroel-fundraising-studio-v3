@@ -157,6 +157,51 @@ export function buildDobPreview(rows: DobWorkbookRow[], donorLookup: DobDonorLoo
   return rows.map((row) => classifyDobRow(row, donorLookup, existingLookup, confirmedExistingIdByRow.get(row.rowNumber) ?? null));
 }
 
+export type DobConfirmValidation =
+  | { ok: true; donorId: string; existingId: string }
+  | { ok: false; reason: string };
+
+// Validates the ONE narrow case the "Confirm this is the donor's birthday"
+// persistence path (app/api/import/dob/confirm/route.ts) is allowed to act
+// on: an existing birthday row that is currently needs_review purely
+// because donor-own identity can't be established automatically, whose
+// month/day/year already exactly match the spreadsheet row. Deliberately
+// reuses classifyDobRow itself (never a parallel reimplementation) so this
+// can never drift from the preview's own classification rules -- run twice,
+// once without and once with the confirmation, exactly mirroring what the
+// review UI already showed the fundraiser before they clicked Confirm.
+//
+// Does NOT handle the enrich_missing_year sub-case (existing year is null)
+// -- confirming identity there still routes through the normal bulk
+// "Commit all clean rows" path, which already writes year AND relationship
+// (if blank) atomically in one step; splitting that into a separate
+// identity-only write here would be redundant and add a second audit row
+// for no benefit.
+export function validateDonorOwnBirthdayConfirmation(row: DobWorkbookRow, existingId: string, donorLookup: DobDonorLookup, existingLookup: DobExistingLookup): DobConfirmValidation {
+  const withoutConfirmation = classifyDobRow(row, donorLookup, existingLookup, null);
+  if (withoutConfirmation.status !== "needs_review") {
+    return { ok: false, reason: `This row's current classification is "${withoutConfirmation.status}", not needs_review -- there is nothing to confirm.` };
+  }
+  if (!withoutConfirmation.existingBirthday || withoutConfirmation.existingBirthday.id !== existingId) {
+    return { ok: false, reason: "The confirmed record is not the specific existing birthday row currently surfaced for review on this donor." };
+  }
+  // Independent of classification: a relationship that already carries an
+  // explicit, non-blank value (Spouse, Child, etc.) can never be
+  // overwritten to "Donor" through this path, even if some other quirk of
+  // the data made classifyDobRow report needs_review for it. Only a
+  // genuinely blank relationship may be confirmed.
+  if (withoutConfirmation.existingBirthday.relationship && withoutConfirmation.existingBirthday.relationship.trim()) {
+    return { ok: false, reason: `This record's relationship is already set to "${withoutConfirmation.existingBirthday.relationship}" -- only a blank relationship can be confirmed as the donor's own birthday.` };
+  }
+
+  const withConfirmation = classifyDobRow(row, donorLookup, existingLookup, existingId);
+  if (withConfirmation.status !== "already_recorded") {
+    return { ok: false, reason: `Confirming this row resolves to "${withConfirmation.status}", not an exact date match -- this confirmation path only persists identity when the existing record's month/day/year already exactly match the spreadsheet.` };
+  }
+
+  return { ok: true, donorId: withConfirmation.matchedDonorId!, existingId };
+}
+
 // Grouped counts for the preview UI -- computed once here so the route,
 // the review UI, and tests/staging verification all count the exact same
 // way, never three independent tallies that could silently drift apart.

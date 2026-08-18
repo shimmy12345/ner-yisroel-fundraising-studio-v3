@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { classifyDobRow } from "../lib/import/dob-pipeline.ts";
+import { classifyDobRow, validateDonorOwnBirthdayConfirmation } from "../lib/import/dob-pipeline.ts";
 
 // Category 4: real-regression tests for the two genuine shortened-first-
 // name needs_review cases found in the live staging audit of
@@ -34,6 +34,12 @@ async function run() {
     assert.equal(confirmed.status, "already_recorded");
     assert.equal(confirmed.canCommit, false);
     assert.equal(confirmed.existingBirthday.personName, "Yaakov", "confirming this is the donor's own birthday must never rewrite the existing personName");
+
+    // The persistence path (validateDonorOwnBirthdayConfirmation, backing
+    // app/api/import/dob/confirm/route.ts) must accept exactly this real
+    // case -- this is the motivating real-world row.
+    const validation = validateDonorOwnBirthdayConfirmation(dobRow, "existing-klein", donorLookup, existingLookup);
+    assert.deepEqual(validation, { ok: true, donorId: donor.donorId, existingId: "existing-klein" });
   }
 
   // --- Case 2: Aharon J. Spetner, donor 1f645294-3557-4902-af8f-d3b60e40ce6d,
@@ -54,6 +60,9 @@ async function run() {
     assert.equal(confirmed.status, "already_recorded");
     assert.equal(confirmed.canCommit, false);
     assert.equal(confirmed.existingBirthday.personName, "Aharon", "confirming this is the donor's own birthday must never rewrite the existing personName");
+
+    const validation = validateDonorOwnBirthdayConfirmation(dobRow, "existing-spetner", donorLookup, existingLookup);
+    assert.deepEqual(validation, { ok: true, donorId: donor.donorId, existingId: "existing-spetner" });
   }
 
   // --- Regression guard: the real enrich_missing_year case from the same

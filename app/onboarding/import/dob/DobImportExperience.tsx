@@ -72,6 +72,24 @@ export function DobImportExperience() {
     try {
       const nextConfirmations = new Map(confirmations).set(row.rowNumber, row.existingBirthday.id);
       const preview = await fetchPreview(rawRows, [...nextConfirmations].map(([rowNumber, existingId]) => ({ rowNumber, existingId })));
+      // An exact month/day/year match resolves to already_recorded, which
+      // the bulk commit route never writes for (by design, there is
+      // nothing to enrich or create). Without a separate persisted write,
+      // this confirmation would be forgotten the moment the preview is
+      // rebuilt from scratch -- so for exactly this sub-case, persist the
+      // donor-own identity fact (relationship="Donor" only, nothing else)
+      // through the dedicated confirm endpoint, which independently
+      // re-derives and re-validates every precondition server-side rather
+      // than trusting this client's re-preview result. A row that instead
+      // resolves to enrich_missing_year needs no separate persistence here
+      // -- "Commit all clean rows" already writes both year and relationship
+      // for that case in one atomic step.
+      const confirmedRow = preview.rows.find((r) => r.rowNumber === row.rowNumber);
+      if (confirmedRow?.status === "already_recorded") {
+        const response = await fetch("/api/import/dob/confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ donorCode: row.donorCode, month: row.month, day: row.day, year: row.year, existingId: row.existingBirthday.id }) });
+        const payload = await response.json() as { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "That confirmation could not be saved.");
+      }
       setConfirmations(nextConfirmations);
       setRows(preview.rows);
       setSummary(preview.summary);
