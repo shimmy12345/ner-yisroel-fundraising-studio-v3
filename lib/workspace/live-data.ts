@@ -90,7 +90,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -101,6 +101,14 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
     env.DB.prepare(`SELECT d.id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, d.updated_at, d.relationship_summary, d.institutional_memory FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
+    // Same as lastContacts above, but excluding role='recipient' rows -- a
+    // donor merely receiving a broadcast text/email/photo (one shared
+    // outreach logged once, linked to many donors) never by itself counts as
+    // "substantive" contact. Feeds reconnect_contact_gap only; Last Contact
+    // display (lastContacts/contactByDonor above) is unaffected and still
+    // counts every completed interaction, recipient touches included -- see
+    // lastSubstantiveContactAt's doc comment in recommendation-evidence.ts.
+    env.DB.prepare(`SELECT donor_id, MAX(occurred_at) AS value FROM interactions ${demo ? "WHERE donor_id IN (SELECT id FROM donors WHERE data_source = 'sample') AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at)) AND (role IS NULL OR role != 'recipient')" : "WHERE user_id = ? AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at)) AND (role IS NULL OR role != 'recipient')"} GROUP BY donor_id`).bind(...(demo ? [now] : [userId, now])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT donor_id, MAX(activity_date) AS value FROM giving_activities ${demo ? "WHERE record_origin = 'sample' AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift') AND donor_id IN (SELECT id FROM donors WHERE data_source = 'sample')" : "WHERE owner_user_id = ? AND record_origin = 'live' AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')"} GROUP BY donor_id`).bind(...(demo ? [] : [userId])).all<DonorDateRow>(),
     env.DB.prepare(`SELECT i.id, i.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, i.type, i.occurred_at, i.summary, i.source, i.created_at, i.updated_at
       FROM interactions i JOIN donors d ON d.id = i.donor_id
@@ -156,6 +164,10 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
+  // Excludes role='recipient' -- see the substantiveContacts query above.
+  // Used only for contact-gap candidate selection/scoring below, never for
+  // Last Contact display (which stays on contactByDonor, unchanged).
+  const substantiveContactByDonor = new Map(substantiveContacts.results.map((item) => [item.donor_id, item.value]));
   const activityByDonor = new Map(lastActivities.results.map((item) => [item.donor_id, item.value]));
   const contacts: ContactRow[] = donors.results.map((item) => ({ ...item, last_contact: contactByDonor.get(item.id) ?? null, recent_activity: Math.max(item.updated_at, contactByDonor.get(item.id) ?? 0, activityByDonor.get(item.id) ?? 0) }));
   type RankedPriority = Omit<WorkspacePriority, "bucket"> & { rank: number; sortAt: number };
@@ -213,7 +225,14 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     pledgeDonorIds: openPledgeByDonor.keys(),
     yahrtzeitRows: yahrtzeitRows.results.map((row) => ({ donorId: row.donor_id, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
     importantDateRows: importantDateRows.results.map((row) => ({ donorId: row.donor_id, month: row.month, day: row.day })),
-    contactGapCandidates: contacts.map((item) => ({ donorId: item.id, daysSinceLastContact: item.last_contact ? Math.floor((now - item.last_contact) / 86400) : null })),
+    // Substantive (non-recipient) contact, not the display Last Contact
+    // value -- otherwise a donor who only ever received a broadcast would
+    // look "recently contacted" here and never even enter the pool that
+    // reconnectContactGapCandidate is generated from.
+    contactGapCandidates: contacts.map((item) => {
+      const substantive = substantiveContactByDonor.get(item.id) ?? null;
+      return { donorId: item.id, daysSinceLastContact: substantive ? Math.floor((now - substantive) / 86400) : null };
+    }),
     timezone,
     now,
   });
@@ -250,6 +269,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       openPledge: pledge ? { balanceCents: pledge.balance_cents ?? 0, campaign: null, description: pledge.description || pledge.item_type, activityDate: pledge.activity_date } : null,
       lastCompletedInteraction: lastInteractionRow ? { type: lastInteractionRow.type, summary: lastInteractionRow.summary, occurredAt: lastInteractionRow.occurred_at } : null,
       lastContactAt: contactByDonor.get(donorId) ?? null,
+      lastSubstantiveContactAt: substantiveContactByDonor.get(donorId) ?? null,
       openReminder: reminder ? { action: reminder.action, reason: reminder.reason, dueAt: reminder.due_at } : null,
       relationshipSummary: donorRow.relationship_summary,
       institutionalMemory: donorRow.institutional_memory,
@@ -280,6 +300,12 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // upcomingRelationshipDates instead.
     const sortAt = recommendation.kind === "acknowledge_gift" ? -(gift?.activity_date ?? 0)
       : recommendation.kind === "follow_up_pledge" ? (pledge?.activity_date ?? 0)
+      // reconnect_contact_gap sorts by the same substantive-contact measure
+      // its own candidate score is based on (see reconnectContactGapCandidate),
+      // so displayed order never disagrees with the "why" text. Every other
+      // kind (continue_conversation, relationship_opportunity, solicit) is
+      // unaffected -- still the all-contact-types value, unchanged.
+      : recommendation.kind === "reconnect_contact_gap" ? -(evidence.contact.daysSinceSubstantiveContact ?? Number.MAX_SAFE_INTEGER)
       : -(evidence.contact.daysSinceLastContact ?? Number.MAX_SAFE_INTEGER);
     ranked.push({
       queueId: `recommendation:${donorId}:${recommendation.kind}`,

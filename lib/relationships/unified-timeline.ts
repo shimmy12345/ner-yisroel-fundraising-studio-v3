@@ -12,7 +12,15 @@ export type TimelinePayment = { id: string; payment_date: number; applied_cents:
 // D1's raw driver (not the drizzle query builder) returns SQLite integer
 // booleans as plain 0/1, not real booleans -- these stay `number` to match
 // every row this component reads.
-export type TimelineInteraction = { id: string; type: string; occurred_at: number; occurred_at_date_only?: number; summary: string; source: string; created_at: number; status_changed_at?: number | null };
+// shared_activity_id/role/shared_activity_recipient_count/shared_activity_summary
+// are all null for an ordinary single-donor interaction (unchanged from
+// before these fields existed) and only populated together when this row is
+// one donor's link into a sharedActivities parent -- see that table's doc
+// comment in db/schema.ts. shared_activity_summary is the parent's
+// canonical note text; UnifiedRelationshipTimeline.tsx prefers it over this
+// row's own `summary` when present, so editing the shared note is a single
+// UPDATE that's immediately visible on every linked donor's timeline.
+export type TimelineInteraction = { id: string; type: string; occurred_at: number; occurred_at_date_only?: number; summary: string; source: string; created_at: number; status_changed_at?: number | null; shared_activity_id?: string | null; role?: string | null; shared_activity_recipient_count?: number | null; shared_activity_summary?: string | null };
 export type TimelineReminder = { id: string; action: string; reason: string; status: string; due_at: number | null; due_at_date_only?: number; created_at: number; updated_at: number };
 
 export type UnifiedTimelineItem =

@@ -22,6 +22,10 @@ export const STAGING_RESET_TABLE_ORDER = [
   "import_preview_sessions",
   // Depend only on `interactions` or `donors`.
   "activity_status_audits",
+  // References shared_activities, not interactions directly -- deleted here
+  // (before shared_activities itself, further down) for the same
+  // children-before-parents reason as activity_status_audits above.
+  "shared_activity_recipient_audits",
   "donor_contact_audits",
   "donor_historical_context",
   "donor_merge_audits",
@@ -60,6 +64,10 @@ export const STAGING_RESET_TABLE_ORDER = [
   // `donors` self-references itself (merged_into_donor_id), which is safe
   // once nothing else in this list still points at any donor row.
   "interactions",
+  // References by interactions.shared_activity_id (and by
+  // shared_activity_recipient_audits, already deleted above) -- deleted
+  // once interactions is gone, same reasoning as every other parent here.
+  "shared_activities",
   "giving_activities",
   "data_imports",
   "donors",

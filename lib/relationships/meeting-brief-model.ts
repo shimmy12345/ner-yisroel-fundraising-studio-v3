@@ -28,6 +28,13 @@ export type MeetingBriefInteraction = {
   type: string;
   occurredAt: number;
   summary: string;
+  // Null for an ordinary single-donor interaction, unchanged from before
+  // these existed. When role is set, the UI should say "Sent to N donors"
+  // (recipient) or "N participants" (participant) rather than implying a
+  // one-on-one conversation -- never list the other donors by name here.
+  sharedActivityId: string | null;
+  role: "participant" | "recipient" | null;
+  recipientCount: number | null;
 };
 
 export type MeetingBriefReminder = {

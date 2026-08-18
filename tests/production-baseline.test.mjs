@@ -186,8 +186,17 @@ test("baseline picks up the schema-changing 0029 date of birth import migration"
   // 0029_important_dates_dob_source.sql widens important_dates.source's
   // CHECK constraint to accept 'import-dob' alongside 'manual' (a table
   // rebuild, not a new table), so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0029_important_dates_dob_source.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 30);
+  assert.ok(manifest.sourceMigrations.includes("0029_important_dates_dob_source.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0030 shared activities migration", () => {
+  // 0030_shared_activities.sql adds the shared_activities/
+  // shared_activity_recipient_audits tables and interactions.shared_activity_id/
+  // role columns, so the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0030_shared_activities.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 31);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

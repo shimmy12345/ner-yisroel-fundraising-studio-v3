@@ -40,7 +40,7 @@ type DonorRow = {
 
 type GivingRow = { id: string; activity_date: number | null; paid_cents: number | null; balance_cents: number | null; description: string | null; item_type: string | null; source_campaign: string | null };
 type LegacyGiftRow = { id: string; received_at: number; amount_cents: number; fund: string };
-type InteractionRow = { id: string; type: string; occurred_at: number; summary: string };
+type InteractionRow = { id: string; type: string; occurred_at: number; summary: string; role: string | null; shared_activity_id: string | null; shared_activity_recipient_count: number | null; shared_activity_summary: string | null };
 type ReminderRow = { id: string; action: string; reason: string; due_at: number | null };
 type HistoricalContextRow = { text: string; source: string; source_date: number | null };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
@@ -66,8 +66,9 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
       FROM gifts g JOIN donors d ON d.id = g.donor_id
       WHERE g.donor_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
       ORDER BY g.received_at DESC LIMIT 1000`).bind(donorId, userId).all<LegacyGiftRow>(),
-    env.DB.prepare(`SELECT i.id, i.type, i.occurred_at, i.summary
+    env.DB.prepare(`SELECT i.id, i.type, i.occurred_at, i.summary, i.role, i.shared_activity_id, sa.recipient_count AS shared_activity_recipient_count, sa.summary AS shared_activity_summary
       FROM interactions i JOIN donors d ON d.id = i.donor_id
+      LEFT JOIN shared_activities sa ON sa.id = i.shared_activity_id
       WHERE i.donor_id = ? AND i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
         AND i.occurred_at <= ? AND i.source NOT LIKE 'cancelled:%' AND i.source NOT LIKE 'archived:%'
         AND (i.source LIKE 'capture-completed:%' OR (i.source NOT LIKE 'capture-scheduled:%' AND i.occurred_at <= i.created_at))
@@ -125,7 +126,17 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
       description: gift.fund || null,
     })),
   ];
-  const interactionData: MeetingBriefInteraction[] = interactions.results.map((item) => ({ id: item.id, type: item.type, occurredAt: item.occurred_at, summary: item.summary }));
+  const interactionData: MeetingBriefInteraction[] = interactions.results.map((item) => ({
+    id: item.id,
+    type: item.type,
+    occurredAt: item.occurred_at,
+    // Prefer the shared_activities parent's summary when linked -- same
+    // single-canonical-copy rule as the unified timeline.
+    summary: item.shared_activity_summary ?? item.summary,
+    sharedActivityId: item.shared_activity_id,
+    role: item.role === "participant" || item.role === "recipient" ? item.role : null,
+    recipientCount: item.shared_activity_recipient_count,
+  }));
   const reminderData: MeetingBriefReminder[] = reminders.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at }));
   const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
   const unconfirmedHistoricalContext = historicalContextRows.results.map((row) => importedContextLine(row.text, row.source, row.source_date ? dateLabel(row.source_date) : null));
@@ -179,12 +190,20 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   const openPledgeSource = giving.results.find((item) => (item.balance_cents ?? 0) > 0);
   const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: openPledgeSource.activity_date } : null;
   const latestInteraction = interactions.results[0];
+  // Same "most recent of the last 5 fetched" precision this whole evidence
+  // build already uses for lastContactAt -- not a new approximation. A donor
+  // whose last 5 interactions are entirely role='recipient' broadcasts (rare
+  // -- would mean no substantive contact logged at all in the visible
+  // window) falls back to null here, matching how "never contacted" is
+  // already handled everywhere else in this evidence shape.
+  const latestSubstantiveInteraction = interactions.results.find((item) => item.role !== "recipient");
   const recommendationEvidence = buildRecommendationEvidence({
     donorId,
     mostRecentPaidGift: mostRecentPaidGiftForEvidence,
     openPledge: openPledgeForEvidence,
     lastCompletedInteraction: latestInteraction ? { type: latestInteraction.type, summary: latestInteraction.summary, occurredAt: latestInteraction.occurred_at } : null,
     lastContactAt: latestInteraction?.occurred_at ?? null,
+    lastSubstantiveContactAt: latestSubstantiveInteraction?.occurred_at ?? null,
     openReminder: reminders.results[0] ? { action: reminders.results[0].action, reason: reminders.results[0].reason, dueAt: reminders.results[0].due_at } : null,
     relationshipSummary: donor.relationship_summary,
     institutionalMemory: donor.institutional_memory,

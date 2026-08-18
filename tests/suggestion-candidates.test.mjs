@@ -31,6 +31,7 @@ const emptyInput = {
   openPledge: null,
   lastCompletedInteraction: null,
   lastContactAt: null,
+  lastSubstantiveContactAt: null,
   openReminder: null,
   relationshipSummary: null,
   institutionalMemory: null,
@@ -41,7 +42,10 @@ const emptyInput = {
 
 function reconnectCandidateFor(daysSinceContact) {
   const lastContactAt = daysSinceContact === null ? null : daysAgo(daysSinceContact);
-  const evidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt }, NOW, TIMEZONE);
+  // Mirrors lastContactAt -- this helper tests the generic days-since-contact
+  // monotonicity invariant, not the recipient-role distinction, so both
+  // fields carry the same fact here.
+  const evidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt, lastSubstantiveContactAt: lastContactAt }, NOW, TIMEZONE);
   return generateCandidates(evidence).find((c) => c.kind === "reconnect_contact_gap") ?? null;
 }
 
@@ -222,7 +226,7 @@ async function run() {
       ...emptyInput,
       donorId: fixture.giftDonorId,
       mostRecentPaidGift: { giftSource: "giving_activity", giftId: "g-1", amountCents: 10000, occurredAt: daysAgo(5), campaign: null, description: null, acknowledged: false },
-      lastContactAt: daysAgo(5),
+      lastContactAt: daysAgo(5), lastSubstantiveContactAt: daysAgo(5),
     }, NOW, TIMEZONE);
     assert.equal(buildDonorRecommendation(giftEvidence).kind, "acknowledge_gift");
 
@@ -230,14 +234,14 @@ async function run() {
       ...emptyInput,
       donorId: fixture.pledgeDonorId,
       openPledge: { balanceCents: 50000, campaign: null, description: null, activityDate: daysAgo(100) },
-      lastContactAt: daysAgo(5),
+      lastContactAt: daysAgo(5), lastSubstantiveContactAt: daysAgo(5),
     }, NOW, TIMEZONE);
     assert.equal(buildDonorRecommendation(pledgeEvidence).kind, "follow_up_pledge");
 
     const yahrtzeitEvidence = buildRecommendationEvidence({
       ...emptyInput,
       donorId: fixture.yahrtzeitDonorId,
-      lastContactAt: daysAgo(5),
+      lastContactAt: daysAgo(5), lastSubstantiveContactAt: daysAgo(5),
       yahrtzeits: [{ deceasedNameEnglish: "Test Person", deceasedNameHebrew: null, relationship: "Mother", hebrewMonth: "Elul", hebrewDay: 3 }],
     }, NOW, TIMEZONE);
     assert.equal(buildDonorRecommendation(yahrtzeitEvidence).kind, "yahrtzeit_outreach");
@@ -245,7 +249,7 @@ async function run() {
     const birthdayEvidence = buildRecommendationEvidence({
       ...emptyInput,
       donorId: fixture.birthdayDonorId,
-      lastContactAt: daysAgo(5),
+      lastContactAt: daysAgo(5), lastSubstantiveContactAt: daysAgo(5),
       importantDates: [{ type: "birthday", personName: "Test Person", relationship: null, month: 8, day: 16, year: null }],
     }, NOW, TIMEZONE);
     assert.equal(buildDonorRecommendation(birthdayEvidence).kind, "birthday_outreach");
@@ -253,7 +257,7 @@ async function run() {
     const anniversaryEvidence = buildRecommendationEvidence({
       ...emptyInput,
       donorId: fixture.anniversaryDonorId,
-      lastContactAt: daysAgo(5),
+      lastContactAt: daysAgo(5), lastSubstantiveContactAt: daysAgo(5),
       importantDates: [{ type: "anniversary", personName: null, relationship: null, month: 8, day: 17, year: null }],
     }, NOW, TIMEZONE);
     assert.equal(buildDonorRecommendation(anniversaryEvidence).kind, "anniversary_outreach");

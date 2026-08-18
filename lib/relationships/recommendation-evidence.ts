@@ -35,8 +35,20 @@ export type RecommendationEvidenceInput = {
   // cancelled one) -- drives continue_conversation and acknowledgedSinceGift.
   lastCompletedInteraction: { type: string; summary: string; occurredAt: number } | null;
   // MAX(occurred_at) across all completed contact, independent of whether
-  // the full interaction row was fetched -- drives reconnect_contact_gap.
+  // the full interaction row was fetched. Display-only ("Last Contact" on
+  // the donor page/timeline) -- every completed interaction counts here,
+  // including a role='recipient' broadcast touch. Does NOT drive
+  // reconnect_contact_gap; see lastSubstantiveContactAt below for that.
   lastContactAt: number | null;
+  // Same MAX(occurred_at)-across-completed-contact definition as
+  // lastContactAt, but excluding role='recipient' rows (a donor merely
+  // receiving a broadcast text/email/photo, never a real back-and-forth).
+  // This is the field reconnect_contact_gap actually uses -- an explicit,
+  // approved product decision: Last Contact updates for every recipient,
+  // but a broadcast alone must never suppress "this donor needs personal
+  // outreach." role='participant' and every existing single-donor
+  // interaction type count as substantive, identical to today's behavior.
+  lastSubstantiveContactAt: number | null;
   // The donor's open reminder, if any -- a real recommendations row (an
   // explicit fundraiser commitment), never invented here.
   openReminder: { action: string; reason: string; dueAt: number | null } | null;
@@ -99,6 +111,8 @@ export type RecommendationEvidence = {
   contact: {
     lastCompletedInteraction: { type: string; summary: string; occurredAt: number; daysAgo: number } | null;
     daysSinceLastContact: number | null;
+    // Feeds reconnect_contact_gap only -- see lastSubstantiveContactAt above.
+    daysSinceSubstantiveContact: number | null;
   };
   reminder: { action: string; reason: string; dueAt: number | null; isOverdue: boolean } | null;
   narrative: { relationshipSummary: string | null; institutionalMemory: string | null };
@@ -152,6 +166,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
         ? { ...input.lastCompletedInteraction, daysAgo: daysBetween(now, input.lastCompletedInteraction.occurredAt) }
         : null,
       daysSinceLastContact: input.lastContactAt !== null ? daysBetween(now, input.lastContactAt) : null,
+      daysSinceSubstantiveContact: input.lastSubstantiveContactAt !== null ? daysBetween(now, input.lastSubstantiveContactAt) : null,
     },
     // Calendar-day (not raw-instant) comparison, matching
     // lib/relationships/unified-timeline.ts and the already-proven pattern

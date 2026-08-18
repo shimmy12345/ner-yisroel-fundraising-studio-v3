@@ -21,6 +21,10 @@ const emptyInput = {
   openPledge: null,
   lastCompletedInteraction: null,
   lastContactAt: null,
+  // Mirrors lastContactAt everywhere in this file except the dedicated
+  // recipient-role tests below -- none of these fixtures model a broadcast
+  // touch, so "substantive" and "any" contact are the same fact for them.
+  lastSubstantiveContactAt: null,
   openReminder: null,
   relationshipSummary: null,
   institutionalMemory: null,
@@ -44,12 +48,12 @@ const gift = (overrides = {}) => ({ giftSource: "giving_activity", giftId: "acti
 async function run() {
   // --- evidence builder: derived fields ---
   // 1. A new/unmarked gift is unacknowledged by default.
-  const withUnacknowledgedGift = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: false }), lastContactAt: daysAgo(3) }, NOW, TIMEZONE);
+  const withUnacknowledgedGift = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: false }), lastContactAt: daysAgo(3), lastSubstantiveContactAt: daysAgo(3) }, NOW, TIMEZONE);
   assert.equal(withUnacknowledgedGift.giving.mostRecentPaidGift.acknowledged, false);
   // An unrelated interaction after the gift date must NOT, by itself,
   // count as acknowledgment -- only the explicit flag does. This is the
   // exact behavior the old date-comparison inference used to get wrong.
-  const withGiftAndLaterInteraction = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: false }), lastContactAt: daysAgo(1) }, NOW, TIMEZONE);
+  const withGiftAndLaterInteraction = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ acknowledged: false }), lastContactAt: daysAgo(1), lastSubstantiveContactAt: daysAgo(1) }, NOW, TIMEZONE);
   assert.ok(generateCandidates(withGiftAndLaterInteraction).find((c) => c.kind === "acknowledge_gift"), "a later, unrelated interaction must never silently count as a thank-you");
   // 2/3/4. Marking any of the three statuses (thank_you_sent/
   // thank_you_call/no_acknowledgment_needed) suppresses the candidate --
@@ -100,9 +104,9 @@ async function run() {
   assert.ok(generateCandidates(withReminder).find((c) => c.kind === "honor_reminder"), "an open reminder must generate honor_reminder");
   assert.ok(generateCandidates(withUnacknowledgedGift).find((c) => c.kind === "acknowledge_gift"), "an unacknowledged paid gift must generate acknowledge_gift");
   assert.ok(generateCandidates(withPledge).find((c) => c.kind === "follow_up_pledge"));
-  const gapEvidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(120) }, NOW, TIMEZONE);
+  const gapEvidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(120), lastSubstantiveContactAt: daysAgo(120) }, NOW, TIMEZONE);
   assert.ok(generateCandidates(gapEvidence).find((c) => c.kind === "reconnect_contact_gap"));
-  const noGapEvidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(10) }, NOW, TIMEZONE);
+  const noGapEvidence = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(10), lastSubstantiveContactAt: daysAgo(10) }, NOW, TIMEZONE);
   assert.equal(generateCandidates(noGapEvidence).find((c) => c.kind === "reconnect_contact_gap"), undefined, "a recent contact must not generate a contact-gap candidate");
   const narrativeEvidence = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: "Loves the annual gala" }, NOW, TIMEZONE);
   assert.ok(generateCandidates(narrativeEvidence).find((c) => c.kind === "relationship_opportunity"));
@@ -117,8 +121,8 @@ async function run() {
 
   // --- hard constraint 1: reminder suppresses the next-touchpoint family,
   // never the money-stewardship family ---
-  const reminderPlusGift = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, mostRecentPaidGift: gift({ amountCents: 1000, occurredAt: daysAgo(3) }), lastContactAt: daysAgo(10) }, NOW, TIMEZONE);
-  const reminderPlusGap = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, lastContactAt: daysAgo(200) }, NOW, TIMEZONE);
+  const reminderPlusGift = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, mostRecentPaidGift: gift({ amountCents: 1000, occurredAt: daysAgo(3) }), lastContactAt: daysAgo(10), lastSubstantiveContactAt: daysAgo(10) }, NOW, TIMEZONE);
+  const reminderPlusGap = buildRecommendationEvidence({ ...emptyInput, openReminder: { action: "Call", reason: "r", dueAt: null }, lastContactAt: daysAgo(200), lastSubstantiveContactAt: daysAgo(200) }, NOW, TIMEZONE);
   const afterReminderWithGift = buildDonorRecommendation(reminderPlusGift);
   assert.ok(["honor_reminder", "acknowledge_gift"].includes(afterReminderWithGift.kind), "a reminder must not eliminate a competing gift-acknowledgment candidate");
   const afterReminderWithGap = buildDonorRecommendation(reminderPlusGap);
@@ -158,7 +162,7 @@ async function run() {
   const confirmedBeatsHistorical = buildRecommendationEvidence({
     ...emptyInput,
     mostRecentPaidGift: gift({ amountCents: 1000, occurredAt: daysAgo(2) }),
-    lastContactAt: daysAgo(20),
+    lastContactAt: daysAgo(20), lastSubstantiveContactAt: daysAgo(20),
     historicalContext: [{ text: "Solicit for $10k", source: "import-monday", sourceDate: daysAgo(300) }],
   }, NOW, TIMEZONE);
   assert.equal(buildDonorRecommendation(confirmedBeatsHistorical).kind, "acknowledge_gift", "a confirmed recent gift must outrank an unconfirmed historical solicitation note");
@@ -169,7 +173,7 @@ async function run() {
     ...emptyInput,
     mostRecentPaidGift: gift({ amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign" }),
     openPledge: { balanceCents: 800000, campaign: "Annual Campaign", description: null, activityDate: daysAgo(200) },
-    lastContactAt: daysAgo(200),
+    lastContactAt: daysAgo(200), lastSubstantiveContactAt: daysAgo(200),
   }, NOW, TIMEZONE);
   const case1Result = buildDonorRecommendation(case1);
   assert.equal(case1Result.kind, "acknowledge_gift");
@@ -181,7 +185,7 @@ async function run() {
   // for this donor must disappear entirely (assuming nothing else
   // qualifies) -- proving suppression is keyed to the correct gift, not
   // just "some gift exists".
-  const case1Acknowledged = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign", acknowledged: true }), openPledge: case1.giving.openPledge, lastContactAt: daysAgo(200) }, NOW, TIMEZONE);
+  const case1Acknowledged = buildRecommendationEvidence({ ...emptyInput, mostRecentPaidGift: gift({ amountCents: 200000, occurredAt: daysAgo(5), campaign: "Annual Campaign", acknowledged: true }), openPledge: case1.giving.openPledge, lastContactAt: daysAgo(200), lastSubstantiveContactAt: daysAgo(200) }, NOW, TIMEZONE);
   assert.equal(buildDonorRecommendation(case1Acknowledged).kind, "follow_up_pledge", "acknowledging the gift must remove it from contention, leaving the next-best candidate");
   // 10. Acknowledgment on a DIFFERENT gift (different giftId) must never
   // suppress this one -- status is tied to the specific gift, not the donor.
@@ -192,7 +196,7 @@ async function run() {
   const case2 = buildRecommendationEvidence({
     ...emptyInput,
     openPledge: { balanceCents: 300000, campaign: "Building Fund", description: null, activityDate: daysAgo(90) },
-    lastContactAt: daysAgo(90),
+    lastContactAt: daysAgo(90), lastSubstantiveContactAt: daysAgo(90),
     historicalContext: [{ text: "Solicit for $18k -- corporate sponsorship", source: "import-monday", sourceDate: daysAgo(120) }],
   }, NOW, TIMEZONE);
   assert.equal(buildDonorRecommendation(case2).kind, "follow_up_pledge");
@@ -200,12 +204,12 @@ async function run() {
   // Case 3: long contact gap vs. specific relationship narrative -- specificity wins over raw urgency.
   const case3 = buildRecommendationEvidence({
     ...emptyInput,
-    lastContactAt: daysAgo(150),
+    lastContactAt: daysAgo(150), lastSubstantiveContactAt: daysAgo(150),
     relationshipSummary: "Interested in funding a new scholarship track; wants to discuss after his daughter's wedding in September.",
   }, NOW, TIMEZONE);
   assert.equal(buildDonorRecommendation(case3).kind, "relationship_opportunity");
   // With no narrative at all, the same contact gap must fall back honestly.
-  const case3NoNarrative = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(150) }, NOW, TIMEZONE);
+  const case3NoNarrative = buildRecommendationEvidence({ ...emptyInput, lastContactAt: daysAgo(150), lastSubstantiveContactAt: daysAgo(150) }, NOW, TIMEZONE);
   assert.equal(buildDonorRecommendation(case3NoNarrative).kind, "reconnect_contact_gap");
 
   // --- yahrtzeit_outreach: awareness vs. action urgency ---

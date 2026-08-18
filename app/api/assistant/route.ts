@@ -12,7 +12,7 @@ import { getDataMode } from "../../../lib/workspace/mode";
 
 type RequestBody = { task?: AssistantTask | "custom"; prompt?: string };
 type DonorRow = { id: string; display_name: string; relationship_summary: string | null; institutional_memory: string | null };
-type InteractionRow = { id: string; summary: string; occurred_at: number };
+type InteractionRow = { id: string; summary: string; occurred_at: number; role: string | null; shared_activity_recipient_count: number | null; shared_activity_summary: string | null };
 type RecommendationRow = { id: string; action: string; reason: string; due_at: number | null };
 type HistoricalContextRow = { text: string; source: string; source_date: number | null };
 const supported = new Set(["custom", "relationship-summary", "meeting-brief", "draft", "next-action", "lapsed-relationships", "executive-summary"]);
@@ -42,7 +42,10 @@ export async function POST(request: Request) {
     const familyImportantDates = (primaryMeetingBrief?.familyImportantDates ?? []).map(familyDateLine);
     const [donor, interactions, recommendations, historicalContext] = primaryId ? await Promise.all([
       env.DB.prepare(`SELECT id, display_name, relationship_summary, institutional_memory FROM donors WHERE id = ? AND ${mode === "demo" ? "data_source = 'sample'" : "owner_user_id = ? AND data_source = 'live'"}`).bind(...(mode === "demo" ? [primaryId] : [primaryId, profile.id])).first<DonorRow>(),
-      env.DB.prepare(`SELECT id, summary, occurred_at FROM interactions WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND occurred_at <= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at)) ORDER BY occurred_at DESC LIMIT 1`).bind(...(mode === "demo" ? [primaryId, now] : [primaryId, profile.id, now])).all<InteractionRow>(),
+      env.DB.prepare(`SELECT interactions.id, interactions.summary, interactions.occurred_at, interactions.role, shared_activities.recipient_count AS shared_activity_recipient_count, shared_activities.summary AS shared_activity_summary
+        FROM interactions
+        LEFT JOIN shared_activities ON shared_activities.id = interactions.shared_activity_id
+        WHERE interactions.donor_id = ? ${mode === "demo" ? "" : "AND interactions.user_id = ?"} AND interactions.occurred_at <= ? AND interactions.source NOT LIKE 'cancelled:%' AND interactions.source NOT LIKE 'archived:%' AND (interactions.source LIKE 'capture-completed:%' OR (interactions.source NOT LIKE 'capture-scheduled:%' AND interactions.occurred_at <= interactions.created_at)) ORDER BY interactions.occurred_at DESC LIMIT 1`).bind(...(mode === "demo" ? [primaryId, now] : [primaryId, profile.id, now])).all<InteractionRow>(),
       env.DB.prepare(`SELECT id, action, reason, due_at FROM recommendations WHERE donor_id = ? ${mode === "demo" ? "" : "AND user_id = ?"} AND status = 'open' ORDER BY due_at LIMIT 10`).bind(...(mode === "demo" ? [primaryId] : [primaryId, profile.id])).all<RecommendationRow>(),
       // Text only for the few most recent unconfirmed rows -- kept in its
       // own query, never joined into the interactions/recommendations
@@ -54,7 +57,15 @@ export async function POST(request: Request) {
     const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: profile.timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
     const snapshot: AssistantContextSnapshot = {
       donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyImportantDates },
-      latestInteraction: latest ? { id: latest.id, summary: latest.summary.replace("\n", ": "), occurredAt: new Date(latest.occurred_at * 1000).toISOString() } : null,
+      // Prefer the shared_activities parent's summary when linked (same
+      // single-canonical-copy rule as the timeline/Meeting Brief), and
+      // append a count-only note for a shared activity -- "sent to N
+      // donors" / "N participants" -- never the other donors' names here.
+      latestInteraction: latest ? {
+        id: latest.id,
+        summary: `${(latest.shared_activity_summary ?? latest.summary).replace("\n", ": ")}${latest.shared_activity_recipient_count ? ` (${latest.role === "recipient" ? `sent to ${latest.shared_activity_recipient_count} donors` : `${latest.shared_activity_recipient_count} participants`})` : ""}`,
+        occurredAt: new Date(latest.occurred_at * 1000).toISOString(),
+      } : null,
       recommendations: recommendations.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at ? new Date(item.due_at * 1000).toISOString() : null })),
       priorities: brief.priorities.map(({ name, label, reason, why, action }) => ({ name, label, reason, why, action })), meetings: brief.meetings, gifts: brief.gifts.map(({ id, name, amount, detail }) => ({ id, name, amount, detail })),
     };

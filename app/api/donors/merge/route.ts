@@ -63,6 +63,41 @@ async function planResearchReconciliation(survivorId: string, duplicateId: strin
   return statements;
 }
 
+type SharedActivityCollisionRow = { duplicate_interaction_id: string; shared_activity_id: string; duplicate_role: string | null; duplicate_source: string; survivor_interaction_id: string; survivor_role: string | null };
+
+// The plain "UPDATE interactions SET donor_id=survivorId WHERE donor_id=
+// duplicateId" below would violate interactions_shared_activity_donor_uidx
+// whenever both donors already independently received the SAME shared
+// activity (e.g. both were on the same broadcast text before being
+// recognized as duplicates and merged). Detected and resolved here, ahead
+// of that blind reassignment, following the exact same
+// read-then-return-extra-batch-statements shape as
+// planResearchReconciliation above: the duplicate's colliding link is
+// detached (shared_activity_id cleared) and archived -- never a real SQL
+// DELETE, matching interactions' own delete convention -- rather than left
+// to collide with the survivor's own already-existing link to that same
+// activity. If the duplicate's role was the stronger one (participant beats
+// recipient -- real engagement outranks a broadcast touch), the survivor's
+// surviving row is upgraded to match, so the fact that this donor actually
+// participated is never lost to the merge.
+async function planSharedActivityReconciliation(survivorId: string, duplicateId: string, userId: string) {
+  const collisions = await env.DB.prepare(`SELECT dup.id AS duplicate_interaction_id, dup.shared_activity_id, dup.role AS duplicate_role, dup.source AS duplicate_source, surv.id AS survivor_interaction_id, surv.role AS survivor_role
+    FROM interactions dup
+    JOIN interactions surv ON surv.shared_activity_id = dup.shared_activity_id AND surv.donor_id = ? AND surv.user_id = ?
+    WHERE dup.donor_id = ? AND dup.user_id = ? AND dup.shared_activity_id IS NOT NULL`).bind(survivorId, userId, duplicateId, userId).all<SharedActivityCollisionRow>();
+  const now = Math.floor(Date.now() / 1000);
+  const statements = [];
+  for (const row of collisions.results) {
+    if (row.duplicate_role === "participant" && row.survivor_role === "recipient") {
+      statements.push(env.DB.prepare("UPDATE interactions SET role='participant' WHERE id=?").bind(row.survivor_interaction_id));
+    }
+    statements.push(env.DB.prepare("UPDATE interactions SET shared_activity_id=NULL, source=? WHERE id=?").bind(`archived:${row.duplicate_source}`, row.duplicate_interaction_id));
+    statements.push(env.DB.prepare("UPDATE shared_activities SET recipient_count = recipient_count - 1, updated_at=? WHERE id=?").bind(now, row.shared_activity_id));
+    statements.push(env.DB.prepare("INSERT INTO shared_activity_recipient_audits (id, shared_activity_id, donor_id, user_id, action, created_at) VALUES (?,?,?,?,'removed',?)").bind(crypto.randomUUID(), row.shared_activity_id, duplicateId, userId, now));
+  }
+  return statements;
+}
+
 async function activeDonor(id: string, userId: string) {
   return env.DB.prepare(`SELECT ${MERGE_DONOR_SELECT} FROM donors WHERE id=? AND owner_user_id=? AND data_source='live' AND archived_at IS NULL LIMIT 1`).bind(id, userId).first<MergeDonorRow>();
 }
@@ -100,11 +135,16 @@ export async function POST(request: Request) {
   const now = Math.floor(Date.now() / 1000); const auditId = crypto.randomUUID();
   try {
     const researchStatements = await planResearchReconciliation(survivorId, duplicateId, profile.id);
+    const sharedActivityStatements = await planSharedActivityReconciliation(survivorId, duplicateId, profile.id);
     await env.DB.batch([
       env.DB.prepare(`UPDATE donors SET archived_at=?,merged_into_donor_id=?,donor_code=NULL,external_source=NULL,external_id=NULL,updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live' AND archived_at IS NULL`).bind(now, survivorId, now, duplicateId, profile.id),
       env.DB.prepare(`UPDATE donors SET display_name=?,last_name=?,primary_first_name=?,primary_title=?,spouse=?,spouse_first_name=?,spouse_title=?,donor_code=?,external_source=?,external_id=?,source_snapshot=?,email=?,phone=?,home_phone=?,alternate_mobile_phone=?,address=?,address_line_1=?,city=?,state=?,postal_code=?,country=?,contact_note=?,updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live' AND archived_at IS NULL`).bind(after.display_name, after.last_name, after.primary_first_name, after.primary_title, after.spouse, after.spouse_first_name, after.spouse_title, after.donor_code, after.external_source, after.external_id, after.source_snapshot, after.email, after.phone, after.home_phone, after.alternate_mobile_phone, after.address, after.address_line_1, after.city, after.state, after.postal_code, after.country, after.contact_note, now, survivorId, profile.id),
       env.DB.prepare("UPDATE gifts SET donor_id=? WHERE donor_id=?").bind(survivorId, duplicateId),
       env.DB.prepare("UPDATE giving_activities SET donor_id=? WHERE donor_id=? AND owner_user_id=?").bind(survivorId, duplicateId, profile.id),
+      // Must run before the blind interactions reassignment below --
+      // detaches/archives any duplicate row that would otherwise collide
+      // with a shared-activity link the survivor already has.
+      ...sharedActivityStatements,
       env.DB.prepare("UPDATE interactions SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),
       env.DB.prepare("UPDATE recommendations SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),
       env.DB.prepare("UPDATE donor_contact_audits SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),

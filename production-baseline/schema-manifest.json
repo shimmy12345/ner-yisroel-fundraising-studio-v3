@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "c691e68f87ea3f40335e0036036ec554ba2b74ef7ecf3bee6cd0dec64502fccc",
+  "schemaHash": "ad48af84e4a315dd8bd0464f12229f0b4d5cb27b1f27a15fd876f9b2013625e1",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -31,7 +31,8 @@
     "0026_gift_acknowledgments.sql",
     "0027_yahrtzeits.sql",
     "0028_important_dates.sql",
-    "0029_important_dates_dob_source.sql"
+    "0029_important_dates_dob_source.sql",
+    "0030_shared_activities.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -3512,12 +3513,33 @@
             "notNull": true,
             "defaultValue": "0",
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "shared_activity_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "role",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
           {
             "from": "donor_id",
             "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "shared_activity_id",
+            "toTable": "shared_activities",
             "to": "id",
             "onUpdate": "NO ACTION",
             "onDelete": "NO ACTION"
@@ -3543,6 +3565,27 @@
             "sql": "CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`)"
           },
           {
+            "name": "interactions_shared_activity_donor_uidx",
+            "columns": [
+              "shared_activity_id",
+              "donor_id"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `interactions_shared_activity_donor_uidx` ON `interactions` (`shared_activity_id`,`donor_id`) WHERE `shared_activity_id` IS NOT NULL"
+          },
+          {
+            "name": "interactions_shared_activity_idx",
+            "columns": [
+              "shared_activity_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `interactions_shared_activity_idx` ON `interactions` (`shared_activity_id`)"
+          },
+          {
             "name": null,
             "columns": [
               "id"
@@ -3553,7 +3596,9 @@
             "sql": null
           }
         ],
-        "checks": []
+        "checks": [
+          "CHECK (`role` IN ('participant','recipient'))"
+        ]
       },
       {
         "name": "jl_payment_assignment_audits",
@@ -4377,6 +4422,219 @@
         "checks": []
       },
       {
+        "name": "shared_activities",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "type",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "occurred_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "occurred_at_date_only",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "summary",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'manual'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "recipient_count",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "deleted_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "shared_activities_user_date_idx",
+            "columns": [
+              "user_id",
+              "occurred_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `shared_activities_user_date_idx` ON `shared_activities` (`user_id`,`occurred_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift'))"
+        ]
+      },
+      {
+        "name": "shared_activity_recipient_audits",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "shared_activity_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "shared_activity_id",
+            "toTable": "shared_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "shared_activity_recipient_audits_activity_date_idx",
+            "columns": [
+              "shared_activity_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('added','removed'))"
+        ]
+      },
+      {
         "name": "users",
         "columns": [
           {
@@ -4968,7 +5226,7 @@
     {
       "type": "table",
       "name": "interactions",
-      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -5009,6 +5267,16 @@
       "type": "table",
       "name": "sample_cleanup_audits",
       "sql": "CREATE TABLE `sample_cleanup_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `backup_confirmed` integer NOT NULL, `removed_donors` integer NOT NULL, `removed_gifts` integer NOT NULL, `removed_interactions` integer NOT NULL, `removed_recommendations` integer NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "shared_activities",
+      "sql": "CREATE TABLE `shared_activities` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift')), `occurred_at` integer NOT NULL, `occurred_at_date_only` integer NOT NULL DEFAULT 0, `summary` text NOT NULL, `source` text NOT NULL DEFAULT 'manual', `recipient_count` integer NOT NULL DEFAULT 0, `deleted_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "shared_activity_recipient_audits",
+      "sql": "CREATE TABLE `shared_activity_recipient_audits` ( `id` text PRIMARY KEY NOT NULL, `shared_activity_id` text NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('added','removed')), `created_at` integer NOT NULL, FOREIGN KEY (`shared_activity_id`) REFERENCES `shared_activities`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -5282,6 +5550,16 @@
     },
     {
       "type": "index",
+      "name": "interactions_shared_activity_donor_uidx",
+      "sql": "CREATE UNIQUE INDEX `interactions_shared_activity_donor_uidx` ON `interactions` (`shared_activity_id`,`donor_id`) WHERE `shared_activity_id` IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "interactions_shared_activity_idx",
+      "sql": "CREATE INDEX `interactions_shared_activity_idx` ON `interactions` (`shared_activity_id`)"
+    },
+    {
+      "type": "index",
       "name": "jl_payment_assignment_audits_import_payment_idx",
       "sql": "CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`)"
     },
@@ -5314,6 +5592,16 @@
       "type": "index",
       "name": "sample_cleanup_audits_user_date_idx",
       "sql": "CREATE INDEX `sample_cleanup_audits_user_date_idx` ON `sample_cleanup_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "shared_activities_user_date_idx",
+      "sql": "CREATE INDEX `shared_activities_user_date_idx` ON `shared_activities` (`user_id`,`occurred_at`)"
+    },
+    {
+      "type": "index",
+      "name": "shared_activity_recipient_audits_activity_date_idx",
+      "sql": "CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`)"
     },
     {
       "type": "index",

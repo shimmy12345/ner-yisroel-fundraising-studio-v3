@@ -117,8 +117,72 @@ export const interactions = sqliteTable("interactions", {
   occurredAtDateOnly: integer("occurred_at_date_only", { mode: "boolean" }).notNull().default(false),
   summary: text("summary").notNull(),
   source: text("source").notNull().default("manual"),
+  // Both null for every pre-existing row and for an ordinary single-donor
+  // interaction -- only set when this row is one donor's link into a
+  // sharedActivities parent (see that table's own header comment). role is
+  // meaningless without sharedActivityId and is never set alone.
+  sharedActivityId: text("shared_activity_id").references(() => sharedActivities.id),
+  role: text("role", { enum: ["participant", "recipient"] }),
   ...timestamps,
-}, (table) => [index("interactions_donor_date_idx").on(table.donorId, table.occurredAt)]);
+}, (table) => [
+  index("interactions_donor_date_idx").on(table.donorId, table.occurredAt),
+  index("interactions_shared_activity_idx").on(table.sharedActivityId),
+  // A donor can only be linked to a given shared activity once -- guards
+  // both accidental double-add from the recipient picker and the donor-merge
+  // case where the surviving donor already has a link to the same activity
+  // as the one being reassigned (app/api/donors/merge/route.ts must de-dup
+  // explicitly before that reassignment, this constraint is the backstop).
+  uniqueIndex("interactions_shared_activity_donor_uidx").on(table.sharedActivityId, table.donorId).where(sql`shared_activity_id IS NOT NULL`),
+]);
+
+// The parent record for one outreach effort logged once and linked to
+// multiple donors (a shared meeting, or a broadcast text/email/photo sent to
+// many donors) -- see interactions.sharedActivityId/role. Holds the single
+// canonical copy of type/date/summary; each linked donor still gets their
+// own interactions row (donorId stays NOT NULL there, every existing
+// single-donor query keeps working unchanged) so Last Contact, the
+// timeline, Meeting Brief, and recommendation scoring all continue reading
+// interactions per-donor exactly as before. Editing the note/summary here
+// is a single UPDATE, not a fan-out write across every linked donor's row.
+export const sharedActivities = sqliteTable("shared_activities", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  // Same enum as interactions.type today -- deliberately not widened here.
+  // Adding a dedicated "text"/message type is a separate, explicitly-flagged
+  // follow-up decision (it would require rebuilding interactions' own CHECK
+  // constraint, an existing-data-touching migration, not just an ADD COLUMN
+  // like this one), not something this migration bundles in.
+  type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift"] }).notNull(),
+  occurredAt: integer("occurred_at", { mode: "timestamp" }).notNull(),
+  occurredAtDateOnly: integer("occurred_at_date_only", { mode: "boolean" }).notNull().default(false),
+  summary: text("summary").notNull(),
+  source: text("source").notNull().default("manual"),
+  // Denormalized, updated whenever a recipient/participant link is added or
+  // removed -- lets the timeline show "Sent to N donors" / "N participants"
+  // without a COUNT(*) or a join on every donor-page render.
+  recipientCount: integer("recipient_count").notNull().default(0),
+  // Application-level cascade delete: set when the whole activity is
+  // deleted, which also soft-cancels (source -> 'cancelled:...') every
+  // linked interactions row -- not yet built (Phase 2 UX); only the bulk
+  // create path (app/api/interactions/shared/route.ts) exists so far.
+  // Never a real SQL DELETE, matching interactions' own delete convention.
+  deletedAt: integer("deleted_at", { mode: "timestamp" }),
+  ...timestamps,
+}, (table) => [index("shared_activities_user_date_idx").on(table.userId, table.occurredAt)]);
+
+// Append-only log of recipient/participant add/remove events on a shared
+// activity, matching activityStatusAudits' shape/convention (interaction-id-
+// keyed, indexed on (parentId, createdAt)) rather than a generic diffing
+// framework -- this only ever needs to answer "who was added or removed,
+// and when," not a full field-level history.
+export const sharedActivityRecipientAudits = sqliteTable("shared_activity_recipient_audits", {
+  id: text("id").primaryKey(),
+  sharedActivityId: text("shared_activity_id").notNull().references(() => sharedActivities.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  action: text("action", { enum: ["added", "removed"] }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("shared_activity_recipient_audits_activity_date_idx").on(table.sharedActivityId, table.createdAt)]);
 
 export const activityStatusAudits = sqliteTable("activity_status_audits", {
   id: text("id").primaryKey(),

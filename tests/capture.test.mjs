@@ -104,7 +104,10 @@ assert.match(captureExperience, /acceptRelationshipSnapshot/);
 assert.match(captureExperience, /Nothing generated is saved unless you check this box/);
 assert.match(interactionRoute, /body\.acceptRelationshipSnapshot === true/);
 assert.doesNotMatch(interactionRoute, /!scheduled && extracted\.commitments\.length > 0/, "detected commitments do not silently create saved follow-ups");
-assert.match(timelineExperience, /splitInteractionSummary\(activity\.summary\)/);
+// Prefers the shared_activities parent's summary when this row is linked to
+// one -- a single edit to the shared note is then immediately visible on
+// every linked donor's timeline, never a stale per-row copy.
+assert.match(timelineExperience, /splitInteractionSummary\(activity\.shared_activity_summary \?\? activity\.summary\)/);
 assert.match(workspace, /i\.source LIKE 'capture-scheduled:%' OR i\.occurred_at > i\.created_at/);
 assert.match(workspace, /todaySchedule/);
 assert.match(workspace, /upcomingActivities/);

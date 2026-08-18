@@ -207,8 +207,16 @@ function solicitCandidate(evidence: RecommendationEvidence): RecommendationCandi
   return null;
 }
 
+// Deliberately reads daysSinceSubstantiveContact, not daysSinceLastContact --
+// an approved product decision, not an oversight: a role='recipient'
+// broadcast touch (one text/email/photo logged once and linked to many
+// donors) updates Last Contact display but must never by itself suppress
+// this candidate. See lastSubstantiveContactAt's doc comment in
+// recommendation-evidence.ts for the full rule. role='participant' and
+// every existing single-donor interaction type are unaffected -- they count
+// here exactly as they did before this field existed.
 function reconnectContactGapCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
-  const days = evidence.contact.daysSinceLastContact;
+  const days = evidence.contact.daysSinceSubstantiveContact;
   if (days !== null && days < 90) return null;
   return {
     kind: "reconnect_contact_gap",
@@ -223,7 +231,7 @@ function reconnectContactGapCandidate(evidence: RecommendationEvidence): Recomme
     specificity: 0.15,
     recency: 0.1,
     urgency: days === null ? 0.5 : clamp01(days / 365),
-    supportingDate: evidence.contact.daysSinceLastContact !== null ? evidence.now - evidence.contact.daysSinceLastContact * 86400 : null,
+    supportingDate: days !== null ? evidence.now - days * 86400 : null,
   };
 }
 

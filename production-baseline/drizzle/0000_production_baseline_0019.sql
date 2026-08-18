@@ -387,7 +387,7 @@ CREATE TABLE `interactions` (
   `summary` text NOT NULL,
   `source` text DEFAULT 'manual' NOT NULL,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL,
+  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')),
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
@@ -492,6 +492,33 @@ CREATE TABLE `sample_cleanup_audits` (
   `removed_interactions` integer NOT NULL,
   `removed_recommendations` integer NOT NULL,
   `created_at` integer NOT NULL,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `shared_activities` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `type` text NOT NULL CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift')),
+  `occurred_at` integer NOT NULL,
+  `occurred_at_date_only` integer NOT NULL DEFAULT 0,
+  `summary` text NOT NULL,
+  `source` text NOT NULL DEFAULT 'manual',
+  `recipient_count` integer NOT NULL DEFAULT 0,
+  `deleted_at` integer,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `shared_activity_recipient_audits` (
+  `id` text PRIMARY KEY NOT NULL,
+  `shared_activity_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `action` text NOT NULL CHECK (`action` IN ('added','removed')),
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`shared_activity_id`) REFERENCES `shared_activities`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
@@ -652,6 +679,10 @@ CREATE INDEX `important_dates_user_idx` ON `important_dates` (`user_id`);
 
 CREATE INDEX `interactions_donor_date_idx` ON `interactions` (`donor_id`,`occurred_at`);
 
+CREATE UNIQUE INDEX `interactions_shared_activity_donor_uidx` ON `interactions` (`shared_activity_id`,`donor_id`) WHERE `shared_activity_id` IS NOT NULL;
+
+CREATE INDEX `interactions_shared_activity_idx` ON `interactions` (`shared_activity_id`);
+
 CREATE UNIQUE INDEX `jl_payment_assignment_audits_import_payment_idx` ON `jl_payment_assignment_audits` (`import_id`,`payment_fingerprint`);
 
 CREATE INDEX `jl_payment_assignment_audits_pledge_idx` ON `jl_payment_assignment_audits` (`pledge_activity_id`,`created_at`);
@@ -665,6 +696,10 @@ CREATE INDEX `recommendations_user_status_idx` ON `recommendations` (`user_id`,`
 CREATE INDEX `relationship_queue_dismissals_user_date_idx` ON `relationship_queue_dismissals` (`user_id`,`dismissed_at`);
 
 CREATE INDEX `sample_cleanup_audits_user_date_idx` ON `sample_cleanup_audits` (`user_id`,`created_at`);
+
+CREATE INDEX `shared_activities_user_date_idx` ON `shared_activities` (`user_id`,`occurred_at`);
+
+CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`);
 
 CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
 
@@ -683,5 +718,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','c691e68f87ea3f40335e0036036ec554ba2b74ef7ecf3bee6cd0dec64502fccc',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','ad48af84e4a315dd8bd0464f12229f0b4d5cb27b1f27a15fd876f9b2013625e1',1785944072);
 PRAGMA optimize;
