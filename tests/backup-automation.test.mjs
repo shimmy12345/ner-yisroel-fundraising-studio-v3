@@ -81,41 +81,17 @@ for (const [workflow, label] of [[nightly, "nightly"], [monthly, "monthly"]]) {
 
 // --- Status objects are written with a credential distinct from both the
 // backup bucket's write and read credentials -- a leaked status-write
-// credential must never grant any access to real backup content. The
-// monthly workflow's one deliberate exception: it also uses this same
-// status-write credential (already Read & Write on the status bucket) for
-// a best-effort READ of backup-latest-success.json before restoring, so it
-// can identify and record which specific dated backup it tested (see
-// "Determine which immutable backup..." / the header's race-condition
-// note). That read never gates the job's pass/fail outcome and never
-// touches the backup bucket itself, so it's verified separately below
-// rather than by a blanket "credential appears nowhere early" rule. ---
+// credential must never grant any access to real backup content. Design C
+// (latest/'s own R2 metadata, read with the existing read-only backup-
+// bucket credential -- see tests/backup-identity-metadata.test.mjs for the
+// full identity-capture coverage) means the monthly workflow never needs
+// the status-write credential for anything except its own publish step,
+// same as the nightly workflow -- no exception needed here. ---
 for (const workflow of [nightly, monthly]) {
   assert.match(workflow, /R2_STATUS_WRITE_ACCESS_KEY_ID/, "status publication must use its own, separately-scoped credential");
 }
 assert.doesNotMatch(nightly.split("Publish backup status")[0], /R2_STATUS_WRITE_ACCESS_KEY_ID/, "the status-write credential must not appear before the status-publish step in the nightly workflow");
-{
-  const beforePublish = monthly.split("Publish restore-verification status")[0];
-  const identityStepIndex = monthly.indexOf("Determine which immutable backup was actually most recently published");
-  const downloadStepIndex = monthly.indexOf("Download the backup object to verify");
-  assert.ok(identityStepIndex > 0 && identityStepIndex < downloadStepIndex, "the identity-lookup step must exist and run before the real download step");
-  const identityStepText = monthly.slice(identityStepIndex, downloadStepIndex);
-  assert.match(identityStepText, /R2_STATUS_WRITE_ACCESS_KEY_ID/, "the identity-lookup step must use the status-write (read+write) credential to read backup-latest-success.json");
-  const realWorkText = monthly.slice(downloadStepIndex, monthly.indexOf("Publish restore-verification status"));
-  assert.doesNotMatch(realWorkText, /R2_STATUS_WRITE_ACCESS_KEY_ID/, "the real download/decrypt/restore steps must never use the status-write credential -- only the backup-bucket read credential");
-  // The identity-lookup step must never be able to fail the job on its own
-  // -- it's a best-effort provenance read, not a correctness gate. Proven
-  // by the absence of the `e` (errexit) flag in its own `set` line (unlike
-  // real-work steps in this file, e.g. the download step just below it,
-  // which does use `-e`-equivalent behavior via explicit `exit 1` and is
-  // meant to fail the job on a real failure). Checks the flag token
-  // specifically, not a raw substring match -- "pipefail" itself contains
-  // an "e" and must never trip this.
-  const setLineMatch = identityStepText.match(/\bset -(\w+)\b/);
-  assert.ok(setLineMatch, "the identity-lookup step must have its own `set` line");
-  assert.ok(!setLineMatch[1].includes("e"), `the identity-lookup step's \`set -${setLineMatch[1]}\` must never include the errexit ('e') flag -- a failed read there must fall through to the latest/ fallback, never abort the job`);
-  assert.ok(beforePublish.length > 0);
-}
+assert.doesNotMatch(monthly.split("Publish restore-verification status")[0], /R2_STATUS_WRITE_ACCESS_KEY_ID/, "the status-write credential must not appear before the status-publish step in the monthly workflow");
 
 // --- The status-worker (and only the status-worker) may hold read access
 // to the status bucket; it must never gain any credential or binding
@@ -159,15 +135,18 @@ assert.doesNotMatch(deployment.split("Backup/restore status reporting")[1] ?? ""
 
 // --- Category 1: restore-verification captures the SPECIFIC immutable
 // dated backup identity it actually tested, not just the mutable latest/
-// pointer -- the workflow must prefer downloading that dated object over
-// latest/, and must publish it in restore-latest-success.json alongside
-// the pre-existing latest/ pointer name. ---
-assert.match(monthly, /backup-latest-success\.json/, "the monthly workflow must read the backup pipeline's own published success record");
-assert.match(monthly, /aws s3api get-object.*"\$\{IDENTITY_KEY\}" latest\.sql\.gz\.gpg/s, "the download step must prefer the specific dated object identified by the identity-lookup step");
+// pointer -- Design C: that identity comes from latest/'s own R2 object
+// metadata (dated-backup-key, attached atomically by the nightly workflow
+// -- see the "one PutObject call" and validation checks in
+// tests/backup-identity-metadata.test.mjs, which owns the detailed
+// adversarial-input and race-condition coverage for this mechanism). Here:
+// just the published-shape checks. ---
+assert.match(monthly, /aws s3api get-object.*"\$\{IDENTITY_KEY\}" latest\.sql\.gz\.gpg/s, "the download step must prefer the specific dated object identified by the identity step");
 assert.match(monthly, /verifiedLatestObjectKey/, "the published status must always carry the latest/ pointer name it targeted");
 assert.match(monthly, /verifiedBackupObjectKey/);
 assert.match(monthly, /verifiedBackupCompletedAt/);
 assert.match(monthly, /verifiedBackupObjectKey: null, verifiedBackupCompletedAt: null/, "when identity cannot be established, both fields must be published as explicit JSON null -- never omitted, never guessed");
+assert.match(nightly, /--metadata "dated-backup-key=\$\{DATED_KEY\}"/, "the nightly workflow must attach the dated-backup-key metadata when promoting latest/");
 
 // --- Category 8: existing backup/restore operational behavior is
 // unchanged except for the minimum provenance capture required above --

@@ -18,7 +18,21 @@
 #   4. Retention is enforced by an R2 lifecycle rule on the `daily/` prefix
 #      (set up once outside this workflow -- see docs/DEPLOYMENT.md), not
 #      by this workflow deleting anything itself.
-#   5. Additively, and only after all of the above: publishes a tiny
+#   5. When promoting the SAME ciphertext to the mutable `latest/` pointer,
+#      attaches the immutable `daily/...` key that was just uploaded as
+#      that object's own R2 metadata (`dated-backup-key`), in the SAME
+#      PutObject call that writes `latest/`'s content -- never a separate
+#      write. This makes `latest/` self-identifying: whoever reads it later
+#      (see d1-restore-verify-monthly.yml) learns exactly which immutable
+#      dated object it corresponds to, from one atomic read, with no
+#      separate lookup that could race against a concurrent backup run.
+#      Treat this `latest/` promotion as the canonical successful-backup
+#      boundary: reaching it (with content and provenance written
+#      together) is what "this backup succeeded" means here. It does NOT
+#      claim anything about step 6 below (status publication) also having
+#      succeeded -- that is a separate, best-effort, informational fact,
+#      never a precondition for `latest/` itself being trustworthy.
+#   6. Additively, and only after all of the above: publishes a tiny
 #      non-secret status JSON (timestamp, outcome, object key -- never
 #      backup content) to a SEPARATE, dedicated status bucket, using its
 #      own separately-scoped write credential. This is how Workspace
@@ -118,12 +132,23 @@ jobs:
           BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
         run: |
           set -euo pipefail
+          # dated-backup-key is computed identically to the dated upload
+          # step above (same formula, same steps.stamp.outputs.value), so
+          # the two are always byte-identical -- and it is attached here,
+          # in the SAME PutObject call that writes latest/'s content, so
+          # latest/'s content and its provenance metadata can never drift
+          # apart: a failed PutObject leaves the previous latest/ (content
+          # AND metadata) completely untouched, and a successful one
+          # replaces both atomically together. There is no partial-update
+          # path in the PutObject operation itself.
+          DATED_KEY="daily/${DATABASE_NAME}-${{ steps.stamp.outputs.value }}.sql.gz.gpg"
           aws s3api put-object \
             --endpoint-url "${ENDPOINT_URL}" \
             --bucket "${BUCKET}" \
             --key "latest/${DATABASE_NAME}.sql.gz.gpg" \
             --body export.sql.gz.gpg \
-            --content-type application/octet-stream
+            --content-type application/octet-stream \
+            --metadata "dated-backup-key=${DATED_KEY}"
 
       - name: Clean up local plaintext/ciphertext
         if: always()

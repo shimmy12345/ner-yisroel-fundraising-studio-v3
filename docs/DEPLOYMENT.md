@@ -201,22 +201,42 @@ export` runs.
   no per-table enumeration to keep in sync), gzip it, GPG-encrypt it
   (AES256, symmetric passphrase), shred the plaintext, and upload the
   ciphertext to a dedicated R2 bucket under `daily/<name>-<timestamp>.sql.gz.gpg`
-  and (overwriting each run) `latest/<name>.sql.gz.gpg`.
+  and (overwriting each run) `latest/<name>.sql.gz.gpg`. That second upload
+  also attaches the just-uploaded `daily/...` key as `latest/`'s own R2
+  object metadata (`dated-backup-key`) — in the SAME `PutObject` call that
+  writes `latest/`'s content, so the two can never drift apart from each
+  other (a failed `PutObject` leaves the previous `latest/`, content and
+  metadata, completely untouched).
 - **`.github/workflows/d1-restore-verify-monthly.yml`** — on the 1st of
   every month (`0 9 1 * *` UTC, plus manual `workflow_dispatch`): a
   periodic spot-check of the *backup pipeline*, not a per-backup gate — it
   does not run after every nightly backup, and a newer nightly backup
   existing than the one most recently restore-tested is normal and
-  expected. First reads `backup-latest-success.json` (best-effort, using
-  its own status-bucket credential — see the status-reporting section
-  below) to learn the exact, immutable, dated `daily/...` object the backup
-  pipeline most recently produced, then downloads and restores *that
-  specific object* rather than the mutable `latest/...` pointer — this
-  avoids a real race (a concurrent nightly backup run could overwrite
-  `latest/...` between reading the metadata and downloading it) and lets
-  the published result truthfully name which dated backup was tested. If
-  that identity can't be established (unreadable/malformed metadata, or
-  the specific object fails to download), falls back to downloading
+  expected. First performs exactly one `HeadObject` on `latest/...` (using
+  the existing read-only backup-bucket credential — no new secret, and the
+  status-write credential is never referenced anywhere in this job except
+  its own final publish step) to read that `dated-backup-key` metadata,
+  strictly validates it against an exact allowlist pattern
+  (`daily/<name>-YYYYMMDDTHHMMSSZ.sql.gz.gpg`, rejecting any other prefix,
+  database name, path traversal, embedded whitespace/newlines, shell
+  metacharacters, or malformed timestamp — see
+  `tests/backup-identity-metadata.test.mjs`), then downloads and restores
+  *that specific immutable object* rather than the mutable `latest/...`
+  pointer. Treat `latest/` promotion as the canonical successful-backup
+  boundary: valid metadata proves the backup pipeline reached that
+  promotion step with content and provenance written together — it does
+  not prove the nightly job's own later, best-effort status-publish step
+  also succeeded, which is a separate, informational fact. Because
+  `latest/`'s content and metadata are always written atomically together,
+  and this job performs only that one `HeadObject` (never re-reading
+  `latest/` to "double check"), there is no race window: whatever
+  concurrent or later backup run does to `latest/` afterward cannot change
+  which immutable object this run restores.
+  `verifiedBackupCompletedAt` is derived from that restored object's own
+  `LastModified` (read directly from the same `GetObject` response that
+  downloads it — never a second API call, never parsed back out of the key
+  string). If the metadata can't be read or fails validation, or the
+  specific object can't be downloaded, this falls back to downloading
   `latest/...` directly — still proving the pipeline produces a restorable
   backup, just without a provable dated identity for that run. Either way,
   runs `scripts/verify-remote-restore.mjs`, which restores the downloaded

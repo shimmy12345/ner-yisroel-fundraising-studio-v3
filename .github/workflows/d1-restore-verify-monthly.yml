@@ -5,37 +5,62 @@
 # newer nightly backup existing than the one most recently restore-tested
 # is normal, expected, and not itself a problem (see docs/DEPLOYMENT.md).
 # This workflow:
-#   0. Best-effort: reads the backup pipeline's own most recent
-#      backup-latest-success.json (from the status bucket, using this job's
-#      existing read+write status credential -- no new credential) to learn
-#      the exact, immutable, dated daily/... object the backup pipeline most
-#      recently produced. If this can't be read or doesn't parse, this step
-#      never fails the job -- it only means the tested-backup identity is
-#      recorded as unknown for this run (see step 1 and Part 4 below).
+#   0. Reads the mutable `latest/...` object's own R2 metadata (ONE
+#      HeadObject call, using the existing read-only backup-bucket
+#      credential -- no new secret, and R2_STATUS_WRITE_* is never
+#      referenced anywhere in this job except the final publish step) to
+#      learn `dated-backup-key`: the specific immutable `daily/...` object
+#      the nightly backup workflow most recently promoted to `latest/`.
+#      That metadata is written by d1-backup-nightly.yml in the SAME
+#      PutObject call that writes `latest/`'s content -- never a separate
+#      write -- so `latest/`'s content and its provenance can never drift
+#      apart from each other: a failed PutObject leaves the previous
+#      `latest/` (content AND metadata) completely untouched, and a
+#      successful one replaces both atomically together.
 #
-#      Race-condition note: `latest/...` is a MUTABLE pointer, overwritten
-#      by every nightly backup run (a separate concurrency group from this
-#      workflow, so the two CAN run concurrently -- e.g. a manually
-#      triggered backup while a manually triggered restore-verify is
-#      in flight). Downloading `latest/...` directly and separately trusting
-#      whatever backup-latest-success.json said moments earlier would be
-#      unsound: nothing would guarantee they still describe the same bytes.
-#      This workflow avoids that race entirely by downloading the SPECIFIC
-#      IMMUTABLE dated `daily/...` object named in backup-latest-success.json
-#      (retained 90 days, never overwritten) instead of `latest/...` --
-#      whatever step 0 names is guaranteed to still be exactly that object
-#      when step 1 downloads it, no matter what any concurrent backup run
-#      does to the `latest/` pointer in the meantime. Under the *scheduled*
-#      path this race is already very unlikely (the monthly cron fires at
-#      09:00 UTC, hours after the 08:00 UTC nightly backup normally
-#      completes), but manual `workflow_dispatch` runs of either workflow
-#      make no such timing guarantee, so the dated-object approach is used
-#      unconditionally, not just as a scheduled-path optimization.
-#   1. Downloads that dated object if step 0 established its identity;
-#      otherwise falls back to downloading `latest/...` directly (read-only
-#      credential -- cannot write or delete anything in the bucket), still
-#      proving the pipeline produces a restorable backup even though this
-#      run can't name which dated backup it was.
+#      Terminology: treat `latest/` promotion as the canonical
+#      successful-backup boundary. Reading valid `dated-backup-key`
+#      metadata proves the backup pipeline reached that promotion step
+#      with content and provenance written together -- it does NOT prove
+#      every later bookkeeping/status-publish step of that GitHub Actions
+#      job also succeeded (that's a separate, best-effort, informational
+#      fact -- see d1-backup-nightly.yml's own header comment).
+#
+#      This value is NEVER trusted merely because it's present: it is
+#      validated against an exact allowlist pattern
+#      (daily/<DATABASE_NAME>-YYYYMMDDTHHMMSSZ.sql.gz.gpg) before use --
+#      rejecting any other prefix, any other database name, path
+#      traversal, embedded whitespace/newlines, shell metacharacters, a
+#      malformed timestamp shape, or any other arbitrary key. Anything
+#      that fails validation (including an unreadable/absent HEAD
+#      response, e.g. a `latest/` object that predates this feature) is
+#      treated exactly like no metadata existed at all -- the
+#      tested-backup identity for this run is recorded as unknown, never
+#      guessed.
+#
+#      Race-condition note: `latest/...` itself is still a MUTABLE
+#      pointer, overwritten by every nightly backup run (a separate
+#      concurrency group from this workflow, so the two CAN run
+#      concurrently). But this workflow performs exactly ONE HeadObject on
+#      `latest/` for the entire job -- it never re-reads `latest/` to
+#      "double check" the identity. R2 (like S3) gives strong per-object
+#      read consistency, so that one HEAD call returns one coherent
+#      (content, metadata) snapshot; it can never observe new content with
+#      stale metadata or vice versa, because both are written by the same
+#      atomic PutObject. Once step 1 below captures the validated dated
+#      key, that key refers to an IMMUTABLE object (daily/... keys are
+#      never overwritten, only new ones added) -- so no matter how many
+#      times a concurrent or later backup run overwrites `latest/` after
+#      this job's one HEAD call, it cannot change which object this run
+#      downloads and restores.
+#   1. Downloads that validated dated object if step 0 established its
+#      identity; otherwise falls back to downloading `latest/...` directly
+#      (same read-only credential), still proving the pipeline produces a
+#      restorable backup even though this run can't name which dated
+#      backup it was. verifiedBackupCompletedAt's one canonical source is
+#      the immutable dated object's own LastModified, read directly from
+#      this same GetObject response -- never a second API call, never
+#      parsed back out of the key string.
 #   2. Decrypts and decompresses it.
 #   3. Restores it into a brand-new, throwaway remote D1 database (never
 #      the real fundraising-os-staging-db).
@@ -60,9 +85,11 @@
 #
 # Any failure in steps 1-5 fails this job (red X + whatever notification
 # settings this repository/org has configured for Actions failures) --
-# there is no soft-fail path. Step 0 is the only best-effort exception,
-# by design (see above). See docs/DEPLOYMENT.md's "Automated D1 backup"
-# section for the required secrets and one-time setup.
+# there is no soft-fail path. Step 0's own metadata read/validation never
+# fails the job by itself (an unreadable or invalid result just means
+# "identity unknown" going into step 1), by design (see above). See
+# docs/DEPLOYMENT.md's "Automated D1 backup" section for the required
+# secrets and one-time setup.
 name: D1 monthly restore verification
 
 on:
@@ -99,40 +126,52 @@ jobs:
           set -euo pipefail
           command -v aws >/dev/null 2>&1 || pip install --quiet awscli
 
-      - name: Determine which immutable backup was actually most recently published
+      - name: Determine and validate the immutable backup identity from latest/'s metadata
         id: identity
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATUS_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATUS_WRITE_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET }}
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
         run: |
           set -uo pipefail
-          # Best-effort provenance lookup -- see the header comment's race-
-          # condition note. Reuses this job's existing status-bucket
-          # credential (already Read & Write on that bucket for the publish
-          # step below); no new secret. Never fatal: a failure here only
-          # means step "Download the backup object to verify" falls back to
-          # latest/ with the tested-backup identity recorded as unknown.
+          # Design C -- see the header comment for the full race-condition
+          # and terminology analysis. This is the ONLY HeadObject call
+          # against latest/ in this job; the key captured (and strictly
+          # validated) here is what step 1 restores, never re-derived from
+          # a second HEAD. Uses only the existing read-only backup-bucket
+          # credential -- R2_STATUS_WRITE_* is never referenced here.
           echo "known=false" >> "$GITHUB_OUTPUT"
-          if aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" --key "backup-latest-success.json" backup-success.json; then
-            KEY="$(jq -r '.backupObjectKey // empty' backup-success.json)"
-            AT="$(jq -r '.completedAt // empty' backup-success.json)"
-            DB="$(jq -r '.databaseName // empty' backup-success.json)"
-            if [ -n "${KEY}" ] && [ -n "${AT}" ] && [ "${DB}" = "${DATABASE_NAME}" ]; then
+          if aws s3api head-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "latest/${DATABASE_NAME}.sql.gz.gpg" > latest-head.json; then
+            DATED_KEY="$(jq -r '.Metadata["dated-backup-key"] // empty' latest-head.json)"
+            # Strict allowlist validation -- never trust R2 metadata merely
+            # because it is present. Must match exactly
+            # "daily/<DATABASE_NAME>-YYYYMMDDTHHMMSSZ.sql.gz.gpg", full
+            # string, nothing else: no other prefix, no other database
+            # name, no path traversal, no embedded whitespace/newlines, no
+            # shell metacharacters, no malformed timestamp shape, no
+            # arbitrary key. Anything that doesn't match exactly is
+            # rejected -- identity stays unknown, never guessed.
+            VALID=false
+            if [ -n "${DATED_KEY}" ] && [ "$(printf '%s' "${DATED_KEY}" | wc -l)" = "0" ]; then
+              EXPECTED_PATTERN="^daily/${DATABASE_NAME}-[0-9]{8}T[0-9]{6}Z\.sql\.gz\.gpg\$"
+              if [[ "${DATED_KEY}" =~ ${EXPECTED_PATTERN} ]]; then
+                VALID=true
+              fi
+            fi
+            if [ "${VALID}" = "true" ]; then
               {
                 echo "known=true"
-                echo "key=${KEY}"
-                echo "at=${AT}"
+                echo "key=${DATED_KEY}"
               } >> "$GITHUB_OUTPUT"
             else
-              echo "::warning::backup-latest-success.json was readable but missing or mismatched fields -- falling back to latest/ with unknown tested-backup identity."
+              echo "::warning::latest/'s dated-backup-key metadata is missing or does not match the expected form -- falling back to latest/ with unknown tested-backup identity."
             fi
           else
-            echo "::warning::Could not read backup-latest-success.json -- falling back to latest/ with unknown tested-backup identity."
+            echo "::warning::Could not HEAD latest/ -- falling back to a direct download attempt with unknown tested-backup identity."
           fi
-          rm -f backup-success.json
+          rm -f latest-head.json
 
       - name: Download the backup object to verify
         id: download
@@ -144,21 +183,38 @@ jobs:
           BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
           IDENTITY_KNOWN: ${{ steps.identity.outputs.known }}
           IDENTITY_KEY: ${{ steps.identity.outputs.key }}
-          IDENTITY_AT: ${{ steps.identity.outputs.at }}
         run: |
           set -uo pipefail
-          # Prefers the specific immutable dated object identified above
-          # (guarantees identity -- see the header comment). Only falls
-          # back to the mutable latest/ pointer when that identity could
-          # not be established or that specific object could not be
-          # downloaded; the fallback still proves the pipeline produces a
-          # restorable backup, just without a provable dated identity.
+          # Restores the SAME validated immutable key captured in the
+          # identity step above -- no second HEAD of latest/, no
+          # re-derivation. Only falls back to the mutable latest/ pointer
+          # when that identity could not be established or that specific
+          # object could not be downloaded; the fallback still proves the
+          # pipeline produces a restorable backup, just without a provable
+          # dated identity.
           DOWNLOADED=false
           KNOWN=false
+          TESTED_AT=""
           if [ "${IDENTITY_KNOWN}" = "true" ]; then
-            if aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "${IDENTITY_KEY}" latest.sql.gz.gpg; then
+            if aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "${IDENTITY_KEY}" latest.sql.gz.gpg > download-response.json; then
               DOWNLOADED=true
               KNOWN=true
+              # verifiedBackupCompletedAt's one canonical source: the
+              # immutable dated object's own LastModified, read directly
+              # from this same GetObject response -- never a second API
+              # call, never parsed back out of the key string. Reformatted
+              # to this system's usual Z-suffixed UTC shape for
+              # consistency with every other published timestamp.
+              RAW_LAST_MODIFIED="$(jq -r '.LastModified // empty' download-response.json)"
+              if [ -n "${RAW_LAST_MODIFIED}" ]; then
+                TESTED_AT="$(date -u -d "${RAW_LAST_MODIFIED}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+              fi
+              if [ -z "${TESTED_AT}" ]; then
+                # Both fields of an identity are published together or not
+                # at all -- never a key with no matching date.
+                echo "::warning::Could not determine the restored object's LastModified -- tested-backup identity recorded as unknown for this run."
+                KNOWN=false
+              fi
             else
               echo "::warning::Could not download the specific dated backup object (${IDENTITY_KEY}) -- falling back to latest/ with unknown tested-backup identity."
             fi
@@ -170,11 +226,12 @@ jobs:
             fi
           fi
           test -s latest.sql.gz.gpg || { echo "::error::Downloaded backup object is empty."; exit 1; }
+          rm -f download-response.json
           {
             echo "known=${KNOWN}"
             if [ "${KNOWN}" = "true" ]; then
               echo "key=${IDENTITY_KEY}"
-              echo "at=${IDENTITY_AT}"
+              echo "at=${TESTED_AT}"
             fi
           } >> "$GITHUB_OUTPUT"
 
