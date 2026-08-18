@@ -11,6 +11,7 @@ import {
 import { isFutureScheduledDate, parseScheduledDate, schedulingLabel, toLocalDateTimeValue } from "../../lib/capture/scheduling";
 import type { DonorSearchRecord } from "../../lib/relationships/donor-search";
 import { DonorAutocomplete } from "./DonorAutocomplete";
+import { RecipientPicker } from "./RecipientPicker";
 import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
 
 const kinds: Array<{ value: InteractionKind; icon: string }> = [
@@ -21,6 +22,30 @@ const kinds: Array<{ value: InteractionKind; icon: string }> = [
   { value: "note", icon: "✎" },
   { value: "personal", icon: "♡" },
 ];
+
+// Not every interaction type has an obvious default role -- these are
+// starting points the fundraiser can still override explicitly (the role
+// picker is always shown, never hidden), not a hidden classification.
+// meeting/call/visit/personal imply real back-and-forth (participant);
+// email/note default to broadcast-style outreach (recipient).
+const ROLE_DEFAULT_BY_KIND: Record<InteractionKind, "participant" | "recipient"> = {
+  meeting: "participant",
+  call: "participant",
+  visit: "participant",
+  personal: "participant",
+  email: "recipient",
+  note: "recipient",
+};
+
+// A UX-risk threshold, not the backend's own limit (see MAX_SHARED_RECIPIENTS
+// below, which mirrors the real server-side cap in
+// app/api/interactions/shared/route.ts) -- large outreach is never blocked,
+// just confirmed once before saving.
+const LARGE_SELECTION_CONFIRM_THRESHOLD = 15;
+// Mirrors MAX_RECIPIENTS in app/api/interactions/shared/route.ts.
+const MAX_SHARED_RECIPIENTS = 200;
+
+type SharedSaveResult = { sharedActivityId: string; interactionIds: string[]; recipientCount: number; occurredAt: string };
 
 type SaveResult = {
   interactionId: string;
@@ -47,6 +72,66 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   const [errorMessage, setErrorMessage] = useState("");
   const [acceptRelationshipSnapshot, setAcceptRelationshipSnapshot] = useState(false);
   const activeDonor = donors.find((item) => item.id === donorId);
+
+  // Multi-donor mode -- entirely additive. When entryMode is "single" every
+  // piece of state and behavior above is untouched, so single-donor capture
+  // (including editing an existing interaction, which never shows the mode
+  // toggle at all) keeps working exactly as it did before this existed.
+  const [entryMode, setEntryMode] = useState<"single" | "multiple">("single");
+  const [recipientIds, setRecipientIds] = useState<string[]>([]);
+  const [roleOverride, setRoleOverride] = useState<"participant" | "recipient" | null>(null);
+  const [sharedSummary, setSharedSummary] = useState("");
+  const [sharedOccurredAt, setSharedOccurredAt] = useState(() => toLocalDateTimeValue(new Date(initialNow)));
+  const [showLargeConfirm, setShowLargeConfirm] = useState(false);
+  const [sharedStatus, setSharedStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [sharedResult, setSharedResult] = useState<SharedSaveResult | null>(null);
+  const [sharedErrorMessage, setSharedErrorMessage] = useState("");
+  const sharedKind = selectedKind ?? "meeting";
+  const role = roleOverride ?? ROLE_DEFAULT_BY_KIND[sharedKind];
+  const sharedValidDate = Boolean(parseScheduledDate(sharedOccurredAt));
+  const sharedReady = recipientIds.length >= 2 && sharedSummary.trim().length >= 4 && sharedValidDate;
+
+  async function saveSharedActivity(confirmedLarge = false) {
+    if (!sharedReady || sharedStatus === "saving") return;
+    if (recipientIds.length >= LARGE_SELECTION_CONFIRM_THRESHOLD && !confirmedLarge) {
+      setShowLargeConfirm(true);
+      return;
+    }
+    setShowLargeConfirm(false);
+    setSharedStatus("saving");
+    setSharedErrorMessage("");
+    try {
+      const response = await fetch("/api/interactions/shared", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          donorIds: recipientIds,
+          type: sharedKind,
+          role,
+          summary: sharedSummary,
+          occurredAt: parseScheduledDate(sharedOccurredAt)?.toISOString(),
+        }),
+      });
+      const payload = await response.json() as SharedSaveResult & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "The shared activity could not be saved.");
+      setSharedResult(payload);
+      setSharedStatus("saved");
+    } catch (error) {
+      setSharedErrorMessage(error instanceof Error ? error.message : "The shared activity could not be saved.");
+      setSharedStatus("error");
+    }
+  }
+
+  function resetShared() {
+    setRecipientIds([]);
+    setRoleOverride(null);
+    setSharedSummary("");
+    setSharedOccurredAt(toLocalDateTimeValue(new Date()));
+    setShowLargeConfirm(false);
+    setSharedStatus("idle");
+    setSharedResult(null);
+    setSharedErrorMessage("");
+  }
 
   const inferredKind = useMemo(() => inferInteractionKind(note), [note]);
   const activeKind = selectedKind ?? inferredKind;
@@ -103,6 +188,27 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     setStatus("idle");
   }
 
+  if (sharedStatus === "saved" && sharedResult) {
+    return (
+      <main className="capture-page capture-success">
+        <div className="success-mark">✓</div>
+        <p className="eyebrow">SHARED ACTIVITY LOGGED</p>
+        <h1>{role === "recipient" ? `Sent to ${sharedResult.recipientCount} donors` : `Logged with ${sharedResult.recipientCount} participants`}</h1>
+        <p className="capture-lede">
+          {interactionKindLabel(sharedKind)} on{" "}
+          {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(sharedResult.occurredAt))}.
+        </p>
+        <section className="update-receipt" aria-label="Updated relationship surfaces">
+          <article><span>↗</span><div><strong>{sharedResult.recipientCount} donor timelines updated</strong><p>Each linked donor's Last Contact was updated. {role === "recipient" ? "This does not, by itself, count as a substantive-contact touch -- reconnect suggestions are unaffected." : "This counts as a substantive contact, the same as any other logged interaction."}</p></div><b>Done</b></article>
+          <article><span>✓</span><div><strong>No reminders were created</strong><p>Bulk outreach never auto-creates a follow-up. Add one from an individual donor's page if needed.</p></div><b>Done</b></article>
+        </section>
+        <div className="success-actions">
+          <button onClick={resetShared}>Log another</button>
+        </div>
+      </main>
+    );
+  }
+
   if (status === "saved" && result) {
     return (
       <main className="capture-page capture-success">
@@ -141,7 +247,15 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
         <a href={donorId ? `/donors/${encodeURIComponent(donorId)}` : "/donors"} aria-label="Close interaction capture">×</a>
       </header>
 
+      {!editing && (
+        <div className="capture-mode-toggle" role="group" aria-label="Number of donors">
+          <button type="button" className={entryMode === "single" ? "active" : ""} aria-pressed={entryMode === "single"} onClick={() => setEntryMode("single")}>Single donor</button>
+          <button type="button" className={entryMode === "multiple" ? "active" : ""} aria-pressed={entryMode === "multiple"} onClick={() => setEntryMode("multiple")}>Multiple donors</button>
+        </div>
+      )}
+
       <div className="capture-layout">
+      {entryMode === "single" ? <>
         <section className="capture-composer-card">
           <div className="capture-context">
             <div className="mini-avatar" style={{ background: "#d9e8df" }}>{activeDonor ? donorInitials({ displayName: activeDonor.name, primaryFirstName: activeDonor.primaryFirstName, lastName: activeDonor.lastName }) : "?"}</div>
@@ -255,6 +369,71 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           </div>
           <div className="trust-note"><span>✓</span><p><strong>No duplicate entry.</strong> {future ? "The planned activity remains separate from the completed outcome you log later." : "Fundraising OS keeps the original note and records every inferred update."}</p></div>
         </aside>
+      </> : (
+        <section className="capture-composer-card capture-shared-composer">
+          <p className="eyebrow">SHARED ACTIVITY</p>
+          <h2>One activity, multiple donors</h2>
+          <p className="field-help">Log this once. Every selected donor gets their own timeline entry and Last Contact update, but the note and date are stored once.</p>
+
+          <div className="interaction-kind-picker" aria-label="Interaction type">
+            {kinds.map((kind) => (
+              <button
+                className={sharedKind === kind.value ? "active" : ""}
+                key={kind.value}
+                onClick={() => setSelectedKind(kind.value)}
+                aria-pressed={sharedKind === kind.value}
+              >
+                <span>{kind.icon}</span>{interactionKindLabel(kind.value)}
+              </button>
+            ))}
+          </div>
+
+          <fieldset className="role-picker">
+            <legend>Role for every selected donor</legend>
+            <div className="role-picker-options">
+              <button type="button" className={role === "recipient" ? "active" : ""} aria-pressed={role === "recipient"} onClick={() => setRoleOverride("recipient")}>
+                Recipients<small>Sent a text, email, or update. Updates Last Contact; does not suppress "needs outreach" suggestions.</small>
+              </button>
+              <button type="button" className={role === "participant" ? "active" : ""} aria-pressed={role === "participant"} onClick={() => setRoleOverride("participant")}>
+                Participants<small>Actively took part in a meeting or call. Counts as substantive contact, same as any other interaction.</small>
+              </button>
+            </div>
+          </fieldset>
+
+          <RecipientPicker donors={donors} selectedIds={recipientIds} onChange={setRecipientIds} maxRecipients={MAX_SHARED_RECIPIENTS} />
+
+          <label className="capture-field-label" htmlFor="shared-summary">Summary / notes</label>
+          <textarea
+            id="shared-summary"
+            value={sharedSummary}
+            onChange={(event) => { setSharedSummary(event.target.value); setSharedStatus("idle"); }}
+          />
+          <p className="field-help">This exact text is shown on every selected donor's timeline. Editing it later updates all of them at once.</p>
+
+          <div className="interaction-date-row">
+            <label htmlFor="shared-occurred-at">Date &amp; time</label>
+            <input id="shared-occurred-at" type="datetime-local" value={sharedOccurredAt} onChange={(event) => { setSharedOccurredAt(event.target.value); setSharedStatus("idle"); }} />
+            <button type="button" onClick={() => setSharedOccurredAt(toLocalDateTimeValue(new Date()))}>Now</button>
+          </div>
+
+          {sharedStatus === "error" && <p className="capture-error">{sharedErrorMessage} Your note is still here—try again.</p>}
+
+          {showLargeConfirm && (
+            <div className="large-selection-confirm">
+              <p>You're about to log this touchpoint for {recipientIds.length} donors. Continue?</p>
+              <div>
+                <button type="button" onClick={() => setShowLargeConfirm(false)}>Cancel</button>
+                <button type="button" className="danger-button" onClick={() => saveSharedActivity(true)}>Log for {recipientIds.length} donors</button>
+              </div>
+            </div>
+          )}
+
+          <button className="capture-save" disabled={!sharedReady || sharedStatus === "saving"} onClick={() => saveSharedActivity(false)}>
+            {sharedStatus === "saving" ? "Saving…" : "Save once"}
+          </button>
+          <p className="capture-assurance">No reminder is created automatically for any recipient -- add one from an individual donor's page afterward if needed.</p>
+        </section>
+      )}
       </div>
     </main>
   );

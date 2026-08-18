@@ -163,9 +163,10 @@ export const sharedActivities = sqliteTable("shared_activities", {
   recipientCount: integer("recipient_count").notNull().default(0),
   // Application-level cascade delete: set when the whole activity is
   // deleted, which also soft-cancels (source -> 'cancelled:...') every
-  // linked interactions row -- not yet built (Phase 2 UX); only the bulk
-  // create path (app/api/interactions/shared/route.ts) exists so far.
-  // Never a real SQL DELETE, matching interactions' own delete convention.
+  // linked interactions row -- see the delete-activity action in
+  // app/api/interactions/shared/[id]/route.ts (also handles single-recipient
+  // removal and summary/type/date edits). Never a real SQL DELETE, matching
+  // interactions' own delete convention.
   deletedAt: integer("deleted_at", { mode: "timestamp" }),
   ...timestamps,
 }, (table) => [index("shared_activities_user_date_idx").on(table.userId, table.occurredAt)]);

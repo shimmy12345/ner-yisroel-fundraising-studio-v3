@@ -921,3 +921,48 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .yahrtzeit-form-preview { margin:0; color:#365448; font-size:13px; }
 .yahrtzeit-form-actions { display:flex; gap:8px; }
 @media (max-width:600px) { .yahrtzeit-form-date { grid-template-columns:1fr; } }
+
+/* Shared multi-donor activity: entry-mode toggle, recipient picker, role
+   choice, large-selection confirmation, and timeline/badge polish. */
+.capture-mode-toggle { display:flex; gap:8px; margin-bottom:14px; }
+.capture-mode-toggle button { min-height:40px; padding:8px 14px; border:1px solid #cad8d0; border-radius:20px; background:#fff; color:#5a655e; font-size:13px; font-weight:700; cursor:pointer; }
+.capture-mode-toggle button.active { border-color:#315f4b; background:#dfece4; color:#1f4a38; }
+.recipient-picker { display:grid; gap:8px; margin:14px 0; }
+.recipient-picker label { font-size:11px; font-weight:750; color:#455a50; text-transform:uppercase; letter-spacing:.04em; }
+.recipient-picker > input { min-height:44px; padding:10px 12px; border:1px solid #cad8d0; border-radius:8px; font:inherit; font-size:14px; }
+.recipient-picker-results { display:grid; gap:2px; max-height:320px; overflow-y:auto; margin-top:4px; padding:6px; border:1px solid #dde5e0; border-radius:9px; background:#fbfcfb; }
+.recipient-picker-result { display:grid; grid-template-columns:20px 34px minmax(0,1fr); align-items:center; gap:10px; min-height:44px; padding:8px 10px; border:none; border-radius:7px; background:transparent; text-align:left; font:inherit; cursor:pointer; }
+.recipient-picker-result:hover { background:#eef4f0; }
+.recipient-picker-result.selected { background:#dfece4; }
+.recipient-picker-result:disabled { cursor:not-allowed; opacity:.45; }
+.recipient-picker-check { color:#315f4b; font-weight:800; }
+.recipient-picker-selected { margin-top:4px; }
+.recipient-picker-count { margin:0 0 8px; color:var(--muted); font-size:12px; font-weight:700; }
+.recipient-picker-cap-note { color:#874437; }
+.recipient-picker-chips { display:flex; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
+.recipient-picker-chip { display:flex; align-items:center; gap:6px; min-height:36px; padding:6px 6px 6px 12px; border:1px solid #cad8d0; border-radius:20px; background:#fff; font-size:13px; }
+.recipient-picker-chip small { margin-left:4px; color:var(--muted); }
+.recipient-picker-chip button { display:grid; place-items:center; width:28px; height:28px; border:none; border-radius:50%; background:#eef1ef; color:#5a655e; font-size:15px; line-height:1; cursor:pointer; }
+.recipient-picker-chip button:hover { background:#e0e6e2; color:#874437; }
+.role-picker { display:grid; gap:8px; margin:14px 0; }
+.role-picker legend { font-size:11px; font-weight:750; color:#455a50; text-transform:uppercase; letter-spacing:.04em; }
+.role-picker-options { display:flex; gap:8px; }
+.role-picker-options button { flex:1; min-height:48px; padding:10px 12px; border:1px solid #cad8d0; border-radius:9px; background:#fff; color:#5a655e; font-size:13px; font-weight:700; cursor:pointer; text-align:left; }
+.role-picker-options button.active { border-color:#315f4b; background:#dfece4; color:#1f4a38; }
+.role-picker-options button small { display:block; margin-top:2px; color:var(--muted); font-weight:500; font-size:11px; }
+.large-selection-confirm { position:sticky; bottom:12px; z-index:5; margin-top:16px; padding:16px; border:1px solid #d6aa9e; border-radius:10px; background:#fff8f5; box-shadow:0 10px 30px rgba(65,48,40,.15); }
+.large-selection-confirm p { margin:0 0 12px; color:#625750; line-height:1.5; }
+.large-selection-confirm div { display:flex; justify-content:flex-end; gap:8px; }
+.large-selection-confirm button { min-height:38px; padding:8px 14px; border:1px solid #cad8d0; border-radius:8px; background:#fff; color:#315f4b; font-weight:750; cursor:pointer; }
+.large-selection-confirm button.danger-button { border-color:#874437; background:#874437; color:#fff; }
+.event-shared-activity { padding:3px 7px; border-radius:10px; background:#e8eef5; color:#2a4d73; font-size:9px; font-weight:650; }
+.shared-activity-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.shared-activity-actions button { min-height:36px; padding:7px 11px; border:1px solid #cad8d0; border-radius:8px; background:#fff; color:#315f4b; font-size:11px; font-weight:700; cursor:pointer; }
+.shared-activity-actions button.danger-button { border-color:#874437; color:#874437; }
+@media (max-width:760px) {
+  .recipient-picker-results { max-height:260px; }
+  .role-picker-options { flex-direction:column; }
+  .large-selection-confirm { bottom:8px; }
+  .large-selection-confirm div { flex-direction:column; }
+  .large-selection-confirm button { width:100%; }
+}

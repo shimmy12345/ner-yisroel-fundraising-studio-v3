@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { ActivityActions } from "../../components/ActivityActions";
+import { SharedActivityActions } from "../../components/SharedActivityActions";
 import { CompletePriorityButton } from "../../components/CompletePriorityButton";
 import { DismissPriorityButton } from "../../components/DismissPriorityButton";
 import { RescheduleButton } from "../../components/RescheduleButton";
@@ -29,7 +30,8 @@ const STATUS_LABELS: Record<TimelineStatus, string> = { scheduled: "Scheduled", 
 // the initial view once more than RECENT_LIMIT are showing.
 const RECENT_LIMIT = 10;
 
-export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now, acknowledgments = {} }: {
+export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now, acknowledgments = {}, donorId }: {
+  donorId: string;
   giving: TimelineGiving[];
   legacyGifts: TimelineLegacyGift[];
   payments: TimelinePayment[];
@@ -118,7 +120,10 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
       const sharedActivityLabel = activity.shared_activity_id && activity.shared_activity_recipient_count
         ? activity.role === "recipient" ? `Sent to ${activity.shared_activity_recipient_count} donors` : `${activity.shared_activity_recipient_count} participants`
         : null;
-      return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{eventDate(item.eventAt, timezone, activity.occurred_at_date_only)}</strong></time><span className="timeline-dot">•</span><div className="timeline-content"><div><h3>{timelineTitle}</h3><span className="event-type">{typeLabel}</span>{sharedActivityLabel && <span className="event-shared-activity">{sharedActivityLabel}</span>}<span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div>{item.plannedAt && item.status === "completed" && <small className="timeline-planned-date">Originally planned for {dateTime(item.plannedAt, timezone)}</small>}<p>{timelineNote}</p>{live && scheduled && <a className="timeline-outcome-link" href={`/interactions/${encodeURIComponent(activity.id)}/outcome`}>Log Outcome</a>}{live && item.status === "cancelled" && <a className="timeline-outcome-link secondary" href={`/interactions/${encodeURIComponent(activity.id)}/outcome`}>Edit or reopen</a>}{live && item.status !== "cancelled" && <ActivityActions activityId={activity.id} editHref={`/interactions/${encodeURIComponent(activity.id)}/edit`} scheduled={scheduled} canCancel={scheduled && activity.occurred_at > now} />}</div></article>;
+      return <article className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{eventDate(item.eventAt, timezone, activity.occurred_at_date_only)}</strong></time><span className="timeline-dot">•</span><div className="timeline-content"><div><h3>{timelineTitle}</h3><span className="event-type">{typeLabel}</span>{sharedActivityLabel && <span className="event-shared-activity">{sharedActivityLabel}</span>}<span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div>{item.plannedAt && item.status === "completed" && <small className="timeline-planned-date">Originally planned for {dateTime(item.plannedAt, timezone)}</small>}<p>{timelineNote}</p>{live && scheduled && <a className="timeline-outcome-link" href={`/interactions/${encodeURIComponent(activity.id)}/outcome`}>Log Outcome</a>}{live && item.status === "cancelled" && <a className="timeline-outcome-link secondary" href={`/interactions/${encodeURIComponent(activity.id)}/outcome`}>Edit or reopen</a>}{live && item.status !== "cancelled" && (activity.shared_activity_id
+        ? <SharedActivityActions sharedActivityId={activity.shared_activity_id} donorId={donorId} initialSummary={activity.shared_activity_summary ?? activity.summary} initialType={activity.type} initialOccurredAt={activity.occurred_at} />
+        : <ActivityActions activityId={activity.id} editHref={`/interactions/${encodeURIComponent(activity.id)}/edit`} scheduled={scheduled} canCancel={scheduled && activity.occurred_at > now} />
+      )}</div></article>;
     })}</div>}
     {hiddenCount > 0 && <button type="button" className="timeline-more" onClick={() => setVisibleCount((count) => count + RECENT_LIMIT)}>Show {nextBatchSize} more</button>}
     {visibleCount > RECENT_LIMIT && <button type="button" className="timeline-more" onClick={() => setVisibleCount(RECENT_LIMIT)}>Show recent {RECENT_LIMIT}</button>}
