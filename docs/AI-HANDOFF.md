@@ -12,108 +12,480 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-c95f6b6 (Update AI-HANDOFF.md for the applied regenerations + review findings)
+a04b4bd (Implement Phase 1 of the Ask/Solicitation feature (approved design)) -- **LOCAL ONLY, NOT PUSHED**
 
 origin/feature/independent-cloudflare-sandbox:
-c95f6b6 (pushed)
+0ba9ee9 (unchanged -- local HEAD is 2 commits ahead: 0ba9ee9 design-doc commit already pushed last session, then this session's a04b4bd implementation commit, still local-only)
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
 
 Working tree:
-clean
+clean (this handoff-update commit is the only thing after a04b4bd)
 
-## Ask / Solicitation Feature -- DESIGN ONLY (not implemented, awaiting approval)
+**No D1 writes were made. No migration was applied to any database. Nothing was deployed. Nothing was pushed.** This entire Phase 1 implementation exists only as local commits on this branch, per explicit instruction to stop after a local commit and report.
 
-Full design report: `docs/ASK-SOLICITATION-DESIGN.md` (26-item report per
-the task's own numbered request -- schema, status model, ask-vs-
-commitment-vs-gift semantics, Suggested Action/Meeting Brief/Assistant/
-Today wiring, donor-merge/backup/reset infra impact, tests, risks, phased
-rollout). **No schema, migration, or application code was written. No D1
-writes were made.** This is purely a design/audit deliverable, committed
-as documentation only.
+## Ask / Solicitation Feature -- Phase 1 IMPLEMENTED (local only -- not applied/pushed/deployed)
 
-Purpose (narrow, explicitly not a CRM/pipeline): let the system know,
-structurally, "we asked this donor for $X and it's still pending" --
-today that only exists buried in interaction notes (the exact
-Klein/Pfeiffer/Rovinsky cases from the prior cleanup-audit task).
+Design doc (approved, unchanged): `docs/ASK-SOLICITATION-DESIGN.md`.
+This section reports the Phase 1 **implementation** built on top of that
+approved design. **No D1 writes were made. No migration was applied to
+any database. Nothing was deployed. Nothing was pushed.** Everything
+below exists only as local git commits on
+`feature/independent-cloudflare-sandbox` (`a04b4bd`, plus this handoff
+commit) -- stopped here per explicit instruction, awaiting the next
+approval to push/apply/deploy.
 
-Key findings from the architecture audit:
-- **No existing table can cleanly represent an Ask.** `giving_activities`
-  is exclusively JL-Solutions-imported financial data (per
-  `docs/FUNDRAISING_OS_PRINCIPLES.md`, "JL Solutions remains the
-  financial system of record") -- its `category` values (`open_pledge`,
-  `partially_paid_pledge`, etc.) already mean a specific, later,
-  back-office-recorded thing. A new `asks` table is justified; the word
-  "pledge" must not be reused for it.
-- **A `solicitCandidate` already exists** in
-  `lib/relationships/recommendation-candidates.ts` -- exactly the gap
-  this feature closes: fuzzy regex-matching against free text, capped at
-  `"narrative"`/`"unconfirmed_historical"` certainty, never `"confirmed"`.
-  A new `open_ask` candidate at `"confirmed"` certainty naturally
-  outranks it on merit (no explicit suppression needed).
-- **The existing reminder system (`recommendations` table +
-  `reminder`/`reminderDueAt()`, already used by interaction capture)
-  fully covers "follow up in N days"** -- no new `follow_up_at` field or
-  second reminder mechanism needed.
-- **The Assistant cannot answer donor-named or cross-donor questions**
-  ("What did I ask Klein for?", "Who has an outstanding ask?") -- it's a
-  fixed-task, single-"primary-donor" rule-based classifier with no
-  donor-name resolution or search anywhere in it today. Recommended v1
-  scope is bounded accordingly (primary-donor-only, via the same
-  Meeting Brief evidence already threaded through).
-- **Today/suggestion-candidates already has the exact cross-donor
-  wiring pattern needed** (`openPledgeByDonor` in
-  `lib/workspace/live-data.ts` + `selectSuggestionDonorIds` in
-  `lib/workspace/suggestion-candidates.ts`) -- reusing it means no new
-  dashboard section is needed for stale asks to surface.
-- **Donor merge** (`app/api/donors/merge/route.ts`) has an explicit,
-  atomic, per-table `donor_id` reassignment list that a new `asks` table
-  must be added to. Audit also surfaced (informational, out of scope
-  here) that `yahrtzeits`/`important_dates`/`gift_acknowledgments`/
-  `donor_historical_context` are NOT currently reassigned on merge -- a
-  pre-existing gap the Ask feature must not repeat.
-- **Backup/production-baseline are schema-driven** (full `wrangler d1
-  export`; baseline regenerated via `pnpm run db:baseline:generate`) --
-  no manual changes needed there. **Staging-reset's
-  `STAGING_RESET_TABLE_ORDER`** (`lib/operations/staging-reset.ts`) is a
-  hand-maintained list with its own regression test guarding
-  completeness -- would need an explicit addition (test would catch it
-  if forgotten).
+### 1. Root architecture implemented
 
-Recommended minimum schema (see design doc for full reasoning):
+Exactly the approved design, end to end: new `asks`/`ask_changes` tables;
+a `open_ask` candidate in the existing shared recommendation engine
+(confirmed-certainty, never a parallel engine); wiring into Meeting
+Brief/Assistant/Today via the same evidence-building code paths every
+other candidate already uses; a direct-creation route and a status-
+transition route built on a pure, unit-tested decision function
+(`planAskUpdate` in `lib/capture/ask.ts`); progressive-disclosure UI in
+single-donor interaction capture only; a donor-profile Open Ask
+card/history/direct-log entry point; donor-merge reassignment. Every
+piece of shared logic (amount/purpose/note validation, the "what is this
+ask" descriptor, the follow-up action text, the status-transition rules)
+lives once in `lib/capture/ask.ts`, imported everywhere it's needed --
+never duplicated or reimplemented.
+
+### 2. Exact schema/migration
+
+`drizzle/0032_asks.sql` (also reflected in `db/schema.ts`):
+```sql
+CREATE TABLE asks (
+  id text PRIMARY KEY NOT NULL,
+  user_id text NOT NULL REFERENCES users(id),
+  donor_id text NOT NULL REFERENCES donors(id),
+  amount_cents integer,                      -- nullable, integer cents only
+  purpose text,                               -- nullable, free text
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','committed','declined','withdrawn')),
+  asked_at integer NOT NULL,
+  note text,
+  source_interaction_id text REFERENCES interactions(id),  -- nullable
+  created_at integer NOT NULL,
+  updated_at integer NOT NULL
+);
+CREATE INDEX asks_donor_status_idx ON asks (donor_id, status);
+
+CREATE TABLE ask_changes (
+  id text PRIMARY KEY NOT NULL,
+  ask_id text NOT NULL REFERENCES asks(id),   -- real FK (asks are never hard-deleted)
+  user_id text NOT NULL REFERENCES users(id),
+  donor_id text NOT NULL REFERENCES donors(id),
+  action text NOT NULL CHECK (action IN ('created','updated','status_changed')),
+  changed_fields text NOT NULL,               -- json array
+  before_json text,                            -- json, null on 'created'
+  after_json text NOT NULL,                    -- json
+  created_at integer NOT NULL
+);
+CREATE INDEX ask_changes_ask_idx ON ask_changes (ask_id, created_at);
 ```
-asks: id, user_id, donor_id, amount_cents (nullable), purpose (nullable,
-      free text), status (pending|committed|declined|withdrawn),
-      asked_at, note (nullable), source_interaction_id (nullable),
-      created_at, updated_at
-ask_changes: small append-only audit table, modeled on the existing
-      donor_contact_audits pattern
-```
+One evidence-based composite index on `asks` (covers both "asks for this
+donor" and "pending asks for this donor" via its leftmost/full-pair
+match); one on `ask_changes` (history for one ask), mirroring
+`donor_contact_audits`'s single index exactly. No speculative indexes
+added. Verified by applying this migration together with every other
+committed migration (0000-0032) to a real in-memory SQLite database
+(`node:sqlite`'s `DatabaseSync`) and inspecting the resulting
+columns/FKs/indexes directly -- not just visual review.
 
-Status model recommendation: `pending | committed | declined | withdrawn`
--- "closed" renamed to "withdrawn" (too vague otherwise), required to
-carry a note explaining why.
+### 3. Ask status semantics
 
-Unresolved decisions needing explicit approval before any implementation
-(full detail in the design doc's final section):
-1. Status model (`pending/committed/declined/withdrawn`, `withdrawn`
-   requires a note) -- confirm.
-2. Purpose stays free text, no taxonomy -- confirm.
-3. Multiple concurrent open asks per donor allowed (no one-at-a-time
-   constraint) -- confirm.
-4. Direct "+ Log ask" creation (no interaction required) belongs in v1 --
-   confirm.
-5. Follow-up interaction linking: only the originating interaction is
-   linked in v1 (Option A/D) vs. an opt-in nullable `ask_id` on later
-   interactions (Option B) -- pick one.
-6. A small `ask_changes` audit table is justified -- confirm.
-7. Backfilling Klein/Pfeiffer/Rovinsky as real Ask records is a
-   **separate**, later, explicitly-approved step after the feature ships
-   -- not part of the implementation itself.
-8. Whether to then also clear those 3 donors' `relationship_summary`
-   once their Ask exists -- callback to the still-open item from the
-   prior cleanup-audit task.
+`pending | committed | declined | withdrawn`, exactly as approved.
+Transitions are one-way, always FROM `pending` (`ASK_TERMINAL_STATUSES`
+in `lib/capture/ask.ts`) -- **no reopening in Phase 1**: attempting a
+second status change on an already-terminal ask returns `409` with
+`"This ask is already {status} and cannot be changed again."` A
+`withdrawn` transition is rejected (`422`) unless a non-empty `note` is
+provided in the same request -- that note becomes the required reason,
+stored in the existing `note` column (no new column). No stage
+selector/pipeline vocabulary anywhere.
+
+### 4. Ask vs. JL financial-data protections
+
+Verified two ways: (a) neither `app/api/asks/route.ts` nor
+`app/api/asks/[id]/route.ts` contains any `INSERT`/`UPDATE` statement
+targeting `giving_activities` or `gifts` -- asserted directly in
+`tests/asks.test.mjs`; (b) marking an ask `committed` only ever writes
+to `asks`/`ask_changes`/`recommendations` (retiring its own reminder) --
+nothing else. No gift-to-ask matching of any kind exists; a newly
+imported gift cannot and does not close an ask automatically. "Committed"
+means only "the fundraiser recorded that the donor said yes," never "JL
+has recorded the pledge."
+
+### 5. Interaction-capture UX
+
+`app/capture/CaptureExperience.tsx`, single-donor mode only: a "Did you
+make an ask?" No/Yes toggle (default **No**) appears after the existing
+reminder picker, using the same visual convention
+(`reminder-picker`/`ask-picker` share styling). When Yes: Amount
+(optional, `inputMode="decimal"`, parsed client-side to integer cents,
+degrading to `null` — never a client-side error — on anything
+unparseable/non-positive), Purpose (optional, 200-char cap), Note
+(optional, 2000-char cap). Saving POSTs `madeAsk`/`askAmountCents`/
+`askPurpose`/`askNote` to the **existing** `/api/interactions` route,
+which creates the interaction, the ask (`source_interaction_id` set to
+the just-created interaction's id), and the shared reminder (if any) in
+one `env.DB.batch()` -- atomic, matching the pre-existing
+interaction+reminder pattern exactly. The ask toggle is **never shown**
+when editing an existing interaction (`!editing` guard) -- editing never
+creates or changes an ask. No auto-detection from note text
+("$"/"solicited"/"asked"/"pledge") anywhere -- `madeAsk` must be
+explicitly `true`.
+
+### 6. Direct Log Ask UX
+
+`app/donors/[id]/AskManagement.tsx`'s `LogAskForm`, mirroring
+`GivingManagement.tsx`'s `PendingGiftForm` exactly (collapsible inline
+form, same interaction pattern). Fields: Amount (optional), Purpose
+(optional), Date asked (defaults to today), Note (optional), and the
+**same** reminder picker component reused a third time (interaction
+capture, direct create, and — not built, see §7 — no separate "add
+follow-up to an existing ask" flow in this phase's approved donor-profile
+mockup). Posts to `POST /api/asks`. Status is always `pending`; no stage
+selector is ever shown.
+
+### 7. Donor-profile Open Ask UX
+
+New `<section className="asks-section">` on `app/donors/[id]/page.tsx`,
+positioned right after the JL-sourced giving KPI grid and visually
+distinct from it (different background/border, its own "ASKS" eyebrow) --
+deliberately never implies confirmed financial data. Live mode only (no
+demo/sample asks data exists). Zero-to-N open (pending) asks render as
+compact cards (`OpenAskCard`): amount (only when non-null — **never**
+"$0"), purpose (or "Support requested" when both amount and purpose are
+absent), "Asked {date}", and three actions -- **Mark committed** and
+**Declined** as the two prominent, emphasized buttons, and a small `•••`
+overflow that reveals **Stop pursuing** (the `withdrawn` status) behind a
+required-reason textarea, deliberately de-emphasized so this never reads
+as pipeline-management software, per explicit instruction. Historical
+(committed/declined/withdrawn) asks collapse into a `<details>` "Past
+asks (N)" section, same pattern `GivingManagement.tsx` already uses for
+non-actionable records.
+
+### 8. Status-transition behavior
+
+`PATCH /api/asks/[id]` -- thin wrapper around the pure `planAskUpdate()`
+(validates, enforces the one-way-from-pending rule, computes exactly
+which fields changed). A no-op request (nothing actually different from
+the stored row) returns `"No changes were needed."` and writes nothing --
+verified directly (`planAskUpdate(pendingAsk, {amountCents: <same
+value>, purpose: <same value>})` returns `{ ok: true, changed: false }`).
+Reopening is not supported (§3). Every meaningful mutation writes one
+`ask_changes` row (see §9) and, if the status changed, completes every
+open reminder tied to this ask (`id LIKE 'ask-<id>-%'`, retiring every
+"Add follow-up" reminder ever set for it, not just the first).
+
+### 9. Audit-history behavior
+
+`ask_changes`, modeled directly on the existing `donor_contact_audits`
+shape: `action` (`created`/`updated`/`status_changed`), `changed_fields`
+(json array), `before_json`/`after_json`. A status change is always
+logged as `status_changed`; an amount/purpose/note-only edit is logged as
+`updated`. Not event sourcing -- one row per meaningful mutation, nothing
+finer-grained.
+
+### 10. Reminder integration
+
+Fully reused, no new mechanism. Interaction capture: the existing
+`reminder`/`reminderDueAt()`/`recommendations`-insert path, now routed to
+an ask-specific id (`ask-<askId>-<uuid>`) and action text
+(`askFollowUpAction()`) when an ask was made, otherwise unchanged
+(`activity-<interactionId>`, `extracted.nextAction`). Direct creation:
+same picker, same mechanism. No `follow_up_at`/`next_follow_up_at`
+column, no Ask-specific reminder table.
+
+### 11. Suggested Action behavior and timing rule
+
+New `open_ask` candidate (`certainty: "confirmed"`), added to
+`generateCandidates()` -- the existing shared engine, not a parallel one.
+**Timing rule, evidence-grounded, not invented:** urgency reuses
+`follow_up_pledge`'s exact horizon (`clamp01(ageDays / 180)`) and exact
+confidence cutoff (`ageDays >= 60 ? "medium" : "low"`) verbatim -- the
+closest existing precedent for "a stale, confirmed, money-adjacent open
+item." One deliberate, reasoned departure from that precedent: `recency`
+is a constant `0.7` (not `follow_up_pledge`'s decaying `0.3`), because an
+ask's own fact ("we asked, still pending") stays exactly as true and
+current regardless of age -- there's no "last activity" to go stale the
+way a pledge's does. This is what makes a same-day ask still outrank the
+existing fuzzy `solicitCandidate` on merit (verified:
+`certaintyMultiplier(1.0) * (0.35*0.75 + 0.35*0.7 + 0.30*0) ≈ 0.51` vs.
+`solicit`'s `0.85 * (0.35*0.7 + 0.35*0.5 + 0.30*0.4) ≈ 0.46`) while
+`urgency` still starts near zero, so a fresh ask never reads as an
+immediate nag (verified: `ageDays=0` → `urgency < 0.05`, `confidence:
+"low"`; `ageDays=90` → `urgency ≈ 0.5`, `confidence: "medium"`, and the
+open_ask candidate wins the overall recommendation when nothing else
+outranks it -- all asserted directly in `tests/asks.test.mjs` items
+15-17). This was flagged as a genuine design decision (not a stop
+condition) because a direct, reasoned precedent existed to reuse for two
+of the three scoring axes; only `recency` needed adjustment, with
+explicit reasoning grounded in the existing three-axis scoring model's
+own semantics. `honor_reminder` is not hard-suppressed by `open_ask`
+either way -- it already reliably outranks a fresh `open_ask` candidate
+on scoring merit alone (specificity 0.9 vs. 0.75, recency/urgency 0.6-1
+vs. 0.7/near-zero) whenever an explicit reminder exists, so no new
+suppression rule was needed (documented in
+`recommendation-rank.ts`'s `REMINDER_SUPPRESSES` comment).
+
+### 12. Today integration
+
+`lib/workspace/live-data.ts`: new `openAskByDonor` map (oldest pending
+ask per donor), threaded into the same per-donor evidence loop as
+`openPledgeByDonor`. `lib/workspace/suggestion-candidates.ts`:
+`askDonorIds` added to `selectSuggestionDonorIds()`, **unbounded** like
+`giftDonorIds`/`pledgeDonorIds` (always included, never subject to the
+contact-gap pool cap). `open_ask: "Open ask"` added to
+`suggestionLabelByKind`. **No new dashboard section, no "Ask Pipeline,"
+no "Open Opportunities" view** -- stale pending asks surface exclusively
+through the existing Suggested Action ranking on Today, exactly as
+specified.
+
+### 13. Meeting Brief integration
+
+`lib/relationships/meeting-brief.ts` queries every pending ask for the
+donor (oldest first); `meeting-brief-model.ts`'s `MeetingBrief.openAsks`
+carries the full list, and a new `askLine()` formatter produces exactly
+`"Open ask: $10,000 for dinner sponsorship, pending since Aug 1."` --
+factual, never calling it an "opportunity" (asserted directly:
+`askLine(...)` does not match `/opportunity/i`). The oldest pending ask
+also feeds the same `buildRecommendationEvidence()` call every other
+candidate uses, so Suggested Action reflects it automatically.
+
+### 14. Assistant integration
+
+Bounded exactly to what the existing architecture supports, per explicit
+instruction: `AssistantContextSnapshot.donor.openAsks` (pre-formatted
+lines via `askLine`) is threaded through from the **primary donor's**
+Meeting Brief only (`app/api/assistant/route.ts`), and surfaced in the
+`meeting-brief`/`relationship-summary` task templates
+(`lib/ai/rule-based.ts`'s new `openAsksBlock`). **Not built:**
+donor-name NLU, cross-donor Ask search, a "show me every open ask"
+capability, any new Assistant architecture -- none of these are
+achievable without infrastructure that doesn't exist for *any* fact type
+today, not just asks (confirmed during the design phase's audit).
+
+### 15. Shared/multi-donor safety behavior
+
+`app/api/interactions/shared/route.ts` (the multi-donor/broadcast route)
+was **not touched at all** -- verified directly: it contains zero
+references to `madeAsk` or `INSERT INTO asks`
+(`tests/asks.test.mjs` item 22). This is structural, not just a code-
+review claim: the single-donor form fields (including the new ask toggle)
+only ever render inside `entryMode === "single"`'s JSX branch, and only
+`saveInteraction()` (which POSTs to `/api/interactions`, never
+`/api/interactions/shared`) sends ask fields at all. A shared/broadcast
+activity cannot create an ask for any recipient, let alone N of them.
+
+### 16. Donor-merge behavior
+
+`app/api/donors/merge/route.ts`: `UPDATE asks SET donor_id=? WHERE
+donor_id=? AND user_id=?` and the same for `ask_changes`, added to the
+existing atomic `env.DB.batch()` alongside every other reassigned table;
+`asks` added to `linkedCounts()`/`movedCounts` reporting. Verified
+behaviorally against a real in-memory SQLite database (not just source
+review): seeded two donors, an ask, and an `ask_changes` row for the
+duplicate donor, ran the literal reassignment statements, confirmed both
+rows now belong to the survivor. **No fuzzy deduplication of asks** is
+attempted merely because amount/purpose look similar -- multiple pending
+asks are explicitly allowed (verified: inserting two `pending` asks for
+the same donor against the real schema succeeds with no constraint
+violation).
+
+### 17. Infrastructure/baseline/reset changes
+
+- `db/schema.ts` -- new `asks`/`ask_changes` table definitions.
+- `production-baseline/schema-manifest.json` and
+  `production-baseline/drizzle/0000_production_baseline_0019.sql` --
+  regenerated via the existing `pnpm run db:baseline:generate -- --write`
+  generator (never hand-edited); now reflects 33 source migrations
+  (0000-0032).
+- `lib/data-health/production-baseline.ts` -- the hardcoded
+  `PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 32` invariant bumped
+  to `33`, comment updated to describe `0032_asks.sql`.
+- `lib/operations/workspace-backup.ts` -- **newly discovered during this
+  task** (not caught during the design-phase audit): a *separate*,
+  smaller, human-readable JSON export (`/api/import/backup`, distinct
+  from the nightly whole-database `wrangler d1 export`) requires every
+  fundraising table to be explicitly classified into one of two lists,
+  enforced by its own regression test. Added `asks`/`ask_changes` to
+  `WORKSPACE_BACKUP_EXCLUDED_TABLES` (same treatment as
+  `yahrtzeits`/`important_dates` -- real donor-facing data, covered only
+  by the nightly full backup; including them in the smaller export would
+  need its own separately-verified owner-scoping work, out of scope
+  here).
+- `lib/operations/staging-reset.ts` -- `ask_changes` then `asks` added to
+  `STAGING_RESET_TABLE_ORDER` (children-before-parents order: ask_changes
+  references ask_id). The existing self-check test
+  (`tests/staging-reset.test.mjs`) confirms this list is exactly the
+  fundraising-table set.
+- **Nightly backup/restore workflow YAML: untouched**, confirmed
+  unnecessary -- `wrangler d1 export` (`.github/workflows/d1-backup-
+  nightly.yml`) is a full, untargeted database export with no per-table
+  enumeration to update.
+
+### 18. Mobile behavior
+
+Verified by reading the actual CSS, not just the JSX: `.ask-picker
+.ask-fields` mirrors `.reminder-picker > input`'s three-breakpoint
+pattern exactly (base: label-left layout; tablet+: wider label column;
+narrow mobile: `.reminder-picker legend`/`.ask-fields` both collapse to
+full-width, stacked). The Open Ask card grid
+(`.open-ask-list`) collapses to a single column under 700px; the Log Ask
+form becomes a fixed bottom sheet under 700px, matching
+`.pending-gift-form`'s existing mobile treatment exactly. No wide tables,
+no desktop-only management UI anywhere in this feature.
+
+### 19. Tests added and results
+
+`tests/asks.test.mjs` -- all 25 required items, run in `pnpm test`'s
+existing chain. Mix of real behavioral tests (pure validation/transition
+functions from `lib/capture/ask.ts`; real recommendation-engine
+evidence/candidate construction; a real in-memory SQLite database built
+from every actual committed migration for schema/merge/multi-ask
+behavior) and source-string checks only where this repo has no D1/route
+test harness at all (confirmed by auditing every existing API-route test
+in this codebase first -- `tests/activity-editing.test.mjs`,
+`tests/donor-merge.test.mjs`, etc. -- none of them invoke a route handler
+against a mocked `env`; they all verify committed source text, the
+established convention this task's own tests follow for the same reason).
+**Result: all 25 items pass.**
+
+Existing tests updated for legitimate, intentional changes (not weakened
+to make something pass):
+- `tests/today.test.mjs` -- the donor page's exact `env.DB.prepare(...)`
+  call-site count invariant, `21 -> 22` (one new, real, intentional
+  query), with an updated comment explaining why.
+- `tests/production-baseline.test.mjs` -- a new "0032 asks migration"
+  test (same pattern as every prior migration's own test in this file);
+  the superseded 0031 test downgraded from an exact-length assertion to
+  an `.includes()` check, matching how every earlier migration's test in
+  this same file already reads once it's no longer the newest.
+- `tests/shared-activity-ux.test.mjs` -- one assertion's regex loosened
+  to no longer require `acceptRelationshipSnapshot` be the literal last
+  field in the request body object (it no longer is, now that ask fields
+  are appended after it) -- the assertion's actual intent (the flag is
+  still sent, still correctly gated) is unchanged and still verified.
+- `tests/assistant.test.mjs` -- its hand-built `AssistantContextSnapshot`
+  fixture gained `openAsks: []` (a plain untyped test fixture, so this
+  wasn't caught by `tsc`; caught by actually running the test).
+
+### 20. Typecheck/build results
+
+`pnpm exec tsc --noEmit`: clean, zero errors, after every single edit in
+this task (re-run repeatedly throughout, not just once at the end).
+`pnpm run build:staging-independent`: succeeded, exit 0; the build's own
+route listing confirms `/api/asks` and `/api/asks/:id` are registered.
+
+### 21. Exact files changed
+
+New: `app/api/asks/route.ts`, `app/api/asks/[id]/route.ts`,
+`app/donors/[id]/AskManagement.tsx`, `drizzle/0032_asks.sql`,
+`lib/capture/ask.ts`, `tests/asks.test.mjs`.
+
+Modified: `db/schema.ts`, `app/api/interactions/route.ts`,
+`app/api/donors/merge/route.ts`, `app/api/assistant/route.ts`,
+`app/capture/CaptureExperience.tsx`, `app/donors/[id]/page.tsx`,
+`app/globals.css`, `lib/ai/types.ts`, `lib/ai/rule-based.ts`,
+`lib/relationships/recommendation-evidence.ts`,
+`lib/relationships/recommendation-candidates.ts`,
+`lib/relationships/recommendation-rank.ts`,
+`lib/relationships/meeting-brief.ts`,
+`lib/relationships/meeting-brief-model.ts`, `lib/workspace/live-data.ts`,
+`lib/workspace/suggestion-candidates.ts`,
+`lib/data-health/production-baseline.ts`,
+`lib/operations/staging-reset.ts`, `lib/operations/workspace-backup.ts`,
+`package.json`, `production-baseline/schema-manifest.json`,
+`production-baseline/drizzle/0000_production_baseline_0019.sql`,
+`tests/today.test.mjs`, `tests/production-baseline.test.mjs`,
+`tests/shared-activity-ux.test.mjs`, `tests/assistant.test.mjs`.
+
+32 files changed total (`git diff --stat` on commit `a04b4bd`), 1607
+insertions, 43 deletions.
+
+### 22. Migration number/name and confirmation it remains unapplied
+
+`drizzle/0032_asks.sql`. **Not applied to any D1 database** -- verified
+only against a local, disposable, in-memory SQLite instance
+(`node:sqlite`), never against staging or production D1. No `wrangler d1
+execute`/`migrations apply` command was run at any point in this task.
+
+### 23. Local commit SHA
+
+`a04b4bd` -- "Implement Phase 1 of the Ask/Solicitation feature (approved
+design)." Plus this handoff-update commit immediately following it (see
+"Current Git State" above for its SHA once created).
+
+### 24. Confirmation nothing was pushed
+
+Confirmed: `origin/feature/independent-cloudflare-sandbox` is still
+`0ba9ee9` (the prior session's design-doc commit) -- `git push` was never
+run. `git fetch` (read-only) was used once, only to confirm this.
+
+### 25. Confirmation nothing was deployed
+
+Confirmed: no `wrangler deploy` or equivalent command was run at any
+point. No application code that affects the running Worker was deployed
+anywhere.
+
+### 26. Confirmation no D1/R2/workflow/main/production changes occurred
+
+Confirmed: every schema/behavior claim above was verified against a
+local, disposable, in-memory SQLite database (`node:sqlite`'s
+`DatabaseSync`) or by reading committed source -- never against live D1.
+No R2 object was read or written. No `.github/workflows/*.yml` file was
+modified. `origin/main` was not fetched-against/touched/merged (still
+`4ea1d5e...`, unverified-but-unchanged this task since no operation could
+have affected it). No production binding/environment was touched at any
+point -- this repo's `wrangler.staging.jsonc` has no production D1
+binding, and no other wrangler config was referenced.
+
+### 27. Implementation issues / design assumptions that surfaced
+
+1. **`lib/operations/workspace-backup.ts`'s secondary JSON-export table
+   classification** (§17) was not caught during the design-phase audit
+   and only surfaced while actually wiring infrastructure in this task --
+   a real gap in the original design doc's "Infrastructure" section,
+   now closed.
+2. **The timing/urgency scoring for `open_ask`** (§11) required a
+   genuine, reasoned departure from `follow_up_pledge`'s exact precedent
+   (constant `recency` instead of decaying) to satisfy both "must
+   normally beat fuzzy solicit evidence" and "must not nag immediately" --
+   flagged in detail rather than silently invented; verified numerically,
+   not just asserted.
+3. **Reminder linkage to an ask uses an id-prefix convention**
+   (`ask-<askId>-<uuid>`), not a real FK -- deliberately matching the
+   pre-existing `activity-<interactionId>` convention `recommendations`
+   already uses for interaction reminders (that table has no
+   interaction_id column either). Consistent with precedent, but worth
+   flagging as a soft link, not a database-enforced one.
+4. **No "Add follow-up" action exists on the donor-page Open Ask card
+   itself** in this phase -- the approved mockup for this task
+   (`[Mark committed] [Declined] [•••]`) omits it, unlike the earlier
+   design doc's own mockup which included it. Reminders can currently
+   only be set at ask-creation time (interaction capture or direct Log
+   Ask), not added later to an already-pending ask. Flagged as a scope
+   note, not a bug -- easy to add later if wanted.
+5. **The three Klein/Pfeiffer/Rovinsky historical cases were NOT
+   backfilled** -- confirmed, per explicit instruction; they remain
+   exactly as left by the prior cleanup-audit task (relationship_summary
+   still flagged NEEDS_REVIEW, untouched).
+
+### Unresolved decisions from the design phase -- now resolved by this
+implementation (recorded here for continuity)
+
+All 8 items from the design doc's "Unresolved decisions" section were
+implemented exactly as recommended (status model incl. `withdrawn`
+requiring a note; free-text purpose; multiple concurrent pending asks
+allowed; direct creation included; only-originating-interaction linking,
+Option A/D; the `ask_changes` audit table built). Items 7-8 (backfilling
+Klein/Pfeiffer/Rovinsky, and clearing their `relationship_summary`) were
+explicitly **not** done in this task, per instruction -- still open, see
+"Next Approval Required" below.
 
 ## Latest Completed Task
 
@@ -795,10 +1167,31 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**New: the Ask/Solicitation feature design (see section above,
-`docs/ASK-SOLICITATION-DESIGN.md`) needs approval on its 8 unresolved
-decisions before any implementation begins.** Nothing has been built —
-this is purely awaiting a go/no-go and answers to those 8 items.
+**New, blocking: the Ask/Solicitation feature Phase 1 implementation
+(see section above) is complete, local-only, and needs explicit approval
+for each of these before it can go anywhere near real data:**
+1. **Push** `feature/independent-cloudflare-sandbox` to origin (currently
+   2 commits ahead of `origin`: `0ba9ee9` is already pushed,
+   `a04b4bd` + this handoff commit are not).
+2. **Apply migration `0032_asks.sql`** to `fundraising-os-staging-db`
+   (`wrangler d1 execute ... --file drizzle/0032_asks.sql --remote`, or
+   the repo's normal migration-apply path) -- has not been run against
+   any real database, only verified locally against disposable in-memory
+   SQLite.
+3. **Deploy** the Worker to Independent Staging so the new UI/routes
+   actually go live -- not done in this task.
+4. Once live, **live-verify** the end-to-end flow (log an ask from
+   capture, confirm it appears on the donor page/Meeting Brief/Today,
+   transition its status, confirm the audit row) against real staging
+   data -- not done in this task (no D1 access was used at all).
+5. A **secondary product decision**, surfaced during this implementation
+   (§27 item 4 above): whether to add an "Add follow-up" action to an
+   *already-created* pending ask on the donor page (not built in Phase 1
+   -- reminders currently only attach at ask-creation time).
+
+Everything from the design doc's 8 unresolved decisions was implemented
+as recommended and is no longer open (see the design-resolution note
+above) -- **except** items 7-8, which remain deliberately untouched:
 
 The 4 approved SAFE_TO_REGENERATE rows are done (applied and verified —
 see "Relationship-Summary Cleanup Audit" above). Nothing is blocking; the
@@ -842,6 +1235,40 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-19T00:00:00Z (approximate)
+Claude (Sonnet 5) — Ask/Solicitation feature Phase 1 IMPLEMENTED, local
+only. Built the approved design end to end: `asks`/`ask_changes` tables
++ migration (`drizzle/0032_asks.sql`), a new confirmed-certainty
+`open_ask` Suggested Action candidate wired into the existing shared
+recommendation engine (reusing `follow_up_pledge`'s exact urgency/
+confidence precedent, with one reasoned, numerically-verified departure
+so a fresh ask still outranks the existing fuzzy `solicitCandidate`),
+Meeting Brief/Assistant/Today integration (no new dashboard section, no
+new search infrastructure), progressive-disclosure "Did you make an
+ask?" in single-donor interaction capture only (verified the
+shared/multi-donor route has zero ask-related code), a direct "+ Log
+ask" entry point, a donor-profile Open Ask card with de-emphasized
+"Stop pursuing," `PATCH`/`POST` API routes built on a pure, unit-tested
+`planAskUpdate()`, and donor-merge reassignment. Infrastructure: baseline
+regenerated via the existing generator (not hand-edited), staging-reset
+order updated, and a previously-undiscovered secondary JSON-export
+table-classification requirement (`lib/operations/workspace-backup.ts`)
+found and closed. `tests/asks.test.mjs` (25-item coverage, mixing real
+behavioral tests -- including a real in-memory SQLite database built from
+every committed migration for schema/merge/multi-ask verification --
+with source-string checks only where this repo has no D1/route test
+harness) added to `pnpm test`'s existing chain; a handful of existing
+tests updated for legitimate, intentional changes (query-count invariant,
+a new migration's own test, one now-non-terminal field assertion, one
+test fixture). `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all pass. **No D1 writes, no migration
+applied, nothing deployed, nothing pushed** -- committed locally only
+(`a04b4bd` + this handoff commit), per explicit instruction to stop after
+a local commit. Full 27-item report, exact files changed, and 5 next-
+approval items are all above.
+
+---
 
 2026-08-19T00:00:00Z (approximate)
 Claude (Sonnet 5) — Ask/Solicitation feature DESIGN ONLY (no
