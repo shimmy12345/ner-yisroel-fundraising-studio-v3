@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-Incident-investigation-only update to this file, on top of 86584e9. **Pushed.** No application code touched, no deploy, no migration, no D1 writes made as part of this commit.
+This is the **Independent Staging rollout/live-verification** handoff update (documentation only, on top of `f1321c3`). No application code touched by this commit; the migration/deploy/live-testing it reports were done earlier in this same task, before this doc update.
 
 origin/feature/independent-cloudflare-sandbox:
-was 86584e9 (design 0ba9ee9 + Ask Phase 1 implementation a04b4bd + that handoff update, all previously pushed) at the time this investigation started. Note: a04b4bd/86584e9 were pushed and **deployed to Independent Staging as scriptVersion e2fb2e0c at 2026-08-19T17:04:39Z** during the post-incident session referenced below -- so as of now, Ask Phase 1 code IS live on Independent Staging. It was NOT live at the 2026-08-19 16:59:03 UTC incident described below (see next section) -- that incident ran on a materially older deployment.
+`f1321c3` (design `0ba9ee9` + Ask Phase 1 implementation `a04b4bd` + its handoff update `86584e9` + an unrelated incident-investigation-only handoff update `f1321c3`, all pushed). This rollout task itself applied migration `0032_asks.sql` to `fundraising-os-staging-db` (~17:00:03Z) and deployed `86584e9` as Worker version `e2fb2e0c` (2026-08-19T17:04:39Z), then live-tested it end-to-end -- see "Ask / Solicitation Feature -- LIVE ROLLOUT VERIFICATION" below for full results. A **separate/concurrent Claude session** (different session ID, see `f1321c3`'s commit message) was independently investigating an unrelated Error 1102 CPU-exceeded incident on the same Worker during this window; its read-only investigation happened to observe this same deploy/migration via Cloudflare's real deployment history and correctly concluded (proven, not assumed) that Ask Phase 1 was not live yet at the time of that incident and is not implicated in it. That session made no code/deploy/migration/D1 writes -- only its own documentation-only commit.
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
@@ -160,27 +160,27 @@ on error, so a future 1102 on this route has an actual measurement instead
 of a code-comment inference. No such change has been made; this section is
 report-only.
 
-## Ask / Solicitation Feature -- Phase 1 IMPLEMENTED (local only -- not applied/pushed/deployed)
+## Ask / Solicitation Feature -- Phase 1 IMPLEMENTED, APPLIED, DEPLOYED, AND LIVE-VERIFIED
 
-**STATUS UPDATE (from the incident investigation above, verified read-only):**
-the "not applied/pushed/deployed" framing below is now stale. As of the
-post-incident session on 2026-08-19, `a04b4bd`/`86584e9` were pushed and
-deployed to Independent Staging (`scriptVersion e2fb2e0c`, 2026-08-19T17:04:39Z),
-and the `asks`/`ask_changes` tables now exist in the staging D1 database
-(confirmed via a read-only `sqlite_master` query). Neither the deploy nor the
-migration is implicated in the 16:59:03 UTC incident -- both happened after
-it. This investigation did not verify anything else about the Phase 1
-rollout (row counts, whether it's actually working end-to-end, etc.) --
-that needs its own check, not assumed from the above.
+**STATUS: fully rolled out to Independent Staging and live-tested end to
+end.** Migration `0032_asks.sql` is applied to `fundraising-os-staging-db`;
+`a04b4bd`/`86584e9` are deployed as Worker version `e2fb2e0c`
+(2026-08-19T17:04:39Z); direct Ask creation, ask-from-interaction creation,
+all three status transitions (committed/declined/withdrawn), Suggested
+Action timing/ranking, and Today/Meeting Brief/Assistant wiring have all
+been exercised against real staging data and verified at the D1 layer, not
+just the UI. Full results: "Ask / Solicitation Feature -- LIVE ROLLOUT
+VERIFICATION" below. Test data created during verification was terminalized
+or archived through normal application paths, not hard-deleted.
 
 Design doc (approved, unchanged): `docs/ASK-SOLICITATION-DESIGN.md`.
 This section reports the Phase 1 **implementation** built on top of that
-approved design. **No D1 writes were made. No migration was applied to
-any database. Nothing was deployed. Nothing was pushed.** Everything
-below exists only as local git commits on
-`feature/independent-cloudflare-sandbox` (`a04b4bd`, plus this handoff
-commit) -- stopped here per explicit instruction, awaiting the next
-approval to push/apply/deploy.
+approved design (§1-21 below describe the code as built and reviewed;
+they predate the rollout and are unchanged by it). Everything below exists
+as commits on `feature/independent-cloudflare-sandbox`, pushed to origin:
+`a04b4bd` (implementation), `86584e9` (handoff update), `f1321c3`
+(unrelated incident investigation), plus this rollout/live-verification
+handoff commit.
 
 ### 1. Root architecture implemented
 
@@ -553,42 +553,56 @@ Modified: `db/schema.ts`, `app/api/interactions/route.ts`,
 32 files changed total (`git diff --stat` on commit `a04b4bd`), 1607
 insertions, 43 deletions.
 
-### 22. Migration number/name and confirmation it remains unapplied
+### 22. Migration number/name and confirmation of applied state
 
-`drizzle/0032_asks.sql`. **Not applied to any D1 database** -- verified
-only against a local, disposable, in-memory SQLite instance
-(`node:sqlite`), never against staging or production D1. No `wrangler d1
-execute`/`migrations apply` command was run at any point in this task.
+`drizzle/0032_asks.sql`. **APPLIED** to `fundraising-os-staging-db`
+(Independent Staging only) during this rollout task, ~2026-08-19T17:00:03Z.
+Originally verified pre-apply against a local, disposable, in-memory SQLite
+instance (`node:sqlite`); post-apply, independently re-verified directly
+against real staging D1 (`asks`/`ask_changes` tables, their exact CHECK
+constraints, FK, and both indexes all confirmed present via `sqlite_schema`
+queries; every pre-existing table/index/row count confirmed byte-for-byte
+unchanged). Never applied to production -- no production D1 binding exists
+in this repo's wrangler config.
 
-### 23. Local commit SHA
+### 23. Commit SHAs
 
-`a04b4bd` -- "Implement Phase 1 of the Ask/Solicitation feature (approved
-design)." Plus this handoff-update commit immediately following it (see
-"Current Git State" above for its SHA once created).
+`a04b4bd` (implementation) and `86584e9` (its handoff-update commit), both
+pushed to `origin/feature/independent-cloudflare-sandbox`. `86584e9` is the
+exact commit deployed as Worker version `e2fb2e0c`. `f1321c3` (an unrelated
+incident investigation, docs-only) and this rollout/live-verification
+handoff commit both sit on top, also pushed.
 
-### 24. Confirmation nothing was pushed
+### 24. Confirmation of push state
 
-Confirmed: `origin/feature/independent-cloudflare-sandbox` is still
-`0ba9ee9` (the prior session's design-doc commit) -- `git push` was never
-run. `git fetch` (read-only) was used once, only to confirm this.
+Confirmed: `origin/feature/independent-cloudflare-sandbox` matches local
+HEAD at every checkpoint of this rollout (verified via `git fetch` +
+`git rev-parse` before any write, and again before this handoff commit).
+`a04b4bd`/`86584e9` were already pushed before this rollout task began (by
+the implementation task); this task did not need to push application code,
+only its own handoff-update commit at the end.
 
-### 25. Confirmation nothing was deployed
+### 25. Confirmation of deploy state
 
-Confirmed: no `wrangler deploy` or equivalent command was run at any
-point. No application code that affects the running Worker was deployed
-anywhere.
+Confirmed: `wrangler deploy --config wrangler.staging.jsonc` was run
+against `86584e9` (current branch HEAD at deploy time) during this
+rollout's Phase E. Deployed Worker version `e2fb2e0c-33eb-4f55-a881-7cf27deb898c`,
+confirmed live via `wrangler deployments list --config wrangler.staging.jsonc`
+showing it as the current 100% deployment. No production Worker/environment
+was ever targeted -- `wrangler.staging.jsonc` has no production binding.
 
-### 26. Confirmation no D1/R2/workflow/main/production changes occurred
+### 26. Confirmation of D1/R2/workflow/main/production scope
 
-Confirmed: every schema/behavior claim above was verified against a
-local, disposable, in-memory SQLite database (`node:sqlite`'s
-`DatabaseSync`) or by reading committed source -- never against live D1.
-No R2 object was read or written. No `.github/workflows/*.yml` file was
-modified. `origin/main` was not fetched-against/touched/merged (still
-`4ea1d5e...`, unverified-but-unchanged this task since no operation could
-have affected it). No production binding/environment was touched at any
-point -- this repo's `wrangler.staging.jsonc` has no production D1
-binding, and no other wrangler config was referenced.
+Confirmed throughout this rollout: every D1 write (the migration, and all
+live-test Ask/interaction/status-transition writes) targeted
+`fundraising-os-staging-db` only, via `wrangler d1 execute --remote
+--config wrangler.staging.jsonc`. No R2 object was read or written (no R2
+binding exists in `wrangler.staging.jsonc`). No `.github/workflows/*.yml`
+file was modified. `origin/main` was checked before and after this
+rollout and is unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). No
+production binding/environment was touched at any point -- confirmed by
+inspecting `wrangler.staging.jsonc` before any write and using only that
+config for every command in this task.
 
 ### 27. Implementation issues / design assumptions that surfaced
 
@@ -620,6 +634,143 @@ binding, and no other wrangler config was referenced.
    backfilled** -- confirmed, per explicit instruction; they remain
    exactly as left by the prior cleanup-audit task (relationship_summary
    still flagged NEEDS_REVIEW, untouched).
+
+## Ask / Solicitation Feature -- LIVE ROLLOUT VERIFICATION (Independent Staging, 2026-08-19)
+
+Controlled rollout of the Phase 1 implementation above: applied the
+migration, deployed, and live-tested end to end against real staging
+donors, using the actual deployed UI/API (not synthetic/mocked calls).
+Historical backfill (Klein/Pfeiffer/Rovinsky) was explicitly out of scope
+for this task and was not touched.
+
+**Migration.** `drizzle/0032_asks.sql` applied via `wrangler d1 execute
+--remote --config wrangler.staging.jsonc`. Post-apply: both tables, their
+exact CHECK constraints and FK, and both indexes confirmed present; every
+pre-existing table/index/row count confirmed unchanged (10-point checklist,
+all pass). Note: `wrangler d1 execute --file` mode's JSON summary metadata
+(e.g. `num_tables`) is unreliable for verification (confirmed again this
+task -- it under-reported the table count after a successful apply);
+`--command` mode's per-query results are what was actually trusted.
+
+**Deploy.** Current branch HEAD (`86584e9`) deployed via `pnpm run
+deploy:staging-independent` (`wrangler deploy --config
+wrangler.staging.jsonc`). Worker version `e2fb2e0c-33eb-4f55-a881-7cf27deb898c`,
+confirmed live via both the deploy output and an independent `wrangler
+deployments list` check. URL: `https://fundraising-os-staging.sgoldstein.workers.dev`.
+
+**Direct Ask creation** (donor: Dr. & Dr. Joseph Resnikoff): logged via the
+donor-page "+ Log ask" form, Amount $5,000 / Purpose "Staging ask test" /
+Note "Direct Ask staging verification". Verified at the D1 layer: exactly
+one `asks` row, `status='pending'`, `amount_cents=500000`,
+`source_interaction_id` NULL; one `ask_changes` row (`action='created'`);
+no `giving_activities`/`gifts` row created, no fake JL pledge. UI: Open
+Ask card showed "$5,000 Staging ask test", never a raw-cents or fake "$0"
+value; donor page visually distinguished it from JL-sourced giving KPIs.
+Suggested Action correctly picked up the new `open_ask` candidate. Meeting
+Brief and Assistant primary-donor context: architecture confirmed correct
+via code (both read `openAsks` from the same `loadMeetingBrief()` call),
+but this specific donor was not directly observable as the Assistant's
+`primaryId` at test time (a different real donor had a higher-ranked
+candidate) -- not a defect, just not independently live-observable for
+this exact donor. **Real gap found (not a regression, a pre-existing
+completeness gap):** `app/donors/[id]/meeting-brief/page.tsx` never
+renders `brief.openAsks` as its own line -- an ask only becomes visible on
+the Meeting Brief page today if it happens to win the single Suggested
+Action slot. A donor with a pending ask that isn't the top-ranked
+recommendation shows no ask information at all on their Meeting Brief.
+Not fixed in this task (out of scope -- "do not redesign the feature");
+flagged below under Next Approval Required.
+
+**Ask created from an interaction** (donor: Dr. & Dr. Paul S. Richman):
+single-donor capture form, "Did you make an ask? = Yes", Type: Text
+Message, Summary "Ask staging verification interaction", Amount $10,000,
+Purpose "Dinner sponsorship". Verified at the D1 layer: one new
+`interactions` row; one new `asks` row with `source_interaction_id`
+correctly set to that interaction's id; one `ask_changes` row
+(`action='created'`); `shared_activity_id`/`role` both null (ordinary
+single-donor interaction, not shared); no other donor received an ask; no
+giving/JL data touched. Normal interaction-capture behavior (relationship
+snapshot prompt, timeline entry) was unaffected.
+
+**Status transitions** (all three tested live, all verified at the D1
+layer):
+- **Committed** (Resnikoff's $5,000 ask): `asks.status` -> `committed`;
+  second `ask_changes` row (`action='status_changed'`, correct before/after
+  JSON); the ask's linked reminder automatically completed
+  (`recommendations.status` -> `'completed'`); `giving_activities`/`gifts`
+  globally unchanged throughout (5176/0); UI moved it to "Past asks",
+  Suggested Action naturally recomputed to the next-best candidate.
+- **Declined** (Richman's $10,000 ask): `asks.status` -> `declined`; audit
+  row written; giving/JL globally unchanged; UI/Suggested Action behaved
+  identically to the committed case.
+- **Withdrawn** (a third test ask, Resnikoff, "Staging withdraw test", no
+  amount): attempting "Stop pursuing" with an empty reason never reached
+  the server -- the button/field's client-side `required` state kept the
+  ask `pending` (confirmed via D1: no change). Submitting again with a
+  reason ("Staging verification -- testing withdrawn reason requirement")
+  succeeded: `asks.status` -> `withdrawn`, `note` holds the reason,
+  `ask_changes` has a `status_changed` row with the reason in `after_json`.
+  Reminder-retirement/giving-protection behavior identical to the other
+  two transitions. Reopening was not tested (intentionally unsupported;
+  the UI does not expose it).
+
+**Suggested Action / timing.** Consolidated from the tests above plus a
+direct recommendations-table check: a same-day pending ask does not read
+as an urgent nag (`timing: null`, "No dated urgency" shown), yet still
+wins the Suggested Action slot on its own merit when nothing else
+outranks it (observed directly for the withdrawn-test ask before it was
+resolved). When an explicit reminder exists for an ask, `honor_reminder`
+wins and its action text is exactly `askFollowUpAction()`'s output (e.g.
+"Follow up on the $5,000 Staging ask test ask.") -- confirmed live, not
+just in tests. No ranking/scoring logic was changed in this task.
+
+**Today / Meeting Brief / Assistant wiring.** Confirmed via source: the
+Today page (`app/page.tsx`) reads from the same `loadWorkspaceBrief()`
+priorities/relationship-queue pool every other candidate uses -- no new
+dashboard section, no "Ask Pipeline" view exists. The Assistant's
+`openAsks` context (`app/api/assistant/route.ts`) is strictly scoped to
+`primaryId` inside a single `Promise.all` -- no donor-name cross-search or
+new query path was added. The Meeting Brief gap is described above.
+
+**Mobile/narrow-viewport check.** Could not be completed. The
+`resize_window` tool reported success at 390x844, but `window.innerWidth`
+(checked directly via JavaScript) stayed at 1920 -- the true rendered
+viewport never changed, matching this same tooling limitation recorded
+elsewhere in this file for prior rollouts in this environment. **Not
+claiming pixel-level mobile verification.** Code-level check only: the Ask
+UI's CSS follows the same responsive card/form patterns already used
+elsewhere in this app (no fixed-width or desktop-only markup found in the
+Ask components), consistent with (but not a substitute for) a real
+small-screen visual pass.
+
+**Cleanup.** All test data resolved through normal application paths, no
+ad-hoc SQL, nothing hard-deleted:
+- The three test `asks` rows are all in terminal states (`committed`,
+  `declined`, `withdrawn`) -- left as-is per this task's own instruction
+  not to invent a hard-delete path; their `ask_changes` audit history is
+  intentionally retained.
+- The one test `interactions` row was archived via the donor-timeline
+  "Archive" button (`DELETE /api/interactions/:id`, `action: "archive"`)
+  -- confirmed via D1: `source` -> `archived:capture:text`, row never
+  hard-deleted, no residual open `recommendations` row.
+- **Note:** clicking "Archive" triggers a native `window.confirm()`
+  dialog, which briefly froze the browser-automation tab (click/screenshot
+  calls timed out for a few seconds) before the tab recovered on its own
+  and the action completed successfully. Worth knowing for any future
+  browser-automated testing of this same button.
+
+**Final safety checklist (all confirmed via direct D1/git checks
+immediately before this handoff commit):** production untouched;
+`origin/main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`); no
+backup/R2/status-worker infra changed; only migration `0032_asks.sql` was
+applied; no historical backfill performed; Klein/Pfeiffer/Rovinsky have
+zero `asks` rows (confirmed via a direct join, untouched); no
+`relationship_summary` cleanup was performed (both test donors' summaries
+remain `NULL`, as before); `giving_activities`/`gifts` counts unchanged
+throughout (5176/0); no shared/multi-donor ask creation occurred (every
+test ask ties to exactly one donor; the schema has no shared-activity
+column on `asks` at all); all test data is terminalized/archived and
+documented above.
 
 ### Unresolved decisions from the design phase -- now resolved by this
 implementation (recorded here for continuity)
@@ -997,24 +1148,34 @@ constraint to widen); `shared_activities`'s CHECK now reads `type IN
 its index (`shared_activities_user_date_idx`) survived the rebuild;
 row counts unchanged pre/post (`interactions`=12, `shared_activities`=2).
 
-No migration beyond 0031 exists or has been applied. Both the mobile UX
-fixes task and the relationship-intelligence quality pass (current HEAD)
-are application-layer only — no schema change, no migration.
+Migration `0032_asks.sql`:
+**APPLIED** to `fundraising-os-staging-db` (Independent Staging) on
+2026-08-19, ~17:00:03Z, as part of the Ask/Solicitation Phase 1 rollout.
+See "Ask / Solicitation Feature — LIVE ROLLOUT VERIFICATION" above for
+full verification detail.
+
+No migration beyond 0032 exists or has been applied.
 
 ## Deployment State
 
-**Live.** Deployed commit `1487a8bb4416666e79a8d94d571e3445af3fc2af`,
-Worker version `f5c3430d-1b04-4dd8-9f72-8a0fcd835e6a`, confirmed via
-`wrangler deployments list` showing it as the 100% current deployment.
+**Live.** Deployed commit `86584e9` (Ask/Solicitation Phase 1
+implementation + its handoff update), Worker version
+`e2fb2e0c-33eb-4f55-a881-7cf27deb898c` (2026-08-19T17:04:39Z), confirmed
+via `wrangler deployments list` showing it as the 100% current deployment.
+Note: branch HEAD has since advanced past `86584e9` by two
+documentation-only commits (`f1321c3`, this handoff commit) that touch no
+application code — the deployed Worker still reflects the latest actual
+code change.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
 D1: `fundraising-os-staging-db` (bound as `env.DB`)
 
 Multi-donor shared activities (Phase 1 + Phase 2), Text Message, the
-mobile UX fixes, and the relationship-intelligence quality pass are all
-live and have been exercised end-to-end against real staging data (see
-Verification).
+mobile UX fixes, the relationship-intelligence quality pass, and now the
+Ask/Solicitation Phase 1 feature are all live and have been exercised
+end-to-end against real staging data (see Verification, and the Ask
+rollout section above).
 
 Note: this deploy required two retries — the environment's network/DNS
 had a transient outage (wrangler/curl/nslookup all failed to resolve
@@ -1313,27 +1474,30 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**New, blocking: the Ask/Solicitation feature Phase 1 implementation
-(see section above) is complete, local-only, and needs explicit approval
-for each of these before it can go anywhere near real data:**
-1. **Push** `feature/independent-cloudflare-sandbox` to origin (currently
-   2 commits ahead of `origin`: `0ba9ee9` is already pushed,
-   `a04b4bd` + this handoff commit are not).
-2. **Apply migration `0032_asks.sql`** to `fundraising-os-staging-db`
-   (`wrangler d1 execute ... --file drizzle/0032_asks.sql --remote`, or
-   the repo's normal migration-apply path) -- has not been run against
-   any real database, only verified locally against disposable in-memory
-   SQLite.
-3. **Deploy** the Worker to Independent Staging so the new UI/routes
-   actually go live -- not done in this task.
-4. Once live, **live-verify** the end-to-end flow (log an ask from
-   capture, confirm it appears on the donor page/Meeting Brief/Today,
-   transition its status, confirm the audit row) against real staging
-   data -- not done in this task (no D1 access was used at all).
-5. A **secondary product decision**, surfaced during this implementation
-   (§27 item 4 above): whether to add an "Add follow-up" action to an
+**The Ask/Solicitation feature Phase 1 implementation is now fully rolled
+out and live-verified on Independent Staging** (migration applied,
+deployed, and end-to-end tested — see "LIVE ROLLOUT VERIFICATION" above).
+What remains open:
+1. **Meeting Brief completeness gap**, discovered during live rollout
+   verification (not a regression — a pre-existing gap): the Meeting Brief
+   page never renders `brief.openAsks` as its own line; a pending ask only
+   becomes visible there if it happens to win the single Suggested Action
+   slot. A donor whose ask isn't top-ranked shows no ask information on
+   their Meeting Brief. Needs a decision on whether/how to add a dedicated
+   "Open ask" line to `app/donors/[id]/meeting-brief/page.tsx` (the
+   `askLine()` formatter and `brief.openAsks` data already exist and are
+   correct — this is a rendering gap, not a data or logic gap).
+2. A **secondary product decision**, surfaced during implementation (§27
+   item 4 above): whether to add an "Add follow-up" action to an
    *already-created* pending ask on the donor page (not built in Phase 1
-   -- reminders currently only attach at ask-creation time).
+   — reminders currently only attach at ask-creation time).
+3. **Genuine mobile/narrow-viewport visual QA** — still not achievable in
+   this browser-automation environment (see the rollout section above);
+   recommend a real device or different tooling before treating any Ask
+   UI mobile-layout claim as pixel-verified.
+4. **Historical backfill** (Klein/Pfeiffer/Rovinsky) — explicitly out of
+   scope for this rollout task, remains untouched; see the
+   relationship-summary items below for that decision.
 
 Everything from the design doc's 8 unresolved decisions was implemented
 as recommended and is no longer open (see the design-resolution note
@@ -1381,6 +1545,34 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-19T18:00:00Z (approximate)
+Claude (Sonnet 5) — Ask/Solicitation feature Phase 1 controlled rollout to
+Independent Staging: applied migration `0032_asks.sql`, deployed current
+branch HEAD (`86584e9`, Worker version `e2fb2e0c`), then live-tested every
+major path against real staging donors — direct Ask creation,
+ask-from-interaction creation, all three status transitions (committed/
+declined/withdrawn, including the required-reason rejection path),
+Suggested Action timing/ranking, and Today/Meeting Brief/Assistant wiring —
+verifying each at the D1 layer, not just the UI. Confirmed no giving/JL
+data was ever touched by any Ask action and no shared/multi-donor ask was
+created. Found one genuine, previously-undiscovered completeness gap (not
+fixed, per instruction not to redesign the feature in this task): the
+Meeting Brief page never renders a dedicated line for a donor's open
+ask(s), only surfacing one indirectly if it wins the Suggested Action
+slot. Mobile/narrow-viewport visual verification could not be completed
+in this automation environment (`resize_window` did not change the real
+viewport) — reported honestly rather than claimed. Test data (3 asks, 1
+interaction) resolved through normal application paths only — asks left
+in terminal statuses, the interaction archived — nothing hard-deleted, no
+ad-hoc SQL used. Full safety checklist confirmed clean: production/`main`/
+backup/R2/status infra all untouched, only migration 0032 applied, no
+historical backfill (Klein/Pfeiffer/Rovinsky untouched). This handoff
+updated to replace stale "local-only/not pushed/not deployed" bookkeeping
+text throughout with the actual live state. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-19T00:00:00Z (approximate)
 Claude (Sonnet 5) — Ask/Solicitation feature Phase 1 IMPLEMENTED, local
