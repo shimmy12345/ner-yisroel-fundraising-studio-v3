@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-1c2273537403f790f9670f468125606f312b5c43
+aa2a8b7c858acb984358da8a82c2d580734f1222
 
 origin/feature/independent-cloudflare-sandbox:
-1c2273537403f790f9670f468125606f312b5c43
+aa2a8b7c858acb984358da8a82c2d580734f1222
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58
@@ -25,23 +25,34 @@ clean
 
 ## Latest Completed Task
 
-Text Message added as a first-class interaction type (canonical DB value
-`text`, display label "Text Message"), including migration 0031,
-application-layer propagation, focused tests, and the controlled
-Independent Staging rollout (migration + deploy + live verification).
-**This feature is live on Independent Staging**, alongside the
-previously-completed multi-donor shared-activity feature.
+Four live mobile-usability fixes, all on `feature/independent-cloudflare-sandbox`, deployed and live-verified on Independent Staging:
+1. `continue_conversation` no longer manufactures generic "Continue the
+   conversation about X" copy from a bare recent touch; it only fires when
+   the note names a real commitment, otherwise the existing honest empty
+   state ("No suggested action available") shows instead.
+2. The donor-page KPI grid lets Suggested Action span full width on
+   mobile beneath the three numeric tiles, instead of squeezing prose
+   into a half-width 2x2 column.
+3. Shared-activity edit now states the exact affected-donor count
+   ("This change affects all N donors...") and gained a separate
+   non-destructive "Add note for this donor" action reusing the existing
+   single-donor capture form.
+4. RecipientPicker's mobile search-result rows no longer overlap (a CSS
+   grid auto-row-sizing bug collapsed every row to a uniform ~49px track
+   regardless of wrapped content); the secondary metadata line is also
+   restrained to one truncating line.
 
 Relevant commits (all on `feature/independent-cloudflare-sandbox`, all
 pushed):
 - Phase 1 (shared-activity schema + backend + recipient-aware scoring): `c42cca30ef38c0da1986c3f5e800f6d1b3482400`
 - Phase 2 (shared-activity capture-form UX, edit/remove/delete routes + UI, Meeting Brief copy): `391a5095c20450daa57cbe37a08e0e329944c9d4`
-- Prior handoff doc update: `4175c7f180fdd96a5b5a97dd143108f5659c2185`
-- Text Message type (migration 0031 + app-layer propagation + tests): `1c2273537403f790f9670f468125606f312b5c43` (current HEAD)
+- Text Message type (migration 0031 + app-layer propagation + tests): `1c2273537403f790f9670f468125606f312b5c43`
+- Mobile UX fixes (recommendation wording/layout, shared-edit clarity, RecipientPicker overlap): `aa2a8b7c858acb984358da8a82c2d580734f1222` (current HEAD)
 
 For behavior detail: `git show c42cca3` / `git show 391a509` / `git show
-1c22735` (self-contained commit messages), plus
-`tests/shared-activity-ux.test.mjs` and `tests/text-message-type.test.mjs`.
+1c22735` / `git show aa2a8b7` (self-contained commit messages), plus
+`tests/shared-activity-ux.test.mjs`, `tests/text-message-type.test.mjs`,
+and `tests/mobile-ux-fixes.test.mjs`.
 
 ## Important Product Decisions
 
@@ -90,6 +101,24 @@ Durable — do not accidentally reverse these:
   `role='recipient'` in the multi-donor picker (`ROLE_DEFAULT_BY_KIND` in
   `CaptureExperience.tsx`), remaining overridable to `participant` via the
   existing role picker.
+- `continue_conversation` (in `lib/relationships/recommendation-candidates.ts`)
+  now only fires when the most recent completed interaction's note
+  contains real commitment language (reused from
+  `relationshipSnapshotDetails` in `lib/capture/interaction.ts`) — no
+  longer on the mere existence of a recent touch. Its eligibility window
+  (≤30 days) and every other candidate/the scoring formula in
+  `recommendation-rank.ts` are unchanged. When it doesn't fire and
+  nothing else applies, the recommendation is honestly `null` — the UI's
+  existing "No suggested action available" / "None available" copy
+  covers that, no new fallback string was added.
+- The donor page's shared-activity row now offers a separate
+  "Add note for this donor" action (a plain link to
+  `/capture?donorId=...`, same prefill convention as the page's own
+  "+ Log interaction" link) alongside "Edit shared activity". This is
+  structurally guaranteed to create only an ordinary single-donor
+  interaction (`shared_activity_id`/`role` both null) — the single-donor
+  `POST /api/interactions` route never references `shared_activities`.
+  "Detach and customize" was NOT built; not needed given this reuse.
 
 ## Database / Migration State
 
@@ -116,21 +145,23 @@ constraint to widen); `shared_activities`'s CHECK now reads `type IN
 its index (`shared_activities_user_date_idx`) survived the rebuild;
 row counts unchanged pre/post (`interactions`=12, `shared_activities`=2).
 
-No migration beyond 0031 exists or has been applied.
+No migration beyond 0031 exists or has been applied. The mobile UX
+fixes task (current HEAD) is application-layer + CSS only — no schema
+change, no migration.
 
 ## Deployment State
 
-**Live.** Deployed commit `1c2273537403f790f9670f468125606f312b5c43`,
-Worker version `8e254d14-1bfe-430c-b3d8-fa8576878d44`, confirmed via the
+**Live.** Deployed commit `aa2a8b7c858acb984358da8a82c2d580734f1222`,
+Worker version `1b1fdd8c-5650-4f62-86b9-842d52fa7af7`, confirmed via the
 `wrangler deploy` output itself (Current Version ID).
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
 D1: `fundraising-os-staging-db` (bound as `env.DB`)
 
-Multi-donor shared activities (Phase 1 + Phase 2) and Text Message are
-both live and have been exercised end-to-end against real staging data
-(see Verification).
+Multi-donor shared activities (Phase 1 + Phase 2), Text Message, and the
+mobile UX fixes are all live and have been exercised end-to-end against
+real staging data (see Verification).
 
 ## Verification
 
@@ -247,9 +278,55 @@ afterward:**
   ended, never hard-deleted, consistent with every other cleanup in this
   project.
 
+**Live, Mobile UX fixes rollout (2026-08-18), against real staging donors
+and a real shared activity, cleaned up afterward:**
+
+- **RecipientPicker overlap**: `resize_window` does not change the true
+  rendered viewport in this environment (confirmed: `window.innerWidth`
+  stayed 1280 after requesting 390×844) — same limitation as the prior
+  session. Instead, the real `.content` container was narrowed to 375px
+  via direct DOM style (same layout engine, same real CSS cascade, just a
+  narrowed element instead of a narrowed window — valid for this bug
+  since none of the relevant grid rules are viewport-media-query-gated).
+  Before the fix: searching "Rosen" showed severely overlapping rows
+  (`firstRow.offsetHeight` was 49px while `firstRow.scrollHeight` — the
+  content's actual required height — was 175px). After deploying the
+  fix: rows are fully separated, each row's height matches its own
+  content, secondary metadata truncates to one line
+  ("58252 · drose…" instead of wrapping across 3+ lines).
+- Selected-donor state confirmed live: tapping a result shows a
+  checkmark, green highlight, and "1 selected" with a chip below.
+- **Shared-activity edit warning**: opening "Edit shared activity" on a
+  real 2-donor activity showed, verbatim: "This change affects all 2
+  donors linked to this activity -- it edits the one shared summary,
+  type, and date, not just this donor's copy," in a visually distinct
+  amber box, and the save button read "Save for all 2 donors".
+- **Donor-specific note**: clicking "Add note for this donor" navigated
+  to `/capture?donorId=...` prefilled with the correct donor in
+  single-donor mode. After saving, verified directly against D1: exactly
+  one new `interactions` row, `donor_id` = the one donor, `role`/
+  `shared_activity_id` both `NULL`. The shared activity's own row was
+  re-queried afterward and its `summary`/`recipient_count` (2) and both
+  linked donors' `role='participant'` were unchanged.
+- **Suggested Action wording**: reproduced the exact originally-reported
+  case (a Text Message interaction with note "Text message", no
+  commitment language) — Suggested Action showed "None available" /
+  "No suggested action available" in place of the old "Continue the
+  conversation from the recent text about 'Text message'."
+- **Mobile Suggested Action layout**: with the `.content` container
+  narrowed to 375px and the exact shipped CSS rule applied, the three
+  numeric KPI tiles (Lifetime Paid, Most Recent Paid Gift, Open
+  Commitments) rendered as compact columns in one row, and Suggested
+  Action spanned the full width beneath them with room for natural
+  prose — confirmed visually via screenshot.
+- Cleanup: all 3 test rows (the shared activity + its 2 links, plus the
+  donor-specific note) archived/cancelled via the app's own routes,
+  confirmed via SQL (`source` = `archived:capture:email` /
+  `cancelled:manual`), never hard-deleted.
+
 ## Safety / Infrastructure State
 
-This rollout (both the shared-activity and Text Message work):
+This rollout (shared-activity, Text Message, and mobile UX fixes work):
 - D1: migrations 0030 and 0031 applied to `fundraising-os-staging-db`
   only; all read/write operations scoped to that database via `wrangler
   d1 execute --remote`; no other database touched.
@@ -257,52 +334,73 @@ This rollout (both the shared-activity and Text Message work):
 - Backup/restore workflows (`.github/workflows/d1-*.yml`): not touched.
 - Production: not touched (no production Worker/D1 binding exists in
   `wrangler.staging.jsonc`; confirmed before any write).
-- `origin/main`: not touched — checked before and after the Text Message
-  rollout, unchanged at `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`.
+- `origin/main`: not touched — checked before and after both the Text
+  Message and mobile-UX-fixes rollouts, unchanged at
+  `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` throughout.
 - No unexpected `recommendations` rows were created at any point
-  (checked directly by donor_id + status/action filter after the Text
-  Message live test — 0 rows).
-- `donors`/`giving_activities` row counts unaffected by the Text Message
-  live test (interactions/shared_activities only).
+  (checked directly by donor_id + status/action filter after each live
+  test — 0 rows).
+- `donors`/`giving_activities` row counts unaffected by any of these live
+  tests (interactions/shared_activities only).
 
 ## Outstanding Work / Known Limitations
 
-- Narrow-viewport (real small-screen) visual QA for the multi-donor
-  picker is still outstanding — automation tooling in this environment
-  couldn't resize the actual viewport. Recommend a manual phone/tablet
-  check (or a different automation environment) before relying on this
-  for a real mobile fundraiser workflow.
+- True device/viewport visual QA is still not possible in this
+  automation environment (`resize_window` does not change
+  `window.innerWidth`). The mobile UX fixes task worked around this by
+  narrowing the real `.content` DOM element to 375px and applying the
+  exact shipped CSS — a real-cascade, real-layout-engine check that is
+  strong evidence but not identical to a true device viewport (it can't
+  exercise viewport-media-query-gated rules like the sidebar/nav
+  collapse). Recommend a genuine phone/tablet check, or a different
+  automation environment, before treating any mobile layout claim here
+  as fully pixel-verified.
 - The `continue_conversation` vs. `reconnect_contact_gap` ranking
-  interaction described above (Verification section) is a real, observed
-  UX nuance — not a defect in the approved scoring rule, but worth a
-  product decision if the copy ever needs to distinguish "continuing a
-  broadcast" from "continuing a real conversation."
+  interaction described above (Verification section, from the earlier
+  shared-activity rollout) is unaffected by this task's wording fix and
+  remains a real, observed UX nuance worth a product decision if the
+  copy ever needs to distinguish "continuing a broadcast" from
+  "continuing a real conversation." continue_conversation's ELIGIBILITY
+  on a broadcast recipient touch was explicitly not changed in this task
+  (only its wording, and only when it does fire) — flagging again per
+  the task's own instruction to report rather than silently redesign it.
 - Shared-activity recipient list editing beyond "remove one donor" (e.g.
   adding a donor to an already-saved activity) is not built.
 - Meeting Brief's other surfaces (discussion topics, people-mentioned)
   are not role-aware — only the "Last Interaction" card is.
+- "Add note for this donor" always launches an empty single-donor
+  capture form — it does not pre-fill any context from the shared
+  activity it was opened from (e.g. the shared summary or date). Not
+  requested by this task; worth considering if fundraisers want that
+  context carried over.
 
 ## Next Approval Required
 
-None blocking — both features are live and verified on Independent
-Staging.
+None blocking — the shared-activity, Text Message, and mobile UX fixes
+are all live and verified on Independent Staging.
 
 Optional follow-ups, each would need its own explicit approval before
 work begins:
-- Manual/alternate-tooling mobile visual QA to close the outstanding gap
-  above.
+- A genuine device/alternate-tooling mobile visual QA pass to close the
+  viewport-emulation gap above.
 - A product decision on the `continue_conversation`/`reconnect_contact_gap`
-  ranking nuance, if it's judged worth addressing (explicitly out of scope
-  for the Text Message task that just landed).
+  ranking nuance and/or continue_conversation's eligibility on broadcast
+  recipient touches, if judged worth addressing.
+- Pre-filling shared-activity context into the new "Add note for this
+  donor" capture form, if fundraisers want it.
 
 ## Last Updated
 
-2026-08-18T21:50:00Z
-Claude (Sonnet 5) — Text Message added as a first-class interaction type:
-migration 0031 applied to Independent Staging, feature branch deployed
-(commit `1c22735`, Worker version `8e254d14-1bfe-430c-b3d8-fa8576878d44`),
-live verification (single-donor create, 2-donor shared recipient touch,
-timeline labels, Last Contact vs. substantive-contact scoring verified
-directly against D1, no auto-reminder) complete and test data cleaned up,
-this handoff updated to reflect live state. Session
+2026-08-18T23:15:00Z
+Claude (Sonnet 5) — Four live mobile-usability fixes shipped: continue_conversation
+no longer manufactures generic copy from a bare recent touch (only fires
+on real commitment language); donor-page Suggested Action spans full
+width on mobile instead of a squeezed 2x2 column; shared-activity edit
+now states the exact affected-donor count and gained a separate
+"Add note for this donor" action; RecipientPicker's mobile overlap bug
+(CSS grid auto-row-sizing collapsing to a uniform track) is fixed.
+Deployed (commit `aa2a8b7`, Worker version
+`1b1fdd8c-5650-4f62-86b9-842d52fa7af7`), live-verified against real
+staging data including direct D1 checks, test data cleaned up via normal
+app routes, this handoff updated to reflect live state. Session
 `session_01DoQiMShaMrVYHvopkVj581`.
