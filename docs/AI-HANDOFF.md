@@ -11,21 +11,167 @@ the repository/infrastructure disagree, trust the repository/infrastructure.
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD:
-a04b4bd (Implement Phase 1 of the Ask/Solicitation feature (approved design)) -- **LOCAL ONLY, NOT PUSHED**
+Current HEAD (this commit):
+Incident-investigation-only update to this file, on top of 86584e9. **Pushed.** No application code touched, no deploy, no migration, no D1 writes made as part of this commit.
 
 origin/feature/independent-cloudflare-sandbox:
-0ba9ee9 (unchanged -- local HEAD is 2 commits ahead: 0ba9ee9 design-doc commit already pushed last session, then this session's a04b4bd implementation commit, still local-only)
+was 86584e9 (design 0ba9ee9 + Ask Phase 1 implementation a04b4bd + that handoff update, all previously pushed) at the time this investigation started. Note: a04b4bd/86584e9 were pushed and **deployed to Independent Staging as scriptVersion e2fb2e0c at 2026-08-19T17:04:39Z** during the post-incident session referenced below -- so as of now, Ask Phase 1 code IS live on Independent Staging. It was NOT live at the 2026-08-19 16:59:03 UTC incident described below (see next section) -- that incident ran on a materially older deployment.
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
 
 Working tree:
-clean (this handoff-update commit is the only thing after a04b4bd)
+clean.
 
-**No D1 writes were made. No migration was applied to any database. Nothing was deployed. Nothing was pushed.** This entire Phase 1 implementation exists only as local commits on this branch, per explicit instruction to stop after a local commit and report.
+## Independent Staging Incident -- Error 1102 (2026-08-19 16:59:03 UTC / 12:59:03 EDT) -- INVESTIGATION ONLY, NO FIX APPLIED
+
+Ray ID `a2dab4de9e40be78`. Investigated per explicit instruction to look only,
+not fix/deploy/migrate/write D1. Findings below are from Cloudflare
+Observability (the actual event record for this Ray ID), `wrangler
+deployments list`/`versions view` (real deployment history), read-only D1
+`SELECT`/`COUNT` queries (no writes), and the repo's own git history --
+not carried over from the prior 1102 incidents.
+
+**1-3. Request.** `GET https://fundraising-os-staging.sgoldstein.workers.dev/`
+(root -- the Today/homepage route). A real browser navigation (`sec-fetch-
+mode: navigate`, `sec-fetch-dest: document`, referer same-origin `/`), not a
+`.rsc` prefetch payload fetch. Cloudflare's own event record: `"outcome":
+"exceededCpu"`, plus a separate runtime-generated log line whose message is
+verbatim `"Worker exceeded CPU time limit."` -- independently re-verified for
+this specific Ray ID, not assumed from prior incidents.
+
+**4-7. Metrics.** `cpuTimeMs: 163`, `wallTimeMs: 517`, `response.status: 503`.
+`scriptVersion.id: f5c3430d-1b04-4dd8-9f72-8a0fcd835e6a` -- this is the exact
+version that served the failing request, read directly off the event record.
+
+**Deployed version/commit (proven + one inferred link).** PROVEN via
+`wrangler deployments list --config wrangler.staging.jsonc`: version
+`f5c3430d` was deployed 2026-08-19T04:23:33Z and remained live until version
+`e2fb2e0c` superseded it at 2026-08-19T17:04:39Z -- i.e. `f5c3430d` was the
+only version live at 16:59:03Z. Cloudflare deploys carry no git-SHA metadata
+(Source/Tag/Message are all `-`), so the exact commit is INFERRED from
+timestamp adjacency, not proven by embedded metadata: the deploy timestamp
+(00:23:33 EDT) falls between commit `1487a8b` ("Stop surfacing weak
+machine-generated relationship intelligence", 00:15:47 EDT) and the next
+commit `37dcdd4` (00:49:35 EDT), matching this repo's own commit-then-
+handoff-commit pattern. Checked `1487a8b`'s diff directly: it only touches
+`lib/capture/interaction.ts`'s `mentionedPeople`/`mentionedOrganizations`/
+`inferSubject`, called only from that same file (capture/write-time path) --
+grepped the whole repo at that commit and confirmed zero call sites in the
+Today-page read path. **This commit is not implicated as the CPU driver.**
+
+**Burst correlation (16:58:58-16:59:08 UTC window, same Worker).** Pulled
+every event for `fundraising-os-staging` in this window directly from
+Observability:
+| Timestamp (EDT) | Route | Outcome |
+|---|---|---|
+| 12:58:56.729 | GET `/.rsc?_rsc=...` (prefetch payload of `/`) | success |
+| 12:59:02.401 | POST `/api/giving/acknowledge` | success (`gift_acknowledgment_recorded`) |
+| 12:59:03.090 | GET `/` | **error -- exceededCpu, 503** |
+
+No `.rsc`/dynamic-route burst, no `/assistant`, `/settings`,
+`/onboarding/import`, donor-page, Meeting Brief, or Ask-route requests
+anywhere in this window. Only one failure. This rules out mechanisms (A) the
+vinext prefetch-storm mechanism returning and (D) several independent
+concurrent CPU failures -- there was exactly one failing request, and it was
+a real navigation, not a prefetch fetch. Confirmed in source at the live
+commit (`1487a8b`): `app/components/AppShell.tsx`'s persistent nav links
+(Today/Import/Assistant/Settings/brand logo) all still carry `prefetch=
+{false}`, exactly as commit `f639810` (2026-08-17, the original prefetch-
+burst fix) left them -- the fix is intact and not what failed here.
+**Conclusion: (C) one genuinely expensive user-request route** -- a single,
+real Today-page load exceeded CPU on its own, on the same
+`loadWorkspaceBrief()` path implicated (but never fully proven) in both
+prior incidents.
+
+**Route source trace.** `app/page.tsx` (`TodayPage`, `export const dynamic =
+"force-dynamic"`) calls `loadWorkspaceBrief()` in
+`lib/workspace/live-data.ts`: a 15-query `Promise.all` D1 fan-out, then a
+per-donor loop over `selectSuggestionDonorIds()` that calls the same shared
+`buildRecommendationEvidence()`/`buildDonorRecommendation()` engine
+Meeting Brief/Assistant/donor pages use. Per the code's own comment (added
+after the original Today-scoring incident that isn't otherwise documented in
+this file's current text): only the `reconnect_contact_gap` category is
+bounded; donors with a qualifying recent gift, open pledge, yahrtzeit, or
+birthday/anniversary are **"kept in full, unbounded."** Read-only D1 counts
+just now (not at incident time, so approximate): 248 total live donors
+(matches the "247 of 248" figure in that code comment -- same roster), 32
+donors with a qualifying recent gift, 58 with an open pledge. A JL donation
+import completed at **12:52:54 EDT, six minutes before the incident**
+(`jl_donation_import_completed` in the event log) -- plausible contributing
+factor (a fresh bulk import can transiently inflate the unbounded
+recent-gift/open-pledge pools right before a Today-page load), but NOT
+proven at the precise incident-time row counts, since these counts were
+taken after the fact. This route has **no phase instrumentation** at all
+(unlike donor pages' `donor_page_render`): searched Observability for every
+log line sharing this request's traceId (`22de44c9b28fe2b9aa8a56b3322f8063`)
+and found exactly two -- the terminal fetch-error record and the runtime's
+own CPU-limit message. Zero application log lines. The route reached no
+instrumentation checkpoint because none exists to reach.
+
+**Ask feature causality -- ruled out, not assumed.** (a) Deployed before
+16:59:03 UTC? **No** -- the live version (`f5c3430d`) predates both Ask
+commits (`a04b4bd`/`86584e9`, 15:20-15:24 UTC) by ~11 hours; the version
+containing Ask code (`e2fb2e0c`) wasn't deployed until 17:04:39 UTC, ~5.5
+minutes *after* the incident. (b) Migration 0032 applied at incident time?
+**No** -- `asks`/`ask_changes` tables exist in D1 now, but wrangler's local
+command logs show zero D1 activity anywhere between 13:39 UTC and 17:00:03
+UTC that day; the only D1 execute activity near the incident starts at
+17:00:03 UTC (after it), clustered around the 17:04:31 UTC deploy -- i.e.
+the migration was applied afterward, not before. (c) Did the failing
+request execute Ask-related code? **No** -- the deployed script version
+literally didn't contain it. (d) Ask-related query count added: **zero**.
+
+**Comparison with prior 1102s.**
+- **Aug 17 donor-page incident** (`f446e74`, 2026-08-17T18:56:41Z): root
+  cause was never proven either; only diagnostic instrumentation
+  (`donor_page_render`) plus one proven Important-Dates sort fix were
+  shipped. This incident's route (`/`) has no equivalent instrumentation --
+  same gap, different route.
+- **Five-route prefetch burst** (`f639810`, 2026-08-17): proven mechanism --
+  vinext's always-visible sidebar auto-prefetching `/`, `/assistant`,
+  `/onboarding/import`, `/settings` simultaneously, each independently
+  running `loadWorkspaceBrief()`'s full fan-out. Fixed with `prefetch=
+  {false}`, confirmed still intact and not the cause here (see above).
+- **Earlier Today/homepage scoring incident**: produced the "247 of 248"
+  bound on `reconnect_contact_gap` in `live-data.ts`. This incident's route
+  and underlying call path are identical; the categories that bound left
+  unbounded (gift/pledge/yahrtzeit/important-date) are the prime suspects
+  here, unconfirmed at exact incident-time volumes.
+
+**Proven vs. inference, explicitly.** PROVEN: failing route, method, CPU
+outcome, cpu/wall metrics, exact scriptVersion live at incident time, deploy
+timeline (Ask code deployed after, not before), migration timing (D1
+activity only starts after the incident), no burst, prefetch fix intact, zero
+app-level logs for this request, route's unbounded-candidate-pool design.
+INFERRED (not proven): that `f5c3430d` corresponds specifically to commit
+`1487a8b` (timestamp adjacency, not embedded metadata -- though `1487a8b`
+is independently cleared as the CPU driver regardless of exact match); that
+the JL import six minutes prior is what inflated the unbounded pools enough
+to tip this specific request over the limit (plausible, not measured at the
+time).
+
+**Next instrumentation needed (root cause still not fully proven).** Add the
+same phase-timing pattern `donor_page_render` uses to `loadWorkspaceBrief()`
+itself: a structured log line covering the 15-query fan-out duration, D1 row
+counts per query (especially `suggestionDonorIds` final size), and
+per-donor scoring loop duration/count -- emitted unconditionally, not just
+on error, so a future 1102 on this route has an actual measurement instead
+of a code-comment inference. No such change has been made; this section is
+report-only.
 
 ## Ask / Solicitation Feature -- Phase 1 IMPLEMENTED (local only -- not applied/pushed/deployed)
+
+**STATUS UPDATE (from the incident investigation above, verified read-only):**
+the "not applied/pushed/deployed" framing below is now stale. As of the
+post-incident session on 2026-08-19, `a04b4bd`/`86584e9` were pushed and
+deployed to Independent Staging (`scriptVersion e2fb2e0c`, 2026-08-19T17:04:39Z),
+and the `asks`/`ask_changes` tables now exist in the staging D1 database
+(confirmed via a read-only `sqlite_master` query). Neither the deploy nor the
+migration is implicated in the 16:59:03 UTC incident -- both happened after
+it. This investigation did not verify anything else about the Phase 1
+rollout (row counts, whether it's actually working end-to-end, etc.) --
+that needs its own check, not assumed from the above.
 
 Design doc (approved, unchanged): `docs/ASK-SOLICITATION-DESIGN.md`.
 This section reports the Phase 1 **implementation** built on top of that
