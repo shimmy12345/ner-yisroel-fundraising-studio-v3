@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-4175c7f180fdd96a5b5a97dd143108f5659c2185
+1c2273537403f790f9670f468125606f312b5c43
 
 origin/feature/independent-cloudflare-sandbox:
-4175c7f180fdd96a5b5a97dd143108f5659c2185
+1c2273537403f790f9670f468125606f312b5c43
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58
@@ -25,20 +25,23 @@ clean
 
 ## Latest Completed Task
 
-Multi-donor shared outreach activities (log one meeting/text/email once,
-link it to several donors) — backend (Phase 1), UX (Phase 2), and the
-controlled Independent Staging rollout (migration + deploy + live
-verification) are all complete. **This feature is live on Independent
-Staging.**
+Text Message added as a first-class interaction type (canonical DB value
+`text`, display label "Text Message"), including migration 0031,
+application-layer propagation, focused tests, and the controlled
+Independent Staging rollout (migration + deploy + live verification).
+**This feature is live on Independent Staging**, alongside the
+previously-completed multi-donor shared-activity feature.
 
 Relevant commits (all on `feature/independent-cloudflare-sandbox`, all
 pushed):
-- Phase 1 (schema + backend + recipient-aware scoring): `c42cca30ef38c0da1986c3f5e800f6d1b3482400`
-- Phase 2 (capture-form UX, edit/remove/delete routes + UI, Meeting Brief copy): `391a5095c20450daa57cbe37a08e0e329944c9d4`
-- Handoff doc: `4175c7f180fdd96a5b5a97dd143108f5659c2185` (current HEAD)
+- Phase 1 (shared-activity schema + backend + recipient-aware scoring): `c42cca30ef38c0da1986c3f5e800f6d1b3482400`
+- Phase 2 (shared-activity capture-form UX, edit/remove/delete routes + UI, Meeting Brief copy): `391a5095c20450daa57cbe37a08e0e329944c9d4`
+- Prior handoff doc update: `4175c7f180fdd96a5b5a97dd143108f5659c2185`
+- Text Message type (migration 0031 + app-layer propagation + tests): `1c2273537403f790f9670f468125606f312b5c43` (current HEAD)
 
-For behavior detail: `git show c42cca3` / `git show 391a509` (self-contained
-commit messages), plus `tests/shared-activity-ux.test.mjs`.
+For behavior detail: `git show c42cca3` / `git show 391a509` / `git show
+1c22735` (self-contained commit messages), plus
+`tests/shared-activity-ux.test.mjs` and `tests/text-message-type.test.mjs`.
 
 ## Important Product Decisions
 
@@ -65,46 +68,69 @@ Durable — do not accidentally reverse these:
   untouched.
 - The multi-donor shared route (`/api/interactions/shared`) only engages
   for 2+ donors.
-- Text/Message is NOT an implemented interaction type — would require
-  rebuilding `interactions.type`'s CHECK constraint (a migration beyond
-  0030, touching existing data). Deliberately deferred.
 - Photo is not a separate interaction type — represented by its real
-  channel + summary text.
+  channel + summary text (e.g. "Text Message" with the photo described in
+  the note). This also governs Text Message: WhatsApp/iMessage/SMS/photo
+  are all subchannels of the one `text` type, never their own type.
 - Backend recipient cap: 200 donors per shared activity.
 - Large-selection UI confirmation begins at 15 selected donors (never
   blocks the save) — live-verified with 16 selected.
+- **Text Message is now a real, implemented interaction type** — canonical
+  DB value `text`, display label "Text Message". `interactions.type` has
+  no CHECK constraint in the live schema (enforcement is application-level
+  only, via the `kinds`/`KINDS`/`allowedKinds` validation sets), so only
+  `shared_activities.type`'s CHECK required a migration (0031) to widen.
+  Both TypeScript enums are kept in sync by convention, not by a shared DB
+  constraint — see the doc comments on both columns in `db/schema.ts`.
+- Text Message role/scoring semantics are NOT special-cased: the existing
+  generic role-based rule above (`role='recipient'` = broadcast,
+  `role='participant'` = substantive) applies to Text Message exactly like
+  every other type, with no per-type branch — live-verified directly at
+  the data layer (see Verification below). Text Message defaults to
+  `role='recipient'` in the multi-donor picker (`ROLE_DEFAULT_BY_KIND` in
+  `CaptureExperience.tsx`), remaining overridable to `participant` via the
+  existing role picker.
 
 ## Database / Migration State
 
 Migration `0030_shared_activities.sql`:
 **APPLIED** to `fundraising-os-staging-db` (Independent Staging) on
-2026-08-19.
+2026-08-19. (See prior verification detail in git history of this file —
+unchanged since, not re-verified in this update.)
 
-Applied via `wrangler d1 execute fundraising-os-staging-db --remote
---file=drizzle/0030_shared_activities.sql`. All 8 statements in the file
-executed successfully. Post-migration verification (read-only, against
-real staging data) confirmed: `interactions`/`donors`/`recommendations`
-row counts unchanged (8/248/4 immediately pre-migration), all 8
-pre-existing `interactions` rows have `shared_activity_id IS NULL AND
-role IS NULL`, `shared_activities` and `shared_activity_recipient_audits`
-both exist with the exact designed DDL (including the partial unique
-index `interactions_shared_activity_donor_uidx`), and table count went
-from exactly 42 → 44 (no unrelated schema drift).
+Migration `0031_interactions_text_type.sql`:
+**APPLIED** to `fundraising-os-staging-db` (Independent Staging) on
+2026-08-18.
 
-No migration beyond 0030 exists or has been applied.
+Applied via `wrangler d1 execute fundraising-os-staging-db --remote --file
+drizzle/0031_interactions_text_type.sql --config wrangler.staging.jsonc`.
+7 statements executed (58 rows written — the 2 pre-existing
+`shared_activities` rows being rebuilt with the widened CHECK). Verified
+directly against `sqlite_schema` pre/post: `interactions`'s own table DDL
+and all 3 of its indexes (`interactions_donor_date_idx`,
+`interactions_shared_activity_idx`,
+`interactions_shared_activity_donor_uidx`) were confirmed present and
+untouched (this migration never rebuilds that table — it has no CHECK
+constraint to widen); `shared_activities`'s CHECK now reads `type IN
+('call','email','meeting','visit','note','personal','gift','text')` and
+its index (`shared_activities_user_date_idx`) survived the rebuild;
+row counts unchanged pre/post (`interactions`=12, `shared_activities`=2).
+
+No migration beyond 0031 exists or has been applied.
 
 ## Deployment State
 
-**Live.** Deployed commit `4175c7f180fdd96a5b5a97dd143108f5659c2185`,
-Worker version `8f9b01f2-5999-49f1-8475-df8134f1dc87`, verified via the
-live `/health` page's "Deployed version" badge after deploy.
+**Live.** Deployed commit `1c2273537403f790f9670f468125606f312b5c43`,
+Worker version `8e254d14-1bfe-430c-b3d8-fa8576878d44`, confirmed via the
+`wrangler deploy` output itself (Current Version ID).
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
 D1: `fundraising-os-staging-db` (bound as `env.DB`)
 
-Phase 1 + Phase 2 are both live and have been exercised end-to-end against
-real staging data (see Verification).
+Multi-donor shared activities (Phase 1 + Phase 2) and Text Message are
+both live and have been exercised end-to-end against real staging data
+(see Verification).
 
 ## Verification
 
@@ -177,23 +203,67 @@ All test interactions/shared-activities have been soft-cancelled/deleted;
 none are active. `interactions` table now has 12 rows total (8 original +
 4 test rows, all 4 now cancelled, never hard-deleted).
 
+**Live, Text Message rollout (2026-08-18), using two real donors from the
+actual staging roster, both created via the deployed app UI and cleaned up
+afterward:**
+
+- Single-donor Text Message: created for "Dr. & Mrs. Yaakov Abdelhak" via
+  the single-donor capture form. Confirmed at the data layer: `type =
+  'text'`, `role = NULL`, `shared_activity_id = NULL`. Timeline badge
+  read "Completed · Text Message" (friendly label, never the raw enum
+  value) and "Last meaningful contact" updated to the capture date.
+- Shared Text Message, `role='recipient'`, 2 donors ("Mr. & Mrs. Ari
+  Abramovitz", "Mr. & Mrs. Shaya Abramson"): the multi-donor picker
+  defaulted the role toggle to "Recipients" the instant Text Message was
+  selected (no manual step needed), matching the approved default.
+  Confirmation screen read "Sent to 2 donors" / "Text Message on Aug 18,
+  9:42 PM" and explicitly stated Last Contact was updated but the touch
+  "does not, by itself, count as a substantive-contact touch" and that
+  "No reminders were created." **Verified directly against
+  `fundraising-os-staging-db`, not just the UI**: both `interactions` rows
+  had `type='text'`, `role='recipient'`, the same `shared_activity_id`;
+  the plain Last-Contact query (`MAX(occurred_at)`, no role filter)
+  returned the touch timestamp for both donors; the exact production
+  substantive-contact query (same query, `AND (role IS NULL OR role !=
+  'recipient')`) returned **zero rows** for both donors, proving the
+  recipient touch does not suppress `reconnect_contact_gap`; a query
+  against `recommendations` for either donor with an open, text-related
+  row returned 0 — no automatic reminder was created.
+- No per-type branch exists anywhere in the scoring path — the SQL
+  condition that excludes `role='recipient'` from
+  `lastSubstantiveContactAt` (in `lib/workspace/live-data.ts`) is entirely
+  type-agnostic, so this behavior is structural, not something that could
+  regress for Text Message specifically without also breaking every other
+  shared type.
+- Cleanup: the single-donor row was archived via `DELETE
+  /api/interactions/:id` (`action: "archive"`) and the shared activity was
+  deleted via `DELETE /api/interactions/shared/:id` (`action:
+  "delete-activity"`) — both are the app's own normal routes (invoked
+  directly rather than by clicking the UI's confirm-dialog buttons, to
+  avoid a blocking native `window.confirm()` in browser automation; the
+  server-side effect is identical to clicking through). Final state
+  confirmed via SQL: all 3 test rows now read `source =
+  'archived:capture:text'` or `source = 'cancelled:manual'` — soft
+  ended, never hard-deleted, consistent with every other cleanup in this
+  project.
+
 ## Safety / Infrastructure State
 
-This rollout:
-- D1: migration 0030 applied to `fundraising-os-staging-db` only; all
-  read/write operations scoped to that database via `wrangler d1 execute
-  --remote`; no other database touched.
+This rollout (both the shared-activity and Text Message work):
+- D1: migrations 0030 and 0031 applied to `fundraising-os-staging-db`
+  only; all read/write operations scoped to that database via `wrangler
+  d1 execute --remote`; no other database touched.
 - R2: not touched.
 - Backup/restore workflows (`.github/workflows/d1-*.yml`): not touched.
 - Production: not touched (no production Worker/D1 binding exists in
   `wrangler.staging.jsonc`; confirmed before any write).
-- `origin/main`: not touched — checked before and after this rollout,
-  unchanged at `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`.
+- `origin/main`: not touched — checked before and after the Text Message
+  rollout, unchanged at `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`.
 - No unexpected `recommendations` rows were created at any point
-  (count stayed at 4 throughout every phase).
-- `donors`/`giving_activities` row counts and the two test donors'
-  `updated_at`/`relationship_summary`/`institutional_memory` fields were
-  confirmed unchanged by the shared-activity operations.
+  (checked directly by donor_id + status/action filter after the Text
+  Message live test — 0 rows).
+- `donors`/`giving_activities` row counts unaffected by the Text Message
+  live test (interactions/shared_activities only).
 
 ## Outstanding Work / Known Limitations
 
@@ -202,8 +272,6 @@ This rollout:
   couldn't resize the actual viewport. Recommend a manual phone/tablet
   check (or a different automation environment) before relying on this
   for a real mobile fundraiser workflow.
-- Text/Message interaction type remains deferred (needs its own migration
-  decision, separate from 0030).
 - The `continue_conversation` vs. `reconnect_contact_gap` ranking
   interaction described above (Verification section) is a real, observed
   UX nuance — not a defect in the approved scoring rule, but worth a
@@ -216,21 +284,25 @@ This rollout:
 
 ## Next Approval Required
 
-None blocking — the feature is live and verified on Independent Staging.
+None blocking — both features are live and verified on Independent
+Staging.
 
 Optional follow-ups, each would need its own explicit approval before
 work begins:
 - Manual/alternate-tooling mobile visual QA to close the outstanding gap
   above.
 - A product decision on the `continue_conversation`/`reconnect_contact_gap`
-  ranking nuance, if it's judged worth addressing.
-- Any future decision to add a real Text/Message type (new migration).
+  ranking nuance, if it's judged worth addressing (explicitly out of scope
+  for the Text Message task that just landed).
 
 ## Last Updated
 
-2026-08-19T00:35:00Z
-Claude (Sonnet 5) — Controlled Independent Staging rollout: migration
-0030 applied, feature branch deployed, live verification (2-recipient,
-2-participant, edit/remove/delete, mobile-functional) complete, this
-handoff updated to reflect live state. Session
+2026-08-18T21:50:00Z
+Claude (Sonnet 5) — Text Message added as a first-class interaction type:
+migration 0031 applied to Independent Staging, feature branch deployed
+(commit `1c22735`, Worker version `8e254d14-1bfe-430c-b3d8-fa8576878d44`),
+live verification (single-donor create, 2-donor shared recipient touch,
+timeline labels, Last Contact vs. substantive-contact scoring verified
+directly against D1, no auto-reminder) complete and test data cleaned up,
+this handoff updated to reflect live state. Session
 `session_01DoQiMShaMrVYHvopkVj581`.
