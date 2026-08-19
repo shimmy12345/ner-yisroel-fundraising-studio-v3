@@ -13,6 +13,7 @@ import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE }
 import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { logger } from "../logger";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -89,7 +90,88 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
   };
 }
 
+// Request-scoped memoization for loadWorkspaceBrief, added after live
+// telemetry (docs/AI-HANDOFF.md, "Independent Staging Instrumentation")
+// proved vinext invokes this loader twice per single Today/Assistant
+// navigation, inside the SAME Cloudflare request (same rayId/traceId).
+//
+// Root cause (verified against vinext 0.0.50's actual source, not
+// assumed): vinext's app-router runtime runs a pre-render "probe" pass
+// for any route without a loading.tsx boundary
+// (node_modules/vinext/dist/server/app-page-probe.js's
+// probeAppPageBeforeRender -> probeAppPageComponent), which calls the
+// page's default export directly as a plain function
+// (dist/entries/app-rsc-entry.js's `probePage()`) and fully awaits it --
+// purely to catch a thrown redirect()/notFound()/forbidden()/
+// unauthorized() before committing to a streamed response. That full
+// execution (including this loader) is separate from, and precedes, the
+// real render, which invokes the same page component a second time via
+// React's actual renderToReadableStream.
+//
+// React's cache() cannot fix this: verified directly in
+// react.react-server.development.js -- cache() checks
+// ReactSharedInternals.A (the active render dispatcher) and, when none is
+// active, calls the wrapped function directly with no memoization at all.
+// vinext's probe call happens outside any active dispatcher (it's a plain
+// function call, not a React render), so cache() would be a silent no-op
+// there, and the real render would then establish its own fresh,
+// unrelated cache scope -- no dedup either way.
+//
+// AsyncLocalStorage does correctly span the probe/render boundary: vinext
+// itself documents wrapping its ENTIRE per-request handler.fetch() call in
+// one AsyncLocalStorage.run() (dist/shims/request-context.js's
+// runWithExecutionContext), so anything entered partway through via
+// enterWith() persists for the rest of that same request and is invisible
+// to any other request. This is also empirically already true in this
+// exact app: donor_page_render logs the identical cf-ray (read via
+// next/headers, itself ALS-backed) on both of a donor page's two
+// per-request invocations. enterWith(), not run(), because this loader
+// has no wrapping callback of its own to hand to run() -- its documented
+// semantics ("persists the store through any following asynchronous
+// calls") are exactly what's needed for a store entered during the first
+// (probe) call to remain visible during the second (render) call.
+//
+// A single module-level `new AsyncLocalStorage()` would NOT be safe here:
+// vinext's own als-registry.js documents that Vite's separate RSC/SSR/
+// client module environments (plus HMR) can load one source file as
+// multiple module instances, which would silently fork a module-local ALS
+// and defeat the dedup. Mirroring vinext's own fix, the ALS instance is
+// registered on `globalThis` under a `Symbol.for(...)` key instead, so
+// every module instance resolves to the same one.
+//
+// Freshness: this cache is request-scoped only -- entered fresh (or not
+// at all) for every new incoming request, keyed by the exact loader
+// arguments, holding only the in-flight/settled promise for the
+// still-executing request. It never persists across two separate
+// navigations, so a donation/import logged just before a new Today load
+// is unaffected: nothing here is a cross-request cache.
+const REQUEST_BRIEF_CACHE_ALS_KEY = Symbol.for("fundraising-os.workspace-brief-request-cache.als");
+const globalWithBriefCacheAls = globalThis as unknown as Record<symbol, AsyncLocalStorage<Map<string, Promise<WorkspaceBrief>>> | undefined>;
+
+function getRequestScopedBriefCache(): Map<string, Promise<WorkspaceBrief>> {
+  const als = (globalWithBriefCacheAls[REQUEST_BRIEF_CACHE_ALS_KEY] ??= new AsyncLocalStorage());
+  let store = als.getStore();
+  if (!store) {
+    store = new Map();
+    als.enterWith(store);
+  }
+  return store;
+}
+
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8, context = "unknown"): Promise<WorkspaceBrief> {
+  const cache = getRequestScopedBriefCache();
+  const cacheKey = `${userId} ${timezone} ${mode} ${now} ${priorityLimit}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    logger.info("workspace_brief_phase", { phase: "cache_hit", context });
+    return cached;
+  }
+  const promise = loadWorkspaceBriefUncached(userId, timezone, mode, now, priorityLimit, context);
+  cache.set(cacheKey, promise);
+  return promise;
+}
+
+async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode: DataMode, now: number, priorityLimit: number, context: string): Promise<WorkspaceBrief> {
   // Temporary diagnostic instrumentation for Error 1102 investigation on
   // this loader (see incident 2026-08-19 16:59:03 UTC, Ray a2dab4de9e40be78,
   // and docs/AI-HANDOFF.md). Phase timings/counts only -- never donor
