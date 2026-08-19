@@ -12,13 +12,13 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-1487a8bb4416666e79a8d94d571e3445af3fc2af
+fe35859 (Add read-only relationship_summary cleanup PREVIEW tool -- tooling only, no D1 writes)
 
 origin/feature/independent-cloudflare-sandbox:
-1487a8bb4416666e79a8d94d571e3445af3fc2af
+fe35859 (pushed)
 
 origin/main:
-4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58
+4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
 
 Working tree:
 clean
@@ -76,6 +76,85 @@ For behavior detail: `git show c42cca3` / `git show 391a509` / `git show
 messages), plus `tests/shared-activity-ux.test.mjs`,
 `tests/text-message-type.test.mjs`, `tests/mobile-ux-fixes.test.mjs`, and
 `tests/relationship-quality.test.mjs`.
+
+## Relationship-Summary Cleanup Audit (PREVIEW ONLY -- nothing applied)
+
+Follows on from the "Existing (pre-fix) `relationship_summary`/
+`institutional_memory` rows" item in Outstanding Work below. A staged
+AUDIT -> PREVIEW -> CLASSIFY pass was run against
+`fundraising-os-staging-db` (read-only) to find remaining pre-fix
+(`1487a8b`) machine-generated junk. **No D1 writes were performed at any
+point in this task.**
+
+Tooling: `scripts/relationship-summary-cleanup-preview.mjs` (`pnpm run
+cleanup:relationship-summary-preview`), tested by
+`tests/relationship-summary-cleanup-preview.test.mjs`. Committed in
+`fe35859`.
+
+Provenance: donors.relationship_summary/institutional_memory have no
+field-level provenance column, but all 4 real write paths
+(`app/api/interactions/route.ts`, `app/api/interactions/[id]/route.ts`,
+`app/api/interactions/[id]/outcome/route.ts`,
+`app/api/import/monday/commit/route.ts`'s `confirm_contact` action) go
+through the same `extractInteraction()` -- there is no manual free-text
+entry path for either field (manual notes live in the separate
+`donors.contact_note`, audited via `donor_contact_audits`, which never
+touches these two). Old-format values are identified by a structural
+signature, not a guess: the pre-fix `actionableRelationshipSnapshot`
+always began its output with the literal `"Latest discussion topics: "`;
+the current version never produces that prefix, verified against `git
+show 1487a8b~1:lib/capture/interaction.ts`.
+
+`institutional_memory` was audited separately and needs NO cleanup: its
+field construction (`${interactionKindLabel(type)} context:
+${note.trim()}`) is byte-for-byte identical before and after `1487a8b` --
+the extraction bug was entirely inside
+`actionableRelationshipSnapshot`/`relationshipSnapshotDetails`, which
+`institutional_memory` never used. 9 donors have a non-null
+`institutional_memory`; none are proposed for any change.
+
+No audit/history table covers changes to either field (`donor_contact_audits`
+is scoped to contact fields only) -- if cleanup is applied later, consider
+whether it needs one; this task did not build one since it made no writes.
+
+Results (248 live, non-archived donors scanned; 9 have a non-null
+`relationship_summary`):
+- SAFE_TO_CLEAR: 0
+- SAFE_TO_REGENERATE: 4
+- NEEDS_REVIEW: 5
+- MANUAL_UNCERTAIN: 0
+- ALREADY_GOOD: 0
+
+SAFE_TO_REGENERATE (traced to a source interaction; current extractor
+finds a real fact there -- proposed value shown, not yet written):
+- Dr. & Mrs. Yaakov Abdelhak (`e4626eea-...`) -> "Personal invite to Teaneck event."
+- Dr. & Mrs. Gavin Horn (`cd4fbfd1-...`) -> "Messaged to welcome son back to Yeshiva."
+- Mr. & Mrs. Dovie Weinschneider (`9a9e3a1f-...`) -> "Discussed Kollel donation and said to follow up after succos."
+- Mr. & Mrs. Tzvi Shlionsky (`2a1735d2-...`) -> "Sent him an email with photo of his son."
+
+NEEDS_REVIEW (left untouched by design; a human should read the source
+note before any action):
+- Mr. & Mrs. Mayer Simcha Klein, Mr. & Mrs. Allen Pfeiffer, Rabbi Michoel
+  A. Rovinsky -- all three store "People mentioned: Solicited." but no
+  interaction on file reproduces that value under the retrievable
+  `1487a8b~1` generator. Investigated, not just assumed a script
+  limitation: `git log --all -- lib/capture/interaction.ts` shows an
+  earlier commit, `e1760c6`, first added the "Solicited"-as-CRM-verb
+  exclusion -- the pre-`e1760c6` generator (not retrievable/reconstructed
+  here) had no such exclusion, which is consistent with how these 3 rows
+  were produced. Genuinely older data than this tool can trace, correctly
+  routed to human review rather than guessed at.
+- Dr. Jacques Semmelman -- source note mentions "Yahrtzeit"; current
+  extractor finds no fact signal but also doesn't recognize "Yahrtzeit" as
+  one, so this is flagged rather than silently cleared.
+- Mr. & Mrs. Yaakov Zachter -- source note mentions "Zman"; same reason.
+
+Both of the above surface a real, known gap in the current extractor's
+`FACT_SIGNAL_PATTERN` keyword coverage (no "Yahrtzeit"/"Zman"/bare-dollar-
+amount signal words). Deliberately NOT fixed as part of this task (that
+would be expanding `lib/capture/interaction.ts`, a second, separate
+decision, not a cleanup-audit deliverable) -- flagged here as a known
+limitation.
 
 ## Important Product Decisions
 
@@ -457,11 +536,12 @@ relationship-intelligence quality work):
   context carried over.
 - Existing (pre-fix) `relationship_summary`/`institutional_memory` rows
   written before this quality pass may still contain the old field-label
-  dump format or a misclassified "person" — explicitly NOT rewritten or
-  backfilled per instruction. If a cleanup of already-saved bad rows is
-  wanted, that needs its own separate, reviewed plan (a query to find
-  affected donors, and an explicit decision on what to do with each) —
-  do not improvise one.
+  dump format or a misclassified "person" — a read-only AUDIT/PREVIEW/
+  CLASSIFY pass has now been run (see "Relationship-Summary Cleanup
+  Audit" above); 4 rows have a clean regenerated value ready to review, 5
+  need a human read, 0 need no action. **No cleanup has been written to
+  D1** — that is the next, separate, explicitly-approved step (see Next
+  Approval Required).
 - Place/holiday names (e.g. "Israel", "Rosh Hashanah") can still appear
   in the `people` array — genuinely ambiguous with real given names in
   this donor community (e.g. "Israel" is also a real first name), so no
@@ -483,9 +563,21 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-None blocking — the shared-activity, Text Message, mobile UX fixes, and
-relationship-intelligence quality pass are all live and verified on
-Independent Staging.
+**Blocking: applying the relationship_summary cleanup preview.** The
+AUDIT/PREVIEW/CLASSIFY pass (see "Relationship-Summary Cleanup Audit"
+above) is complete and has NOT been written to D1. Before any write
+happens, a human needs to approve, specifically:
+1. Whether to write the 4 SAFE_TO_REGENERATE proposed values shown above
+   (each has a shown OLD -> NEW value and a traced source interaction).
+2. Confirmation that the 5 NEEDS_REVIEW rows stay untouched by automation
+   (they need a person to read the source note first — no proposed value
+   exists for them).
+3. Whether `institutional_memory` is confirmed out of scope (this audit
+   found it needs no cleanup at all).
+
+Everything else is non-blocking — the shared-activity, Text Message,
+mobile UX fixes, and relationship-intelligence quality pass are all live
+and verified on Independent Staging.
 
 Optional follow-ups, each would need its own explicit approval before
 work begins:
@@ -496,11 +588,34 @@ work begins:
   recipient touches, if judged worth addressing.
 - Pre-filling shared-activity context into the new "Add note for this
   donor" capture form, if fundraisers want it.
-- A separate, reviewed cleanup plan for existing pre-fix
-  `relationship_summary`/`institutional_memory` rows, if wanted (see
-  Outstanding Work above — explicitly not done automatically).
+- Expanding the extractor's `FACT_SIGNAL_PATTERN` keyword coverage
+  (e.g. "Yahrtzeit", "Zman", bare dollar amounts) — a known gap surfaced
+  by the cleanup audit's NEEDS_REVIEW bucket, deliberately not fixed as
+  part of that task.
 
 ## Last Updated
+
+2026-08-19T00:00:00Z (approximate)
+Claude (Sonnet 5) — Relationship-summary cleanup AUDIT/PREVIEW/CLASSIFY
+pass completed (read-only against `fundraising-os-staging-db`). Built
+`scripts/relationship-summary-cleanup-preview.mjs`, reusing the real
+production extractor (never reimplemented) to propose regenerated values
+and a small frozen legacy-generator block used only to trace old-format
+values back to their source note. 9 donors have a non-null
+relationship_summary: 4 SAFE_TO_REGENERATE (proposed value shown), 5
+NEEDS_REVIEW (left untouched, reasons documented above), 0 SAFE_TO_CLEAR,
+0 MANUAL_UNCERTAIN, 0 ALREADY_GOOD. `institutional_memory` audited
+separately and confirmed to need no cleanup. Added
+`tests/relationship-summary-cleanup-preview.test.mjs` (12-item coverage,
+offline against synthetic fixtures) and a `pnpm run
+cleanup:relationship-summary-preview` script alias. `pnpm test` and
+`pnpm exec tsc --noEmit` both clean. Committed and pushed as `fe35859`.
+**No D1 writes were performed at any point in this task** — applying the
+4 regenerations (and deciding what, if anything, to do about the 5
+needs-review rows) is a separate, explicitly-approved next step; see Next
+Approval Required above.
+
+---
 
 2026-08-19T04:35:00Z
 Claude (Sonnet 5) — Relationship-intelligence quality pass shipped: fixed
