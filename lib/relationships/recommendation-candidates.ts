@@ -1,5 +1,6 @@
 import type { RecommendationEvidence } from "./recommendation-evidence.ts";
 import type { GiftSource } from "../giving/acknowledgment.ts";
+import { interactionKindLabel, relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";
 
 // Plausible next-action candidates generated from one donor's evidence.
 // Each generator only fires on its own precondition, so a candidate simply
@@ -130,17 +131,32 @@ function followUpPledgeCandidate(evidence: RecommendationEvidence): Recommendati
 function continueConversationCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const interaction = evidence.contact.lastCompletedInteraction;
   if (!interaction || interaction.daysAgo > 30) return null;
-  const [subject, ...rest] = interaction.summary.split("\n");
-  const note = rest.join(" ").trim();
+  const kind = interaction.type as InteractionKind;
+  const friendlyType = interactionKindLabel(kind) || interaction.type;
+  const { subject, note } = splitInteractionSummary(interaction.summary);
+  const details = relationshipSnapshotDetails(note || subject, kind);
+  // Only surfaces when the note itself names something to follow up on --
+  // a bare "texted to check in" with no commitment language is not useful
+  // fundraising guidance. Mechanically paraphrasing "the recent {type}
+  // about {subject}" just because SOME interaction exists within 30 days
+  // produced exactly that (a real, observed live example: "Continue the
+  // conversation from the recent text about 'Text message'."). When
+  // there's nothing specific, this candidate simply doesn't fire, same as
+  // every other candidate here -- callers already have an honest empty
+  // state ("No suggested action available" / "None available") for when
+  // nothing survives, so no new fallback string is needed.
+  if (details.commitments.length === 0) return null;
+  const daysAgoLabel = interaction.daysAgo === 0 ? "today" : `${interaction.daysAgo} day${interaction.daysAgo === 1 ? "" : "s"} ago`;
+  const action = details.recommendedNextAction.replace(/^./, (letter) => letter.toUpperCase());
   return {
     kind: "continue_conversation",
-    action: `Continue the conversation from the recent ${interaction.type}${subject ? ` about "${subject}"` : ""}.`,
-    why: `The most recent completed interaction was ${interaction.daysAgo === 0 ? "today" : `${interaction.daysAgo} day${interaction.daysAgo === 1 ? "" : "s"} ago`} and may have an open thread worth following up on.`,
-    evidence: [`${interaction.type} on ${dateLabel(interaction.occurredAt)}: ${note || subject || "no additional detail recorded"}.`],
+    action: /[.!?]$/.test(action) ? action : `${action}.`,
+    why: `A specific follow-up was noted in the most recent ${friendlyType.toLowerCase()} (${daysAgoLabel}).`,
+    evidence: [`${friendlyType} on ${dateLabel(interaction.occurredAt)}: ${note || subject || "no additional detail recorded"}.`],
     confidence: "medium",
     timing: null,
     certainty: "confirmed",
-    specificity: 0.55,
+    specificity: 0.6,
     recency: recencyScore(interaction.daysAgo, 30),
     urgency: 0.35,
     supportingDate: interaction.occurredAt,

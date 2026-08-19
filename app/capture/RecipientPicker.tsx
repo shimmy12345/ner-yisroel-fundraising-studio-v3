@@ -65,7 +65,12 @@ export function RecipientPicker({ donors, selectedIds, onChange, maxRecipients, 
         >
           <span className="recipient-picker-check" aria-hidden="true">{checked ? "✓" : ""}</span>
           <span className="autocomplete-avatar">{donorInitials({ displayName: donor.name, primaryFirstName: donor.primaryFirstName, lastName: donor.lastName })}</span>
-          <span className="autocomplete-identity"><strong>{donor.name}</strong>{numericDonorCode({ donorCode: donor.code }) && <span className="donor-code">{numericDonorCode({ donorCode: donor.code })}</span>}<small>{[donor.spouse, donor.email, donor.phone].filter(Boolean).join(" · ")}</small></span>
+          {/* One restrained secondary line (code + email-or-phone, not
+              spouse/email/phone all joined) that truncates instead of
+              wrapping -- multi-line metadata was colliding with the row
+              below it on narrow screens (see .recipient-picker-result's
+              grid-auto-rows fix below for the other half of that bug). */}
+          <span className="autocomplete-identity"><strong>{donor.name}</strong><small>{[numericDonorCode({ donorCode: donor.code }), donor.email || donor.phone].filter(Boolean).join(" · ")}</small></span>
         </button>;
       }) : <p>No matching donors</p>}
     </div>}

@@ -474,7 +474,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .right-rail { grid-template-columns: 1fr; }.right-rail .compact-card { grid-column: auto; }
   .donor-breadcrumb { margin-top: 0; }.donor-header { align-items: flex-start; flex-direction: column; gap: 19px; }.donor-identity { align-items: flex-start; }.donor-avatar { width: 54px; height: 54px; }.donor-identity h1 { font-size: 34px; }.contact-row { gap: 10px; }.contact-row > span { width: 100%; }
   .header-actions { width: 100%; justify-content: flex-start; }.header-actions button:first-child { display:none; }.header-actions .primary { flex: 1; text-align: center; }
-  .donor-snapshot-grid { grid-template-columns: 1fr 1fr; }.snapshot-card:nth-child(2) { border-right: 0; }.snapshot-card:nth-child(-n+2) { border-bottom: 1px solid #e9ebe7; }.snapshot-card { padding: 14px; }
+  .donor-snapshot-grid { grid-template-columns: repeat(3, 1fr); }.snapshot-card:nth-child(3) { border-right: 0; }.snapshot-card:nth-child(-n+3) { border-bottom: 1px solid #e9ebe7; }.snapshot-card { padding: 14px; }.snapshot-card:last-child { grid-column: 1 / -1; border-bottom: 0; }
   .brief-signals, .memory-grid { grid-template-columns: 1fr; }.brief-signals article { border-bottom: 1px solid #e5e9e5; }.brief-signals article:last-child { border-bottom: 0; }
   .memory-grid article:nth-child(odd) { border-right: 0; }.memory-grid article:nth-child(-n+3) { border-bottom: 1px solid #e8eae7; }
   .card-heading { display: block; }.card-heading .updated { display: inline-block; margin-top: 8px; }
@@ -930,11 +930,21 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .recipient-picker { display:grid; gap:8px; margin:14px 0; }
 .recipient-picker label { font-size:11px; font-weight:750; color:#455a50; text-transform:uppercase; letter-spacing:.04em; }
 .recipient-picker > input { min-height:44px; padding:10px 12px; border:1px solid #cad8d0; border-radius:8px; font:inherit; font-size:14px; }
-.recipient-picker-results { display:grid; gap:2px; max-height:320px; overflow-y:auto; margin-top:4px; padding:6px; border:1px solid #dde5e0; border-radius:9px; background:#fbfcfb; }
-.recipient-picker-result { display:grid; grid-template-columns:20px 34px minmax(0,1fr); align-items:center; gap:10px; min-height:44px; padding:8px 10px; border:none; border-radius:7px; background:transparent; text-align:left; font:inherit; cursor:pointer; }
+.recipient-picker-results { display:grid; grid-auto-rows:min-content; gap:2px; max-height:320px; overflow-y:auto; margin-top:4px; padding:6px; border:1px solid #dde5e0; border-radius:9px; background:#fbfcfb; }
+.recipient-picker-result { display:grid; grid-template-columns:20px 34px minmax(0,1fr); align-items:start; gap:10px; min-height:44px; padding:10px; border:none; border-radius:7px; background:transparent; text-align:left; font:inherit; cursor:pointer; }
 .recipient-picker-result:hover { background:#eef4f0; }
 .recipient-picker-result.selected { background:#dfece4; }
 .recipient-picker-result:disabled { cursor:not-allowed; opacity:.45; }
+.recipient-picker-result .recipient-picker-check, .recipient-picker-result .autocomplete-avatar { margin-top:2px; }
+/* The shared .autocomplete-identity small (used by the single-donor
+   DonorAutocomplete too) wraps onto multiple lines by design there; this
+   picker's rows are denser and were the actual source of the reported
+   overlap (a CSS grid item with align-items other than stretch doesn't
+   reliably grow its implicit row to fit wrapped text -- grid-auto-rows:
+   min-content above fixes that generally, and this keeps the row itself
+   compact and predictable by truncating to one line instead). Scoped to
+   this component only -- DonorAutocomplete's own rows are untouched. */
+.recipient-picker-result .autocomplete-identity small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .recipient-picker-check { color:#315f4b; font-weight:800; }
 .recipient-picker-selected { margin-top:4px; }
 .recipient-picker-count { margin:0 0 8px; color:var(--muted); font-size:12px; font-weight:700; }
@@ -957,8 +967,10 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .large-selection-confirm button.danger-button { border-color:#874437; background:#874437; color:#fff; }
 .event-shared-activity { padding:3px 7px; border-radius:10px; background:#e8eef5; color:#2a4d73; font-size:9px; font-weight:650; }
 .shared-activity-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
-.shared-activity-actions button { min-height:36px; padding:7px 11px; border:1px solid #cad8d0; border-radius:8px; background:#fff; color:#315f4b; font-size:11px; font-weight:700; cursor:pointer; }
+.shared-activity-actions button, .shared-activity-actions a { min-height:36px; padding:7px 11px; border:1px solid #cad8d0; border-radius:8px; background:#fff; color:#315f4b; font-size:11px; font-weight:700; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; }
 .shared-activity-actions button.danger-button { border-color:#874437; color:#874437; }
+.shared-activity-actions a.shared-activity-note-link { border-color:#315f4b; background:#eaf1ed; }
+.shared-activity-edit-warning { margin:0 0 13px; padding:9px 11px; border-radius:8px; background:#fff2d7; color:#805b18; font-size:11px; font-weight:650; line-height:1.5; }
 @media (max-width:760px) {
   .recipient-picker-results { max-height:260px; }
   .role-picker-options { flex-direction:column; }
