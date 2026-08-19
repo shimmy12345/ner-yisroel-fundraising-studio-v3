@@ -145,7 +145,7 @@ function continueConversationCandidate(evidence: RecommendationEvidence): Recomm
   // every other candidate here -- callers already have an honest empty
   // state ("No suggested action available" / "None available") for when
   // nothing survives, so no new fallback string is needed.
-  if (details.commitments.length === 0) return null;
+  if (!details.recommendedNextAction) return null;
   const daysAgoLabel = interaction.daysAgo === 0 ? "today" : `${interaction.daysAgo} day${interaction.daysAgo === 1 ? "" : "s"} ago`;
   const action = details.recommendedNextAction.replace(/^./, (letter) => letter.toUpperCase());
   return {
@@ -168,9 +168,13 @@ function relationshipOpportunityCandidate(evidence: RecommendationEvidence): Rec
   if (!text) return null;
   return {
     kind: "relationship_opportunity",
-    action: `Reach out and reference what's already known: ${text}`,
-    why: "Relationship notes describe a specific, donor-relevant fact and no open reminder currently covers this.",
-    evidence: [`relationship_summary/institutional_memory: "${text}"`],
+    // `text` is now always a specific, quoted fact (never a field-label
+    // dump -- see actionableRelationshipSnapshot's doc comment), so this
+    // stays a plain, direct prompt grounded in that one fact, not internal
+    // provenance language.
+    action: `Reach out and reference: ${text}`,
+    why: "A specific, donor-relevant fact is on file and no open reminder currently covers this.",
+    evidence: [`Recorded relationship note: "${text}"`],
     confidence: "medium",
     timing: null,
     certainty: "narrative",
@@ -191,8 +195,8 @@ function solicitCandidate(evidence: RecommendationEvidence): RecommendationCandi
     return {
       kind: "solicit",
       action: `Make a solicitation ask, following up on: ${narrativeText}`,
-      why: "Relationship notes describe a specific, still-relevant solicitation opportunity.",
-      evidence: [`relationship_summary/institutional_memory: "${narrativeText}"`],
+      why: "A specific, still-relevant solicitation opportunity is on file.",
+      evidence: [`Recorded relationship note: "${narrativeText}"`],
       confidence: "medium",
       timing: null,
       certainty: "narrative",

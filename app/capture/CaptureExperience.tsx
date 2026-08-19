@@ -165,7 +165,13 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           reminder,
           customDate: reminder === "custom" ? customDate : undefined,
           occurredAt: parseScheduledDate(occurredAt)?.toISOString(),
-          acceptRelationshipSnapshot,
+          // Gated on the CURRENT preview, not just the checkbox's own state
+          // -- if the note was edited down to nothing meaningful after the
+          // box was checked (or the box was never shown at all because
+          // there was never anything meaningful), this must never send
+          // true. preview is computed from these exact same note/activeKind/
+          // subject values in this same render, so it's always in sync.
+          acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview.relationshipSummary !== null,
         }),
       });
       const payload = await response.json() as SaveResult & { error?: string };
@@ -344,7 +350,14 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
                 <span>{interactionKindLabel(preview.type)}</span><span>{dateLabel}</span>
                 {preview.commitments.length > 0 && <span>{preview.commitments.length} commitment{preview.commitments.length > 1 ? "s" : ""}</span>}
               </div>
-              {!future && <div className="relationship-snapshot-preview"><label><input type="checkbox" checked={acceptRelationshipSnapshot} onChange={(event) => setAcceptRelationshipSnapshot(event.target.checked)} /><span><strong>Use this relationship snapshot</strong><small>Nothing generated is saved unless you check this box.</small></span></label><p>{preview.relationshipSummary}</p></div>}
+              {/* Only ever offers a real fact to opt into -- never a generic
+                  category label or boilerplate the user would have to
+                  manually reject. See actionableRelationshipSnapshot's doc
+                  comment: null here means nothing specific and
+                  donor-relevant was actually found in this note. */}
+              {!future && (preview.relationshipSummary
+                ? <div className="relationship-snapshot-preview"><label><input type="checkbox" checked={acceptRelationshipSnapshot} onChange={(event) => setAcceptRelationshipSnapshot(event.target.checked)} /><span><strong>Use this relationship snapshot</strong><small>Nothing generated is saved unless you check this box.</small></span></label><p>{preview.relationshipSummary}</p></div>
+                : <p className="relationship-snapshot-preview relationship-snapshot-empty">No meaningful relationship details detected.</p>)}
             </div>
           )}
 

@@ -32,7 +32,13 @@ assert.equal(brief.recentGift?.id, "gift-recent");
 assert.equal(brief.largestGift?.id, "gift-old");
 assert.equal(brief.openPledgeCents, 10000);
 assert.equal(brief.lastMeaningfulContact?.id, "interaction-a");
-assert.deepEqual(brief.recentDiscussionTopics, ["Scholarship update", "Impact update"]);
+// Real quoted fact from the note, not a generic category label -- Meeting
+// Brief inherits the same extraction quality gate as the donor page's
+// Relationship Snapshot (see specificFacts' doc comment in
+// lib/capture/interaction.ts), so "Scholarship update"/"Impact update"
+// (coarse category names that told a fundraiser nothing they didn't
+// already know) are gone in favor of the actual sentence.
+assert.deepEqual(brief.recentDiscussionTopics, ["Discussed scholarship outcomes with Maya Cohen and a campus visit"]);
 assert.deepEqual(brief.peopleMentioned, ["Maya Cohen"]);
 assert.equal(brief.discussionTopics.length, 3);
 assert.equal(brief.followUpActions.length, 3);

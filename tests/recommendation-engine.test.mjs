@@ -352,9 +352,14 @@ async function run() {
   assert.match(liveData, /importantDates:/, "the homepage/Today queue must feed important-date rows into the shared evidence");
 
   // --- Suggested Action summary-card presentation (donor page KPI card) ---
-  // Real staging text (verbatim, from the exact donor whose imported note
-  // was "Solicited for a plaque ($5k)") -- proves the fix against the
-  // exact problematic recommendation, not a synthetic approximation.
+  // A legacy-shaped fixture: relationship_summary predating the extraction
+  // quality-gate fix (a field-label dump) is never backfilled for existing
+  // rows (explicit product decision), so the recommendation engine must
+  // still behave sanely if one is ever read. It must not add its OWN raw
+  // field-name prefix on top ("relationship_summary/institutional_memory:"
+  // -- the exact internal-provenance leak fixed in this same change), even
+  // though it doesn't re-validate/re-clean whatever text it's handed --
+  // quality is enforced at the extraction layer, not here.
   const verboseNarrative = "Latest discussion topics: Relationship update.\nPeople mentioned: Solicited.\nRecommended next action: Review this note before the next interaction.";
   const verboseEvidence = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: verboseNarrative }, NOW, TIMEZONE);
   const verboseRecommendation = buildDonorRecommendation(verboseEvidence);
@@ -364,7 +369,8 @@ async function run() {
   // gets the complete text; nothing was deleted from the recommendation engine.
   assert.match(verboseRecommendation.action, /Latest discussion topics:/);
   assert.match(verboseRecommendation.action, /People mentioned: Solicited/);
-  assert.match(verboseRecommendation.evidence.join(" "), /relationship_summary\/institutional_memory:/);
+  assert.match(verboseRecommendation.evidence.join(" "), /Recorded relationship note:/);
+  assert.doesNotMatch(verboseRecommendation.evidence.join(" "), /relationship_summary\/institutional_memory:/, "the recommendation engine must never expose the raw DB field name in donor-facing evidence text");
 
   const verboseSummary = summarizeRecommendationForSnapshot(verboseRecommendation);
   // 1. No raw evidence-label strings leak into the summary card.

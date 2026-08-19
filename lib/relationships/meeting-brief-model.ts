@@ -142,7 +142,12 @@ export function buildMeetingBrief(
     const kind = allowedKinds.has(interaction.type as InteractionKind) ? interaction.type as InteractionKind : "note";
     return relationshipSnapshotDetails(note || subject, kind);
   });
-  const recentDiscussionTopics = [...new Set(relationshipSignals.flatMap((item) => item.topics))].slice(0, 5);
+  // Real quoted facts from the notes themselves, not generic category
+  // labels ("Personal update", "Yeshiva") -- see specificFacts' doc
+  // comment in lib/capture/interaction.ts. A donor with no specific
+  // relationship fact on file simply shows no discussion topics, rather
+  // than a manufactured category name.
+  const recentDiscussionTopics = [...new Set(relationshipSignals.flatMap((item) => item.specificFacts))].slice(0, 5);
   const peopleMentioned = [...new Set(relationshipSignals.flatMap((item) => item.people))].slice(0, 8);
 
   const discussionTopics = [

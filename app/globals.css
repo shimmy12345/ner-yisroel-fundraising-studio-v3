@@ -384,6 +384,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .relationship-snapshot-preview label span { display:grid; gap:2px; }
 .relationship-snapshot-preview label small { color:#718078; font-weight:500; }
 .relationship-snapshot-preview > p { margin:10px 0 0 26px; color:#53635b; font-size:12px; line-height:1.6; white-space:pre-line; }
+.relationship-snapshot-empty { margin-top:10px; padding-top:11px; border-top:1px solid #dfe8e2; color:#8b958f; font-size:12px; line-height:1.6; }
 .reminder-picker legend { width: 130px; }
 .reminder-picker button { padding: 9px 11px; font-size: 12px; }
 .reminder-picker > input { width: calc(100% - 130px); margin-left: 130px; }

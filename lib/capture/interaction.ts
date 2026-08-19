@@ -9,7 +9,11 @@ export type InteractionExtraction = {
   suggestedSubject: string;
   summary: string;
   memory: string;
-  relationshipSummary: string;
+  // null when nothing specific/donor-relevant was actually extracted from
+  // this note -- see actionableRelationshipSnapshot's doc comment. Never a
+  // manufactured placeholder; callers must treat null as "nothing to show
+  // or save here", not coerce it to an empty string.
+  relationshipSummary: string | null;
   nextAction: string;
   commitments: string[];
 };
@@ -74,25 +78,88 @@ export function inferSubject(note: string, kind: InteractionKind): string {
 const sentenceList = (note: string) => note.trim().split(/(?:[.!?]+\s+|[\r\n]+)/).map((item) => item.trim()).filter(Boolean);
 const concise = (value: string, max = 180) => value.length <= max ? value : `${value.slice(0, max - 1).trim()}…`;
 
-// Proven false positive (staging incident): a Monday.com-imported note
-// reading "Solicited for a plaque ($5k)" -- a genuine, correctly-captured
-// note whose first word is a common fundraising CRM disposition verb, not
-// a person -- was extracted as "People mentioned: Solicited." This regex
-// has no way to tell "capitalized because it's a proper noun" from
-// "capitalized only because it opens a sentence", so common donor-pipeline
-// status/action verbs that could plausibly start a note are excluded here,
-// the same way Called/Emailed/Discussed/Shared already are below.
-const CRM_STATUS_VERBS = ["Solicited", "Declined", "Confirmed", "Pending", "Requested", "Reviewed", "Completed", "Cancelled", "Rescheduled", "Postponed", "Attended", "Contacted", "Reached", "Scheduled", "Reminded", "Thanked", "Updated", "Approved", "Rejected", "Received", "Processed"];
+// Proven false positive (staging incidents): notes reading "Solicited for a
+// plaque ($5k)" and "Messaged about the building fund" -- genuine,
+// correctly-captured notes whose first word is a common fundraising/
+// communication verb, not a person -- were extracted as "People mentioned:
+// Solicited"/"People mentioned: Messaged." This regex has no way to tell
+// "capitalized because it's a proper noun" from "capitalized only because
+// it opens a sentence", so every common way a fundraiser's note plausibly
+// opens (a channel verb, a CRM disposition verb) is excluded by name here.
+// This list is intentionally bounded to this specific, closed domain
+// vocabulary -- how a fundraiser describes contacting or dispositioning a
+// donor -- not an open-ended attempt at general English verb detection.
+const COMMUNICATION_ACTION_VERBS = [
+  "Called", "Emailed", "Messaged", "Texted", "Spoke", "Met", "Discussed", "Asked", "Visited", "Contacted", "Reached", "Sent", "Shared", "Followed", "Send", "Follow",
+  "Solicited", "Declined", "Confirmed", "Pending", "Requested", "Reviewed", "Completed", "Cancelled", "Rescheduled", "Postponed", "Attended", "Scheduled", "Reminded", "Thanked", "Updated", "Approved", "Rejected", "Received", "Processed",
+];
+// Three genuine closed grammatical categories, not fundraising-specific
+// jargon -- modal auxiliary verbs ("Will send...", "Would follow up..."),
+// days of the week ("...by Friday"), and indefinite pronouns ("Nothing
+// major") are all common sentence-initial or mid-sentence capitalized
+// words in a short note, and none of them is ever a donor's name.
+const MODAL_VERBS = ["Will", "Would", "Should", "Could", "Can", "May", "Might", "Must", "Shall"];
+const DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const INDEFINITE_PRONOUNS = ["Nothing", "Everything", "Something", "Anything"];
+const NON_NAME_WORDS = new Set(["Meeting", "Coffee", "Lunch", "Dinner", "The", "This", "That", "These", "Those", "She", "He", "They", "We", "I", "It", ...COMMUNICATION_ACTION_VERBS, ...MODAL_VERBS, ...DAYS_OF_WEEK, ...INDEFINITE_PRONOUNS]);
+
+// Generalizes beyond the fixed verb list above: a bare capitalized word
+// immediately followed by one of these words is being used as a verb, not
+// standing alone as someone's name -- "Messaged about", "Reconnected with",
+// "Chatted via" -- a real first name essentially never precedes these
+// particles at the start of a sentence in this note-writing style ("David
+// about the pledge" is not how these notes read). Catches a future
+// unlisted verb without needing the dictionary to be exhaustive.
+const VERB_FOLLOWER_PATTERN = /^(about|regarding|with|via)\b/i;
+
+// Regular plurals matter here: real notes as often say "Yeshivas Ner
+// Yisroel" (institution word FIRST, qualifier after -- the common pattern
+// for yeshiva names) as "Ford Foundation" (qualifier first). A literal
+// "Yeshiva" with no "s" handling matched neither the plural nor a
+// keyword-first name, letting a real organization slip through
+// unrecognized and get misclassified as a person instead.
+const ORG_TYPE_WORD = "Foundations?|Universit(?:y|ies)|Colleges?|Schools?|Yeshivas?|Synagogues?|Congregations?|Hospitals?|Compan(?:y|ies)|Inc\\.?|LLC";
+const ORG_TYPE_TEST = new RegExp(`\\b(?:${ORG_TYPE_WORD})\\b`, "u");
 
 function mentionedPeople(note: string) {
-  const ignored = new Set(["Called", "Emailed", "Meeting", "Coffee", "Lunch", "Dinner", "Visited", "Discussed", "Shared", "Send", "Follow", "The", "This", "She", "He", "They", "We", "I", ...CRM_STATUS_VERBS]);
-  const names = note.match(/\b\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*)*/gu) ?? [];
-  return [...new Set(names.map((name) => name.trim().replace(/[’']s$/u, "")).filter((name) => !ignored.has(name) && !/\b(?:Foundation|University|College|School|Yeshiva|Synagogue|Congregation|Hospital|Inc|LLC)\b/u.test(name)))].slice(0, 5);
+  const matches = [...note.matchAll(/\b\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*)*/gu)];
+  const names = matches
+    .map((match) => {
+      const name = match[0].trim().replace(/[’']s$/u, "");
+      if (NON_NAME_WORDS.has(name)) return null;
+      if (ORG_TYPE_TEST.test(name)) return null;
+      // Only single-word matches are structurally ambiguous with a verb --
+      // a genuine multi-word match ("David Cohen") is never mistaken for a
+      // sentence-initial verb, so this check only ever narrows single words.
+      // Uses this specific match's own position (not indexOf) so a repeated
+      // word elsewhere in the note can't be checked against the wrong
+      // occurrence's context.
+      if (!name.includes(" ")) {
+        const afterIndex = (match.index ?? 0) + match[0].length;
+        const after = note.slice(afterIndex).replace(/^[.,!?]?\s*/, "");
+        if (VERB_FOLLOWER_PATTERN.test(after)) return null;
+      }
+      return name;
+    })
+    .filter((name): name is string => name !== null);
+  return [...new Set(names)].slice(0, 5);
 }
 
 function mentionedOrganizations(note: string) {
-  const organizations = note.match(/\b(?:\p{Lu}[\p{L}'’&.-]*\s+){0,5}(?:Foundation|University|College|School|Yeshiva|Synagogue|Congregation|Hospital|Company|Inc\.?|LLC)\b/gu) ?? [];
-  return [...new Set(organizations.map((item) => item.trim()))].slice(0, 5);
+  const organizations = [
+    // Qualifier-first pattern ("Ford Foundation", "Beth Israel Hospital").
+    ...(note.match(new RegExp(`\\b(?:\\p{Lu}[\\p{L}'’&.-]*\\s+){0,5}(?:${ORG_TYPE_WORD})\\b`, "gu")) ?? []),
+    // Keyword-first pattern ("Yeshivas Ner Yisroel") -- the common naming
+    // convention for yeshivas specifically, which the qualifier-first
+    // pattern above structurally can't capture at all.
+    ...(note.match(/\bYeshivas?\s+(?:\p{Lu}[\p{L}'’-]*\s*){1,4}/gu) ?? []),
+  ];
+  // A bare institution-type word with no qualifier ("Yeshiva", "School",
+  // "Foundation" alone) doesn't identify any SPECIFIC organization -- it's
+  // a generic category, not a donor-relevant fact. Only keep matches with
+  // a real qualifying word attached ("Yeshivas Ner Yisroel", "Beth Israel
+  // Congregation").
+  return [...new Set(organizations.map((item) => item.trim()).filter((item) => item.includes(" ")))].slice(0, 5);
 }
 
 function commitmentAction(sentence: string) {
@@ -102,47 +169,77 @@ function commitmentAction(sentence: string) {
   return direct ? concise(`${direct[1]}${direct[2]}`.replace(/[.!?]+$/, ""), 120) : null;
 }
 
+const COMMITMENT_PATTERN = /\b(promised|agreed|committed|will|would|send|follow up|follow-up|call back|introduce|schedule|share|provide)\b/i;
+const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly|no longer|ready|hesitant|more involved|less involved|reconnected|stepped back)\b/i;
+// The same closed vocabulary inferSubject() already uses to classify a
+// note into a coarse category (pledge/gift/scholarship/campus/proposal/
+// event/personal) -- reused here not to produce another label, but to
+// find the actual SENTENCE that earned the classification, so the
+// specific fact survives instead of being collapsed into a generic
+// category name. A sentence flagged here is a real quote from the note,
+// never a manufactured phrase.
+const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|scholarship|student|tuition|education|campus|tour|school visit|site visit|proposal|request for support|funding request|ask amount|event|gala|dinner|reception|parlor meeting|family|spouse|son|daughter|wedding|engaged|engagement|seminary|birthday|anniversary|sick|illness|recovering|hospital|passed away)\b/i;
+
 export type RelationshipSnapshotDetails = {
-  topics: string[];
   people: string[];
   organizations: string[];
   commitments: string[];
   openFollowUps: string[];
   relationshipChanges: string[];
-  recommendedNextAction: string;
+  // null when no commitment sentence yielded a concrete, gradable action --
+  // never a manufactured "review this note" placeholder. See
+  // actionableRelationshipSnapshot's doc comment for why this must stay
+  // null rather than fall back to boilerplate.
+  recommendedNextAction: string | null;
+  // Real, quoted sentences worth surfacing as relationship intelligence --
+  // specific donor-relevant facts, never a generic category label
+  // ("Personal update", "Relationship update"). Prioritized: a concrete
+  // commitment first, then a noted relationship change, then any other
+  // sentence matching a recognized fact signal. Deduplicated and capped at
+  // 2 -- a snapshot is meant to be a quick prompt before the next
+  // interaction, not a full transcript.
+  specificFacts: string[];
 };
 
+// `kind` is unused here now (topics/category labels were dropped from this
+// output -- see specificFacts below) but stays in the signature since
+// every caller already has it on hand and passes it, matching
+// inferSubject's shape (still used separately for subject-line suggestions).
 export function relationshipSnapshotDetails(note: string, kind: InteractionKind): RelationshipSnapshotDetails {
   const sentences = sentenceList(note);
-  const topics = inferSubject(note, kind).split(" and ").map((topic) => topic.replace(/^./, (letter) => letter.toUpperCase()));
   const people = mentionedPeople(note);
   const organizations = mentionedOrganizations(note);
-  const commitmentSentences = sentences.filter((sentence) => /\b(promised|agreed|committed|will|would|send|follow up|follow-up|call back|introduce|schedule|share|provide)\b/i.test(sentence)).slice(0, 3);
-  const relationshipChanges = sentences.filter((sentence) => /\b(increased|decreased|changed|newly|no longer|ready|hesitant|more involved|less involved|reconnected|stepped back)\b/i.test(sentence)).slice(0, 2);
-  const nextAction = commitmentSentences.map(commitmentAction).find(Boolean) ?? "Review this note before the next interaction";
+  const commitmentSentences = sentences.filter((sentence) => COMMITMENT_PATTERN.test(sentence)).slice(0, 3);
+  const relationshipChangeSentences = sentences.filter((sentence) => RELATIONSHIP_CHANGE_PATTERN.test(sentence)).slice(0, 2);
+  const factSignalSentences = sentences.filter((sentence) => FACT_SIGNAL_PATTERN.test(sentence));
+  const nextAction = commitmentSentences.map(commitmentAction).find(Boolean) ?? null;
+  const cleanSentence = (sentence: string) => concise(sentence).replace(/[.!?]+$/, "");
+  const specificFacts = [...new Set([...commitmentSentences, ...relationshipChangeSentences, ...factSignalSentences].map(cleanSentence))].slice(0, 2);
   return {
-    topics,
     people,
     organizations,
-    commitments: commitmentSentences.map((item) => concise(item).replace(/[.!?]+$/, "")),
-    openFollowUps: commitmentSentences.length ? [nextAction] : [],
-    relationshipChanges: relationshipChanges.map((item) => concise(item).replace(/[.!?]+$/, "")),
+    commitments: commitmentSentences.map(cleanSentence),
+    openFollowUps: nextAction ? [nextAction] : [],
+    relationshipChanges: relationshipChangeSentences.map(cleanSentence),
     recommendedNextAction: nextAction,
+    specificFacts,
   };
 }
 
-export function actionableRelationshipSnapshot(note: string, kind: InteractionKind) {
+// Builds donors.relationship_summary. Returns null -- never a placeholder
+// string -- when nothing specific and donor-relevant was actually found in
+// the note: a generic category label ("Personal update", "Yeshiva" alone)
+// or the mere fact that an interaction happened is not relationship
+// intelligence worth persisting or displaying. Every caller (the capture
+// preview, the donor page's Relationship Snapshot card, Meeting Brief,
+// Assistant) must treat null as "nothing to show", not coerce it to text.
+// When something IS worth keeping, this returns a plain natural-language
+// sentence (or two) quoted from the note itself -- never a dump of field
+// labels like "Latest discussion topics: ...\nPeople mentioned: ...".
+export function actionableRelationshipSnapshot(note: string, kind: InteractionKind): string | null {
   const details = relationshipSnapshotDetails(note, kind);
-  const topicLabel = details.topics.map((topic, index) => index ? topic.toLowerCase() : topic).join(" and ");
-  return [
-    `Latest discussion topics: ${topicLabel}.`,
-    details.people.length ? `People mentioned: ${details.people.join(", ")}.` : null,
-    details.organizations.length ? `Organizations mentioned: ${details.organizations.join(", ")}.` : null,
-    details.commitments.length ? `Commitments: ${details.commitments.join("; ")}.` : null,
-    details.openFollowUps.length ? `Open follow-ups: ${details.openFollowUps.join("; ")}.` : null,
-    details.relationshipChanges.length ? `Relationship changes: ${details.relationshipChanges.join("; ")}.` : null,
-    `Recommended next action: ${details.recommendedNextAction}.`,
-  ].filter(Boolean).join("\n");
+  if (details.specificFacts.length === 0) return null;
+  return details.specificFacts.map((fact) => /[.!?]$/.test(fact) ? fact : `${fact}.`).join(" ");
 }
 
 export function sanitizeRelationshipSnapshot(value: string | null) {

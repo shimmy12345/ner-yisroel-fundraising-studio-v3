@@ -3,6 +3,7 @@ import {
   extractInteraction,
   inferInteractionKind,
   inferSubject,
+  relationshipSnapshotDetails,
   reminderDueAt,
   sanitizeRelationshipSnapshot,
   splitInteractionSummary,
@@ -23,21 +24,27 @@ assert.equal(extracted.subject, "", "an unaccepted suggestion never becomes the 
 assert.equal(extracted.suggestedSubject, "Campus visit and impact update");
 assert.deepEqual(extracted.commitments, ['Send the material referenced in “Campus visit and impact update”']);
 assert.equal(extractInteraction(note, "meeting", "Campus stewardship").subject, "Campus stewardship", "an explicitly accepted subject is preserved");
-assert.match(extracted.relationshipSummary, /Latest discussion topics: Campus visit and impact update\./);
-assert.match(extracted.relationshipSummary, /People mentioned: Elena, Maya/);
-assert.match(extracted.relationshipSummary, /Commitments:/);
-assert.match(extracted.relationshipSummary, /Recommended next action:/);
+// The relationship snapshot is now a plain natural-language quote from the
+// note itself -- never a dump of field labels ("Latest discussion topics:
+// ...\nPeople mentioned: ..."). See actionableRelationshipSnapshot's doc
+// comment in lib/capture/interaction.ts.
+assert.match(extracted.relationshipSummary, /I promised to send the outcomes brief/);
+assert.match(extracted.relationshipSummary, /visit campus this fall/);
+assert.doesNotMatch(extracted.relationshipSummary, /Latest discussion topics:|People mentioned:|Commitments:|Recommended next action:/, "the snapshot must never be a field-label dump");
 assert.doesNotMatch(extracted.relationshipSummary, /sentiment|confidence|classification|extraction/i);
+const briefDetails = relationshipSnapshotDetails(note, "meeting");
+assert.deepEqual(briefDetails.people, ["Elena", "Maya"], "genuine names must still be captured");
 
-// Regression (proven staging bug): a genuine, correctly-captured note
-// whose first word is a common fundraising CRM status/disposition verb
-// must never be misread as a mentioned person. The real imported note was
-// "Solicited for a plaque ($5k)"; naive capitalized-word matching had no
-// way to tell "capitalized because it's a proper noun" from "capitalized
-// only because it opens a sentence".
-for (const statusNote of ["Solicited for a plaque ($5k)", "Declined the invitation this year.", "Confirmed attendance for the gala."]) {
-  const statusExtraction = extractInteraction(statusNote);
-  assert.doesNotMatch(statusExtraction.relationshipSummary, /People mentioned:/, `a sentence-initial CRM status verb in "${statusNote}" must never be presented as a mentioned person`);
+// Regression (proven staging bugs): a genuine, correctly-captured note
+// whose first word is a common fundraising CRM status/disposition verb, or
+// a channel/communication verb, must never be misread as a mentioned
+// person. Real imported/live notes: "Solicited for a plaque ($5k)" and a
+// Text Message logged as just "Messaged" -- naive capitalized-word
+// matching had no way to tell "capitalized because it's a proper noun"
+// from "capitalized only because it opens a sentence".
+for (const statusNote of ["Solicited for a plaque ($5k)", "Declined the invitation this year.", "Confirmed attendance for the gala.", "Messaged about the building fund update.", "Messaged him about the pledge."]) {
+  const statusDetails = relationshipSnapshotDetails(statusNote, "note");
+  assert.deepEqual(statusDetails.people, [], `a sentence-initial CRM/communication verb in "${statusNote}" must never be presented as a mentioned person`);
 }
 // Genuine names must still be captured -- already proven above (Elena,
 // Maya) and unaffected by this fix, since it only adds entries to the

@@ -22,7 +22,11 @@ const globalsCss = await readFile(new URL("../app/globals.css", import.meta.url)
 assert.match(captureExperience, /const \[entryMode, setEntryMode\] = useState<"single" \| "multiple">\("single"\)/, "single donor must remain the default entry mode");
 assert.match(captureExperience, /method: initialActivity \? "PATCH" : "POST"/, "the existing single-donor create\/edit routing must be untouched");
 assert.match(captureExperience, /fetch\(initialActivity \? `\/api\/interactions\/\$\{encodeURIComponent\(initialActivity\.id\)\}` : "\/api\/interactions"/, "single-donor save must still hit the original route");
-assert.match(captureExperience, /acceptRelationshipSnapshot,\s*\}\),/, "the single-donor request body (including the relationship-snapshot flag) must be unchanged");
+// The flag itself is now gated on the CURRENT preview actually having
+// something meaningful (see the mobile-ux-fixes/relationship-quality
+// tests), not just a bare pass-through -- everything else about the
+// single-donor request body is unchanged.
+assert.match(captureExperience, /acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview\.relationshipSummary !== null,\s*\}\),/, "the single-donor request body must still send the relationship-snapshot flag, now correctly gated on the current preview");
 
 // 2. Multi-donor recipient flow submits the shared route only for 2+ donors.
 assert.match(sharedRoute, /donorIds\.length < 2\)\s*return Response\.json\(\{ error: "A shared activity needs at least two donors/, "the backend itself refuses fewer than 2 donors");
