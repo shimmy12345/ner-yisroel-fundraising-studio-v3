@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-fe35859 (Add read-only relationship_summary cleanup PREVIEW tool -- tooling only, no D1 writes)
+7874d6b (Add explicit-allowlist apply mode; regenerate 4 approved donor summaries -- staging D1 write, see Relationship-Summary Cleanup Audit below)
 
 origin/feature/independent-cloudflare-sandbox:
-fe35859 (pushed)
+7874d6b (pushed)
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
@@ -77,84 +77,210 @@ messages), plus `tests/shared-activity-ux.test.mjs`,
 `tests/text-message-type.test.mjs`, `tests/mobile-ux-fixes.test.mjs`, and
 `tests/relationship-quality.test.mjs`.
 
-## Relationship-Summary Cleanup Audit (PREVIEW ONLY -- nothing applied)
+## Relationship-Summary Cleanup Audit (Phase 1 applied; 5 donors still pending review)
 
 Follows on from the "Existing (pre-fix) `relationship_summary`/
-`institutional_memory` rows" item in Outstanding Work below. A staged
-AUDIT -> PREVIEW -> CLASSIFY pass was run against
-`fundraising-os-staging-db` (read-only) to find remaining pre-fix
-(`1487a8b`) machine-generated junk. **No D1 writes were performed at any
-point in this task.**
+`institutional_memory` rows" item in Outstanding Work below. Two-phase
+task: (1) `fe35859` -- a read-only AUDIT -> PREVIEW -> CLASSIFY pass
+against `fundraising-os-staging-db` to find remaining pre-fix (`1487a8b`)
+machine-generated junk; (2) `7874d6b` -- an explicitly-approved APPLY of
+the 4 SAFE_TO_REGENERATE rows the preview found, plus a read-only
+investigation of the 5 NEEDS_REVIEW rows (not modified).
 
-Tooling: `scripts/relationship-summary-cleanup-preview.mjs` (`pnpm run
-cleanup:relationship-summary-preview`), tested by
-`tests/relationship-summary-cleanup-preview.test.mjs`. Committed in
-`fe35859`.
+Tooling: `scripts/relationship-summary-cleanup-preview.mjs`. Preview:
+`pnpm run cleanup:relationship-summary-preview`. Apply (explicit donor-ID
+allowlist only, never a caller-supplied replacement string): `node
+scripts/relationship-summary-cleanup-preview.mjs --apply <id1,id2,...>`.
+Tested by `tests/relationship-summary-cleanup-preview.test.mjs` (12-item
+classification coverage) and `tests/relationship-summary-apply.test.mjs`
+(12-item apply-mode safety coverage, offline against synthetic fixtures).
 
-Provenance: donors.relationship_summary/institutional_memory have no
-field-level provenance column, but all 4 real write paths
-(`app/api/interactions/route.ts`, `app/api/interactions/[id]/route.ts`,
+Provenance (unchanged from Phase 1): donors.relationship_summary/
+institutional_memory have no field-level provenance column, but all 4
+real write paths (`app/api/interactions/route.ts`,
+`app/api/interactions/[id]/route.ts`,
 `app/api/interactions/[id]/outcome/route.ts`,
 `app/api/import/monday/commit/route.ts`'s `confirm_contact` action) go
-through the same `extractInteraction()` -- there is no manual free-text
-entry path for either field (manual notes live in the separate
-`donors.contact_note`, audited via `donor_contact_audits`, which never
-touches these two). Old-format values are identified by a structural
-signature, not a guess: the pre-fix `actionableRelationshipSnapshot`
-always began its output with the literal `"Latest discussion topics: "`;
-the current version never produces that prefix, verified against `git
-show 1487a8b~1:lib/capture/interaction.ts`.
+through the same `extractInteraction()` -- no manual free-text entry path
+exists for either field. Old-format values are identified by a structural
+signature (the pre-fix generator's unconditional `"Latest discussion
+topics: "` prefix), not a guess. `institutional_memory`'s field
+construction is byte-for-byte identical before/after `1487a8b` and was
+never written by this task (see Applied Regenerations below for how that
+was verified). No audit/history table covers either field
+(`donor_contact_audits` is scoped to contact fields only) -- per
+instruction, no new audit subsystem was built solely for this cleanup;
+traceability instead comes from: a deterministic, tested tool; an
+explicit approved-donor-ID allowlist; printed before/after per donor;
+this handoff's execution report; and the commit SHA (`7874d6b`).
 
-`institutional_memory` was audited separately and needs NO cleanup: its
-field construction (`${interactionKindLabel(type)} context:
-${note.trim()}`) is byte-for-byte identical before and after `1487a8b` --
-the extraction bug was entirely inside
-`actionableRelationshipSnapshot`/`relationshipSnapshotDetails`, which
-`institutional_memory` never used. 9 donors have a non-null
-`institutional_memory`; none are proposed for any change.
+### Applied Regenerations (4 of 4, staging, verified)
 
-No audit/history table covers changes to either field (`donor_contact_audits`
-is scoped to contact fields only) -- if cleanup is applied later, consider
-whether it needs one; this task did not build one since it made no writes.
+Re-verified against a **fresh** classification (a brand-new
+`wrangler d1 execute --remote` read) immediately before writing --
+identical to the original preview: same 4 donor IDs, same source
+interactions, same proposed values, no new/removed candidates. Applied
+via `--apply` with exactly these 4 IDs; 4 applied, 0 failed closed.
 
-Results (248 live, non-archived donors scanned; 9 have a non-null
-`relationship_summary`):
-- SAFE_TO_CLEAR: 0
-- SAFE_TO_REGENERATE: 4
-- NEEDS_REVIEW: 5
-- MANUAL_UNCERTAIN: 0
-- ALREADY_GOOD: 0
+| Donor | Before | After | Source interaction |
+|---|---|---|---|
+| Dr. & Mrs. Yaakov Abdelhak (`e4626eea-56ce-4005-96db-eeafbfde6628`) | `Latest discussion topics: Event planning.\nPeople mentioned: Personal, Teaneck.\nRecommended next action: Review this note before the next interaction.` | `Personal invite to Teaneck event.` | `monday-interaction-81662eab` (note, 2024-09-02) |
+| Dr. & Mrs. Gavin Horn (`cd4fbfd1-a461-4954-b580-64d3585f9cb9`) | `Latest discussion topics: Personal update.\nPeople mentioned: Messaged.\nOrganizations mentioned: Yeshiva.\nRecommended next action: Review this note before the next interaction.` | `Messaged to welcome son back to Yeshiva.` | `56d24b22-de8d-462d-9c9e-6e8791b60189` (text, 2026-08-16) |
+| Mr. & Mrs. Dovie Weinschneider (`9a9e3a1f-50d6-42b6-b986-c7608f0b8e8e`) | `Latest discussion topics: Giving follow-up.\nPeople mentioned: Discussed Kollel.\nCommitments: ...\nOpen follow-ups: follow up after succos.\nRecommended next action: follow up after succos.` | `Discussed Kollel donation and said to follow up after succos.` | `ccd22502-beff-4db5-88aa-1d2426383271` (call, 2026-08-17) |
+| Mr. & Mrs. Tzvi Shlionsky (`2a1735d2-c3a6-4707-beb9-9ac7a0ab4e34`) | `Latest discussion topics: Personal update.\nPeople mentioned: Sent.\nRecommended next action: Review this note before the next interaction.` | `Sent him an email with photo of his son.` | `monday-interaction-5e36f7aa` (note, 2025-06-16) |
 
-SAFE_TO_REGENERATE (traced to a source interaction; current extractor
-finds a real fact there -- proposed value shown, not yet written):
-- Dr. & Mrs. Yaakov Abdelhak (`e4626eea-...`) -> "Personal invite to Teaneck event."
-- Dr. & Mrs. Gavin Horn (`cd4fbfd1-...`) -> "Messaged to welcome son back to Yeshiva."
-- Mr. & Mrs. Dovie Weinschneider (`9a9e3a1f-...`) -> "Discussed Kollel donation and said to follow up after succos."
-- Mr. & Mrs. Tzvi Shlionsky (`2a1735d2-...`) -> "Sent him an email with photo of his son."
+**How the write works** (`planApply`/`executePlan` in the tool): re-reads
+and re-classifies fresh from D1 immediately before writing; a donor is
+written only if its ID is in the explicit approved list AND it currently
+(this fresh read) classifies SAFE_TO_REGENERATE; the write is a
+conditional `UPDATE donors SET relationship_summary = <current extractor
+output> WHERE id = <id> AND relationship_summary = <exact value just
+read>` (compare-and-swap -- fails closed, no write, if the stored value
+changed since the read); only `relationship_summary` is ever assigned.
+Values are hex-blob-encoded (`CAST(X'...' AS TEXT)`) in the generated SQL
+-- **found and fixed live**: the pre-fix values contain literal newlines,
+which broke `wrangler d1 execute --command`'s Windows shell-argument
+parsing (a real SQLITE_ERROR, no write occurred, caught and fixed before
+any donor was touched); a `--file`-based alternative was tried and
+rejected after discovering its JSON response's `meta.changes` is NOT a
+trustworthy per-row count (verified live: an UPDATE targeting a
+nonexistent donor id still came back `changes: 1`) -- unsafe for the
+compare-and-swap check, so apply mode stays on `--command` mode with
+hex-encoded values instead.
 
-NEEDS_REVIEW (left untouched by design; a human should read the source
-note before any action):
-- Mr. & Mrs. Mayer Simcha Klein, Mr. & Mrs. Allen Pfeiffer, Rabbi Michoel
-  A. Rovinsky -- all three store "People mentioned: Solicited." but no
-  interaction on file reproduces that value under the retrievable
-  `1487a8b~1` generator. Investigated, not just assumed a script
-  limitation: `git log --all -- lib/capture/interaction.ts` shows an
-  earlier commit, `e1760c6`, first added the "Solicited"-as-CRM-verb
-  exclusion -- the pre-`e1760c6` generator (not retrievable/reconstructed
-  here) had no such exclusion, which is consistent with how these 3 rows
-  were produced. Genuinely older data than this tool can trace, correctly
-  routed to human review rather than guessed at.
-- Dr. Jacques Semmelman -- source note mentions "Yahrtzeit"; current
-  extractor finds no fact signal but also doesn't recognize "Yahrtzeit" as
-  one, so this is flagged rather than silently cleared.
-- Mr. & Mrs. Yaakov Zachter -- source note mentions "Zman"; same reason.
+**Post-write verification** (all independently re-checked against live
+staging after the write, read-only):
+- `relationship_summary` for all 4 donors read back and matches the
+  applied value exactly (and matches `actionableRelationshipSnapshot`
+  computed fresh from the source note).
+- `institutional_memory` for all 4 donors: the generated UPDATE
+  statement's SQL never references `institutional_memory` (mechanically
+  impossible for this write to have touched it -- also asserted by
+  `tests/relationship-summary-cleanup-preview.test.mjs`); current stored
+  values remain consistent with each donor's known source-interaction
+  note (e.g. Abdelhak: `"Note context: Personal invite to Teaneck
+  event"`).
+- All 4 source interactions re-read: same `donor_id`/`type`/`occurred_at`
+  as traced during classification -- unchanged.
+- Table-wide: `relationship_summary` non-null count is still 9 (was 9
+  before) -- no row nulled, no new candidate appeared.
+- Re-running the preview immediately after: `SAFE_TO_REGENERATE: 0`,
+  `ALREADY_GOOD: 4` (exactly these 4 donors, reclassified), `NEEDS_REVIEW:
+  5` (identical to before, same donors/reasons) -- confirms exactly these
+  4 rows changed, nothing else did, and the tool is idempotent (won't
+  re-propose them).
 
-Both of the above surface a real, known gap in the current extractor's
-`FACT_SIGNAL_PATTERN` keyword coverage (no "Yahrtzeit"/"Zman"/bare-dollar-
-amount signal words). Deliberately NOT fixed as part of this task (that
-would be expanding `lib/capture/interaction.ts`, a second, separate
-decision, not a cleanup-audit deliverable) -- flagged here as a known
-limitation.
+### NEEDS_REVIEW Investigation (5 of 5, read-only -- NOT modified)
+
+**Klein / Pfeiffer / Rovinsky** (all three stored "People mentioned:
+Solicited." -- the false-person extraction the user specifically asked to
+re-investigate). Each donor has exactly one interaction on file, a
+Monday-imported note, and the underlying note **does** contain a real
+fundraising fact beyond the bogus person -- clearing to null would lose
+it:
+- Klein (`b5e8cc18-...`): `"Solicited for a plaque ($5k)"` (note,
+  2025-11-06)
+- Pfeiffer (`d1b9cf78-...`): `"Solicited for $10k"` (note, 2025-09-15)
+- Rovinsky (`952a1cc7-...`): `"Solicited for a plaque in memory of his
+  wife ($5k)"` (note, 2025-09-29)
+
+The current extractor returns `null` for all three (`specificFacts: []`,
+`people: []`) -- it has no fact-signal keyword for "solicited"/dollar
+amounts, so **regenerating with the current extractor as-is would produce
+an empty relationship_summary, silently discarding the ask amount**. Not
+a script bug: confirmed by direct git-history tracing that these 3 rows'
+"Solicited" exclusion behavior predates the earliest retrievable
+extractor version (`e1760c6~1` had no CRM-status-verb exclusion at all),
+consistent with genuinely older data.
+**Recommendation**: do NOT auto-clear or auto-regenerate. A human should
+manually set relationship_summary to the underlying ask fact -- e.g.
+`"Solicited for a plaque ($5k)."` / `"Solicited for $10k."` / `"Solicited
+for a plaque in memory of his wife ($5k)."` -- these are already clean,
+single-sentence facts once the false "People mentioned:" label is
+dropped; no extractor change is required to write them by hand.
+
+**Semmelman** (`5c35437c-...`): source interaction `544721ad-...`
+(personal, 2026-08-07), note: `"Sent text on wife's Yahrtzeit to
+acknowledge it"` (subject: "Yahrtzeit text"). Current extractor: `null`,
+misdetects "Yahrtzeit" as a false person (same bug class as
+"Messaged"/"Solicited", just not yet in the exclusion list). **Checked
+whether the underlying fact is already tracked elsewhere**: yes -- this
+donor already has a first-class row in the dedicated `yahrtzeits` table
+(`deceased_name_english: "Esther"`, `relationship: "Wife"`, `hebrew_month:
+"Av"`, `hebrew_day: 23`). The durable fact (wife's Yahrtzeit date) is
+already correctly tracked in its purpose-built table; what this
+interaction adds is only that *this particular touch* (a text
+acknowledging it) happened -- temporary interaction context, not new
+durable data. **Recommendation**: leave relationship_summary null/cleared
+for this donor (a human call, not automated in this task) rather than
+manually re-typing a fact that duplicates the yahrtzeits table.
+
+**Zachter** (`19af69d6-...`): source interaction `8b502028-...` (text,
+2026-08-18), note: `"Texted video from first day of Zman and thanked him
+for his support that makes it happen"`. Current extractor: `null`,
+misdetects "Zman" as a false person. No dedicated table tracks
+institutional calendar milestones like "Zman" (unlike Yahrtzeit/birthday/
+anniversary, which do have dedicated tables) -- this is routine
+stewardship-acknowledgment language tied to a recurring yeshiva calendar
+event, not a durable donor-specific fact. **Recommendation**: a human
+should decide case-by-case; a reasonable manual value would be a short
+paraphrase like `"Thanked for supporting the yeshiva's Zman."`, but this
+is lower-value/more borderline than the three solicitation-amount cases
+above.
+
+### Part C -- Extractor Expansion Recommendation (not implemented)
+
+Narrow assessment of whether `lib/capture/interaction.ts`'s
+`FACT_SIGNAL_PATTERN` should be expanded to recognize Yahrtzeit, Zman, and
+explicit dollar amounts. **Not implemented in this task.** Distinguishing
+by category:
+
+1. **Yahrtzeit-related facts -- durable, but already tracked elsewhere.**
+   The `yahrtzeits` table (schema confirmed, and confirmed populated for
+   the one case investigated) is the correct, purpose-built home for this
+   durable fact (Hebrew-calendar-aware recurrence, editable, its own
+   `yahrtzeitChanges` audit trail). Adding a generic "Yahrtzeit" keyword
+   to `specificFacts` would duplicate/risk drifting from that table rather
+   than add new information. **Recommendation: do not add** a generic
+   Yahrtzeit fact-signal keyword; if anything, the donor page's existing
+   Yahrtzeit surfacing (see `relationship-date-events`/`important-dates`
+   tests) is the right place to make this more visible, not
+   relationship_summary.
+2. **Zman/yeshiva timing context -- temporary interaction context, not a
+   durable relationship fact.** No dedicated table exists for it (nor
+   should one, necessarily -- it's an institutional calendar event, not
+   donor-specific data), but it's also not obviously worth a standing
+   fact-signal keyword: promoting every "Zman"/holiday-adjacent mention
+   risks pulling in routine liturgical-calendar chatter as if it were a
+   special donor insight. **Recommendation: do not add** a generic
+   keyword; treat these on a case-by-case manual basis (as done for
+   Zachter above) rather than automating.
+3. **Explicit solicitation/donation amounts ("$5k", "$10,000", etc.) --
+   giving/solicitation information that currently has nowhere else to
+   live.** Confirmed via schema: `giving_activities` only tracks
+   confirmed/imported financial gifts (JL Solutions is the system of
+   record per `docs/FUNDRAISING_OS_PRINCIPLES.md`); there is no dedicated
+   pledge/ask/solicitation-tracking table. Unlike Yahrtzeit, a solicitation
+   amount genuinely has no other home today, and per this task's own
+   investigation, silently regenerating with the current extractor would
+   discard it (all 3 Solicited cases above). **Recommendation: this is the
+   one category worth a real product decision** -- either (a) add narrow,
+   carefully-scoped dollar-amount fact-signal support (risk: false
+   positives on incidental dollar mentions unrelated to a live ask, and
+   scope creep toward relationship_summary becoming a pledge tracker,
+   which `FUNDRAISING_OS_PRINCIPLES.md` explicitly warns against -- "not a
+   full CRM... accounting system"), or (b) build a small, purpose-built
+   "solicitation/ask" field or table (mirroring how Yahrtzeit got its own
+   table) so this data doesn't have to route through free-text extraction
+   at all. Not implemented here -- flagged for a separate, explicit
+   decision.
+
+Challenge to the premise: none of these three categories should be
+treated the same way. Yahrtzeit is durable but has its own home already;
+Zman is temporary/low-value; solicitation amounts are durable, giving-
+adjacent, and currently homeless. relationship_summary should stay a
+concise "what should I know" surface, not become a generic interaction-
+note dump for all three.
 
 ## Important Product Decisions
 
@@ -535,13 +661,27 @@ relationship-intelligence quality work):
   requested by this task; worth considering if fundraisers want that
   context carried over.
 - Existing (pre-fix) `relationship_summary`/`institutional_memory` rows
-  written before this quality pass may still contain the old field-label
-  dump format or a misclassified "person" — a read-only AUDIT/PREVIEW/
-  CLASSIFY pass has now been run (see "Relationship-Summary Cleanup
-  Audit" above); 4 rows have a clean regenerated value ready to review, 5
-  need a human read, 0 need no action. **No cleanup has been written to
-  D1** — that is the next, separate, explicitly-approved step (see Next
-  Approval Required).
+  written before this quality pass: 4 of 9 non-null rows were cleaned up
+  (regenerated with the current extractor, applied and verified -- see
+  "Relationship-Summary Cleanup Audit" above). 5 remain, all investigated
+  and left untouched pending a human decision: 3 ("Solicited" false-person
+  cases -- Klein/Pfeiffer/Rovinsky) have a real underlying solicitation-
+  amount fact the current extractor can't recover on its own; 2
+  (Semmelman/Zachter) hinge on a Yahrtzeit/Zman keyword gap the extractor
+  doesn't recognize. See Next Approval Required for what's needed to close
+  these out.
+- The current extractor's `FACT_SIGNAL_PATTERN` has no keyword coverage
+  for Yahrtzeit, Zman/yeshiva-timing language, or explicit dollar amounts
+  ("$5k", "$10,000"). Investigated in depth (see "Relationship-Summary
+  Cleanup Audit" -> "Part C"); recommendation is narrow and category-
+  specific, not implemented: Yahrtzeit facts are already durably tracked
+  in the dedicated `yahrtzeits` table (don't duplicate into
+  relationship_summary); Zman/timing mentions are temporary interaction
+  context better handled case-by-case than with a standing keyword;
+  solicitation dollar amounts are the one category that currently has
+  nowhere else to live in the schema and deserves an explicit product
+  decision (either narrow fact-signal support, or a small dedicated
+  ask/solicitation field/table).
 - Place/holiday names (e.g. "Israel", "Rosh Hashanah") can still appear
   in the `people` array — genuinely ambiguous with real given names in
   this donor community (e.g. "Israel" is also a real first name), so no
@@ -563,17 +703,30 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Blocking: applying the relationship_summary cleanup preview.** The
-AUDIT/PREVIEW/CLASSIFY pass (see "Relationship-Summary Cleanup Audit"
-above) is complete and has NOT been written to D1. Before any write
-happens, a human needs to approve, specifically:
-1. Whether to write the 4 SAFE_TO_REGENERATE proposed values shown above
-   (each has a shown OLD -> NEW value and a traced source interaction).
-2. Confirmation that the 5 NEEDS_REVIEW rows stay untouched by automation
-   (they need a person to read the source note first — no proposed value
-   exists for them).
-3. Whether `institutional_memory` is confirmed out of scope (this audit
-   found it needs no cleanup at all).
+The 4 approved SAFE_TO_REGENERATE rows are done (applied and verified —
+see "Relationship-Summary Cleanup Audit" above). Nothing is blocking; the
+following need a human decision before any further write happens to the
+5 remaining rows:
+1. **Klein / Pfeiffer / Rovinsky** ("Solicited" false-person cases): the
+   underlying note has a real solicitation-amount fact
+   ("Solicited for a plaque ($5k)." / "Solicited for $10k." / "Solicited
+   for a plaque in memory of his wife ($5k)."). Decide whether to
+   manually set relationship_summary to that fact for each (recommended —
+   see the audit section for exact suggested text), leave as-is, or
+   handle differently. Not automated — the current extractor would return
+   null for all three if regenerated as-is, which would silently discard
+   the ask amount.
+2. **Semmelman**: recommend clearing relationship_summary to null (the
+   durable fact — wife's Yahrtzeit — is already tracked in the dedicated
+   `yahrtzeits` table; this row would just duplicate it). Needs explicit
+   confirmation before any write.
+3. **Zachter**: more borderline; recommend a human read and a short manual
+   value (e.g. "Thanked for supporting the yeshiva's Zman.") or leave
+   as-is — lower priority than the other 4.
+4. **Extractor expansion** (Part C above): a real product decision on
+   whether to add dollar-amount fact-signal support (the one category of
+   the three investigated that has no other home in the schema) — not
+   implemented, needs its own explicit approval and design if wanted.
 
 Everything else is non-blocking — the shared-activity, Text Message,
 mobile UX fixes, and relationship-intelligence quality pass are all live
@@ -588,12 +741,51 @@ work begins:
   recipient touches, if judged worth addressing.
 - Pre-filling shared-activity context into the new "Add note for this
   donor" capture form, if fundraisers want it.
-- Expanding the extractor's `FACT_SIGNAL_PATTERN` keyword coverage
-  (e.g. "Yahrtzeit", "Zman", bare dollar amounts) — a known gap surfaced
-  by the cleanup audit's NEEDS_REVIEW bucket, deliberately not fixed as
-  part of that task.
 
 ## Last Updated
+
+2026-08-19T00:00:00Z (approximate)
+Claude (Sonnet 5) — Relationship-summary cleanup Phase 2: applied the 4
+explicitly-approved SAFE_TO_REGENERATE rows to `fundraising-os-staging-db`
+and investigated the 5 NEEDS_REVIEW rows (read-only, not modified). Before
+writing, re-verified the 4 rows against a fresh classification (identical
+to the original preview — no drift). Extended
+`scripts/relationship-summary-cleanup-preview.mjs` with a `--apply
+<id1,id2,...>` mode: explicit donor-ID allowlist only, re-classifies fresh
+immediately before each write, fails closed if a donor no longer
+classifies SAFE_TO_REGENERATE or its stored value changed since the read
+(conditional UPDATE, compare-and-swap), writes only relationship_summary,
+proposed value always computed server-side from the current extractor —
+never a caller-supplied string. Found and fixed two real bugs live during
+development: (1) the pre-fix values contain literal newlines, which broke
+`wrangler d1 execute --command`'s Windows shell-argument parsing (caught
+before any write happened, no data affected); (2) `wrangler d1 execute
+--file`'s JSON response `meta.changes` is NOT a trustworthy per-row count
+(confirmed live against a no-op query) — switched to hex-blob-encoded
+values (`CAST(X'...' AS TEXT)`) under `--command` mode instead, which
+does report reliable counts. All 4 applied successfully; post-write
+verification confirmed relationship_summary matches the extractor exactly,
+institutional_memory and source interactions unchanged, exactly 4 rows
+changed table-wide, and a fresh preview run is idempotent (reclassifies
+all 4 as ALREADY_GOOD, proposes nothing). Investigated all 5 NEEDS_REVIEW
+donors read-only: the 3 "Solicited" cases (Klein/Pfeiffer/Rovinsky) each
+have a real solicitation-amount fact in their source note that the
+current extractor can't recover (would discard it if auto-regenerated);
+Semmelman's Yahrtzeit fact is already tracked in the dedicated
+`yahrtzeits` table; Zachter's "Zman" mention is temporary interaction
+context. Wrote a narrow, category-specific extractor-expansion
+recommendation (not implemented) distinguishing durable facts already
+tracked elsewhere (Yahrtzeit — don't duplicate), temporary context (Zman —
+handle manually), and giving-adjacent information with no other home
+(dollar amounts — the one category worth a real product decision). Added
+`tests/relationship-summary-apply.test.mjs` (12-item apply-mode safety
+coverage, offline). `pnpm test` and `pnpm exec tsc --noEmit` both clean.
+Committed and pushed as `7874d6b`. `origin/main` untouched. No Worker
+deploy — no application code was touched, this was a data-only operation.
+See "Relationship-Summary Cleanup Audit" above for full detail, and Next
+Approval Required for what's still open on the 5 remaining rows.
+
+---
 
 2026-08-19T00:00:00Z (approximate)
 Claude (Sonnet 5) — Relationship-summary cleanup AUDIT/PREVIEW/CLASSIFY
