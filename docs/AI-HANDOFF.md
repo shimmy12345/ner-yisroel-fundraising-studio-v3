@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-aa2a8b7c858acb984358da8a82c2d580734f1222
+1487a8bb4416666e79a8d94d571e3445af3fc2af
 
 origin/feature/independent-cloudflare-sandbox:
-aa2a8b7c858acb984358da8a82c2d580734f1222
+1487a8bb4416666e79a8d94d571e3445af3fc2af
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58
@@ -25,34 +25,57 @@ clean
 
 ## Latest Completed Task
 
-Four live mobile-usability fixes, all on `feature/independent-cloudflare-sandbox`, deployed and live-verified on Independent Staging:
-1. `continue_conversation` no longer manufactures generic "Continue the
-   conversation about X" copy from a bare recent touch; it only fires when
-   the note names a real commitment, otherwise the existing honest empty
-   state ("No suggested action available") shows instead.
-2. The donor-page KPI grid lets Suggested Action span full width on
-   mobile beneath the three numeric tiles, instead of squeezing prose
-   into a half-width 2x2 column.
-3. Shared-activity edit now states the exact affected-donor count
-   ("This change affects all N donors...") and gained a separate
-   non-destructive "Add note for this donor" action reusing the existing
-   single-donor capture form.
-4. RecipientPicker's mobile search-result rows no longer overlap (a CSS
-   grid auto-row-sizing bug collapsed every row to a uniform ~49px track
-   regardless of wrapped content); the secondary metadata line is also
-   restrained to one truncating line.
+A relationship-intelligence quality pass, deployed and live-verified on
+Independent Staging: stopped surfacing weak machine-generated content as
+if it were real relationship intelligence, end to end (extraction ->
+snapshot -> recommendation -> presentation). Root cause was entirely
+upstream in `lib/capture/interaction.ts`'s extraction, so one fix there
+flows through to every consumer (donor page, Meeting Brief, Assistant,
+capture preview):
+1. `mentionedPeople()` no longer misclassifies channel/CRM verbs
+   (Messaged, Called, Solicited, and others) as people -- consolidated
+   verb list plus a structural check (a bare capitalized word followed by
+   "about"/"regarding"/"with"/"via" is a verb, not a name) and exclusion
+   of modal auxiliaries/days-of-week/indefinite pronouns as closed
+   grammatical classes. Also fixed organization matching to recognize
+   keyword-first yeshiva names ("Yeshivas Ner Yisroel"), which the
+   original qualifier-first-only regex couldn't capture at all.
+2. The category-label "topics" field (e.g. "Personal update", a coarse
+   classifier output, not a fact) was replaced with `specificFacts` --
+   real quoted sentences from the note, reusing the same keyword signals
+   but returning the matched sentence instead of a fixed label.
+3. Relationship Snapshot / `donors.relationship_summary` is now natural
+   language (or `null` when nothing specific was found) -- never a
+   field-label dump, never a manufactured "Review this note before the
+   next interaction" placeholder.
+4. Suggested Action (`relationship_opportunity`/`solicit` candidates) no
+   longer echoes a field-label dump wholesale, and no longer leaks the
+   raw DB field name `relationship_summary/institutional_memory:` into
+   evidence text.
+5. The internal "Confidence: medium" label is gone from the Suggested
+   Action detail view (donor page and Meeting Brief); timing still shows
+   on its own when present.
+6. The capture-form preview only offers the "Use this relationship
+   snapshot" opt-in when something meaningful was actually extracted;
+   shows "No meaningful relationship details detected." otherwise, so a
+   fundraiser is never asked to manually reject generation garbage.
+
+No existing `relationship_summary`/`institutional_memory` rows were
+rewritten or backfilled -- this only changes generation going forward.
 
 Relevant commits (all on `feature/independent-cloudflare-sandbox`, all
 pushed):
 - Phase 1 (shared-activity schema + backend + recipient-aware scoring): `c42cca30ef38c0da1986c3f5e800f6d1b3482400`
 - Phase 2 (shared-activity capture-form UX, edit/remove/delete routes + UI, Meeting Brief copy): `391a5095c20450daa57cbe37a08e0e329944c9d4`
 - Text Message type (migration 0031 + app-layer propagation + tests): `1c2273537403f790f9670f468125606f312b5c43`
-- Mobile UX fixes (recommendation wording/layout, shared-edit clarity, RecipientPicker overlap): `aa2a8b7c858acb984358da8a82c2d580734f1222` (current HEAD)
+- Mobile UX fixes (recommendation wording/layout, shared-edit clarity, RecipientPicker overlap): `aa2a8b7c858acb984358da8a82c2d580734f1222`
+- Relationship-intelligence quality pass (extraction/snapshot/recommendation/preview quality gate): `1487a8bb4416666e79a8d94d571e3445af3fc2af` (current HEAD)
 
 For behavior detail: `git show c42cca3` / `git show 391a509` / `git show
-1c22735` / `git show aa2a8b7` (self-contained commit messages), plus
-`tests/shared-activity-ux.test.mjs`, `tests/text-message-type.test.mjs`,
-and `tests/mobile-ux-fixes.test.mjs`.
+1c22735` / `git show aa2a8b7` / `git show 1487a8b` (self-contained commit
+messages), plus `tests/shared-activity-ux.test.mjs`,
+`tests/text-message-type.test.mjs`, `tests/mobile-ux-fixes.test.mjs`, and
+`tests/relationship-quality.test.mjs`.
 
 ## Important Product Decisions
 
@@ -119,6 +142,20 @@ Durable — do not accidentally reverse these:
   interaction (`shared_activity_id`/`role` both null) — the single-donor
   `POST /api/interactions` route never references `shared_activities`.
   "Detach and customize" was NOT built; not needed given this reuse.
+- Relationship intelligence quality gate (see Latest Completed Task): a
+  generated fact/action must be specific, donor-relevant, and grounded in
+  the actual note — never a generic channel/type label, never a
+  sentence-start verb misclassified as a person, never boilerplate
+  generated only because a note exists. Enforced with deterministic
+  regex/keyword rules in `lib/capture/interaction.ts`, not an opaque
+  scoring system. `specificFacts` (real quoted sentences) replaced the
+  old category-label `topics` field; `recommendedNextAction` is `null`,
+  not a manufactured placeholder, when no commitment sentence parsed.
+  Quality enforcement lives entirely at the extraction/generation layer
+  (`actionableRelationshipSnapshot`) — consuming code (recommendation
+  engine, donor page, Meeting Brief, Assistant, capture preview) was NOT
+  redesigned, it just correctly handles the now-nullable
+  `relationshipSummary`/`recommendedNextAction`.
 
 ## Database / Migration State
 
@@ -145,23 +182,30 @@ constraint to widen); `shared_activities`'s CHECK now reads `type IN
 its index (`shared_activities_user_date_idx`) survived the rebuild;
 row counts unchanged pre/post (`interactions`=12, `shared_activities`=2).
 
-No migration beyond 0031 exists or has been applied. The mobile UX
-fixes task (current HEAD) is application-layer + CSS only — no schema
-change, no migration.
+No migration beyond 0031 exists or has been applied. Both the mobile UX
+fixes task and the relationship-intelligence quality pass (current HEAD)
+are application-layer only — no schema change, no migration.
 
 ## Deployment State
 
-**Live.** Deployed commit `aa2a8b7c858acb984358da8a82c2d580734f1222`,
-Worker version `1b1fdd8c-5650-4f62-86b9-842d52fa7af7`, confirmed via the
-`wrangler deploy` output itself (Current Version ID).
+**Live.** Deployed commit `1487a8bb4416666e79a8d94d571e3445af3fc2af`,
+Worker version `f5c3430d-1b04-4dd8-9f72-8a0fcd835e6a`, confirmed via
+`wrangler deployments list` showing it as the 100% current deployment.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
 D1: `fundraising-os-staging-db` (bound as `env.DB`)
 
-Multi-donor shared activities (Phase 1 + Phase 2), Text Message, and the
-mobile UX fixes are all live and have been exercised end-to-end against
-real staging data (see Verification).
+Multi-donor shared activities (Phase 1 + Phase 2), Text Message, the
+mobile UX fixes, and the relationship-intelligence quality pass are all
+live and have been exercised end-to-end against real staging data (see
+Verification).
+
+Note: this deploy required two retries — the environment's network/DNS
+had a transient outage (wrangler/curl/nslookup all failed to resolve
+`dash.cloudflare.com`/`api.cloudflare.com` for several minutes); the
+deploy succeeded once connectivity returned, verified independently via
+`wrangler deployments list` in the same session before live-testing.
 
 ## Verification
 
@@ -324,9 +368,47 @@ and a real shared activity, cleaned up afterward:**
   confirmed via SQL (`source` = `archived:capture:email` /
   `cancelled:manual`), never hard-deleted.
 
+**Live, relationship-intelligence quality pass (2026-08-19), using one
+real staging donor ("Mr. & Mrs. Ari Abramovitz"), all three interactions
+created via the deployed app UI and cleaned up afterward:**
+
+- Generic Text Message, no meaningful fact ("Messaged about the building
+  fund update."): capture preview showed "No meaningful relationship
+  details detected." with no checkbox; saved with no "Relationship
+  snapshot refreshed" confirmation ("Relationship snapshot unchanged —
+  The generated draft was not accepted, so it was not saved." instead).
+  Confirmed directly in D1: `donors.relationship_summary` /
+  `institutional_memory` stayed `NULL`.
+- Real fact ("Ari mentioned that his daughter is starting seminary in
+  Israel this fall."): preview showed the plain sentence with the opt-in
+  checkbox; checked and saved — confirmed directly in D1 that
+  `relationship_summary` is exactly that sentence, no field labels. Donor
+  page RELATIONSHIP SNAPSHOT card rendered the same clean sentence;
+  SUGGESTED ACTION read "Reach out and reference: [the sentence]" (no
+  "what's already known" redundancy, no field-dump echo); evidence read
+  `Recorded relationship note: "..."` (never `relationship_summary/
+  institutional_memory:`); no `.recommendation-meta` element was even
+  present (timing is null for this kind, so nothing renders — confirming
+  "Confidence:" is gone). KPI card showed the fixed "Review before next
+  outreach" headline.
+- Concrete next action ("Will send the updated pledge form by Friday.",
+  left unaccepted to isolate this from the fact test above): donor page
+  SUGGESTED ACTION read "Send the updated pledge form by Friday." — a
+  direct, concise action, matching the task's own "strong example" style
+  — both in the detail view and the KPI card, with no truncation needed.
+- Cleanup: all 3 test interactions archived via the app's own
+  `DELETE /api/interactions/:id` route (`action: "archive"`), confirmed
+  via SQL (`source` = `archived:capture:text` / `archived:capture:note`).
+  Archiving the 2nd/3rd interaction automatically triggered the existing
+  `contextStatement` revert logic in `app/api/interactions/[id]/route.ts`,
+  which reset `donors.relationship_summary`/`institutional_memory` back
+  to `NULL` (their state before this test) with no manual SQL needed —
+  confirmed directly in D1.
+
 ## Safety / Infrastructure State
 
-This rollout (shared-activity, Text Message, and mobile UX fixes work):
+This rollout (shared-activity, Text Message, mobile UX fixes, and
+relationship-intelligence quality work):
 - D1: migrations 0030 and 0031 applied to `fundraising-os-staging-db`
   only; all read/write operations scoped to that database via `wrangler
   d1 execute --remote`; no other database touched.
@@ -373,11 +455,37 @@ This rollout (shared-activity, Text Message, and mobile UX fixes work):
   activity it was opened from (e.g. the shared summary or date). Not
   requested by this task; worth considering if fundraisers want that
   context carried over.
+- Existing (pre-fix) `relationship_summary`/`institutional_memory` rows
+  written before this quality pass may still contain the old field-label
+  dump format or a misclassified "person" — explicitly NOT rewritten or
+  backfilled per instruction. If a cleanup of already-saved bad rows is
+  wanted, that needs its own separate, reviewed plan (a query to find
+  affected donors, and an explicit decision on what to do with each) —
+  do not improvise one.
+- Place/holiday names (e.g. "Israel", "Rosh Hashanah") can still appear
+  in the `people` array — genuinely ambiguous with real given names in
+  this donor community (e.g. "Israel" is also a real first name), so no
+  attempt was made to filter them; a full named-entity/place gazetteer
+  was judged out of scope for a deterministic-rules-only fix. Confirmed
+  low-impact: Meeting Brief's "PEOPLE MENTIONED" card is the only reader
+  of this field, and this class of imprecision existed before this task
+  too (it doesn't affect the main Relationship Snapshot text, which is
+  driven by `specificFacts`, not `people`).
+- The fact-signal sentence extraction (`specificFacts`) can occasionally
+  promote a sentence that's technically "specific" (contains a signal
+  keyword like "family") but still fairly generic in substance (e.g. "A
+  nice family update, all is well" would NOT pass — verified null in
+  testing — but a borderline case worded differently could). No proper-
+  noun/digit specificity filter was added on top, since the task's own
+  worked examples (e.g. "Concerned about pledge balance") don't
+  consistently contain one either — this was a deliberate trade-off, not
+  an oversight.
 
 ## Next Approval Required
 
-None blocking — the shared-activity, Text Message, and mobile UX fixes
-are all live and verified on Independent Staging.
+None blocking — the shared-activity, Text Message, mobile UX fixes, and
+relationship-intelligence quality pass are all live and verified on
+Independent Staging.
 
 Optional follow-ups, each would need its own explicit approval before
 work begins:
@@ -388,19 +496,26 @@ work begins:
   recipient touches, if judged worth addressing.
 - Pre-filling shared-activity context into the new "Add note for this
   donor" capture form, if fundraisers want it.
+- A separate, reviewed cleanup plan for existing pre-fix
+  `relationship_summary`/`institutional_memory` rows, if wanted (see
+  Outstanding Work above — explicitly not done automatically).
 
 ## Last Updated
 
-2026-08-18T23:15:00Z
-Claude (Sonnet 5) — Four live mobile-usability fixes shipped: continue_conversation
-no longer manufactures generic copy from a bare recent touch (only fires
-on real commitment language); donor-page Suggested Action spans full
-width on mobile instead of a squeezed 2x2 column; shared-activity edit
-now states the exact affected-donor count and gained a separate
-"Add note for this donor" action; RecipientPicker's mobile overlap bug
-(CSS grid auto-row-sizing collapsing to a uniform track) is fixed.
-Deployed (commit `aa2a8b7`, Worker version
-`1b1fdd8c-5650-4f62-86b9-842d52fa7af7`), live-verified against real
-staging data including direct D1 checks, test data cleaned up via normal
-app routes, this handoff updated to reflect live state. Session
-`session_01DoQiMShaMrVYHvopkVj581`.
+2026-08-19T04:35:00Z
+Claude (Sonnet 5) — Relationship-intelligence quality pass shipped: fixed
+the "Messaged" (and other channel/CRM verbs) misclassified as a person
+bug at its root, replaced the generic category-label "topics" field with
+real quoted `specificFacts`, made the Relationship Snapshot/capture
+preview/Suggested Action all honestly show nothing when extraction found
+nothing meaningful instead of boilerplate or a field-label dump, removed
+the internal "Confidence:"/raw-field-name leaks from donor-facing UI.
+Deployed (commit `1487a8b`, Worker version
+`f5c3430d-1b04-4dd8-9f72-8a0fcd835e6a`, confirmed via `wrangler
+deployments list` after a transient network/DNS outage delayed the
+deploy), live-verified against real staging data (a generic Text Message,
+a real fact, and a concrete next action) including direct D1 checks, test
+data cleaned up via normal app routes (archiving automatically reverted
+the donor's relationship_summary/institutional_memory via existing
+`contextStatement` logic — no manual SQL needed), this handoff updated to
+reflect live state. Session `session_01DoQiMShaMrVYHvopkVj581`.
