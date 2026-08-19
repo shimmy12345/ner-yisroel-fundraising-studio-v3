@@ -30,7 +30,7 @@ export async function POST(request: Request) {
   try {
     const mode = await getDataMode(profile.id);
     const now = Math.floor(Date.now() / 1000);
-    const brief = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now);
+    const brief = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now, undefined, "assistant_api");
     const primaryId = brief.priorities[0]?.donorId ?? brief.gifts[0]?.donorId ?? null;
     // The canonical, evidence-driven recommendation for the primary donor
     // -- reuses lib/relationships/meeting-brief.ts's own loader so this can
