@@ -160,18 +160,24 @@ on error, so a future 1102 on this route has an actual measurement instead
 of a code-comment inference. No such change has been made; this section is
 report-only.
 
-## Ask / Solicitation Feature -- Phase 1 IMPLEMENTED, APPLIED, DEPLOYED, AND LIVE-VERIFIED
+## Ask / Solicitation Feature -- **COMPLETE / CLOSED FOR V1**
 
-**STATUS: fully rolled out to Independent Staging and live-tested end to
-end.** Migration `0032_asks.sql` is applied to `fundraising-os-staging-db`;
-`a04b4bd`/`86584e9` are deployed as Worker version `e2fb2e0c`
-(2026-08-19T17:04:39Z); direct Ask creation, ask-from-interaction creation,
-all three status transitions (committed/declined/withdrawn), Suggested
-Action timing/ranking, and Today/Meeting Brief/Assistant wiring have all
-been exercised against real staging data and verified at the D1 layer, not
-just the UI. Full results: "Ask / Solicitation Feature -- LIVE ROLLOUT
-VERIFICATION" below. Test data created during verification was terminalized
-or archived through normal application paths, not hard-deleted.
+**STATUS: fully implemented, applied, deployed, live-verified, and now
+closed out** -- including the last deliberately-deferred piece (the 3
+reviewed historical cases) and their follow-on relationship_summary
+cleanup. Migration `0032_asks.sql` is applied to
+`fundraising-os-staging-db`; `a04b4bd`/`86584e9` are deployed as Worker
+version `e2fb2e0c` (2026-08-19T17:04:39Z); direct Ask creation,
+ask-from-interaction creation, all three status transitions
+(committed/declined/withdrawn), Suggested Action timing/ranking,
+Today/Meeting Brief/Assistant wiring, and the Klein/Pfeiffer/Rovinsky
+historical backfill + cleanup have all been exercised against real
+staging data and verified at the D1 layer, not just the UI. Full results:
+"Ask / Solicitation Feature -- LIVE ROLLOUT VERIFICATION" and "Ask /
+Solicitation Feature -- HISTORICAL BACKFILL AND CLOSURE" below. No
+production/main/backup/R2/status infrastructure was ever touched by any
+part of this feature's rollout. Remaining scope is intentionally deferred
+(see "Intentionally Deferred Ask Enhancements" below), not blocking.
 
 Design doc (approved, unchanged): `docs/ASK-SOLICITATION-DESIGN.md`.
 This section reports the Phase 1 **implementation** built on top of that
@@ -179,8 +185,8 @@ approved design (§1-21 below describe the code as built and reviewed;
 they predate the rollout and are unchanged by it). Everything below exists
 as commits on `feature/independent-cloudflare-sandbox`, pushed to origin:
 `a04b4bd` (implementation), `86584e9` (handoff update), `f1321c3`
-(unrelated incident investigation), plus this rollout/live-verification
-handoff commit.
+(unrelated incident investigation), `0387d4b` (rollout/live-verification
+handoff), plus this historical-backfill/closure handoff commit.
 
 ### 1. Root architecture implemented
 
@@ -772,6 +778,157 @@ test ask ties to exactly one donor; the schema has no shared-activity
 column on `asks` at all); all test data is terminalized/archived and
 documented above.
 
+## Ask / Solicitation Feature -- HISTORICAL BACKFILL AND CLOSURE (2026-08-19)
+
+Closes the last open item from docs/ASK-SOLICITATION-DESIGN.md §20/21 and
+this file's own prior "Next Approval Required": the 3 already-reviewed
+historical solicitation cases (Klein/Pfeiffer/Rovinsky), backfilled into
+real `asks` rows, with their broken machine-generated
+`relationship_summary` values cleared only after each Ask was verified.
+
+**Tooling.** `scripts/ask-historical-backfill.mjs` -- a narrow, one-off
+script, not a general importer. An explicit, hardcoded 3-entry allowlist
+(exact donor ID + source interaction ID pairs) is the only input it will
+ever act on; no note-text scanning or Monday-classification lookup exists
+anywhere in the file. Two independently-gated phases: `--apply-asks`
+(create the 3 `asks`/`ask_changes` rows) and `--cleanup-summaries` (clear
+`relationship_summary`, only for donors whose Ask was just freshly
+re-verified). No flag = dry run (read-only). Idempotency: the schema has
+no UNIQUE constraint on `asks.source_interaction_id` (noted below as a
+future consideration only, not worth a migration for 3 records); the
+script enforces it itself via `INSERT ... SELECT ... WHERE NOT EXISTS`
+guards, safe even without cross-statement transactions (`wrangler d1
+execute --remote` rejects explicit `BEGIN`/`COMMIT` -- confirmed live,
+error code 7500, directs callers to Durable Object transaction APIs this
+CLI-only script has no access to).
+
+**Pre-write re-verification (all 3 independently re-confirmed against
+fresh staging D1 before any write, per explicit instruction not to trust
+the reviewed case blindly):** exact donor IDs, exact source interaction
+IDs, exact note text (first line, byte-for-byte), interaction dates,
+`user_id`/`owner_user_id` ownership, and that no ask already existed for
+any of the 3 source interactions. All 3 matched the reviewed case exactly
+-- no discrepancy, no STOP condition triggered.
+
+**Dry run:** exactly 3 eligible (as required -- the script itself refuses
+to proceed to `--apply-asks` if the count is ever not 3).
+
+**Backfill result (all 3 applied on the first real attempt after fixing
+one bug -- see below):**
+
+| Donor | Ask ID | Amount | Purpose | Asked | Source interaction |
+|---|---|---|---|---|---|
+| Mr. & Mrs. Mayer Simcha Klein | `d3b77711-938d-4a61-bf59-02510ca77314` | $5,000 | Plaque | 2025-11-06 | `monday-interaction-5a79919d` |
+| Mr. & Mrs. Allen Pfeiffer | `dc35a805-af5c-4dbd-8eda-a1cdc182abd1` | $10,000 | (none -- note specifies no purpose) | 2025-09-15 | `monday-interaction-7161c502` |
+| Rabbi Michoel A. Rovinsky | `90b9b052-af64-48ed-82d8-78b060a9ef8b` | $5,000 | Plaque in memory of his wife | 2025-09-29 | `monday-interaction-6d655cb9` |
+
+All 3: `status = 'pending'` (the source notes only prove "solicited," never
+a terminal outcome -- no commitment/decline was invented), `asked_at` =
+the source interaction's exact `occurred_at`, `note = NULL` (the source
+note is already preserved via `source_interaction_id`; a duplicate copy in
+`note` was judged not useful). One `ask_changes` row per Ask
+(`action='created'`, `changed_fields =
+["amountCents","purpose","status","askedAt","note","sourceInteractionId"]`,
+matching the exact shape the real `/api/interactions` route uses for an
+ask created from an interaction). Verified directly against D1
+post-apply: exactly 3 new asks, exactly 3 new `ask_changes` rows, correct
+linkage/amounts/purposes/dates, `giving_activities`/`gifts` counts
+unchanged throughout (5176/0), no `recommendations` rows created for these
+3 donors, the 3 source `interactions` rows byte-for-byte unchanged, and
+the pre-existing 3 test asks from the prior rollout (Resnikoff x2,
+Richman x1, all already terminal) untouched.
+
+**Bug found and fixed live, before any write succeeded:** the script's
+generated multi-line SQL (readable in source, but containing literal
+newlines) broke `wrangler d1 execute --command`'s Windows shell-argument
+parsing (`incomplete input: SQLITE_ERROR`) -- the same class of bug
+documented in `scripts/relationship-summary-cleanup-preview.mjs`. Fixed
+by collapsing whitespace/newlines to single spaces before sending (SQLite
+is whitespace-insensitive; only the Windows shell argument boundary
+cared). Confirmed via a fresh D1 read that the failed first attempt wrote
+nothing (0 matching asks) before retrying. One additional transient
+failure (a `UV_HANDLE_CLOSING` assertion during a read-only fetch)
+matched the same known, transient, first-attempt-only wrangler/Windows
+hiccup observed repeatedly elsewhere in this project's history -- resolved
+on immediate retry with identical arguments, not a real error.
+
+**Relationship_summary cleanup (all 3, applied after Ask verification,
+first attempt, all succeeded):**
+
+| Donor | Before | After |
+|---|---|---|
+| Klein | `"Latest discussion topics: Relationship update.\nPeople mentioned: Solicited.\nRecommended next action: Review this note before the next interaction."` | `NULL` |
+| Pfeiffer | (same broken format) | `NULL` |
+| Rovinsky | (same broken format) | `NULL` |
+
+Each cleared only via a compare-and-swap `UPDATE donors SET
+relationship_summary = NULL WHERE id = ? AND relationship_summary =
+<exact hex-encoded current value>` -- fails closed (0 rows) if the stored
+value had drifted since the read; all 3 matched `changes = 1`. Verified
+post-cleanup: all 3 donors' `relationship_summary` is `NULL`;
+`institutional_memory` for all 3 is byte-for-byte unchanged (still
+`"Note context: Solicited for..."` -- this field was never touched, by
+design); the 3 source interactions unchanged; table-wide
+`relationship_summary` non-null count dropped from 9 (pre-existing
+baseline) to 6, matching exactly (4 previously-regenerated-clean rows +
+Semmelman + Zachter, the 2 other NEEDS_REVIEW donors from the prior
+cleanup-audit task, which are **not** solicitation cases and were
+correctly left untouched -- spot-checked directly, still their original
+old-format text). No other donor's relationship_summary was touched.
+
+**Recommendation verification (read-only, live-confirmed for Klein on the
+deployed app):** the `open_ask` candidate is eligible and wins Suggested
+Action -- "Follow up on the $5,000 Plaque ask." -- even though
+`relationship_summary` is now `NULL` and the old fuzzy `solicitCandidate`
+would otherwise still match `institutional_memory`'s "Solicited for a
+plaque ($5k)" text (confirmed in source: `solicitCandidate` falls back to
+`institutionalMemory` when `relationshipSummary` is null). The confirmed
+Ask wins on merit exactly as designed (§10), not because the fuzzy path
+was disabled. Because these are historical (~9-10 months old as of
+2026-08-19), they surface as clearly-labeled **stale pending asks**, not
+as new/urgent ones -- Klein's detail read "An ask was made 286 days ago
+and is still pending," with the UI's usual "No dated urgency" copy (no
+explicit reminder was set, per design -- historical backfills never
+auto-create reminders). This is the intended behavior, not a defect; no
+ranking/scoring logic was changed to produce it.
+
+**Donor profile / Meeting Brief (live-verified for Klein, no app deploy
+needed or performed -- this was a pure data backfill):** the donor page's
+Open Ask card correctly shows "$5,000 / Plaque / Asked Nov 6, 2025"; the
+Relationship Snapshot card now reads "No relationship snapshot yet" (an
+honest empty state, not the old broken text); Institutional Memory still
+correctly shows "Note context: Solicited for a plaque ($5k)" (untouched);
+the Meeting Brief page's Suggested Action panel shows the same "Follow up
+on the $5,000 Plaque ask." evidence. The previously-documented Meeting
+Brief gap (no dedicated `openAsks` line, separate from the Suggested
+Action slot) still applies here exactly as it does for every other Ask --
+not a new or backfill-specific issue, not fixed in this task (redesigning
+the feature was explicitly out of scope).
+
+**Tests.** `tests/ask-historical-backfill.test.mjs`, 14 items (dry-run
+fixture matching, deterministic amount/purpose mapping, source-interaction
+requirement, existing-Ask no-op, unapproved donor/source rejection, no
+reminders/recommendations, no giving/JL mutation, rerun idempotency,
+cleanup-after-verification-only, compare-and-swap cleanup,
+institutional_memory/source-interaction/other-donor immutability),
+offline/networkless via injectable fetch/write functions, mirroring
+`tests/relationship-summary-apply.test.mjs`'s pattern. Added to `pnpm
+test`'s chain. `pnpm test` (full suite) and `pnpm exec tsc --noEmit` both
+clean. No application/TypeScript code was touched by this task (only
+`scripts/`, `tests/`, `package.json`'s test chain, and this handoff), so
+no build or deploy was needed or performed -- confirmed live: Worker
+version is still `e2fb2e0c`, unchanged.
+
+**Final safety checklist (all re-confirmed via direct D1/git checks
+immediately before this handoff commit):** production untouched;
+`origin/main` unchanged; no backup/R2/status-worker infra changed; no
+migration beyond 0032 applied (this task applied none -- it only wrote
+rows); Klein/Pfeiffer/Rovinsky are the only 3 historical cases converted,
+exactly as reviewed; `giving_activities`/`gifts` unchanged throughout;
+`institutional_memory` and all 3 source interactions byte-for-byte
+unchanged; no other donor's Ask or `relationship_summary` touched; no
+reminders or `recommendations` rows auto-created by the backfill.
+
 ### Unresolved decisions from the design phase -- now resolved by this
 implementation (recorded here for continuity)
 
@@ -838,7 +995,7 @@ messages), plus `tests/shared-activity-ux.test.mjs`,
 `tests/text-message-type.test.mjs`, `tests/mobile-ux-fixes.test.mjs`, and
 `tests/relationship-quality.test.mjs`.
 
-## Relationship-Summary Cleanup Audit (Phase 1 applied; 5 donors still pending review)
+## Relationship-Summary Cleanup Audit (Phase 1 applied; 3 of 5 NEEDS_REVIEW donors resolved via the Ask feature backfill, 2 still pending review)
 
 Follows on from the "Existing (pre-fix) `relationship_summary`/
 `institutional_memory` rows" item in Outstanding Work below. Two-phase
@@ -1434,13 +1591,16 @@ relationship-intelligence quality work):
 - Existing (pre-fix) `relationship_summary`/`institutional_memory` rows
   written before this quality pass: 4 of 9 non-null rows were cleaned up
   (regenerated with the current extractor, applied and verified -- see
-  "Relationship-Summary Cleanup Audit" above). 5 remain, all investigated
-  and left untouched pending a human decision: 3 ("Solicited" false-person
-  cases -- Klein/Pfeiffer/Rovinsky) have a real underlying solicitation-
-  amount fact the current extractor can't recover on its own; 2
-  (Semmelman/Zachter) hinge on a Yahrtzeit/Zman keyword gap the extractor
-  doesn't recognize. See Next Approval Required for what's needed to close
-  these out.
+  "Relationship-Summary Cleanup Audit" above). Of the original 5
+  NEEDS_REVIEW rows, 3 ("Solicited" false-person cases --
+  Klein/Pfeiffer/Rovinsky) are now **resolved**: their solicitation-amount
+  fact was backfilled into real `asks` rows and their broken
+  relationship_summary cleared to `NULL` -- see "Ask / Solicitation
+  Feature -- HISTORICAL BACKFILL AND CLOSURE" above. 2 remain
+  (Semmelman/Zachter), hinging on a Yahrtzeit/Zman keyword gap the
+  extractor doesn't recognize -- unrelated to the Ask feature, still
+  pending a human decision. See Next Approval Required for what's needed
+  to close these out.
 - The current extractor's `FACT_SIGNAL_PATTERN` has no keyword coverage
   for Yahrtzeit, Zman/yeshiva-timing language, or explicit dollar amounts
   ("$5k", "$10,000"). Investigated in depth (see "Relationship-Summary
@@ -1474,61 +1634,64 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**The Ask/Solicitation feature Phase 1 implementation is now fully rolled
-out and live-verified on Independent Staging** (migration applied,
-deployed, and end-to-end tested — see "LIVE ROLLOUT VERIFICATION" above).
-What remains open:
-1. **Meeting Brief completeness gap**, discovered during live rollout
-   verification (not a regression — a pre-existing gap): the Meeting Brief
-   page never renders `brief.openAsks` as its own line; a pending ask only
-   becomes visible there if it happens to win the single Suggested Action
-   slot. A donor whose ask isn't top-ranked shows no ask information on
-   their Meeting Brief. Needs a decision on whether/how to add a dedicated
-   "Open ask" line to `app/donors/[id]/meeting-brief/page.tsx` (the
-   `askLine()` formatter and `brief.openAsks` data already exist and are
-   correct — this is a rendering gap, not a data or logic gap).
-2. A **secondary product decision**, surfaced during implementation (§27
-   item 4 above): whether to add an "Add follow-up" action to an
-   *already-created* pending ask on the donor page (not built in Phase 1
-   — reminders currently only attach at ask-creation time).
+**The Ask/Solicitation feature is now COMPLETE / CLOSED FOR V1** —
+implemented, migration applied, deployed, end-to-end live-tested, and the
+3 known historical cases backfilled with their broken relationship_summary
+values cleared (see "LIVE ROLLOUT VERIFICATION" and "HISTORICAL BACKFILL
+AND CLOSURE" above). No unresolved blocker remains for Ask v1. What
+remains is intentionally deferred, not blocking (see "Intentionally
+Deferred Ask Enhancements" below) — nothing here requires action before
+the feature can be considered done:
+1. **Meeting Brief completeness gap** (pre-existing, not a regression):
+   the Meeting Brief page never renders `brief.openAsks` as its own line;
+   a pending ask only becomes visible there if it happens to win the
+   single Suggested Action slot. Needs a decision on whether/how to add a
+   dedicated "Open ask" line to `app/donors/[id]/meeting-brief/page.tsx`
+   (the `askLine()` formatter and `brief.openAsks` data already exist and
+   are correct — this is a rendering gap, not a data or logic gap).
+2. **"Add follow-up" on an already-created pending ask** (§27 item 4) —
+   not built in Phase 1, reminders currently only attach at ask-creation
+   time.
 3. **Genuine mobile/narrow-viewport visual QA** — still not achievable in
-   this browser-automation environment (see the rollout section above);
-   recommend a real device or different tooling before treating any Ask
-   UI mobile-layout claim as pixel-verified.
-4. **Historical backfill** (Klein/Pfeiffer/Rovinsky) — explicitly out of
-   scope for this rollout task, remains untouched; see the
-   relationship-summary items below for that decision.
+   this browser-automation environment; recommend a real device or
+   different tooling before treating any Ask UI mobile-layout claim as
+   pixel-verified.
 
-Everything from the design doc's 8 unresolved decisions was implemented
-as recommended and is no longer open (see the design-resolution note
-above) -- **except** items 7-8, which remain deliberately untouched:
+### Intentionally Deferred Ask Enhancements
 
-The 4 approved SAFE_TO_REGENERATE rows are done (applied and verified —
-see "Relationship-Summary Cleanup Audit" above). Nothing is blocking; the
-following need a human decision before any further write happens to the
-5 remaining rows (note: items 1-3 below would be resolved differently,
-and arguably better, once the Ask feature exists — see the design doc's
-§20 migration/backfill strategy):
-1. **Klein / Pfeiffer / Rovinsky** ("Solicited" false-person cases): the
-   underlying note has a real solicitation-amount fact
-   ("Solicited for a plaque ($5k)." / "Solicited for $10k." / "Solicited
-   for a plaque in memory of his wife ($5k)."). Decide whether to
-   manually set relationship_summary to that fact for each (recommended —
-   see the audit section for exact suggested text), leave as-is, or
-   handle differently. Not automated — the current extractor would return
-   null for all three if regenerated as-is, which would silently discard
-   the ask amount.
-2. **Semmelman**: recommend clearing relationship_summary to null (the
+Explicitly out of scope for v1, not overlooked — do not build these
+without a separate, explicit approval:
+- Adding reminders later from an existing Ask card (item 2 above).
+- Cross-donor Assistant search / "what did I ask Klein for?" (needs
+  donor-name-resolution infrastructure that doesn't exist for any fact
+  type today — see design doc §16).
+- Follow-up-interaction-to-Ask linking beyond the originating interaction
+  (design doc §8, Option A/D was chosen deliberately).
+- Pipeline/reporting views, sales stages, probability, forecasting (never
+  in scope — see design doc §25).
+- Automatic gift-to-ask matching or auto-close from payments.
+- Ask support on shared/multi-donor interactions (structurally excluded —
+  verified zero ask-related code in `app/api/interactions/shared/route.ts`).
+- Meeting Brief dedicated `openAsks` line (item 1 above).
+
+**Separate, unrelated to Ask v1 closure — still open from the earlier
+relationship-summary cleanup audit:** 2 of the original 5 NEEDS_REVIEW
+donors are not solicitation cases and were correctly left untouched by
+the Ask backfill (Klein/Pfeiffer/Rovinsky, the 3 that *were* solicitation
+cases, are now resolved via the Ask feature instead — see above):
+1. **Semmelman**: recommend clearing relationship_summary to null (the
    durable fact — wife's Yahrtzeit — is already tracked in the dedicated
    `yahrtzeits` table; this row would just duplicate it). Needs explicit
    confirmation before any write.
-3. **Zachter**: more borderline; recommend a human read and a short manual
+2. **Zachter**: more borderline; recommend a human read and a short manual
    value (e.g. "Thanked for supporting the yeshiva's Zman.") or leave
-   as-is — lower priority than the other 4.
-4. **Extractor expansion** (Part C above): a real product decision on
-   whether to add dollar-amount fact-signal support (the one category of
-   the three investigated that has no other home in the schema) — not
-   implemented, needs its own explicit approval and design if wanted.
+   as-is.
+3. **Extractor expansion** (Part C above): a real product decision on
+   whether to add dollar-amount fact-signal support — not implemented,
+   needs its own explicit approval and design if wanted. (The Ask feature
+   itself now covers new solicitation notes going forward via "Did you
+   make an ask?" — this item is only about the extractor's free-text
+   `relationship_summary` generation, a separate concern.)
 
 Everything else is non-blocking — the shared-activity, Text Message,
 mobile UX fixes, and relationship-intelligence quality pass are all live
@@ -1545,6 +1708,37 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-19T19:00:00Z (approximate)
+Claude (Sonnet 5) — Ask/Solicitation feature CLOSED FOR V1: backfilled the
+3 already-reviewed historical solicitation cases (Klein/Pfeiffer/Rovinsky)
+into real `asks` rows via a new narrow, allowlist-only, idempotent script
+(`scripts/ask-historical-backfill.mjs`), then cleared their broken
+machine-generated `relationship_summary` values (compare-and-swap,
+NULL-out) only after each Ask was freshly re-verified. All 3 donor/
+interaction records were independently re-confirmed against live staging
+before any write, exactly matching the reviewed case. Dry run found
+exactly 3 eligible; apply created exactly 3 asks + 3 audit rows (one bug
+found and fixed live -- multi-line generated SQL broke Windows shell
+argument parsing, same class of issue documented in the sibling cleanup
+script; fixed by flattening whitespace before sending); cleanup cleared
+exactly 3 relationship_summary values, leaving the 2 unrelated
+NEEDS_REVIEW donors (Semmelman/Zachter, not solicitation cases)
+untouched. Live-verified on the deployed app (Klein): Open Ask card,
+Suggested Action ("Follow up on the $5,000 Plaque ask."), and Meeting
+Brief all correct; old broken Relationship Snapshot text replaced by an
+honest empty state; `open_ask` wins over the old fuzzy `solicitCandidate`
+even though it now falls back to `institutional_memory` text, exactly as
+designed. No application code was touched (script/tests/docs only), so no
+deploy was needed or performed. `giving_activities`/`gifts`,
+`institutional_memory`, and all 3 source interactions confirmed unchanged
+throughout. 14 new focused tests added
+(`tests/ask-historical-backfill.test.mjs`), `pnpm test` and `pnpm exec tsc
+--noEmit` both clean. This closes the last open item for Ask v1 — see
+"Ask / Solicitation Feature -- HISTORICAL BACKFILL AND CLOSURE" above for
+full detail. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-19T18:00:00Z (approximate)
 Claude (Sonnet 5) — Ask/Solicitation feature Phase 1 controlled rollout to
