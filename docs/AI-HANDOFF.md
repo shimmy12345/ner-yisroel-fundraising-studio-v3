@@ -12,16 +12,108 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD:
-7874d6b (Add explicit-allowlist apply mode; regenerate 4 approved donor summaries -- staging D1 write, see Relationship-Summary Cleanup Audit below)
+c95f6b6 (Update AI-HANDOFF.md for the applied regenerations + review findings)
 
 origin/feature/independent-cloudflare-sandbox:
-7874d6b (pushed)
+c95f6b6 (pushed)
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
 
 Working tree:
 clean
+
+## Ask / Solicitation Feature -- DESIGN ONLY (not implemented, awaiting approval)
+
+Full design report: `docs/ASK-SOLICITATION-DESIGN.md` (26-item report per
+the task's own numbered request -- schema, status model, ask-vs-
+commitment-vs-gift semantics, Suggested Action/Meeting Brief/Assistant/
+Today wiring, donor-merge/backup/reset infra impact, tests, risks, phased
+rollout). **No schema, migration, or application code was written. No D1
+writes were made.** This is purely a design/audit deliverable, committed
+as documentation only.
+
+Purpose (narrow, explicitly not a CRM/pipeline): let the system know,
+structurally, "we asked this donor for $X and it's still pending" --
+today that only exists buried in interaction notes (the exact
+Klein/Pfeiffer/Rovinsky cases from the prior cleanup-audit task).
+
+Key findings from the architecture audit:
+- **No existing table can cleanly represent an Ask.** `giving_activities`
+  is exclusively JL-Solutions-imported financial data (per
+  `docs/FUNDRAISING_OS_PRINCIPLES.md`, "JL Solutions remains the
+  financial system of record") -- its `category` values (`open_pledge`,
+  `partially_paid_pledge`, etc.) already mean a specific, later,
+  back-office-recorded thing. A new `asks` table is justified; the word
+  "pledge" must not be reused for it.
+- **A `solicitCandidate` already exists** in
+  `lib/relationships/recommendation-candidates.ts` -- exactly the gap
+  this feature closes: fuzzy regex-matching against free text, capped at
+  `"narrative"`/`"unconfirmed_historical"` certainty, never `"confirmed"`.
+  A new `open_ask` candidate at `"confirmed"` certainty naturally
+  outranks it on merit (no explicit suppression needed).
+- **The existing reminder system (`recommendations` table +
+  `reminder`/`reminderDueAt()`, already used by interaction capture)
+  fully covers "follow up in N days"** -- no new `follow_up_at` field or
+  second reminder mechanism needed.
+- **The Assistant cannot answer donor-named or cross-donor questions**
+  ("What did I ask Klein for?", "Who has an outstanding ask?") -- it's a
+  fixed-task, single-"primary-donor" rule-based classifier with no
+  donor-name resolution or search anywhere in it today. Recommended v1
+  scope is bounded accordingly (primary-donor-only, via the same
+  Meeting Brief evidence already threaded through).
+- **Today/suggestion-candidates already has the exact cross-donor
+  wiring pattern needed** (`openPledgeByDonor` in
+  `lib/workspace/live-data.ts` + `selectSuggestionDonorIds` in
+  `lib/workspace/suggestion-candidates.ts`) -- reusing it means no new
+  dashboard section is needed for stale asks to surface.
+- **Donor merge** (`app/api/donors/merge/route.ts`) has an explicit,
+  atomic, per-table `donor_id` reassignment list that a new `asks` table
+  must be added to. Audit also surfaced (informational, out of scope
+  here) that `yahrtzeits`/`important_dates`/`gift_acknowledgments`/
+  `donor_historical_context` are NOT currently reassigned on merge -- a
+  pre-existing gap the Ask feature must not repeat.
+- **Backup/production-baseline are schema-driven** (full `wrangler d1
+  export`; baseline regenerated via `pnpm run db:baseline:generate`) --
+  no manual changes needed there. **Staging-reset's
+  `STAGING_RESET_TABLE_ORDER`** (`lib/operations/staging-reset.ts`) is a
+  hand-maintained list with its own regression test guarding
+  completeness -- would need an explicit addition (test would catch it
+  if forgotten).
+
+Recommended minimum schema (see design doc for full reasoning):
+```
+asks: id, user_id, donor_id, amount_cents (nullable), purpose (nullable,
+      free text), status (pending|committed|declined|withdrawn),
+      asked_at, note (nullable), source_interaction_id (nullable),
+      created_at, updated_at
+ask_changes: small append-only audit table, modeled on the existing
+      donor_contact_audits pattern
+```
+
+Status model recommendation: `pending | committed | declined | withdrawn`
+-- "closed" renamed to "withdrawn" (too vague otherwise), required to
+carry a note explaining why.
+
+Unresolved decisions needing explicit approval before any implementation
+(full detail in the design doc's final section):
+1. Status model (`pending/committed/declined/withdrawn`, `withdrawn`
+   requires a note) -- confirm.
+2. Purpose stays free text, no taxonomy -- confirm.
+3. Multiple concurrent open asks per donor allowed (no one-at-a-time
+   constraint) -- confirm.
+4. Direct "+ Log ask" creation (no interaction required) belongs in v1 --
+   confirm.
+5. Follow-up interaction linking: only the originating interaction is
+   linked in v1 (Option A/D) vs. an opt-in nullable `ask_id` on later
+   interactions (Option B) -- pick one.
+6. A small `ask_changes` audit table is justified -- confirm.
+7. Backfilling Klein/Pfeiffer/Rovinsky as real Ask records is a
+   **separate**, later, explicitly-approved step after the feature ships
+   -- not part of the implementation itself.
+8. Whether to then also clear those 3 donors' `relationship_summary`
+   once their Ask exists -- callback to the still-open item from the
+   prior cleanup-audit task.
 
 ## Latest Completed Task
 
@@ -703,10 +795,17 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**New: the Ask/Solicitation feature design (see section above,
+`docs/ASK-SOLICITATION-DESIGN.md`) needs approval on its 8 unresolved
+decisions before any implementation begins.** Nothing has been built —
+this is purely awaiting a go/no-go and answers to those 8 items.
+
 The 4 approved SAFE_TO_REGENERATE rows are done (applied and verified —
 see "Relationship-Summary Cleanup Audit" above). Nothing is blocking; the
 following need a human decision before any further write happens to the
-5 remaining rows:
+5 remaining rows (note: items 1-3 below would be resolved differently,
+and arguably better, once the Ask feature exists — see the design doc's
+§20 migration/backfill strategy):
 1. **Klein / Pfeiffer / Rovinsky** ("Solicited" false-person cases): the
    underlying note has a real solicitation-amount fact
    ("Solicited for a plaque ($5k)." / "Solicited for $10k." / "Solicited
@@ -743,6 +842,35 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-19T00:00:00Z (approximate)
+Claude (Sonnet 5) — Ask/Solicitation feature DESIGN ONLY (no
+implementation): audited existing architecture end to end (interactions,
+recommendations, giving_activities, the shared Suggested Action engine,
+Meeting Brief, Assistant, Today/suggestion-candidates, imports, donor
+merge, staging-reset/backup/baseline infra) by reading the actual code,
+not assuming. Confirmed no existing table can represent an Ask (
+giving_activities is exclusively JL-imported financial-system-of-record
+data) and that an existing `solicitCandidate` already does fuzzy,
+never-"confirmed" regex-matching against free text -- exactly the gap a
+new structured Ask closes. Wrote a full 26-item design report to
+`docs/ASK-SOLICITATION-DESIGN.md`: minimum schema (`asks` + a small
+`ask_changes` audit table), a 4-status model (`pending/committed/
+declined/withdrawn` -- "closed" renamed for clarity), ask-vs-commitment-
+vs-gift semantics (never auto-creates/links a real JL pledge), reuse of
+the existing reminder system (no new follow-up-date field), Suggested
+Action/Meeting Brief/Today wiring recommendations grounded in the actual
+files that would need to change, an explicit statement of what the
+Assistant cannot do without new search infrastructure, donor-merge/
+backup/reset infra impact (including a discovered, out-of-scope,
+pre-existing merge gap for yahrtzeits/important_dates/etc.), exactly how
+the Klein/Pfeiffer/Rovinsky cases would be represented, and a phased
+implementation order. Committed as documentation only -- no schema,
+migration, or application code was written; no D1 writes were made.
+8 explicit decisions are flagged as needing approval before any
+implementation begins.
+
+---
 
 2026-08-19T00:00:00Z (approximate)
 Claude (Sonnet 5) — Relationship-summary cleanup Phase 2: applied the 4
