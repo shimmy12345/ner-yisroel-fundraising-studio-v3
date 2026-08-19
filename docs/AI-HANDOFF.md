@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-This is the **Independent Staging rollout/live-verification** handoff update (documentation only, on top of `f1321c3`). No application code touched by this commit; the migration/deploy/live-testing it reports were done earlier in this same task, before this doc update.
+Documentation-only update to this file, on top of `83bfa75`. Reports the just-completed Today/Assistant loader instrumentation task (code + deploy already done and verified before this doc update -- see "Independent Staging Instrumentation" section below).
 
 origin/feature/independent-cloudflare-sandbox:
-`f1321c3` (design `0ba9ee9` + Ask Phase 1 implementation `a04b4bd` + its handoff update `86584e9` + an unrelated incident-investigation-only handoff update `f1321c3`, all pushed). This rollout task itself applied migration `0032_asks.sql` to `fundraising-os-staging-db` (~17:00:03Z) and deployed `86584e9` as Worker version `e2fb2e0c` (2026-08-19T17:04:39Z), then live-tested it end-to-end -- see "Ask / Solicitation Feature -- LIVE ROLLOUT VERIFICATION" below for full results. A **separate/concurrent Claude session** (different session ID, see `f1321c3`'s commit message) was independently investigating an unrelated Error 1102 CPU-exceeded incident on the same Worker during this window; its read-only investigation happened to observe this same deploy/migration via Cloudflare's real deployment history and correctly concluded (proven, not assumed) that Ask Phase 1 was not live yet at the time of that incident and is not implicated in it. That session made no code/deploy/migration/D1 writes -- only its own documentation-only commit.
+`83bfa75` (`0387d4b`'s Ask-rollout handoff + this session's instrumentation commit `83bfa75`, adding phase-timing telemetry to `loadWorkspaceBrief()`; both pushed). Deployed to Independent Staging as Worker version `f29c075f-b1e3-496d-bc10-cc52ecf05554`. See "Independent Staging Instrumentation -- Today/Assistant Loader Phase Timing" below for the full report, including 3 live-verified telemetry samples and two evidence-backed findings (the loader runs twice per navigation; scoring/assembly are ~0ms, D1 fan-out dominates the function's own cost).
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
@@ -151,14 +151,169 @@ the JL import six minutes prior is what inflated the unbounded pools enough
 to tip this specific request over the limit (plausible, not measured at the
 time).
 
-**Next instrumentation needed (root cause still not fully proven).** Add the
-same phase-timing pattern `donor_page_render` uses to `loadWorkspaceBrief()`
-itself: a structured log line covering the 15-query fan-out duration, D1 row
-counts per query (especially `suggestionDonorIds` final size), and
-per-donor scoring loop duration/count -- emitted unconditionally, not just
-on error, so a future 1102 on this route has an actual measurement instead
-of a code-comment inference. No such change has been made; this section is
-report-only.
+**Next instrumentation needed (root cause still not fully proven) -- DONE, see
+below.** The phase-timing instrumentation this paragraph originally called
+for has since been implemented, deployed, and live-verified -- see
+"Independent Staging Instrumentation -- Today/Assistant Loader Phase
+Timing" immediately below for what was added and what the first live
+telemetry shows.
+
+## Independent Staging Instrumentation -- Today/Assistant Loader Phase Timing (2026-08-19)
+
+Instrumentation-only follow-up to the Error 1102 investigation above, per
+explicit instruction: no recommendation-behavior change, no
+candidate-selection-rule change, no D1 writes/migrations, no optimization.
+Branch `feature/independent-cloudflare-sandbox` only; `origin/main`
+untouched (still `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
+
+**Commit:** `83bfa75` ("Add phase-timing instrumentation to
+loadWorkspaceBrief (Today/Assistant loader)"), pushed directly to
+`origin/feature/independent-cloudflare-sandbox` (on top of `0387d4b`, the
+concurrent Ask-rollout session's handoff commit -- rebased cleanly, no
+file overlap). **Deployed Worker version:**
+`f29c075f-b1e3-496d-bc10-cc52ecf05554` (`wrangler deploy --config
+wrangler.staging.jsonc`, confirmed via the deploy's own printed Version
+ID). `pnpm test` (88 files including the new
+`tests/workspace-brief-instrumentation.test.mjs`), `pnpm exec tsc
+--noEmit`, and `pnpm run build:staging-independent` all passed (exit 0)
+before commit/push/deploy.
+
+**What was added, exactly.** Three fields' worth of source-verified phase
+boundaries in `lib/workspace/live-data.ts`'s `loadWorkspaceBrief()`
+(current implementation traced fresh, not assumed from the prior report --
+it now also threads Ask Phase 1's `askDonorIds`/`openAskByDonor` through
+the same 16-query fan-out and candidate-selection call, one more query
+than this file described before Ask shipped):
+1. `workspace_brief_phase` / `phase: "query_complete"` -- logged the
+   instant the 16-query `Promise.all` D1 fan-out resolves. Fields:
+   `context`, `elapsedMs`, `totalLiveDonors`, `givingRows`,
+   `remindersRows`.
+2. `workspace_brief_phase` / `phase: "scoring_start"` -- logged after
+   candidate-pool construction, immediately before the per-donor scoring
+   loop starts. Fields: `context`, `elapsedMs`, `recentGiftDonorCount`,
+   `openPledgeDonorCount`, `openAskDonorCount`, `yahrtzeitDonorCount`,
+   `importantDateDonorCount`, `contactGapCandidateCount`,
+   `finalSuggestionDonorCount`.
+3. `workspace_brief_render` -- final event, logged right before `return`.
+   Fields: everything above plus `totalDurationMs`,
+   `queryFanoutDurationMs`, `scoringDurationMs`, `assemblyDurationMs`,
+   `donorsScoredCount`, `recommendationCount`, `resultPriorityCount`.
+
+All three use the existing `logger.info()` convention (same sanitization
+as `donor_page_render`) and `performance.now()` (monotonic), not
+`Date.now()`, per explicit instruction -- donor_page_render's own separate
+`Date.now()` convention on the donor-page route was left untouched (out of
+scope). **No PII, no donor names/emails/notes/summaries, no full
+recommendation payloads** -- verified both by manual review and by the new
+test's regex checks against the banned-field list. **No new D1 queries** --
+`env.DB.prepare(` call-site count is unchanged at 16, pinned by the new
+test. **No per-donor log lines** -- the scoring loop body is asserted
+log-call-free. All candidate counts are read from Maps/Sets already built
+earlier in the function (`recentGiftByDonor.size` etc.) -- nothing
+recomputed or newly queried. A trivial, backward-compatible optional 6th
+positional `context` parameter (default `"unknown"`) was added and threaded
+through all three call sites: Today (`"today"`), the Assistant page
+(`"assistant_page"`), and the Assistant API route (`"assistant_api"`) --
+`cf-ray` was deliberately *not* added to keep this change minimal (it would
+have required introducing `next/headers` into a `lib/` module, a pattern
+not currently used outside `app/`); correlation to a Cloudflare Ray ID
+still works via timestamp + the existing per-request `traceId` Cloudflare
+itself already exposes across every log line for that request.
+
+**Live verification -- 3 ordinary Today-page loads, Independent Staging,
+2026-08-19 ~13:42-13:43 EDT.** Authenticated browser navigations to `/`,
+no stress testing, no intentional 1102. All three succeeded
+(`"outcome":"ok"`, HTTP 200); **no 1102 was encountered, accidental or
+otherwise.**
+
+| Ray ID | cpuTimeMs | wallTimeMs | queryFanoutDurationMs (per call) | scoringDurationMs | assemblyDurationMs | finalSuggestionDonorCount | donorsScoredCount |
+|---|---|---|---|---|---|---|---|
+| `a2daf4f58fd82f06` (1st load, cold start) | **242** | 828 | 65 | 0 | 0 | 139 | 139 |
+| `a2daf527db1f2f06` (2nd load) | **152** | 489 | 53 | 0 | 0 | 139 | 139 |
+| `a2daf5995d132f06` (3rd load) | **141** | 480 | 67 / 65 | 0 | 0 | 139 | 139 |
+
+All other candidate counts were byte-identical across all three loads and
+both internal calls within each (data didn't change between reloads):
+`totalLiveDonors: 248`, `recentGiftDonorCount: 7`, `openPledgeDonorCount:
+44`, `openAskDonorCount: 0`, `yahrtzeitDonorCount: 24`,
+`importantDateDonorCount: 172`, `contactGapCandidateCount: 100`,
+`recommendationCount: 129`, `resultPriorityCount: 10`. **Candidate counts
+are stable, not varying materially** across ordinary reloads.
+
+**Two findings, both unplanned, both load-bearing:**
+
+1. **`loadWorkspaceBrief()` runs TWICE per single Today-page navigation --
+   inside the same request (same `cf-ray`/`traceId`), not two separate
+   requests.** Every one of the 3 loads produced two complete
+   `workspace_brief_phase`/`workspace_brief_render` triplets under one
+   `rayId`. This is not new behavior from this change -- the same
+   double-invocation pattern is independently visible in the pre-existing
+   `donor_page_render` log (two `donor_page_render` lines per donor-page
+   visit, same rayId), so it's a systemic characteristic of this app's
+   RSC/SSR rendering pipeline (vinext), not something this instrumentation
+   introduced or something specific to the Today route. Net effect: every
+   real Today-page load already runs the 16-query D1 fan-out **32 times**,
+   not 16. Not investigated further here (out of scope -- instrumentation
+   only) but this is the single most concrete, actionable lead this
+   telemetry produced.
+2. **Scoring and assembly are consistently ~0ms; D1 fan-out is
+   essentially 100% of `loadWorkspaceBrief()`'s own measured internal
+   cost.** Across all 6 internal calls sampled, `scoringDurationMs` and
+   `assemblyDurationMs` were both `0` even at `donorsScoredCount: 139`
+   (out of 248 total donors) -- **this weighs against the "unbounded
+   per-donor scoring loop" hypothesis** carried over from the original
+   incident report as the likely CPU driver, at today's actual data
+   volumes. D1 fan-out (`queryFanoutDurationMs`, 53-67ms per call) is
+   where essentially all of the function's own time goes.
+3. **Caveat, stated plainly: `loadWorkspaceBrief()`'s own instrumented
+   phases (~2x 53-67ms = roughly 110-134ms per request) account for only
+   a fraction of each request's total `wallTimeMs` (480-828ms) and
+   `cpuTimeMs` (141-242ms).** A substantial share of both wall time and
+   CPU time is currently happening *outside* this function entirely --
+   auth/session/Cloudflare Access JWT verification, the outer RSC
+   page-tree render/serialization, or the second loader invocation's own
+   overhead beyond the D1 re-fetch. This instrumentation does not yet
+   have visibility into that portion, and it should not be assumed
+   negligible.
+4. **A successful, ordinary request (`a2daf4f58fd82f06`, cold start) used
+   242ms of CPU time -- more than the original incident's 163ms -- and
+   still succeeded.** This weakens any assumption that Error 1102 on this
+   route is simply "any request whose `cpuTimeMs` crosses a fixed
+   threshold around 150-165ms fails." Whatever separates a successful
+   140-240ms request from the incident's killed 163ms request is not yet
+   understood from this data alone.
+
+**Whether a hotspot is now proven: no, not fully -- but the working
+hypothesis has shifted with real evidence.** Before this task, the
+leading (code-comment-based) hypothesis was the unbounded
+gift/pledge/yahrtzeit/important-date candidate pool driving an expensive
+per-donor scoring loop. That is now directly *disproven as the dominant
+cost* at current data volumes (proven: scoring is ~0ms). The evidence
+now points at (a) the double-invocation of the entire loader per request,
+and (b) D1 fan-out cost (query volume/row-count-driven, likely
+deserialization CPU rather than network wait, since Workers' `cpuTimeMs`
+excludes I/O wait) as the two real, evidence-backed levers -- with a
+meaningful uninstrumented remainder (caveat 3 above) still unaccounted
+for. No optimization has been implemented; per explicit instruction, this
+task stops at reporting the evidence.
+
+**Smallest evidence-supported next step (not implemented, per explicit
+instruction to stop and report):**
+1. Determine why `loadWorkspaceBrief()` (and, by the same pre-existing
+   pattern, the donor-page loader) runs twice per single navigation, and
+   whether that's a fixable rendering artifact -- eliminating it would
+   plausibly roughly halve this route's D1 query volume and a
+   correspondingly large share of its fan-out cost.
+2. Extend the same lightweight phase-boundary pattern to the currently
+   uninstrumented remainder of the request (auth/session resolution, the
+   outer page render/serialization step) so the ~350-700ms of wall time
+   (and unknown CPU time) outside `loadWorkspaceBrief()` becomes
+   attributable instead of a blind spot.
+
+**Next approval required:** none for further investigation/instrumentation
+of the same kind. Any change to fix (1) or (2) above -- or any other
+optimization -- needs its own explicit approval before implementation, per
+this task's instruction not to optimize yet.
 
 ## Ask / Solicitation Feature -- Phase 1 IMPLEMENTED, APPLIED, DEPLOYED, AND LIVE-VERIFIED
 
@@ -1158,14 +1313,15 @@ No migration beyond 0032 exists or has been applied.
 
 ## Deployment State
 
-**Live.** Deployed commit `86584e9` (Ask/Solicitation Phase 1
-implementation + its handoff update), Worker version
-`e2fb2e0c-33eb-4f55-a881-7cf27deb898c` (2026-08-19T17:04:39Z), confirmed
-via `wrangler deployments list` showing it as the 100% current deployment.
-Note: branch HEAD has since advanced past `86584e9` by two
-documentation-only commits (`f1321c3`, this handoff commit) that touch no
-application code — the deployed Worker still reflects the latest actual
-code change.
+**Live.** Deployed commit `83bfa75` (Today/Assistant loader phase-timing
+instrumentation, on top of Ask/Solicitation Phase 1's `86584e9`), Worker
+version `f29c075f-b1e3-496d-bc10-cc52ecf05554`, confirmed via the deploy
+command's own printed Version ID and via live-verified telemetry
+(`workspace_brief_render`/`workspace_brief_phase` log events observed for
+3 real Today-page loads immediately after deploy). Note: branch HEAD may
+advance past `83bfa75` by documentation-only commits (like this one) that
+touch no application code — the deployed Worker reflects the latest
+actual code change, `83bfa75`.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
@@ -1545,6 +1701,36 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-19T17:43:00Z (approximate)
+Claude (Sonnet 5) — Today/Assistant loader (`loadWorkspaceBrief()`)
+phase-timing instrumentation, anchored against the Error 1102 investigation
+above (Ray `a2dab4de9e40be78`). Instrumentation only — no recommendation
+behavior, candidate-selection rules, or D1 data changed. Added three
+compact structured log events (`workspace_brief_phase` x2,
+`workspace_brief_render`), a new test
+(`tests/workspace-brief-instrumentation.test.mjs`), and a trivial
+backward-compatible `context` parameter. `pnpm test`/`tsc --noEmit`/
+`build:staging-independent` all passed. Committed `83bfa75`, pushed to
+`origin/feature/independent-cloudflare-sandbox` (`origin/main` untouched),
+deployed as Worker version `f29c075f-b1e3-496d-bc10-cc52ecf05554`, then
+live-verified with 3 ordinary Today-page loads (no 1102 encountered). Two
+evidence-backed findings: `loadWorkspaceBrief()` runs twice per single
+navigation (same request, same rayId — a pre-existing pattern, also seen
+in `donor_page_render`, not introduced here); and scoring/assembly are
+consistently ~0ms while D1 fan-out is ~100% of the function's own measured
+cost — weakening the "unbounded scoring loop" hypothesis and pointing
+instead at the double-invocation and fan-out cost as the more
+evidence-backed levers. A meaningful share of each request's total
+cpuTimeMs/wallTimeMs (roughly half or more) still falls outside this
+function's instrumented phases and remains unattributed. No optimization
+implemented, per explicit instruction — see "Independent Staging
+Instrumentation" above for full detail, including the smallest
+evidence-supported next steps identified (not yet approved). Next
+approval required: none to investigate further; any fix/optimization
+needs its own separate approval.
+
+---
 
 2026-08-19T18:00:00Z (approximate)
 Claude (Sonnet 5) — Ask/Solicitation feature Phase 1 controlled rollout to
