@@ -149,17 +149,39 @@ assert.match(liveData, /const __assemblyStart = performance\.now\(\);/);
 }
 
 // 3 (dedup does not persist across separate requests) and 8 (no global
-// cache introduced). The cache lives behind AsyncLocalStorage, entered
-// fresh per store, not a bare module-level Map -- see the behavioral
-// test below for the actual persistence/isolation semantics this relies
-// on. Source-level: confirm the singleton is registered on `globalThis`
-// via `Symbol.for(...)` (matching vinext's own als-registry.js pattern,
-// required because Vite's RSC/SSR/client module environments can load
-// this file as more than one module instance) rather than a naive
-// module-local `new AsyncLocalStorage()` that could silently fork.
+// cache introduced). The cache lives behind AsyncLocalStorage, scoped by
+// worker/index.ts's run() call around the whole request -- not a bare
+// module-level Map -- see the behavioral test below for the actual
+// persistence/isolation semantics this relies on. Source-level: confirm
+// the singleton is registered on `globalThis` via `Symbol.for(...)`
+// (matching vinext's own als-registry.js pattern, required because
+// Vite's RSC/SSR/client module environments can load this file as more
+// than one module instance) rather than a naive module-local
+// `new AsyncLocalStorage()` that could silently fork. Also confirm
+// enterWith()/disable() are never called anywhere in this file: Cloudflare
+// Workers' AsyncLocalStorage intentionally does not implement them (see
+// docs/AI-HANDOFF.md's dedup-fix section for the incident this caused
+// when an earlier version of this fix used enterWith() and broke the
+// Today page live on staging) -- only run()/getStore() are supported and
+// used here.
 assert.match(liveData, /import \{ AsyncLocalStorage \} from "node:async_hooks";/);
 assert.match(liveData, /Symbol\.for\("fundraising-os\.workspace-brief-request-cache\.als"\)/, "the ALS singleton must be registered under a Symbol.for(...) globalThis key, not a bare module-level instance");
 assert.doesNotMatch(liveData, /^const \w+ = new AsyncLocalStorage\(\);/m, "must not declare a bare module-level AsyncLocalStorage instance (would fork across Vite's multiple module environments)");
+assert.doesNotMatch(liveData, /\.enterWith\(|\.disable\(/, "must never call enterWith()/disable() -- Cloudflare Workers' AsyncLocalStorage does not implement them");
+assert.match(liveData, /export function runWithWorkspaceBriefRequestScope/, "must export a run()-based wrapper for worker/index.ts to wrap the whole request in");
+assert.match(liveData, /getBriefCacheAls\(\)\.run\(new Map\(\), fn\)/, "the exported wrapper must use AsyncLocalStorage.run(), not enterWith()");
+assert.match(liveData, /getBriefCacheAls\(\)\.getStore\(\) \?\? new Map\(\)/, "a missing store (e.g. a call path that bypasses worker/index.ts's wrapper) must fail open to an unshared Map, never throw");
+
+// worker/index.ts must actually wrap vinext's handler.fetch() call in the
+// exported request-scope helper -- this is the one file in the repo that
+// spans both of vinext's per-request invocations (its probe call and its
+// real render call), so it's the only place run() can correctly be
+// established for this to work at all.
+{
+  const workerEntry = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(workerEntry, /import \{ runWithWorkspaceBriefRequestScope \} from "\.\.\/lib\/workspace\/live-data";/);
+  assert.match(workerEntry, /runWithWorkspaceBriefRequestScope\(\(\) => handler\.fetch\(request, env, ctx\)\)/, "worker/index.ts must wrap the entire vinext handler.fetch() call, not just part of it");
+}
 
 // 9 (no new D1 queries) is already covered by check 7 above (still
 // exactly 16 D1 call sites) -- the wrapper adds zero.
@@ -172,55 +194,70 @@ assert.doesNotMatch(liveData, /^const \w+ = new AsyncLocalStorage\(\);/m, "must 
 assert.match(liveData, /phase: "cache_hit"/);
 
 // Behavioral test: verifies the actual JS semantics the fix depends on
-// using node:async_hooks directly (available in plain Node, same API
-// nodejs_compat exposes in the real Workers runtime) -- NOT by invoking
-// loadWorkspaceBrief itself, since it calls env.DB from cloudflare:workers,
-// which has no meaningful mock outside a real Workers/Miniflare runtime
-// (matching this repo's established limitation for every D1-coupled
-// loader/route, per the file-level comment at the top of this file and
-// tests/today.test.mjs).
+// using node:async_hooks directly. This mirrors exactly what the fix
+// does (AsyncLocalStorage.run() wraps the whole scope, only getStore() is
+// called from inside it) -- not the earlier, broken enterWith()-based
+// design. It is NOT invoking loadWorkspaceBrief itself, since that calls
+// env.DB from cloudflare:workers, which has no meaningful mock outside a
+// real Workers/Miniflare runtime (matching this repo's established
+// limitation for every D1-coupled loader/route, per the file-level
+// comment at the top of this file and tests/today.test.mjs).
 //
 // This proves the WITHIN-one-request half of the mechanism: a store
-// entered via enterWith() during an earlier awaited call is still the
-// same store on a later awaited call in the same unbroken async chain
-// (mirroring vinext's probe-then-render sequence, both awaited in turn
-// from renderAppPageLifecycle). It also proves getStore() is undefined
-// before anything has entered a store, so a fresh chain that never
-// touches this ALS starts clean.
+// established by one outer run() call is still the same store on a later
+// awaited call nested inside it, even across a real task-boundary
+// (setTimeout) -- mirroring vinext's probe-then-render sequence, both
+// invoked from within worker/index.ts's single run()-wrapped
+// handler.fetch() call. It also proves getStore() is undefined outside
+// any run() call, so a code path that bypasses the wrapper fails open
+// rather than crashing (see the getRequestScopedBriefCache assertion
+// above).
 //
-// LIMITATION, stated plainly: it does NOT and cannot prove Cloudflare
-// Workers' cross-request isolation guarantee (that a second, wholly
-// separate incoming fetch() in the same warm isolate does not see a
-// store entered during a prior request) -- Node has no equivalent to
-// Workers' per-request IoContext boundary, so a Node-only test of that
-// claim would test Node's semantics, not the Workers runtime's. That
-// guarantee rests on Cloudflare's documented request-isolation model and
-// on vinext's own request-context shim (dist/shims/request-context.js)
-// depending on the identical assumption for its own, load-bearing
-// per-request ExecutionContext plumbing -- and is verified empirically
-// against the real deployment in this task's live-verification step
-// (5 ordinary Today loads showing unchanged, non-stale candidate counts).
+// This exact run()/getStore() pattern (a Map store, two sequential
+// awaited calls separated by a real task boundary, checked for reference
+// equality) was also independently verified against the real Cloudflare
+// Workers runtime via `wrangler dev` against a minimal standalone Worker
+// before this fix was redeployed -- see docs/AI-HANDOFF.md's dedup-fix
+// section. This Node-based test proves the same JS semantics but cannot
+// by itself prove Workers' cross-request isolation guarantee (that a
+// second, wholly separate incoming fetch() in the same warm isolate gets
+// its own fresh run() scope) -- Node has no equivalent to Workers'
+// per-request IoContext boundary. That guarantee rests on Cloudflare's
+// documented request-isolation model, is exactly what vinext's own
+// request-context shim (dist/shims/request-context.js) already depends on
+// for its own load-bearing per-request ExecutionContext plumbing, and is
+// verified empirically against the real deployment in this task's
+// live-verification step.
 {
   const { test } = await import("node:test");
   const { AsyncLocalStorage } = await import("node:async_hooks");
 
-  await test("AsyncLocalStorage enterWith() persists a store across sequential awaited calls in one continuation (the mechanism loadWorkspaceBrief's dedup relies on)", async () => {
+  await test("AsyncLocalStorage run()/getStore() (no enterWith) shares one store across sequential awaited calls separated by a real task boundary", async () => {
     const als = new AsyncLocalStorage();
-    function getOrCreateStore() {
-      let store = als.getStore();
-      if (!store) {
-        store = new Map();
-        als.enterWith(store);
-      }
+    assert.equal(als.getStore(), undefined, "no store should exist outside any run() call");
+
+    async function firstCall() {
+      const store = als.getStore();
+      if (!store) throw new Error("no store visible in the first call");
+      store.set("a", "first");
       return store;
     }
-    assert.equal(als.getStore(), undefined, "no store should exist before anything has entered one");
-    const first = getOrCreateStore();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await Promise.resolve().then(() => {});
-    const second = getOrCreateStore();
-    assert.strictEqual(first, second, "the same store instance must be returned on a later awaited call in the same continuation -- this is what makes the second (probe or render) loadWorkspaceBrief call see the first call's cached promise");
-    first.set("k", "v");
-    assert.equal(second.get("k"), "v", "writes made during the first call must be visible to the second call");
+    async function secondCall() {
+      const store = als.getStore();
+      if (!store) throw new Error("no store visible in the second call");
+      store.set("b", "second");
+      return store;
+    }
+
+    const result = await als.run(new Map(), async () => {
+      const first = await firstCall();
+      await new Promise((resolve) => setTimeout(resolve, 0)); // a real task boundary, like vinext's probe -> render gap
+      const second = await secondCall();
+      return { first, second };
+    });
+
+    assert.strictEqual(result.first, result.second, "the same store instance must be returned on a later awaited call nested in the same run(), even across a task boundary -- this is what makes the second (probe or render) loadWorkspaceBrief call see the first call's cached promise");
+    assert.deepEqual([...result.second.entries()], [["a", "first"], ["b", "second"]], "writes from the first call must be visible to the second call");
+    assert.equal(als.getStore(), undefined, "the store must not leak outside the run() call");
   });
 }

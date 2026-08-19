@@ -117,45 +117,58 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 // there, and the real render would then establish its own fresh,
 // unrelated cache scope -- no dedup either way.
 //
-// AsyncLocalStorage does correctly span the probe/render boundary: vinext
-// itself documents wrapping its ENTIRE per-request handler.fetch() call in
-// one AsyncLocalStorage.run() (dist/shims/request-context.js's
-// runWithExecutionContext), so anything entered partway through via
-// enterWith() persists for the rest of that same request and is invisible
-// to any other request. This is also empirically already true in this
-// exact app: donor_page_render logs the identical cf-ray (read via
-// next/headers, itself ALS-backed) on both of a donor page's two
-// per-request invocations. enterWith(), not run(), because this loader
-// has no wrapping callback of its own to hand to run() -- its documented
-// semantics ("persists the store through any following asynchronous
-// calls") are exactly what's needed for a store entered during the first
-// (probe) call to remain visible during the second (render) call.
+// IMPORTANT, learned the hard way (see docs/AI-HANDOFF.md's dedup-fix
+// section for the full incident): Cloudflare Workers' AsyncLocalStorage
+// intentionally does NOT implement enterWith()/disable() -- confirmed on
+// Cloudflare's own docs (developers.cloudflare.com/workers/runtime-apis/
+// nodejs/asynclocalstorage/), only run()/getStore() are supported. A first
+// version of this fix called enterWith() here and broke the Today page
+// live on Independent Staging (rolled back within minutes). This version
+// uses ONLY run()/getStore(). Since run() requires a callback that spans
+// the whole scope the store should be visible in, and this loader doesn't
+// own that scope (vinext's probe call and its later, separate real-render
+// call are both internal to vinext's dispatch, not nested inside any
+// callback of ours), the run() call lives in worker/index.ts instead --
+// the one file in this repo that already wraps vinext's entire per-request
+// handler.fetch(...) call, exactly mirroring vinext's own documented
+// pattern for its request-context shim (dist/shims/request-context.js's
+// runWithExecutionContext, which wraps that same handler.fetch() in one
+// AsyncLocalStorage.run() of its own). This file only ever calls
+// getStore() -- never run() or enterWith() -- and falls back to a
+// non-shared, one-off Map if no store is active (e.g. a code path that
+// somehow bypasses worker/index.ts's wrapper), which only forgoes the
+// dedup optimization, never breaks correctness.
 //
 // A single module-level `new AsyncLocalStorage()` would NOT be safe here:
 // vinext's own als-registry.js documents that Vite's separate RSC/SSR/
 // client module environments (plus HMR) can load one source file as
-// multiple module instances, which would silently fork a module-local ALS
-// and defeat the dedup. Mirroring vinext's own fix, the ALS instance is
-// registered on `globalThis` under a `Symbol.for(...)` key instead, so
-// every module instance resolves to the same one.
+// multiple module instances, which would silently fork a module-local ALS.
+// Mirroring vinext's own fix, the ALS instance is registered on
+// `globalThis` under a `Symbol.for(...)` key instead, so every module
+// instance -- including worker/index.ts's -- resolves to the same one.
 //
-// Freshness: this cache is request-scoped only -- entered fresh (or not
-// at all) for every new incoming request, keyed by the exact loader
-// arguments, holding only the in-flight/settled promise for the
+// Freshness: this cache is request-scoped only -- a fresh Map for every
+// new incoming request (worker/index.ts's run() call), keyed by the exact
+// loader arguments, holding only the in-flight/settled promise for the
 // still-executing request. It never persists across two separate
 // navigations, so a donation/import logged just before a new Today load
 // is unaffected: nothing here is a cross-request cache.
 const REQUEST_BRIEF_CACHE_ALS_KEY = Symbol.for("fundraising-os.workspace-brief-request-cache.als");
 const globalWithBriefCacheAls = globalThis as unknown as Record<symbol, AsyncLocalStorage<Map<string, Promise<WorkspaceBrief>>> | undefined>;
 
+function getBriefCacheAls(): AsyncLocalStorage<Map<string, Promise<WorkspaceBrief>>> {
+  return (globalWithBriefCacheAls[REQUEST_BRIEF_CACHE_ALS_KEY] ??= new AsyncLocalStorage());
+}
+
+// Called once, by worker/index.ts, wrapping its entire handler.fetch(...)
+// call for one incoming request -- see the comment above for why it lives
+// there rather than in this file.
+export function runWithWorkspaceBriefRequestScope<T>(fn: () => T): T {
+  return getBriefCacheAls().run(new Map(), fn);
+}
+
 function getRequestScopedBriefCache(): Map<string, Promise<WorkspaceBrief>> {
-  const als = (globalWithBriefCacheAls[REQUEST_BRIEF_CACHE_ALS_KEY] ??= new AsyncLocalStorage());
-  let store = als.getStore();
-  if (!store) {
-    store = new Map();
-    als.enterWith(store);
-  }
-  return store;
+  return getBriefCacheAls().getStore() ?? new Map();
 }
 
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8, context = "unknown"): Promise<WorkspaceBrief> {

@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { runWithWorkspaceBriefRequestScope } from "../lib/workspace/live-data";
 
 interface Env {
   ASSETS: Fetcher;
@@ -46,7 +47,15 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    // Wraps the entire per-request vinext dispatch (which internally calls
+    // the matched page component's Server Component function up to twice
+    // -- see lib/workspace/live-data.ts's comment on
+    // runWithWorkspaceBriefRequestScope for why) in one
+    // AsyncLocalStorage.run(), so loadWorkspaceBrief() can dedupe its own
+    // expensive work across those two calls within this one request. Uses
+    // only run()/getStore() -- Cloudflare Workers' AsyncLocalStorage does
+    // not implement enterWith()/disable().
+    return runWithWorkspaceBriefRequestScope(() => handler.fetch(request, env, ctx));
   },
 };
 
