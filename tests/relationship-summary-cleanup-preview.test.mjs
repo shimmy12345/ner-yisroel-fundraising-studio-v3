@@ -148,14 +148,24 @@ async function run() {
     assert.deepEqual(first, second);
   }
 
-  // --- 9: the preview performs no writes -- classifyDonors is a pure,
-  // synchronous function with no D1/wrangler access at all (verified by
-  // its signature above, taking only already-fetched arrays/Maps), and
-  // every wrangler call the script does make is a read-only SELECT/COUNT,
-  // never an INSERT/UPDATE/DELETE. ---
+  // --- 9: the PREVIEW path performs no writes. `classifyDonors` and
+  // `fetchLiveClassification` (which `run()` uses) are never given a
+  // writeFn and never build write SQL. A separate, explicitly-gated apply
+  // path (planApply/executePlan, added after this preview tool -- see
+  // tests/relationship-summary-apply.test.mjs) does contain exactly one
+  // write statement; this test pins it to a single, tightly-scoped,
+  // conditional UPDATE of `donors.relationship_summary` only -- never an
+  // INSERT/DELETE, never unconditional, never touching another column. ---
   {
     const source = await readFile(new URL("../scripts/relationship-summary-cleanup-preview.mjs", import.meta.url), "utf8");
-    assert.doesNotMatch(source, /\b(INSERT INTO|UPDATE\s+donors|DELETE FROM)\b/i, "the preview script must never contain a D1 write statement");
+    assert.doesNotMatch(source, /\b(INSERT INTO|DELETE FROM)\b/i, "the script must never contain an INSERT or DELETE");
+    const updateStatements = [...source.matchAll(/UPDATE\s+donors\s+SET[^`]*?(?=`|\n\s*\);)/gis)];
+    assert.equal(updateStatements.length, 1, "expected exactly one UPDATE statement in the whole file (the gated apply-mode write)");
+    const [update] = updateStatements;
+    assert.match(update[0], /^UPDATE donors SET relationship_summary = /, "the only write must set relationship_summary, and nothing else, first");
+    assert.doesNotMatch(update[0], /,\s*\w+\s*=/, "the write must assign exactly one column -- no comma-separated second assignment");
+    assert.doesNotMatch(update[0], /institutional_memory/, "the write must never touch institutional_memory");
+    assert.match(update[0], /WHERE id = .* AND relationship_summary = /, "the write must be conditional on both id and the exact previously-observed value (compare-and-swap), never an unconditional bulk UPDATE");
     const wranglerCalls = [...source.matchAll(/wranglerJson\(\s*\n?\s*`?"?(SELECT[^)]*)/gi)];
     assert.ok(wranglerCalls.length >= 2, "expected at least the donors and interactions SELECT queries");
   }

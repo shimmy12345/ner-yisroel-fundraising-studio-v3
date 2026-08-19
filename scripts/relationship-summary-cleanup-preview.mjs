@@ -99,6 +99,22 @@ function wranglerJson(sql) {
   throw new Error(`Could not find JSON in wrangler output for query:\n${sql}\n${result.stdout}`);
 }
 
+// IMPORTANT, discovered while building apply mode: `wrangler d1 execute
+// --file` (used elsewhere in this repo for large/multi-line SQL) uploads
+// the file and returns a "Total queries executed"/"Rows written" SUMMARY,
+// not the same per-statement `meta.changes` that `--command` mode returns
+// -- confirmed live: a conditional UPDATE with a WHERE clause that could
+// not possibly match any row (a nonexistent donor id) still came back
+// with `meta.changes: 1` under `--file` mode (while its own "Rows
+// written" summary field correctly said 0). That makes `--file` mode
+// UNSAFE for this script's compare-and-swap check, which depends on
+// `changes` being an exact, trustworthy per-row count -- so apply mode
+// stays on `--command` mode (wranglerJson, proven reliable by every read
+// in this file) and instead avoids the actual problem (embedded literal
+// newlines in the pre-fix field-label-dump value breaking Windows
+// shell-argument parsing) by hex-encoding any value that goes into
+// generated SQL -- see sqlLiteral() below.
+
 // --- Legacy generator (commit 1487a8b~1), reproduced here ONLY to trace
 // an old-format relationship_summary value back to the interaction note
 // that produced it. Never used to determine a proposed/new value -- that
@@ -273,9 +289,11 @@ function classifyDonors(candidates, interactionsByDonor) {
   return buckets;
 }
 
-async function run() {
-  console.log(`Reading ${DB_NAME} (read-only, no writes)...\n`);
-
+// Fetches a fresh live snapshot from D1 and classifies it. Used by BOTH
+// `run()` (preview/print only) and `applyApproved()` (which re-fetches and
+// re-classifies immediately before every write, so it can never act on
+// stale in-memory state from an earlier call).
+function fetchLiveClassification() {
   const donorRows = wranglerJson(
     "SELECT id, display_name, relationship_summary, institutional_memory FROM donors WHERE data_source='live' AND archived_at IS NULL",
   )[0].results;
@@ -300,6 +318,116 @@ async function run() {
   }
 
   const buckets = classifyDonors(candidates, interactionsByDonor);
+  return { totalDonors, rsNonNull, imNonNull, candidates, interactionsByDonor, buckets };
+}
+
+// SQLite string-literal escaping (single quotes doubled) -- the same
+// convention already used for donor IDs in the IN(...) list above. Safe
+// for values with no embedded literal newlines (donor IDs, short SQL
+// fragments); do NOT use for arbitrary donor-content strings -- see
+// sqlLiteral() below.
+function sqlString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+// Hex-encodes a value's UTF-8 bytes into a SQLite blob literal, cast back
+// to TEXT -- e.g. `CAST(X'48656c6c6f' AS TEXT)` for "Hello". Used for the
+// apply-mode UPDATE's SET/WHERE values, which come from real donor content
+// (the pre-fix field-label-dump format is multi-line) -- embedding a
+// literal newline in a `--command` shell argument breaks Windows cmd.exe's
+// argument parsing before the query ever reaches D1 (confirmed live: a
+// SQLITE_ERROR "unrecognized token", with the target row unchanged
+// afterward). Hex has no quotes, backslashes, or whitespace, so it needs
+// no escaping and survives shell quoting intact regardless of content.
+function sqlLiteral(value) {
+  return `CAST(X'${Buffer.from(String(value), "utf8").toString("hex")}' AS TEXT)`;
+}
+
+// Pure decision logic for apply mode -- no D1 access here, so it is
+// directly unit-testable against synthetic candidates/interactionsByDonor
+// (the same fixtures classifyDonors tests use). Takes the caller's
+// explicitly-approved donor IDs and a freshly-fetched classification, and
+// decides, per ID, WRITE (with the exact SQL to run) or SKIP (with a
+// reason) -- it never receives or trusts a proposed replacement STRING
+// from the caller; `proposed` always comes from `buckets.SAFE_TO_REGENERATE`,
+// which was computed by classifyDonors() from the real current extractor.
+function planApply(approvedIds, candidates, buckets) {
+  const safeById = new Map(buckets.SAFE_TO_REGENERATE.map((item) => [item.donor.id, item]));
+  const candidateById = new Map(candidates.map((d) => [d.id, d]));
+
+  return approvedIds.map((donorId) => {
+    const item = safeById.get(donorId);
+    if (!item) {
+      const known = candidateById.get(donorId);
+      const bucketName = known
+        ? Object.entries(buckets).find(([, items]) => items.some((i) => i.donor.id === donorId))?.[0]
+        : null;
+      return {
+        donorId, action: "SKIP", value: known?.relationship_summary ?? null, proposed: null,
+        reason: known
+          ? `Donor currently classifies as ${bucketName ?? "unknown"}, not SAFE_TO_REGENERATE -- refusing to write. Re-run the preview and re-review before retrying.`
+          : "Donor not found among current relationship_summary candidates (no non-null relationship_summary, or donor no longer live/archived) -- refusing to write.",
+      };
+    }
+    return {
+      donorId, action: "WRITE", value: item.value, proposed: item.proposed,
+      donorName: item.donor.display_name, sourceInteraction: item.sourceInteraction,
+      // Conditional on the exact value just observed -- if another writer
+      // changed it since this read, `changes` comes back 0 at execution
+      // time and executePlan() fails that donor closed instead of
+      // overwriting an unexpected value (a compare-and-swap, not a guess).
+      sql: `UPDATE donors SET relationship_summary = ${sqlLiteral(item.proposed)} WHERE id = ${sqlString(donorId)} AND relationship_summary = ${sqlLiteral(item.value)}`,
+    };
+  });
+}
+
+// I/O half of apply mode -- executes a plan from planApply(). `writeFn`
+// defaults to the real `wranglerJson` (an actual D1 write, in --command
+// mode -- deliberately NOT --file mode; see the comment above wranglerJson
+// for why) but is injectable so tests can simulate D1's response (e.g.
+// `changes: 0` for a stale-value race) without ever touching live data.
+async function executePlan(plan, writeFn = wranglerJson) {
+  const results = [];
+  for (const step of plan) {
+    if (step.action === "SKIP") {
+      results.push({ donorId: step.donorId, status: "FAILED_CLOSED", before: step.value, after: null, reason: step.reason });
+      continue;
+    }
+    const update = writeFn(step.sql);
+    const changes = update?.[0]?.meta?.changes ?? 0;
+    if (changes !== 1) {
+      results.push({
+        donorId: step.donorId, status: "FAILED_CLOSED", before: step.value, after: null,
+        reason: `Conditional UPDATE matched ${changes} row(s), expected exactly 1 -- the stored relationship_summary changed between this run's read and write. No write applied.`,
+      });
+      continue;
+    }
+    results.push({
+      donorId: step.donorId, status: "APPLIED", before: step.value, after: step.proposed,
+      sourceInteraction: step.sourceInteraction, donorName: step.donorName,
+    });
+  }
+  return results;
+}
+
+// APPLY MODE -- the only path in this file that writes to D1. Takes a list
+// of donor IDs the caller has already gotten explicit human approval for
+// (from the CLI, e.g. `--apply id1,id2`); re-fetches and re-classifies
+// fresh from D1 (never a cached/earlier read) via fetchLiveClassification(),
+// plans via planApply() (pure), then executes via executePlan() (the only
+// write). Only `relationship_summary` is ever assigned; `institutional_memory`,
+// interactions, and every other table/column are never referenced in any
+// write statement in this file.
+async function applyApproved(approvedIds) {
+  const { candidates, buckets } = fetchLiveClassification();
+  const plan = planApply(approvedIds, candidates, buckets);
+  return executePlan(plan);
+}
+
+async function run() {
+  console.log(`Reading ${DB_NAME} (read-only, no writes)...\n`);
+
+  const { totalDonors, rsNonNull, imNonNull, candidates, buckets } = fetchLiveClassification();
 
   console.log(`Total donors scanned: ${totalDonors}`);
   console.log(`relationship_summary non-null: ${rsNonNull}`);
@@ -330,8 +458,46 @@ async function run() {
   return buckets;
 }
 
+// CLI: `node scripts/relationship-summary-cleanup-preview.mjs` previews
+// (read-only). `node scripts/relationship-summary-cleanup-preview.mjs
+// --apply <donorId1,donorId2,...>` writes ONLY the listed, explicitly-
+// approved donor IDs -- and only those currently (freshly re-read) in the
+// SAFE_TO_REGENERATE bucket. No proposed text is ever accepted on the
+// command line; the replacement value always comes from the live extractor
+// re-run inside applyApproved().
+async function runCli() {
+  const applyIndex = process.argv.indexOf("--apply");
+  if (applyIndex === -1) {
+    await run();
+    return;
+  }
+  const idArg = process.argv[applyIndex + 1];
+  const approvedIds = (idArg ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+  if (approvedIds.length === 0) {
+    console.error("--apply requires a comma-separated list of donor IDs, e.g. --apply id1,id2");
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Applying ${approvedIds.length} explicitly-approved donor ID(s) to ${DB_NAME} (relationship_summary only)...\n`);
+  const results = await applyApproved(approvedIds);
+  let failed = 0;
+  for (const result of results) {
+    console.log(`\nDonor: ${result.donorId}`);
+    console.log(`  Status: ${result.status}`);
+    if (result.status === "APPLIED") {
+      console.log(`  Before: ${JSON.stringify(result.before)}`);
+      console.log(`  After: ${JSON.stringify(result.after)}`);
+    } else {
+      failed++;
+      console.log(`  Reason: ${result.reason}`);
+    }
+  }
+  console.log(`\n${results.length - failed} applied, ${failed} failed closed (no write).`);
+  if (failed > 0) process.exitCode = 1;
+}
+
 // Robust direct-execution check across platforms.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) await run();
+if (isMain) await runCli();
 
-export { run, classifyDonors, candidateTexts, OLD_FORMAT_PREFIX, oldActionableRelationshipSnapshot, normalizeKind };
+export { run, applyApproved, planApply, executePlan, fetchLiveClassification, classifyDonors, candidateTexts, OLD_FORMAT_PREFIX, oldActionableRelationshipSnapshot, normalizeKind };
