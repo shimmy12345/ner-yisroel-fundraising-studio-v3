@@ -29,7 +29,7 @@ type RequestBody = {
   occurredAt?: string;
 };
 
-const KINDS = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+const KINDS = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 const ROLES = new Set(["participant", "recipient"]);
 
 // Comfortably above the largest example this feature was designed around

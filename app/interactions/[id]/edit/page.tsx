@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string };
 type ReminderRow = { due_at: number | null };
 type DonorRow = { id: string; display_name: string; primary_first_name: string | null; last_name: string | null; spouse: string | null; spouse_first_name: string | null; donor_code: string | null; external_id: string | null; email: string | null; phone: string | null; home_phone: string | null; alternate_mobile_phone: string | null };
-const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 
 export default async function EditActivityPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ returnTo?: string }> }) {
   const { id } = await params;

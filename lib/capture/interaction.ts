@@ -1,6 +1,6 @@
 import { addCalendarDays, localDateParts, zonedTimeToUtc } from "../workspace/local-time.ts";
 
-export type InteractionKind = "call" | "email" | "meeting" | "visit" | "note" | "personal";
+export type InteractionKind = "call" | "email" | "meeting" | "visit" | "note" | "personal" | "text";
 export type ReminderChoice = "none" | "tomorrow" | "next-week" | "custom";
 
 export type InteractionExtraction = {
@@ -21,6 +21,7 @@ const KIND_LABELS: Record<InteractionKind, string> = {
   visit: "Visit",
   note: "Note",
   personal: "Personal interaction",
+  text: "Text Message",
 };
 
 export function interactionKindLabel(kind: InteractionKind): string {
@@ -30,6 +31,7 @@ export function interactionKindLabel(kind: InteractionKind): string {
 export function inferInteractionKind(note: string): InteractionKind {
   const lower = note.toLowerCase();
   if (/\b(called|phone|spoke by phone|voicemail)\b/.test(lower)) return "call";
+  if (/\b(texted|text message|texting|sms|whatsapp|imessage)\b/.test(lower)) return "text";
   if (/\b(emailed|email|wrote to|replied)\b/.test(lower)) return "email";
   if (/\b(coffee|lunch|dinner|met|meeting)\b/.test(lower)) return "meeting";
   if (/\b(visit|visited|campus tour|stopped by)\b/.test(lower)) return "visit";
@@ -64,6 +66,7 @@ export function inferSubject(note: string, kind: InteractionKind): string {
     visit: "Donor visit follow-up",
     note: "Relationship update",
     personal: "Personal update",
+    text: "Text message follow-up",
   };
   return fallbacks[kind];
 }

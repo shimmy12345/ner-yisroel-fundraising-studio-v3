@@ -19,7 +19,7 @@ export default async function CapturePage({ searchParams }: { searchParams: Prom
   const requestedParams = await searchParams;
   const requested = requestedParams.donorId;
   const initialDonorId = requested && donors.results.some((item) => item.id === requested) ? requested : "";
-  const allowedKinds = new Set(["call", "email", "meeting", "visit", "note", "personal"]);
+  const allowedKinds = new Set(["call", "email", "meeting", "visit", "note", "personal", "text"]);
   const initialKind = allowedKinds.has(requestedParams.type ?? "") ? requestedParams.type as "call" | "email" | "meeting" | "visit" | "note" | "personal" : null;
   return <AppShell active="donors"><CaptureExperience donors={donors.results.map((item) => ({
     id: item.id,

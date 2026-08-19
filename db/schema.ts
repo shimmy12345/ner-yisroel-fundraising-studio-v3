@@ -108,7 +108,14 @@ export const interactions = sqliteTable("interactions", {
   id: text("id").primaryKey(),
   donorId: text("donor_id").notNull().references(() => donors.id),
   userId: text("user_id").notNull().references(() => users.id),
-  type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift"] }).notNull(),
+  // No CHECK constraint exists on this column in the live schema (confirmed
+  // by direct inspection -- unlike shared_activities.type below, which has
+  // one). Enforcement is application-level only, via the KINDS/kinds
+  // validation sets in the capture/edit routes, so widening this enum is a
+  // pure TypeScript-level change with no migration of its own; it must stay
+  // in sync with shared_activities.type by convention, not by a shared DB
+  // constraint.
+  type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift", "text"] }).notNull(),
   occurredAt: integer("occurred_at", { mode: "timestamp" }).notNull(),
   // True only for Monday.com-imported rows, where the source supplied a
   // calendar date and nothing else -- occurredAt is anchored at UTC noon,
@@ -147,12 +154,11 @@ export const interactions = sqliteTable("interactions", {
 export const sharedActivities = sqliteTable("shared_activities", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
-  // Same enum as interactions.type today -- deliberately not widened here.
-  // Adding a dedicated "text"/message type is a separate, explicitly-flagged
-  // follow-up decision (it would require rebuilding interactions' own CHECK
-  // constraint, an existing-data-touching migration, not just an ADD COLUMN
-  // like this one), not something this migration bundles in.
-  type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift"] }).notNull(),
+  // Kept in sync with interactions.type by convention (see that column's
+  // comment). Unlike interactions.type, this column DOES have a real CHECK
+  // constraint in the live schema, so widening it required 0031's table
+  // rebuild (SQLite has no ALTER TABLE ... ALTER COLUMN for a CHECK).
+  type: text("type", { enum: ["call", "email", "meeting", "visit", "note", "personal", "gift", "text"] }).notNull(),
   occurredAt: integer("occurred_at", { mode: "timestamp" }).notNull(),
   occurredAtDateOnly: integer("occurred_at_date_only", { mode: "boolean" }).notNull().default(false),
   summary: text("summary").notNull(),

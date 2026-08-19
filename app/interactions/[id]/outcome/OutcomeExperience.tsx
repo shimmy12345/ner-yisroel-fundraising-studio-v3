@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { toLocalDateTimeValue } from "../../../../lib/capture/scheduling";
 import { donorInitials, numericDonorCode } from "../../../../lib/relationships/donor-identity";
+import { interactionKindLabel, type InteractionKind } from "../../../../lib/capture/interaction";
 
 type ActivityStatus = "scheduled" | "completed" | "no-response" | "cancelled" | "archived" | "logged";
 type OutcomeActivity = { id: string; donorId: string; donorName: string; primaryFirstName: string | null; lastName: string | null; donorCode: string | null; type: string; status: ActivityStatus; plannedLabel: string; completedLabel: string | null; subject: string; notes: string; outcome: string };
@@ -10,7 +11,7 @@ type OutcomeAction = "complete" | "cancel" | "reschedule" | "no-response" | "reo
 type FollowUp = { id: string; type: string; at: string; subject: string; notes: string } | null;
 type Audit = { id: string; action: string; from_status: string; to_status: string; createdLabel: string; undone_at: number | null };
 type Result = { error?: string; auditId?: string; followUpId?: string; followUpHref?: string; activityHref?: string; message?: string; status?: ActivityStatus };
-const typeLabel = (type: string) => type === "personal" ? "Personal interaction" : `${type.charAt(0).toUpperCase()}${type.slice(1)}`;
+const typeLabel = (type: string) => interactionKindLabel(type as InteractionKind) || `${type.charAt(0).toUpperCase()}${type.slice(1)}`;
 const statusLabel = (status: ActivityStatus) => status === "no-response" ? "No response" : `${status.charAt(0).toUpperCase()}${status.slice(1)}`;
 
 export function OutcomeExperience({ activity, initialCompletedValue, initialRescheduleValue, followUp, audits }: { activity: OutcomeActivity; initialCompletedValue: string; initialRescheduleValue: string; followUp: FollowUp; audits: Audit[] }) {
@@ -70,7 +71,7 @@ export function OutcomeExperience({ activity, initialCompletedValue, initialResc
       <label htmlFor="activity-completed-at">Completed date &amp; time</label><div className="outcome-date-row"><input id="activity-completed-at" type="datetime-local" value={completedAt} onChange={(event) => setCompletedAt(event.target.value)} /><button type="button" onClick={() => setCompletedAt(toLocalDateTimeValue(new Date()))}>Now</button></div>
       <label className="outcome-follow-up-toggle"><input type="checkbox" checked={followUpEnabled} onChange={(event) => setFollowUpEnabled(event.target.checked)} /> Add a follow-up activity</label>
       {followUpEnabled && <div className="outcome-follow-up-fields">
-        <label htmlFor="activity-follow-up-type">Follow-up type <span aria-hidden="true">*</span></label><select id="activity-follow-up-type" required value={followUpType} onChange={(event) => setFollowUpType(event.target.value)}>{["call", "email", "meeting", "visit", "note", "personal"].map((type) => <option key={type} value={type}>{typeLabel(type)}</option>)}</select>
+        <label htmlFor="activity-follow-up-type">Follow-up type <span aria-hidden="true">*</span></label><select id="activity-follow-up-type" required value={followUpType} onChange={(event) => setFollowUpType(event.target.value)}>{["call", "email", "meeting", "visit", "note", "personal", "text"].map((type) => <option key={type} value={type}>{typeLabel(type)}</option>)}</select>
         <label htmlFor="activity-follow-up-at">Follow-up date &amp; time <span aria-hidden="true">*</span></label><input id="activity-follow-up-at" required type="datetime-local" value={followUpAt} onChange={(event) => setFollowUpAt(event.target.value)} />
         <label htmlFor="activity-follow-up-subject">Subject (optional)</label><input id="activity-follow-up-subject" value={followUpSubject} onChange={(event) => setFollowUpSubject(event.target.value)} />
         <label htmlFor="activity-follow-up-notes">Notes (optional)</label><textarea id="activity-follow-up-notes" value={followUpNotes} onChange={(event) => setFollowUpNotes(event.target.value)} />

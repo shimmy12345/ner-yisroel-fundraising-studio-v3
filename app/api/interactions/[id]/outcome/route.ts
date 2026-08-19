@@ -13,7 +13,7 @@ type OutcomeBody = {
   followUpEnabled?: boolean; followUpType?: string; followUpSubject?: string; followUpNotes?: string; followUpAt?: string; auditId?: string;
 };
 
-const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 const parseDate = (value?: string) => { if (!value) return null; const parsed = new Date(value); return Number.isFinite(parsed.getTime()) ? parsed : null; };
 const splitSummary = (summary: string) => {
   const [subject = "Interaction", ...parts] = summary.split("\n");

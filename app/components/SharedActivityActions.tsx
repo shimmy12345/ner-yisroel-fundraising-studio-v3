@@ -4,7 +4,7 @@ import { useState } from "react";
 import { interactionKindLabel, type InteractionKind } from "../../lib/capture/interaction";
 import { toLocalDateTimeValue } from "../../lib/capture/scheduling";
 
-const kinds: InteractionKind[] = ["call", "email", "meeting", "visit", "note", "personal"];
+const kinds: InteractionKind[] = ["call", "email", "meeting", "visit", "note", "personal", "text"];
 
 // Deliberately two separate, differently-labeled, differently-styled
 // actions -- never one button that could be mistaken for the other.

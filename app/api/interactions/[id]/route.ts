@@ -8,7 +8,7 @@ import { logger } from "../../../../lib/logger";
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
 type DonorContext = { relationship_summary: string | null; institutional_memory: string | null };
 type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string; acceptRelationshipSnapshot?: boolean };
-const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 const reminders = new Set<ReminderChoice>(["none", "tomorrow", "next-week", "custom"]);
 
 function extraction(row: Pick<InteractionRow, "type" | "summary">) {

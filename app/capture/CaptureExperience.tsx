@@ -21,13 +21,16 @@ const kinds: Array<{ value: InteractionKind; icon: string }> = [
   { value: "visit", icon: "⌂" },
   { value: "note", icon: "✎" },
   { value: "personal", icon: "♡" },
+  { value: "text", icon: "💬" },
 ];
 
 // Not every interaction type has an obvious default role -- these are
 // starting points the fundraiser can still override explicitly (the role
 // picker is always shown, never hidden), not a hidden classification.
 // meeting/call/visit/personal imply real back-and-forth (participant);
-// email/note default to broadcast-style outreach (recipient).
+// email/note/text default to broadcast-style outreach (recipient) -- a
+// shared text is far more often a one-way blast (e.g. a building-progress
+// photo update) than a two-way conversation, same reasoning as email.
 const ROLE_DEFAULT_BY_KIND: Record<InteractionKind, "participant" | "recipient"> = {
   meeting: "participant",
   call: "participant",
@@ -35,6 +38,7 @@ const ROLE_DEFAULT_BY_KIND: Record<InteractionKind, "participant" | "recipient">
   personal: "participant",
   email: "recipient",
   note: "recipient",
+  text: "recipient",
 };
 
 // A UX-risk threshold, not the backend's own limit (see MAX_SHARED_RECIPIENTS

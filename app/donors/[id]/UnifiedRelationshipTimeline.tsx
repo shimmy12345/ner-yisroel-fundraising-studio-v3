@@ -10,7 +10,7 @@ import { GiftAcknowledgmentActions, GivingRecordActions } from "./GivingManageme
 import { buildUnifiedTimeline, TIMELINE_FILTERS, type TimelineFilter, type TimelineGiving, type TimelineInteraction, type TimelineLegacyGift, type TimelinePayment, type TimelineReminder, type TimelineStatus } from "../../../lib/relationships/unified-timeline";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { financialDateLabel } from "../../../lib/financial-date";
-import { splitInteractionSummary } from "../../../lib/capture/interaction";
+import { interactionKindLabel, splitInteractionSummary, type InteractionKind } from "../../../lib/capture/interaction";
 import type { GiftAcknowledgmentStatus } from "../../../lib/giving/acknowledgment";
 import { localDayKey } from "../../../lib/workspace/local-time";
 
@@ -110,7 +110,7 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
       // donor's own interactions.summary.
       const { timelineTitle, timelineNote } = splitInteractionSummary(activity.shared_activity_summary ?? activity.summary);
       const followUp = activity.source.includes("followup:");
-      const typeLabel = `${item.noResponse ? "No response · " : item.status === "completed" ? followUp ? "Completed follow-up · " : "Completed · " : item.status === "cancelled" ? "Cancelled · " : "Scheduled · "}${activity.type}`;
+      const typeLabel = `${item.noResponse ? "No response · " : item.status === "completed" ? followUp ? "Completed follow-up · " : "Completed · " : item.status === "cancelled" ? "Cancelled · " : "Scheduled · "}${interactionKindLabel(activity.type as InteractionKind) || activity.type}`;
       const scheduled = item.status === "scheduled";
       // "Sent to N donors" for a broadcast recipient, "N participants" for a
       // shared meeting/call -- never the recipient list itself here (see

@@ -9,7 +9,7 @@ type LinkedInteractionRow = { id: string; donor_id: string; source: string };
 type PatchBody = { summary?: string; type?: InteractionKind; occurredAt?: string };
 type DeleteBody = { action?: "remove-recipient" | "delete-activity"; donorId?: string };
 
-const KINDS = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+const KINDS = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 
 async function ownedSharedActivity(id: string, userId: string) {
   return env.DB.prepare("SELECT id, type, occurred_at, summary, source, deleted_at FROM shared_activities WHERE id = ? AND user_id = ? LIMIT 1").bind(id, userId).first<SharedActivityRow>();

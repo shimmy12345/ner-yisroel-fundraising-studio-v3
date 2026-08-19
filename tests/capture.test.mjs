@@ -94,7 +94,7 @@ const donorDirectoryExperience = await readFile(new URL("../app/donors/DonorDire
 assert.doesNotMatch(interactionRoute, /Only meetings can be scheduled in the future/);
 assert.match(interactionRoute, /capture-scheduled/);
 assert.match(interactionRoute, /if \(!scheduled && body\.acceptRelationshipSnapshot === true\)/);
-assert.match(interactionRoute, /\["call", "email", "meeting", "visit", "note", "personal"\]/);
+assert.match(interactionRoute, /\["call", "email", "meeting", "visit", "note", "personal", "text"\]/);
 assert.match(interactionRoute, /storedType, occurredAtEpoch/);
 assert.match(captureExperience, /subject: subject\.trim\(\)/, "the accepted field value, including blank, is sent explicitly");
 assert.match(captureExperience, /placeholder=\{note\.trim\(\)\.length >= 4 \? preview\.suggestedSubject/);

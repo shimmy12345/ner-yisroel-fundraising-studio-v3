@@ -20,7 +20,7 @@ type RequestBody = {
   acceptRelationshipSnapshot?: boolean;
 };
 
-const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 const reminders = new Set<ReminderChoice>(["none", "tomorrow", "next-week", "custom"]);
 
 export async function POST(request: Request) {

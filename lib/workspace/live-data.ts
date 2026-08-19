@@ -63,7 +63,7 @@ function dayKey(epoch: number, timezone: string) {
 }
 
 function activityTypeLabel(type: string) {
-  return ({ call: "Call", email: "Email", meeting: "Meeting", visit: "Visit", note: "Note", personal: "Personal interaction" } as Record<string, string>)[type] ?? "Activity";
+  return ({ call: "Call", email: "Email", meeting: "Meeting", visit: "Visit", note: "Note", personal: "Personal interaction", text: "Text Message" } as Record<string, string>)[type] ?? "Activity";
 }
 
 function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: number): WorkspaceScheduledActivity {

@@ -136,7 +136,7 @@ export function buildMeetingBrief(
   const recentInteractions = [...interactions].sort((a, b) => b.occurredAt - a.occurredAt).slice(0, 5);
   const openReminders = [...reminders].sort((a, b) => (a.dueAt ?? Number.MAX_SAFE_INTEGER) - (b.dueAt ?? Number.MAX_SAFE_INTEGER)).slice(0, 5);
   const openPledgeCents = gifts.reduce((sum, gift) => sum + Math.max(0, gift.balanceCents), 0);
-  const allowedKinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+  const allowedKinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
   const relationshipSignals = recentInteractions.map((interaction) => {
     const { note, subject } = splitInteractionSummary(interaction.summary);
     const kind = allowedKinds.has(interaction.type as InteractionKind) ? interaction.type as InteractionKind : "note";

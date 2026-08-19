@@ -495,10 +495,10 @@ CREATE TABLE `sample_cleanup_audits` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
-CREATE TABLE `shared_activities` (
+CREATE TABLE "shared_activities" (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` text NOT NULL,
-  `type` text NOT NULL CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift')),
+  `type` text NOT NULL CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift','text')),
   `occurred_at` integer NOT NULL,
   `occurred_at_date_only` integer NOT NULL DEFAULT 0,
   `summary` text NOT NULL,
@@ -718,5 +718,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','ad48af84e4a315dd8bd0464f12229f0b4d5cb27b1f27a15fd876f9b2013625e1',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','ef81413e1101d3e344727edda935398247cf4a4aa68c4ee76361341a742a5542',1785944072);
 PRAGMA optimize;

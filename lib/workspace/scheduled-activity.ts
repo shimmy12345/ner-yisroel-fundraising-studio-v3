@@ -59,7 +59,7 @@ export function scheduleBucket(source: string, occurredAt: number, createdAt: nu
 export function sanitizeScheduledRelationshipContext(summary: string | null, memory: string | null, activities: ScheduledContextActivity[]) {
   let safeSummary = sanitizeRelationshipSnapshot(summary);
   let safeMemory = memory;
-  const allowedKinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal"]);
+  const allowedKinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
   for (const activity of activities) {
     if (!isScheduledActivity(activity.source, activity.occurredAt, activity.createdAt)) continue;
     const { subject, note } = splitInteractionSummary(activity.summary);

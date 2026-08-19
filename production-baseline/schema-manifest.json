@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "ad48af84e4a315dd8bd0464f12229f0b4d5cb27b1f27a15fd876f9b2013625e1",
+  "schemaHash": "ef81413e1101d3e344727edda935398247cf4a4aa68c4ee76361341a742a5542",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -32,7 +32,8 @@
     "0027_yahrtzeits.sql",
     "0028_important_dates.sql",
     "0029_important_dates_dob_source.sql",
-    "0030_shared_activities.sql"
+    "0030_shared_activities.sql",
+    "0031_interactions_text_type.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -4535,7 +4536,7 @@
           }
         ],
         "checks": [
-          "CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift'))"
+          "CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift','text'))"
         ]
       },
       {
@@ -5271,7 +5272,7 @@
     {
       "type": "table",
       "name": "shared_activities",
-      "sql": "CREATE TABLE `shared_activities` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift')), `occurred_at` integer NOT NULL, `occurred_at_date_only` integer NOT NULL DEFAULT 0, `summary` text NOT NULL, `source` text NOT NULL DEFAULT 'manual', `recipient_count` integer NOT NULL DEFAULT 0, `deleted_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE \"shared_activities\" ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL CHECK (`type` IN ('call','email','meeting','visit','note','personal','gift','text')), `occurred_at` integer NOT NULL, `occurred_at_date_only` integer NOT NULL DEFAULT 0, `summary` text NOT NULL, `source` text NOT NULL DEFAULT 'manual', `recipient_count` integer NOT NULL DEFAULT 0, `deleted_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",

@@ -33,7 +33,7 @@ export async function getRelationshipUpdates(donorId: string, userId: string): P
     const sourceKind = interaction?.source.startsWith("capture:")
       ? interaction.source.slice("capture:".length)
       : "note";
-    const allowedKinds = new Set(["call", "email", "meeting", "visit", "note", "personal"]);
+    const allowedKinds = new Set(["call", "email", "meeting", "visit", "note", "personal", "text"]);
     const kind = (allowedKinds.has(sourceKind) ? sourceKind : "note") as InteractionKind;
 
     return {
