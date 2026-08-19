@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 export default async function AssistantPage() {
   const identity = await requireChatGPTUser("/assistant");
   const profile = await ensureUserProfile(identity);
-  const brief = await loadWorkspaceBrief(profile.id, profile.timezone, await getDataMode(profile.id));
+  const brief = await loadWorkspaceBrief(profile.id, profile.timezone, await getDataMode(profile.id), undefined, undefined, "assistant_page");
   return (
     <AppShell active="assistant">
       <main className="assistant-page">

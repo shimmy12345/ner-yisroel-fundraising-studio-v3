@@ -9,9 +9,10 @@ import { buildDonorRecommendation } from "../relationships/recommendation-rank.t
 import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
-import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS } from "./suggestion-candidates.ts";
+import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
 import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
+import { logger } from "../logger";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
@@ -88,7 +89,16 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
   };
 }
 
-export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
+export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8, context = "unknown"): Promise<WorkspaceBrief> {
+  // Temporary diagnostic instrumentation for Error 1102 investigation on
+  // this loader (see incident 2026-08-19 16:59:03 UTC, Ray a2dab4de9e40be78,
+  // and docs/AI-HANDOFF.md). Phase timings/counts only -- never donor
+  // names, notes, emails, or full result payloads. Mirrors the
+  // donor_page_render pattern in app/donors/[id]/page.tsx, using
+  // performance.now() (monotonic) instead of Date.now() for phase timing.
+  // Safe to delete once the next incident has been diagnosed with real
+  // evidence.
+  const __loaderStart = performance.now();
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
   const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows] = await Promise.all([
@@ -168,6 +178,15 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // acknowledgments/yahrtzeitRows/importantDateRows above.
     demo ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, asked_at FROM asks WHERE user_id = ? AND status = 'pending' ORDER BY donor_id, asked_at ASC`).bind(userId).all<AskRow>(),
   ]);
+  const queryFanoutDurationMs = Math.round(performance.now() - __loaderStart);
+  logger.info("workspace_brief_phase", {
+    phase: "query_complete",
+    context,
+    elapsedMs: queryFanoutDurationMs,
+    totalLiveDonors: donors.results.length,
+    givingRows: giving.results.length,
+    remindersRows: reminders.results.length,
+  });
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
   // Excludes role='recipient' -- see the substantiveContacts query above.
@@ -268,9 +287,38 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   // so gift_source is always "giving_activity" here.
   const acknowledgedGivingActivityIds = new Set(acknowledgments.results.filter((row) => row.gift_source === "giving_activity").map((row) => row.gift_id));
 
+  // Candidate-pool sizes as they actually feed selectSuggestionDonorIds()
+  // (lib/workspace/suggestion-candidates.ts, untouched by this
+  // instrumentation): giftDonorIds/pledgeDonorIds/askDonorIds pass through
+  // in full with no further filtering, so recentGiftByDonor.size/
+  // openPledgeByDonor.size/openAskByDonor.size are exact. yahrtzeit/
+  // important-date counts here are pre-lead-window-filter (donors with any
+  // record on file, not just those inside the lead window that module
+  // applies internally) -- a cheap upper bound, not double-counted logic.
+  // contactGapCandidateCount mirrors that module's own pool-size bound
+  // (CONTACT_GAP_POOL_SIZE, imported unchanged) applied to the same
+  // candidate list it receives.
+  const scoringStartElapsedMs = Math.round(performance.now() - __loaderStart);
+  logger.info("workspace_brief_phase", {
+    phase: "scoring_start",
+    context,
+    elapsedMs: scoringStartElapsedMs,
+    recentGiftDonorCount: recentGiftByDonor.size,
+    openPledgeDonorCount: openPledgeByDonor.size,
+    openAskDonorCount: openAskByDonor.size,
+    yahrtzeitDonorCount: yahrtzeitsByDonor.size,
+    importantDateDonorCount: importantDatesByDonor.size,
+    contactGapCandidateCount: Math.min(contacts.length, CONTACT_GAP_POOL_SIZE),
+    finalSuggestionDonorCount: suggestionDonorIds.size,
+  });
+  const __scoringLoopStart = performance.now();
+  let donorsScoredCount = 0;
+  let recommendationCount = 0;
+
   for (const donorId of suggestionDonorIds) {
     const donorRow = donorById.get(donorId);
     if (!donorRow) continue;
+    donorsScoredCount += 1;
     const gift = recentGiftByDonor.get(donorId);
     const pledge = openPledgeByDonor.get(donorId);
     const ask = openAskByDonor.get(donorId);
@@ -321,6 +369,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       // unaffected -- still the all-contact-types value, unchanged.
       : recommendation.kind === "reconnect_contact_gap" ? -(evidence.contact.daysSinceSubstantiveContact ?? Number.MAX_SAFE_INTEGER)
       : -(evidence.contact.daysSinceLastContact ?? Number.MAX_SAFE_INTEGER);
+    recommendationCount += 1;
     ranked.push({
       queueId: `recommendation:${donorId}:${recommendation.kind}`,
       donorId,
@@ -340,6 +389,8 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       giftId: recommendation.giftId,
     });
   }
+  const scoringDurationMs = Math.round(performance.now() - __scoringLoopStart);
+  const __assemblyStart = performance.now();
 
   const activeQueue = dedupeRelationshipQueue(ranked, new Set(dismissals.results.map((item) => item.item_key)));
   const allPriorities: WorkspacePriority[] = activeQueue.map(({ rank: _rank, sortAt: _sortAt, ...item }) => ({ ...item, bucket: relationshipQueueBucket(item.dueAt, now, timezone) }));
@@ -389,5 +440,29 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const scheduledCount = todaySchedule.length + upcomingActivities.length;
   const overview = deduped.length || gifts.length || scheduledCount ? `${deduped.length} relationship priorit${deduped.length === 1 ? "y" : "ies"}, ${scheduledCount} scheduled activit${scheduledCount === 1 ? "y" : "ies"}, and ${gifts.length} recent gift${gifts.length === 1 ? "" : "s"} are visible from your live workspace.` : "Your live workspace has no time-sensitive priorities yet. Import data or log an interaction to build today's brief.";
   const recommendation = deduped[0] ? `Start with ${deduped[0].name}: ${deduped[0].reason}.` : "No recommended action is available until your workspace contains a due reminder, open pledge, recent gift, or relationship activity.";
+
+  // Single compact structured log line, timings/counts only -- no donor
+  // name, email, note, or recommendation text. See the comment on this
+  // function's context param and the phase logs above for what this
+  // correlates with.
+  logger.info("workspace_brief_render", {
+    context,
+    totalDurationMs: Math.round(performance.now() - __loaderStart),
+    queryFanoutDurationMs,
+    scoringDurationMs,
+    assemblyDurationMs: Math.round(performance.now() - __assemblyStart),
+    totalLiveDonors: donors.results.length,
+    recentGiftDonorCount: recentGiftByDonor.size,
+    openPledgeDonorCount: openPledgeByDonor.size,
+    openAskDonorCount: openAskByDonor.size,
+    yahrtzeitDonorCount: yahrtzeitsByDonor.size,
+    importantDateDonorCount: importantDatesByDonor.size,
+    contactGapCandidateCount: Math.min(contacts.length, CONTACT_GAP_POOL_SIZE),
+    finalSuggestionDonorCount: suggestionDonorIds.size,
+    donorsScoredCount,
+    recommendationCount,
+    resultPriorityCount: deduped.length,
+  });
+
   return { overview, recommendation, priorities: deduped, priorityCount: allPriorities.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, upcomingRelationshipDates, generatedAt: now };
 }

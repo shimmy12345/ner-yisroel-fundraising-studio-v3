@@ -80,7 +80,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const mode = await getDataMode(profile.id);
   const showAll = (await searchParams).priorities === "all";
   const now = Math.floor(Date.now() / 1000);
-  const data = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now, showAll ? 50 : 10);
+  const data = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now, showAll ? 50 : 10, "today");
   const greeting = timeOfDayGreeting(now, profile.timezone);
   const agendaQueueCount = data.relationshipQueue.overdue.length + data.relationshipQueue.today.length;
   const comingQueueCount = data.relationshipQueue.thisWeek.length + data.relationshipQueue.upcoming.length;
