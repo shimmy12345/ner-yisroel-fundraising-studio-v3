@@ -57,6 +57,7 @@ type SaveResult = {
   scheduled: boolean;
   reminderAt: string | null;
   relationshipUpdated: boolean;
+  askId: string | null;
   extracted: ReturnType<typeof extractInteraction>;
 };
 
@@ -75,6 +76,15 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   const [occurredAt, setOccurredAt] = useState(() => initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date(initialNow)));
   const [errorMessage, setErrorMessage] = useState("");
   const [acceptRelationshipSnapshot, setAcceptRelationshipSnapshot] = useState(false);
+  // "Did you make an ask?" -- single-donor capture only, and only for a
+  // brand-new interaction (not an edit -- editing an existing interaction
+  // never creates or changes an ask; keeps the edit path's contract
+  // unchanged). Default No, per design -- explicit user action required,
+  // never inferred from the note text.
+  const [madeAsk, setMadeAsk] = useState(false);
+  const [askAmount, setAskAmount] = useState("");
+  const [askPurpose, setAskPurpose] = useState("");
+  const [askNote, setAskNote] = useState("");
   const activeDonor = donors.find((item) => item.id === donorId);
 
   // Multi-donor mode -- entirely additive. When entryMode is "single" every
@@ -149,6 +159,19 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   const dateLabel = schedulingLabel(occurredAt);
   const nowLabel = dateLabel;
 
+  // Integer cents only -- never floating point, matching every money
+  // column in this app. An unparseable/non-positive amount degrades to
+  // "no specific figure" (null) rather than a client-side error -- a
+  // legitimate ask can have no amount at all, and the server re-validates
+  // regardless.
+  function parseDollarsToCents(value: string): number | null {
+    const cleaned = value.replace(/[^0-9.]/g, "");
+    if (!cleaned) return null;
+    const dollars = Number.parseFloat(cleaned);
+    if (!Number.isFinite(dollars) || dollars <= 0) return null;
+    return Math.round(dollars * 100);
+  }
+
   async function saveInteraction() {
     if (!ready || status === "saving") return;
     setStatus("saving");
@@ -172,6 +195,15 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           // true. preview is computed from these exact same note/activeKind/
           // subject values in this same render, so it's always in sync.
           acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview.relationshipSummary !== null,
+          // Only sent for a brand-new interaction, never an edit -- see
+          // madeAsk's own comment. Explicit action only: madeAsk must be
+          // true, never inferred from the note text.
+          ...(!initialActivity && madeAsk ? {
+            madeAsk: true,
+            askAmountCents: parseDollarsToCents(askAmount),
+            askPurpose: askPurpose.trim(),
+            askNote: askNote.trim(),
+          } : {}),
         }),
       });
       const payload = await response.json() as SaveResult & { error?: string };
@@ -194,6 +226,10 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     setOccurredAt(initialActivity ? toLocalDateTimeValue(new Date(initialActivity.occurredAt)) : toLocalDateTimeValue(new Date()));
     setErrorMessage("");
     setAcceptRelationshipSnapshot(false);
+    setMadeAsk(false);
+    setAskAmount("");
+    setAskPurpose("");
+    setAskNote("");
     setResult(null);
     setStatus("idle");
   }
@@ -234,8 +270,11 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           {!result.scheduled && result.relationshipUpdated && <article><span>◇</span><div><strong>Institutional memory updated</strong><p>{result.extracted.memory}</p></div><b>Done</b></article>}
           {!result.scheduled && result.relationshipUpdated && <article><span>✦</span><div><strong>Relationship snapshot refreshed</strong><p>{result.extracted.relationshipSummary}</p></div><b>Done</b></article>}
           {!result.scheduled && !result.relationshipUpdated && <article><span>✓</span><div><strong>Relationship snapshot unchanged</strong><p>The generated draft was not accepted, so it was not saved.</p></div><b>Done</b></article>}
+          {result.askId && (
+            <article><span>$</span><div><strong>Ask logged</strong><p>Pending -- follow up from the donor page when there's news.</p></div><b>Done</b></article>
+          )}
           {result.reminderAt && (
-            <article><span>◷</span><div><strong>Reminder created</strong><p>{result.extracted.nextAction}</p></div><b>Done</b></article>
+            <article><span>◷</span><div><strong>Reminder created</strong><p>{result.askId ? "Follow up on this ask." : result.extracted.nextAction}</p></div><b>Done</b></article>
           )}
         </section>
         <div className="success-actions">
@@ -342,6 +381,27 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
               />
             )}
           </fieldset>
+
+          {/* Single-donor capture only -- never shown when editing an
+              existing interaction (editing never creates/changes an ask).
+              Explicit Yes/No, default No -- never inferred from the note
+              text containing "$"/"solicited"/"asked"/etc. */}
+          {!editing && (
+            <fieldset className="reminder-picker ask-picker">
+              <legend>Did you make an ask? <span>optional</span></legend>
+              <div>
+                <button type="button" className={!madeAsk ? "active" : ""} onClick={() => setMadeAsk(false)} aria-pressed={!madeAsk}>No</button>
+                <button type="button" className={madeAsk ? "active" : ""} onClick={() => setMadeAsk(true)} aria-pressed={madeAsk}>Yes</button>
+              </div>
+              {madeAsk && (
+                <div className="ask-fields">
+                  <input aria-label="Ask amount" placeholder="Amount (optional)" inputMode="decimal" value={askAmount} onChange={(event) => setAskAmount(event.target.value)} />
+                  <input aria-label="Ask purpose" placeholder="Purpose (optional) — e.g. dinner sponsorship" value={askPurpose} onChange={(event) => setAskPurpose(event.target.value)} maxLength={200} />
+                  <input aria-label="Ask note" placeholder="Note (optional)" value={askNote} onChange={(event) => setAskNote(event.target.value)} maxLength={2000} />
+                </div>
+              )}
+            </fieldset>
+          )}
 
           {note.trim().length >= 4 && (
             <div className="extraction-preview" aria-live="polite">

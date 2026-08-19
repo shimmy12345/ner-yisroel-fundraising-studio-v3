@@ -1,6 +1,7 @@
 import type { RecommendationEvidence } from "./recommendation-evidence.ts";
 import type { GiftSource } from "../giving/acknowledgment.ts";
 import { interactionKindLabel, relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";
+import { askFollowUpAction } from "../capture/ask.ts";
 
 // Plausible next-action candidates generated from one donor's evidence.
 // Each generator only fires on its own precondition, so a candidate simply
@@ -13,6 +14,7 @@ export type RecommendationCandidateKind =
   | "honor_reminder"
   | "acknowledge_gift"
   | "follow_up_pledge"
+  | "open_ask"
   | "continue_conversation"
   | "relationship_opportunity"
   | "solicit"
@@ -125,6 +127,46 @@ function followUpPledgeCandidate(evidence: RecommendationEvidence): Recommendati
     recency: 0.3,
     urgency: clamp01(ageDays / 180),
     supportingDate: pledge.activityDate,
+  };
+}
+
+// A pending, structured ask -- a real asks row (confirmed evidence),
+// never inferred from free text. Modeled on followUpPledgeCandidate
+// above (the closest existing "stale open money-adjacent item"
+// precedent), reusing its exact urgency horizon (180 days) and its exact
+// confidence cutoff (60 days) verbatim rather than inventing new
+// numbers. `recency` deliberately does NOT decay with age the way
+// followUpPledgeCandidate's does: a pledge's recency reflects "how long
+// since money last moved," which genuinely goes stale, but an ask's own
+// fact ("we asked, still pending") stays exactly as true and current
+// regardless of age -- there is no decaying "last activity" to measure.
+// A constant, high recency (0.7, versus follow_up_pledge's 0.3) is what
+// makes this candidate reliably outrank the fuzzy, narrative-only
+// solicitCandidate below on a FRESH ask (certainty alone, at 1.0 vs
+// solicit's 0.85, is not always enough once solicit's own recency/
+// urgency inputs are counted) -- required by design ("a pending
+// structured Ask... should normally beat fuzzy solicitation evidence...
+// because the structured Ask is confirmed evidence"). This is what lets
+// a day-0 ask still win the ranking while `urgency` stays near zero, so
+// it never reads as an immediate nag (see confidence/urgency below) --
+// winning the ranking and sounding urgent are two different things.
+function openAskCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
+  const ask = evidence.openAsk;
+  if (!ask) return null;
+  const amountLabel = ask.amountCents !== null ? money(ask.amountCents) : null;
+  const askedLabel = ask.ageDays === 0 ? "today" : `${ask.ageDays} day${ask.ageDays === 1 ? "" : "s"} ago`;
+  return {
+    kind: "open_ask",
+    action: askFollowUpAction(ask.amountCents, ask.purpose),
+    why: `An ask was made ${askedLabel} and is still pending.`,
+    evidence: [`${amountLabel ? `${amountLabel} ` : ""}${ask.purpose ? `${ask.purpose}, ` : ""}asked ${dateLabel(ask.askedAt)}, still pending.`],
+    confidence: ask.ageDays >= 60 ? "medium" : "low",
+    timing: null,
+    certainty: "confirmed",
+    specificity: 0.75,
+    recency: 0.7,
+    urgency: clamp01(ask.ageDays / 180),
+    supportingDate: ask.askedAt,
   };
 }
 
@@ -347,6 +389,7 @@ export function generateCandidates(evidence: RecommendationEvidence): Recommenda
     honorReminderCandidate(evidence),
     acknowledgeGiftCandidate(evidence),
     followUpPledgeCandidate(evidence),
+    openAskCandidate(evidence),
     continueConversationCandidate(evidence),
     relationshipOpportunityCandidate(evidence),
     solicitCandidate(evidence),

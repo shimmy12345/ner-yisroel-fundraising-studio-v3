@@ -7,6 +7,7 @@ import {
   type MeetingBriefInteraction,
   type MeetingBriefReminder,
   type MeetingBriefFamilyDate,
+  type MeetingBriefAsk,
 } from "./meeting-brief-model";
 import { importedContextLine } from "./historical-context";
 import { buildRecommendationEvidence } from "./recommendation-evidence";
@@ -46,6 +47,7 @@ type HistoricalContextRow = { text: string; source: string; source_date: number 
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 type YahrtzeitRow = { deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
+type AskRow = { id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
@@ -56,7 +58,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -89,6 +91,15 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     env.DB.prepare(`SELECT gift_source, gift_id, status FROM gift_acknowledgments WHERE donor_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 2000`).bind(donorId, userId).all<AcknowledgmentRow>(),
     env.DB.prepare(`SELECT deceased_name_english, deceased_name_hebrew, relationship, hebrew_month, hebrew_day FROM yahrtzeits WHERE donor_id = ? AND user_id = ?`).bind(donorId, userId).all<YahrtzeitRow>(),
     env.DB.prepare(`SELECT type, person_name, relationship, month, day, year FROM important_dates WHERE donor_id = ? AND user_id = ?`).bind(donorId, userId).all<ImportantDateRow>(),
+    // Oldest first -- [0] (if any) is the one most-in-need-of-follow-up ask,
+    // fed into recommendation evidence below. Only 'pending' asks are
+    // "open" -- committed/declined/withdrawn are history, not this brief's
+    // concern.
+    env.DB.prepare(`SELECT a.id, a.amount_cents, a.purpose, a.asked_at
+      FROM asks a JOIN donors d ON d.id = a.donor_id
+      WHERE a.donor_id = ? AND a.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
+        AND a.status = 'pending'
+      ORDER BY a.asked_at ASC`).bind(donorId, userId, userId).all<AskRow>(),
   ]);
 
   const address = [
@@ -197,6 +208,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   // window) falls back to null here, matching how "never contacted" is
   // already handled everywhere else in this evidence shape.
   const latestSubstantiveInteraction = interactions.results.find((item) => item.role !== "recipient");
+  const openAskForEvidence = openAskRows.results[0] ? { id: openAskRows.results[0].id, amountCents: openAskRows.results[0].amount_cents, purpose: openAskRows.results[0].purpose, askedAt: openAskRows.results[0].asked_at } : null;
   const recommendationEvidence = buildRecommendationEvidence({
     donorId,
     mostRecentPaidGift: mostRecentPaidGiftForEvidence,
@@ -205,6 +217,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     lastContactAt: latestInteraction?.occurred_at ?? null,
     lastSubstantiveContactAt: latestSubstantiveInteraction?.occurred_at ?? null,
     openReminder: reminders.results[0] ? { action: reminders.results[0].action, reason: reminders.results[0].reason, dueAt: reminders.results[0].due_at } : null,
+    openAsk: openAskForEvidence,
     relationshipSummary: donor.relationship_summary,
     institutionalMemory: donor.institutional_memory,
     historicalContext: historicalContextRows.results.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
@@ -212,6 +225,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     importantDates: importantDateEvidenceInput,
   }, now, timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
+  const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at }));
 
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyImportantDates);
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyImportantDates, openAsks);
 }

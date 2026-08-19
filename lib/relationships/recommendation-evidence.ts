@@ -52,6 +52,17 @@ export type RecommendationEvidenceInput = {
   // The donor's open reminder, if any -- a real recommendations row (an
   // explicit fundraiser commitment), never invented here.
   openReminder: { action: string; reason: string; dueAt: number | null } | null;
+  // The donor's oldest still-PENDING ask (a real asks row -- confirmed
+  // evidence, never inferred from free text). Multiple simultaneous
+  // pending asks are allowed by design; only the oldest is fed into
+  // evidence/scoring here (same "pick the one most relevant fact" pattern
+  // as mostRecentPaidGift/openPledge/lastCompletedInteraction above) --
+  // the donor page/Meeting Brief display every open ask independently of
+  // this single evidence slot. Deliberately NOT nested under `giving`:
+  // an ask is relationship-layer data the fundraiser recorded, never
+  // giving_activities/gifts (JL Solutions financial-system-of-record
+  // data) -- see docs/ASK-SOLICITATION-DESIGN.md.
+  openAsk: { id: string; amountCents: number | null; purpose: string | null; askedAt: number } | null;
   // donors.relationship_summary / institutional_memory -- human-reviewed,
   // AI-suggested-then-accepted text. More trustworthy than an imported
   // note, less than a confirmed database row.
@@ -115,6 +126,7 @@ export type RecommendationEvidence = {
     daysSinceSubstantiveContact: number | null;
   };
   reminder: { action: string; reason: string; dueAt: number | null; isOverdue: boolean } | null;
+  openAsk: { id: string; amountCents: number | null; purpose: string | null; askedAt: number; ageDays: number } | null;
   narrative: { relationshipSummary: string | null; institutionalMemory: string | null };
   historicalContext: Array<{ text: string; source: string; sourceDate: number | null }>;
   yahrtzeits: YahrtzeitEvidence[];
@@ -177,6 +189,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
     reminder: input.openReminder
       ? { ...input.openReminder, isOverdue: input.openReminder.dueAt !== null && localDayKey(input.openReminder.dueAt, timezone) < localDayKey(now, timezone) }
       : null,
+    openAsk: input.openAsk ? { ...input.openAsk, ageDays: daysBetween(now, input.openAsk.askedAt) } : null,
     narrative: { relationshipSummary: input.relationshipSummary, institutionalMemory: input.institutionalMemory },
     historicalContext: input.historicalContext,
     yahrtzeits,

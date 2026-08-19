@@ -68,6 +68,30 @@ export type MeetingBriefFamilyDate = {
   ambiguityNote: string | null;
 };
 
+// A fundraiser-recorded, still-PENDING ask -- relationship-layer data, not
+// giving_activities/gifts (JL Solutions financial-system-of-record data).
+// amountCents/purpose are both nullable: a legitimate ask can have no
+// specific figure ("asked him to support the dinner") or no stated purpose.
+export type MeetingBriefAsk = {
+  id: string;
+  amountCents: number | null;
+  purpose: string | null;
+  askedAt: number;
+};
+
+const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
+
+// One shared line-formatter, mirroring familyDateLine below, so the donor
+// page, Meeting Brief, and the Assistant's pre-formatted context lines can
+// never phrase the same ask fact differently. Never says "$0" -- a null
+// amount degrades to purpose-only or a generic "pending ask" phrase
+// instead of a fake zero-dollar figure.
+export function askLine(item: MeetingBriefAsk, dateLabel: (epoch: number) => string): string {
+  const amountLabel = item.amountCents !== null ? money(item.amountCents) : null;
+  const what = amountLabel && item.purpose ? `${amountLabel} for ${item.purpose}` : amountLabel ?? item.purpose ?? "support (amount not specified)";
+  return `Open ask: ${what}, pending since ${dateLabel(item.askedAt)}.`;
+}
+
 // One shared line-formatter so the donor-profile Meeting Brief page and the
 // Assistant's pre-formatted context lines can never phrase the same fact
 // differently. Always describes an UPCOMING date -- never implies outreach
@@ -114,6 +138,10 @@ export type MeetingBrief = {
   // background context is never conditional on urgency the way the
   // suggested action is.
   familyImportantDates: MeetingBriefFamilyDate[];
+  // Every still-PENDING ask for this donor (oldest first) -- factual,
+  // never called an "opportunity." committed/declined/withdrawn asks are
+  // history, not this brief's concern.
+  openAsks: MeetingBriefAsk[];
 };
 
 function firstLine(value: string) {
@@ -129,6 +157,7 @@ export function buildMeetingBrief(
   unconfirmedHistoricalContextCount = unconfirmedHistoricalContext.length,
   recommendation: DonorRecommendation | null = null,
   familyImportantDates: MeetingBriefFamilyDate[] = [],
+  openAsks: MeetingBriefAsk[] = [],
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -191,6 +220,7 @@ export function buildMeetingBrief(
     unconfirmedHistoricalContextCount,
     recommendation,
     familyImportantDates,
+    openAsks,
   };
 }
 import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";

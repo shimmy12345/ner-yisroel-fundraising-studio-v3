@@ -22,10 +22,18 @@ export type DonorRecommendation = {
 // honor_reminder answers "what's the next relationship touchpoint" -- so do
 // continue_conversation/relationship_opportunity/reconnect_contact_gap/solicit.
 // When a reminder exists, those are suppressed as duplicates of a question
-// the reminder already answers. acknowledge_gift/follow_up_pledge are a
-// different concern (money/stewardship) and are never suppressed by a
-// reminder -- see design case 1 (a recent gift can still win over an
-// unrelated open reminder on merit).
+// the reminder already answers. acknowledge_gift/follow_up_pledge/open_ask
+// are a different concern (money/stewardship) and are never suppressed by
+// a reminder -- see design case 1 (a recent gift can still win over an
+// unrelated open reminder on merit). open_ask joins that group rather than
+// the vague-touchpoint one: it's a concrete, specific action ("follow up
+// on the $10k ask"), not a generic "reach out" suggestion, so it deserves
+// to surface on its own merit exactly like follow_up_pledge does. This
+// still gives an EXPLICIT reminder set specifically for an ask (from
+// capture or the donor page's "Add follow-up") the final word in practice:
+// honor_reminder's own scoring (specificity 0.9, recency/urgency 0.6-1)
+// reliably outranks open_ask's (0.75/0.7/ramping 0-1) without needing a
+// hard suppression rule -- see openAskCandidate's own comment.
 const REMINDER_SUPPRESSES: ReadonlySet<RecommendationCandidateKind> = new Set([
   "continue_conversation",
   "relationship_opportunity",
@@ -63,6 +71,7 @@ const KIND_PRIORITY: RecommendationCandidateKind[] = [
   "birthday_outreach",
   "anniversary_outreach",
   "follow_up_pledge",
+  "open_ask",
   "relationship_opportunity",
   "continue_conversation",
   "solicit",

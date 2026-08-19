@@ -30,6 +30,10 @@ export type AssistantContextSnapshot = {
     // birthday_outreach/anniversary_outreach when one of them is the
     // winning candidate within its lead window.
     familyImportantDates: string[];
+    // Pre-formatted, still-PENDING ask lines (lib/relationships/meeting-
+    // brief-model.ts's askLine) -- confirmed evidence (a real asks row),
+    // never called an "opportunity." Empty when the donor has no open ask.
+    openAsks: string[];
   };
   latestInteraction: {
     id: string;

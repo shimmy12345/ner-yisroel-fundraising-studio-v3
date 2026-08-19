@@ -6,7 +6,7 @@ import { classifyAssistantPrompt, RuleBasedAIService } from "../../../lib/ai/rul
 import type { AssistantContextSnapshot, AssistantTask } from "../../../lib/ai/types";
 import { importedContextLine } from "../../../lib/relationships/historical-context";
 import { loadMeetingBrief } from "../../../lib/relationships/meeting-brief";
-import { familyDateLine } from "../../../lib/relationships/meeting-brief-model";
+import { familyDateLine, askLine } from "../../../lib/relationships/meeting-brief-model";
 import { logger } from "../../../lib/logger";
 import { getDataMode } from "../../../lib/workspace/mode";
 
@@ -55,8 +55,12 @@ export async function POST(request: Request) {
     ]) : [null, { results: [] }, { results: [] }, { results: [] }];
     const latest = interactions.results[0];
     const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: profile.timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
+    // Same shared formatter Meeting Brief/the donor page would use for this
+    // exact donor -- confirmed evidence (a real asks row), never called an
+    // "opportunity."
+    const openAsks = (primaryMeetingBrief?.openAsks ?? []).map((item) => askLine(item, dateLabel));
     const snapshot: AssistantContextSnapshot = {
-      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyImportantDates },
+      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyImportantDates, openAsks },
       // Prefer the shared_activities parent's summary when linked (same
       // single-canonical-copy rule as the timeline/Meeting Brief), and
       // append a count-only note for a shared activity -- "sent to N

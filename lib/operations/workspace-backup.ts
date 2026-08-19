@@ -56,6 +56,15 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   "important_date_changes",
   "gift_acknowledgments",
   "donor_historical_context",
+  // Ask/solicitation tracking (Phase 1) -- same reasoning as yahrtzeits/
+  // important_dates above: real donor-facing data added after this route
+  // was written. Deliberately not added to WORKSPACE_BACKUP_TABLES in this
+  // phase -- that would require its own correct owner-scoping work
+  // verified against real data, a separate decision from building the
+  // feature itself. Covered today only by the nightly whole-database R2
+  // backup.
+  "asks",
+  "ask_changes",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",

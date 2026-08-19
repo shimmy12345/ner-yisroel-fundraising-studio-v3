@@ -143,7 +143,7 @@ const timedAllKeys = [...donorPage.matchAll(/timedAll\(marks, "(\w+)"/g)].map((m
 for (const phase of ["donorLookup", "donorViews", "donorResearch", "historicalContext", "yahrtzeits", "importantDates", "evidence"]) {
   assert.ok(directMarkKeys.includes(`${phase}Ms`), `${phase} must be timed (marks.${phase}Ms)`);
 }
-for (const phase of ["giving", "gifts", "interactions", "reminders", "paymentEvents", "contactAudits", "donorDirectory", "acknowledgments"]) {
+for (const phase of ["giving", "gifts", "interactions", "reminders", "paymentEvents", "contactAudits", "donorDirectory", "acknowledgments", "asks"]) {
   assert.ok(timedAllKeys.includes(phase), `${phase} must be timed via timedAll(marks, "${phase}", ...)`);
 }
 // cf-ray correlation: the same next/headers API this app already uses
@@ -151,10 +151,13 @@ for (const phase of ["giving", "gifts", "interactions", "reminders", "paymentEve
 // invented mechanism.
 assert.match(donorPage, /headers\(\)\)\.get\("cf-ray"\)/, "the donor page must read cf-ray via next/headers, matching the app's existing header-access pattern");
 // Instrumentation must only wrap already-issued promises, never add a new
-// D1 statement of its own -- 21 env.DB.prepare(...) call sites, exactly
-// matching the pre-instrumentation count on origin/feature/independent-
-// cloudflare-sandbox (verified directly via the same regex, not assumed).
-assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 21, "instrumentation must not add or remove any D1 query call sites");
+// D1 statement of its own -- 22 env.DB.prepare(...) call sites: the
+// original 21 (verified directly via the same regex on origin/feature/
+// independent-cloudflare-sandbox before this task, not assumed) plus
+// exactly one legitimate new query added by the Ask feature (asks by
+// donor, timed via timedAll(marks, "asks", ...) like every other phase
+// above) -- a real, intentional addition, not an instrumentation leak.
+assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 22, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query added by the Ask feature");
 
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);

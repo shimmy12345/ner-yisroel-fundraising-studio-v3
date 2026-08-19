@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "ef81413e1101d3e344727edda935398247cf4a4aa68c4ee76361341a742a5542",
+  "schemaHash": "7c8f86b3ebc1a9291d43ebafe2f0c74c9623ba41931bb682379b1d154fe692b5",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -33,7 +33,8 @@
     "0028_important_dates.sql",
     "0029_important_dates_dob_source.sql",
     "0030_shared_activities.sql",
-    "0031_interactions_text_type.sql"
+    "0031_interactions_text_type.sql",
+    "0032_asks.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -187,6 +188,254 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "ask_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "ask_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "ask_id",
+            "toTable": "asks",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ask_changes_ask_idx",
+            "columns": [
+              "ask_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `ask_changes_ask_idx` ON `ask_changes` (`ask_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','updated','status_changed'))"
+        ]
+      },
+      {
+        "name": "asks",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "amount_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "purpose",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'pending'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "asked_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_interaction_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "source_interaction_id",
+            "toTable": "interactions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "asks_donor_status_idx",
+            "columns": [
+              "donor_id",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `asks_donor_status_idx` ON `asks` (`donor_id`,`status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('pending','committed','declined','withdrawn'))"
+        ]
       },
       {
         "name": "data_health_repair_audits",
@@ -5101,6 +5350,16 @@
     },
     {
       "type": "table",
+      "name": "ask_changes",
+      "sql": "CREATE TABLE `ask_changes` ( `id` text PRIMARY KEY NOT NULL, `ask_id` text NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','status_changed')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`ask_id`) REFERENCES `asks`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "asks",
+      "sql": "CREATE TABLE `asks` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `amount_cents` integer, `purpose` text, `status` text NOT NULL DEFAULT 'pending' CHECK (`status` IN ('pending','committed','declined','withdrawn')), `asked_at` integer NOT NULL, `note` text, `source_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`source_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "data_health_repair_audits",
       "sql": "CREATE TABLE `data_health_repair_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `record_type` text NOT NULL CHECK (`record_type` IN ('interaction','reminder')), `record_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('reattach','move_to_survivor','archive','dismiss_false_positive')), `previous_donor_id` text, `next_donor_id` text, `previous_state_json` text NOT NULL, `next_state_json` text NOT NULL, `reason` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -5303,6 +5562,16 @@
       "type": "index",
       "name": "activity_status_audits_interaction_date_idx",
       "sql": "CREATE INDEX `activity_status_audits_interaction_date_idx` ON `activity_status_audits` (`interaction_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "ask_changes_ask_idx",
+      "sql": "CREATE INDEX `ask_changes_ask_idx` ON `ask_changes` (`ask_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "asks_donor_status_idx",
+      "sql": "CREATE INDEX `asks_donor_status_idx` ON `asks` (`donor_id`,`status`)"
     },
     {
       "type": "index",

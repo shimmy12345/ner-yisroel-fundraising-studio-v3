@@ -25,8 +25,9 @@ assert.match(captureExperience, /fetch\(initialActivity \? `\/api\/interactions\
 // The flag itself is now gated on the CURRENT preview actually having
 // something meaningful (see the mobile-ux-fixes/relationship-quality
 // tests), not just a bare pass-through -- everything else about the
-// single-donor request body is unchanged.
-assert.match(captureExperience, /acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview\.relationshipSummary !== null,\s*\}\),/, "the single-donor request body must still send the relationship-snapshot flag, now correctly gated on the current preview");
+// single-donor request body is unchanged (the Ask feature's fields are
+// appended after it, additive only -- see tests/asks.test.mjs).
+assert.match(captureExperience, /acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview\.relationshipSummary !== null,/, "the single-donor request body must still send the relationship-snapshot flag, now correctly gated on the current preview");
 
 // 2. Multi-donor recipient flow submits the shared route only for 2+ donors.
 assert.match(sharedRoute, /donorIds\.length < 2\)\s*return Response\.json\(\{ error: "A shared activity needs at least two donors/, "the backend itself refuses fewer than 2 donors");

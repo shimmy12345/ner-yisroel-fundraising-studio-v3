@@ -26,6 +26,12 @@ export const STAGING_RESET_TABLE_ORDER = [
   // (before shared_activities itself, further down) for the same
   // children-before-parents reason as activity_status_audits above.
   "shared_activity_recipient_audits",
+  // ask_changes references ask_id (a real FK here, unlike yahrtzeit_id --
+  // see db/schema.ts's askChanges comment), so it's deleted first. asks
+  // references interactions (nullable, source_interaction_id) and donors,
+  // so it's deleted before both of those, further down.
+  "ask_changes",
+  "asks",
   "donor_contact_audits",
   "donor_historical_context",
   "donor_merge_audits",

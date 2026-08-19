@@ -27,6 +27,7 @@ type HistoricalContextRow = { donor_id: string; text: string; source: string; so
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
+type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -90,7 +91,7 @@ function scheduledActivity(item: ScheduledActivityRow, timezone: string, now: nu
 export async function loadWorkspaceBrief(userId: string, timezone: string, mode: DataMode = "live", now = Math.floor(Date.now() / 1000), priorityLimit = 8): Promise<WorkspaceBrief> {
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -161,6 +162,11 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     // birthday_outreach/anniversary_outreach the same way. Never joined
     // into interactions/recommendations.
     demo ? Promise.resolve({ results: [] as ImportantDateRow[] }) : env.DB.prepare(`SELECT id, donor_id, type, person_name, relationship, month, day, year FROM important_dates WHERE user_id = ? LIMIT 5000`).bind(userId).all<ImportantDateRow>(),
+    // Every in-scope donor's oldest PENDING ask -- feeds open_ask the same
+    // way openPledgeByDonor feeds follow_up_pledge below. No demo/sample
+    // data exists for this new feature, matching historicalContextRows/
+    // acknowledgments/yahrtzeitRows/importantDateRows above.
+    demo ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, asked_at FROM asks WHERE user_id = ? AND status = 'pending' ORDER BY donor_id, asked_at ASC`).bind(userId).all<AskRow>(),
   ]);
 
   const contactByDonor = new Map(lastContacts.results.map((item) => [item.donor_id, item.value]));
@@ -204,6 +210,11 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   }
   const openPledgeByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openPledgeByDonor.has(item.donor_id)) openPledgeByDonor.set(item.donor_id, item);
+  // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
+  // per donor is the oldest pending ask, same "one most relevant fact"
+  // pattern as openPledgeByDonor above.
+  const openAskByDonor = new Map<string, AskRow>();
+  for (const item of openAskRows.results) if (!openAskByDonor.has(item.donor_id)) openAskByDonor.set(item.donor_id, item);
   const yahrtzeitsByDonor = new Map<string, YahrtzeitRow[]>();
   for (const row of yahrtzeitRows.results) {
     if (!yahrtzeitsByDonor.has(row.donor_id)) yahrtzeitsByDonor.set(row.donor_id, []);
@@ -223,6 +234,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   const suggestionDonorIds = selectSuggestionDonorIds({
     giftDonorIds: recentGiftByDonor.keys(),
     pledgeDonorIds: openPledgeByDonor.keys(),
+    askDonorIds: openAskByDonor.keys(),
     yahrtzeitRows: yahrtzeitRows.results.map((row) => ({ donorId: row.donor_id, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
     importantDateRows: importantDateRows.results.map((row) => ({ donorId: row.donor_id, month: row.month, day: row.day })),
     // Substantive (non-recipient) contact, not the display Last Contact
@@ -249,7 +261,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
   // yahrtzeit_outreach/birthday_outreach/anniversary_outreach have no entry
   // here -- they're excluded from this ranked path entirely (see the
   // continue below) and never look this map up.
-  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
+  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", open_ask: "Open ask", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
   const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
   // live-data.ts's own "recent gift" bucket only ever draws from
   // giving_activities (never the legacy gifts table -- see GivingRow),
@@ -261,6 +273,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
     if (!donorRow) continue;
     const gift = recentGiftByDonor.get(donorId);
     const pledge = openPledgeByDonor.get(donorId);
+    const ask = openAskByDonor.get(donorId);
     const reminder = reminderByDonor.get(donorId);
     const lastInteractionRow = latestInteractionByDonor.get(donorId);
     const evidence = buildRecommendationEvidence({
@@ -271,6 +284,7 @@ export async function loadWorkspaceBrief(userId: string, timezone: string, mode:
       lastContactAt: contactByDonor.get(donorId) ?? null,
       lastSubstantiveContactAt: substantiveContactByDonor.get(donorId) ?? null,
       openReminder: reminder ? { action: reminder.action, reason: reminder.reason, dueAt: reminder.due_at } : null,
+      openAsk: ask ? { id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, askedAt: ask.asked_at } : null,
       relationshipSummary: donorRow.relationship_summary,
       institutionalMemory: donorRow.institutional_memory,
       historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),

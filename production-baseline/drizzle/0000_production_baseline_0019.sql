@@ -22,6 +22,38 @@ CREATE TABLE `activity_status_audits` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `ask_changes` (
+  `id` text PRIMARY KEY NOT NULL,
+  `ask_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `action` text NOT NULL CHECK (`action` IN ('created','updated','status_changed')),
+  `changed_fields` text NOT NULL,
+  `before_json` text,
+  `after_json` text NOT NULL,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`ask_id`) REFERENCES `asks`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `asks` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `amount_cents` integer,
+  `purpose` text,
+  `status` text NOT NULL DEFAULT 'pending' CHECK (`status` IN ('pending','committed','declined','withdrawn')),
+  `asked_at` integer NOT NULL,
+  `note` text,
+  `source_interaction_id` text,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`source_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `data_health_repair_audits` (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` text NOT NULL,
@@ -574,6 +606,10 @@ CREATE TABLE `yahrtzeits` (
 
 CREATE INDEX `activity_status_audits_interaction_date_idx` ON `activity_status_audits` (`interaction_id`,`created_at`);
 
+CREATE INDEX `ask_changes_ask_idx` ON `ask_changes` (`ask_id`,`created_at`);
+
+CREATE INDEX `asks_donor_status_idx` ON `asks` (`donor_id`,`status`);
+
 CREATE INDEX `data_imports_user_date_idx` ON `data_imports` (`user_id`,`created_at`);
 
 CREATE INDEX `data_imports_user_file_hash_status_idx` ON `data_imports` (`user_id`,`file_hash`,`status`);
@@ -718,5 +754,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','ef81413e1101d3e344727edda935398247cf4a4aa68c4ee76361341a742a5542',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','7c8f86b3ebc1a9291d43ebafe2f0c74c9623ba41931bb682379b1d154fe692b5',1785944072);
 PRAGMA optimize;

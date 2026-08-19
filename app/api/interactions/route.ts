@@ -7,6 +7,7 @@ import {
   type InteractionKind,
   type ReminderChoice,
 } from "../../../lib/capture/interaction";
+import { validateAskAmountCents, validateAskPurpose, validateAskNote, askFollowUpAction } from "../../../lib/capture/ask";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 
 type RequestBody = {
@@ -18,6 +19,16 @@ type RequestBody = {
   customDate?: string;
   occurredAt?: string;
   acceptRelationshipSnapshot?: boolean;
+  // "Did you make an ask?" -- single-donor capture only (this route is
+  // never used for shared/multi-donor activities; see
+  // app/api/interactions/shared/route.ts, a deliberately separate route
+  // this feature does not touch). Ask creation requires explicit user
+  // action (madeAsk === true) -- never inferred from note text containing
+  // "$"/"solicited"/"asked"/etc.
+  madeAsk?: boolean;
+  askAmountCents?: number | null;
+  askPurpose?: string;
+  askNote?: string;
 };
 
 const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
@@ -37,6 +48,17 @@ export async function POST(request: Request) {
     return Response.json({ error: "A donor and interaction note are required" }, { status: 422 });
   }
   if (body.type && !kinds.has(body.type)) return Response.json({ error: "Invalid interaction type" }, { status: 422 });
+
+  // Explicit user action only -- madeAsk must be exactly true; the note's
+  // own text is never inspected for "$"/"solicited"/"asked"/etc. to infer
+  // an ask.
+  const madeAsk = body.madeAsk === true;
+  const askAmount = madeAsk ? validateAskAmountCents(body.askAmountCents) : { ok: true as const, amountCents: null };
+  if (!askAmount.ok) return Response.json({ error: "Ask amount must be a positive whole number of cents, or left blank" }, { status: 422 });
+  const askPurposeResult = madeAsk ? validateAskPurpose(body.askPurpose) : { ok: true as const, purpose: null };
+  if (!askPurposeResult.ok) return Response.json({ error: "Ask purpose is too long" }, { status: 422 });
+  const askNoteResult = madeAsk ? validateAskNote(body.askNote) : { ok: true as const, note: null };
+  if (!askNoteResult.ok) return Response.json({ error: "Ask note is too long" }, { status: 422 });
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -68,15 +90,34 @@ export async function POST(request: Request) {
     );
   }
 
+  const askId = madeAsk ? crypto.randomUUID() : null;
+  if (askId) {
+    const afterJson = { amountCents: askAmount.amountCents, purpose: askPurposeResult.purpose, status: "pending", askedAt: occurredAtEpoch, note: askNoteResult.note, sourceInteractionId: interactionId };
+    statements.push(
+      env.DB.prepare(`INSERT INTO asks (id, user_id, donor_id, amount_cents, purpose, status, asked_at, note, source_interaction_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`)
+        .bind(askId, userId, donorId, askAmount.amountCents, askPurposeResult.purpose, occurredAtEpoch, askNoteResult.note, interactionId, now, now),
+      env.DB.prepare(`INSERT INTO ask_changes (id, ask_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
+        VALUES (?, ?, ?, ?, 'created', ?, NULL, ?, ?)`)
+        .bind(crypto.randomUUID(), askId, userId, donorId, JSON.stringify(["amountCents", "purpose", "status", "askedAt", "note", "sourceInteractionId"]), JSON.stringify(afterJson), now),
+    );
+  }
+
+  // One shared reminder picker (per design -- no duplicate reminder UI):
+  // if an ask was made, the reminder is about following up on THAT ask
+  // (id prefix "ask-<askId>-", same convention app/api/asks/route.ts
+  // uses, so app/api/asks/[id]/route.ts can retire it on a status
+  // change); otherwise it's the existing generic activity follow-up
+  // ("activity-<interactionId>"), unchanged from before this feature.
   if (dueAt) {
     statements.push(
       env.DB.prepare("INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(
-          `activity-${interactionId}`,
+          askId ? `ask-${askId}-${crypto.randomUUID()}` : `activity-${interactionId}`,
           donorId,
           userId,
-          extracted.nextAction,
-          "Reminder requested for this activity.",
+          askId ? askFollowUpAction(askAmount.amountCents, askPurposeResult.purpose) : extracted.nextAction,
+          askId ? "Follow-up reminder requested when this ask was logged." : "Reminder requested for this activity.",
           94,
           "open",
           Math.floor(dueAt.getTime() / 1000),
@@ -93,13 +134,14 @@ export async function POST(request: Request) {
     return Response.json({ error: "Interaction could not be saved" }, { status: 500 });
   }
 
-  logger.info("interaction_captured", { donorId, userId, interactionId });
+  logger.info("interaction_captured", { donorId, userId, interactionId, askCreated: askId !== null });
   return Response.json({
     interactionId,
     occurredAt: occurredAt.toISOString(),
     scheduled,
     reminderAt: dueAt?.toISOString() ?? null,
     relationshipUpdated: !scheduled && body.acceptRelationshipSnapshot === true,
+    askId,
     extracted,
   }, { status: 201 });
 }

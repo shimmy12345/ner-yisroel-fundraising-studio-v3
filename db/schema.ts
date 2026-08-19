@@ -645,3 +645,68 @@ export const donorResearchFindingSources = sqliteTable("donor_research_finding_s
   primaryKey({ columns: [table.findingId, table.sourceId] }),
   index("donor_research_finding_sources_source_idx").on(table.sourceId),
 ]);
+
+// A fundraiser-recorded ask/solicitation -- the relationship layer's own
+// record of "we asked this donor for $X," deliberately separate from
+// giving_activities (JL Solutions import only -- the financial system of
+// record; see docs/FUNDRAISING_OS_PRINCIPLES.md). status='committed' means
+// only that the fundraiser recorded the donor's yes -- it never creates,
+// updates, or implies a real JL-recorded pledge/gift; nothing in this
+// codebase ever writes to giving_activities/gifts from an ask status
+// change. Editable (amount/purpose/note/status) -- this row IS the
+// maintained fact, not an event log; its own history lives in askChanges
+// below, same convention as yahrtzeits/yahrtzeitChanges above. Multiple
+// simultaneous pending asks per donor are allowed by design -- no
+// uniqueness constraint enforces "one open ask."
+export const asks = sqliteTable("asks", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  // Nullable: a legitimate ask can carry no specific figure ("asked him to
+  // support the dinner"). Integer cents, matching every other money column
+  // in this schema (committedCents/paidCents/balanceCents) -- never
+  // floating point.
+  amountCents: integer("amount_cents"),
+  // Free text in v1 -- deliberately no enum/taxonomy/campaign table (see
+  // design doc). "General"/no purpose is represented as NULL, not an
+  // empty string.
+  purpose: text("purpose"),
+  status: text("status", { enum: ["pending", "committed", "declined", "withdrawn"] }).notNull().default("pending"),
+  askedAt: integer("asked_at", { mode: "timestamp" }).notNull(),
+  note: text("note"),
+  // Nullable: an ask need not originate from a logged interaction (a
+  // direct "+ Log ask" entry, or a future historical backfill). Only the
+  // ORIGINATING interaction is ever linked -- v1 deliberately does not
+  // track which of a donor's later interactions were "about" this ask (no
+  // ask_id column on interactions, no join table); revisit only if real
+  // usage demonstrates a need.
+  sourceInteractionId: text("source_interaction_id").references(() => interactions.id),
+  ...timestamps,
+}, (table) => [
+  // One evidence-based composite index: covers "asks for this donor"
+  // (donor page, donor-merge reassignment) via its leftmost column, and
+  // "pending asks for this donor" (recommendation-evidence building) via
+  // the full pair -- the only two access patterns this feature actually
+  // has in v1 (there is no cross-donor "all pending asks" listing to
+  // index for). A separate donor_id-only index would be redundant.
+  index("asks_donor_status_idx").on(table.donorId, table.status),
+]);
+
+// Append-only audit trail for meaningful asks changes (status transitions,
+// amount/purpose corrections) -- matching donor_contact_audits' shape.
+// Deliberately narrow: not event sourcing, just "what changed and when."
+// askId IS a real foreign key here (unlike yahrtzeitChanges.yahrtzeitId,
+// which is not) because, unlike yahrtzeits, asks are never hard-deleted in
+// v1 -- every mutation is an update, so an audit row can never outlive the
+// ask it describes.
+export const askChanges = sqliteTable("ask_changes", {
+  id: text("id").primaryKey(),
+  askId: text("ask_id").notNull().references(() => asks.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  action: text("action", { enum: ["created", "updated", "status_changed"] }).notNull(),
+  changedFields: text("changed_fields", { mode: "json" }).$type<string[]>().notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("ask_changes_ask_idx").on(table.askId, table.createdAt)]);

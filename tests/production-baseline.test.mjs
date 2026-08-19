@@ -206,8 +206,16 @@ test("baseline picks up the schema-changing 0031 text message type migration", (
   // interactions.type has no CHECK constraint at all, so it needed no DDL
   // change here, only its own TypeScript enum in db/schema.ts. The schema
   // hash must change again because of the shared_activities rebuild.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0031_interactions_text_type.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 32);
+  assert.ok(manifest.sourceMigrations.includes("0031_interactions_text_type.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0032 asks migration", () => {
+  // 0032_asks.sql adds the asks/ask_changes tables (new tables, not a
+  // rebuild), so the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0032_asks.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 33);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

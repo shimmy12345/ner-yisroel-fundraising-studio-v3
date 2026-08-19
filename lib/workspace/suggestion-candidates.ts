@@ -79,6 +79,10 @@ function staleness(days: number | null): number {
 export function selectSuggestionDonorIds(input: {
   giftDonorIds: Iterable<string>;
   pledgeDonorIds: Iterable<string>;
+  // A donor with any still-PENDING ask -- included in full/unbounded, same
+  // as giftDonorIds/pledgeDonorIds above: exactly as "always worth
+  // surfacing" a signal as an open pledge, per design.
+  askDonorIds?: Iterable<string>;
   yahrtzeitRows: YahrtzeitCandidateRow[];
   importantDateRows?: ImportantDateCandidateRow[];
   contactGapCandidates: ContactGapCandidate[];
@@ -90,6 +94,7 @@ export function selectSuggestionDonorIds(input: {
   const selected = new Set<string>();
   for (const id of input.giftDonorIds) selected.add(id);
   for (const id of input.pledgeDonorIds) selected.add(id);
+  for (const id of input.askDonorIds ?? []) selected.add(id);
 
   const yahrtzeitsByDonor = new Map<string, YahrtzeitCandidateRow[]>();
   for (const row of input.yahrtzeitRows) {

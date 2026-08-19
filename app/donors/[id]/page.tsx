@@ -10,6 +10,7 @@ import { getDataMode } from "../../../lib/workspace/mode";
 import { DONOR_GIVING_SQL } from "../../../lib/relationships/giving";
 import { isCancelledActivity, isScheduledActivity, sanitizeScheduledRelationshipContext } from "../../../lib/workspace/scheduled-activity";
 import { PendingGiftForm } from "./GivingManagement";
+import { OpenAskCard, AskHistory, LogAskForm } from "./AskManagement";
 import { countsInGivingTotals } from "../../../lib/giving/management";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { UnifiedRelationshipTimeline } from "./UnifiedRelationshipTimeline";
@@ -39,6 +40,7 @@ type FindingRow = { id: string; category: string; claim: string; status: "curren
 type HistoricalContextRow = { id: string; text: string; source_date: number | null; classification: string; source: string; created_at: number };
 type SourceRow = { finding_id: string; url: string; title: string; publisher: string | null; published_at: number | null; source_tier: string };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus; created_at: number };
+type AskRow = { id: string; amount_cents: number | null; purpose: string | null; status: "pending" | "committed" | "declined" | "withdrawn"; asked_at: number; note: string | null; created_at: number };
 type YahrtzeitRow = { id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number; hebrew_year: number | null };
 type ImportantDateRow = { id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null; notes: string | null };
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
@@ -91,7 +93,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     marks.donorViewsMs = Date.now() - donorViewsStart;
     d1Calls += 1;
   }
-  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult] = await Promise.all([
+  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult] = await Promise.all([
     timedAll(marks, "giving", (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>()),
     timedAll(marks, "gifts", env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>()),
     timedAll(marks, "interactions", env.DB.prepare(`SELECT interactions.id, interactions.type, interactions.occurred_at, interactions.occurred_at_date_only, interactions.summary, interactions.source, interactions.created_at, interactions.shared_activity_id, interactions.role, shared_activities.recipient_count AS shared_activity_recipient_count, shared_activities.summary AS shared_activity_summary, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at
@@ -115,9 +117,13 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     // never joined into giving_activities/gifts; "current status" is
     // computed client-side as the first (newest) row per (source, id).
     timedAll(marks, "acknowledgments", mode === "demo" ? Promise.resolve({ results: [] as AcknowledgmentRow[] }) : env.DB.prepare("SELECT gift_source, gift_id, status, created_at FROM gift_acknowledgments WHERE donor_id=? AND user_id=? ORDER BY created_at DESC LIMIT 2000").bind(id, profile.id).all<AcknowledgmentRow>()),
+    // No demo/sample data exists for this new feature, matching
+    // contactAuditResult/acknowledgmentResult's demo handling above.
+    timedAll(marks, "asks", mode === "demo" ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare("SELECT id, amount_cents, purpose, status, asked_at, note, created_at FROM asks WHERE donor_id=? AND user_id=? ORDER BY asked_at DESC LIMIT 200").bind(id, profile.id).all<AskRow>()),
   ]);
-  d1Calls += 4 + (mode === "live" ? 4 : 0);
+  d1Calls += 4 + (mode === "live" ? 5 : 0);
   const activities = activityResult.results;
+  const asks = askResult.results;
   const countedActivities = activities.filter(countsInGivingTotals);
   const paymentEvents = paymentEventResult.results;
   const legacyGifts = giftResult.results;
@@ -248,6 +254,12 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // in recommendation-evidence.ts. lastContactAt below (Last Contact
   // display, and "Last meaningful contact" in the aside) is unaffected.
   const latestSubstantiveInteraction = completedInteractions.find((item) => item.role !== "recipient");
+  // Open Ask card below shows every pending ask; evidence only ever takes
+  // the oldest (most-in-need-of-follow-up) one -- same "one most relevant
+  // fact" pattern as openPledgeForEvidence above.
+  const openAsks = asks.filter((item) => item.status === "pending").sort((a, b) => a.asked_at - b.asked_at);
+  const historicalAsks = asks.filter((item) => item.status !== "pending");
+  const openAskForEvidence = openAsks[0] ? { id: openAsks[0].id, amountCents: openAsks[0].amount_cents, purpose: openAsks[0].purpose, askedAt: openAsks[0].asked_at } : null;
   const evidenceStart = Date.now();
   const recommendationEvidence = buildRecommendationEvidence({
     donorId: id,
@@ -257,6 +269,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     lastContactAt: completedInteractions[0]?.occurred_at ?? null,
     lastSubstantiveContactAt: latestSubstantiveInteraction?.occurred_at ?? null,
     openReminder: next ? { action: next.action, reason: next.reason, dueAt: next.due_at } : null,
+    openAsk: openAskForEvidence,
     relationshipSummary: donor.relationship_summary,
     institutionalMemory: donor.institutional_memory,
     historicalContext: historicalContextRows.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
@@ -285,6 +298,12 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     <header className="donor-header"><div className="donor-identity"><div className="avatar donor-avatar">{donorInitials({ displayName: donor.display_name, primaryFirstName: donor.primary_first_name, lastName: donor.last_name })}</div><div><div className="identity-line"><div><h1>{donor.display_name}</h1>{donorCode && <span className="donor-code donor-header-code">{donorCode}</span>}</div>{mode === "demo" ? <span className="relationship-badge">Demo record</span> : <span className="relationship-badge">{donor.external_source === "Manual" ? "Manual" : "JL Solutions"}</span>}</div>{people && <p>{people}</p>}<div className="contact-row">{donor.email && <a href={`mailto:${donor.email}`}>✉ {donor.email}</a>}{donor.phone && <a href={`tel:${donor.phone.replace(/\D/g, "")}`}>☎ {donor.phone}</a>}</div></div></div>{mode === "live" && <div className="header-actions"><a href={`/donors/${encodeURIComponent(id)}/edit`}>Edit Contact Details</a><a href={`/donors/${encodeURIComponent(id)}/resolve-duplicate`}>Resolve Duplicate</a><a href={`/capture?donorId=${encodeURIComponent(id)}`}>＋ Log interaction</a></div>}</header>
     {mode === "live" && <nav className="meeting-brief-entry" aria-label="Meeting preparation"><div><strong>Meeting coming up?</strong><span>Review a concise brief built only from this donor’s live record.</span></div><a href={meetingBriefNavigationHref(id, currentHref, origin)}>Prepare for Meeting</a></nav>}
     <section className="donor-snapshot-grid"><article className="snapshot-card"><p>Lifetime paid</p><strong>{money(paid)}</strong><span>{countedActivities.length + legacyGifts.length} confirmed giving record{countedActivities.length + legacyGifts.length === 1 ? "" : "s"}</span></article><article className="snapshot-card"><p>Most recent paid gift</p><strong>{mostRecent ? money(mostRecent.amount) : "—"}</strong><span>{mostRecent ? financialDateLabel(mostRecent.occurredAt) : "No paid gift recorded"}</span></article><article className="snapshot-card"><p>Open commitments</p><strong>{money(open)}</strong><span>From included giving history</span></article><article className="snapshot-card"><p>Suggested action</p><strong>{recommendationSummary?.headline || "None available"}</strong>{recommendationSummary?.supporting && <span className="snapshot-supporting">{recommendationSummary.supporting}</span>}<span>{recommendation?.timing || "No dated urgency"}</span></article></section>
+    {/* Deliberately its own section, visually separate from the JL-sourced
+        giving KPI grid above -- an ask is relationship-layer data the
+        fundraiser recorded, never giving_activities/gifts (JL Solutions
+        financial-system-of-record data). Live mode only, matching every
+        other write-capable donor-page feature (no demo/sample asks data). */}
+    {mode === "live" && <section className="asks-section"><div className="card-heading"><div><p className="eyebrow">ASKS</p><h2>{openAsks.length > 0 ? `${openAsks.length} open ask${openAsks.length === 1 ? "" : "s"}` : "No open ask"}</h2></div><LogAskForm donorId={id} minCustomDate={new Date().toISOString().slice(0, 10)} /></div>{openAsks.length > 0 && <div className="open-ask-list">{openAsks.map((ask) => <OpenAskCard key={ask.id} ask={{ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }} />)}</div>}<AskHistory asks={historicalAsks.map((ask) => ({ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }))} /></section>}
     <div className="relationship-grid"><main className="relationship-main">
       <section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP SNAPSHOT</p><h2>{relationshipContext.summary ? "Prepare for the next interaction" : "No relationship snapshot yet"}</h2></div></div><p className="summary">{relationshipContext.summary || "Log a completed interaction to begin a practical snapshot from this household’s actual activity."}</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">SUGGESTED ACTION</p><h3>{recommendation?.action || "No suggested action available"}</h3><p>{recommendation?.why || "Add a reminder, or log an interaction, to generate a suggested next step."}</p>{recommendation && <p className="recommendation-evidence">{recommendation.evidence.join(" ")}</p>}{recommendation?.timing && <p className="recommendation-meta">{recommendation.timing}</p>}{recommendation?.kind === "reconnect_contact_gap" && completedInteractions[0] && completedInteractions[0].occurred_at > Math.floor(Date.now() / 1000) - 90 * 86400 && <p className="recommendation-clarifier">Last Contact reflects every touch, including broadcast texts/emails sent to many donors at once. This suggestion looks at substantive, one-to-one contact only.</p>}{mode === "live" && recommendation?.kind === "acknowledge_gift" && recommendation.giftSource && recommendation.giftId && <GiftAcknowledgmentActions giftSource={recommendation.giftSource} giftId={recommendation.giftId} initialStatus={null} compact />}</div></div>{mode === "live" && historicalContextRows.length > 0 && <details className="historical-context-disclosure"><summary>Imported context ({historicalContextRows.length})</summary><p className="historical-context-lede">Notes imported from external sources. Not logged interactions — never counted as contact, and never assumed to have actually happened.</p><div className="historical-context-list">{historicalContextRows.map((row) => <article key={row.id} className="historical-context-entry"><p className="historical-context-text">“{row.text}”</p><p className="historical-context-provenance">{row.source === "import-monday" ? "Monday.com" : row.source}{row.source_date ? ` · ${date(row.source_date, profile.timezone)}` : ""} · Completion was never confirmed.</p></article>)}</div></details>}</section>
       <section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>{relationshipContext.memory ? "Recorded relationship context" : "No institutional memory recorded"}</h2></div></div>{relationshipContext.memory && <p className="summary">{relationshipContext.memory}</p>}</section>
