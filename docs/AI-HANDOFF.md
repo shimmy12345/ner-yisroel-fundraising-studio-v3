@@ -12,27 +12,30 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-Documentation-only update to this file, on top of `93bdfb3`. Reports the
-just-completed Today's-Agenda-birthday-bucketing + open-pledge-payment-
-recency correctness fixes (code + deploy + live verification already done
-before this doc update -- see "Today's-Agenda Birthday Bucketing +
-Open-Pledge Payment Recency -- FIXED AND LIVE" section below, which is
-the authoritative current state for those two bugs).
+`e69dc58` -- implements the Monthly Payment Plan feature end to end (code
++ tests + guardrail updates + docs), on top of `3472f40`/`a78e49f`'s
+design-only commits. **NOT deployed, migration NOT applied to any D1
+database, no staging data written.** See "Pledge Payment Plan --
+IMPLEMENTATION REPORT" below for the full accounting and the exact
+approval needed before a staging rollout.
 
 origin/feature/independent-cloudflare-sandbox:
-`93bdfb3` (the two correctness fixes above, on top of `eec5266`'s
-corrected request-scoped dedup fix, the concurrent session's
-Ask-backfill/closure work, and the earlier instrumentation commit
-`83bfa75`; all pushed). Deployed to Independent Staging as Worker version
-`5f738898-adee-4e43-8fc9-2f170e377c07` -- **not** `db4dcc3e`/`f29c075f`/
-`70f3c2c6` (all superseded). See "Deployment State" and the birthday/
-pledge-fix section below for the full report.
+`93bdfb3` (the birthday-bucketing + open-pledge-payment-recency
+correctness fixes, on top of `eec5266`'s corrected request-scoped dedup
+fix, the concurrent session's Ask-backfill/closure work, and the earlier
+instrumentation commit `83bfa75`; all pushed). Deployed to Independent
+Staging as Worker version `5f738898-adee-4e43-8fc9-2f170e377c07` --
+**not** `db4dcc3e`/`f29c075f`/`70f3c2c6` (all superseded). **Local HEAD
+(`e69dc58`, and the two design commits before it) is 3 commits ahead of
+origin and has NOT been pushed.** See "Deployment State" and the
+birthday/pledge-fix section below for the full prior report.
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
 
 Working tree:
-clean.
+clean as of the `e69dc58` commit (this doc update itself is a small
+follow-up commit on top).
 
 ## Independent Staging Incident -- Error 1102 (2026-08-19 16:59:03 UTC / 12:59:03 EDT) -- INVESTIGATION ONLY, NO FIX APPLIED
 
