@@ -2494,6 +2494,202 @@ to, or force-pushed. No merge into or from `origin/main` occurred.
 application code, D1 schema, migration, Cloudflare configuration, or
 deployment occurred in this task.
 
+## Relationship Snapshot / Institutional Memory Divergence -- Donor 987 vs 67909 (2026-08-20) -- INVESTIGATION ONLY, NO FIX APPLIED
+
+Investigated per explicit instruction: root-cause only, no D1 write, no
+extraction-heuristic change, no deploy, `main` untouched. All findings
+below are from read-only `wrangler d1 execute --remote --config
+wrangler.staging.jsonc` `SELECT`s against Independent Staging and direct
+execution of the real, unmodified `lib/capture/interaction.ts` functions
+against the two donors' actual stored note text -- not inference from
+conversation history.
+
+**Rows (sanitized -- no donor names/contact info).**
+
+| | Donor 987 | Donor 67909 |
+|---|---|---|
+| type | call | call |
+| source | `capture:call` | `capture:call` |
+| shared_activity_id | null | null |
+| role | null | null |
+| occurred_at -> created_at gap | 7s | 42s |
+| updated_at == created_at | yes (never edited) | yes (never edited) |
+| `activity_status_audits` rows | none | none |
+| donors.relationship_health | null | 86 |
+| donors.relationship_summary / institutional_memory | both NULL | both set |
+| donors.updated_at vs. interaction created_at | unrelated, predates it | exactly equal |
+
+Both interactions are eligible/"completed-live" under the same downstream
+query (`lib/relationships/read.ts`'s last-contact SELECT: not
+`cancelled:%`/`archived:%`, and `occurred_at <= created_at` since neither
+carries a `capture-scheduled:` source prefix).
+
+**Ruled out, not assumed, per explicit instruction to test rather than
+assume:**
+- Shared-activity/recipient-role path: both rows have
+  `shared_activity_id IS NULL` and `role IS NULL` -- neither interaction
+  went through `app/api/interactions/shared/route.ts` at all. (That route
+  *would* be a real bug for a substantive 1:1 call if it were involved --
+  it never writes `relationship_summary`/`institutional_memory` for any
+  recipient, any role, any interaction type, by explicit design -- but it
+  is not implicated in this specific pair.)
+- Capture route divergence: identical route for both --
+  `source = 'capture:call'` on both rows only comes from
+  `app/api/interactions/route.ts`.
+- Edit-vs-create distinction: neither row was ever edited
+  (`updated_at == created_at`, zero `activity_status_audits` rows for
+  either interaction id).
+- Write failure: `app/api/interactions/route.ts`'s `env.DB.batch()` call
+  either fully succeeds or the whole request 500s (`logger.error
+  interaction_capture_failed`) -- both interactions exist with no
+  scheduled-or-cancelled marker, so both requests succeeded end to end.
+- UI/cache staleness: `app/donors/[id]/page.tsx` reads
+  `donor.relationship_summary`/`donor.institutional_memory` directly off
+  the `donors` row every render (`dynamic = "force-dynamic"`, no live
+  derivation, no cache layer) -- D1's NULL for donor 987 and the honest
+  empty state the UI would show are the same fact, not a staleness gap.
+
+**Proven root cause.** `app/api/interactions/route.ts` only writes
+`relationship_summary`/`institutional_memory` when
+`!scheduled && body.acceptRelationshipSnapshot === true` (route.ts:86-91).
+The client (`app/capture/CaptureExperience.tsx`) only ever sends
+`acceptRelationshipSnapshot: true` when its own locally-computed
+`preview.relationshipSummary !== null` (line 197) -- and only shows the
+accept checkbox at all when that preview is non-null (line 418-420); when
+it's null the UI instead renders "No meaningful relationship details
+detected," with no checkbox to check. `preview.relationshipSummary` and
+`extracted.relationshipSummary` both come from
+`actionableRelationshipSnapshot()` in `lib/capture/interaction.ts`, which
+returns null unless at least one sentence matches
+`COMMITMENT_PATTERN`, `RELATIONSHIP_CHANGE_PATTERN`, or
+`FACT_SIGNAL_PATTERN`.
+
+Fetched both notes' actual text (not reproduced verbatim here) and ran
+the real `relationshipSnapshotDetails()`/`actionableRelationshipSnapshot()`
+functions against each, unmodified:
+- Donor 987's note describes a call about a **grandson's** bar mitzvah.
+  `specificFactsCount: 0`, `snapshotIsNull: true`.
+- Donor 67909's note (near-identical phrasing) describes a call about a
+  **son's** bar mitzvah. `specificFactsCount: 1`, `snapshotIsNull: false`.
+
+`FACT_SIGNAL_PATTERN` includes `\bson\b`/`\bdaughter\b`/`\bfamily\b` etc.
+as family-relevance signals. `\bson\b` requires a word boundary
+immediately before "son"; in "grandson's" the preceding character is "d"
+(a word character), so no boundary exists there and the match never
+fires. In "son's" (standalone), the boundary exists and it matches. Nothing
+in `FACT_SIGNAL_PATTERN`, `COMMITMENT_PATTERN`, or
+`RELATIONSHIP_CHANGE_PATTERN` recognizes "grandson"/"granddaughter"/
+"grandchild" as a distinct family-relevance term. This is why
+`institutional_memory` was also lost for donor 987, not just the
+snapshot: `extracted.memory` itself is always a non-null template string
+regardless of extraction success, but the UI gates the *entire* accept
+checkbox (which controls both fields' write, per the single shared
+`acceptRelationshipSnapshot` condition in route.ts:86-91) on
+`relationshipSummary` alone -- so a call with genuine, donor-relevant
+content (a grandchild's simcha) that happens to route through the
+"grandchild" family branch instead of the "child" branch never even gets
+offered for saving.
+
+**Not isolated to donor 987.** This is a content-shaped regex gap, not a
+per-donor data issue: any note whose only family-relevance signal is
+"grandson"/"granddaughter"/"grandchild"/"grandparent" (common phrasing
+for a yeshiva/day-school fundraiser logging a donor's grandchild's
+milestone) will silently fail to produce a snapshot preview -- and
+therefore silently lose institutional-memory capture too -- regardless of
+donor, capture route, or interaction type. No historical-frequency count
+was run (would require scanning existing interaction summary text, out
+of scope for a no-write investigation task); a real count needs a
+targeted read-only pass before any backfill decision.
+
+**Smallest evidence-supported fix (not applied -- reporting first, per
+explicit instruction, since it touches extraction heuristics):** add
+grandchild-relationship terms ("grandson", "granddaughter", "grandchild",
+"grandparent") to `FACT_SIGNAL_PATTERN` in `lib/capture/interaction.ts`.
+Single-file, single-regex change; no route, schema, or write-gating logic
+needs to change. A regression test belongs in `tests/capture.test.mjs`
+(or a small dedicated test file, matching this repo's structural-test
+convention) asserting a grandchild-milestone note now yields a non-null
+`actionableRelationshipSnapshot`. If approved, any backfill for
+previously-missed grandchild-phrased interactions would need to go
+through the existing human-review preview/apply tooling
+(`scripts/relationship-summary-cleanup-preview.mjs`, the same pattern
+already used for the prior relationship-summary cleanup pass) rather than
+an automatic write, per `docs/FUNDRAISING_OS_PRINCIPLES.md`'s "Never save
+AI-generated content without explicit user acceptance" rule.
+
+**Confirmation: no D1 write, no extraction-heuristic change, no deploy.**
+Only `SELECT` queries were run against Independent Staging; the local
+`node` invocation that exercised `relationshipSnapshotDetails()`/
+`actionableRelationshipSnapshot()` imported the existing, unmodified
+source file and made no edits to it. `origin/main` not touched. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+## Grandchild/Grandparent Extraction-Gap Fix -- FACT_SIGNAL_PATTERN (2026-08-20)
+
+Forward fix for the gap confirmed in "Relationship Snapshot /
+Institutional Memory Divergence -- Donor 987 vs 67909" above, approved by
+explicit instruction after that investigation.
+
+**Change.** `lib/capture/interaction.ts`'s `FACT_SIGNAL_PATTERN` gained
+six alternatives: `grandsons?|granddaughters?|grandchild(?:ren)?|
+grandparents?|grandmothers?|grandfathers?` (inserted after the existing
+`son|daughter`). No other pattern, route, schema, or write-gating logic
+changed. `COMMITMENT_PATTERN`/`RELATIONSHIP_CHANGE_PATTERN` were left
+untouched -- the gap was specifically in family-relevance fact detection,
+not commitment or relationship-change detection.
+
+**Regression tests.** New file `tests/relationship-snapshot-family-terms.test.mjs`,
+added to `package.json`'s `test` script chain. Runs the real, unmodified
+`relationshipSnapshotDetails()`/`actionableRelationshipSnapshot()`
+functions (not a source-text regex check) against: grandson/grandsons,
+granddaughter/granddaughters, grandchild/grandchildren, grandparent/
+grandparents, grandmother, grandfather (all producing facts); son/
+daughter unchanged (still producing facts, proving the fix didn't alter
+existing behavior); three false-positive probes ("Johnson", "reasons ...
+in person", "season") proving the new alternatives don't loosen matching
+for unrelated words containing "son"; and a structural check on
+`app/api/interactions/route.ts` proving the `!scheduled &&
+body.acceptRelationshipSnapshot === true` gate and the combined
+`relationship_summary`+`institutional_memory` UPDATE are both still
+present -- i.e. a fixed extraction pattern still cannot write anything
+without explicit client acceptance. All pass.
+
+**Donor 987's real note, re-checked (extraction only, no write):**
+`specificFactsCount` went from 0 (pre-fix) to 1 (post-fix); donor
+67909's stayed at 1 either way. Donor 987's row was NOT written to --
+per explicit instruction, no backfill was performed for 987 or anyone
+else. The next time this donor's call (or a similar note) goes through
+capture, the client will now offer the accept checkbox; the donor row
+itself is untouched by this task.
+
+**Read-only historical audit (no writes).** Scanned Independent Staging
+`interactions.summary LIKE '%grand%'`: 15 rows total. 1 (donor 987's own
+call, already known) was previously null under the old pattern and now
+produces a fact under the new one. The other 14 are `type = 'text'`,
+`source = 'manual'`, single-line summaries with no separate subject/note
+split -- confirmed via `splitInteractionSummary()` that their `note`
+portion is empty, so they were never eligible for extraction before or
+after this fix, old pattern or new. Their `type`/`source` combination
+matches `app/api/interactions/shared/route.ts` (the shared/broadcast
+route, which stores `summary` as one raw field and never calls the
+extraction functions at all, for any recipient, regardless of content --
+already documented in the investigation above as a deliberate, separate
+design choice). **Conclusion: not a materially broader extraction
+problem** -- exactly the one already-confirmed case was affected; no
+scope expansion needed, per explicit instruction to stop and report
+rather than expand if the audit had found otherwise.
+
+**Verification.** `pnpm test` (all suites, including the new file):
+exit 0, every suite reports `fail 0`. `pnpm exec tsc --noEmit`: clean,
+exit 0. `pnpm run build:staging-independent`: completed, full route
+manifest printed, no errors.
+
+**Confirmation: no D1 write, no deployment.** Only read-only `SELECT`s
+were run against Independent Staging D1 for both the original
+investigation and this audit. No `wrangler deploy` was run. `origin/main`
+unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -3265,6 +3461,72 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T19:00:00Z (approximate)
+Claude (Sonnet 5) — Implemented the approved forward fix for the
+grandchild/grandparent extraction gap confirmed in the prior
+investigation-only task. Added six alternatives to `FACT_SIGNAL_PATTERN`
+in `lib/capture/interaction.ts` (`grandsons?|granddaughters?|
+grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?`) --
+narrow, single-pattern change, no route/schema/gating-logic touched.
+Added `tests/relationship-snapshot-family-terms.test.mjs` (wired into
+`package.json`'s test chain): exercises the real extraction functions for
+every requested singular/plural family term, proves son/daughter behavior
+is unchanged, proves three "son"-substring false positives (Johnson,
+reasons/person, season) still don't match, and structurally proves the
+`acceptRelationshipSnapshot`-gated write is still required for both
+`relationship_summary` and `institutional_memory`. Re-ran the fixed
+extractor against donor 987's actual stored note (read-only, no write):
+now produces a fact, where before it produced none; donor 987's row
+itself was NOT backfilled, per explicit instruction. Read-only historical
+audit of all Independent Staging interactions containing "grand": 15
+total, exactly 1 (donor 987's own, already known) was affected by the old
+gap; the other 14 are shared/broadcast text messages
+(`app/api/interactions/shared/route.ts`, single-line summaries, no note
+body) that never call the extraction functions at all, by prior
+documented design -- not a materially broader problem, no scope
+expansion. `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. No D1 write, no deploy,
+`origin/main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
+Full report: "Grandchild/Grandparent Extraction-Gap Fix --
+FACT_SIGNAL_PATTERN (2026-08-20)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
+
+2026-08-20T18:20:00Z (approximate)
+Claude (Sonnet 5) — Investigation-only task: traced why a CALL logged for
+donor 987 did not update Relationship Snapshot/Institutional Memory while
+a near-identical CALL for donor 67909 did. Ruled out shared-activity/
+recipient-role (both interactions have `shared_activity_id`/`role` NULL --
+neither went through `app/api/interactions/shared/route.ts`), capture-
+route divergence (both `source = 'capture:call'`, same single-donor
+route), edit-after-create, write failure, and UI/D1 staleness (donor
+page reads `donors.relationship_summary`/`institutional_memory` directly,
+no cache/live derivation, and D1 already correctly shows NULL for 987).
+Proven root cause via read-only D1 `SELECT`s plus running the real,
+unmodified `actionableRelationshipSnapshot()`/`relationshipSnapshotDetails()`
+functions against each donor's actual note text: donor 987's note
+describes a call about a **grandson's** bar mitzvah, donor 67909's a
+**son's** bar mitzvah. `FACT_SIGNAL_PATTERN` in `lib/capture/interaction.ts`
+matches `\bson\b` but that word-boundary regex never fires inside
+"grandson" (no boundary before "son" when preceded by "grand"), and
+"grandson"/"granddaughter"/"grandchild" aren't recognized as their own
+family-relevance terms anywhere in the pattern. `app/api/interactions/
+route.ts` only writes `relationship_summary`/`institutional_memory` when
+the client sends `acceptRelationshipSnapshot: true`, and the client
+(`CaptureExperience.tsx`) only offers that checkbox when its local
+extraction preview is non-null -- so donor 987's call was never even
+offered for saving, on either field, despite genuine donor-relevant
+content. Not isolated to donor 987: any note whose only family signal is
+a grandchild-relationship word will hit the same gap. Smallest fix
+identified (add grandchild terms to `FACT_SIGNAL_PATTERN`) but NOT
+applied, per explicit instruction to report before touching extraction
+heuristics. No D1 write, no code change, no deploy. Full report:
+"Relationship Snapshot / Institutional Memory Divergence -- Donor 987 vs
+67909 (2026-08-20)" above. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T17:45:00Z (approximate)
 Claude (Sonnet 5) — Documentation/workflow-safety task: audited and fixed

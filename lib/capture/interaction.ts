@@ -178,7 +178,14 @@ const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly|no lon
 // specific fact survives instead of being collapsed into a generic
 // category name. A sentence flagged here is a real quote from the note,
 // never a manufactured phrase.
-const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|scholarship|student|tuition|education|campus|tour|school visit|site visit|proposal|request for support|funding request|ask amount|event|gala|dinner|reception|parlor meeting|family|spouse|son|daughter|wedding|engaged|engagement|seminary|birthday|anniversary|sick|illness|recovering|hospital|passed away)\b/i;
+// grandson/granddaughter/grandchild/grandparent/grandmother/grandfather
+// added 2026-08-20: \bson\b never matched inside "grandson" (no word
+// boundary before "son" when preceded by "grand"), so a note about a
+// donor's grandchild's milestone -- common phrasing for this fundraiser --
+// silently produced no relationship-snapshot facts. Proven via a real
+// donor pair (987 vs 67909, near-identical notes differing only in
+// "grandson's" vs "son's"); see docs/AI-HANDOFF.md.
+const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|scholarship|student|tuition|education|campus|tour|school visit|site visit|proposal|request for support|funding request|ask amount|event|gala|dinner|reception|parlor meeting|family|spouse|son|daughter|grandsons?|granddaughters?|grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?|wedding|engaged|engagement|seminary|birthday|anniversary|sick|illness|recovering|hospital|passed away)\b/i;
 
 export type RelationshipSnapshotDetails = {
   people: string[];
