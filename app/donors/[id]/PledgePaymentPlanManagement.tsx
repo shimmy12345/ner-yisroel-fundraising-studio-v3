@@ -3,7 +3,15 @@
 import { useState } from "react";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
-const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
+// timeZone: "UTC" is required here -- these are date-only epochs (UTC
+// midnight, the same convention lib/financial-date.ts's parseFinancialDate/
+// financialDateLabel use for every other financial date in this app).
+// Without it, Intl.DateTimeFormat falls back to the browser's local
+// timezone and a UTC-midnight date can display as the PREVIOUS calendar
+// day west of UTC -- the exact date-only/timezone bug class already fixed
+// once for open-pledge activity dates (see resolveOpenPledgeActivityDate's
+// doc comment).
+const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(epoch * 1000));
 const isoDate = (epoch: number) => new Date(epoch * 1000).toISOString().slice(0, 10);
 
 export type PledgePlanState = {

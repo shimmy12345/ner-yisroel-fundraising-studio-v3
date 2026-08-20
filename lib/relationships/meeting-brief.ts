@@ -11,6 +11,7 @@ import {
   type MeetingBriefPledgePlanSummary,
 } from "./meeting-brief-model";
 import { importedContextLine } from "./historical-context";
+import { financialDateLabel } from "../financial-date";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "./recommendation-evidence";
 import { buildDonorRecommendation } from "./recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment";
@@ -268,7 +269,15 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
         isLate: activePlan.isLate,
         isPlanEndedWithBalance: activePlan.isPlanEndedWithBalance,
         isCompleted: activePlan.isCompleted,
-        nextExpectedLabel: activePlan.nextUnsatisfiedExpectedPaymentAt !== null ? dateLabel(activePlan.nextUnsatisfiedExpectedPaymentAt) : null,
+        // financialDateLabel (UTC-pinned), never the timezone-aware
+        // dateLabel above -- this is a financial date-only epoch (UTC
+        // midnight, same convention as every other pledge/payment date),
+        // not a recurrence date computed in the fundraiser's own
+        // timezone like familyDateLine's occurrences. Using dateLabel here
+        // would shift the displayed day backward for any fundraiser west
+        // of UTC -- the same date-only/timezone bug class already fixed
+        // once for open-pledge activity dates.
+        nextExpectedLabel: activePlan.nextUnsatisfiedExpectedPaymentAt !== null ? financialDateLabel(activePlan.nextUnsatisfiedExpectedPaymentAt) : null,
       }
     : null;
 
