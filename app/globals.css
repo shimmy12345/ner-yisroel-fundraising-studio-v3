@@ -700,7 +700,13 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .pledge-plans-section { margin-bottom: 22px; padding: 20px 22px; border: 1px solid var(--line); border-radius: 13px; background: #fbfaf6; box-shadow: var(--shadow); }
 .pledge-plans-section .card-heading { margin-bottom: 4px; }
 .open-pledge-plan-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 14px; }
-.open-pledge-plan-row { padding: 14px 15px; border: 1px solid #e4dcc4; border-radius: 10px; background: #fff; }
+.open-pledge-plan-row { padding: 14px 15px; border: 1px solid #e4dcc4; border-radius: 10px; background: #fff; min-width: 0; max-width: 100%; }
+/* auto-fill lays out as many 240px+ tracks as the row's width allows, even
+   with only one card present -- a lone card then only occupies the first
+   track instead of the full row. When that card is showing the payment-plan
+   form (Set/Edit), let it span every track so the form has real room; compact
+   view-mode/no-plan-yet cards are unaffected and keep the normal grid size. */
+.open-pledge-plan-row:has(.payment-plan-form) { grid-column: 1 / -1; }
 .open-pledge-summary { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 10px; }
 .open-pledge-summary strong { font-family: Georgia, serif; font-size: 20px; font-weight: 600; color: #3a3320; }
 .open-pledge-summary span { color: var(--muted); font-size: 12px; text-align: right; }
@@ -716,12 +722,15 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .payment-plan-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .payment-plan-end { border-color: #e0c8bd !important; color: #a3402c !important; }
 .payment-plan-set-button { padding: 9px 13px; border: 1px solid #91ad9c; border-radius: 8px; background: #f2f7f3; color: #315f4b; font-weight: 750; cursor: pointer; }
-.payment-plan-form { padding-top: 10px; border-top: 1px dashed #e4dcc4; }
-.payment-plan-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.payment-plan-fields label { display: grid; gap: 6px; color: #52625a; font-size: 13px; font-weight: 700; }
+.payment-plan-form { padding-top: 10px; border-top: 1px dashed #e4dcc4; max-width: 100%; }
+.payment-plan-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; max-width: 100%; }
+/* min-width: 0 overrides the grid default (min-width: auto), which would
+   otherwise floor each column at its input's un-set intrinsic width -- see
+   the input/textarea rule below, which is the other half of this fix. */
+.payment-plan-fields label { display: grid; gap: 6px; color: #52625a; font-size: 13px; font-weight: 700; min-width: 0; }
 .payment-plan-fields label:last-child { grid-column: 1 / -1; }
 .payment-plan-fields span { color: var(--muted); font-weight: 500; }
-.payment-plan-fields input, .payment-plan-fields textarea { min-height: 42px; padding: 9px 11px; border: 1px solid #d5ded8; border-radius: 8px; font: inherit; }
+.payment-plan-fields input, .payment-plan-fields textarea { min-height: 42px; padding: 9px 11px; border: 1px solid #d5ded8; border-radius: 8px; font: inherit; width: 100%; max-width: 100%; box-sizing: border-box; }
 .payment-plan-fields textarea { min-height: 70px; resize: vertical; }
 .payment-plan-form .payment-plan-actions { justify-content: flex-end; }
 .payment-plan-form .payment-plan-actions button:last-child { border-color: var(--green); background: var(--green); color: #fff; }
