@@ -12,30 +12,28 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`e69dc58` -- implements the Monthly Payment Plan feature end to end (code
-+ tests + guardrail updates + docs), on top of `3472f40`/`a78e49f`'s
-design-only commits. **NOT deployed, migration NOT applied to any D1
-database, no staging data written.** See "Pledge Payment Plan --
-IMPLEMENTATION REPORT" below for the full accounting and the exact
-approval needed before a staging rollout.
+`0f75ad0` -- the Monthly Payment Plan feature (`e69dc58`), its doc-update
+follow-up (`f474d1d`), and a small display-bug fix (`0f75ad0`) found
+during the controlled staging rollout (see "Pledge Payment Plan -- LIVE
+ROLLOUT VERIFICATION" below). **Deployed to Independent Staging (Worker
+version `1875be3f-392f-4b74-835a-8270a9d1f84a`); migration 0033 applied to
+Independent Staging only; a real payment plan now exists on the real
+KOLX2026 pledge, created through the actual product UI and verified.
+Production untouched.**
 
 origin/feature/independent-cloudflare-sandbox:
+`0f75ad0` (pushed; matches local HEAD exactly, no divergence). Previously
 `93bdfb3` (the birthday-bucketing + open-pledge-payment-recency
-correctness fixes, on top of `eec5266`'s corrected request-scoped dedup
-fix, the concurrent session's Ask-backfill/closure work, and the earlier
-instrumentation commit `83bfa75`; all pushed). Deployed to Independent
-Staging as Worker version `5f738898-adee-4e43-8fc9-2f170e377c07` --
-**not** `db4dcc3e`/`f29c075f`/`70f3c2c6` (all superseded). **Local HEAD
-(`e69dc58`, and the two design commits before it) is 3 commits ahead of
-origin and has NOT been pushed.** See "Deployment State" and the
-birthday/pledge-fix section below for the full prior report.
+correctness fixes) was the tip; see "Deployment State" and the
+birthday/pledge-fix section below for that prior report.
 
 origin/main:
-4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
+4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched throughout this
+task -- reconfirmed via a fresh fetch immediately before and after the
+staging rollout).
 
 Working tree:
-clean as of the `e69dc58` commit (this doc update itself is a small
-follow-up commit on top).
+clean.
 
 ## Independent Staging Incident -- Error 1102 (2026-08-19 16:59:03 UTC / 12:59:03 EDT) -- INVESTIGATION ONLY, NO FIX APPLIED
 
@@ -1745,6 +1743,183 @@ a direct D1 insert) as live staging acceptance verification; (3) commit
 this working tree and push to `origin/feature/independent-cloudflare-
 sandbox`; (4) deploy to Independent Staging. None of these four steps have
 been taken.
+
+## Pledge Payment Plan -- LIVE ROLLOUT VERIFICATION (Independent Staging, 2026-08-20)
+
+Controlled rollout of the implementation above, approved and executed
+end to end against real staging data using the actual deployed UI/API
+(not synthetic/mocked calls). Production was never touched.
+
+**Migration.** `drizzle/0033_pledge_payment_plans.sql` applied via
+`wrangler d1 execute fundraising-os-staging-db --remote --config
+wrangler.staging.jsonc --file ...`. Verified via `--command` mode (not
+the unreliable `--file` JSON summary, per this repo's established
+practice): both `pledge_payment_plans` and `pledge_payment_plan_changes`
+exist with DDL byte-for-byte identical to the migration file (CHECK
+constraints, both FKs, both indexes `pledge_payment_plans_pledge_idx`/
+`pledge_payment_plan_changes_plan_idx` all present); pre-existing table
+row counts unchanged before/after (`giving_activities` 5176,
+`jl_payment_assignment_audits` 19, `gifts` 0, `donors` 248, both times).
+
+**A real bug found and fixed during rollout.** After creating the real
+plan through the UI, the donor page displayed "Next expected: Sep 17,
+2026" / "Final expected: May 17, 2027" -- one day EARLIER than the
+approved Sep 18/May 18 values. Stopped and investigated before treating
+verification as complete. Root cause, confirmed by reading the stored
+row directly in D1: `next_expected_payment_at`/`final_expected_payment_at`
+were stored exactly correctly (Sep 18 2026 / May 18 2027, UTC midnight)
+-- this was a **display-only** bug, not a data-integrity problem.
+`app/donors/[id]/PledgePaymentPlanManagement.tsx`'s local `dateLabel`
+helper formatted these UTC-midnight date-only epochs with
+`Intl.DateTimeFormat` and no `timeZone` specified, so it silently fell
+back to the browser's local timezone -- for any timezone west of UTC, a
+UTC-midnight epoch always displays as the previous calendar day. The
+exact same bug was independently present in
+`lib/relationships/meeting-brief.ts`'s `openPledgePlanSummary` construction
+(it reused the fundraiser-timezone-aware `dateLabel`, correct for
+recurrence dates like birthdays but wrong for a UTC-midnight financial
+date). Both fixed by switching to `financialDateLabel` (the
+`timeZone: "UTC"`-pinned helper every other financial date in this app
+already uses, from `lib/financial-date.ts`) -- commit `0f75ad0`. Re-ran
+`pnpm test`/`tsc --noEmit`/`pnpm run build:staging-independent` (all
+clean), pushed, redeployed, and reconfirmed the donor page now correctly
+reads "Next expected: Sep 18, 2026" / "Final expected: May 18, 2027".
+
+**Deploy.** Two deployments this task: an initial one at commit `f474d1d`
+(Worker version `831f319f-89b6-4cb0-bdea-74e428311419`, 2026-08-20T04:31:58Z)
+before the display bug was caught, and the corrected one at commit
+`0f75ad0` (Worker version `1875be3f-392f-4b74-835a-8270a9d1f84a`,
+2026-08-20T04:38:18.759Z) after the fix -- this second version is the one
+the real KOLX2026 plan was created under and is the one currently live.
+Both via `pnpm run deploy:staging-independent`
+(`wrangler deploy --config wrangler.staging.jsonc`), confirmed live both
+via the deploy output and an independent `wrangler deployments list`
+check. URL: `https://fundraising-os-staging.sgoldstein.workers.dev`.
+
+**KOLX2026 before/after financial values (proving JL/financial data was
+never touched).** Pledge: `giving_activities.id =
+ed3e9f11-33a7-4414-9409-217d41d63009` (donor: Mr. & Mrs. Yaakov Zachter,
+`donor_id = 19af69d6-f147-474b-88ad-f6358ff65b9a`, campaign KOLX2026).
+Read immediately before any write: `paid_cents=450000` ($4,500),
+`balance_cents=1350000` ($13,500), latest linked payment (
+`jl_payment_assignment_audits`) Aug 18, 2026 for $1,500 -- exactly
+matching the values the approval was based on, no drift. Read again
+after migration, after plan creation, after the edit-path test, and
+after the note revert: `paid_cents`/`balance_cents`/`updated_at` on the
+`giving_activities` row **never changed** (`updated_at` stayed at
+2026-08-19T16:49:47Z throughout, predating every write this task made by
+~12 hours), the linked-payment count for this pledge stayed at exactly 1,
+and every whole-database row count (`giving_activities`,
+`jl_payment_assignment_audits`, `gifts`, `donors`) stayed identical at
+every checkpoint.
+
+**Exact plan created (through the real "Set payment plan" UI, not a
+direct D1 insert).** Cadence monthly, installment amount $1,500
+(150000 cents), next expected payment 2026-09-18, final expected payment
+2027-05-18, no note. `pledge_payment_plans` row `id =
+5050be0a-5505-4a67-9c78-73c20275e277`: `expected_day_of_month` correctly
+auto-derived as `18` from the entered date (never a separate input,
+never exposed in the UI); `pledge_activity_id` correctly points at the
+verified pledge; `donor_id`/`user_id` correctly scoped; `ended_at IS
+NULL`. Exactly one `pledge_payment_plans` row exists for this pledge at
+every checkpoint -- no duplicate ever created, including after the
+edit-path test below.
+
+**Audit trail.** `pledge_payment_plan_changes` holds exactly 3 rows for
+this plan, in order: `created` (the initial plan, `changed_fields`
+covering all 5 populated fields), `updated` (`changed_fields=["note"]`,
+the harmless edit-path verification test below), `updated`
+(`changed_fields=["note"]`, reverting the note back to null). No
+`ended` row -- the real plan was deliberately never ended as part of
+testing, per the approved rollout plan (end-plan behavior is already
+covered by the automated test suite).
+
+**follow_up_pledge suppression -- proven structurally, not just by
+ranking.** Built a one-off script (run locally, then deleted -- never
+committed) that fed the exact real staging values (the plan's stored
+fields, `linkedPaymentDates=[Aug 18, 2026]`, `balanceCents=1,350,000`,
+real `now`) through the actual `buildRecommendationEvidence` +
+`generateCandidates` functions from the committed module (not a
+reimplementation). Result: `activePaymentPlan.isOnTrack: true`,
+`isLate: false`, and `generateCandidates` returned only
+`['reconnect_contact_gap']` -- **no `follow_up_pledge` candidate is
+generated at all** for this donor, not merely outranked by something
+else. This matches the donor page's real "Suggested Action" ("Review
+before next outreach," an unrelated `reconnect_contact_gap`
+recommendation) and confirms the candidate itself is suppressed.
+
+**Donor-page verification.** `$13,500` open commitment still shown; a
+new "OPEN PLEDGES" section (live-mode only, one card per open pledge)
+renders the KOLX2026 pledge with a "PAYMENT PLAN" block: "Monthly / Next
+expected: Sep 18, 2026 / Final expected: May 18, 2027 / Expected
+installment: $1,500 / [Edit plan] [End plan]" -- confirming "Set payment
+plan" correctly became "Edit plan"/"End plan" once a plan exists.
+`expected_day_of_month`, the plan id, and any other internal linkage are
+never exposed in this UI.
+
+**Meeting Brief verification.** The real donor's Meeting Brief
+("Suggested Preparation" -> "Discuss the open pledge") reads: "Open
+pledge: $13,500 remaining. Being paid monthly; next expected payment
+Sep 18, 2026." -- truthful, correctly dated (post-fix), never implies
+the pledge is paid off, never framed as a collections problem.
+
+**Assistant-context verification -- code path confirmed, live exercise
+not achieved this session (honest limitation, not a failure).**
+`app/api/assistant/route.ts` (line ~40) calls the exact same
+`loadMeetingBrief()` already verified correct above, and threads
+`primaryMeetingBrief.recommendation` into the Assistant's context
+snapshot -- so by construction it can never disagree with the Meeting
+Brief/donor page for the same donor, and no separate Assistant-specific
+payment-plan code exists (as designed -- scope was not broadened).
+However, tracing `lib/ai/rule-based.ts` shows `snapshot.donor.recommendation`
+is only surfaced in the `meeting-brief` task's response text, which is
+itself gated on an upcoming dated meeting reminder existing for some
+donor (`s.meetings[0]`) -- none exists in this workspace right now, and
+Zachter is not currently the workspace's auto-selected "primary donor"
+(`brief.priorities[0]`/`brief.gifts[0]`) either. The Assistant API has no
+donor-selection input by design. Rather than create a synthetic meeting
+reminder or add a donor-selection parameter just to force this specific
+check -- either of which would be scope creep beyond what was approved --
+this was left as a verified-by-code-inspection-only item. If a live
+Assistant exercise for this exact donor is wanted, the natural trigger is
+a real dated meeting reminder for Zachter, which would also be genuine
+product usage rather than test scaffolding.
+
+**Mobile/narrow-viewport verification -- not achieved (known tooling
+limitation, same as prior tasks this session).** `resize_window` to
+390x844 reported success, but the rendered page continued showing the
+full desktop layout (sidebar nav, no reflow), and a subsequent `zoom`
+screenshot attempt timed out. Did not claim mobile verification that
+didn't actually happen. The responsive CSS added in the implementation
+(`app/globals.css`) mirrors the Asks section's existing breakpoint
+exactly, by construction, but that is a code-review claim, not a
+verified rendering claim.
+
+**Edit-path test.** Used the real "Edit plan" UI to add a temporary note
+("Staging edit-path verification test note (2026-08-20)"), verified via
+D1 that exactly the `note` field changed (`changed_fields=["note"]`,
+every financial/schedule field byte-identical before and after,
+`giving_activities` untouched, no duplicate plan row), then used the same
+UI to clear the note back to blank, matching the approved value exactly.
+Final state: `note IS NULL`, matching the original approval.
+
+**End Plan was deliberately never exercised against the real plan** --
+per the approved rollout instructions, since automated tests already
+cover it and doing so on the real KOLX2026 plan would create
+unnecessary audit noise / temporarily alter live recommendation
+behavior. The real plan remains active (`ended_at IS NULL`) after this
+task.
+
+**Final quality gates.** Re-ran after the display-bug fix (the only code
+change made during rollout): `pnpm test` -- all pass; `pnpm exec tsc
+--noEmit` -- clean; `pnpm run build:staging-independent` -- succeeds.
+Nothing changed in the committed tree after that point (git status clean,
+local HEAD `0f75ad0` == `origin/feature/independent-cloudflare-sandbox`
+HEAD, `origin/main` unchanged at `4ea1d5e` -- all reconfirmed via a fresh
+fetch at the end of this task).
+
+**Production**: never touched at any point in this task -- no D1 write,
+no deploy, no code change to any production-pointing config.
 
 ## Latest Completed Task
 
