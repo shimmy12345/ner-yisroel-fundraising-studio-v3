@@ -1921,6 +1921,165 @@ fetch at the end of this task).
 **Production**: never touched at any point in this task -- no D1 write,
 no deploy, no code change to any production-pointing config.
 
+## Independent Staging Incident -- Error 1102 (2026-08-20 15:44:12 UTC / 11:44:12 EDT) -- INFRASTRUCTURE-LIMIT AUDIT ONLY, NO FIX/CHANGE APPLIED
+
+Ray ID `a2e2849e1fdc23dd`. Investigated per explicit instruction to determine
+whether repeated 1102s are an account/plan CPU-ceiling problem rather than
+solely an application defect -- no application code change, no deploy, no
+D1 write, no billing/plan change. All findings below are read directly from
+the Cloudflare dashboard (Workers plans page, the Worker's Settings page,
+and Observability event records for this exact Ray ID), not carried over
+from memory or from prior incidents.
+
+**1. Workers plan: FREE, verified via the dashboard's own "Current plan"
+badge** (`dash.cloudflare.com/2f34086b78ac8643498a1a600b846757/workers/plans`
+-- Free tier card is explicitly marked "Current plan"). Not inferred.
+
+**2-5. CPU limit.** The plan page's own published Free-tier row: **100,000
+requests/day, up to 10 ms CPU time per request, 10 ms max CPU time per
+invocation.** `wrangler.staging.jsonc` (read directly, reproduced in full in
+the "Deployment State" section) contains **no `limits.cpu_ms` key at all**
+-- no override configured. The Worker's own Settings page in the dashboard
+(`workers/services/view/fundraising-os-staging/production/settings`) has
+**no "Limits"/CPU-ms configuration section at all** -- confirming this is
+not user-adjustable on Free (that section only exists on Paid); the
+effective ceiling is simply the Free-plan platform default itself, and
+nothing is set lower than that default.
+
+**6. Memory limit.** 128 MB, per Cloudflare's platform-wide Workers isolate
+memory ceiling (same on Free and Paid -- not itself a line item on the
+Workers plans page, which prices compute/requests/storage, not the fixed
+runtime memory ceiling). Not relevant to this specific incident (see below).
+
+**7. Has this Worker ever used >10 ms CPU on an ordinary, successful
+request? Yes, repeatedly, already documented in this file before today.**
+The 2026-08-19 dedup-fix verification table above (`## Independent Staging
+Duplicate-Loader Fix`) recorded 5 real, ordinary Today-page navigations,
+none of them a stress test, none intentionally provoking a 1102:
+70, 79, 85, 94, and 223 ms CPU, **all `"outcome":"ok"`, HTTP 200** -- i.e.
+7-22x the Free-tier's published 10 ms ceiling, succeeding. The
+instrumentation table before that recorded 141-242 ms CPU, also all
+successful. This is not new evidence manufactured for this audit; it was
+already sitting in this document.
+
+**Incident detail -- Ray `a2e2849e1fdc23dd`, read directly from the
+Observability event record:**
+
+| Field | Value |
+|---|---|
+| Route | `GET /?priorities=all` (Today/workspace-brief route, "coming-up-queue" expanded view -- same `loadWorkspaceBrief()` path as bare `/`) |
+| Referer | a donor page, navigating back to the queue (`from=%2F%3Fpriorities%3Dall%23coming-up-queue&origin=queue`) -- a real user click, not a prefetch or automated probe |
+| `outcome` | `"exceededCpu"` |
+| `cpuTimeMs` | **68** |
+| `wallTimeMs` | 201 |
+| `response.status` | 503 |
+| `scriptVersion.id` | `1875be3f-392f-4b74-835a-8270a9d1f84a` -- the exact Worker version live at the end of today's payment-plan rollout (see above); includes the dedup fix (`eec5266`, live since 2026-08-19) |
+| `requestId` / `traceId` | `7770000e34da0f538867c1467bbcd157` / `a501b9f06190c5b37cfbd3c93d9501de` |
+| Separate runtime log line | `"Worker exceeded CPU time limit."`, same timestamp |
+
+**Nearby traffic (11:39:16-11:44:12 EDT window, same Worker, pulled with no
+filter applied).** A real, single-user session: five separate
+`pledge_payment_plan_created` events (11:39:45, 11:41:43, 11:42:47,
+11:43:40, 11:44:09 EDT -- someone exploring the newly-rolled-out payment-
+plan feature after this task's own rollout finished, not this task's own
+KOLX2026 write), interleaved with `donor_page_render` and repeated
+`GET /?priorities=all` navigations. **No burst, no concurrency**: the
+failing request is the only event at its timestamp, and the identical
+route succeeded (`workspace_brief_render` logged, no error) at 11:39:17,
+11:39:48, 11:41:52, 11:43:05, and 11:43:42 EDT -- four times in the same
+five minutes, immediately before and after the failure. This rules out
+mechanism (D) (concurrent contention) exactly as the prior 16:59:03
+incident did (see below) -- this is again mechanism (C), a single ordinary
+request that happened to exceed CPU on its own.
+
+**Comparison with prior 1102 (`a2dab4de9e40be78`, 2026-08-19 16:59:03
+UTC, documented above).**
+
+| | Prior (`a2dab4de9e40be78`) | New (`a2e2849e1fdc23dd`) |
+|---|---|---|
+| Route | `GET /` | `GET /?priorities=all` (same underlying loader) |
+| `cpuTimeMs` | 163 | **68** |
+| `wallTimeMs` | 517 | 201 |
+| `scriptVersion` | `f5c3430d` (before the dedup fix) | `1875be3f` (after the dedup fix, and after today's payment-plan feature) |
+| Burst? | No -- single failing request | No -- single failing request |
+
+**The most important new finding: this incident's kill threshold (68 ms) is
+lower than several already-documented SUCCESSFUL requests on the identical
+route** (85, 94, 141, 152, 223, 242 ms all previously succeeded, tabulated
+above in this same file). That is not consistent with a simple "any
+request over some fixed cpuTimeMs number fails" rule -- it indicates the
+account is not reliably operating below its ordinary budget on Free at
+all, to the point that individual request outcomes vary independent of
+their own measured cost. The dedup fix (`eec5266`) cut typical cost by
+roughly 40-65% and is confirmed still live in the version that failed here
+(`1875be3f` descends from it) -- and a request still got killed, at a cost
+lower than several that didn't.
+
+**CRITICAL DECISION: (A) Free-plan ceiling is fundamentally too low for
+this SSR app. Recommend Workers Paid.** Ordinary, successful requests on
+this exact route have repeatedly cost 70-242 ms of CPU -- 7-24x the
+Free-tier's published 10 ms ceiling -- even after a proven, deployed
+optimization (the dedup fix) materially reduced typical cost. This new
+incident's failure occurred at a cost (68 ms) below several prior
+successes on the same route, meaning the account isn't cleanly separated
+into "under budget, succeeds" vs. "over budget, fails" on Free -- it's
+chronically over Free's intended envelope for this app's ordinary
+render path, with individual requests surviving or not somewhat
+inconsistently. This is `exceededCpu`, not `exceededMemory` -- **not**
+option D; the 128 MB memory ceiling is not implicated and a plan upgrade
+does not change it regardless. Workers Paid's default 30-second (up to
+5-minute, configurable) per-invocation CPU ceiling would remove this
+entire failure class outright for a route whose own instrumented internal
+phases alone (D1 query fan-out) already run 53-67 ms per loader call, before
+counting the ~200-700 ms of wall time (and unknown CPU) this file's prior
+instrumentation task documented as still unattributed outside
+`loadWorkspaceBrief()` (auth/session resolution, RSC render/serialization).
+
+**Is code optimization still needed after an upgrade? Yes.** A plan
+upgrade removes the acute failure risk but does not address two open
+items already on record in this file: (1) the cold-start request still
+doesn't reliably dedupe (`## Independent Staging Duplicate-Loader Fix`,
+"What remains unproven / open" #1), so the single most expensive case
+(223 ms observed) is unresolved; (2) a large share of each request's
+wall time and CPU time happens outside `loadWorkspaceBrief()` entirely
+and remains uninstrumented (#3, same section). Neither is blocking once
+on Paid, but both are still worth pursuing as non-urgent follow-ups --
+this audit did not investigate or fix either.
+
+**Estimated minimum plan/cost.** Workers Paid: **$5/month base
+subscription** + usage-based overage beyond included quotas (10M
+requests/month included, then $0.30/million; CPU $0.02/million ms beyond
+included; per-invocation CPU ceiling default 30 s, configurable up to 5
+min) -- read directly off the same Workers plans page. This is a
+low-traffic, single-owner staging environment (231 events in the hour
+surrounding this incident, 2 errors); expected usage should stay at or
+very near the $5/month base with negligible overage, though this is an
+estimate from observed traffic volume, not a Cloudflare-quoted figure.
+
+**Exact approval needed next.** Explicit authorization to upgrade this
+Cloudflare account (`2f34086b78ac8643498a1a600b846757`,
+"Sgoldstein@nirc.edu's Account") from Workers Free to Workers Paid ($5/mo
+base + usage) -- **not performed in this task**, per explicit instruction
+to stop before any billing/plan/config change. Alternatively, if the
+decision is to stay on Free, the next approval needed would instead be
+for a further CPU-optimization task (the two open items above), which
+would reduce but -- per this file's own prior caveat -- not provably
+eliminate 1102 risk on Free, since the account is already over budget for
+this route's ordinary cost even after the last optimization pass.
+
+**Proven vs. inference, explicitly.** PROVEN: account plan (dashboard's
+own "Current plan" badge), no `limits.cpu_ms` override in config or in the
+dashboard, this incident's route/outcome/cpu/wall/version/no-burst facts
+(read directly off the event record and surrounding log window), that
+ordinary successful requests on this same route have repeatedly exceeded
+Free's published 10 ms ceiling (already-documented historical table, not
+re-measured today), that this incident is CPU- not memory-bound.
+INFERRED: the exact dollar cost of upgrading (Cloudflare's own usage-based
+overage isn't predictable from 5 samples of traffic); that Paid would
+fully eliminate 1102 risk for this route (very likely given the 3000x
+higher default ceiling relative to this route's own measured cost, but
+not something that can be proven without actually being on Paid).
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -2692,6 +2851,37 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T15:50:00Z (approximate)
+Claude (Sonnet 5) — Infrastructure-limit audit of a new Independent Staging
+Error 1102 (Ray `a2e2849e1fdc23dd`, 15:44:12 UTC), per explicit instruction:
+investigation only, no application code change, no deploy, no D1 write, no
+billing/plan change. Confirmed via the Cloudflare dashboard (not memory):
+this account is on **Workers Free** (10 ms CPU/request, no configurable
+`limits.cpu_ms` -- none set in `wrangler.staging.jsonc` either). The
+incident itself: `outcome: "exceededCpu"`, `cpuTimeMs: 68`, `wallTimeMs:
+201`, route `GET /?priorities=all` (same `loadWorkspaceBrief()` path as
+prior incidents), `scriptVersion` `1875be3f-...` (today's post-rollout
+version, includes the 2026-08-19 dedup fix), no burst/concurrency at the
+same timestamp. Cross-referenced against this file's own already-recorded
+data: ordinary successful requests on this exact route have repeatedly
+cost 70-242 ms CPU (7-24x Free's published ceiling), and this incident's
+68 ms kill is *lower* than several of those prior successes -- meaning the
+account is chronically over Free's intended budget for this app, not
+failing on rare outliers. Recommendation returned: **(A) Free-plan
+ceiling is fundamentally too low for this SSR app; upgrade to Workers
+Paid ($5/mo base + usage)** would remove this failure class outright
+(default 30 s/up to 5 min CPU ceiling vs. this route's ~60-70 ms
+internal-phase cost alone); code optimization (cold-start dedup gap,
+uninstrumented wall-time remainder -- both already on record as open
+items) is still recommended afterward as non-blocking follow-up, not a
+substitute. No upgrade performed -- explicit approval required first, per
+instruction to stop before any billing/plan/config change. Full report:
+`## Independent Staging Incident -- Error 1102 (2026-08-20 15:44:12 UTC ...)
+-- INFRASTRUCTURE-LIMIT AUDIT ONLY` above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T04:10:00Z (approximate)
 Claude (Sonnet 5) — Revised the pledge payment-plan design (still not
