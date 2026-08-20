@@ -1,9 +1,20 @@
 # Pledge Payment Plan — Design (not implemented)
 
-Status: **DESIGN ONLY.** No schema, migration, or application code has been
-written. No D1 was touched (read-only queries only, for the audit and the
-KOLX2026 worked example). This document is the full audit and design
-report; `docs/AI-HANDOFF.md` carries a summary and points here.
+Status: **DESIGN ONLY, REVISED AND APPROVED (pending the mechanics
+introduced by this revision).** No schema, migration, or application code
+has been written. No D1 was touched (read-only queries only, for the
+audit and the KOLX2026 worked example). This document is the full audit
+and design report; `docs/AI-HANDOFF.md` carries a summary and points
+here.
+
+**Revision note**: the overall design was approved with one material
+correction required to §8 (the original `latest actual payment + ~30
+days` expected-date formula conflated EXPECTED schedule with ACTUAL
+payment behavior and was rejected) and one reversal to §11 (a plan is no
+longer auto-ended when the pledge balance reaches zero). §8, §9's
+references, §11, and §19 are revised below; every other section reflects
+the original, still-approved design. See "Approval status" near the end
+for the exact list of what changed vs. what's confirmed.
 
 Product boundary (restated, governs every recommendation below): JL /
 `giving_activities` remains the financial system of record. This feature
@@ -155,13 +166,14 @@ Every field from the task's own sketch, challenged:
 | `pledge_activity_id` | Yes, **required, non-nullable** | The stable link — see §5. Named to match `jl_payment_assignment_audits.pledge_activity_id`'s existing convention exactly, not a new name. |
 | `cadence` | Yes, but trivial | See §6 — kept as a single-value, CHECK-constrained column (`'monthly'` only) purely for display/self-documentation. **Plays no role in suppression logic at all** — only `next_expected_payment_at`/`final_expected_payment_at` do. |
 | `installment_amount_cents` | Yes, nullable, **display-only** | Never validated against actual payments (§20 risk #4) — storing it is cheap and useful for the UI/glance value, but the suppression logic never reads it. |
-| `next_expected_payment_at` | Yes, **required** | The plan's original anchor date. See §8 for how it's used (never overwritten by a background process; only by an explicit edit). |
+| `expected_day_of_month` | **Yes — required** (revised in this round) | The fixed calendar-day anchor (1-31), auto-derived from `next_expected_payment_at`'s own day at creation/edit time (no separate form field — see §11). **Necessary, not merely convenient**: once `next_expected_payment_at`/a derived cycle date has been clamped through a February (displayed as day 28), the raw date value alone cannot say whether the *original* intended day was 28 or 31 — that information is lost the moment it's clamped. A separate persisted anchor is the only way to correctly return to the 31st in March. See §8. |
+| `next_expected_payment_at` | Yes, **required** | The plan's original/last-edited anchor date. See §8 (revised in this round) for exactly how it's used — it is the seed the calendar-month walk starts from, never overwritten by a background process, only by an explicit `[Edit plan]`. |
 | `final_expected_payment_at` | Yes, **required, not nullable** | Deliberately required, not optional — this is the sole backstop against indefinite silent suppression (risk #11, "user forgets to end plan"). Without it, an on-track plan could suppress follow-up forever. |
 | `note` | Yes, nullable | Matches `asks.note` exactly. |
 | `status` (enum) | **No — replaced by `ended_at`** | Challenged directly, per the task's own instruction. There are truly only two states here (active/ended), not the 3+ states that justify an enum elsewhere in this schema (`recommendations.status`, `data_imports.status`). A nullable `ended_at` timestamp (`NULL` = active, non-null = ended) is smaller, gives "when did it end" for free, and avoids the task's own flagged risk of a status column duplicating what a timestamp already implies. |
 | `created_at`/`updated_at` | Yes | Matches the `...timestamps` spread convention used everywhere else in this schema (see `asks`). |
 
-**Recommended schema:**
+**Recommended schema** (revised in this round — adds `expected_day_of_month`):
 ```
 pledge_payment_plans
   id                          text PRIMARY KEY
@@ -170,10 +182,14 @@ pledge_payment_plans
   pledge_activity_id          text NOT NULL REFERENCES giving_activities(id)
   cadence                     text NOT NULL DEFAULT 'monthly' CHECK (cadence IN ('monthly'))
   installment_amount_cents    integer                    -- nullable, display-only
-  next_expected_payment_at    integer NOT NULL           -- date-only epoch
+  expected_day_of_month       integer NOT NULL CHECK (expected_day_of_month BETWEEN 1 AND 31)
+  next_expected_payment_at    integer NOT NULL           -- date-only epoch; the anchor
   final_expected_payment_at   integer NOT NULL           -- date-only epoch, required backstop
   note                        text                       -- nullable
-  ended_at                    integer                    -- nullable; NULL = active
+  ended_at                    integer                    -- nullable; NULL = active; ONLY ever
+                                                           -- set by an explicit fundraiser
+                                                           -- action, never automatically on
+                                                           -- zero balance (revised, see §11)
   created_at                  integer NOT NULL
   updated_at                  integer NOT NULL
 ```
@@ -280,69 +296,168 @@ Comparing the four options as asked:
 on the plan record), so it can be tuned in one place later without a
 migration if real usage proves it wrong.
 
-## 8. Expected-vs-actual logic
+## 8. Expected-vs-actual logic (REVISED)
 
-All fields below are **derived at evidence-build time, never stored**
-(per the task's own explicit preference, and matching how `ageDays` is
-already derived from `activityDate` today — not a new pattern).
+**This section replaces the prior version's `effectiveExpectedAt =
+latestActualPaymentAt + ~30 days` formula, which was rejected**: it
+conflated the AGREED schedule with ACTUAL payment behavior, causing an
+early or late payment to permanently shift all future expected dates
+(concretely: an Aug 15 early payment then a Sep 22 late payment would
+have dragged the "expected day" from the 18th toward the 22nd, when the
+agreement is and stays "the 18th of every month"). The revised model
+keeps EXPECTED and ACTUAL strictly separate, as required:
+
+- **EXPECTED** — `next_expected_payment_at`, `expected_day_of_month`,
+  `final_expected_payment_at`. Advances **only** by calendar-month
+  arithmetic from itself. Never touched by an actual payment's own date.
+- **ACTUAL** — `latestActualPaymentAt` (MAX of linked
+  `jl_payment_assignment_audits.payment_date` for this exact pledge —
+  the same query the Bug 2 fix already added, reused directly). Used
+  **only** to decide whether an expected cycle has been *satisfied* —
+  never to redefine what the schedule itself is.
+
+### Calendar-month advancement rule
+
+All fields below are still **derived at evidence-build time, never
+stored** (`next_expected_payment_at` itself is never rewritten by
+background logic — see the note at the end of this section).
 
 ```
-GRACE_DAYS = 7            // constant, not stored
-APPROX_MONTHLY_DAYS = 30  // constant, not stored -- see the month-end
-                           // problem below for why this is a day-count
-                           // approximation, not calendar-month arithmetic
+function daysInSpecificMonth(year, month): integer
+  // Small (~5-line) helper -- reuses isLeapYear(), already exported
+  // from lib/calendar/gregorian-recurring-date.ts. Every non-February
+  // month's real day count is fixed and already correct in that file's
+  // own DAYS_IN_MONTH_MAX table; only February varies by year, which
+  // isLeapYear() already answers. No new date library, no new engine.
+  return month === 2 ? (isLeapYear(year) ? 29 : 28) : DAYS_IN_MONTH_MAX[month - 1]
 
-Given: plan.nextExpectedPaymentAt, plan.finalExpectedPaymentAt,
-       plan.endedAt, latestActualPaymentAt (MAX(jl_payment_assignment_
-       audits.payment_date) for THIS pledge_activity_id -- the exact
-       same query the Bug 2 fix already added, reused directly),
-       balanceCents, now
+function advanceOneCalendarMonth(fromDateOnlyEpoch, expectedDayOfMonth): epoch
+  { year, month } = calendar parts of fromDateOnlyEpoch (UTC, date-only)
+  nextMonth = month === 12 ? 1 : month + 1
+  nextYear  = month === 12 ? year + 1 : year
+  // ALWAYS clamps to expectedDayOfMonth -- the FIXED anchor -- never to
+  // fromDateOnlyEpoch's own (possibly already-clamped) day. This is
+  // exactly what makes Feb 28 -> Mar 31 correct instead of Feb 28 -> Mar 28.
+  clampedDay = min(expectedDayOfMonth, daysInSpecificMonth(nextYear, nextMonth))
+  return dateOnlyEpoch(nextYear, nextMonth, clampedDay)
+```
 
-isActive       = plan.endedAt === null
-isFullyPaid    = balanceCents <= 0
-isPastFinal    = now > plan.finalExpectedPaymentAt
+`advanceOneCalendarMonth` is called with `expectedDayOfMonth` — the
+stored anchor — on every step, never with the previous step's own
+(possibly clamped) day. This is the entire mechanism that prevents
+permanent drift to the 28th after a February.
 
-// The "current" expected date re-anchors to the most recent REAL
-// payment once one exists, rather than chaining projections off the
-// original anchor -- this is what avoids compounding drift (see the
-// month-end problem below). It is never less than the plan's own
-// original anchor.
-effectiveExpectedAt = latestActualPaymentAt !== null
-  ? max(plan.nextExpectedPaymentAt, latestActualPaymentAt + APPROX_MONTHLY_DAYS)
-  : plan.nextExpectedPaymentAt
+### Cycle-satisfaction rule
+
+```
+GRACE_DAYS = 7                // constant, not stored
+CYCLE_WALK_CAP = 60           // defensive bound only (~5 years) --
+                                // guards against corrupted/absurd anchor
+                                // data, not a normal-operation limit;
+                                // a donor paying monthly for 5 real
+                                // years just walks 60 cheap steps
+
+function isCycleSatisfied(cycleExpectedAt, latestActualPaymentAt): boolean
+  return latestActualPaymentAt !== null
+    && latestActualPaymentAt >= cycleExpectedAt - GRACE_DAYS   // symmetric
+    // No upper bound needed here: a payment arbitrarily LATE for this
+    // cycle still satisfies it (better late than never -- see risk #2/#6
+    // below); lateness itself is measured separately, from "now," not
+    // from whether some payment eventually arrived.
+
+function currentCycleExpectedAt(plan, latestActualPaymentAt): epoch
+  cycle = plan.nextExpectedPaymentAt
+  iterations = 0
+  while isCycleSatisfied(cycle, latestActualPaymentAt) and iterations < CYCLE_WALK_CAP:
+    cycle = advanceOneCalendarMonth(cycle, plan.expectedDayOfMonth)
+    iterations += 1
+  return cycle   // the first NOT-YET-satisfied expected cycle
+```
+
+This directly answers every one of the eight required cases (worked
+through in detail in §8a below): a payment within `±GRACE_DAYS` of a
+cycle's expected date satisfies exactly that cycle; a late payment still
+satisfies whichever cycle it lands closest-after; two payments in one
+month collapse to the same `MAX()` used everywhere else in this codebase;
+a skipped month self-corrects the moment a catch-up payment lands; and —
+critically — **the walk always advances using `expected_day_of_month`,
+never the actual payment's own day**, so a September payment landing on
+the 22nd still produces `Oct 18` as the next cycle, not `Oct 22`.
+
+### Putting it together
+
+```
+isActive     = plan.endedAt === null
+isFullyPaid  = balanceCents <= 0             // derived from JL balance
+                                                // directly, always -- see §11
+isPastFinal  = now > plan.finalExpectedPaymentAt
+
+cycleAt = currentCycleExpectedAt(plan, latestActualPaymentAt)
 
 daysLate = (isActive && !isFullyPaid && !isPastFinal)
-  ? max(0, daysBetween(now, effectiveExpectedAt) - GRACE_DAYS)
+  ? max(0, daysBetween(now, cycleAt) - GRACE_DAYS)
   : 0
-isLate               = daysLate > 0
-isOnTrack            = isActive && !isFullyPaid && !isPastFinal && !isLate
+isLate                 = daysLate > 0
+isOnTrack              = isActive && !isFullyPaid && !isPastFinal && !isLate
 isPlanEndedWithBalance = isActive && isPastFinal && !isFullyPaid
-isCompleted          = isFullyPaid   // regardless of endedAt
+isCompleted             = isFullyPaid           // regardless of endedAt or isActive
 ```
 
-**The month-end problem, resolved by avoiding it entirely.** The task
-asks to compare (a) storing `next_expected_payment_date` and advancing it
-by one calendar month after each detected payment, using existing date
-helpers, vs. (b) day-of-month + final date. Neither is used here.
-Calendar-month arithmetic (`setUTCMonth`-style) has the well-known Jan-31
-+1-month-=-Mar-3 overflow bug, and no month-arithmetic helper exists
-anywhere in this codebase today (`lib/workspace/local-time.ts` only has
-day-granularity `addCalendarDays`) — building one would be new machinery
-for a problem this design doesn't need to solve. Instead,
-`effectiveExpectedAt` is a **derived day-count approximation**
-(`latestActualPaymentAt + ~30 days`), recomputed fresh every time
-directly from the real most-recent payment — never a chained/iterated
-projection, so there is nothing to drift. This is a suppression
-heuristic, not a real calendar system: an edge-of-month plan will
-gradually drift a day or two against true calendar months over a year,
-which is irrelevant for "is a payment meaningfully overdue" and explicitly
-out of scope for anything more precise (this is not an accounting or
-amortization system).
+"LATE" means exactly: **`now > cycleAt + 7 calendar days`**, where
+`cycleAt` is the first not-yet-satisfied expected cycle (never a raw,
+possibly-stale `next_expected_payment_at` read straight off the row) —
+this is the precise form of the approved "today > next_expected_payment_date
++ 7 calendar days" rule, generalized to "current cycle" so it stays
+correct after any number of elapsed months without a background job ever
+rewriting the stored anchor.
 
-`next_expected_payment_at` in the stored record therefore means "the
-plan's originally-declared next-due date, used as the floor/anchor before
-any payment has landed, and never silently rewritten by a background
-process" — only an explicit `[Edit plan]` action changes it.
+`next_expected_payment_at` in the stored record means "the plan's
+originally-declared (or last explicitly edited) anchor date." It is
+**never** rewritten by background logic — the UI displays the *derived*
+`cycleAt` (e.g. "Next expected: Oct 18"), which is always current, while
+the stored field stays exactly what the fundraiser last set until they
+explicitly `[Edit plan]`. This keeps the "prefer deriving over storing
+computed state" discipline intact even under the revised, stricter
+calendar-anchored model.
+
+### 8a. Deterministic behavior for the eight required cases
+
+| # | Case | `isCycleSatisfied` outcome | Result |
+|---|---|---|---|
+| 1 | Payment a few days early (e.g. expected 18th, paid 15th) | `15th >= 18th - 7 = 11th` → satisfied | Cycle satisfied; walk advances to next month's 18th. A payment more than 7 days early does not yet satisfy the upcoming cycle (it may instead satisfy an earlier still-open one, or simply not count yet) — bounded by the same symmetric grace window, not a separate rule. |
+| 2 | Payment on the expected date | `18th >= 11th` → satisfied trivially | On track. |
+| 3 | Payment during the 7-day grace (e.g. paid the 23rd) | `23rd >= 11th` → satisfied | On track — the whole point of the grace window. |
+| 4 | Payment after grace (e.g. paid the 26th, 8 days late) | Still `>= 11th` → eventually satisfied once it lands | The gap between the grace deadline and the actual late payment correctly shows `isLate = true`; the moment the late payment is recorded, the cycle is satisfied and the walk advances — self-correcting, no manual reset needed. |
+| 5 | Two payments in one month | `MAX(payment_date)` is the only input | Identical to the Bug 2 fix's own multi-payment handling — the later payment is what's checked; the earlier one is irrelevant. |
+| 6 | No payment for one month, then a payment the following month | The skipped cycle is `isLate` throughout the gap; the catch-up payment satisfies whichever cycle it's within grace of | Self-corrects the moment the catch-up payment lands — no special-casing, no manual "resume" action. |
+| 7 | Payment below the optional installment amount | Amount is never inspected | Satisfies the cycle exactly the same as a full payment — see the Installment-amount section below for why this is the simple, safe rule. |
+| 8 | Payment above the optional installment amount | Amount is never inspected | Same as #7 — a larger payment satisfies the cycle no differently; if it happens to zero the balance, `isCompleted` takes over separately (§11), unrelated to this rule. |
+
+### Installment-amount semantics (confirmed)
+
+`installment_amount_cents` is **purely descriptive** — the
+cycle-satisfaction rule never reads it. The "very simple, safe rule"
+requested: presence and *date* of a linked payment is what satisfies a
+cycle; *amount* is never checked. This is safe because (a) real donors
+legitimately vary payment amounts for many benign reasons that shouldn't
+trigger false lateness, (b) amount reconciliation is exactly the kind of
+accounting-adjacent logic this feature must not become, and (c) the one
+case where amount genuinely matters — the pledge being effectively paid
+off — is already and separately handled by `isFullyPaid`, which reads the
+real JL balance directly, not this rule.
+
+### The month-end problem, now resolved with calendar-month arithmetic
+
+The revised model *does* build the small calendar-month-advancement
+function the original version deliberately avoided — because the task's
+own worked requirement (schedule must not drift from the 18th, and Feb
+28 must not permanently reset a 31st-anchored schedule to the 28th)
+cannot be satisfied by a day-count approximation; it requires real
+calendar intent. The scope stays minimal: one ~10-line advancement
+function, reusing `isLeapYear()` (already exported), storing exactly one
+new field (`expected_day_of_month`) to preserve the anchor day across a
+clamp — not a general recurrence engine (still monthly-only, still no
+recurrence-rule string, still no library).
 
 ## 9. Recommendation suppression/reactivation rules
 
@@ -446,13 +561,20 @@ declining a solicitation, so forcing a reason isn't warranted). Sets
 this codebase's universal convention (asks, interactions, relationship
 summaries — nothing fundraiser-entered is ever hard-deleted here).
 
-**Auto-end on full payment**: when the linked pledge's `balance_cents`
-reaches `0`, auto-set `ended_at` (with an `'ended'` audit row, reason
-`"pledge paid in full"`) rather than requiring a manual click. This is a
-safe, deterministic, evidence-backed transition (reacting to an
-unambiguous fact, balance = 0), not a guess — the same spirit as
-`planPaymentAssignments` already auto-flipping `nextStatus` to
-`'completed_gift'` when balance hits zero today.
+**Paid-off behavior (REVISED — no longer auto-ends the plan).** The
+original version of this design recommended auto-setting `ended_at` when
+`balance_cents` reaches `0`. **This is rejected**: `ended_at` must
+represent only an explicit local ending/editing action; a zero balance is
+derived financial state, and the two must not be conflated. Once
+`balance_cents <= 0`, `isFullyPaid`/`isCompleted` (§8) already makes the
+plan's suppression logic moot on its own — `openPledge` itself becomes
+`null` once balance is `<=0` (structural, unrelated to any plan), so
+`follow_up_pledge` cannot fire regardless of whether `ended_at` was ever
+set. The plan row is left exactly as the fundraiser last left it. The
+donor-profile card (§10) may show a passive, non-blocking hint ("This
+plan appears complete — paid in full") with the existing `[End plan]`
+button still available for the fundraiser to click if/when they want to,
+but nothing is written automatically.
 
 ## 12. Audit-history recommendation
 
@@ -536,7 +658,7 @@ task's explicit instruction.
 dashboard"** — this integrates through the exact same three existing
 surfaces every other evidence field does.
 
-## 19. KOLX2026 worked example
+## 19. KOLX2026 worked example (REVISED — true calendar-month schedule)
 
 **Design fixture only — no row was created, KOLX2026 was not modified.**
 Real donor/pledge used for concreteness (Mr. & Mrs. Yaakov Zachter,
@@ -550,49 +672,48 @@ donor_id:                   19af69d6-f147-474b-88ad-f6358ff65b9a
 pledge_activity_id:         ed3e9f11-33a7-4414-9409-217d41d63009
 cadence:                    monthly
 installment_amount_cents:   150000        ($1,500)
-next_expected_payment_at:   2026-09-18    (one month after the Aug 18 payment)
-final_expected_payment_at:  2027-05-18    ($13,500 / $1,500 = 9 more months from Aug 18)
+expected_day_of_month:      18
+next_expected_payment_at:   2026-09-18    (one calendar month after Aug 18)
+final_expected_payment_at:  2027-05-18    (unchanged from the original design fixture)
 note:                       null
 ended_at:                   null
 ```
 
-| Scenario | `latestActualPaymentAt` | `effectiveExpectedAt` | `daysLate` | Result |
+| Scenario | `latestActualPaymentAt` | `cycleAt` (current unsatisfied cycle) | `daysLate` | Result |
 |---|---|---|---|---|
-| Aug 19 (day after the Aug 18 payment) | Aug 18 | max(Sep 18, Aug 18+30d≈Sep 17) = Sep 18 | 0 | **ON TRACK** — `follow_up_pledge` suppressed |
-| One day before next expected (Sep 17) | Aug 18 | Sep 18 | 0 | **ON TRACK** — suppressed |
-| Seven days after the expected date (Sep 25) | Aug 18 | Sep 18 | max(0, 7-7)=0 | **ON TRACK** — exactly at the grace boundary, still suppressed (grace is inclusive) |
-| Task's own "today Sep 1" LATE example, i.e. 14 days after Aug 18 with no new payment | Aug 18 | Sep 18* | — | *(see note below — this example predates the Sep 18 anchor; using the plan's literal first cycle, expected≈Sep 18, so Sep 1 is still before it and is ON TRACK. A true 14-days-late case, e.g. Oct 2 with no Sep payment: daysLate=max(0,14-7)=7 → **LATE** — "Check in on the $13,500 pledge payment plan." / "Expected monthly payment appears overdue (last payment Aug 18)."* |
-| After May 18, 2027 with $0 balance | — | — | — | **COMPLETED** — `balance<=0` means `openPledge` itself is already null; no candidate at all (unrelated to the plan) |
-| After May 18, 2027 with $3,000 balance | — | isPastFinal=true | — | **PLAN ENDED WITH BALANCE** — "Follow up -- the payment plan for the open $3,000 pledge was expected to be complete by May 18, 2027." |
-
-(Table note: the task's illustrative "expected Aug 18, today Sep 1" LATE
-example describes a *different*, simpler plan shape than this specific
-worked fixture's first-cycle math produces — included above for
-completeness, with the actual formula's own boundary behavior spelled
-out explicitly rather than silently reconciled.)
+| **Aug 19** (day after the Aug 18 payment) | Aug 18 | Sep 18 (Aug 18 doesn't satisfy Sep 18 — too early: `Aug18 < Sep18-7=Sep11`) | 0 (now < cycleAt) | **ON TRACK** — suppressed |
+| **Sep 17** (one day before expected) | Aug 18 | Sep 18 | 0 | **ON TRACK** — suppressed |
+| **Sep 18** (exactly on the expected date, no September payment yet) | Aug 18 | Sep 18 | 0 | **ON TRACK** — suppressed (right at the due date, still within grace) |
+| **Sep 25** (7 days after expected, no September payment) | Aug 18 | Sep 18 | max(0, 7-7)=0 | **ON TRACK** — exactly at the grace boundary, grace is inclusive |
+| **Sep 26** with no September payment | Aug 18 | Sep 18 | max(0, 8-7)=1 | **LATE** — "Check in on the $13,500 pledge payment plan." / "Expected monthly payment appears overdue (last payment Aug 18)." |
+| **Sep 22** if a payment arrived that day (4 days after expected, within grace) | Sep 22 | `isCycleSatisfied(Sep18, Sep22)`: `Sep22 >= Sep11` → satisfied → walk advances to `advanceOneCalendarMonth(Sep18, 18) = Oct18`; `isCycleSatisfied(Oct18, Sep22)`: `Sep22 >= Oct11`? No → stop at Oct 18 | 0 (now=Sep22 < Oct18) | **ON TRACK** — the September cycle is satisfied (a few days late is fine); next expected cycle is now Oct 18 |
+| **October, after that late-but-within-grace September payment** | Sep 22 | `advanceOneCalendarMonth(Sep18, expectedDayOfMonth=18)` = **Oct 18** — **not** `Sep22 + ~1 month ≈ Oct 22`, because the walk always uses the fixed `expected_day_of_month=18`, never the actual payment's own day | — | Proves no drift: the schedule stays anchored to the 18th regardless of which day payments actually land on |
+| **Final date (May 18, 2027) with $0 balance** | — | — | — | **COMPLETED** — `balance<=0` means `openPledge` itself is already `null` structurally; no `follow_up_pledge` candidate at all, unrelated to the plan. The plan row itself is **not** auto-ended (§11, revised) — it simply stops mattering to the recommendation engine. |
+| **Final date (May 18, 2027) with $3,000 balance** | — | `isPastFinal = true` overrides on-track status regardless of cycle satisfaction | — | **PLAN ENDED WITH BALANCE** — "Follow up -- the payment plan for the open $3,000 pledge was expected to be complete by May 18, 2027." |
 
 ## 20. Edge-case decisions
 
 | # | Risk | Decision |
 |---|---|---|
-| 1 | Payment a few days early | Naturally handled — an early payment simply re-anchors `effectiveExpectedAt` earlier too; no special case. |
-| 2 | Payment a few days late | Absorbed by the 7-day grace (§7); no false reactivation. |
-| 3 | Two payments in one month | `MAX(payment_date)` already picks the later one correctly (same logic already tested by the Bug 2 fix); a bonus payment just makes the plan look extra on-track. |
-| 4 | Payment amount differs from expected installment | **Deferred, by design.** `installment_amount_cents` is never validated against actual payments — any payment counts as activity, avoiding false reactivation over normal real-world variance. |
-| 5 | Plan changes midstream | `[Edit plan]` writes an `'updated'` audit row; evaluation is always derived fresh, so no migration logic needed. |
-| 6 | Donor skips a month but catches up later | Self-correcting with no special-casing: the plan correctly shows `isLate` during the gap and automatically re-suppresses the moment the catch-up payment lands. |
+| 1 | Payment a few days early | Naturally handled by the symmetric `±GRACE_DAYS` window in `isCycleSatisfied` (§8/§8a #1) — satisfies the upcoming cycle without redefining the schedule itself. |
+| 2 | Payment a few days late | Absorbed by the 7-day grace (§7/§8a #3); no false reactivation. |
+| 3 | Two payments in one month | `MAX(payment_date)` already picks the later one correctly (same logic already tested by the Bug 2 fix and reused unchanged here); a bonus payment just satisfies the current cycle a bit more comfortably. |
+| 4 | Payment amount differs from expected installment | **Deferred, by design.** `installment_amount_cents` is never validated against actual payments (§8a Installment-amount semantics) — any payment counts as cycle-satisfying activity, avoiding false reactivation over normal real-world variance. |
+| 5 | Plan changes midstream | `[Edit plan]` writes an `'updated'` audit row; evaluation is always derived fresh from the current stored anchor, so no migration logic is needed. |
+| 6 | Donor skips a month but catches up later | Self-correcting with no special-casing (§8a #4/#6): the skipped cycle correctly shows `isLate` during the gap and the walk automatically advances/re-suppresses the moment the catch-up payment satisfies it — using the fixed `expected_day_of_month` for the next cycle, never drifting to the catch-up payment's own day. |
 | 7 | Multiple open pledges | Covered by §15 — always scoped to one `pledge_activity_id`. |
 | 8 | JL row replacement/import identity | **Deferred**, with passive detection recommended (§5/§14) — not solved with reconciliation heuristics. |
-| 9 | Final date passes with balance | Explicit `isPlanEndedWithBalance` case (§8/§19). |
-| 10 | Pledge paid early | `isFullyPaid` takes priority over everything; plan auto-ends (§11). |
-| 11 | User forgets to end plan | Mitigated by the required `final_expected_payment_at` backstop and auto-end-on-full-payment; residual risk beyond that is accepted for v1, not solved further. |
+| 9 | Final date passes with balance | Explicit `isPlanEndedWithBalance` case (§8/§19), overrides on-track status regardless of cycle satisfaction. |
+| 10 | Pledge paid early | `isFullyPaid` (derived directly from the live JL balance) takes priority over everything for recommendation purposes — `follow_up_pledge` cannot fire once balance is `<=0`, regardless of the plan. The plan row itself is **not** auto-ended (revised — see §11); it remains until an explicit `[End plan]`. |
+| 11 | User forgets to end plan | Mitigated by the required `final_expected_payment_at` backstop (`isPlanEndedWithBalance` still fires) and by `isFullyPaid` already suppressing `follow_up_pledge` on its own once paid off; a stale-but-harmless plan row sitting unended is accepted residual risk for v1, not solved further. |
 | 12 | Imported historical payments predate the plan | No special handling needed — `MAX(payment_date)` naturally considers any real payment regardless of when the plan itself was created; confirmed no bug risk here. |
 
 ## 21. Files likely to change (implementation phase — not done now)
 
-- `db/schema.ts` — new `pledgePaymentPlans`, `pledgePaymentPlanChanges` tables
+- `db/schema.ts` — new `pledgePaymentPlans`, `pledgePaymentPlanChanges` tables (including `expectedDayOfMonth`)
 - `drizzle/00XX_pledge_payment_plans.sql` (next free migration number after 0032)
-- `lib/relationships/recommendation-evidence.ts` — extend `openPledge` with `activePaymentPlan`; derive `isOnTrack`/`isLate`/`daysLate`/`isPlanEndedWithBalance`/`isCompleted`
+- new `lib/relationships/pledge-payment-plan.ts` (or similar) — the small, pure calendar-month arithmetic (`advanceOneCalendarMonth`, reusing `isLeapYear` from `lib/calendar/gregorian-recurring-date.ts`) and cycle-satisfaction walk (`isCycleSatisfied`, `currentCycleExpectedAt`) from §8 — kept separate from `recommendation-evidence.ts` since it's pure date arithmetic, not evidence-shaping, mirroring how `lib/calendar/*.ts` is already split out from the loaders that consume it
+- `lib/relationships/recommendation-evidence.ts` — extend `openPledge` with `activePaymentPlan`; derive `isOnTrack`/`isLate`/`daysLate`/`isPlanEndedWithBalance`/`isCompleted` using the above module
 - `lib/relationships/recommendation-candidates.ts` — `followUpPledgeCandidate` branches on plan state
 - `lib/workspace/live-data.ts` — fetch plans + reuse/extend the existing pledge-payment query; thread into `openPledge`
 - `lib/relationships/meeting-brief.ts` — same threading + `pledgePlanLine()`
@@ -609,18 +730,20 @@ out explicitly rather than silently reconciled.)
 ## 22. Tests required
 
 - Migration/schema rehearsal (real in-memory SQLite, mirroring `0032_asks.sql`'s own rehearsal test)
+- `advanceOneCalendarMonth`: Jan 31 → Feb 28 (non-leap) / Feb 29 (leap); Feb 28/29 → Mar 31 (**must** return to 31, not stay pinned at 28 — the core month-end requirement); every other month's ordinary 31→30-day transition (e.g. day 31 anchor into April → 30)
+- `isCycleSatisfied`/`currentCycleExpectedAt` (the cycle-satisfaction walk): each of the 8 §8a cases individually — a few days early, on the date, within grace, after grace (self-corrects once paid), two payments in one month, a skipped month followed by a catch-up, amount below/above installment (both must satisfy identically, amount never inspected)
+- **The core anti-drift proof**: a September payment landing on a non-anchor day (e.g. the 22nd) must still produce `Oct 18` as the next cycle, never `Oct 22` — the KOLX2026 §19 "proving no drift" scenario, asserted directly
 - `activePaymentPlan` derivation: on-track / late / plan-ended-with-balance / completed / no-plan, for every §19 scenario
 - `followUpPledgeCandidate`: suppressed when on-track; correct wording when late; correct wording when ended-with-balance; unchanged behavior with no plan
 - Multi-pledge isolation: a plan on pledge A never affects pledge B, same donor
-- Grace-period boundary: exactly at grace, one day past grace
-- Re-anchoring: consecutive payments on different days-of-month don't drift `effectiveExpectedAt`
+- Grace-period boundary: exactly at grace (still on track), one day past grace (late)
 - Historical payment predating plan creation still counts (§20 #12)
-- Two payments in one month still resolves correctly (§20 #3)
 - Donor merge: plan/plan-changes `donor_id` reassigned; `pledge_activity_id` untouched; no dedup applied
 - Staging-reset: new tables present (self-check test should force this)
 - Backup/export classification: new tables classified (self-check test should force this)
 - API routes: create/edit/end, audit-row correctness, ownership checks (mirroring `asks` route tests)
-- Auto-end on full payment
+- Paid-off behavior: `ended_at` is confirmed **not** auto-set when balance reaches zero; `isCompleted`/`isFullyPaid` alone suppresses the candidate
+- `expected_day_of_month` auto-derivation from the fundraiser-entered `next_expected_payment_at` at creation/edit time
 - No reminders/recommendations auto-created by plan creation/edit/end
 
 ## 23. Risks
@@ -675,15 +798,50 @@ and Meeting Brief's `pledgePlanLine()` wording, always phrase it as
 
 ---
 
+## Approval status (updated this round)
+
+**The overall design is approved**, with one material revision required
+and now made: §8's expected-vs-actual mechanism (previously a rejected
+`latest actual payment + ~30 days` day-count approximation) has been
+replaced with a true calendar-month-anchored schedule (`expected_day_of_
+month` + `advanceOneCalendarMonth` + the `isCycleSatisfied` walk, §8/§8a),
+and §11's paid-off behavior (previously auto-ending the plan on zero
+balance) has been reversed to never auto-set `ended_at`. Every other
+previously-approved item (§4's field set otherwise, `ended_at` over a
+status enum, `giving_activities.id` linkage, monthly-only cadence, the
+fixed 7-day grace, optional/never-validated installment amount,
+one-pledge-per-plan, the compact card UX, `follow_up_pledge` becoming
+plan-aware rather than a new candidate kind, no JL mutation, no fake
+giving rows, no automatic reminders, no general recurrence engine, no
+cross-donor reporting, no pipeline/collections architecture, multiple
+pledges each having their own plan, "Payment plan" terminology, and the
+phased implementation order in §25) is **unchanged and remains approved**
+exactly as originally written.
+
 ## Unresolved decisions requiring explicit approval
 
-1. The minimal field set in §4 — in particular: `final_expected_payment_at` **required** (not optional), `installment_amount_cents` optional and never validated, `cadence` kept as a trivial single-value column rather than omitted entirely.
-2. `ended_at` (nullable timestamp) instead of a `status` enum column.
-3. `giving_activities.id` as the stable pledge link, accepting the documented residual risk (rare pledge-terms-correction edge case, §5/§14/§20#8) as deferred rather than solved.
-4. The fixed 7-day grace period default (not user-configurable, not zero, not behavior-inferred).
-5. The "effective expected date" derivation (`max(stored anchor, latest actual payment + ~30 days)`) and the deliberate choice to approximate monthly cadence as a 30-day window rather than building real calendar-month arithmetic.
-6. Auto-ending a plan (with an audited `'ended'` row) when the pledge balance reaches $0, rather than requiring a manual `[End plan]` click.
-7. Terminology: "Payment plan" vs. the other candidate labels.
-8. The donor-profile UX shape (new `OpenPledgePlanCard` mirroring `OpenAskCard`), and that no reminder/follow-up integration is added in v1.
-9. The phased order in §25, and that Phase 1 (schema + migration only, no UI) is what gets built first once approved — not the whole feature at once.
-10. Scope boundary: explicitly **not** building quarterly/custom cadence, amount validation, or cross-donor reporting in this feature at all — v2-or-never, not silently smuggled into v1.
+Only the mechanics introduced or changed by *this* revision remain open
+— everything else above is confirmed:
+
+1. **The `expected_day_of_month` field itself** (§4/§8) — a new,
+   required, auto-derived-not-user-entered field, storing the fixed
+   calendar-day anchor separately from `next_expected_payment_at` so a
+   February clamp can never permanently lose the true anchor day.
+2. **The specific calendar-month advancement algorithm** (§8) —
+   `advanceOneCalendarMonth` always clamps to the *fixed*
+   `expected_day_of_month`, never to the previous cycle's own (possibly
+   already-clamped) day. This is what makes Feb 28 → Mar 31 correct; a
+   simpler-but-wrong version would silently produce Feb 28 → Mar 28.
+3. **The specific cycle-satisfaction rule** (§8/§8a) — a symmetric
+   `±GRACE_DAYS` window around each cycle's expected date, checked via a
+   bounded forward walk (`CYCLE_WALK_CAP = 60`, a defensive/data-sanity
+   bound only) that finds the first not-yet-satisfied cycle; payment
+   *amount* is never inspected for satisfaction purposes.
+4. **The reversed paid-off behavior** (§11) — confirming `ended_at` is
+   *never* auto-set on zero balance, and that the plan row is left
+   exactly as the fundraiser last left it (with only a passive UI hint,
+   never a write) once the pledge is fully paid.
+5. Confirmation that the phased order in §25 still applies unchanged
+   under this revised mechanism, and that Phase 1 (schema + migration
+   only, including the new `expected_day_of_month` column, no UI) is
+   what gets built first once approved — not the whole feature at once.

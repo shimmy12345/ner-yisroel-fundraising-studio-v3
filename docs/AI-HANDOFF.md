@@ -1487,57 +1487,75 @@ audited while tracing Bug 2:
   own Bug 2 fix and the Ask feature both already used. Not built here;
   flagged as the concrete next step if/when this feature is approved.
 
-## Pledge Payment Plan -- DESIGN COMPLETE, NOT IMPLEMENTED (2026-08-20)
+## Pledge Payment Plan -- DESIGN APPROVED (with one revision), NOT IMPLEMENTED (2026-08-20)
 
 Full design report: `docs/PLEDGE-PAYMENT-PLAN-DESIGN.md`. **No schema,
 migration, or application code was written; D1 was only read (never
 written) for the KOLX2026 worked example, which was NOT modified.**
 
-**What this closes.** Answers the "Deferred: monthly payment plans" note
-directly above -- the smallest coherent feature for marking an open
+**What this closes.** The smallest coherent feature for marking an open
 pledge as being paid on a known schedule, so `follow_up_pledge` stops
 surfacing while a donor is paying as expected.
 
-**Recommended model (summary -- see the design doc for full reasoning on
-every point):** a new, small local table `pledge_payment_plans` (+
-`pledge_payment_plan_changes` audit table, directly modeled on
-`ask_changes`), linked to `giving_activities.id` (proven stable across
-ordinary JL reimports -- payments update that row in place; only a rare
-future correction to the pledge's own original commitment terms would
-orphan the link, which is deliberately deferred rather than solved with
-reconciliation heuristics). Monthly-only cadence in v1 (no recurrence
-engine). `final_expected_payment_at` required (the sole backstop against
-indefinite silent suppression). `ended_at` nullable timestamp instead of
-a status enum. A fixed 7-day grace period. `isOnTrack`/`isLate`/
-`isPlanEndedWithBalance`/`isCompleted` are all **derived at evidence-build
-time, never stored** -- reusing the exact `jl_payment_assignment_audits`
-query the Bug 2 payment-recency fix already added. No new candidate kind:
-`followUpPledgeCandidate` gains one early-return suppression branch plus
-plan-aware wording; scoring formulas are otherwise untouched. Integrates
-through the same three existing evidence loaders (Today, donor page,
-Meeting Brief/Assistant) the Ask feature and the Bug 2 fix both already
-used -- no new dashboard, no cross-donor reporting.
+**Status: the overall design is approved.** One material revision was
+required and has been made (see below); with that revision, every other
+previously-recommended decision (field set, `ended_at` over a status
+enum, `giving_activities.id` linkage, monthly-only cadence, fixed 7-day
+grace, optional/never-validated installment amount, one-pledge-per-plan,
+compact card UX, `follow_up_pledge` becoming plan-aware rather than a new
+candidate kind, no JL mutation, no fake giving rows, no automatic
+reminders, no general recurrence engine, no cross-donor reporting, no
+pipeline/collections architecture, "Payment plan" terminology, the
+phased build order) is confirmed and unchanged.
 
-**KOLX2026 worked example** (design fixture only, not applied): walks the
-real pledge (Zachter, $13,500 open, $1,500/mo hypothetical plan) through
-on-track / grace-boundary / late / plan-ended-with-$0 / plan-ended-with-
-balance scenarios -- see the design doc's "KOLX2026 worked example"
-section for the full table.
+**The revision (REJECTED and corrected):** the original design derived
+the next expected payment date as `latest actual payment + ~30 days`.
+This was rejected -- it conflates the AGREED/EXPECTED schedule with
+ACTUAL payment behavior, so an early or late payment would permanently
+drag the schedule off its true anchor day (e.g. expected-18th drifting
+toward the 22nd after one late payment). **Corrected model**: EXPECTED
+and ACTUAL are now kept strictly separate. A new, required
+`expected_day_of_month` field (1-31, auto-derived from the fundraiser's
+entered date, not a separate form input) anchors the schedule; a small,
+pure `advanceOneCalendarMonth` function (reusing `isLeapYear`, already
+exported from `lib/calendar/gregorian-recurring-date.ts`) advances the
+expected date one real calendar month at a time, always clamping to the
+*fixed* anchor day -- so Feb 28 correctly reverts to Mar 31, never stays
+pinned at the 28th. A separate `isCycleSatisfied`/`currentCycleExpectedAt`
+walk (bounded, deterministic, amount-blind) decides whether an actual
+linked payment satisfies a given expected cycle, using a symmetric
+±7-day grace window -- verified computationally (not just asserted) that
+a September payment landing on the 22nd still produces `Oct 18` as the
+next cycle, never `Oct 22`. Still monthly-only, still no recurrence-rule
+string, still no library -- one small (~10-line) advancement function
+plus one new schema field, not a general recurrence engine.
 
-**10 explicit decisions need approval before any implementation begins**
-(full list in the design doc's "Unresolved decisions" section) --
-covering the exact field set, the `ended_at` vs. status-enum choice, the
-`giving_activities.id` linkage risk, the 7-day grace default, the
-day-count (not calendar-month) lateness approximation, auto-ending a
-plan on full payment, terminology ("Payment plan"), the donor-profile UX
-shape, the phased build order (schema+migration first, UI later), and
-the explicit non-goals (no quarterly/custom cadence, no amount
-validation, no cross-donor reporting).
+**Also reversed: paid-off behavior.** The original design auto-set
+`ended_at` when the pledge balance reached zero. **Rejected and
+corrected**: `ended_at` now represents only an explicit local
+ending/editing action; zero balance is derived financial state and the
+two are never conflated. A fully-paid pledge already can't produce a
+`follow_up_pledge` candidate at all (structural -- `openPledge` itself
+becomes `null` once balance is `<=0`), so no plan mutation was ever
+needed for this to work correctly; the plan row is now left exactly as
+the fundraiser last left it.
 
-**Status: stopped for approval, as instructed.** No implementation, no
-migration, no deploy. Next step is the user reviewing the 10 decisions
-above (or the design doc directly) and approving before Phase 1
-(schema-only) begins.
+**KOLX2026 worked example (revised)**: walks the real pledge (Zachter,
+$13,500 open, $1,500/mo hypothetical plan, expected day 18) through
+Aug19 / Sep17 / Sep18 / Sep25 (grace boundary) / Sep26 (late) / Sep22
+(within-grace payment) / October (proving the schedule stays anchored to
+the 18th, not drifting to the 22nd) / final-date-with-$0 /
+final-date-with-balance -- see the design doc's revised "KOLX2026 worked
+example" section for the full table.
+
+**Remaining approval needed**: only the mechanics introduced by this
+revision -- the `expected_day_of_month` field itself, the specific
+calendar-month advancement algorithm, the specific cycle-satisfaction
+rule (symmetric grace window, bounded walk, amount-blind), and the
+reversed paid-off behavior (see the design doc's "Unresolved decisions"
+list, now narrowed to just these). Once confirmed, next step is Phase 1
+(schema + migration only, including the new `expected_day_of_month`
+column, no UI).
 
 ## Latest Completed Task
 
@@ -2310,6 +2328,38 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T04:10:00Z (approximate)
+Claude (Sonnet 5) — Revised the pledge payment-plan design (still not
+implemented) per one required correction: the expected-vs-actual model
+in `docs/PLEDGE-PAYMENT-PLAN-DESIGN.md` §8 previously derived the next
+expected payment date as `latest actual payment + ~30 days`, which was
+rejected for conflating the agreed schedule with actual payment behavior
+(an early or late payment would permanently drag future expected dates
+off their true anchor). Replaced with a calendar-month-anchored model: a
+new required `expected_day_of_month` field (auto-derived, not a separate
+form input) plus a small pure `advanceOneCalendarMonth` function (reusing
+`isLeapYear`, already exported) that always clamps to the fixed anchor
+day, not the previous cycle's own clamped day -- verified computationally
+that Feb 28 correctly reverts to Mar 31, and that a September payment
+landing on the 22nd still produces Oct 18 as the next cycle, never Oct
+22. Also defined the exact cycle-satisfaction rule (symmetric ±7-day
+grace window, bounded forward walk, payment amount never inspected) and
+reversed the paid-off behavior -- `ended_at` is now never auto-set on
+zero balance; only an explicit `[End plan]` sets it, since a fully-paid
+pledge already can't produce a `follow_up_pledge` candidate on its own.
+Reworked the KOLX2026 worked example with the corrected model across
+Aug19/Sep17/Sep18/Sep25/Sep26/Sep22/October/final-date scenarios. Every
+other previously-approved design decision (field set otherwise, `ended_at`
+over a status enum, `giving_activities.id` linkage, monthly-only cadence,
+fixed grace, terminology, phased order, non-goals) is confirmed unchanged.
+No schema, migration, application code, or deploy -- design and
+documentation only, committed and pushed to
+`feature/independent-cloudflare-sandbox`. `origin/main` unchanged.
+Remaining approval needed is narrowed to just the mechanics introduced by
+this revision. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T03:20:00Z (approximate)
 Claude (Sonnet 5) — Designed (not implemented) the smallest coherent
