@@ -12,10 +12,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-Documentation-only update to this file, on top of `83bfa75`. Reports the just-completed Today/Assistant loader instrumentation task (code + deploy already done and verified before this doc update -- see "Independent Staging Instrumentation" section below).
+Documentation-only update to this file, on top of `eec5266`. Reports the just-completed Error 1102 duplicate-loader-execution fix (code + deploy + live verification already done before this doc update -- see "Independent Staging Duplicate-Loader Fix — CURRENT STATUS" section below, which is the authoritative current state; treat the instrumentation/deployment details further down this file as historical unless that section says otherwise).
 
 origin/feature/independent-cloudflare-sandbox:
-`83bfa75` (`0387d4b`'s Ask-rollout handoff + this session's instrumentation commit `83bfa75`, adding phase-timing telemetry to `loadWorkspaceBrief()`; both pushed). Deployed to Independent Staging as Worker version `f29c075f-b1e3-496d-bc10-cc52ecf05554`. See "Independent Staging Instrumentation -- Today/Assistant Loader Phase Timing" below for the full report, including 3 live-verified telemetry samples and two evidence-backed findings (the loader runs twice per navigation; scoring/assembly are ~0ms, D1 fan-out dominates the function's own cost).
+`eec5266` (the corrected request-scoped dedup fix, on top of the concurrent session's Ask-backfill/closure work and this session's earlier instrumentation commit `83bfa75`; all pushed). Deployed to Independent Staging as Worker version `db4dcc3e-1629-4457-81e6-ae53ffeb5894` -- **not** `f29c075f` (superseded) or `70f3c2c6` (broken, rolled back). See "Independent Staging Duplicate-Loader Fix" below for the full report: proven root cause, the failed `enterWith()` deploy, the corrected `run()`-based fix, and 5-navigation live-verification telemetry (4/5 deduped correctly, CPU materially reduced; 1/5 cold-start case still not deduped, unproven why).
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
@@ -314,6 +314,178 @@ instruction to stop and report):**
 of the same kind. Any change to fix (1) or (2) above -- or any other
 optimization -- needs its own explicit approval before implementation, per
 this task's instruction not to optimize yet.
+
+## Independent Staging Duplicate-Loader Fix -- CURRENT STATUS: LIVE AND VERIFIED (mostly), 2026-08-19
+
+**Read this section first if you're picking up the 1102 investigation. It
+supersedes the "next step" note directly above -- that next step is now
+done.** Deployed Worker version is `db4dcc3e-1629-4457-81e6-ae53ffeb5894`,
+NOT the earlier instrumentation-only `f29c075f` or the broken
+`70f3c2c6` -- see "Deployment State" below for the single source of
+truth on what's actually live.
+
+**Proven duplicate-execution cause** (source-verified against vinext
+0.0.50, not assumed): vinext's app-router runtime runs a pre-render
+"probe" pass for any route without a `loading.tsx` boundary
+(`node_modules/vinext/dist/server/app-page-probe.js`'s
+`probeAppPageBeforeRender` -> `probeAppPageComponent`), which calls the
+page's default export directly as a plain function
+(`dist/entries/app-rsc-entry.js`'s `probePage()`) and fully awaits it --
+purely to catch a thrown `redirect()`/`notFound()`/`forbidden()`/
+`unauthorized()` before committing to a streamed response. That full
+execution (including `loadWorkspaceBrief()`) is separate from, and
+precedes, the real render, which invokes the same page component a
+second time via React's actual `renderToReadableStream`. Both happen
+inside the SAME Cloudflare request (same rayId/traceId) -- confirmed
+directly, not inferred, in the original instrumentation telemetry.
+
+**Fix attempt 1 -- FAILED, broke staging (preserved as incident history,
+not hidden).** Commit `76c3694` wrapped `loadWorkspaceBrief()` in
+request-scoped memoization using `AsyncLocalStorage`, calling
+`als.enterWith(store)` the first time it ran in a request so the second
+call would see the same store. Deployed as Worker version `70f3c2c6`.
+**This broke the Today page live on Independent Staging within
+minutes.** Symptom: the browser showed "Something interrupted the
+workspace." Telemetry showed exactly why: `cpuTimeMs` collapsed to ~18ms
+(a fast crash, not a real computation) and **zero**
+`workspace_brief_phase`/`workspace_brief_render` events appeared across
+all 5 verification navigations -- the loader was throwing before it
+could log anything. Root cause, confirmed against Cloudflare's own docs
+(developers.cloudflare.com/workers/runtime-apis/nodejs/asynclocalstorage/):
+**Cloudflare Workers' `AsyncLocalStorage` intentionally does not
+implement `enterWith()`/`disable()`** -- only `run()`/`getStore()` are
+supported. Calling `enterWith()` threw immediately. **Rolled back to
+`f29c075f`** (`wrangler rollback f29c075f-...`) as soon as this was
+observed; staging was back to a known-good state within the same
+session, before any further investigation.
+
+**Fix attempt 2 -- corrected, this is what's live now.** Since `run()`
+requires a callback spanning the whole scope the store must be visible
+in, and `loadWorkspaceBrief()` doesn't own that scope (vinext's probe
+call and its real render call are two separate, non-nested invocations,
+both internal to vinext's own dispatch), the `run()` call was moved to
+`worker/index.ts` instead -- the one file in this repo that already
+wraps vinext's entire per-request `handler.fetch(...)` call, and so is
+the only place that correctly spans both of vinext's per-request
+invocations. This exactly mirrors vinext's own documented pattern for
+its own request-context shim (`dist/shims/request-context.js`'s
+`runWithExecutionContext`, which wraps that same `handler.fetch()` call
+in one `AsyncLocalStorage.run()` of its own). `lib/workspace/live-data.ts`
+now exports `runWithWorkspaceBriefRequestScope()` (a thin `run()`
+wrapper) for `worker/index.ts` to call; its own
+`getRequestScopedBriefCache()` only ever calls `getStore()`, falling back
+to a fresh, unshared `Map` (never throwing) if no store is active, so any
+path that somehow bypasses the wrapper only forgoes the dedup
+optimization, never breaks correctness.
+
+**Empirical verification before redeploying (not just Node.js
+semantics):** a minimal standalone Worker was run via `wrangler dev`
+(real `workerd`, the actual Workers runtime, not a Node.js simulation),
+exercising `AsyncLocalStorage.run()` with two sequential `await`ed calls
+separated by a real task boundary (`setTimeout`), mirroring vinext's
+probe -> render gap. Result: `{"ok":true,"sameInstance":true,"entries":
+[["a","first"],["b","second"]]}` -- the same store instance was visible
+to both calls, proving the mechanism works in this exact runtime before
+it was trusted with the real deployment.
+
+**Corrected commit:** `eec5266` ("Fix request-scoped dedup: use
+AsyncLocalStorage.run()/getStore(), not enterWith()"), pushed to
+`origin/feature/independent-cloudflare-sandbox` (fast-forward, no
+conflicts). `pnpm test` / `tsc --noEmit` / `build:staging-independent`
+all passed before commit and again after rebasing onto a concurrent
+session's Ask-backfill push. **Deployed Worker version:**
+`db4dcc3e-1629-4457-81e6-ae53ffeb5894`, deployed 2026-08-19T21:58:13Z
+(approximate, `wrangler deploy` timestamp).
+
+**Live verification -- 5 ordinary Today-page navigations, Independent
+Staging, 2026-08-19 ~21:58-21:59 EDT.** Real browser navigations to `/`,
+no stress testing. Each navigation's Ray ID was correlated directly
+against its `workspace_brief_phase`/`workspace_brief_render` events by
+`traceId` (not inferred from timestamp proximity):
+
+| # | Ray ID | cpuTimeMs | wallTimeMs | Loader executions | queryFanoutDurationMs | finalSuggestionDonorCount | donorsScoredCount | Outcome |
+|---|---|---|---|---|---|---|---|---|
+| 1 (cold start) | `a2ddcb4e9e7e90c2` | 223 | 1156 | **2** (not deduped) | 65, 60 (both calls) | 140 | 140 | ok, 200 |
+| 2 | `a2ddcb873b3c90c2` | 85 | 295 | **1** (query_complete+scoring_start+render, then 1 cache_hit) | 60 | 140 | 140 | ok, 200 |
+| 3 | `a2ddcbc988f790c2` | 79 | 312 | **1** | 60 | 140 | 140 | ok, 200 |
+| 4 | `a2ddcc0a5ff790c2` | 70 | 294 | **1** | 60 | 140 | 140 | ok, 200 |
+| 5 | `a2ddcc44bdfe90c2` | 94 | 325 | **1** | 60 | 140 | 140 | ok, 200 |
+
+`scoringDurationMs`/`assemblyDurationMs` were `0` in every sample, as
+before. `resultPriorityCount: 10` and `recommendationCount: 129` in
+every sample -- Today's visible content was byte-for-byte identical
+across all 5 loads (confirmed both via screenshot and via these counts).
+`openAskDonorCount` is `2` here vs `0` in the original instrumentation
+baseline -- this is a real data change (the concurrent session's Ask
+historical-backfill work created 2 real asks between the two
+measurement sessions), not staleness: every one of these 5 requests
+independently read the current D1 state and got the same *current*
+answer, which is exactly what request-scoped (not cross-request) dedup
+should produce. **No 1102, no 5xx, no blank/error screen, on any of the
+5 navigations** -- including the one that didn't dedupe.
+
+**Before vs. after, explicitly:**
+- **Execution count:** before = 2 loader executions on every single
+  request (proven in the original instrumentation task). After = 1 on
+  4 of 5 (80%); the 5th (a cold start -- the first request the freshly
+  deployed Worker version served) still ran 2. **Zero-execution
+  regression: not observed on any of the 5** -- the loader never
+  disappeared; freshness is intact.
+- **CPU, deduped requests (4 samples):** 70, 79, 85, 94ms (median ~82ms)
+  vs. the original instrumentation baseline's 141, 152, 242ms (median
+  152ms). **A real, material reduction** -- roughly 40-65% lower,
+  consistent with removing one of two D1 fan-outs.
+- **CPU, the one non-deduped request:** 223ms -- in the same range as
+  the pre-fix baseline (141-242ms), not worse than before, but not
+  improved either, since it still ran the loader twice.
+- **Wall time, deduped requests:** 294-325ms (median ~308ms) vs. before's
+  480-828ms (median 489ms) -- also materially lower.
+- Five samples is not enough to compute a rigorous median/confidence
+  interval with any statistical weight -- this is a directional,
+  evidence-backed read, not a claim of precision.
+
+**What is proven:** the duplicate-execution root cause (vinext's probe
+pass); that `enterWith()` is unsupported on Workers and breaks silently
+when used for this; that `run()`/`getStore()`, scoped in
+`worker/index.ts`, correctly dedupes the loader within a request in the
+large majority (4/5) of real requests observed; that CPU/wall time drop
+materially when dedup succeeds; that output and candidate counts are
+byte-identical to what an un-deduped request would have produced (proven
+by comparing against the un-deduped cold-start sample, which shows the
+same `finalSuggestionDonorCount`/`donorsScoredCount`/`resultPriorityCount`
+as the deduped ones); that freshness is intact (candidate counts reflect
+real, concurrent data changes, not a stale cross-request cache).
+
+**What remains unproven / open:**
+1. **Why the cold-start request didn't dedupe.** Not investigated
+   further in this task, per explicit instruction not to start another
+   architectural fix in the same session. Leading (unverified)
+   hypothesis: something about first-request module/dynamic-import
+   resolution in a freshly-started isolate (e.g. `loadSsrHandler()`'s
+   `import.meta.viteRsc.loadModule("ssr", "index")` lazily loading the
+   SSR Vite environment for the first time) interacts with
+   `AsyncLocalStorage` context propagation differently than on a warm
+   isolate. Not confirmed.
+2. **Whether Error 1102 risk is meaningfully reduced overall.** The
+   duplicate-work problem is proven fixed for warm-isolate requests
+   (the large majority of real traffic). It is explicitly NOT proven
+   fixed for cold starts, and the original 1102 incident's own
+   deployed version predated this loader's per-donor-scoring-loop-vs-
+   fan-out cost profile question entirely (see the original incident
+   section above) -- **do not claim future 1102s are impossible.**
+   There may still be another CPU hotspot, and the cold-start case in
+   particular is now the single most CPU-expensive scenario for this
+   route (223ms, close to the old worst case).
+3. The ~350-700ms of each request's wall time (and unknown CPU time)
+   outside `loadWorkspaceBrief()`'s own instrumented phases, noted in
+   the prior instrumentation section, is still completely
+   uninstrumented and unattributed.
+
+**Next approval needed:** none to close out or continue investigating
+along the same lines. Any of the following would need its own separate,
+explicit approval before implementation: investigating/fixing the
+cold-start non-dedup case; extending instrumentation to the
+uninstrumented request remainder; any other optimization.
 
 ## Ask / Solicitation Feature -- **COMPLETE / CLOSED FOR V1**
 
@@ -1479,15 +1651,21 @@ No migration beyond 0032 exists or has been applied.
 
 ## Deployment State
 
-**Live.** Deployed commit `83bfa75` (Today/Assistant loader phase-timing
-instrumentation, on top of Ask/Solicitation Phase 1's `86584e9`), Worker
-version `f29c075f-b1e3-496d-bc10-cc52ecf05554`, confirmed via the deploy
-command's own printed Version ID and via live-verified telemetry
-(`workspace_brief_render`/`workspace_brief_phase` log events observed for
-3 real Today-page loads immediately after deploy). Note: branch HEAD may
-advance past `83bfa75` by documentation-only commits (like this one) that
-touch no application code — the deployed Worker reflects the latest
-actual code change, `83bfa75`.
+**Live -- current as of 2026-08-19T21:58:13Z.** Deployed commit `eec5266`
+("Fix request-scoped dedup: use AsyncLocalStorage.run()/getStore(), not
+enterWith()" -- see "Independent Staging Duplicate-Loader Fix" above for
+the full story, including a rolled-back broken intermediate deploy),
+Worker version `db4dcc3e-1629-4457-81e6-ae53ffeb5894`, confirmed via the
+deploy command's own printed Version ID and via live-verified telemetry
+(5 real Today-page navigations, 4/5 showing the intended single-execution
+dedup, all 5 rendering correctly with no 1102/5xx). **This supersedes the
+two version IDs that appear earlier in this file** (`f29c075f` -- the
+instrumentation-only version this replaced -- and `70f3c2c6` -- a broken
+intermediate deploy that was live for only a few minutes before rollback;
+neither is live now). Branch HEAD may advance past `eec5266` by
+documentation-only commits (like this one) that touch no application
+code — the deployed Worker reflects the latest actual code change,
+`eec5266`.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
@@ -1873,6 +2051,37 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-19T22:05:00Z (approximate)
+Claude (Sonnet 5) — Closed out the Error 1102 duplicate-`loadWorkspaceBrief()`
+investigation. Root cause proven: vinext's pre-render "probe" pass (see
+`docs/AI-HANDOFF.md`'s instrumentation section) calls the page component
+directly, outside React's render dispatcher, so `React.cache()` can't
+dedupe it against the real render. First fix attempt used
+`AsyncLocalStorage.enterWith()`, deployed as Worker `70f3c2c6`, and broke
+the Today page live within minutes (cpuTimeMs collapsed to ~18ms, zero
+`workspace_brief_*` logs, "Something interrupted the workspace" on
+screen) — Cloudflare Workers' `AsyncLocalStorage` does not implement
+`enterWith()`/`disable()`, confirmed on Cloudflare's own docs. Rolled
+back to `f29c075f` immediately. Corrected fix moves the `run()` call to
+`worker/index.ts` (the file that already wraps vinext's whole
+`handler.fetch()`), verified against real `workerd` via a standalone
+`wrangler dev` test before redeploying. Committed `eec5266`, deployed as
+Worker `db4dcc3e-1629-4457-81e6-ae53ffeb5894`. Live-verified with 5 real
+Today navigations, Ray-ID-correlated against instrumentation: 4/5 showed
+the intended single-execution dedup (cpuTimeMs 70-94ms, down from a
+141-242ms baseline — a real, material reduction); the 5th (a cold start)
+still executed the loader twice (cpuTimeMs 223ms, not worse than
+baseline, not improved). No 1102/5xx/blank screen on any of the 5, and
+candidate counts/output were unchanged (the one difference,
+`openAskDonorCount` 0→2, is real new data from a concurrent session's Ask
+backfill, not staleness). Root cause of the cold-start non-dedup case is
+NOT investigated further, per instruction to stop and report rather than
+start another architectural fix. Full detail, before/after tables, and
+what remains unproven: see "Independent Staging Duplicate-Loader Fix —
+CURRENT STATUS" above.
+
+---
 
 2026-08-19T19:00:00Z (approximate)
 Claude (Sonnet 5) — Ask/Solicitation feature CLOSED FOR V1: backfilled the
