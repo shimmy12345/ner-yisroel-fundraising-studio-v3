@@ -1487,6 +1487,58 @@ audited while tracing Bug 2:
   own Bug 2 fix and the Ask feature both already used. Not built here;
   flagged as the concrete next step if/when this feature is approved.
 
+## Pledge Payment Plan -- DESIGN COMPLETE, NOT IMPLEMENTED (2026-08-20)
+
+Full design report: `docs/PLEDGE-PAYMENT-PLAN-DESIGN.md`. **No schema,
+migration, or application code was written; D1 was only read (never
+written) for the KOLX2026 worked example, which was NOT modified.**
+
+**What this closes.** Answers the "Deferred: monthly payment plans" note
+directly above -- the smallest coherent feature for marking an open
+pledge as being paid on a known schedule, so `follow_up_pledge` stops
+surfacing while a donor is paying as expected.
+
+**Recommended model (summary -- see the design doc for full reasoning on
+every point):** a new, small local table `pledge_payment_plans` (+
+`pledge_payment_plan_changes` audit table, directly modeled on
+`ask_changes`), linked to `giving_activities.id` (proven stable across
+ordinary JL reimports -- payments update that row in place; only a rare
+future correction to the pledge's own original commitment terms would
+orphan the link, which is deliberately deferred rather than solved with
+reconciliation heuristics). Monthly-only cadence in v1 (no recurrence
+engine). `final_expected_payment_at` required (the sole backstop against
+indefinite silent suppression). `ended_at` nullable timestamp instead of
+a status enum. A fixed 7-day grace period. `isOnTrack`/`isLate`/
+`isPlanEndedWithBalance`/`isCompleted` are all **derived at evidence-build
+time, never stored** -- reusing the exact `jl_payment_assignment_audits`
+query the Bug 2 payment-recency fix already added. No new candidate kind:
+`followUpPledgeCandidate` gains one early-return suppression branch plus
+plan-aware wording; scoring formulas are otherwise untouched. Integrates
+through the same three existing evidence loaders (Today, donor page,
+Meeting Brief/Assistant) the Ask feature and the Bug 2 fix both already
+used -- no new dashboard, no cross-donor reporting.
+
+**KOLX2026 worked example** (design fixture only, not applied): walks the
+real pledge (Zachter, $13,500 open, $1,500/mo hypothetical plan) through
+on-track / grace-boundary / late / plan-ended-with-$0 / plan-ended-with-
+balance scenarios -- see the design doc's "KOLX2026 worked example"
+section for the full table.
+
+**10 explicit decisions need approval before any implementation begins**
+(full list in the design doc's "Unresolved decisions" section) --
+covering the exact field set, the `ended_at` vs. status-enum choice, the
+`giving_activities.id` linkage risk, the 7-day grace default, the
+day-count (not calendar-month) lateness approximation, auto-ending a
+plan on full payment, terminology ("Payment plan"), the donor-profile UX
+shape, the phased build order (schema+migration first, UI later), and
+the explicit non-goals (no quarterly/custom cadence, no amount
+validation, no cross-donor reporting).
+
+**Status: stopped for approval, as instructed.** No implementation, no
+migration, no deploy. Next step is the user reviewing the 10 decisions
+above (or the design doc directly) and approving before Phase 1
+(schema-only) begins.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -2258,6 +2310,42 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T03:20:00Z (approximate)
+Claude (Sonnet 5) — Designed (not implemented) the smallest coherent
+feature for marking an open pledge as being paid on a known payment plan,
+so `follow_up_pledge` stops surfacing while a donor is paying as
+expected. Full report: `docs/PLEDGE-PAYMENT-PLAN-DESIGN.md`. Audited the
+actual architecture first (open-pledge representation in
+`giving_activities`, `jl_payment_assignment_audits`'s real payment
+ledger, `RecommendationEvidence.openPledge`, `followUpPledgeCandidate`,
+donor merge, JL import upsert behavior, staging-reset/backup-export
+classification, and the Ask/`ask_changes` feature as house-style
+reference) before proposing any schema. Recommended: a new
+`pledge_payment_plans` + `pledge_payment_plan_changes` table pair, linked
+to `giving_activities.id` (proven stable across ordinary JL reimports via
+the fingerprint-keyed upsert; one rare edge case -- a future correction
+to the pledge's own original commitment terms -- flagged as deferred, not
+solved); monthly-only cadence (no recurrence engine); a required
+`final_expected_payment_at` as the sole backstop against indefinite
+silent suppression; `ended_at` nullable timestamp instead of a status
+enum; a fixed 7-day grace period; on-track/late/completed/plan-ended-
+with-balance all derived at evidence-build time, never stored, reusing
+the exact linked-payment query the prior payment-recency fix already
+added; no new recommendation-candidate kind (one suppression branch plus
+plan-aware wording added to the existing `followUpPledgeCandidate`); the
+month-end calendar-arithmetic problem avoided entirely by approximating
+monthly cadence as a 30-day day-count window re-anchored to the most
+recent real payment, rather than building calendar-month arithmetic that
+doesn't exist anywhere in this codebase today. Worked the real KOLX2026
+pledge through five scenarios as a design fixture (read-only, not
+modified). 10 explicit decisions flagged for approval before any
+implementation begins. No schema, migration, application code, or deploy
+-- design and documentation only, committed and pushed to
+`feature/independent-cloudflare-sandbox`. `origin/main` unchanged. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T02:40:00Z (approximate)
 Claude (Sonnet 5) — Fixed two bounded, unrelated correctness bugs. (1)
