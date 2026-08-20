@@ -214,8 +214,17 @@ test("baseline picks up the schema-changing 0031 text message type migration", (
 test("baseline picks up the schema-changing 0032 asks migration", () => {
   // 0032_asks.sql adds the asks/ask_changes tables (new tables, not a
   // rebuild), so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0032_asks.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 33);
+  assert.ok(manifest.sourceMigrations.includes("0032_asks.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0033 pledge payment plans migration", () => {
+  // 0033_pledge_payment_plans.sql adds the pledge_payment_plans/
+  // pledge_payment_plan_changes tables (new tables, not a rebuild), so the
+  // schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0033_pledge_payment_plans.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 34);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

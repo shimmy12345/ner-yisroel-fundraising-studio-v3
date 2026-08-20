@@ -11,6 +11,7 @@ import { DONOR_GIVING_SQL } from "../../../lib/relationships/giving";
 import { isCancelledActivity, isScheduledActivity, sanitizeScheduledRelationshipContext } from "../../../lib/workspace/scheduled-activity";
 import { PendingGiftForm } from "./GivingManagement";
 import { OpenAskCard, AskHistory, LogAskForm } from "./AskManagement";
+import { OpenPledgePlanCard, type PledgePlanState } from "./PledgePaymentPlanManagement";
 import { countsInGivingTotals } from "../../../lib/giving/management";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { UnifiedRelationshipTimeline } from "./UnifiedRelationshipTimeline";
@@ -20,6 +21,7 @@ import { financialDateLabel } from "../../../lib/financial-date";
 import { donorInitials, numericDonorCode } from "../../../lib/relationships/donor-identity";
 import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
+import { evaluatePaymentPlan } from "../../../lib/relationships/pledge-payment-plan";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
 import { GiftAcknowledgmentActions } from "./GivingManagement";
@@ -32,6 +34,7 @@ export const dynamic = "force-dynamic";
 type Donor = { id: string; display_name: string; donor_code: string | null; last_name: string | null; email: string | null; phone: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null; primary_first_name: string | null; spouse: string | null; spouse_first_name: string | null; primary_title: string | null; spouse_title: string | null; external_id: string | null; external_source: string | null; contact_note: string | null; relationship_summary: string | null; institutional_memory: string | null; archived_at: number | null; merged_into_donor_id: string | null };
 type Activity = { id: string; donor_id: string; external_source: string; activity_date: number | null; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; item_type: string | null; description: string | null; source_campaign: string | null; category: string; workspace_status: string; private_note: string | null; confirmed_by_activity_id: string | null; updated_at: number };
 type PaymentEvent = { id: string; payment_date: number; applied_cents: number; remaining_balance_cents: number | null; pledge_activity_id: string; pledge_description: string | null; pledge_campaign: string | null };
+type PaymentPlanRow = { id: string; pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number; note: string | null };
 type Gift = { id: string; received_at: number; amount_cents: number; fund: string };
 type Interaction = { id: string; type: string; occurred_at: number; occurred_at_date_only: number; summary: string; source: string; created_at: number; status_changed_at: number | null; shared_activity_id: string | null; role: string | null; shared_activity_recipient_count: number | null; shared_activity_summary: string | null };
 type Recommendation = { id: string; action: string; reason: string; status: string; due_at: number | null; due_at_date_only: number; created_at: number; updated_at: number };
@@ -93,7 +96,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     marks.donorViewsMs = Date.now() - donorViewsStart;
     d1Calls += 1;
   }
-  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult] = await Promise.all([
+  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult, paymentPlanResult] = await Promise.all([
     timedAll(marks, "giving", (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>()),
     timedAll(marks, "gifts", env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>()),
     timedAll(marks, "interactions", env.DB.prepare(`SELECT interactions.id, interactions.type, interactions.occurred_at, interactions.occurred_at_date_only, interactions.summary, interactions.source, interactions.created_at, interactions.shared_activity_id, interactions.role, shared_activities.recipient_count AS shared_activity_recipient_count, shared_activities.summary AS shared_activity_summary, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at
@@ -120,12 +123,17 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     // No demo/sample data exists for this new feature, matching
     // contactAuditResult/acknowledgmentResult's demo handling above.
     timedAll(marks, "asks", mode === "demo" ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare("SELECT id, amount_cents, purpose, status, asked_at, note, created_at FROM asks WHERE donor_id=? AND user_id=? ORDER BY asked_at DESC LIMIT 200").bind(id, profile.id).all<AskRow>()),
+    // This donor's ACTIVE (ended_at IS NULL) payment plans, if any --
+    // local fundraiser-declared stewardship metadata for a specific open
+    // pledge, never a JL fact. Feeds openPledge.activePaymentPlan.
+    timedAll(marks, "paymentPlans", mode === "demo" ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare("SELECT id, pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note FROM pledge_payment_plans WHERE donor_id=? AND user_id=? AND ended_at IS NULL").bind(id, profile.id).all<PaymentPlanRow>()),
   ]);
-  d1Calls += 4 + (mode === "live" ? 5 : 0);
+  d1Calls += 4 + (mode === "live" ? 6 : 0);
   const activities = activityResult.results;
   const asks = askResult.results;
   const countedActivities = activities.filter(countsInGivingTotals);
   const paymentEvents = paymentEventResult.results;
+  const paymentPlans = paymentPlanResult.results;
   const legacyGifts = giftResult.results;
   const paid = countedActivities.reduce((sum, item) => sum + (item.paid_cents ?? 0), 0) + legacyGifts.reduce((sum, item) => sum + item.amount_cents, 0);
   const open = countedActivities.reduce((sum, item) => sum + Math.max(0, item.balance_cents ?? 0), 0);
@@ -253,7 +261,47 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // already fetched above (drives the "Most Recent Paid Gift" KPI); this
   // just scopes it to payments linked specifically to THIS open pledge.
   const openPledgePaymentDates = openPledgeSource ? paymentEvents.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.payment_date) : [];
-  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates) } : null;
+  const openPledgePlan = openPledgeSource ? paymentPlans.find((item) => item.pledge_activity_id === openPledgeSource.id) : undefined;
+  // Every open pledge this donor has, each with its own independent
+  // payment-plan state (never donor-wide) -- unlike openPledgeForEvidence
+  // below, which only ever carries ONE pledge into Suggested Action/
+  // Meeting Brief/Assistant (the single most relevant fact). A donor with
+  // two open pledges where only one is on a plan gets two cards here, one
+  // "Set payment plan" button and one populated plan card.
+  const openPledgesWithPlans = countedActivities.filter((item) => (item.balance_cents ?? 0) > 0).map((pledge) => {
+    const planRow = paymentPlans.find((item) => item.pledge_activity_id === pledge.id);
+    if (!planRow) return { pledge, planState: null as PledgePlanState | null };
+    const linkedPaymentDates = paymentEvents.filter((event) => event.pledge_activity_id === pledge.id).map((event) => event.payment_date);
+    const evaluation = evaluatePaymentPlan(
+      { nextExpectedPaymentAt: planRow.next_expected_payment_at, expectedDayOfMonth: planRow.expected_day_of_month, finalExpectedPaymentAt: planRow.final_expected_payment_at, endedAt: null },
+      linkedPaymentDates,
+      pledge.balance_cents ?? 0,
+      Math.floor(Date.now() / 1000),
+    );
+    const planState: PledgePlanState = {
+      planId: planRow.id,
+      installmentAmountCents: planRow.installment_amount_cents,
+      nextExpectedPaymentAt: evaluation.nextUnsatisfiedExpectedPaymentAt,
+      finalExpectedPaymentAt: planRow.final_expected_payment_at,
+      note: planRow.note,
+      isOnTrack: evaluation.isOnTrack,
+      isLate: evaluation.isLate,
+      isPlanEndedWithBalance: evaluation.isPlanEndedWithBalance,
+      isCompleted: evaluation.isCompleted,
+    };
+    return { pledge, planState };
+  });
+  const openPledgeForEvidence = openPledgeSource
+    ? {
+        balanceCents: openPledgeSource.balance_cents ?? 0,
+        campaign: openPledgeSource.source_campaign,
+        description: openPledgeSource.description || openPledgeSource.item_type,
+        activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates),
+        activePaymentPlan: openPledgePlan
+          ? { nextExpectedPaymentAt: openPledgePlan.next_expected_payment_at, expectedDayOfMonth: openPledgePlan.expected_day_of_month, finalExpectedPaymentAt: openPledgePlan.final_expected_payment_at, endedAt: null, installmentAmountCents: openPledgePlan.installment_amount_cents, linkedPaymentDates: openPledgePaymentDates }
+          : null,
+      }
+    : null;
   const lastCompletedInteractionForEvidence = completedInteractions[0] ? { type: completedInteractions[0].type, summary: completedInteractions[0].summary, occurredAt: completedInteractions[0].occurred_at } : null;
   // Excludes role='recipient' -- see lastSubstantiveContactAt's doc comment
   // in recommendation-evidence.ts. lastContactAt below (Last Contact
@@ -309,6 +357,11 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
         financial-system-of-record data). Live mode only, matching every
         other write-capable donor-page feature (no demo/sample asks data). */}
     {mode === "live" && <section className="asks-section"><div className="card-heading"><div><p className="eyebrow">ASKS</p><h2>{openAsks.length > 0 ? `${openAsks.length} open ask${openAsks.length === 1 ? "" : "s"}` : "No open ask"}</h2></div><LogAskForm donorId={id} minCustomDate={new Date().toISOString().slice(0, 10)} /></div>{openAsks.length > 0 && <div className="open-ask-list">{openAsks.map((ask) => <OpenAskCard key={ask.id} ask={{ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }} />)}</div>}<AskHistory asks={historicalAsks.map((ask) => ({ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }))} /></section>}
+    {/* One card per open pledge, each with its own independent payment
+        plan -- never a shared donor-wide plan, never a separate
+        pledge-management screen. Live mode only, same as Asks above (no
+        write-capable feature offers demo/sample data). */}
+    {mode === "live" && openPledgesWithPlans.length > 0 && <section className="pledge-plans-section"><div className="card-heading"><div><p className="eyebrow">OPEN PLEDGES</p><h2>{openPledgesWithPlans.length} open pledge{openPledgesWithPlans.length === 1 ? "" : "s"}</h2></div></div><div className="open-pledge-plan-list">{openPledgesWithPlans.map(({ pledge, planState }) => <article key={pledge.id} className="open-pledge-plan-row"><div className="open-pledge-summary"><strong>{money(pledge.balance_cents ?? 0)}</strong><span>{pledge.source_campaign || pledge.description || pledge.item_type || "Open pledge"}</span></div><OpenPledgePlanCard pledgeActivityId={pledge.id} plan={planState} /></article>)}</div></section>}
     <div className="relationship-grid"><main className="relationship-main">
       <section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP SNAPSHOT</p><h2>{relationshipContext.summary ? "Prepare for the next interaction" : "No relationship snapshot yet"}</h2></div></div><p className="summary">{relationshipContext.summary || "Log a completed interaction to begin a practical snapshot from this household’s actual activity."}</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">SUGGESTED ACTION</p><h3>{recommendation?.action || "No suggested action available"}</h3><p>{recommendation?.why || "Add a reminder, or log an interaction, to generate a suggested next step."}</p>{recommendation && <p className="recommendation-evidence">{recommendation.evidence.join(" ")}</p>}{recommendation?.timing && <p className="recommendation-meta">{recommendation.timing}</p>}{recommendation?.kind === "reconnect_contact_gap" && completedInteractions[0] && completedInteractions[0].occurred_at > Math.floor(Date.now() / 1000) - 90 * 86400 && <p className="recommendation-clarifier">Last Contact reflects every touch, including broadcast texts/emails sent to many donors at once. This suggestion looks at substantive, one-to-one contact only.</p>}{mode === "live" && recommendation?.kind === "acknowledge_gift" && recommendation.giftSource && recommendation.giftId && <GiftAcknowledgmentActions giftSource={recommendation.giftSource} giftId={recommendation.giftId} initialStatus={null} compact />}</div></div>{mode === "live" && historicalContextRows.length > 0 && <details className="historical-context-disclosure"><summary>Imported context ({historicalContextRows.length})</summary><p className="historical-context-lede">Notes imported from external sources. Not logged interactions — never counted as contact, and never assumed to have actually happened.</p><div className="historical-context-list">{historicalContextRows.map((row) => <article key={row.id} className="historical-context-entry"><p className="historical-context-text">“{row.text}”</p><p className="historical-context-provenance">{row.source === "import-monday" ? "Monday.com" : row.source}{row.source_date ? ` · ${date(row.source_date, profile.timezone)}` : ""} · Completion was never confirmed.</p></article>)}</div></details>}</section>
       <section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>{relationshipContext.memory ? "Recorded relationship context" : "No institutional memory recorded"}</h2></div></div>{relationshipContext.memory && <p className="summary">{relationshipContext.memory}</p>}</section>

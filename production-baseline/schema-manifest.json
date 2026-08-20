@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "7c8f86b3ebc1a9291d43ebafe2f0c74c9623ba41931bb682379b1d154fe692b5",
+  "schemaHash": "0ee3351a151c0ed1c59d38c86419c310bc77bad760ce9409b64a0488658611fa",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -34,7 +34,8 @@
     "0029_important_dates_dob_source.sql",
     "0030_shared_activities.sql",
     "0031_interactions_text_type.sql",
-    "0032_asks.sql"
+    "0032_asks.sql",
+    "0033_pledge_payment_plans.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -4382,6 +4383,268 @@
         "checks": []
       },
       {
+        "name": "pledge_payment_plan_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "plan_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "plan_id",
+            "toTable": "pledge_payment_plans",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "pledge_payment_plan_changes_plan_idx",
+            "columns": [
+              "plan_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_changes` (`plan_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','updated','ended'))"
+        ]
+      },
+      {
+        "name": "pledge_payment_plans",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "pledge_activity_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "cadence",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'monthly'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "installment_amount_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "expected_day_of_month",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_expected_payment_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "final_expected_payment_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "ended_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "pledge_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "pledge_payment_plans_pledge_idx",
+            "columns": [
+              "pledge_activity_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `pledge_payment_plans_pledge_idx` ON `pledge_payment_plans` (`pledge_activity_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`cadence` IN ('monthly'))",
+          "CHECK (`expected_day_of_month` BETWEEN 1 AND 31)"
+        ]
+      },
+      {
         "name": "recommendations",
         "columns": [
           {
@@ -5515,6 +5778,16 @@
     },
     {
       "type": "table",
+      "name": "pledge_payment_plan_changes",
+      "sql": "CREATE TABLE `pledge_payment_plan_changes` ( `id` text PRIMARY KEY NOT NULL, `plan_id` text NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','ended')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`plan_id`) REFERENCES `pledge_payment_plans`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "pledge_payment_plans",
+      "sql": "CREATE TABLE `pledge_payment_plans` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `cadence` text NOT NULL DEFAULT 'monthly' CHECK (`cadence` IN ('monthly')), `installment_amount_cents` integer, `expected_day_of_month` integer NOT NULL, `next_expected_payment_at` integer NOT NULL, `final_expected_payment_at` integer NOT NULL, `note` text, `ended_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`expected_day_of_month` BETWEEN 1 AND 31) )"
+    },
+    {
+      "type": "table",
       "name": "recommendations",
       "sql": "CREATE TABLE `recommendations` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `reason` text NOT NULL, `score` integer NOT NULL, `status` text DEFAULT 'open' NOT NULL, `due_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `due_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -5847,6 +6120,16 @@
       "type": "index",
       "name": "jl_payment_assignments_pledge_idx",
       "sql": "CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`)"
+    },
+    {
+      "type": "index",
+      "name": "pledge_payment_plan_changes_plan_idx",
+      "sql": "CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_changes` (`plan_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "pledge_payment_plans_pledge_idx",
+      "sql": "CREATE INDEX `pledge_payment_plans_pledge_idx` ON `pledge_payment_plans` (`pledge_activity_id`)"
     },
     {
       "type": "index",

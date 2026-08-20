@@ -697,6 +697,36 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .log-ask-actions button:disabled { cursor: not-allowed; opacity: .5; }
 @media (max-width:700px) { .asks-section .card-heading { flex-direction: column; }.open-ask-list { grid-template-columns: 1fr; }.log-ask-form { position: fixed; inset: auto 14px 16px; width: auto; max-height: 80vh; overflow: auto; }.log-ask-fields { grid-template-columns: 1fr; }.log-ask-fields label:last-child { grid-column: auto; } }
 
+.pledge-plans-section { margin-bottom: 22px; padding: 20px 22px; border: 1px solid var(--line); border-radius: 13px; background: #fbfaf6; box-shadow: var(--shadow); }
+.pledge-plans-section .card-heading { margin-bottom: 4px; }
+.open-pledge-plan-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 14px; }
+.open-pledge-plan-row { padding: 14px 15px; border: 1px solid #e4dcc4; border-radius: 10px; background: #fff; }
+.open-pledge-summary { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.open-pledge-summary strong { font-family: Georgia, serif; font-size: 20px; font-weight: 600; color: #3a3320; }
+.open-pledge-summary span { color: var(--muted); font-size: 12px; text-align: right; }
+.payment-plan-card { padding-top: 10px; border-top: 1px dashed #e4dcc4; }
+.payment-plan-eyebrow { margin: 0; color: #8a7a44; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.payment-plan-cadence { margin: 4px 0 0; font-weight: 700; color: #3a3320; }
+.payment-plan-overdue { color: #a3402c; font-weight: 700; }
+.payment-plan-card p { margin: 4px 0 0; color: #52625a; font-size: 13px; }
+.payment-plan-installment { color: var(--muted); }
+.payment-plan-note-inline { font-style: italic; }
+.payment-plan-actions { display: flex; gap: 7px; margin-top: 12px; }
+.payment-plan-actions button { padding: 8px 11px; border: 1px solid #cbd8d0; border-radius: 8px; background: #fff; color: #365648; font-size: 12px; font-weight: 700; cursor: pointer; }
+.payment-plan-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.payment-plan-end { border-color: #e0c8bd !important; color: #a3402c !important; }
+.payment-plan-set-button { padding: 9px 13px; border: 1px solid #91ad9c; border-radius: 8px; background: #f2f7f3; color: #315f4b; font-weight: 750; cursor: pointer; }
+.payment-plan-form { padding-top: 10px; border-top: 1px dashed #e4dcc4; }
+.payment-plan-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.payment-plan-fields label { display: grid; gap: 6px; color: #52625a; font-size: 13px; font-weight: 700; }
+.payment-plan-fields label:last-child { grid-column: 1 / -1; }
+.payment-plan-fields span { color: var(--muted); font-weight: 500; }
+.payment-plan-fields input, .payment-plan-fields textarea { min-height: 42px; padding: 9px 11px; border: 1px solid #d5ded8; border-radius: 8px; font: inherit; }
+.payment-plan-fields textarea { min-height: 70px; resize: vertical; }
+.payment-plan-form .payment-plan-actions { justify-content: flex-end; }
+.payment-plan-form .payment-plan-actions button:last-child { border-color: var(--green); background: var(--green); color: #fff; }
+@media (max-width:700px) { .open-pledge-plan-list { grid-template-columns: 1fr; }.payment-plan-fields { grid-template-columns: 1fr; }.payment-plan-fields label:last-child { grid-column: auto; } }
+
 /* Lightweight gift acknowledgment ("Mark thank-you sent") */
 .gift-acknowledgment { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-top:9px; }
 .gift-acknowledgment button { padding:7px 10px; border:1px solid #cbd8d0; border-radius:8px; background:#fff; color:#365648; font-size:12px; font-weight:700; cursor:pointer; }

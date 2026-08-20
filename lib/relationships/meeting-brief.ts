@@ -8,6 +8,7 @@ import {
   type MeetingBriefReminder,
   type MeetingBriefFamilyDate,
   type MeetingBriefAsk,
+  type MeetingBriefPledgePlanSummary,
 } from "./meeting-brief-model";
 import { importedContextLine } from "./historical-context";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "./recommendation-evidence";
@@ -49,6 +50,7 @@ type YahrtzeitRow = { deceased_name_english: string; deceased_name_hebrew: strin
 type ImportantDateRow = { type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 type AskRow = { id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
+type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
@@ -59,7 +61,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -110,6 +112,12 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
       FROM jl_payment_assignment_audits
       WHERE donor_id = ? AND user_id = ? AND decision_type = 'apply_to_pledge'
         AND applied_cents > 0 AND payment_date IS NOT NULL`).bind(donorId, userId).all<PledgePaymentRow>(),
+    // This donor's ACTIVE (ended_at IS NULL) payment plan(s), if any --
+    // local stewardship metadata, never a JL fact. Feeds
+    // openPledge.activePaymentPlan.
+    env.DB.prepare(`SELECT pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at
+      FROM pledge_payment_plans
+      WHERE donor_id = ? AND user_id = ? AND ended_at IS NULL`).bind(donorId, userId).all<PaymentPlanRow>(),
   ]);
 
   const address = [
@@ -210,7 +218,18 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   const mostRecentPaidGiftForEvidence = [...paidFromActivities, ...paidFromLegacy].sort((a, b) => b.occurredAt - a.occurredAt)[0] ?? null;
   const openPledgeSource = giving.results.find((item) => (item.balance_cents ?? 0) > 0);
   const openPledgePaymentDates = openPledgeSource ? pledgePaymentRows.results.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.payment_date) : [];
-  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates) } : null;
+  const openPledgePlan = openPledgeSource ? paymentPlanRows.results.find((item) => item.pledge_activity_id === openPledgeSource.id) : undefined;
+  const openPledgeForEvidence = openPledgeSource
+    ? {
+        balanceCents: openPledgeSource.balance_cents ?? 0,
+        campaign: openPledgeSource.source_campaign,
+        description: openPledgeSource.description || openPledgeSource.item_type,
+        activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates),
+        activePaymentPlan: openPledgePlan
+          ? { nextExpectedPaymentAt: openPledgePlan.next_expected_payment_at, expectedDayOfMonth: openPledgePlan.expected_day_of_month, finalExpectedPaymentAt: openPledgePlan.final_expected_payment_at, endedAt: null, installmentAmountCents: openPledgePlan.installment_amount_cents, linkedPaymentDates: openPledgePaymentDates }
+          : null,
+      }
+    : null;
   const latestInteraction = interactions.results[0];
   // Same "most recent of the last 5 fetched" precision this whole evidence
   // build already uses for lastContactAt -- not a new approximation. A donor
@@ -238,5 +257,20 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   const recommendation = buildDonorRecommendation(recommendationEvidence);
   const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at }));
 
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyImportantDates, openAsks);
+  // Same single open pledge already reflected in Suggested Action above --
+  // never a second independent read of plan state, never a donor-wide
+  // summary across multiple open pledges.
+  const activePlan = recommendationEvidence.giving.openPledge?.activePaymentPlan ?? null;
+  const openPledgePlanSummary: MeetingBriefPledgePlanSummary | null = activePlan && recommendationEvidence.giving.openPledge
+    ? {
+        balanceCents: recommendationEvidence.giving.openPledge.balanceCents,
+        isOnTrack: activePlan.isOnTrack,
+        isLate: activePlan.isLate,
+        isPlanEndedWithBalance: activePlan.isPlanEndedWithBalance,
+        isCompleted: activePlan.isCompleted,
+        nextExpectedLabel: activePlan.nextUnsatisfiedExpectedPaymentAt !== null ? dateLabel(activePlan.nextUnsatisfiedExpectedPaymentAt) : null,
+      }
+    : null;
+
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyImportantDates, openAsks, openPledgePlanSummary);
 }

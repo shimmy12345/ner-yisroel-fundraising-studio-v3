@@ -65,6 +65,9 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // backup.
   "asks",
   "ask_changes",
+  // Monthly Payment Plan feature -- same reason as asks/ask_changes above.
+  "pledge_payment_plans",
+  "pledge_payment_plan_changes",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",

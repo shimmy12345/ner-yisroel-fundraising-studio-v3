@@ -103,7 +103,7 @@ async function activeDonor(id: string, userId: string) {
 }
 
 async function linkedCounts(donorId: string, userId: string) {
-  const [gifts, giving, interactions, meetings, reminders, noteInteractions, contactAudits, paymentAudits, asks] = await Promise.all([
+  const [gifts, giving, interactions, meetings, reminders, noteInteractions, contactAudits, paymentAudits, asks, paymentPlans] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) count FROM gifts WHERE donor_id=?").bind(donorId).first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) count FROM giving_activities WHERE donor_id=? AND owner_user_id=?").bind(donorId, userId).first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) count FROM interactions WHERE donor_id=? AND user_id=?").bind(donorId, userId).first<{ count: number }>(),
@@ -113,8 +113,9 @@ async function linkedCounts(donorId: string, userId: string) {
     env.DB.prepare("SELECT COUNT(*) count FROM donor_contact_audits WHERE donor_id=? AND user_id=?").bind(donorId, userId).first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) count FROM jl_payment_assignment_audits WHERE donor_id=? AND user_id=?").bind(donorId, userId).first<{ count: number }>(),
     env.DB.prepare("SELECT COUNT(*) count FROM asks WHERE donor_id=? AND user_id=?").bind(donorId, userId).first<{ count: number }>(),
+    env.DB.prepare("SELECT COUNT(*) count FROM pledge_payment_plans WHERE donor_id=? AND user_id=?").bind(donorId, userId).first<{ count: number }>(),
   ]);
-  return { gifts: gifts?.count ?? 0, pledges: giving?.count ?? 0, interactions: interactions?.count ?? 0, meetings: meetings?.count ?? 0, reminders: reminders?.count ?? 0, notes: (noteInteractions?.count ?? 0), contactAudits: contactAudits?.count ?? 0, paymentAudits: paymentAudits?.count ?? 0, asks: asks?.count ?? 0 };
+  return { gifts: gifts?.count ?? 0, pledges: giving?.count ?? 0, interactions: interactions?.count ?? 0, meetings: meetings?.count ?? 0, reminders: reminders?.count ?? 0, notes: (noteInteractions?.count ?? 0), contactAudits: contactAudits?.count ?? 0, paymentAudits: paymentAudits?.count ?? 0, asks: asks?.count ?? 0, paymentPlans: paymentPlans?.count ?? 0 };
 }
 
 export async function POST(request: Request) {
@@ -132,7 +133,7 @@ export async function POST(request: Request) {
   if (!chosenCodeDonor.donor_code && !chosenCodeDonor.external_id && (otherCodeDonor.donor_code || otherCodeDonor.external_id)) return Response.json({ error: "The existing JL Code must be preserved on the surviving donor." }, { status: 422 });
   const [survivorCounts, duplicateCounts] = await Promise.all([linkedCounts(survivorId, profile.id), linkedCounts(duplicateId, profile.id)]);
   const after = mergeFieldValues(survivor, duplicate, body!.fieldChoices as Record<(typeof MERGE_FIELD_GROUPS)[number], string>);
-  const movedCounts = { gifts: duplicateCounts.gifts, pledges: duplicateCounts.pledges, interactions: duplicateCounts.interactions, meetings: duplicateCounts.meetings, reminders: duplicateCounts.reminders, notes: duplicateCounts.notes, contactAudits: duplicateCounts.contactAudits, paymentAudits: duplicateCounts.paymentAudits, asks: duplicateCounts.asks };
+  const movedCounts = { gifts: duplicateCounts.gifts, pledges: duplicateCounts.pledges, interactions: duplicateCounts.interactions, meetings: duplicateCounts.meetings, reminders: duplicateCounts.reminders, notes: duplicateCounts.notes, contactAudits: duplicateCounts.contactAudits, paymentAudits: duplicateCounts.paymentAudits, asks: duplicateCounts.asks, paymentPlans: duplicateCounts.paymentPlans };
   const now = Math.floor(Date.now() / 1000); const auditId = crypto.randomUUID();
   try {
     const researchStatements = await planResearchReconciliation(survivorId, duplicateId, profile.id);
@@ -156,6 +157,13 @@ export async function POST(request: Request) {
       // the survivor, exactly as with every other reassigned table above.
       env.DB.prepare("UPDATE asks SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),
       env.DB.prepare("UPDATE ask_changes SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),
+      // pledge_activity_id itself never changes here -- the giving_activities
+      // row keeps its own id, it only gets a new donor_id above -- so the
+      // plan's link to its exact pledge stays valid automatically. Only the
+      // plan's own denormalized donor_id needs to move, to stay in sync
+      // with the pledge's new owner.
+      env.DB.prepare("UPDATE pledge_payment_plans SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),
+      env.DB.prepare("UPDATE pledge_payment_plan_changes SET donor_id=? WHERE donor_id=? AND user_id=?").bind(survivorId, duplicateId, profile.id),
       ...researchStatements,
       env.DB.prepare(`INSERT INTO donor_merge_audits (id,user_id,surviving_donor_id,archived_donor_id,field_choices_json,survivor_before_json,duplicate_before_json,survivor_after_json,moved_counts_json,source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(auditId, profile.id, survivorId, duplicateId, JSON.stringify(body!.fieldChoices), JSON.stringify({ donor: survivor, counts: survivorCounts }), JSON.stringify({ donor: duplicate, counts: duplicateCounts }), JSON.stringify(after), JSON.stringify(movedCounts), body?.source === "import" ? "import" : "donor_page", now),
     ]);

@@ -1487,11 +1487,18 @@ audited while tracing Bug 2:
   own Bug 2 fix and the Ask feature both already used. Not built here;
   flagged as the concrete next step if/when this feature is approved.
 
-## Pledge Payment Plan -- DESIGN APPROVED (with one revision), NOT IMPLEMENTED (2026-08-20)
+## Pledge Payment Plan -- IMPLEMENTED, NOT DEPLOYED (migration not applied, no staging write) (2026-08-20)
 
-Full design report: `docs/PLEDGE-PAYMENT-PLAN-DESIGN.md`. **No schema,
-migration, or application code was written; D1 was only read (never
-written) for the KOLX2026 worked example, which was NOT modified.**
+Full design report: `docs/PLEDGE-PAYMENT-PLAN-DESIGN.md`. The design below
+was fully implemented on this branch in a follow-up task (schema,
+migration, API routes, cycle-matching module, evidence/recommendation
+wiring, donor-page UI, Meeting Brief line, donor-merge/staging-reset/
+workspace-backup/production-baseline guardrail updates, and tests) --
+**local commit only, not pushed; migration NOT applied to any D1
+database; no data written to staging; KOLX2026 was only read, never
+modified.** See "Pledge Payment Plan -- IMPLEMENTATION REPORT" further
+below for the full accounting of what was built, tested, and still needs
+explicit approval before a staging rollout.
 
 **What this closes.** The smallest coherent feature for marking an open
 pledge as being paid on a known schedule, so `follow_up_pledge` stops
@@ -1548,14 +1555,193 @@ the 18th, not drifting to the 22nd) / final-date-with-$0 /
 final-date-with-balance -- see the design doc's revised "KOLX2026 worked
 example" section for the full table.
 
-**Remaining approval needed**: only the mechanics introduced by this
-revision -- the `expected_day_of_month` field itself, the specific
-calendar-month advancement algorithm, the specific cycle-satisfaction
-rule (symmetric grace window, bounded walk, amount-blind), and the
-reversed paid-off behavior (see the design doc's "Unresolved decisions"
-list, now narrowed to just these). Once confirmed, next step is Phase 1
-(schema + migration only, including the new `expected_day_of_month`
-column, no UI).
+**Remaining approval needed (historical -- superseded by the implementation
+report immediately below)**: the mechanics introduced by this revision were
+confirmed during implementation (they are exactly what got built --
+`expected_day_of_month`, `advanceOneCalendarMonth`, the symmetric-grace-
+window `matchPaymentsToCycles`, and the reversed paid-off behavior). What
+is still outstanding is not the design, but the staging rollout itself --
+applying the migration and writing the real KOLX2026 plan -- see below.
+
+### Pledge Payment Plan -- IMPLEMENTATION REPORT (2026-08-20)
+
+**Schema.** Two new tables, `pledge_payment_plans` and
+`pledge_payment_plan_changes`, added to `db/schema.ts` and captured in
+`drizzle/0033_pledge_payment_plans.sql` (hand-written after `drizzle-kit
+generate` produced a stale full-schema dump from an out-of-sync local
+journal -- the correct incremental `CREATE TABLE`/index DDL was extracted
+from inside that dump and reformatted to match this repo's established
+migration style; `drizzle/meta/_journal.json` was reverted). Verified via a
+standalone `node:sqlite` rehearsal script that all 34 migrations apply
+cleanly in order and that the CHECK constraints correctly reject
+`expected_day_of_month=32` and `cadence='quarterly'`. `pledge_payment_plans`
+columns: `id`, `user_id`, `donor_id`, `pledge_activity_id` (references
+`giving_activities.id`), `cadence` ('monthly' only, CHECK-enforced),
+`installment_amount_cents` (nullable), `next_expected_payment_at`,
+`expected_day_of_month` (1-31, CHECK-enforced), `final_expected_payment_at`,
+`note` (nullable), `ended_at` (nullable), `created_at`, `updated_at`. No
+`isLate`/`isOnTrack`/`daysLate` columns -- those are always derived, never
+stored (see "Cycle-matching algorithm" below). `pledge_payment_plan_changes`
+mirrors `ask_changes`'s shape exactly (`action` in
+created/updated/ended, `changed_fields`/`before_json`/`after_json`).
+
+**Stable pledge linkage, re-proven.** `pledge_activity_id` points at
+`giving_activities.id`. Re-confirmed by inspecting the JL reimport upsert
+(`ON CONFLICT(owner_user_id, external_source, source_fingerprint) DO UPDATE
+SET paid_cents=...,balance_cents=...,...` -- `id` is never reassigned on
+this path) and by re-reading the live KOLX2026 row, unchanged since the
+design phase. `source_fingerprint` hashes the pledge's *original*
+commitment fields (Code/Due Date/Item Num/Desc/Campaign/Amount/Company);
+only a JL correction to one of those fields (rare) would ever produce a new
+`giving_activities.id` and orphan a plan -- an accepted, previously-flagged
+deferred risk, not a blocker.
+
+**Cycle-matching algorithm, and the critical multi-cycle-satisfaction
+fix.** Implemented in `lib/relationships/pledge-payment-plan.ts` (a
+deliberate path deviation from the task's suggested
+`lib/pledges/payment-plan.ts` -- there is no `lib/pledges/` directory in
+this repo; every other pledge-adjacent module already lives under
+`lib/relationships/`, so the new module follows that existing convention
+instead). Auditing the original design before writing any code confirmed
+it WOULD have let one late payment retroactively satisfy several missed
+cycles merely because its date was later than all of them. Fixed
+structurally, not by convention: `matchPaymentsToCycles()` assigns each
+linked payment to at most one expected cycle and each cycle to at most one
+payment, via a deterministic greedy match that is provably unambiguous --
+monthly cycles are always >=28 days apart (the shortest possible gap, Jan
+31 -> Feb 28) and the grace window is only +/-7 days (14 days wide, under
+28), so two cycles' windows can never overlap and there is never more than
+one valid assignment for any given payment. `evaluatePaymentPlan()` is the
+single entry point every caller (donor page, Meeting Brief, Today via
+`follow_up_pledge`) uses; it is pure, takes already-fetched facts, and
+persists nothing.
+
+**Tests.** `tests/pledge-payment-plan.test.mjs` (new) covers
+`advanceOneCalendarMonth` (Jan 31 -> Feb 28 -> Mar 31, leap-year Feb 29),
+`matchPaymentsToCycles` (including the exact three-cycles/one-March-payment
+scenario proving the fix, and its three-cycles/three-payments counterpart),
+the KOLX2026 worked example, and further edge cases. Added to the `test`
+script chain in `package.json`. The full existing suite required several
+pre-existing pinned-count regression tests to be updated for the two
+legitimate new queries this feature adds (not an instrumentation leak, the
+same pattern each prior feature followed): `tests/today.test.mjs` (donor
+page D1 call-site count 22 -> 23), `tests/workspace-brief-instrumentation
+.test.mjs` (`loadWorkspaceBrief` D1 call-site count 17 -> 18), and
+`tests/production-baseline.test.mjs` (source-migration count 33 -> 34, plus
+a new "baseline picks up the schema-changing 0033" test mirroring the
+existing per-migration tests). `pnpm test`: **all tests pass.**
+`pnpm exec tsc --noEmit`: **clean.** `pnpm run build:staging-independent`:
+**succeeds** (confirmed both `/api/pledge-payment-plans` and
+`/api/pledge-payment-plans/:id` are registered in the route manifest).
+
+**Guardrails updated for the two new tables** (no hand-edited generated
+files -- `production-baseline/schema-manifest.json` and
+`production-baseline/drizzle/0000_production_baseline_0019.sql` were
+regenerated via `pnpm run db:baseline:generate -- --write` and rehearsed
+via `pnpm run db:baseline:rehearse`, which reports 45 tables and a clean
+replay): `lib/data-health/production-baseline.ts`
+(`PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length` 33 -> 34),
+`lib/operations/staging-reset.ts` (`pledge_payment_plan_changes`/
+`pledge_payment_plans` added to `STAGING_RESET_TABLE_ORDER`, deleted before
+`donors`/`giving_activities`, same reasoning as `jl_payment_assignment_
+audits`), `lib/operations/workspace-backup.ts` (both tables added to
+`WORKSPACE_BACKUP_EXCLUDED_TABLES`, same "covered only by the nightly
+whole-database R2 backup for now" treatment as `asks`/`ask_changes`), and
+`app/api/donors/merge/route.ts` (both tables reassigned to the surviving
+donor by `donor_id` on merge, mirroring the `asks`/`ask_changes`
+treatment -- `pledge_activity_id` itself never needs to change, since
+`giving_activities.id` is stable across a merge and only its own
+`donor_id` moves).
+
+**UI.** `app/donors/[id]/PledgePaymentPlanManagement.tsx` (new), mirroring
+`AskManagement.tsx`'s exact pattern: a "Set payment plan" button on any
+open pledge with no active plan; a compact factual card (Monthly / Next
+expected -- the *derived* next-unsatisfied-cycle date, never a possibly-
+stale stored value / Final expected / optional installment / an inline
+"Expected payment overdue" flag when late) with `[Edit plan]`/`[End plan]`
+when one exists. Wired into `app/donors/[id]/page.tsx` as a new "OPEN
+PLEDGES" section (live mode only, same placement pattern as the existing
+Asks section) rendering one card per open pledge -- not just the single
+pledge used for Suggested Action's evidence slot -- so a donor with two
+open pledges where only one is on a plan shows two independent cards.
+`expected_day_of_month`, internal linkage IDs, and status machinery are
+never exposed in this UI. CSS added to `app/globals.css` mirroring the
+Asks section's existing visual language exactly (same tokens, same
+responsive breakpoint).
+
+**Meeting Brief.** `lib/relationships/meeting-brief-model.ts` gained a
+`pledgePlanLine()` formatter (mirroring `askLine`/`familyDateLine`) and a
+`MeetingBriefPledgePlanSummary` type; `buildMeetingBrief`'s "Discuss the
+open pledge" discussion-topic detail now reads e.g. "Open pledge: $13,500
+remaining. Being paid monthly; next expected payment Sep 18." when
+on-track, or "...the expected monthly payment appears overdue." when late
+-- purely factual, never framed as a collections problem, never claiming
+the donor failed to pay when the evidence only proves the expected cycle
+is late. Describes the exact same single open pledge already reflected in
+Suggested Action, never a second independent read or a donor-wide summary.
+`lib/relationships/meeting-brief.ts` threads this through from the same
+`recommendationEvidence.giving.openPledge.activePaymentPlan` evaluation
+already built for Suggested Action -- no separate computation. Assistant
+requires no separate code: it already reuses `loadMeetingBrief()` for the
+primary donor, so it picks this up automatically.
+
+**Recommendation engine.** No new candidate kind. `followUpPledgeCandidate`
+in `lib/relationships/recommendation-candidates.ts` now branches on
+`activePaymentPlan.isOnTrack` (suppressed -- returns null),
+`.isLate` (plan-aware wording, e.g. "Check in on the $13,500 pledge
+payment plan." / "Expected monthly payment is overdue."),
+`.isPlanEndedWithBalance` (e.g. "Follow up on the remaining $3,000 after
+the payment plan end date."), or falls through unchanged to the original
+age-based logic when there is no active plan.
+
+**Explicitly NOT done in this task** (stopped here per the task's own
+instructions): the migration has NOT been applied to any D1 database
+(local, staging, or production); no payment plan has been written for the
+real KOLX2026 pledge on staging; nothing has been pushed to
+`origin/feature/independent-cloudflare-sandbox`; nothing has been deployed.
+Also not attempted: true narrow-viewport/mobile rendering verification
+(same tooling limitation noted in earlier tasks this session -- do not
+treat the responsive CSS above as a substitute for actually having
+verified it on a phone-width viewport).
+
+**Files changed** (local working tree, `feature/independent-cloudflare-
+sandbox`, not yet committed as of this report): `db/schema.ts`,
+`drizzle/0033_pledge_payment_plans.sql` (new),
+`lib/relationships/pledge-payment-plan.ts` (new),
+`lib/capture/pledge-payment-plan.ts` (new),
+`app/api/pledge-payment-plans/route.ts` (new),
+`app/api/pledge-payment-plans/[id]/route.ts` (new),
+`app/donors/[id]/PledgePaymentPlanManagement.tsx` (new),
+`app/donors/[id]/page.tsx`, `app/globals.css`,
+`lib/relationships/recommendation-evidence.ts`,
+`lib/relationships/recommendation-candidates.ts`,
+`lib/workspace/live-data.ts`, `lib/relationships/meeting-brief.ts`,
+`lib/relationships/meeting-brief-model.ts`,
+`app/api/donors/merge/route.ts`, `lib/operations/staging-reset.ts`,
+`lib/operations/workspace-backup.ts`,
+`lib/data-health/production-baseline.ts`,
+`production-baseline/schema-manifest.json` (regenerated),
+`production-baseline/drizzle/0000_production_baseline_0019.sql`
+(regenerated), `tests/pledge-payment-plan.test.mjs` (new),
+`tests/today.test.mjs`, `tests/workspace-brief-instrumentation.test.mjs`,
+`tests/production-baseline.test.mjs`, `package.json`, this file.
+
+**Proposed KOLX2026 staging values (NOT yet written -- for approval only)**:
+pledge activity is the real Zachter KOLX2026 row, $13,500 open balance.
+Proposed plan: cadence monthly, installment amount $1,500 (descriptive
+only), next expected payment 2026-09-18 (`expected_day_of_month` derives to
+18), final expected payment 2027-05-18 (matches the $13,500 balance at
+$1,500/mo over 9 installments), no note. These are illustrative/documented
+test values consistent with the design doc's own KOLX2026 worked example,
+not yet applied to any database.
+
+**Exact approval needed to proceed**: (1) apply
+`drizzle/0033_pledge_payment_plans.sql` to the Independent Staging D1
+database; (2) write the proposed KOLX2026 plan above via the real UI (not
+a direct D1 insert) as live staging acceptance verification; (3) commit
+this working tree and push to `origin/feature/independent-cloudflare-
+sandbox`; (4) deploy to Independent Staging. None of these four steps have
+been taken.
 
 ## Latest Completed Task
 

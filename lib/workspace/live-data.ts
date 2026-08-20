@@ -31,6 +31,7 @@ type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: strin
 type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
+type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -197,7 +198,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const __loaderStart = performance.now();
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -281,6 +282,15 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // is applied to that row. No demo/sample data exists for payment
     // assignments, matching the other demo-skipped queries above.
     demo ? Promise.resolve({ results: [] as PledgePaymentRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, payment_date FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).bind(userId).all<PledgePaymentRow>(),
+    // Every ACTIVE (ended_at IS NULL) payment plan for this user's
+    // pledges -- local fundraiser-declared stewardship metadata, never a
+    // JL fact. Feeds openPledge.activePaymentPlan (see
+    // recommendation-evidence.ts); the actual on-track/late derivation
+    // happens there via evaluatePaymentPlan, using this row's fields
+    // plus pledgePaymentRows above -- nothing is precomputed here. No
+    // demo/sample data exists for this new feature, matching the other
+    // demo-skipped queries above.
+    demo ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at FROM pledge_payment_plans WHERE user_id = ? AND ended_at IS NULL`).bind(userId).all<PaymentPlanRow>(),
   ]);
   const queryFanoutDurationMs = Math.round(performance.now() - __loaderStart);
   logger.info("workspace_brief_phase", {
@@ -344,6 +354,10 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     const list = paymentDatesByPledge.get(item.pledge_activity_id);
     if (list) list.push(item.payment_date); else paymentDatesByPledge.set(item.pledge_activity_id, [item.payment_date]);
   }
+  // At most one ACTIVE plan per pledge is an application-level invariant
+  // (enforced by the create route, not a DB constraint) -- safe to key
+  // by pledge_activity_id directly.
+  const paymentPlanByPledge = new Map(paymentPlanRows.results.map((item) => [item.pledge_activity_id, item]));
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
   // per donor is the oldest pending ask, same "one most relevant fact"
   // pattern as openPledgeByDonor above.
@@ -442,7 +456,21 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     const evidence = buildRecommendationEvidence({
       donorId,
       mostRecentPaidGift: gift ? { giftSource: "giving_activity", giftId: gift.id, amountCents: gift.paid_cents ?? 0, occurredAt: gift.activity_date!, campaign: null, description: gift.description || gift.item_type, acknowledged: acknowledgedGivingActivityIds.has(gift.id) } : null,
-      openPledge: pledge ? { balanceCents: pledge.balance_cents ?? 0, campaign: null, description: pledge.description || pledge.item_type, activityDate: resolveOpenPledgeActivityDate(pledge.activity_date, paymentDatesByPledge.get(pledge.id) ?? []) } : null,
+      openPledge: pledge
+        ? (() => {
+            const linkedPaymentDates = paymentDatesByPledge.get(pledge.id) ?? [];
+            const plan = paymentPlanByPledge.get(pledge.id);
+            return {
+              balanceCents: pledge.balance_cents ?? 0,
+              campaign: null,
+              description: pledge.description || pledge.item_type,
+              activityDate: resolveOpenPledgeActivityDate(pledge.activity_date, linkedPaymentDates),
+              activePaymentPlan: plan
+                ? { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null, installmentAmountCents: plan.installment_amount_cents, linkedPaymentDates }
+                : null,
+            };
+          })()
+        : null,
       lastCompletedInteraction: lastInteractionRow ? { type: lastInteractionRow.type, summary: lastInteractionRow.summary, occurredAt: lastInteractionRow.occurred_at } : null,
       lastContactAt: contactByDonor.get(donorId) ?? null,
       lastSubstantiveContactAt: substantiveContactByDonor.get(donorId) ?? null,

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
@@ -710,3 +710,84 @@ export const askChanges = sqliteTable("ask_changes", {
   afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [index("ask_changes_ask_idx").on(table.askId, table.createdAt)]);
+
+// Fundraiser-declared stewardship metadata for an EXISTING open JL
+// pledge -- "this pledge is being paid monthly" -- never a rewrite of
+// JL/giving_activities data. See docs/PLEDGE-PAYMENT-PLAN-DESIGN.md for
+// the full design. pledgeActivityId is a real FK to the pledge's own
+// giving_activities row, proven stable across ordinary JL reimports
+// (that row is updated in place on payment application; only a
+// correction to the pledge's own original commitment terms, a separate,
+// rare event, would ever replace it -- see the design doc's linkage
+// section). No UNIQUE constraint on pledgeActivityId: a donor can end
+// one plan and start a new one on the same pledge later (renegotiated
+// terms), and history is preserved as two rows, not overwritten --
+// "at most one ACTIVE plan per pledge" is an application-level check
+// (fresh read before insert), same treatment as asks' own "multiple
+// pending asks allowed, no artificial one-at-a-time DB constraint".
+// expectedDayOfMonth is auto-derived from the fundraiser's entered
+// nextExpectedPaymentAt at creation/edit time -- never a separate form
+// field -- and is what every subsequent calendar-month advance clamps
+// to, so a February clamp can never permanently lose a 31st-anchored
+// schedule (see lib/relationships/pledge-payment-plan.ts).
+// isOnTrack/isLate/daysLate/latestActualPaymentAt are deliberately NOT
+// columns here -- always derived fresh from this row + real
+// jl_payment_assignment_audits history, never stored/computed state.
+export const pledgePaymentPlans = sqliteTable("pledge_payment_plans", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  pledgeActivityId: text("pledge_activity_id").notNull().references(() => givingActivities.id),
+  // Monthly-only in v1 -- no recurrence engine. Plays no role in
+  // suppression/lateness logic at all (that's driven entirely by
+  // nextExpectedPaymentAt/expectedDayOfMonth/finalExpectedPaymentAt) --
+  // purely a display label, kept as a real column only so a future
+  // cadence (if ever evidenced) is an additive CHECK widening, not a
+  // redesign, mirroring migration 0031's own precedent for
+  // shared_activities.type.
+  cadence: text("cadence", { enum: ["monthly"] }).notNull().default("monthly"),
+  // Nullable, display-only -- never inspected when deciding whether an
+  // expected cycle is satisfied (see pledge-payment-plan.ts's file
+  // header for why: amount reconciliation would be scope creep toward
+  // accounting software; a real linked payment's DATE is the only
+  // financial evidence this feature reasons about).
+  installmentAmountCents: integer("installment_amount_cents"),
+  expectedDayOfMonth: integer("expected_day_of_month").notNull(),
+  nextExpectedPaymentAt: integer("next_expected_payment_at", { mode: "timestamp" }).notNull(),
+  // Required, not nullable -- the sole backstop against a plan
+  // suppressing follow-up indefinitely if the fundraiser never revisits
+  // it (see the design doc's "user forgets to end plan" risk).
+  finalExpectedPaymentAt: integer("final_expected_payment_at", { mode: "timestamp" }).notNull(),
+  note: text("note"),
+  // NULL = active. Only ever set by an explicit fundraiser [End plan]
+  // action -- NEVER automatically when the real JL balance reaches
+  // zero (a fully-paid pledge is already structurally excluded from
+  // follow_up_pledge regardless of this column; see the design doc's
+  // reversed paid-off-behavior decision).
+  endedAt: integer("ended_at", { mode: "timestamp" }),
+  ...timestamps,
+}, (table) => [
+  check("pledge_payment_plans_expected_day_of_month_range", sql`${table.expectedDayOfMonth} BETWEEN 1 AND 31`),
+  // One evidence-based index: "does this pledge have a plan" (donor
+  // page, evidence loaders, merge reassignment) -- the only access
+  // pattern this feature has in v1, same single-index discipline as
+  // ask_changes_ask_idx.
+  index("pledge_payment_plans_pledge_idx").on(table.pledgeActivityId),
+]);
+
+// Append-only audit trail for meaningful payment-plan changes (creation,
+// edits to the schedule/amount/note, ending) -- directly modeled on
+// askChanges above. planId IS a real foreign key (payment plans are
+// never hard-deleted, only ended) -- same reasoning as askId on
+// askChanges.
+export const pledgePaymentPlanChanges = sqliteTable("pledge_payment_plan_changes", {
+  id: text("id").primaryKey(),
+  planId: text("plan_id").notNull().references(() => pledgePaymentPlans.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  action: text("action", { enum: ["created", "updated", "ended"] }).notNull(),
+  changedFields: text("changed_fields", { mode: "json" }).$type<string[]>().notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("pledge_payment_plan_changes_plan_idx").on(table.planId, table.createdAt)]);

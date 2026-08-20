@@ -110,11 +110,67 @@ function acknowledgeGiftCandidate(evidence: RecommendationEvidence): Recommendat
   };
 }
 
+// Payment-plan-aware, but still exactly one kind ("follow_up_pledge") --
+// no second recommendation engine, no new candidate kind. A payment plan
+// is fundraiser-declared stewardship metadata (see
+// lib/relationships/pledge-payment-plan.ts); when one is active and
+// currently on track, the fundraiser already knows this pledge is being
+// paid as expected, so this candidate is suppressed entirely (returns
+// null) rather than nagging about an open balance alone. When the plan
+// itself is late, or its final expected date has passed with balance
+// remaining, the candidate returns with plan-aware wording instead of
+// the default age-based wording -- but the underlying confidence/
+// urgency scoring formulas are otherwise unchanged from the no-plan
+// case, just driven by the plan's own daysLate/days-past-final instead
+// of raw pledge ageDays.
 function followUpPledgeCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const pledge = evidence.giving.openPledge;
   if (!pledge) return null;
-  const ageDays = pledge.ageDays ?? 0;
+  const plan = pledge.activePaymentPlan;
   const descriptionSuffix = pledge.description ? ` (${pledge.description})` : "";
+
+  if (plan && plan.isOnTrack) return null;
+
+  if (plan && plan.isLate) {
+    return {
+      kind: "follow_up_pledge",
+      action: `Check in on the ${money(pledge.balanceCents)} pledge payment plan.`,
+      // Never asserts the donor failed to pay -- the evidence only
+      // proves the expected cycle is overdue; a payment could already be
+      // in transit.
+      why: `Expected monthly payment is overdue.`,
+      evidence: [`${money(pledge.balanceCents)} open balance${pledge.campaign ? `, ${pledge.campaign}` : ""}${descriptionSuffix}, next expected payment was ${plan.nextUnsatisfiedExpectedPaymentAt !== null ? dateLabel(plan.nextUnsatisfiedExpectedPaymentAt) : "unknown"}${plan.latestActualPaymentAt !== null ? `, last payment ${dateLabel(plan.latestActualPaymentAt)}` : ", no payment linked to this pledge yet"}.`],
+      confidence: plan.daysLate >= 60 ? "medium" : "low",
+      timing: null,
+      certainty: "confirmed",
+      specificity: 0.7,
+      recency: 0.3,
+      urgency: clamp01(plan.daysLate / 180),
+      supportingDate: plan.nextUnsatisfiedExpectedPaymentAt,
+    };
+  }
+
+  if (plan && plan.isPlanEndedWithBalance) {
+    const daysPastFinal = Math.max(0, Math.floor((evidence.now - plan.finalExpectedPaymentAt) / 86400));
+    return {
+      kind: "follow_up_pledge",
+      action: `Follow up on the remaining ${money(pledge.balanceCents)} after the payment plan end date.`,
+      why: `The payment plan's final expected date has passed with balance still open.`,
+      evidence: [`${money(pledge.balanceCents)} open balance${pledge.campaign ? `, ${pledge.campaign}` : ""}${descriptionSuffix}, payment plan expected to be complete by ${dateLabel(plan.finalExpectedPaymentAt)}.`],
+      confidence: daysPastFinal >= 60 ? "medium" : "low",
+      timing: null,
+      certainty: "confirmed",
+      specificity: 0.7,
+      recency: 0.3,
+      urgency: clamp01(daysPastFinal / 180),
+      supportingDate: plan.finalExpectedPaymentAt,
+    };
+  }
+
+  // No plan at all, or the plan is completed/inert (not on-track/late/
+  // ended-with-balance -- e.g. a plan that was manually ended and left
+  // stored, now inert): existing, unmodified age-based behavior.
+  const ageDays = pledge.ageDays ?? 0;
   return {
     kind: "follow_up_pledge",
     action: `Follow up on the open ${money(pledge.balanceCents)} pledge${pledge.campaign ? ` to ${pledge.campaign}` : ""}.`,

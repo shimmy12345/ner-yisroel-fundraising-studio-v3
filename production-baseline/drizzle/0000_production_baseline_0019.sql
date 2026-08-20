@@ -490,6 +490,41 @@ CREATE TABLE `onboarding_preferences` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `pledge_payment_plan_changes` (
+  `id` text PRIMARY KEY NOT NULL,
+  `plan_id` text NOT NULL,
+  `user_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `action` text NOT NULL CHECK (`action` IN ('created','updated','ended')),
+  `changed_fields` text NOT NULL,
+  `before_json` text,
+  `after_json` text NOT NULL,
+  `created_at` integer NOT NULL,
+  FOREIGN KEY (`plan_id`) REFERENCES `pledge_payment_plans`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `pledge_payment_plans` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `pledge_activity_id` text NOT NULL,
+  `cadence` text NOT NULL DEFAULT 'monthly' CHECK (`cadence` IN ('monthly')),
+  `installment_amount_cents` integer,
+  `expected_day_of_month` integer NOT NULL,
+  `next_expected_payment_at` integer NOT NULL,
+  `final_expected_payment_at` integer NOT NULL,
+  `note` text,
+  `ended_at` integer,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action,
+  CHECK (`expected_day_of_month` BETWEEN 1 AND 31)
+);
+
 CREATE TABLE `recommendations` (
   `id` text PRIMARY KEY NOT NULL,
   `donor_id` text NOT NULL,
@@ -727,6 +762,10 @@ CREATE INDEX `jl_payment_assignment_audits_user_date_idx` ON `jl_payment_assignm
 
 CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`);
 
+CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_changes` (`plan_id`,`created_at`);
+
+CREATE INDEX `pledge_payment_plans_pledge_idx` ON `pledge_payment_plans` (`pledge_activity_id`);
+
 CREATE INDEX `recommendations_user_status_idx` ON `recommendations` (`user_id`,`status`);
 
 CREATE INDEX `relationship_queue_dismissals_user_date_idx` ON `relationship_queue_dismissals` (`user_id`,`dismissed_at`);
@@ -754,5 +793,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','7c8f86b3ebc1a9291d43ebafe2f0c74c9623ba41931bb682379b1d154fe692b5',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','0ee3351a151c0ed1c59d38c86419c310bc77bad760ce9409b64a0488658611fa',1785944072);
 PRAGMA optimize;

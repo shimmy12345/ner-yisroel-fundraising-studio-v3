@@ -72,15 +72,17 @@ for (const start of phaseCallStarts) {
   }
 }
 
-// 7. Instrumentation itself does not add D1 queries -- 17 call sites: the
-// original 16 this test pinned for the instrumentation task, plus exactly
-// one legitimate new query added by the open-pledge payment-recency fix
+// 7. Instrumentation itself does not add D1 queries -- 18 call sites: the
+// original 16 this test pinned for the instrumentation task, plus one
+// legitimate new query added by the open-pledge payment-recency fix
 // (jl_payment_assignment_audits, feeding resolveOpenPledgeActivityDate --
-// see docs/AI-HANDOFF.md), mirroring donor_page_render's own "21 before,
-// 22 after the Ask feature's one real new query" comment in
-// tests/today.test.mjs.
+// see docs/AI-HANDOFF.md), plus one more legitimate new query added by the
+// Monthly Payment Plan feature (active payment plans, feeding
+// evaluatePaymentPlan), mirroring donor_page_render's own "21 before, 23
+// after the Ask and Payment Plan features' two real new queries" comment
+// in tests/today.test.mjs.
 const d1CallSites = (liveData.match(/env\.DB\.prepare\(/g) ?? []).length;
-assert.equal(d1CallSites, 17, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query -- instrumentation itself must never add a query");
+assert.equal(d1CallSites, 18, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query and the one legitimate payment-plans query -- instrumentation itself must never add a query");
 
 // 8. Candidate-set sizes are derived from existing in-memory results, not
 // freshly computed/queried: the logged fields must reference the same Map

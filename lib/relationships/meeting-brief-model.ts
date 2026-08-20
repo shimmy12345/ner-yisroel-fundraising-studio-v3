@@ -108,6 +108,34 @@ export function familyDateLine(item: MeetingBriefFamilyDate): string {
   return `Wedding anniversary: ${item.shortLabel}; next occurrence ${item.nextOccurrenceLabel}.${ambiguitySuffix}`;
 }
 
+// The open pledge's active payment plan, already evaluated (see
+// evaluatePaymentPlan in pledge-payment-plan.ts) and its one date field
+// already formatted by the caller (which owns the fundraiser's timezone) --
+// this model file stays pure, no date-formatting/timezone logic of its own.
+export type MeetingBriefPledgePlanSummary = {
+  balanceCents: number;
+  isOnTrack: boolean;
+  isLate: boolean;
+  isPlanEndedWithBalance: boolean;
+  isCompleted: boolean;
+  nextExpectedLabel: string | null;
+};
+
+// One shared line-formatter, mirroring askLine/familyDateLine above, so
+// this fact is never phrased two different ways across surfaces. Purely
+// factual/descriptive ("Being paid monthly," "appears overdue") -- never
+// framed as collections language, and never claims the donor failed to pay
+// when the evidence only proves the expected cycle is late (see
+// docs/PLEDGE-PAYMENT-PLAN-DESIGN.md).
+export function pledgePlanLine(plan: MeetingBriefPledgePlanSummary): string {
+  const remaining = `Open pledge: ${money(plan.balanceCents)} remaining.`;
+  if (plan.isCompleted) return `${remaining} The recorded monthly payment plan appears paid in full.`;
+  if (plan.isPlanEndedWithBalance) return `${remaining} The monthly payment plan's final expected date has passed with balance still open.`;
+  if (plan.isLate) return `${remaining} Being paid monthly; the expected monthly payment appears overdue.`;
+  if (plan.nextExpectedLabel) return `${remaining} Being paid monthly; next expected payment ${plan.nextExpectedLabel}.`;
+  return `${remaining} Being paid monthly.`;
+}
+
 export type MeetingBrief = {
   donor: MeetingBriefDonor;
   lifetimePaidCents: number;
@@ -158,6 +186,12 @@ export function buildMeetingBrief(
   recommendation: DonorRecommendation | null = null,
   familyImportantDates: MeetingBriefFamilyDate[] = [],
   openAsks: MeetingBriefAsk[] = [],
+  // Only ever describes the SAME single open pledge already reflected in
+  // Suggested Action (openPledgeForEvidence) -- never a donor-wide summary,
+  // never a second independent read of plan state. null when that pledge
+  // has no active plan, in which case the pre-existing generic
+  // "outstanding pledge balance" wording below is unchanged.
+  openPledgePlan: MeetingBriefPledgePlanSummary | null = null,
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -188,9 +222,11 @@ export function buildMeetingBrief(
       : { title: "Establish relationship context", detail: "No prior interaction is recorded for this household." },
     openReminders[0]
       ? { title: "Address the recorded next step", detail: `${openReminders[0].action}. ${openReminders[0].reason}` }
-      : openPledgeCents > 0
-        ? { title: "Discuss the open pledge", detail: "The giving record contains an outstanding pledge balance." }
-        : { title: "Agree on a next step", detail: "No open reminder or pledge commitment is recorded." },
+      : openPledgePlan
+        ? { title: "Discuss the open pledge", detail: pledgePlanLine(openPledgePlan) }
+        : openPledgeCents > 0
+          ? { title: "Discuss the open pledge", detail: "The giving record contains an outstanding pledge balance." }
+          : { title: "Agree on a next step", detail: "No open reminder or pledge commitment is recorded." },
   ];
 
   const followUpActions = [

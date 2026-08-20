@@ -12,6 +12,7 @@ import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebre
 import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { localDayKey } from "../workspace/local-time.ts";
+import { evaluatePaymentPlan, type PaymentPlanFields } from "./pledge-payment-plan.ts";
 
 export type RecommendationEvidenceInput = {
   donorId: string;
@@ -42,7 +43,16 @@ export type RecommendationEvidenceInput = {
   // "Open-pledge payment recency" fix for the incident this guards
   // against (a paid-down pledge's evidence silently kept citing its
   // original commitment date as "last activity").
-  openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null } | null;
+  // activePaymentPlan: the fundraiser's own stewardship expectation for
+  // THIS specific pledge ("being paid monthly"), if one exists -- local
+  // metadata, never a JL fact. `linkedPaymentDates` must be every
+  // jl_payment_assignment_audits.payment_date for THIS exact pledge
+  // (same source array activityDate above is resolved from), never a
+  // whole-donor list -- a payment to a different pledge must never
+  // influence this one's evaluation. See lib/relationships/
+  // pledge-payment-plan.ts for the pure evaluation logic (evaluatePaymentPlan)
+  // this field feeds.
+  openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[] }) | null } | null;
   // The donor's most recent COMPLETED interaction (never a scheduled or
   // cancelled one) -- drives continue_conversation and acknowledgedSinceGift.
   lastCompletedInteraction: { type: string; summary: string; occurredAt: number } | null;
@@ -129,7 +139,26 @@ export type RecommendationEvidence = {
   donorId: string;
   giving: {
     mostRecentPaidGift: { giftSource: GiftSource; giftId: string; amountCents: number; occurredAt: number; campaign: string | null; description: string | null; acknowledged: boolean } | null;
-    openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; ageDays: number | null } | null;
+    openPledge: {
+      balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; ageDays: number | null;
+      // Present only when an active payment plan exists for this pledge.
+      // Every field here is either raw plan metadata needed for wording
+      // (installmentAmountCents, finalExpectedPaymentAt) or a fact
+      // DERIVED fresh from the plan + real linked-payment history --
+      // never persisted/computed state (see evaluatePaymentPlan).
+      activePaymentPlan: {
+        installmentAmountCents: number | null;
+        finalExpectedPaymentAt: number;
+        nextUnsatisfiedExpectedPaymentAt: number | null;
+        latestActualPaymentAt: number | null;
+        isOnTrack: boolean;
+        isLate: boolean;
+        daysLate: number;
+        finalDatePassed: boolean;
+        isPlanEndedWithBalance: boolean;
+        isCompleted: boolean;
+      } | null;
+    } | null;
   };
   contact: {
     lastCompletedInteraction: { type: string; summary: string; occurredAt: number; daysAgo: number } | null;
@@ -199,7 +228,17 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
     giving: {
       mostRecentPaidGift: input.mostRecentPaidGift,
       openPledge: input.openPledge
-        ? { ...input.openPledge, ageDays: input.openPledge.activityDate !== null ? daysBetween(now, input.openPledge.activityDate) : null }
+        ? {
+            ...input.openPledge,
+            ageDays: input.openPledge.activityDate !== null ? daysBetween(now, input.openPledge.activityDate) : null,
+            activePaymentPlan: input.openPledge.activePaymentPlan
+              ? {
+                  installmentAmountCents: input.openPledge.activePaymentPlan.installmentAmountCents,
+                  finalExpectedPaymentAt: input.openPledge.activePaymentPlan.finalExpectedPaymentAt,
+                  ...evaluatePaymentPlan(input.openPledge.activePaymentPlan, input.openPledge.activePaymentPlan.linkedPaymentDates, input.openPledge.balanceCents, now),
+                }
+              : null,
+          }
         : null,
     },
     contact: {
