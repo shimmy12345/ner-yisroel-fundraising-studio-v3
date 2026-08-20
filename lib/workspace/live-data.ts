@@ -4,13 +4,13 @@ import { scheduleBucket } from "./scheduled-activity";
 import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, type RelationshipQueueBucket } from "./relationship-queue";
 import { financialDateLabel } from "../financial-date.ts";
 import { donorInitials, numericDonorCode } from "../relationships/donor-identity.ts";
-import { buildRecommendationEvidence } from "../relationships/recommendation-evidence.ts";
+import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../relationships/recommendation-evidence.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
-import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
+import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { logger } from "../logger";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -30,6 +30,7 @@ type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: Gif
 type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
+type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
@@ -37,7 +38,7 @@ export type WorkspaceScheduledActivity = { id: string; donorId: string; type: st
 export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; donorCode: string | null; amount: string; detail: string };
 export type WorkspaceDonorLink = { donorId: string; name: string; initials: string; donorCode: string | null; detail: string; href: string };
 export type WorkspaceMorningBrief = { meetingsToday: number; overdueFollowUps: number; recentGifts: number; upcomingReminders: number; suggestedPriority: WorkspacePriority | null };
-export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; relationshipQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; morningBrief: WorkspaceMorningBrief; recentlyViewed: WorkspaceDonorLink[]; recentlyUpdated: WorkspaceDonorLink[]; todaySchedule: WorkspaceScheduledActivity[]; upcomingActivities: WorkspaceScheduledActivity[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; upcomingRelationshipDates: WorkspaceRelationshipDateEvent[]; generatedAt: number };
+export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; relationshipQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; morningBrief: WorkspaceMorningBrief; recentlyViewed: WorkspaceDonorLink[]; recentlyUpdated: WorkspaceDonorLink[]; todaySchedule: WorkspaceScheduledActivity[]; upcomingActivities: WorkspaceScheduledActivity[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; todayRelationshipDates: WorkspaceRelationshipDateEvent[]; upcomingRelationshipDates: WorkspaceRelationshipDateEvent[]; generatedAt: number };
 
 function identity(item: IdentityRow) {
   return {
@@ -196,7 +197,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const __loaderStart = performance.now();
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -272,6 +273,14 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // data exists for this new feature, matching historicalContextRows/
     // acknowledgments/yahrtzeitRows/importantDateRows above.
     demo ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, asked_at FROM asks WHERE user_id = ? AND status = 'pending' ORDER BY donor_id, asked_at ASC`).bind(userId).all<AskRow>(),
+    // Every payment actually applied to any of this user's pledges --
+    // feeds openPledge's "last activity" date via
+    // resolveOpenPledgeActivityDate (see its doc comment in
+    // recommendation-evidence.ts). NOT the same as the pledge's own
+    // giving_activities.activity_date, which never moves once a payment
+    // is applied to that row. No demo/sample data exists for payment
+    // assignments, matching the other demo-skipped queries above.
+    demo ? Promise.resolve({ results: [] as PledgePaymentRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, payment_date FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).bind(userId).all<PledgePaymentRow>(),
   ]);
   const queryFanoutDurationMs = Math.round(performance.now() - __loaderStart);
   logger.info("workspace_brief_phase", {
@@ -324,6 +333,17 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   }
   const openPledgeByDonor = new Map<string, GivingRow>();
   for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openPledgeByDonor.has(item.donor_id)) openPledgeByDonor.set(item.donor_id, item);
+  // Grouped by pledge (giving_activities.id), not by donor -- a donor's
+  // open pledge is only ever one row (openPledgeByDonor above), but this
+  // map must be keyed on the exact pledge id so a payment linked to a
+  // DIFFERENT pledge (or a different donor entirely) can never leak into
+  // this one's "last activity" date. Feeds resolveOpenPledgeActivityDate
+  // in the per-donor loop below.
+  const paymentDatesByPledge = new Map<string, number[]>();
+  for (const item of pledgePaymentRows.results) {
+    const list = paymentDatesByPledge.get(item.pledge_activity_id);
+    if (list) list.push(item.payment_date); else paymentDatesByPledge.set(item.pledge_activity_id, [item.payment_date]);
+  }
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
   // per donor is the oldest pending ask, same "one most relevant fact"
   // pattern as openPledgeByDonor above.
@@ -422,7 +442,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     const evidence = buildRecommendationEvidence({
       donorId,
       mostRecentPaidGift: gift ? { giftSource: "giving_activity", giftId: gift.id, amountCents: gift.paid_cents ?? 0, occurredAt: gift.activity_date!, campaign: null, description: gift.description || gift.item_type, acknowledged: acknowledgedGivingActivityIds.has(gift.id) } : null,
-      openPledge: pledge ? { balanceCents: pledge.balance_cents ?? 0, campaign: null, description: pledge.description || pledge.item_type, activityDate: pledge.activity_date } : null,
+      openPledge: pledge ? { balanceCents: pledge.balance_cents ?? 0, campaign: null, description: pledge.description || pledge.item_type, activityDate: resolveOpenPledgeActivityDate(pledge.activity_date, paymentDatesByPledge.get(pledge.id) ?? []) } : null,
       lastCompletedInteraction: lastInteractionRow ? { type: lastInteractionRow.type, summary: lastInteractionRow.summary, occurredAt: lastInteractionRow.occurred_at } : null,
       lastContactAt: contactByDonor.get(donorId) ?? null,
       lastSubstantiveContactAt: substantiveContactByDonor.get(donorId) ?? null,
@@ -502,16 +522,27 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const recentlyViewed = donorLinks(recentViews.results, "Viewed");
   const recentlyUpdated = donorLinks(recentUpdates.results.filter((item) => item.event_at > 0), "Updated");
 
-  // Coming Up's date-driven relationship events: built directly from the
+  // Date-driven relationship events: built directly from the
   // yahrtzeit/important-date rows already fetched above, independent of the
   // suggestionDonorIds/ranked path -- every donor with a relationship date
   // inside its lead window gets an event here, whether or not they were
   // even selected into the bounded recommendation pool for other reasons.
   // The two builders are concatenated and re-sorted together so Yahrtzeit,
   // Birthday, and Anniversary events interleave in one chronological list
-  // -- including when two fall on the exact same date, both remain.
+  // -- including when two fall on the exact same date, both remain. An
+  // event whose own dateEpoch is exactly today's local date belongs in
+  // Today's Agenda, not Coming Up (a same-day birthday/yahrtzeit is
+  // today's relationship work, not something still "coming up") --
+  // partitioned by exact equality against localDateOnlyEpoch(now,
+  // timezone), the same UTC-midnight-of-local-date convention
+  // nextGregorianRecurrence/nextYahrtzeitOccurrence already use to decide
+  // "today" when computing dateEpoch in the first place, so this can
+  // never disagree with how the occurrence itself was calculated. No
+  // event is ever excluded by this split and none is duplicated across
+  // both lists -- every event that qualified for the lead window still
+  // appears in exactly one of the two.
   const identityByDonor = new Map(donors.results.map((item) => [item.id, { donorName: item.display_name, ...identity(item) }]));
-  const upcomingRelationshipDates = [
+  const relationshipDateEvents = [
     ...buildYahrtzeitRelationshipDateEvents(
       yahrtzeitRows.results.map((row) => ({ id: row.id, donorId: row.donor_id, deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
       identityByDonor,
@@ -525,6 +556,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       now,
     ),
   ].sort((a, b) => a.dateEpoch - b.dateEpoch);
+  const { today: todayRelationshipDates, upcoming: upcomingRelationshipDates } = partitionRelationshipDateEventsByToday(relationshipDateEvents, now, timezone);
   const morningBrief: WorkspaceMorningBrief = {
     meetingsToday: todaySchedule.filter((item) => item.type === "meeting").length,
     overdueFollowUps: reminders.results.filter((item) => item.due_at != null && dayKey(item.due_at, timezone) < todayKey).length,
@@ -559,5 +591,5 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     resultPriorityCount: deduped.length,
   });
 
-  return { overview, recommendation, priorities: deduped, priorityCount: allPriorities.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, upcomingRelationshipDates, generatedAt: now };
+  return { overview, recommendation, priorities: deduped, priorityCount: allPriorities.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, todayRelationshipDates, upcomingRelationshipDates, generatedAt: now };
 }

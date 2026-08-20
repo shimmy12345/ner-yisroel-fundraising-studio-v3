@@ -39,6 +39,21 @@ export function localDateParts(epochSeconds: number, timezone: string): { year: 
   return { year, month, day };
 }
 
+// "Today," expressed as the same date-only, UTC-midnight epoch convention
+// lib/calendar/hebrew-date.ts and lib/calendar/gregorian-recurring-date.ts
+// use for a recurrence's own gregorianEpoch (both independently compute
+// exactly this: Date.UTC(...) of localDateParts(now, timezone)). Callers
+// comparing an event's dateEpoch against "is this today" must use this,
+// not localDayKey(dateEpoch, timezone)/dayKey(dateEpoch, timezone) --
+// those are for MOMENT-IN-TIME epochs (an interaction's occurred_at, a
+// reminder's due_at) and would re-apply the timezone offset a second time
+// to a value that is already "UTC midnight of the intended local date,"
+// silently shifting it a day off in any non-UTC timezone.
+export function localDateOnlyEpoch(epochSeconds: number, timezone: string): number {
+  const { year, month, day } = localDateParts(epochSeconds, timezone);
+  return Math.floor(Date.UTC(year, month - 1, day) / 1000);
+}
+
 // Adds (or subtracts) whole calendar days to a Y-M-D date, handling
 // month/year rollover. Pure calendar arithmetic -- deliberately anchored
 // to UTC internally so it is never affected by DST (a calendar day is a

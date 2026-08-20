@@ -72,10 +72,15 @@ for (const start of phaseCallStarts) {
   }
 }
 
-// 7. Instrumentation does not add D1 queries -- exact call-site count
-// pinned, mirroring donor_page_render's own "21 before and after" comment.
+// 7. Instrumentation itself does not add D1 queries -- 17 call sites: the
+// original 16 this test pinned for the instrumentation task, plus exactly
+// one legitimate new query added by the open-pledge payment-recency fix
+// (jl_payment_assignment_audits, feeding resolveOpenPledgeActivityDate --
+// see docs/AI-HANDOFF.md), mirroring donor_page_render's own "21 before,
+// 22 after the Ask feature's one real new query" comment in
+// tests/today.test.mjs.
 const d1CallSites = (liveData.match(/env\.DB\.prepare\(/g) ?? []).length;
-assert.equal(d1CallSites, 16, "loadWorkspaceBrief must still issue exactly 16 D1 query call sites -- instrumentation must never add a query");
+assert.equal(d1CallSites, 17, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query -- instrumentation itself must never add a query");
 
 // 8. Candidate-set sizes are derived from existing in-memory results, not
 // freshly computed/queried: the logged fields must reference the same Map
@@ -89,9 +94,13 @@ for (const expr of [
 }
 assert.match(liveData, /Math\.min\(contacts\.length,\s*CONTACT_GAP_POOL_SIZE\)/, "contactGapCandidateCount must be derived from the existing contacts array and the unchanged CONTACT_GAP_POOL_SIZE constant");
 
-// 9. Successful loader result shape is unchanged (WorkspaceBrief return
-// still has exactly the same fields as before this change).
-assert.match(liveData, /return \{ overview, recommendation, priorities: deduped, priorityCount: allPriorities\.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, upcomingRelationshipDates, generatedAt: now \};/, "loadWorkspaceBrief's return shape must be byte-for-byte unchanged");
+// 9. Successful loader result shape is unchanged BY THIS INSTRUMENTATION
+// TASK -- it still has exactly the same fields the instrumentation task
+// left it with, plus one legitimate new field (todayRelationshipDates)
+// added afterward by the Today's-Agenda-birthday-bucketing correctness
+// fix (see docs/AI-HANDOFF.md): a same-day yahrtzeit/birthday/anniversary
+// now belongs in Today's Agenda, not only Coming Up.
+assert.match(liveData, /return \{ overview, recommendation, priorities: deduped, priorityCount: allPriorities\.length, relationshipQueue, morningBrief, recentlyViewed, recentlyUpdated, todaySchedule, upcomingActivities, meetings, gifts, todayRelationshipDates, upcomingRelationshipDates, generatedAt: now \};/, "loadWorkspaceBrief's return shape must match exactly: the instrumentation task's fields plus the one legitimate todayRelationshipDates addition");
 
 // 8b (from the "candidate-selection rules" guardrail). selectSuggestionDonorIds
 // itself, and the pure suggestion-candidates.ts module, are untouched by this

@@ -29,7 +29,19 @@ export type RecommendationEvidenceInput = {
   // pass false -- that's the safe default (never silently suppress).
   mostRecentPaidGift: { giftSource: GiftSource; giftId: string; amountCents: number; occurredAt: number; campaign: string | null; description: string | null; acknowledged: boolean } | null;
   // An open (unpaid) pledge balance -- drives follow_up_pledge and gates
-  // solicit. Same provenance constraint as above.
+  // solicit. Same provenance constraint as above. `activityDate` means
+  // "last payment activity on this pledge," NOT the pledge's own
+  // original commitment date -- giving_activities.activity_date never
+  // changes when a later payment is applied to that row (only
+  // paid_cents/balance_cents do; the payment's own date lives only in
+  // jl_payment_assignment_audits.payment_date). Every caller MUST resolve
+  // this via resolveOpenPledgeActivityDate() below (most recent linked
+  // payment date, falling back to the pledge's own activity_date only
+  // when no payment is linked) rather than reading activity_date
+  // straight off the giving_activities row -- see docs/AI-HANDOFF.md's
+  // "Open-pledge payment recency" fix for the incident this guards
+  // against (a paid-down pledge's evidence silently kept citing its
+  // original commitment date as "last activity").
   openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null } | null;
   // The donor's most recent COMPLETED interaction (never a scheduled or
   // cancelled one) -- drives continue_conversation and acknowledgedSinceGift.
@@ -136,6 +148,23 @@ export type RecommendationEvidence = {
 
 const DAY_SECONDS = 86400;
 const daysBetween = (laterEpoch: number, earlierEpoch: number) => Math.max(0, Math.floor((laterEpoch - earlierEpoch) / DAY_SECONDS));
+
+// Resolves the correct openPledge.activityDate for evidence purposes. A
+// pledge's giving_activities row is updated in place when a payment is
+// applied (balance_cents/paid_cents change), but its own activity_date
+// column is never touched -- the payment's real date lives only in
+// jl_payment_assignment_audits.payment_date, one row per linked payment,
+// scoped to this exact pledge (pledge_activity_id). "Last payment
+// activity" means the most recent of those, not the original commitment
+// date -- falling back to the pledge's own activity_date only when no
+// payment has ever been linked to it (a brand-new, never-paid-against
+// pledge). Every caller building openPledge for evidence (Today, donor
+// page, Meeting Brief) must route through this so all three surfaces
+// agree; a caller must also only ever pass payment dates for THIS one
+// pledge's id, never another pledge's or another donor's.
+export function resolveOpenPledgeActivityDate(pledgeOwnActivityDate: number | null, linkedPaymentDates: number[]): number | null {
+  return linkedPaymentDates.length > 0 ? Math.max(...linkedPaymentDates) : pledgeOwnActivityDate;
+}
 
 export function buildRecommendationEvidence(input: RecommendationEvidenceInput, now: number, timezone: string): RecommendationEvidence {
   const yahrtzeits: YahrtzeitEvidence[] = input.yahrtzeits.map((item) => {

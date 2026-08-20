@@ -50,8 +50,8 @@ function ScheduledActivityCard({ activity, live, upcoming = false }: { activity:
 // on its own truncated line even when it happens to repeat the relationship
 // text verbatim (e.g. relationship "Mother", deceased name "mother"), since
 // those are two independent fields, not a duplicate render.
-function RelationshipDateEventRow({ event }: { event: WorkspaceRelationshipDateEvent }) {
-  const openHref = donorNavigationHref(event.donorId, "/#coming-up-title", "today");
+function RelationshipDateEventRow({ event, today = false }: { event: WorkspaceRelationshipDateEvent; today?: boolean }) {
+  const openHref = donorNavigationHref(event.donorId, today ? "/#today-agenda-title" : "/#coming-up-title", "today");
   return <article className="relationship-date-row">
     <div className="relationship-date-row-date">{event.dateLabel}</div>
     <div className="relationship-date-row-body">
@@ -84,7 +84,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const greeting = timeOfDayGreeting(now, profile.timezone);
   const agendaQueueCount = data.relationshipQueue.overdue.length + data.relationshipQueue.today.length;
   const comingQueueCount = data.relationshipQueue.thisWeek.length + data.relationshipQueue.upcoming.length;
-  const agendaIsEmpty = agendaQueueCount === 0 && data.todaySchedule.length === 0;
+  const agendaIsEmpty = agendaQueueCount === 0 && data.todaySchedule.length === 0 && data.todayRelationshipDates.length === 0;
   const comingIsEmpty = comingQueueCount === 0 && data.upcomingActivities.length === 0 && data.upcomingRelationshipDates.length === 0;
   const visibleUpcomingActivities = showAll ? data.upcomingActivities : data.upcomingActivities.slice(0, agendaIsEmpty ? 5 : 3);
 
@@ -106,7 +106,8 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
 
     <div className={`today-command-grid ${agendaIsEmpty ? "agenda-empty" : ""}`}>
       <section className="today-command-section today-agenda" aria-labelledby="today-agenda-title">
-        <div className="command-section-heading"><div><p className="eyebrow">TODAY</p><h2 id="today-agenda-title">Today's Agenda</h2></div><span className="count">{agendaQueueCount + data.todaySchedule.length}</span></div>
+        <div className="command-section-heading"><div><p className="eyebrow">TODAY</p><h2 id="today-agenda-title">Today's Agenda</h2></div><span className="count">{agendaQueueCount + data.todaySchedule.length + data.todayRelationshipDates.length}</span></div>
+        {data.todayRelationshipDates.length ? <div className="relationship-date-list">{data.todayRelationshipDates.map((event) => <RelationshipDateEventRow event={event} today key={event.id} />)}</div> : null}
         {data.todaySchedule.length ? <div className="today-meeting-list command-activity-list">{data.todaySchedule.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} key={item.id} />)}</div> : null}
         {agendaQueueCount ? <RelationshipQueueExperience scope="agenda" initialQueue={data.relationshipQueue} priorityCount={data.priorityCount} showAll={showAll} expanded={showAll} /> : null}
         {agendaIsEmpty && <p className="command-empty">✓ No activities or follow-ups need attention today.</p>}

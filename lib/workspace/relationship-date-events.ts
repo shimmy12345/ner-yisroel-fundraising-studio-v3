@@ -25,6 +25,7 @@ import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebre
 import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
 import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendation-candidates.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
+import { localDateOnlyEpoch } from "./local-time.ts";
 
 export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary";
 
@@ -197,4 +198,34 @@ export function buildImportantDateRelationshipEvents(
     });
   }
   return events.sort((a, b) => a.dateEpoch - b.dateEpoch);
+}
+
+// Splits a combined, sorted relationship-date-event list (yahrtzeits +
+// important dates, as live-data.ts builds it) into "today" and "upcoming"
+// buckets, so a same-day birthday/yahrtzeit/anniversary belongs in Today's
+// Agenda rather than only Coming Up. Every event that qualified for the
+// lead window in the first place lands in exactly one of the two returned
+// lists -- nothing is dropped, nothing is duplicated.
+//
+// Compares each event's own dateEpoch against localDateOnlyEpoch(now,
+// timezone) by EXACT equality, deliberately not dayKey(event.dateEpoch,
+// timezone)/localDayKey(...): an event's dateEpoch is already a date-only,
+// UTC-midnight-of-the-intended-LOCAL-date value (the same convention
+// nextGregorianRecurrence/nextYahrtzeitOccurrence use internally to decide
+// "today" when computing it) -- re-running it through a timezone-aware
+// day-key function a second time would apply the timezone offset twice,
+// silently shifting a real same-day event into the wrong bucket in any
+// timezone behind UTC. localDateOnlyEpoch is the one correct way to
+// compute "today" in that same date-only space, matching exactly how the
+// occurrence itself decided it was today in the first place.
+export function partitionRelationshipDateEventsByToday(
+  events: WorkspaceRelationshipDateEvent[],
+  now: number,
+  timezone: string,
+): { today: WorkspaceRelationshipDateEvent[]; upcoming: WorkspaceRelationshipDateEvent[] } {
+  const todayEpoch = localDateOnlyEpoch(now, timezone);
+  return {
+    today: events.filter((event) => event.dateEpoch === todayEpoch),
+    upcoming: events.filter((event) => event.dateEpoch !== todayEpoch),
+  };
 }

@@ -10,7 +10,7 @@ import {
   type MeetingBriefAsk,
 } from "./meeting-brief-model";
 import { importedContextLine } from "./historical-context";
-import { buildRecommendationEvidence } from "./recommendation-evidence";
+import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "./recommendation-evidence";
 import { buildDonorRecommendation } from "./recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment";
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
@@ -48,6 +48,7 @@ type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: Gif
 type YahrtzeitRow = { deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 type AskRow = { id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
+type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
@@ -58,7 +59,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -100,6 +101,15 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
       WHERE a.donor_id = ? AND a.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
         AND a.status = 'pending'
       ORDER BY a.asked_at ASC`).bind(donorId, userId, userId).all<AskRow>(),
+    // Every payment actually applied to one of this donor's pledges --
+    // feeds openPledge's "last activity" date via
+    // resolveOpenPledgeActivityDate (see its doc comment). NOT the same
+    // as the pledge's own giving_activities.activity_date, which never
+    // moves once a payment is applied to that row.
+    env.DB.prepare(`SELECT pledge_activity_id, payment_date
+      FROM jl_payment_assignment_audits
+      WHERE donor_id = ? AND user_id = ? AND decision_type = 'apply_to_pledge'
+        AND applied_cents > 0 AND payment_date IS NOT NULL`).bind(donorId, userId).all<PledgePaymentRow>(),
   ]);
 
   const address = [
@@ -199,7 +209,8 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   const paidFromLegacy = legacyGifts.results.map((gift) => ({ giftSource: "gift" as GiftSource, giftId: gift.id, amountCents: gift.amount_cents, occurredAt: gift.received_at, campaign: gift.fund as string | null, description: null as string | null, acknowledged: acknowledgmentByGift.has(`gift:${gift.id}`) }));
   const mostRecentPaidGiftForEvidence = [...paidFromActivities, ...paidFromLegacy].sort((a, b) => b.occurredAt - a.occurredAt)[0] ?? null;
   const openPledgeSource = giving.results.find((item) => (item.balance_cents ?? 0) > 0);
-  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: openPledgeSource.activity_date } : null;
+  const openPledgePaymentDates = openPledgeSource ? pledgePaymentRows.results.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.payment_date) : [];
+  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates) } : null;
   const latestInteraction = interactions.results[0];
   // Same "most recent of the last 5 fetched" precision this whole evidence
   // build already uses for lastContactAt -- not a new approximation. A donor

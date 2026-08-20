@@ -19,7 +19,7 @@ import { donorBackLabel, donorNavigationHref, meetingBriefNavigationHref, safeDo
 import { financialDateLabel } from "../../../lib/financial-date";
 import { donorInitials, numericDonorCode } from "../../../lib/relationships/donor-identity";
 import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
-import { buildRecommendationEvidence } from "../../../lib/relationships/recommendation-evidence";
+import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
 import { GiftAcknowledgmentActions } from "./GivingManagement";
@@ -248,7 +248,12 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   const paidFromLegacy = legacyGifts.map((gift) => ({ giftSource: "gift" as GiftSource, giftId: gift.id, amountCents: gift.amount_cents, occurredAt: gift.received_at, campaign: gift.fund as string | null, description: null as string | null, acknowledged: acknowledgmentByGift.has(`gift:${gift.id}`) }));
   const mostRecentPaidGiftForEvidence = [...paidFromActivities, ...paidFromLegacy].sort((a, b) => b.occurredAt - a.occurredAt)[0] ?? null;
   const openPledgeSource = countedActivities.find((item) => (item.balance_cents ?? 0) > 0);
-  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: openPledgeSource.activity_date } : null;
+  // Last payment activity, not the pledge's own original commitment date --
+  // see resolveOpenPledgeActivityDate's doc comment. paymentEvents is
+  // already fetched above (drives the "Most Recent Paid Gift" KPI); this
+  // just scopes it to payments linked specifically to THIS open pledge.
+  const openPledgePaymentDates = openPledgeSource ? paymentEvents.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.payment_date) : [];
+  const openPledgeForEvidence = openPledgeSource ? { balanceCents: openPledgeSource.balance_cents ?? 0, campaign: openPledgeSource.source_campaign, description: openPledgeSource.description || openPledgeSource.item_type, activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates) } : null;
   const lastCompletedInteractionForEvidence = completedInteractions[0] ? { type: completedInteractions[0].type, summary: completedInteractions[0].summary, occurredAt: completedInteractions[0].occurred_at } : null;
   // Excludes role='recipient' -- see lastSubstantiveContactAt's doc comment
   // in recommendation-evidence.ts. lastContactAt below (Last Contact
