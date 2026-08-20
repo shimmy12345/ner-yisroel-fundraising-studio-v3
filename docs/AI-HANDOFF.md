@@ -2209,6 +2209,163 @@ optimization work on the two open items above would need its own separate
 approval before implementation, as already noted in the audit section
 above.
 
+## Payment-Plan Editor Layout Fix -- Overflowing Its Pledge Card (Independent Staging, 2026-08-20)
+
+Unrelated to the 1102/infrastructure work above -- a UI/CSS bug report:
+the payment-plan editor (Set/Edit) rendered wider than its own pledge
+card, reproducible even with exactly one open pledge. Presentation-only
+fix, per explicit instruction: no changes to
+`PledgePaymentPlanManagement.tsx`, the `/api/pledge-payment-plans*`
+routes, cadence/grace/cycle-matching logic, D1 schema, or any migration.
+
+**Root cause, confirmed by inspection of `app/globals.css` before any
+edit, not guessed.** Two compounding CSS gaps:
+1. `.open-pledge-plan-list { grid-template-columns: repeat(auto-fill,
+   minmax(240px, 1fr)); }` lays out as many 240px+ tracks as the row's
+   width allows *regardless of how many grid items actually exist* --
+   with a single open pledge, the lone `.open-pledge-plan-row` only
+   occupies the first track (~240-300px), not the full row, even on a
+   wide screen.
+2. `.payment-plan-fields input, .payment-plan-fields textarea` had no
+   `width` rule at all, so every field rendered at its browser-default
+   intrinsic width (a `<input type="date">`/currency input/`<textarea>`
+   each want on the order of 150-250px unconstrained). Combined with CSS
+   Grid's default `min-width: auto` on both `.payment-plan-fields`'s
+   `1fr` columns and their `label` grid items (neither had `min-width:
+   0`), the two-column fields grid's own minimum computed width floored
+   at roughly 2x that per-field default plus gap -- comfortably wider
+   than the ~240-300px card from (1), with nothing in the ancestor chain
+   clipping or shrinking it. Result: the form visually escaped the card
+   border exactly as reported ("Installment amount extends beyond the
+   right edge", "Note textarea extends far outside the card").
+
+**Fix -- `app/globals.css` only, 6 rule changes, no new selectors beyond
+one:**
+- `.open-pledge-plan-row:has(.payment-plan-form) { grid-column: 1 / -1;
+  }` (new rule) -- while a card is actively showing the payment-plan
+  form (Set or Edit -- both render the same `PlanForm`, same
+  `payment-plan-form` class), it spans every auto-fill track in the row,
+  so the form gets real width. Compact view-mode and no-plan-yet cards
+  are untouched -- `:has()` only matches while the form is actually
+  present, so this is derived purely from DOM structure with zero
+  component/state changes and zero residual class after Cancel.
+- `min-width: 0` added to `.open-pledge-plan-row`, `.payment-plan-fields`,
+  and `.payment-plan-fields label` -- overrides the CSS Grid default
+  `min-width: auto` at each level so columns can actually shrink to the
+  card's real width instead of being floored by unconstrained field
+  widths.
+- `width: 100%; max-width: 100%; box-sizing: border-box;` added to
+  `.payment-plan-fields input, .payment-plan-fields textarea` -- the
+  actual containment guarantee: every field (Cadence's disabled input,
+  Installment amount, both date inputs, the Note textarea -- there is no
+  `<select>` in this form) is now bound to its parent's width, never its
+  own browser-default intrinsic size.
+- `max-width: 100%` added to `.open-pledge-plan-row` and
+  `.payment-plan-form` as a defensive belt-and-suspenders constraint.
+- The pre-existing `@media (max-width:700px)` breakpoint (already
+  collapsing both grids to one column) was **not modified** -- the fix
+  doesn't interact with it; `grid-column: 1 / -1` on an already-1-column
+  list is a no-op there.
+
+**Files changed:** `app/globals.css` (the fix), `tests/pledge-payment-plan-layout.test.mjs` (new regression test), `package.json` (wired the new test into the `test` script chain). `PledgePaymentPlanManagement.tsx` and `app/donors/[id]/page.tsx` were read but **not modified** -- confirmed no genuine component-state issue existed; this was a pure CSS/layout problem.
+
+**Tests.** New `tests/pledge-payment-plan-layout.test.mjs` (structural/
+guardrail style, matching this repo's existing convention for CSS/JSX
+facts that can't be expressed as computed-value unit tests, e.g.
+`nav-link-prefetch.test.mjs`) -- reads `app/globals.css`,
+`PledgePaymentPlanManagement.tsx`, and `page.tsx` as text and asserts:
+Set/Edit both open `PlanForm` and Cancel returns to view mode; both
+share the `payment-plan-form` class the CSS fix keys off of; the
+`:has()` span rule, `min-width: 0`, and `width: 100%`/`max-width: 100%`/
+`box-sizing: border-box` rules are all present; multiple pledges still
+render independent `open-pledge-plan-row`s under the unchanged
+`auto-fill` grid; the POST/PATCH request body shapes and the `{ ended:
+true }` End Plan body are byte-identical to before; `expected_day_of_month`
+is never referenced as an actual field/prop (only in the file's own
+pre-existing explanatory comment); the component still imports nothing
+from `lib/relationships/pledge-payment-plan.ts`. `pnpm test` (all
+tests, this one included), `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed (exit 0) before commit.
+
+**Commit:** `1605f76` ("Fix payment-plan editor overflowing its pledge
+card (CSS layout only)"), pushed to
+`origin/feature/independent-cloudflare-sandbox` (fast-forward,
+`9563efe..1605f76`, fetch-checked immediately before push -- no
+concurrent movement). `origin/main` unchanged throughout
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
+
+**Deployed:** `pnpm run deploy:staging-independent` ->
+`wrangler deploy --config wrangler.staging.jsonc`. Worker version
+`b5357707-2d49-47a3-a1af-d3849b26f9a3`. Only 1 asset changed on upload
+(`/assets/index-*.css`) -- confirms the deployed change is exactly the
+CSS fix, nothing else.
+
+**Live verification, Independent Staging, real donor records, no
+writes.**
+- **Single-pledge case (the exact reported repro):** Mr. & Mrs. Daniel
+  Stein, DIN2025, $144, an existing plan (Monthly / $36 / next Aug 30
+  2026 / final Nov 30 2026). Clicked Edit plan. Confirmed both visually
+  (screenshot) and geometrically via `getBoundingClientRect()`: the
+  `.payment-plan-form` and all 5 fields (Cadence, Installment amount,
+  both dates, Note) have their right edges at or inside the card's right
+  edge; `document.documentElement.scrollWidth === clientWidth` (no
+  page-level horizontal scroll). Layout matches the approved reference:
+  two-column desktop fields, Note spans full width, Save/Cancel inside
+  the card. **Cancel verified clean**: after clicking Cancel,
+  `.payment-plan-form` is gone, the row's `className` is back to the
+  bare `open-pledge-plan-row` (no residual class), computed
+  `grid-column` is back to `auto`, and the row's width returned to its
+  original ~260px compact size -- no residual width/span state, exactly
+  as required.
+- **Multiple-pledge case:** a real donor with 2 open pledges, no plans
+  yet (CT2027 $300, CT2026 $100), rendered side by side compact
+  beforehand. Clicked "Set payment plan" on CT2027. Confirmed: the
+  active row spans the full section width and contains its whole form
+  (geometrically verified, same method as above); the CT2026 neighbor
+  drops cleanly to its own row below with zero pixel overlap
+  (`overlaps()` check on both rows' `getBoundingClientRect()` returned
+  `false`) and remains fully rendered/readable, its own "Set payment
+  plan" button intact.
+- **Edit-plan case (explicitly required):** the real KOLX2026 plan
+  (Zachter donor, $13,500 open, Monthly / $1,500 / next 09/18/2026 /
+  final 05/18/2027) opened via "Edit plan" -- identical correct
+  containment (`aria-label="Edit payment plan"`, all fields
+  geometrically inside the card, no page overflow). Cancelled afterward
+  to leave the real record's page exactly as found (no plan was
+  modified -- no PATCH request was ever sent during this verification).
+- **Mobile/narrow width: NOT achieved, reported honestly rather than
+  assumed.** `resize_window` to 420x900 reported success, but
+  `window.innerWidth` read back as `1920` immediately after -- the
+  viewport did not actually change, the same tooling limitation recorded
+  in this file's prior payment-plan rollout section. The pre-existing
+  `@media (max-width:700px)` breakpoint that already stacks both grids
+  to one column was not touched by this fix (confirmed by reading the
+  unedited rule), so the previously-existing mobile stacking behavior is
+  believed preserved, but this is a source-code observation, not a
+  live-rendered confirmation, and is reported as such.
+
+**Confirmation: no D1 write, no migration, no schema change, no JL data
+touched, no payment-plan business logic changed.** Only 3 files changed
+(`app/globals.css`, `tests/pledge-payment-plan-layout.test.mjs`,
+`package.json`), none of them touch a D1 query, the API routes, or
+`lib/relationships/pledge-payment-plan.ts`. Verified directly: the two
+donor records used for live verification (Daniel Stein, Zachter) were
+only ever read (`GET`) or had their edit form cancelled -- confirmed by
+the fact that Cancel never issues a request (see `PlanForm.save()`,
+only reachable from the Save button) and no Save button was clicked on
+either donor's real plan during this task.
+
+**Note on CLAUDE.md's stated active branch.** `CLAUDE.md`'s Engineering
+Rules section states "The active Fundraising OS branch is
+`feature/fundraising-os-redesign`" -- this conflicts with every prior
+entry in this file and with this task's own explicit instruction, both
+of which point at `feature/independent-cloudflare-sandbox` (the branch
+this Worker/D1/wrangler config actually deploys from). Flagged per
+CLAUDE.md's own instruction to surface conflicts rather than silently
+picking a side; proceeded on `feature/independent-cloudflare-sandbox`
+since it matches the real, already-deployed infrastructure and every
+other session's work in this file. `CLAUDE.md` itself was not edited.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -2980,6 +3137,44 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T17:15:00Z (approximate)
+Claude (Sonnet 5) — Fixed the payment-plan editor overflowing its pledge
+card (CSS/layout only, presentation bug, unrelated to the 1102 work
+above). Root cause, confirmed by inspection: `.open-pledge-plan-list`'s
+`auto-fill` grid gave a lone open pledge only a narrow ~240-300px track
+even on a wide screen, and `.payment-plan-fields` inputs/textarea had no
+width rule, so the fields grid's default `min-width: auto` floored its
+own minimum width above the card's -- together forcing the form past the
+card border. Fix: `.open-pledge-plan-row:has(.payment-plan-form) {
+grid-column: 1 / -1; }` (span the row only while actively editing, zero
+component/state changes, zero residual class after Cancel) plus
+`min-width: 0` on the fields grid/labels and `width: 100%; max-width:
+100%; box-sizing: border-box;` on every field. Only `app/globals.css`,
+a new structural regression test
+(`tests/pledge-payment-plan-layout.test.mjs`), and `package.json` (test
+wiring) changed -- no touch to `PledgePaymentPlanManagement.tsx`, the
+API routes, cadence/cycle logic, or D1. `pnpm test`/`tsc --noEmit`/build
+all passed. Committed `1605f76`, pushed (fast-forward,
+`9563efe..1605f76`), deployed as Worker `b5357707-2d49-47a3-a1af-d3849b26f9a3`
+(only the CSS asset changed on upload). Live-verified on staging with
+real donor records: single-pledge (Daniel Stein/DIN2025/$144) and
+Edit-plan (the real KOLX2026/Zachter plan) both geometrically confirmed
+fully contained with no page-level horizontal overflow; multiple-pledge
+case confirmed the active editor spans the row with zero overlap against
+the untouched neighbor card; Cancel confirmed to leave no residual
+class/state. Mobile/narrow width honestly reported as unverified --
+`resize_window` did not actually change `window.innerWidth` in this
+environment. Flagged (not silently ignored) that `CLAUDE.md` names a
+different "active branch" than the one this task and every prior session
+actually use; proceeded on `feature/independent-cloudflare-sandbox` since
+it matches the real deployed infrastructure. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout. Full report:
+`## Payment-Plan Editor Layout Fix -- Overflowing Its Pledge Card
+(Independent Staging, 2026-08-20)` above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T16:30:00Z (approximate)
 Claude (Sonnet 5) — Post-upgrade verification of the Error 1102
