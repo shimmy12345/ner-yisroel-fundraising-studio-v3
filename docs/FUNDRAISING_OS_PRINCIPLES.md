@@ -74,7 +74,27 @@ changes to Fundraising OS. It does not describe how the code currently works
 - Minimize files changed.
 - Preserve working behavior unless the task explicitly changes it.
 - Do not modify public `main`; it contains the old CRM.
-- The active Fundraising OS branch is `feature/fundraising-os-redesign`.
+- Independent Staging development happens on whichever branch is currently
+  ahead — verify this with `git fetch` plus `git rev-parse`/`git log` and
+  against `docs/AI-HANDOFF.md`'s "Current Git State" section before starting
+  work, rather than trusting a branch name recorded in this document or any
+  other historical note. As of 2026-08-20, that branch is
+  `feature/independent-cloudflare-sandbox`: `feature/fundraising-os-redesign`
+  is the branch this application's foundation was originally built on, but
+  `feature/independent-cloudflare-sandbox` forked from its tip on 2026-08-05
+  and has continued alone since (proven by `git merge-base`: it contains
+  every commit `feature/fundraising-os-redesign` has, plus 100+ more, while
+  `feature/fundraising-os-redesign` has zero commits the other branch
+  lacks). Treat `feature/fundraising-os-redesign` as a historical/superseded
+  branch, not a second active target — do not delete, merge, or rewrite it
+  without explicit approval, since its actual disposition (kept for
+  reference vs. safe to retire) has not been decided.
+- A branch name recorded in this document, `CLAUDE.md`, or
+  `docs/AI-HANDOFF.md` is a starting hint, never authoritative on its own.
+  When it conflicts with verified current git/deployment state or the
+  user's explicit task instruction, the verified state and the user's
+  instruction win — surface the conflict and correct the stale note rather
+  than silently guessing or silently overriding it.
 - A separate private Sites source repository may have its own `main`; always
   identify the remote before pushing.
 - Do not change production data, bindings, migrations, or access policies

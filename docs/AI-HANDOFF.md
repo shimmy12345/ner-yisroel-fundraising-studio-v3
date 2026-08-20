@@ -2365,6 +2365,134 @@ CLAUDE.md's own instruction to surface conflicts rather than silently
 picking a side; proceeded on `feature/independent-cloudflare-sandbox`
 since it matches the real, already-deployed infrastructure and every
 other session's work in this file. `CLAUDE.md` itself was not edited.
+**Resolved below -- see "Branch/Workflow Documentation Audit and
+Correction" for the follow-up task that fixed this properly, including
+the correction that the stale statement actually lives in
+`docs/FUNDRAISING_OS_PRINCIPLES.md`, not `CLAUDE.md` itself.**
+
+## Branch/Workflow Documentation Audit and Correction (2026-08-20)
+
+Documentation/workflow-safety task only, per explicit instruction: no
+application code, D1, deploy, Cloudflare config, or branch merge/delete/
+rewrite. Follow-up to the note directly above -- confirms and fixes the
+stale "active branch" conflict properly, with git evidence rather than
+inference from conversation history alone.
+
+**Correction to the prior note's own claim.** The prior note said
+"CLAUDE.md's Engineering Rules section states..." -- re-checked directly:
+`CLAUDE.md` itself is 13 lines and contains no branch statement at all.
+The actual stale line lives in `docs/FUNDRAISING_OS_PRINCIPLES.md`
+(Engineering rules, line 77): `"The active Fundraising OS branch is
+`feature/fundraising-os-redesign`."` -- `CLAUDE.md` instructs readers to
+"read `docs/FUNDRAISING_OS_PRINCIPLES.md` and treat it as the governing
+product and engineering guidance," which is how the stale line reaches
+the same authority CLAUDE.md carries. Corrected in this task.
+
+**Git evidence, not inference.** Fresh `git fetch` immediately before any
+edit:
+- `origin/main`: `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (unchanged).
+- `origin/feature/independent-cloudflare-sandbox`:
+  `0eb860265c1e65e6a38e7fd32aa3749dea7c6c5f` (local HEAD, matches exactly,
+  clean working tree).
+- `origin/feature/fundraising-os-redesign`:
+  `ade8594bf72d9053b7f5c09449c13917e6a708a0` -- exists, was not assumed
+  obsolete.
+
+`git merge-base origin/feature/fundraising-os-redesign
+origin/feature/independent-cloudflare-sandbox` returns exactly
+`ade8594...` -- `feature/fundraising-os-redesign`'s own current tip --
+and `git merge-base --is-ancestor` confirms it directly: **every commit
+on `feature/fundraising-os-redesign` is also on
+`feature/independent-cloudflare-sandbox`, and `git rev-list --count
+origin/feature/independent-cloudflare-sandbox..origin/feature/fundraising-os-redesign`
+is exactly `0`** -- `feature/fundraising-os-redesign` has no commit the
+other branch lacks. `git rev-list --count
+origin/feature/fundraising-os-redesign..origin/feature/independent-cloudflare-sandbox`
+is `106` -- everything since `feature/fundraising-os-redesign`'s last
+commit (`ade8594`, "fix: assign full JL payments to pledges,"
+2026-08-05) has happened exclusively on
+`feature/independent-cloudflare-sandbox`: the Ask/Solicitation feature,
+the birthday-bucketing and payment-recency fixes, the Monthly Payment
+Plan feature and its staging rollout, both Error 1102 investigations,
+and the payment-plan layout fix immediately above. This is a fork-and-
+continue relationship, not two parallel environments -- confirmed
+further by both branches sharing the exact same root commit (`fdd6783`,
+"feat: establish Fundraising OS application foundation"), while
+`origin/main` has a completely disjoint root commit (`2b8f94c`, "Initial
+commit") -- structural confirmation of CLAUDE.md's existing "main
+contains the old CRM" statement, not a new finding.
+
+**Why `docs/FUNDRAISING_OS_PRINCIPLES.md` names the wrong branch.** The
+commit that added this file (`350b374`, "docs: add governing principles
+doc and auto-load CLAUDE.md," 2026-08-06) is **not an ancestor of
+`feature/fundraising-os-redesign` at all** -- `git merge-base
+--is-ancestor 350b374 origin/feature/fundraising-os-redesign` returns
+false. The file was authored and committed one day *after*
+`feature/independent-cloudflare-sandbox` had already forked off and
+continued, directly on the sandbox branch -- so the statement was not
+"true when written and later went stale"; it named the wrong branch from
+the moment it was committed, most likely a copy/paste or memory slip by
+whoever wrote it, not a deliberate multi-environment design. No config,
+script, or infrastructure file references either branch name by name --
+`grep`/`git grep` across the repo (excluding this file's own many
+correct mentions) found the stale line as the only other hit, in
+`docs/FUNDRAISING_OS_PRINCIPLES.md`. `package.json`'s
+`deploy:staging-independent`/`build:staging-independent` scripts and
+`wrangler.staging.jsonc` are all config-file-driven, not branch-name-
+driven -- branch discipline here is a human/process convention, not
+something any script enforces, which is exactly why a stale doc could
+have silently misdirected a future session.
+
+**What this file (`docs/AI-HANDOFF.md`) already had right.** Its own
+"Current Git State" section has said "Branch:
+feature/independent-cloudflare-sandbox" since this file's earliest
+entries, and its own preamble already states "If this file and the
+repository/infrastructure disagree, trust the repository/infrastructure"
+-- a narrower version of the authority-order rule this task was asked to
+add. `docs/FUNDRAISING_OS_PRINCIPLES.md` was the only stale outlier.
+
+**`feature/fundraising-os-redesign`'s actual status, established, not
+guessed:** it is the branch this application's foundation was originally
+built on (shares the app's true root commit with the sandbox branch,
+unlike `main`), and its own last commit is a real, substantive fix ("fix:
+assign full JL payments to pledges") -- not a throwaway or experimental
+branch. But it has had zero commits since 2026-08-05, carries no unique
+work `feature/independent-cloudflare-sandbox` lacks, and nothing in the
+repo's config/scripts points at it as a separate deployment target. It is
+**historical/superseded, not a second active environment** -- kept
+as-is, not deleted, merged, renamed, or rewritten, per explicit
+instruction; its final disposition (archive vs. eventual deletion) was
+not decided here and would need its own separate approval.
+
+**Fix.** `docs/FUNDRAISING_OS_PRINCIPLES.md`'s Engineering rules section:
+replaced the single stale "active branch" bullet with two bullets --
+(1) states that Independent Staging development is currently on
+`feature/independent-cloudflare-sandbox`, explains the fork relationship
+and the exact evidence above, and instructs verifying via `git
+fetch`/`rev-parse`/`log` plus this file's own "Current Git State" section
+rather than trusting any recorded branch name, including this one, and
+(2) a general authority-order rule: a branch name in
+`FUNDRAISING_OS_PRINCIPLES.md`, `CLAUDE.md`, or `docs/AI-HANDOFF.md` is a
+starting hint, never authoritative on its own -- verified current git/
+deployment state and the user's explicit task instruction win on
+conflict, and the conflict should be surfaced and the stale note
+corrected, not silently guessed past or silently overridden. This
+mirrors, rather than duplicates, `docs/AI-HANDOFF.md`'s own existing
+"trust the repository/infrastructure" preamble -- no new hierarchy
+taxonomy was invented, and no other document needed a matching change
+(`CLAUDE.md` was re-checked and contains no branch statement to correct;
+`docs/DEPLOYMENT.md` and `README.md` contain no branch references at
+all).
+
+**Confirmation: no branch was merged, deleted, force-pushed, or
+rewritten.** `feature/fundraising-os-redesign` was only read (`git log`,
+`git merge-base`, `git rev-list --count`) -- never checked out, written
+to, or force-pushed. No merge into or from `origin/main` occurred.
+`origin/main` unchanged throughout
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Only
+`docs/FUNDRAISING_OS_PRINCIPLES.md` and this file changed; no
+application code, D1 schema, migration, Cloudflare configuration, or
+deployment occurred in this task.
 
 ## Latest Completed Task
 
@@ -3137,6 +3265,38 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T17:45:00Z (approximate)
+Claude (Sonnet 5) — Documentation/workflow-safety task: audited and fixed
+the stale "active branch" conflict flagged during the payment-plan layout
+task. The stale line actually lives in
+`docs/FUNDRAISING_OS_PRINCIPLES.md` (not `CLAUDE.md` itself, which has no
+branch statement -- CLAUDE.md just directs readers to treat that file as
+governing). Proved with git evidence (`merge-base`, `--is-ancestor`,
+`rev-list --count`), not inference: `feature/fundraising-os-redesign`
+(tip `ade8594`, last commit 2026-08-05) is a strict ancestor of
+`feature/independent-cloudflare-sandbox` (tip `0eb8602`) with zero unique
+commits of its own, while sandbox is 106 commits ahead -- every recent
+feature (Ask, birthday/payment-recency, Monthly Payment Plan, both 1102
+investigations, the layout fix) happened only on sandbox. Also proved the
+principles doc's own branch line was wrong from the moment it was
+written, not merely stale: the commit that added it postdates sandbox's
+fork point and isn't even an ancestor of the redesign branch it names.
+Replaced the single stale bullet in `docs/FUNDRAISING_OS_PRINCIPLES.md`
+with two: (1) correct current-branch guidance that tells the reader to
+verify via git/AI-HANDOFF rather than trust any recorded name, and (2) a
+general authority-order rule (verified git state + the user's explicit
+instruction beat any recorded branch name; surface conflicts, don't
+guess). `feature/fundraising-os-redesign` was only read, never
+checked out, merged, deleted, or force-pushed -- described as historical/
+superseded in the principles doc, disposition left undecided.
+`origin/main` unchanged throughout
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). No application code, D1, or
+deployment touched in this task. Full report: "Branch/Workflow
+Documentation Audit and Correction (2026-08-20)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T17:15:00Z (approximate)
 Claude (Sonnet 5) — Fixed the payment-plan editor overflowing its pledge
