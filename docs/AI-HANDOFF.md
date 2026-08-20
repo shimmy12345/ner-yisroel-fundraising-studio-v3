@@ -2080,6 +2080,135 @@ fully eliminate 1102 risk for this route (very likely given the 3000x
 higher default ceiling relative to this route's own measured cost, but
 not something that can be proven without actually being on Paid).
 
+## Independent Staging Incident -- Error 1102 -- POST-UPGRADE VERIFICATION (Workers Paid, 2026-08-20) -- VERIFICATION ONLY, NO CODE/CONFIG/DEPLOY CHANGE
+
+The user purchased and activated Workers Paid on this account following the
+infrastructure-limit audit above. This section verifies the upgrade landed
+and re-exercises the exact workload that previously failed -- no
+application code change, no wrangler/config change, no D1 write, no
+redeploy, no CPU-limit change performed in this task.
+
+**Plan verified: Workers Paid, confirmed on the dashboard, not assumed.**
+`dash.cloudflare.com/2f34086b78ac8643498a1a600b846757/workers/plans` now
+shows **"Current plan" on the Paid tier** (Free shows "Downgrade" instead).
+Published Paid ceiling, same page: **5 min max CPU time per invocation**
+(vs. Free's 10 ms).
+
+**Effective CPU limit for this Worker: still unset (platform default
+applies), verified on the dashboard.** The Worker's own Settings page
+(`.../fundraising-os-staging/production/settings`) now shows a "Pricing"
+section with a **"CPU Time Limit (ms)" field that only exists on Paid** --
+confirmed empty (placeholder `--`), matching `wrangler.staging.jsonc`
+having no `limits.cpu_ms` (re-read directly, unchanged). No explicit
+override was set at any point -- the Worker runs under Paid's platform
+default (published as 30 s, up to 5 min configurable) purely because the
+account's plan changed, not because of any config edit here.
+
+**Deployed Worker version confirmed unchanged.** `wrangler deployments
+list --config wrangler.staging.jsonc` (read-only) still shows
+`1875be3f-392f-4b74-835a-8270a9d1f84a` (created 2026-08-20T04:38:18.759Z)
+as the most recent/live version -- **no deployment has occurred since**,
+before or after this verification task ran. This is the same version that
+produced the `exceededCpu` failure at 11:44:12 UTC, so any change in
+outcome is attributable only to the plan upgrade, not to a masked code fix.
+
+**Workload exercised: 8 real browser navigations, Independent Staging,
+2026-08-20 ~12:18:50-12:20:13 EDT (16:18:50-16:20:13 UTC).** Real
+authenticated navigations (not a script/load test): 5x `GET
+/?priorities=all` (the exact route and query string that failed
+pre-upgrade), interleaved with 3x real donor-page visits from the Coming
+Up list, mirroring the donor-page/queue-return cycle seen in both prior
+1102 incidents. Ray-ID-correlated directly from each event's own
+Observability record, not inferred from timestamp proximity:
+
+| # | Time (EDT) | Ray ID | `outcome` | `cpuTimeMs` | `wallTimeMs` | `response.status` | `scriptVersion` |
+|---|---|---|---|---|---|---|---|
+| 1 (cold start -- first request of this exercise) | 12:18:50.523 | `a2e2b7542bfc8c23` | **ok** | 354 | 1141 | 200 | `1875be3f-...` |
+| 2 | 12:19:09.181 | `a2e2b7cbdfe48c23` | **ok** | 322 | 809 | 200 | `1875be3f-...` |
+| 3 | 12:19:30.933 | `a2e2b8545f828c23` | **ok** | 221 | 626 | 200 | `1875be3f-...` |
+| 4 | 12:19:53.936 | `a2e2b8e41bcd8c23` | **ok** | 224 | 636 | 200 | `1875be3f-...` |
+| 5 | 12:20:13.489 | `a2e2b95e38cd8c23` | **ok** | 226 | 639 | 200 | `1875be3f-...` |
+
+All 3 interleaved donor-page navigations (`GET /donors/...`) and their
+`donor_page_render` events logged at `level: "info"` throughout, with zero
+`error`-level events anywhere in this exercise. The Observability panel's
+own rolled-up count for the surrounding hour read **279 Success, 2
+Errors** -- both errors are the single pre-upgrade `a2e2849e1fdc23dd`
+event (11:44:12 UTC, before the upgrade); **zero new errors, zero new
+`exceededCpu`, zero new 1102, zero new 5xx of any kind** appeared across
+all 8 navigations exercised after the upgrade.
+
+**Before vs. after, explicitly, and not attributed to reduced computation
+per instruction.** Every one of today's 5 post-upgrade samples
+(221-354 ms CPU) cost **more** CPU than the incident's own 68 ms kill, and
+sample #1 (354 ms) and #2 (322 ms) both exceed every successful pre-upgrade
+sample on record in this file (85-242 ms). **This is the load-bearing
+evidence for this verification: the application's own computational cost
+did not go down** -- if anything today's sample skews slightly higher,
+consistent with ordinary request-to-request variance already documented
+above, not with any code change (none was made; `scriptVersion` is
+identical). What changed is that a 221-354 ms request, which would have
+had a real chance of being killed under Free's ~10 ms/inconsistent
+enforcement (recall: the 68 ms kill was *lower* than several pre-upgrade
+successes), now completes without incident under Paid's much higher
+ceiling. The reduction in failures is attributable to the raised ceiling,
+not to lower application cost -- exactly the distinction the task asked
+this verification to preserve.
+
+**Cold-start note, consistent with (not new proof of) the existing open
+item.** Sample #1, the first request of this exercise (a cold isolate),
+cost the most CPU (354 ms) and wall time (1141 ms) of the five -- the same
+pattern already on record in this file's "Duplicate-Loader Fix" section
+(cold starts costing more, and not reliably deduping). This verification
+did not re-instrument or re-diagnose that gap; it is simply consistent
+with it still being present.
+
+**Can the 1102 infrastructure-limit incident be closed? Yes.** The
+specific failure mode investigated (`exceededCpu` on `GET
+/?priorities=all` / the Today loader, caused by Free's ~10 ms ceiling
+being incompatible with this route's ordinary 70-354 ms cost) has been
+verified resolved at the infrastructure level: same code, same Worker
+version, higher observed CPU costs than the original failure, zero
+failures post-upgrade. There is no more diagnostic value in continuing to
+treat ordinary CPU usage on this route as an application defect requiring
+a fix before the account can be trusted -- the ceiling that made it a
+defect is gone.
+
+**What remains explicitly OPEN, not closed by this verification** (per
+instruction to keep these separate):
+1. **Cold-start dedup gap** (`## Independent Staging Duplicate-Loader
+   Fix`, "What remains unproven / open" #1) -- still unresolved; today's
+   cold-start sample is consistent with it still being present, not proof
+   either way since no dedup-specific instrumentation was read here.
+2. **Uninstrumented wall-time/CPU-time remainder outside
+   `loadWorkspaceBrief()`** (same section, #3) -- still unattributed; a
+   639 ms wall time against ~60-70 ms of instrumented loader phases (per
+   the existing `workspace_brief_phase` telemetry) still leaves most of
+   each request's cost unexplained.
+
+Neither is urgent now that the ceiling risk is gone, but both remain
+legitimate, separate performance-quality work if the user wants to pursue
+them later -- no approval was sought or needed to leave them open, per
+instruction.
+
+**Proven vs. inference, explicitly.** PROVEN: account plan (dashboard's
+own "Current plan" badge, moved from Free to Paid), no CPU-limit override
+configured before or after the upgrade (Settings page field empty,
+`wrangler.staging.jsonc` unchanged), deployed Worker version unchanged
+(`wrangler deployments list`), all 5 sampled requests' exact
+outcome/cpu/wall/status/version (read directly off each event record), no
+new errors of any kind across all 8 navigations exercised. INFERRED:
+that Paid's *effective* per-invocation ceiling is exactly the documented
+30 s default (the dashboard does not expose the live numeric ceiling when
+no override is set; inferred from the empty override field plus
+Cloudflare's own published default, not read as a literal number).
+
+**No approval needed to close this incident** -- per instruction, closing
+it is a reporting action, not a code/config/deploy change. Any future
+optimization work on the two open items above would need its own separate
+approval before implementation, as already noted in the audit section
+above.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -2851,6 +2980,33 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T16:30:00Z (approximate)
+Claude (Sonnet 5) — Post-upgrade verification of the Error 1102
+infrastructure-limit incident, per explicit instruction: verification
+only, no code/config/deploy/D1/CPU-limit change. The user purchased
+Workers Paid following the prior audit. Confirmed on the dashboard (not
+assumed): plan is now Paid ("Current plan" badge), the Worker's CPU-limit
+override field is still empty (Paid platform default applies, nothing
+configured), and `wrangler deployments list` shows the deployed version
+unchanged (`1875be3f-...`, same version that produced the original
+`exceededCpu` failure). Exercised 8 real navigations (5x `GET
+/?priorities=all`, 3x donor pages) -- all succeeded, `outcome: "ok"`,
+`cpuTimeMs` 221-354 (Ray-ID-correlated from each event record), zero new
+errors of any kind. Per explicit instruction, did NOT attribute the
+absence of failures to reduced computation: today's CPU costs were higher
+than the incident's 68 ms kill and higher than several pre-upgrade
+successes, proving the application's cost profile is unchanged -- only
+the ceiling moved. Concluded the 1102 infrastructure-limit incident can be
+closed; explicitly kept two separate, already-documented performance
+items open (cold-start dedup gap, uninstrumented wall-time remainder) since
+neither was investigated or fixed in this task. Full report: `##
+Independent Staging Incident -- Error 1102 -- POST-UPGRADE VERIFICATION
+(Workers Paid, 2026-08-20)` above. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T15:50:00Z (approximate)
 Claude (Sonnet 5) — Infrastructure-limit audit of a new Independent Staging
