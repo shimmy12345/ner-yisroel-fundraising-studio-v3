@@ -12,10 +12,21 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-Documentation-only update to this file, on top of `eec5266`. Reports the just-completed Error 1102 duplicate-loader-execution fix (code + deploy + live verification already done before this doc update -- see "Independent Staging Duplicate-Loader Fix — CURRENT STATUS" section below, which is the authoritative current state; treat the instrumentation/deployment details further down this file as historical unless that section says otherwise).
+Documentation-only update to this file, on top of `93bdfb3`. Reports the
+just-completed Today's-Agenda-birthday-bucketing + open-pledge-payment-
+recency correctness fixes (code + deploy + live verification already done
+before this doc update -- see "Today's-Agenda Birthday Bucketing +
+Open-Pledge Payment Recency -- FIXED AND LIVE" section below, which is
+the authoritative current state for those two bugs).
 
 origin/feature/independent-cloudflare-sandbox:
-`eec5266` (the corrected request-scoped dedup fix, on top of the concurrent session's Ask-backfill/closure work and this session's earlier instrumentation commit `83bfa75`; all pushed). Deployed to Independent Staging as Worker version `db4dcc3e-1629-4457-81e6-ae53ffeb5894` -- **not** `f29c075f` (superseded) or `70f3c2c6` (broken, rolled back). See "Independent Staging Duplicate-Loader Fix" below for the full report: proven root cause, the failed `enterWith()` deploy, the corrected `run()`-based fix, and 5-navigation live-verification telemetry (4/5 deduped correctly, CPU materially reduced; 1/5 cold-start case still not deduped, unproven why).
+`93bdfb3` (the two correctness fixes above, on top of `eec5266`'s
+corrected request-scoped dedup fix, the concurrent session's
+Ask-backfill/closure work, and the earlier instrumentation commit
+`83bfa75`; all pushed). Deployed to Independent Staging as Worker version
+`5f738898-adee-4e43-8fc9-2f170e377c07` -- **not** `db4dcc3e`/`f29c075f`/
+`70f3c2c6` (all superseded). See "Deployment State" and the birthday/
+pledge-fix section below for the full report.
 
 origin/main:
 4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched)
@@ -1277,6 +1288,205 @@ Klein/Pfeiffer/Rovinsky, and clearing their `relationship_summary`) were
 explicitly **not** done in this task, per instruction -- still open, see
 "Next Approval Required" below.
 
+## Today's-Agenda Birthday Bucketing + Open-Pledge Payment Recency -- FIXED AND LIVE (2026-08-19)
+
+Two bounded correctness fixes, unrelated to each other and to the Ask
+feature/1102 work above. Not part of the (separate, not-started-here)
+monthly-payment-plan feature -- see "Deferred: monthly payment plans" below
+for what that would need.
+
+### Bug 1: same-day birthday appeared only in Coming Up, never Today's Agenda
+
+**Live regression case**: Dr. & Mrs. Yaakov Abdelhak, birthday Aug 19,
+observed 2026-08-19 -- showed under Coming Up, not Today's Agenda.
+
+**Root cause: category (C), a Today/Coming-Up classification gap -- NOT a
+timezone or recurring-date calculation bug.**
+`nextGregorianRecurrence`/`nextYahrtzeitOccurrence`
+(lib/calendar/gregorian-recurring-date.ts,
+lib/calendar/hebrew-date.ts) already correctly compute a same-day
+occurrence's `dateEpoch` as exactly today (verified directly: for
+Abdelhak's Aug 19 birthday, `dateEpoch` equals
+`localDateOnlyEpoch(now, timezone)` exactly). The bug was purely
+downstream: `lib/workspace/live-data.ts` built one combined,
+unconditional `upcomingRelationshipDates` list (every yahrtzeit/birthday/
+anniversary inside its lead window, regardless of date), and
+`app/page.tsx` rendered that list only under Coming Up -- there was no
+split for "is this today" anywhere in the pipeline. Today's Agenda itself
+never looked at relationship-date events at all.
+
+**Fix.** Added `partitionRelationshipDateEventsByToday()` (pure, in
+`lib/workspace/relationship-date-events.ts`) plus a new
+`localDateOnlyEpoch(now, timezone)` helper (in
+`lib/workspace/local-time.ts`) that computes "today" in the exact same
+date-only, UTC-midnight-of-local-date convention
+`nextGregorianRecurrence`/`nextYahrtzeitOccurrence` already use
+internally -- deliberately NOT `dayKey`/`localDayKey` (those are for
+moment-in-time epochs like `occurred_at`/`due_at`; applying them to an
+already-date-only `dateEpoch` would re-apply the timezone offset a second
+time and silently misclassify a real same-day event in any timezone
+behind UTC). `WorkspaceBrief` gained a new `todayRelationshipDates` field;
+`app/page.tsx` renders it inside Today's Agenda (reusing the existing
+`RelationshipDateEventRow` component, now with a `today` prop controlling
+its return-anchor) and includes it in the Today's Agenda count badge.
+`upcomingRelationshipDates` (Coming Up) now correctly excludes same-day
+events instead of showing them a second time -- no duplication, by
+design (the task's own preferred UX: Today's Agenda only, not both).
+No persistent recommendation row was manufactured; this is a pure
+re-bucketing of the same recomputed date-event data the existing
+architecture already produced every request.
+
+**Tests** (`tests/relationship-date-today-bucket.test.mjs`, 10 items):
+birthday today (exact Abdelhak regression case, using the real builder
+and the real partition function, not a reimplementation); birthday
+tomorrow; birthday "yesterday" (the builder itself never produces a past
+occurrence -- it recurs next year, outside the lead window, so there's
+nothing for the partition to misclassify); a UTC-midnight timezone
+boundary case (NOW chosen so raw UTC has already rolled to the next
+calendar day while America/New_York is still "today," proving the fix
+uses the correct date-only-epoch comparison, not a double timezone
+conversion); anniversary (same path, same behavior); yahrtzeit (same
+path, same behavior, unaffected outside-window case still produces no
+event); no-duplication across both buckets (union recovers the original
+list exactly, no id appears in both); plus source-level checks that
+`live-data.ts` actually routes through the real partition function and
+that Today's Agenda/Coming Up render/exclude the right lists.
+
+**Live verification** (2026-08-19, deployed Worker, real Abdelhak
+record): Today's Agenda shows "Aug 19, 2026 -- Dr. & Mrs. Yaakov Abdelhak
+(49026) -- Birthday -- Yaakov's birthday · Turning 59" with count badge
+"1"; Coming Up starts at Aug 23 (Raphael Nakhon), correctly does NOT
+repeat Abdelhak's Aug 19 birthday; age ("Turning 59") is correct; no
+duplicate or confusing presentation.
+
+### Bug 2: open-pledge Suggested Action ignored a newly-applied payment
+
+**Live regression case**: pledge KOLX2026 (donor Mr. & Mrs. Yaakov
+Zachter, pledge id `ed3e9f11-33a7-4414-9409-217d41d63009`) -- $18,000
+committed Jun 18, 2026, $4,500 originally paid; a $1,500 payment applied
+Aug 18, 2026 correctly reduced the balance to $13,500 (confirmed in the
+timeline as "Payment applied to pledge, Aug 18, 2026"), but Suggested
+Action still said `"Follow up on the open $13,500 pledge to KOLX2026."` /
+`"No payment activity in 62 days."` / evidence `"...last activity
+2026-06-18."` -- silently ignoring the Aug 18 payment.
+
+**Root cause, traced precisely.** `giving_activities` (the pledge's own
+row) is updated IN PLACE when a payment is applied
+(`paid_cents`/`balance_cents` change), but its `activity_date` column is
+never touched -- it stays the original commitment date forever. The
+payment's real date lives only in `jl_payment_assignment_audits
+.payment_date` (one row per linked payment, `decision_type =
+'apply_to_pledge'`, linked via `pledge_activity_id`). All three surfaces
+sharing `buildRecommendationEvidence` (Today's homepage,
+`app/donors/[id]/page.tsx`, `lib/relationships/meeting-brief.ts`, which
+Assistant also reuses via `loadMeetingBrief()`) were reading
+`activity_date` straight off the `giving_activities` row into
+`openPledge.activityDate` -- never consulting the payment-audit table at
+all for this specific evidence field. (The donor page's separate "Most
+Recent Paid Gift" KPI already correctly used
+`jl_payment_assignment_audits` for a DIFFERENT purpose -- the donor-wide
+most-recent-payment display -- which is why that KPI already showed "Aug
+18, 2026" correctly even while the pledge-specific evidence stayed
+broken; these are not the same computation.)
+
+**Fix.** Added `resolveOpenPledgeActivityDate(pledgeOwnActivityDate,
+linkedPaymentDates)` (pure, in `lib/relationships/recommendation-
+evidence.ts`, next to the `openPledge` type it directly governs): returns
+the max of `linkedPaymentDates` if any exist, else falls back to the
+pledge's own `activity_date`. Wired into all three loaders, each scoping
+its payment-date lookup to the exact pledge id (never a whole-donor or
+whole-account payment list): the donor page reuses its already-fetched
+`paymentEvents` array (no new query needed there); `meeting-brief.ts` and
+`live-data.ts` each gained one new `jl_payment_assignment_audits` query
+(`decision_type = 'apply_to_pledge' AND applied_cents > 0 AND
+payment_date IS NOT NULL`), matching the donor page's existing WHERE
+clause exactly for consistency.
+
+**No new suppression/threshold policy was invented, and none was
+needed.** `followUpPledgeCandidate` (recommendation-candidates.ts) already
+derives `ageDays`, `confidence` (`medium` at `ageDays >= 60`, else
+`low`), and `urgency` (`clamp01(ageDays / 180)`) purely from
+`openPledge.activityDate` -- once that date is correct, the SAME
+unmodified formula automatically answers the task's own question C
+("score materially lower because payment activity is recent"): ageDays
+drops from 62 to 1, confidence drops to `low`, urgency drops to ~0, and
+the wording template (unchanged) now produces a truthful sentence ("No
+payment activity in 1 days" -- honestly true: no *additional* activity
+in the one day since the real payment) instead of the false "62 days."
+The candidate remains technically eligible (never suppressed outright) --
+for the live Zachter case, a different, legitimately higher-ranked
+candidate (`relationship_opportunity`, from an unrelated pre-existing
+narrative-text fact) now wins Suggested Action instead, which is exactly
+the intended effect of a low-urgency pledge candidate no longer being
+falsely inflated by a stale date.
+
+**Tests** (`tests/pledge-payment-recency.test.mjs`, 11 items): no
+payments (falls back to original date); one recent payment (the exact
+live regression -- ageDays 62→1); several payments (latest always wins,
+order-independent); balance/recency stay mutually consistent; unrelated
+donor/different-pledge payments cannot leak in (scoped filtering
+verified); fully-paid pledge produces no `follow_up_pledge` candidate at
+all (pre-existing behavior, confirmed unaffected); an old real payment
+still correctly reports a large `ageDays` and remains eligible (this fix
+never suppresses a genuinely stale pledge); the exact reported bad
+sentence ("No payment activity in 62 days") is asserted absent, the
+correct evidence line ("last activity 2026-08-18") is asserted present,
+and confidence/urgency are asserted low/near-zero for the just-paid case;
+plus source-level cross-surface checks that all three loaders route
+through `resolveOpenPledgeActivityDate` (and that none of them still
+reads `activity_date` straight onto `activityDate`).
+
+**Live verification** (2026-08-19, deployed Worker, real Zachter/KOLX2026
+record, read-only throughout -- confirmed via a direct D1 read
+immediately after verification that `giving_activities` for this pledge
+is byte-for-byte unchanged: `paid_cents=450000, balance_cents=1350000,
+activity_date=1781740800`): donor page shows "Open Commitments: $13,500"
+and "Most Recent Paid Gift: $1,500 / Aug 18, 2026" correctly; Suggested
+Action does not show the buggy pledge text anywhere (a different
+candidate legitimately wins, as expected once the pledge's urgency
+correctly dropped); Meeting Brief agrees exactly with the donor page on
+balance/lifetime-paid ($13,500 / $45,400) and shows the same Suggested
+Action family -- cross-surface consistency confirmed directly, not
+assumed.
+
+### Deferred: monthly payment plans (NOT implemented in this task, audit only)
+
+Per explicit instruction, the broader feature ("a donor paying an open
+pledge monthly through a known final due date should not continually
+surface as requiring follow-up while that plan is current") was not
+built. What exists today that a future implementation could build on,
+audited while tracing Bug 2:
+
+- `jl_payment_assignment_audits` is already, effectively, a real payment
+  ledger per pledge (`pledge_activity_id`, `payment_date`,
+  `applied_cents`, `remaining_balance_cents`, one row per linked
+  payment) -- a future feature could analyze this history to detect an
+  actual recurring cadence, rather than needing a fundraiser to declare
+  one from scratch.
+- No table anywhere currently stores an explicit "this pledge is on an
+  active monthly plan through date X" annotation -- there is no
+  `giving_activities` column and no separate table for it, unlike Asks
+  (which got dedicated `asks`/`ask_changes` tables). The natural
+  precedent this repo already established for "a small, narrow,
+  fundraiser-declared local annotation layered on top of JL financial
+  data, with its own tiny audit table" is exactly the Ask feature's own
+  shape (`docs/ASK-SOLICITATION-DESIGN.md`) -- a future
+  `pledge_payment_plans` (+ small audit) table modeled the same way is
+  the natural fit, not a new column on `giving_activities` itself
+  (JL-imported financial system-of-record data should stay JL-owned).
+- The one concrete hook point this fix's own architecture already
+  provides: `RecommendationEvidenceInput.openPledge` (recommendation-
+  evidence.ts) is exactly where a future `activePaymentPlan: {
+  finalDueDate: number; cadenceDays: number } | null` field would be
+  added, threaded through the same three loaders `resolveOpenPledgeActivityDate`
+  is wired into today (Today, donor page, Meeting Brief/Assistant), and
+  consumed by `followUpPledgeCandidate` to suppress or re-score itself
+  while `now < finalDueDate` and the plan is being honored -- the exact
+  same "add one evidence field, thread it through the three existing
+  loaders, let the existing candidate function read it" shape this task's
+  own Bug 2 fix and the Ask feature both already used. Not built here;
+  flagged as the concrete next step if/when this feature is approved.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -1651,31 +1861,28 @@ No migration beyond 0032 exists or has been applied.
 
 ## Deployment State
 
-**Live -- current as of 2026-08-19T21:58:13Z.** Deployed commit `eec5266`
-("Fix request-scoped dedup: use AsyncLocalStorage.run()/getStore(), not
-enterWith()" -- see "Independent Staging Duplicate-Loader Fix" above for
-the full story, including a rolled-back broken intermediate deploy),
-Worker version `db4dcc3e-1629-4457-81e6-ae53ffeb5894`, confirmed via the
-deploy command's own printed Version ID and via live-verified telemetry
-(5 real Today-page navigations, 4/5 showing the intended single-execution
-dedup, all 5 rendering correctly with no 1102/5xx). **This supersedes the
-two version IDs that appear earlier in this file** (`f29c075f` -- the
-instrumentation-only version this replaced -- and `70f3c2c6` -- a broken
-intermediate deploy that was live for only a few minutes before rollback;
-neither is live now). Branch HEAD may advance past `eec5266` by
-documentation-only commits (like this one) that touch no application
-code — the deployed Worker reflects the latest actual code change,
-`eec5266`.
+**Live -- current as of 2026-08-20T02:34:01Z.** Deployed commit `93bdfb3`
+("Fix Today's-Agenda birthday bucketing and open-pledge payment recency"
+-- see "Today's-Agenda Birthday Bucketing + Open-Pledge Payment Recency"
+above), Worker version `5f738898-adee-4e43-8fc9-2f170e377c07`, confirmed
+via the deploy command's own printed Version ID and independently via
+`wrangler deployments list`. **This supersedes every earlier version ID
+in this file** (`db4dcc3e` -- the request-scoped-dedup fix this replaced
+-- and, before that, `f29c075f`/`70f3c2c6`; none of those are live now).
+Branch HEAD may advance past `93bdfb3` by documentation-only commits
+(like this one) that touch no application code — the deployed Worker
+reflects the latest actual code change, `93bdfb3`.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
 D1: `fundraising-os-staging-db` (bound as `env.DB`)
 
 Multi-donor shared activities (Phase 1 + Phase 2), Text Message, the
-mobile UX fixes, the relationship-intelligence quality pass, and now the
-Ask/Solicitation Phase 1 feature are all live and have been exercised
-end-to-end against real staging data (see Verification, and the Ask
-rollout section above).
+mobile UX fixes, the relationship-intelligence quality pass, the
+Ask/Solicitation Phase 1 feature, the request-scoped duplicate-loader fix,
+and now the Today's-Agenda birthday bucketing + open-pledge payment-
+recency fixes are all live and have been exercised end-to-end against
+real staging data (see Verification, and the sections above).
 
 Note: this deploy required two retries — the environment's network/DNS
 had a transient outage (wrangler/curl/nslookup all failed to resolve
@@ -2051,6 +2258,39 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T02:40:00Z (approximate)
+Claude (Sonnet 5) — Fixed two bounded, unrelated correctness bugs. (1)
+Today's Agenda never showed a same-day birthday/yahrtzeit/anniversary --
+only Coming Up did; root cause was a classification gap (the combined
+relationship-date-event list was never split by "is this today"), not a
+date-calculation bug. Added `partitionRelationshipDateEventsByToday()` +
+`localDateOnlyEpoch()` and a new `todayRelationshipDates` field; live-
+verified with the real reported case (Dr. & Mrs. Yaakov Abdelhak, Aug 19
+birthday) now correctly appearing in Today's Agenda and no longer
+duplicated in Coming Up. (2) Open-pledge Suggested Action cited a
+pledge's original commitment date as "last activity" even after a real
+payment was applied, because `giving_activities.activity_date` never
+moves when a payment is applied in place -- the true payment date lives
+only in `jl_payment_assignment_audits.payment_date`. Added
+`resolveOpenPledgeActivityDate()` and wired it into all three surfaces
+sharing this evidence (Today, donor page, Meeting Brief/Assistant); the
+existing age-based urgency/confidence scoring needed no changes at all
+once given the correct age -- no new suppression policy was invented.
+Live-verified with the real reported case (KOLX2026 pledge, donor Yaakov
+Zachter): the exact bad sentence ("No payment activity in 62 days") is
+gone everywhere, balance/recency now agree across every surface, and no
+giving data was modified by verification (confirmed via a direct D1 read
+before and after). 21 new regression tests across two new files. `pnpm
+test`, `tsc --noEmit`, and `build:staging-independent` all pass. Deployed
+commit `93bdfb3`, Worker version `5f738898-adee-4e43-8fc9-2f170e377c07`.
+`origin/main` unchanged throughout
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Documented (audit only, not
+implemented) what the future monthly-payment-plan feature would need --
+see the fix section above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-19T22:05:00Z (approximate)
 Claude (Sonnet 5) — Closed out the Error 1102 duplicate-`loadWorkspaceBrief()`
