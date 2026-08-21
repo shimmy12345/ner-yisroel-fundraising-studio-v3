@@ -3482,6 +3482,131 @@ model.ts`'s people-mention leak and `outcome/route.ts`'s ungated-write
 gap remain separate, explicitly out-of-scope, open tasks -- no action
 requested on them here.
 
+**UPDATE 2026-08-20 -- DEPLOYED AND APPLIED.** All three approvals
+granted: deploy, live-verify, and apply both historical repairs. See
+"Zman/Yahrtzeit Deployment + Historical Repair -- APPLIED (2026-08-20)"
+below for the full report. Both donors' `relationship_summary` is now
+fixed; `institutional_memory`, `relationship_health`, and both source
+interactions are unchanged.
+
+## Zman/Yahrtzeit Deployment + Historical Repair -- APPLIED (2026-08-20)
+
+Executes the three approvals from the prior task: (1) deploy commit
+`c29590a` to Independent Staging; (2) live-verify Yahrtzeit/Zman capture
+behavior without contaminating real donor history; (3) apply the two
+reviewed historical `relationship_summary` replacements via
+compare-and-swap.
+
+**1. Pre-deploy gates.** Re-ran `pnpm test` (exit 0, all suites `fail
+0`), `pnpm exec tsc --noEmit` (clean), `pnpm run build:staging-
+independent` (succeeded) immediately before deploying -- all still
+passing on the already-committed `c29590a`.
+
+**2. Deployment.** `pnpm run deploy:staging-independent` (`wrangler
+deploy --config wrangler.staging.jsonc`), started 2026-08-21T01:37:04Z.
+**Worker version `e02f2b81-270d-419e-90d7-3a76d36c5e17`**, deployed git
+SHA `c29590a`. No D1 schema/data, R2, workflow, CPU-limit, or
+account-setting change; production untouched.
+
+**3. Live capture-behavior verification (no donor contamination).** Same
+technique as the original grandchild-fix verification: `/capture`'s
+preview is computed entirely client-side from note/type/subject with no
+`donorId` dependency, so every check below was done with no donor
+selected and `Save interaction` never clicked -- zero persistence by
+construction. On the real deployed bundle:
+- Semmelman's actual Yahrtzeit note ("Sent text on wife's Yahrtzeit to
+  acknowledge it.") now correctly offers the "Use this relationship
+  snapshot" checkbox with that exact text as the preview.
+- Zachter's actual Zman-appreciation note ("Texted video from first day
+  of Zman and thanked him for his support that makes it happen.") also
+  correctly offers the checkbox with that exact text.
+- A Zman-only negative control ("Sent video from first day of Zman.")
+  correctly shows "No meaningful relationship details detected." -- no
+  false positive, confirming broadcast-safety live, not just in tests.
+- Zero console messages/errors across every interaction.
+
+**4. Historical repair -- pre-write CAS verification (fresh reads,
+immediately before writing).** Both donors and both source interactions
+re-read fresh from D1: identical to every prior read in this
+investigation (same malformed `relationship_summary`, same good
+`institutional_memory`, same `relationship_health` (86), same
+`updated_at`, interactions still `created_at == updated_at`, unedited).
+Baseline snapshot for the "no other row changed" check: 248 donors, 9
+with non-null `relationship_summary`, 12 with non-null
+`institutional_memory`, 68 interactions, 5 recommendations. All
+preconditions held for both donors -- proceeded.
+
+**5. The writes.** Two independent, single-statement, compare-and-swap
+`UPDATE`s (not a batch), each executed via `wrangler d1 execute
+fundraising-os-staging-db --remote --config wrangler.staging.jsonc
+--json --command`, each gated on the donor's id + `owner_user_id` +
+`data_source = 'live'` AND `relationship_summary` still equal to the
+exact, byte-for-byte malformed value previously reviewed (a
+compare-and-swap against the OLD value, unlike donor 987's earlier
+null-to-value CAS which gated on `IS NULL`). Values containing embedded
+newlines were hex-encoded (`CAST(X'...' AS TEXT)`), matching this
+repo's own established convention in `scripts/relationship-summary-
+cleanup-preview.mjs`'s `sqlLiteral()` (embedding a literal newline in a
+`--command` shell argument breaks Windows argument parsing). Only
+`relationship_summary` and `updated_at` were ever assigned in either
+statement -- `institutional_memory`, `relationship_health`,
+`interactions`, `recommendations`, and every other table/column were
+never referenced in either write.
+
+- Zachter (`19af69d6-f147-474b-88ad-f6358ff65b9a`): D1 response
+  `"changes": 1, "rows_written": 1` -- exactly the intended row.
+- Semmelman (`5c35437c-4b08-4c05-8c65-bb3eb95e06aa`): D1 response
+  `"changes": 1, "rows_written": 1` -- exactly the intended row.
+
+**6. Post-write verification (direct D1 reads).**
+- Zachter's `relationship_summary` = `"Texted video from first day of
+  Zman and thanked him for his support that makes it happen."` --
+  exact byte match to the approved value.
+- Semmelman's `relationship_summary` = `"Sent text on wife's Yahrtzeit
+  to acknowledge it."` -- exact byte match to the approved value.
+- Both donors' `institutional_memory` re-read: byte-for-byte identical
+  to the pre-write read -- untouched.
+- Both donors' `relationship_health`: still `86` for both -- untouched.
+- Both source interactions re-read: every column (`type`, `source`,
+  `occurred_at`, `shared_activity_id`, `role`, `created_at`,
+  `updated_at`, `summary`) byte-for-byte identical to the pre-write
+  read -- untouched.
+- Baseline counts re-checked: donor count still 248, `relationship_
+  summary` non-null count still 9 (replaced content on already-non-null
+  rows, so the count itself doesn't change), `institutional_memory`
+  non-null count still 12, interaction count still 68, recommendation
+  count still 5 -- **exactly two donor rows changed, nothing else.**
+
+**7. Donor-page / Suggested Action verification.** Navigated to both
+donor pages on Independent Staging:
+- Zachter (`/donors/19af69d6-...`): Relationship Snapshot now shows
+  "Texted video from first day of Zman and thanked him for his support
+  that makes it happen." Suggested Action now reads "Reach out and
+  reference: Texted video from first day of Zman and thanked him for
+  his support that makes it happen." -- the old "Latest discussion
+  topics: .../People mentioned: .../Recommended next action: ..." text
+  is gone from both the snapshot card and the Suggested Action card.
+- Semmelman (`/donors/5c35437c-...`): Relationship Snapshot now shows
+  "Sent text on wife's Yahrtzeit to acknowledge it." Suggested Action
+  now reads "Reach out and reference: Sent text on wife's Yahrtzeit to
+  acknowledge it." -- same confirmation, malformed text gone from both
+  surfaces.
+- Zero console errors on either page load.
+
+**8. Kept open, per explicit instruction -- not touched in this task:**
+(1) `Zman`/`Yahrtzeit` still misdetected as "people" by
+`mentionedPeople()` (confirmed not affecting either new snapshot,
+already recorded); (2) `app/api/interactions/[id]/outcome/route.ts`
+still writes `relationship_summary`/`institutional_memory` with no
+`acceptRelationshipSnapshot` gate (already recorded). Both remain
+separate, open, unscoped tasks.
+
+**Confirmation: exactly two donor rows changed, nothing else.** No
+other donor, no interaction, no recommendation, no reminder, no giving
+data, no schema was touched. No `main` merge, no production access.
+`origin/main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`)
+throughout. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -4253,6 +4378,40 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-21T01:50:00Z (approximate)
+Claude (Sonnet 5) — Deployed the approved Zman/Yahrtzeit extraction fix
+(`c29590a`) to Independent Staging (Worker
+`e02f2b81-270d-419e-90d7-3a76d36c5e17`), live-verified Yahrtzeit and
+Zman-appreciation capture behavior on the real deployed bundle with no
+donor selected/no save clicked (zero persistence by construction) --
+both real donor notes correctly offered the accept checkbox with the
+exact desired preview text, a Zman-only negative control correctly
+showed no meaningful details, zero console errors. Then applied the two
+approved historical repairs via compare-and-swap: freshly re-read both
+donors/interactions immediately before writing (unchanged from every
+prior read), executed two independent single-statement CAS `UPDATE`s
+(hex-encoded literals per this repo's existing convention, since both
+malformed values contain embedded newlines), each gated on the exact
+previously-reviewed malformed `relationship_summary` text -- both
+returned `changes: 1`. Post-write D1 verification: both
+`relationship_summary` values now byte-match the approved replacements;
+both `institutional_memory` and `relationship_health` values
+byte-for-byte unchanged; both source interactions byte-for-byte
+unchanged; baseline row/count checks confirm exactly these two donor
+rows changed and nothing else (interaction/recommendation counts
+unchanged). Verified both donor pages render the new Relationship
+Snapshot correctly and that Suggested Action now quotes the fixed text
+instead of the old "Latest discussion topics: .../People mentioned:
+.../Recommended next action: ..." scaffolding. Per explicit instruction,
+left both known open issues untouched: the Zman/Yahrtzeit
+people-extraction false positive, and `outcome/route.ts`'s ungated
+relationship-data write. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Full report: "Zman/
+Yahrtzeit Deployment + Historical Repair -- APPLIED (2026-08-20)"
+above. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T22:30:00Z (approximate)
 Claude (Sonnet 5) — Implemented the approved Yahrtzeit/Zman extraction
