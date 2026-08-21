@@ -4455,6 +4455,513 @@ byte-for-byte against baseline.
 `origin/main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
 Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
 
+## Relationship Snapshot Durable-Accumulation Architecture Investigation (2026-08-21) -- INVESTIGATION/DESIGN ONLY, NO CODE/SCHEMA/D1/DEPLOY CHANGE
+
+**Scope.** Explicit user instruction: the product behavior deployed as
+Option A above (accepting a proposal REPLACES `donors.relationship_
+summary`/`institutional_memory`) is not the long-term desired behavior.
+Accepted donor intelligence should *accumulate* over time, with a
+synthesized current view, contradiction/supersession handling, and
+provenance -- not disappear on the next accept. This section is
+investigation and design only. No file outside `docs/` was touched, no
+migration written, no D1 write made, nothing deployed.
+
+### What `institutional_memory` actually is today (not assumed -- verified)
+
+Read directly from `extractInteraction()` (`lib/capture/interaction.ts`):
+`memory: \`${interactionKindLabel(type)} context: ${note.trim()}\`` --
+e.g. "Call context: Spoke with him about his granddaughter's bat
+mitzvah." **It is a templated echo of the single most-recently-accepted
+interaction's raw note text, nothing more.** It is not, and has never
+been, an accumulation layer:
+- Every one of the 4 write paths that touch it (below) writes it with
+  the exact same replace/CAS semantics as `relationship_summary`, in the
+  same statement, at the same time -- there is no code path anywhere
+  that treats it differently or appends to it.
+- `lib/relationships/recommendation-candidates.ts`'s
+  `relationshipOpportunityCandidate()`/`solicitCandidate()` read it only
+  as `evidence.narrative.relationshipSummary ||
+  evidence.narrative.institutionalMemory` -- a plain OR-fallback used
+  only when `relationship_summary` is null. In practice the two fields
+  are near-duplicates of each other (same underlying note, two
+  templates), not two distinct kinds of information.
+- The Assistant (`app/api/assistant/route.ts`) shows both as separate
+  labeled context lines ("No relationship summary is available." / "No
+  institutional memory is available."), implying to the model that
+  they're different information -- they are not, today.
+
+**Conclusion, not assumed: `institutional_memory` is NOT structurally
+suitable as the durable accumulation layer as it exists today.** It has
+zero internal structure (one opaque string), no per-fact boundaries, no
+dates, no source-interaction linkage beyond "whatever was last
+accepted," and is overwritten by literally the same statement that
+overwrites `relationship_summary`. Turning it into real accumulation
+would mean changing its write semantics in all 4 paths to
+append-with-a-delimiter -- which immediately hits the data-loss/
+supersession problems documented under Approach A below, and would end
+up needing per-fact metadata anyway, at which point it has organically
+become an unstructured, worse-integrity version of a real facts table
+(Approach B/C). A dedicated table is the smaller, not larger, coherent
+change once this is followed through.
+
+### All current write paths into `donors.relationship_summary`/`institutional_memory` (verified by direct read, not assumed complete from memory)
+
+1. **`app/api/interactions/route.ts` (Capture, new interaction).**
+   Unconditional `UPDATE donors SET relationship_summary = ?,
+   institutional_memory = ?, relationship_health = ?, updated_at = ?
+   WHERE id = ? AND owner_user_id = ? AND data_source = 'live'` -- **no
+   compare-and-swap at all**, gated only on `!scheduled &&
+   body.acceptRelationshipSnapshot === true`. Also does not re-verify
+   `extracted.relationshipSummary !== null` server-side (relies on the
+   client only ever sending `true` when its own preview is non-null,
+   per `CaptureExperience.tsx`) -- a pre-existing gap, not introduced by
+   this investigation, noted here because any new architecture must
+   close it rather than inherit it.
+2. **`app/api/interactions/[id]/route.ts` (edit `PATCH` / archive
+   `DELETE`).** Uses `contextStatement()`'s `=`-based CASE-WHEN CAS
+   (only replaces when the stored value still exactly equals what THIS
+   interaction itself had contributed) for edits, and -- **this is a
+   real, pre-existing gap worth flagging plainly** -- on **archive**,
+   replaces the donor's snapshot with whatever `latestOther()`'s raw
+   `extraction()` produces from a *different* interaction's raw text,
+   with **no re-acceptance step for that replacement value**. Today,
+   archiving an interaction that had contributed to the snapshot can
+   silently pull in another interaction's never-explicitly-accepted
+   extraction. This violates "human acceptance remains mandatory" for
+   the *replacement*, even though removing the archived interaction's
+   own contribution is legitimate. Any new architecture must close this,
+   not reproduce it.
+3. **`app/api/interactions/[id]/outcome/route.ts` (Option A, this
+   session).** NULL-safe (`IS`) freshness CAS against the donor row read
+   at request start, gated on `nextStatus` genuinely closing the
+   activity AND `body.acceptRelationshipSnapshot === true` AND
+   server-re-verified `extracted.relationshipSummary !== null`. The
+   newest, smallest, best-tested of the four paths (see the section
+   above).
+4. **`app/api/import/monday/commit/route.ts` (`confirm_contact`
+   decision).** A fourth, previously-undocumented-in-this-file write
+   path, found by direct grep, not recalled from memory. Per-row
+   explicit human confirmation (never bulk, never inferred from text) in
+   the Monday import review UI feeds `extractInteraction()` the same as
+   Capture, then does an unconditional replace guarded only by
+   *recency* (`occurredAt >= latestOther`, the max `occurred_at` across
+   the donor's other real interactions) -- not a value-CAS. Confirms
+   this is a 4-write-path problem, not 3.
+
+All four independently duplicate the same "extract, gate on explicit
+accept, replace the donor row" shape with *different* concurrency
+guards (none / `=`-CAS / `IS`-CAS / recency-only) -- itself evidence that
+the replace-the-donor-row model has already been reinvented four times
+slightly differently, which a shared accumulation layer would collapse
+into one.
+
+**Confirmed NOT write paths** (defensive comments read directly, not
+assumed): gift acknowledgment, yahrtzeit entry, important-date entry,
+and the DOB import commit route all carry explicit "never touches
+relationship_summary/institutional_memory" comments and were verified to
+contain no write to either column.
+
+### `extractInteraction()` / `relationshipSnapshotDetails()` / `actionableRelationshipSnapshot()`
+
+Pure, deterministic, regex/keyword-based (`lib/capture/interaction.ts`)
+-- no AI/NER, no state, no memory of prior calls. `relationshipSnapshot
+Details()` finds `specificFacts`: real quoted sentences matching
+`COMMITMENT_PATTERN`, `RELATIONSHIP_CHANGE_PATTERN`,
+`FACT_SIGNAL_PATTERN`, or `ZMAN_APPRECIATION_PATTERN`, capped at 2 and
+deduplicated. `actionableRelationshipSnapshot()` joins them into a
+sentence or two, or returns `null` if nothing specific was found --
+never a placeholder. This function is reused verbatim by all 4 write
+paths above and stays exactly as-is in every architecture considered
+below; nothing about the extraction logic itself needs to change to
+support accumulation -- only what happens to `specificFacts` *after*
+extraction (single-value replace vs. durable per-fact rows) needs to
+change.
+
+### Consumers, verified by direct read (not assumed)
+
+- **Meeting Brief "People Mentioned" / "Recent Discussion Topics"**
+  (`lib/relationships/meeting-brief-model.ts`) -- **do not read
+  `donors.relationship_summary`/`institutional_memory` at all.** They
+  are computed live, on every render, by re-running
+  `relationshipSnapshotDetails()` directly against the raw `summary`
+  text of the donor's last 5 real interaction rows -- completely
+  independent of whether anything was ever accepted. This is already an
+  existing "derive a current view from source rows at read time"
+  pattern in this codebase, just applied to raw interactions instead of
+  accepted facts -- directly relevant precedent for the recommended
+  architecture below.
+- **Meeting Brief / Today / donor page "Suggested Action"**
+  (`lib/relationships/recommendation-candidates.ts`'s
+  `relationshipOpportunityCandidate()`/`solicitCandidate()`) -- read the
+  single `narrative.relationshipSummary || narrative.institutionalMemory`
+  string (the ACCEPTED, stored value) and pattern-match it for a
+  solicitation phrase. This is the consumer most directly affected by
+  losing an old fact to a new accept -- e.g. an old, still-unresolved
+  solicitation sentence disappearing from `relationship_summary` when an
+  unrelated new fact is accepted currently makes the `solicit`
+  recommendation stop firing, even though nothing about the real
+  solicitation changed.
+- **Assistant** (`app/api/assistant/route.ts`) -- reads
+  `donor.relationship_summary`/`institutional_memory` directly as two
+  separately labeled context lines fed to the model.
+- **Donor page** (`app/donors/[id]/page.tsx`) -- calls
+  `sanitizeScheduledRelationshipContext()` (`lib/workspace/scheduled-
+  activity.ts`), which exists **only** because there is currently no
+  way to know which interaction (if any) produced the current
+  `relationship_summary`/`institutional_memory` value -- it has to
+  heuristically re-run the extractor against every still-*scheduled*
+  (not-yet-happened) activity and hide the stored value if it happens to
+  textually match, to avoid showing a snapshot that "looks like" it
+  already reflects something that hasn't happened yet. **This function's
+  entire existence is evidence for the recommended architecture below**:
+  with a real `sourceInteractionId` per fact, this heuristic
+  text-matching guess becomes an ordinary join/status check instead.
+
+### Existing durable-fact/audit patterns already proven in this codebase (the precedent for Approaches B/C)
+
+`db/schema.ts` already contains five instances of the same two-table
+shape used elsewhere in this app for "a maintained, editable, durable
+fact, with its own append-only change history": `asks`/`askChanges`,
+`yahrtzeits`/`yahrtzeitChanges`, `important_dates`/`important_date_
+changes`, `pledge_payment_plans`/`pledge_payment_plan_changes`, and
+`donor_contact_audits` (donor-row-level). **Most directly relevant:
+`donor_research_findings`** (Donor Research feature) already implements
+almost exactly the "durable facts with supersession" model this task is
+asking for, live and tested today: `status: "current" | "superseded" |
+"removed_not_found" | "unverified"`, a self-referencing
+`supersedesFindingId`, a `fingerprint` for idempotency, and a real
+classification function (`lib/research/pipeline.ts`'s
+`classifyFindingPlan`-equivalent) that decides `reuse` / `insert` /
+`supersede-and-insert` by matching `(category, organizationNormalized)`
+against the donor's existing *active* (current/unverified) findings --
+never overwriting a row in place, never deleting, always leaving a full
+audit trail. This is not a hypothetical pattern to invent; it is
+production code in this exact repository solving the same
+"accumulate, supersede by category-match, preserve history" problem for
+a different kind of fact (research findings instead of interaction-note
+facts).
+
+### Approach A -- extend the current donor fields (accumulate in `institutional_memory`, synthesize `relationship_summary`)
+
+- **Data loss risk:** low for raw text (append-only, never deleted) but
+  **high in practice**: once N accepted facts are concatenated into one
+  blob, there is no clean way to remove or supersede a single sentence
+  without fragile substring surgery (exact-text matching against
+  whatever separator/formatting convention was used) -- a real
+  regression versus today's exact-value CAS, which only works *because*
+  there is exactly one value to compare, not N appended fragments.
+- **Contradictions/supersession:** no structural representation --
+  would require in-band markers inside the text itself (unqueryable, no
+  referential integrity, easy to corrupt on edit).
+- **Provenance/auditability:** none beyond "appended at some point"
+  unless a parallel side-channel of per-sentence metadata is also built
+  -- at which point this has become Approach B/C in substance, without
+  a real table's integrity guarantees (no FK, no index, no atomic
+  supersede).
+- **Archiving/editing a source interaction:** cannot cleanly remove that
+  interaction's specific contribution from a concatenated blob -- a hard
+  blocker on "retain provenance back to the interaction/source."
+- **Human acceptance:** mechanically unchanged (still an explicit
+  checkbox), but the blob grows unbounded over a donor's lifetime --
+  directly violates "preserve history without blindly concatenating
+  stale or contradictory sentences," since blind concatenation is
+  exactly what this approach does by construction.
+- **Impact on existing donor rows:** none required immediately --
+  lowest migration friction of the three, on paper.
+- **Migration/backfill:** trivial if truly free-text-append, but any
+  attempt to add real structure (delimiters, per-entry dates) to avoid
+  the problems above converges toward Approach B's shape anyway.
+- **Today/Meeting Brief/Assistant impact:** none needed if the column
+  keeps holding a single string, but consumers start showing an
+  ever-growing, unbounded run-on paragraph without further work.
+- **Complexity/maintenance:** deceptively low today; the string-surgery
+  problems above push real complexity into ad hoc parsing/regex against
+  the blob later -- a false economy.
+- **Verdict: not recommended.** Cannot satisfy provenance or clean
+  supersession without organically growing into Approach B's shape, but
+  without a real schema's integrity guarantees.
+
+### Approach B -- dedicated relationship-intelligence facts/history table
+
+A new `donor_relationship_facts` table: one row per accepted fact
+(`id, donorId, userId, category, factText, sourceInteractionId`
+nullable FK, `sourceInteractionOccurredAt` (snapshotted at accept time,
+so a later edit to the interaction's own date never retroactively
+changes when the fact was true), `status: "current" | "superseded" |
+"archived_with_source"`, `supersedesFactId` nullable self-reference,
+`fingerprint`, `createdAt`/`updatedAt`) plus a matching
+`donor_relationship_fact_changes` append-only audit table (identical
+shape to `askChanges`/`yahrtzeitChanges`: `action`, `changedFields`,
+`beforeJson`/`afterJson`, `createdAt`). `donors.relationship_summary`/
+`institutional_memory` become a **synthesized, regenerated view**,
+written by a pure function over the donor's current-status facts
+(sorted by `sourceInteractionOccurredAt` descending), not accepted
+directly.
+
+- **Data loss risk:** very low -- every accepted fact is its own
+  immutable row; nothing is ever overwritten in place; "deletion" is
+  always a status transition, never a real `DELETE`.
+- **Contradictions/supersession:** explicit and auditable --
+  `status`/`supersedesFactId`, driven by a category-match rule (see
+  worked examples below), never a silent guess.
+- **Provenance/auditability:** `sourceInteractionId` +
+  snapshotted `sourceInteractionOccurredAt` on every row -- directly
+  satisfies "durable facts should retain provenance back to the
+  interaction/source that produced them."
+- **Archiving/editing a source interaction:** clean, well-defined
+  (`archived_with_source` transition; edits never mutate an already-
+  accepted fact row -- see worked example 5 below). Structurally fixes
+  the pre-existing archive gap in write path #2 above, as a byproduct.
+- **Human acceptance:** every write path funnels through one shared
+  `acceptRelationshipFact()` helper; UI stays the same explicit,
+  default-unchecked checkbox + preview pattern already shipped four
+  times over -- only the persistence target changes.
+- **Impact on existing donor rows:** requires a one-time backfill --
+  see the migration plan below. Zero content loss (today's exact
+  current text becomes fact #1), but honest, disclosed provenance loss
+  for pre-existing data (no reliable way to reconstruct which
+  interaction produced today's value, since today's CAS proves
+  freshness, not identity).
+- **Migration/backfill:** one new table pair (same shape as five
+  existing ones already in `db/schema.ts`) + one backfill script + one
+  shared helper, then each of the 4 write paths migrated independently,
+  one at a time, each fully gated/tested/deployed on its own -- matching
+  this repo's own established incremental-migration discipline (see
+  Option A/B's own history above).
+- **Today/Meeting Brief/Assistant impact:** **zero required changes** --
+  they keep reading `donors.relationship_summary`/`institutional_memory`
+  exactly as today; only what populates those columns changes
+  (synthesis instead of direct accept). This is the "smallest coherent
+  alternative" property explicitly asked for. Richer per-fact display
+  (dates, provenance, category) is a real but strictly optional later
+  phase.
+- **Complexity/maintenance:** a genuinely new table + a synthesis
+  function + a shared accept helper -- real, but proportional: the exact
+  same shape as five other durable-fact features already shipped and
+  load-bearing in this codebase (asks, yahrtzeits, important dates,
+  pledge payment plans, donor research findings), not a novel pattern
+  being introduced for the first time.
+- **Verdict: satisfies every stated requirement.**
+
+### Approach C -- materially better architecture already supported by this codebase
+
+**Same shape as Approach B, realized by directly reusing `donor_
+research_findings`'s already-shipped, already-tested supersession
+model** (`lib/research/pipeline.ts`) instead of designing classification
+logic from scratch: `status` enum, `supersedesFindingId` self-reference,
+and a `(category, secondary-key)` match-and-classify function that
+returns `reuse` / `insert` / `supersede-and-insert`. Adapted here as
+`(category, sourceInteractionId-if-present)`: prefer superseding a fact
+from the SAME source interaction (a correction to what was already
+said) over one merely in the same category from a different
+interaction. This is not a different architecture from B -- it is B,
+built by reusing proven, already-tested code paths and data shapes
+instead of inventing new ones, exactly what was asked for. **This is
+the recommended architecture** (see below): Approach B's schema,
+Approach C's reused classification/supersession logic.
+
+### Category taxonomy for supersession matching
+
+Not a new NLP system -- a coarsening of the regex groups
+`FACT_SIGNAL_PATTERN`/`COMMITMENT_PATTERN`/`RELATIONSHIP_CHANGE_
+PATTERN`/`ZMAN_APPRECIATION_PATTERN` already extract by, into 6 buckets
+used only to decide "does this new fact plausibly replace an old one":
+`family_milestone` (spouse/son/daughter/grandchild.../wedding/engaged/
+birthday/anniversary/yahrtzeit), `solicitation` (proposal/request for
+support/funding request/ask amount, or the ask-follow-up shape in the
+worked example below), `health` (sick/illness/recovering/hospital/
+passed away), `commitment_followup` (`COMMITMENT_PATTERN`: promised/
+agreed/committed/will/would/send/follow up), `engagement` (campus/tour/
+event/gala/dinner/zman-appreciation), `general` (fallback -- pledge/
+gift/scholarship-type facts already better represented by
+`giving_activities`/`asks` and other structured tables should NOT be
+duplicated into this layer; see the next paragraph). Two facts in
+DIFFERENT categories never supersede each other -- they accumulate side
+by side, which is exactly what the worked examples below need (a
+wedding fact, a travel fact, and a solicitation fact from the same donor
+must all remain visible at once, not collapse into one).
+
+**Explicit non-duplication principle** (per the task's own instruction):
+this layer is for genuinely free-text relationship narrative that has
+NO dedicated structured home. A pledge/gift/scholarship-category
+sentence is still stored here as narrative color if that's literally
+what was accepted, but the layer must never become a shadow copy of
+`giving_activities`, `asks`, `yahrtzeits`, or `important_dates` -- those
+remain the system of record for their own fact types, exactly as today
+(`asks.sourceInteractionId` already links an ask back to the interaction
+that produced it, the same provenance convention proposed here). A
+solicitation-category fact accepted here does not create or imply a
+real `asks` row -- exactly like today's `madeAsk` checkbox, which is
+never inferred from note text.
+
+### Known limitation: cross-category contradiction is not solved by category-matching alone
+
+Category-match supersession (same category → supersede) does not catch
+a genuine contradiction stated in a DIFFERENT category's terms (e.g. a
+later note saying "the wedding was called off," which is still
+`family_milestone` and WOULD correctly supersede -- but a subtler
+cross-category contradiction has no automatic detector here, and true
+semantic contradiction detection is out of scope for a deterministic
+regex extractor). **Proposed v1 answer, consistent with "human
+acceptance remains mandatory":** an explicit, human-driven "mark this
+fact no longer current" affordance on the donor page (a manual status
+override, mirroring `pledge_payment_plans.endedAt`'s convention of only
+ever being set by an explicit fundraiser action, never inferred). Flagged
+here as a known limitation and a deliberate v1 scope boundary, not an
+oversight.
+
+### Worked examples (exact behavior through 5 steps)
+
+Assume a donor with no prior accepted facts.
+
+1. **Accept "His daughter is getting married in November."**
+   Category: `family_milestone`. No existing current fact in this
+   category → plain insert, `status: current`. Facts table: 1 row.
+   Synthesized `relationship_summary`: "His daughter is getting married
+   in November." `institutional_memory`: same (only fact on file).
+2. **Later, accept "He plans to be in Israel for Pesach."**
+   Category: `engagement`/travel -- different category, no supersession.
+   Facts table: 2 rows, both current. Synthesized `relationship_
+   summary` (top 2 by `sourceInteractionOccurredAt` desc): "He plans to
+   be in Israel for Pesach. His daughter is getting married in
+   November." `institutional_memory`: full current list, both facts.
+3. **Later, accept "Asked for $25,000 and wants to revisit after the
+   wedding."** Category: `solicitation` -- different from both existing
+   categories, no supersession. Facts table: 3 rows, all current.
+   Synthesized `relationship_summary` (capped at top 2 most recent):
+   "Asked for $25,000 and wants to revisit after the wedding. He plans
+   to be in Israel for Pesach." **The November-wedding fact rotates out
+   of the short summary but is never deleted** -- still `status:
+   current`, still fully present in `institutional_memory`'s full list
+   and in the facts table/donor-page history. This is exactly "old facts
+   may become less relevant over time... without blindly concatenating":
+   it's deprioritized in the short view, not lost.
+4. **A later interaction contradicts/supersedes an earlier fact** --
+   concrete case: accept "Wedding is now postponed to next year."
+   Category: `family_milestone` -- SAME category as the November-wedding
+   fact → supersession fires: the November-wedding fact's `status` flips
+   to `superseded`, `supersedesFactId` on the new row points to it, new
+   row is `status: current`. Facts table: 4 rows (1 superseded, 3
+   current: Pesach, $25k-ask, wedding-postponed). Synthesized
+   `relationship_summary`: "Wedding is now postponed to next year.
+   Asked for $25,000 and wants to revisit after the wedding." The
+   original November sentence is preserved verbatim, `status:
+   superseded`, visible in the facts table and its own change-audit row
+   (`beforeJson`/`afterJson`) -- never silently overwritten or deleted.
+5. **The source interaction for one accepted fact is later edited or
+   archived:**
+   - **Edited** (fundraiser corrects/changes the note, does not
+     re-accept a new proposal): the existing fact row is **completely
+     unchanged** -- facts are immutable, accepted-value snapshots, not
+     live pointers into the interaction's current text. This generalizes
+     Option A's own requirement ("editing/reopening/completing existing
+     outcomes must not accidentally reapply or overwrite Relationship
+     Snapshot information") to the new model. If the fundraiser DOES
+     re-accept a fresh proposal from the edited note, supersession
+     prefers matching by `sourceInteractionId` first (a correction to
+     what THIS interaction already contributed) before falling back to
+     same-category-any-source -- directly reusing Approach C's
+     `(category, sourceInteractionId)` classification.
+   - **Archived** (the source interaction is archived/cancelled
+     entirely): the fact(s) sourced from it transition to `status:
+     archived_with_source` -- distinct from `superseded` (this is
+     provenance loss, not a contradiction). They drop out of the
+     synthesized view (relationship_summary/institutional_memory
+     regenerate without them), the row and its text are preserved
+     forever in the table/audit trail (restorable), and **nothing
+     automatically promotes some other, never-explicitly-accepted
+     interaction's extraction to fill the resulting gap** -- a new fact
+     only ever enters the donor's current view through its own explicit
+     accept flow. This is a direct, structural fix to the pre-existing
+     write-path #2 archive gap documented above, not merely something
+     the new model happens to avoid.
+
+### Recommended architecture
+
+**Approach C: Approach B's schema (dedicated `donor_relationship_facts`
++ `donor_relationship_fact_changes` tables, donor columns become a
+synthesized view), realized by directly reusing `donor_research_
+findings`'s proven status/supersession model instead of inventing new
+classification logic.** This is the only approach of the three that
+satisfies every stated requirement (accumulation, synthesis-not-storage,
+non-destructive supersession, provenance, mandatory human acceptance)
+without requiring any change to Meeting Brief, Today, or Assistant, and
+it reuses a pattern already shipped five times over in this exact
+codebase rather than introducing a genuinely new one.
+
+### Phased migration plan (none of this implemented yet -- design only)
+
+- **Phase 1 -- additive schema only, zero behavior change.** New
+  `donor_relationship_facts`/`donor_relationship_fact_changes` tables.
+  One-time backfill: for every live donor with a non-null
+  `relationship_summary` (falling back to `institutional_memory` only
+  when `relationship_summary` is null, mirroring today's own fallback
+  convention), insert exactly one fact row -- `category: 'general'`
+  (cannot be reliably reclassified retroactively; a safe, disclosed
+  default, not a guess dressed up as certainty), `sourceInteractionId:
+  NULL` (provenance genuinely unknown for pre-existing data -- today's
+  CAS proves freshness, never identity -- disclosed honestly, never
+  fabricated), `status: 'current'`, `factText` = the current column
+  value verbatim. **No write path is touched.** `donors.relationship_
+  summary`/`institutional_memory` continue to be written exactly as
+  today by all 4 existing paths -- this phase writes ONLY the two new
+  tables. Fully reversible (drop both tables; nothing else depends on
+  them yet). Gate: full suite/tsc/build, deploy, live-verify the
+  backfill produced exactly one fact row per qualifying live donor with
+  byte-identical `factText`, and that the two donor columns are
+  provably untouched by this migration.
+- **Phase 2 -- wire the shared helper into ONE write path first
+  (Option A, the newest/smallest/best-tested surface).** Build
+  `acceptRelationshipFact()`: classify → find existing current fact
+  (prefer same `sourceInteractionId`, else same category) → supersede if
+  found, else insert → re-synthesize `relationship_summary`/
+  `institutional_memory` from all current facts → write both via the
+  same NULL-safe CAS pattern Option A already uses (now comparing
+  against the synthesis output, which stays deterministic) → write a
+  `donor_relationship_fact_changes` audit row. No visible UI change --
+  same checkbox, same preview. New regression tests cover the
+  supersession/archive scenarios from the worked examples above, on top
+  of Option A's existing 6. Live-verify on Independent Staging before
+  proceeding.
+- **Phase 3 -- migrate the remaining 3 write paths one at a time**
+  (Capture, edit route, Monday `confirm_contact`), each independently
+  gated/tested/deployed/live-verified, retiring their bespoke direct-
+  UPDATE/`contextStatement()`/recency-guard code in favor of the shared
+  helper. This is where write path #2's pre-existing archive gap gets
+  structurally closed, as a byproduct of the new model rather than a
+  separate fix.
+- **Phase 4 -- optional, not required by any stated requirement.**
+  Richer consumer UI: donor page shows individual current facts with
+  category/date/provenance and a history expander for superseded/
+  archived facts; Meeting Brief could optionally surface facts by
+  category. Deliberately deferred -- Phases 1-3 already fully satisfy
+  every requirement in this task without touching any consumer.
+
+**Safe transition of current staging data and the Option A flow
+specifically:** Phase 1's backfill IS the safe transition -- every
+donor's currently-accepted `relationship_summary` becomes fact #1
+(`status: current`) before any write path changes, so no already-
+accepted intelligence is ever lost, and every consumer's display is
+byte-identical immediately after Phase 1 (nothing reads the new table
+yet). Option A, as the newest and best-tested surface, becomes the
+FIRST write path migrated in Phase 2 -- its existing 6-scenario
+regression suite and its already-live-verified NULL-safe CAS pattern
+become the direct template for Phase 3's other 3 paths, so the
+"concurrent accept fails closed" guarantee already proven for Option A
+today carries forward unchanged into the synthesis write-back. Each
+phase is independently reversible: Phase 1 by dropping two additive
+tables; Phases 2-3 by reverting that specific write path's own commit
+without touching the others or the schema -- matching this repo's own
+established one-path-at-a-time migration discipline already demonstrated
+by Option A/B's own history.
+
+### Status
+
+**Investigation and design complete. Not implemented.** No files
+outside `docs/AI-HANDOFF.md` were touched in this task; no migration
+written; no D1 write made; nothing deployed. Awaiting explicit approval
+before Phase 1 (or any phase) begins.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -5337,6 +5844,29 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T16:00:00Z (approximate)
+Claude (Sonnet 5) — Investigation/design only, per explicit instruction
+that the Option A replace-on-accept behavior is not the desired
+long-term product model. Audited every current write path into
+`donors.relationship_summary`/`institutional_memory` end to end
+(Capture, edit/archive, Option A, and a fourth previously-undocumented
+path in the Monday `confirm_contact` import flow), determined
+`institutional_memory` is not structurally suitable as a durable
+accumulation layer (it is a templated echo of the single most-recently-
+accepted note, not an accumulation of anything), and found that
+`donor_research_findings`' already-shipped status/supersession model is
+directly reusable for this problem. Compared three architectures
+(extend current fields / dedicated facts table / facts table via reused
+research-findings pattern), worked through the five requested scenarios
+(accumulation, non-superseding facts, supersession, cross-category
+persistence, source-interaction edit/archive), and recommended the
+third, with a 4-phase migration plan that backfills existing staging
+data as the first durable fact before any write path changes. No code,
+schema, D1, or deployment touched — `docs/AI-HANDOFF.md` is the only
+file this task modified. Awaiting approval before any implementation.
+
+---
 
 2026-08-21T15:00:00Z (approximate)
 Claude (Sonnet 5) — Implemented, tested, deployed, and live-verified
