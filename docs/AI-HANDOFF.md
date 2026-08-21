@@ -6041,6 +6041,228 @@ file does touch a live application code path -- flagged explicitly in
 approval before applying the (now-corrected) backfill or beginning
 Phase 2.
 
+## Relationship Intelligence Phase 1 -- Semantic Backfill Review (2026-08-21) -- INVESTIGATION ONLY, NO CODE/D1/DEPLOY CHANGE
+
+**Scope, per explicit instruction: a semantic review of the exact 12
+staging candidates only -- no architecture change, no new extraction
+vocabulary, no code touched at all in this task.** The classification
+fixes from the prior task (solicited/Shabbos/Weinschneider) are
+approved and unchanged. This task addresses a narrower, different
+question: mechanically valid (correctly categorized/lifecycled) is not
+the same as *appropriate to enshrine permanently* in the new
+`donor_relationship_facts` layer. Every claim below about structured
+coverage was verified by a direct, live D1 read against the real `asks`
+and `yahrtzeits` rows -- not assumed from memory of earlier tasks in
+this file.
+
+### Disposition test applied
+
+Four buckets, applied per-donor to the exact backfill-preview text:
+`BACKFILL_AS_RELATIONSHIP_FACT` (genuinely useful, donor-specific,
+independent of interaction history, no structured home), `STRUCTURED_
+DATA_ALREADY_COVERS_IT` (an authoritative structured table already holds
+the meaningful content, with no additional donor-specific residue),
+`INTERACTION_HISTORY_ONLY` (primarily describes what the fundraiser/
+Yeshiva did, not a durable donor fact -- belongs in the interaction
+timeline, which already holds it, not relationship intelligence), and
+`NEEDS_REVIEW` (a real donor fact is embedded inside fundraiser-action
+wording that the current deterministic extractor cannot isolate without
+inference -- per explicit instruction, never auto-paraphrased into a
+"cleaner" fact by this review).
+
+### Per-donor review
+
+**Abdelhak -- "Personal invite to Teaneck event."**
+Disposition: **INTERACTION_HISTORY_ONLY**. The entire sentence describes
+an outreach ACTION (an invitation extended); no donor-specific fact
+survives independent of that action -- no preference, relationship, or
+family detail about Abdelhak himself is stated. Preserved donor
+intelligence: none beyond "he was invited," which is procedural.
+Structured coverage: N/A (nothing to cover). Would permanent relationship-
+fact status improve future intelligence: no -- this is exactly the class
+of content the interaction timeline (where it already lives, unchanged)
+already serves; promoting it to durable, non-decaying relationship
+intelligence would add noise, not signal.
+
+**Joel Danziger -- "Dropped off bottle of schnaps for son's bar mitzvah."**
+Disposition: **NEEDS_REVIEW**. Genuinely embeds a real, useful donor fact
+(his son had a bar mitzvah) inside fundraiser-action wording ("dropped
+off a bottle of schnaps"), in a single clause with no sentence boundary
+between them. The current deterministic extractor operates at whole-
+sentence granularity (`sentenceList()` splits on `.!?`/newlines only) --
+it cannot isolate "son's bar mitzvah" from "dropped off schnaps" without
+semantic inference, which this review was explicitly told not to
+perform. Preserved donor intelligence, IF a human isolates it: a real,
+specific family milestone. Structured coverage: none. Improve future
+intelligence: potentially yes, but only via an explicit human decision
+about what to actually enter -- not by mechanically backfilling the
+whole mixed sentence as one "fact," which the prior task's preview would
+otherwise have done by default.
+
+**Mark Danziger -- "called to wish mazel tov on grandson's bar mitzvah this shabbos."**
+Disposition: **NEEDS_REVIEW**. Same structure as Joel Danziger: a real,
+time-bound donor fact (grandson's bar mitzvah, dated to "this Shabbos")
+embedded in a description of the fundraiser's own phone call. Not
+separable without inference. Preserved donor intelligence, if isolated:
+a specific, dated family event -- exactly the kind of content the
+approved `time_bound` lifecycle exists for. Structured coverage: none.
+Improve future intelligence: yes, if a human extracts just the family
+fact -- flagged rather than auto-resolved for the same reason as Joel
+Danziger.
+
+**Horn -- "Messaged to welcome son back to Yeshiva."**
+Disposition: **INTERACTION_HISTORY_ONLY**. Overwhelmingly describes a
+routine outreach action (a welcome-back message); the embedded fact
+("has a son at yeshiva") is low-distinguishing-value background true of
+most families in this donor base, not a notable, stewardship-relevant
+discovery (unlike a specific dated milestone). Preserved donor
+intelligence: negligible/generic. Structured coverage: N/A. Improve
+future intelligence: no -- promoting a nearly-universal background fact
+to permanent, non-decaying relationship intelligence would not sharpen
+future fundraising conversations.
+
+**Klein -- "Note context: Solicited for a plaque ($5k)"**
+Disposition: **STRUCTURED_DATA_ALREADY_COVERS_IT**. Verified live: a
+real `asks` row exists for this donor -- `amount_cents: 500000`,
+`purpose: "Plaque"`, `status: declined`. Every piece of meaningful
+content in the legacy text (the amount, the purpose) is already
+represented, more precisely and with real status tracking, in the
+structured table. Preserved donor intelligence if backfilled anyway:
+none additional -- pure duplication. Improve future intelligence: no --
+worse, it would risk the exact staleness problem this whole
+architecture exists to prevent (a free-text echo of an ask that the real
+`asks` row already shows as `declined`, with no mechanism keeping the
+two in sync).
+
+**Pfeiffer -- "Note context: Solicited for $10k"**
+Disposition: **STRUCTURED_DATA_ALREADY_COVERS_IT**. Verified live: a
+real `asks` row exists -- `amount_cents: 1000000`, `purpose: null`,
+`status: pending`. Same reasoning as Klein. No additional donor-specific
+residue in the legacy text beyond what the ask already holds.
+
+**Rovinsky -- "Note context: Solicited for a plaque in memory of his wife ($5k)"**
+Disposition: **STRUCTURED_DATA_ALREADY_COVERS_IT**. Verified live: a
+real `asks` row exists -- `amount_cents: 500000`, `purpose: "Plaque in
+memory of his wife"`, `status: pending` -- the `purpose` field is a
+byte-for-byte match to the legacy text's own extra detail. Explicitly
+considered whether "in memory of his wife" deserves independent
+treatment as a durable family fact (a death, per this project's own
+established "passed away is durable" principle) rather than being
+folded into the ask -- concluded it does not need duplicating here: this
+detail is definitionally part of describing what the solicitation itself
+is FOR (a memorial plaque), not a separate fact bundled alongside an
+unrelated fundraiser action the way Danziger/Mark-Danziger's cases are.
+No residual donor-specific content survives outside the ask.
+
+**Semmelman -- "Sent text on wife's Yahrtzeit to acknowledge it."**
+Disposition: **STRUCTURED_DATA_ALREADY_COVERS_IT**. Verified live: a
+real `yahrtzeits` row exists -- deceased "Esther," relationship "Wife,"
+Hebrew date Av 23. The durable fact (he has a deceased wife with a
+recorded, recurring yahrtzeit) is fully, precisely represented there,
+including the exact recurring date this free-text sentence does not even
+state. The remainder of the sentence ("Sent text... to acknowledge it")
+is pure fundraiser-action description with no further donor-specific
+content. Improve future intelligence: no -- the structured table already
+does this better (a precise, recurring, correctly-calculated date vs. a
+static sentence that would never update).
+
+**Sonnenblick -- "called to wish mazel tov on son's bar mitzvah this shabbos."**
+Disposition: **NEEDS_REVIEW**. Identical structure and reasoning to Mark
+Danziger -- a real, dated family fact (son's bar mitzvah, this Shabbos)
+embedded in a description of the fundraiser's phone call, not separable
+without inference.
+
+**Weinschneider -- "Discussed Kollel donation and said to follow up after succos."**
+Disposition: **NEEDS_REVIEW** (consistent with the prior task's lifecycle-
+level finding, re-confirmed here under the structured-data question
+specifically). Verified live: **no `asks` row exists for this donor** --
+the Kollel donation discussion was never formalized into the structured
+ask table, so `STRUCTURED_DATA_ALREADY_COVERS_IT` does not apply; the
+donation-interest content is genuinely un-captured donor intelligence,
+bundled with a follow-up instruction the same way the prior task already
+found. Preserved donor intelligence, if isolated: real, currently-
+uncaptured solicitation-adjacent context. Improve future intelligence:
+yes, potentially -- but the same "cannot cleanly isolate" constraint
+applies, so this stays flagged rather than auto-resolved either way.
+
+**Zachter -- "Texted video from first day of Zman and thanked him for his support that makes it happen."**
+Disposition: **BACKFILL_AS_RELATIONSHIP_FACT**. The only one of the 12
+that survives review cleanly. Unlike the bar-mitzvah/schnaps cases, this
+sentence is not "a separable fact hidden inside an unrelated action" --
+per this project's own prior corpus investigation (see the Zman/
+Yahrtzeit extraction-vocabulary investigation earlier in this file),
+this is the single evidenced, non-broadcast exception in the whole real
+corpus where the co-occurrence of Zman language AND genuine thanks/
+support language in one sentence IS itself the donor-relevant signal
+(39 of 42 real "Zman" mentions are generic mass-broadcast templates;
+this is the one real, personal appreciation exchange). The extractor's
+own existing, already-evidenced design (`ZMAN_APPRECIATION_PATTERN`)
+treats the whole sentence as the correctly-scoped fact, not a sub-clause
+needing isolation -- so this does not trigger the "flag rather than
+paraphrase" rule the same way the other action-plus-fact sentences do.
+Preserved donor intelligence: a real, evidenced signal that this donor
+is an engaged, valued, appreciated supporter. Structured coverage: none
+(`giving_activities` shows his actual gifts, not this relationship-
+quality signal). Improve future intelligence: yes.
+
+**Shlionsky -- "Sent him an email with photo of his son."**
+Disposition: **INTERACTION_HISTORY_ONLY**. Overwhelmingly an outreach-
+action description; the embedded fact ("has a son") carries essentially
+no distinguishing stewardship value on its own -- no name, age,
+milestone, or date, unlike the bar-mitzvah cases. Preserved donor
+intelligence: negligible. Structured coverage: N/A. Improve future
+intelligence: no.
+
+### Summary table
+
+| Donor | Legacy text | Disposition | Donor intelligence preserved | Already covered elsewhere? | Why (not) durable |
+|---|---|---|---|---|---|
+| Abdelhak | "Personal invite to Teaneck event." | INTERACTION_HISTORY_ONLY | None -- pure outreach action | N/A | Action record, no donor fact |
+| Joel Danziger | "Dropped off bottle of schnaps for son's bar mitzvah." | NEEDS_REVIEW | Son's bar mitzvah (if isolated) | No | Real fact embedded in action wording, not separable without inference |
+| Mark Danziger | "called to wish mazel tov on grandson's bar mitzvah this shabbos." | NEEDS_REVIEW | Grandson's bar mitzvah, dated (if isolated) | No | Same as above |
+| Horn | "Messaged to welcome son back to Yeshiva." | INTERACTION_HISTORY_ONLY | Negligible -- generic, near-universal background | N/A | Action-dominant, low distinguishing value |
+| Klein | "Note context: Solicited for a plaque ($5k)" | STRUCTURED_DATA_ALREADY_COVERS_IT | None additional | **Yes** -- real `asks` row ($5k, "Plaque", declined) | Duplication risks staleness |
+| Pfeiffer | "Note context: Solicited for $10k" | STRUCTURED_DATA_ALREADY_COVERS_IT | None additional | **Yes** -- real `asks` row ($10k, pending) | Duplication risks staleness |
+| Rovinsky | "Note context: Solicited for a plaque in memory of his wife ($5k)" | STRUCTURED_DATA_ALREADY_COVERS_IT | None additional | **Yes** -- `asks.purpose` matches verbatim | Duplication risks staleness |
+| Semmelman | "Sent text on wife's Yahrtzeit to acknowledge it." | STRUCTURED_DATA_ALREADY_COVERS_IT | None additional | **Yes** -- real `yahrtzeits` row (Esther, Av 23) | Structured table is more precise (real recurring date) |
+| Sonnenblick | "called to wish mazel tov on son's bar mitzvah this shabbos." | NEEDS_REVIEW | Son's bar mitzvah, dated (if isolated) | No | Same as the Danziger cases |
+| Weinschneider | "Discussed Kollel donation and said to follow up after succos." | NEEDS_REVIEW | Kollel donation interest (if isolated) | No -- verified no `asks` row exists | Real fact embedded in a follow-up instruction |
+| Zachter | "Texted video from first day of Zman and thanked him for his support that makes it happen." | **BACKFILL_AS_RELATIONSHIP_FACT** | Genuine engaged-supporter signal | No | The one case where the extractor's own design already correctly scopes the whole sentence as the fact |
+| Shlionsky | "Sent him an email with photo of his son." | INTERACTION_HISTORY_ONLY | Negligible -- no name/age/milestone/date | N/A | Action-dominant, no distinguishing content |
+
+**Totals: 1 BACKFILL_AS_RELATIONSHIP_FACT, 4 STRUCTURED_DATA_ALREADY_
+COVERS_IT, 3 INTERACTION_HISTORY_ONLY, 4 NEEDS_REVIEW.** Of the 12
+mechanically-valid candidates the corrected classifier produced, only
+ONE is actually appropriate to backfill as-is into the permanent
+`donor_relationship_facts` layer without further human decision. This is
+the concrete, quantified version of the principle this task set out to
+enforce: preserving every old value is not a goal in itself.
+
+### What this means for the (still-not-applied) Phase 1 backfill
+
+Not resolved in this task, since resolving it would mean either changing
+the backfill script's own logic (a code change) or making dispositional
+decisions on the user's behalf -- both out of scope for "investigation
+only." Flagged as the open question for the next approval: should the
+backfill script's SAFE_TO_BACKFILL set narrow from "passes the
+mechanical classification/safety checks" to "passes this semantic
+review too" (i.e. only `BACKFILL_AS_RELATIONSHIP_FACT`-dispositioned
+donors actually get backfilled, `STRUCTURED_DATA_ALREADY_COVERS_IT`/
+`INTERACTION_HISTORY_ONLY` donors are skipped by design rather than
+backfilled, and `NEEDS_REVIEW` donors stay exactly where the prior
+task's mechanism already puts them)? This review does not implement that
+narrowing -- it only establishes, with evidence, that the narrowing is
+warranted.
+
+### Status -- STOPPED per explicit instruction
+
+**Investigation only. No code, D1, or deployment change made in this
+task.** No backfill applied, no `donor_relationship_facts` row written,
+no existing donor field altered, Phase 2 not started, nothing deployed.
+Awaiting approval before deciding how (or whether) this semantic review
+changes the backfill script's own logic, applying any backfill, or
+beginning Phase 2.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -6923,6 +7145,32 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T21:00:00Z (approximate)
+Claude (Sonnet 5) — Semantic backfill review of the exact 12 staging
+candidates, per explicit instruction that mechanically valid
+classification is not the same as appropriate to enshrine permanently.
+Verified every structured-coverage claim live against real D1 data
+rather than trusting memory: Klein/Pfeiffer/Rovinsky all have real
+`asks` rows (Rovinsky's `purpose` matches the legacy text verbatim);
+Semmelman has a real `yahrtzeits` row with a precise recurring date the
+free-text sentence doesn't even state; Weinschneider has no `asks` row
+at all, confirming that donor's Kollel-donation content is genuinely
+uncaptured. Applied a four-way disposition test to each candidate and
+found only 1 of 12 (Zachter) is actually appropriate to backfill as-is
+-- 4 are already fully covered by structured data (duplication would
+risk staleness, not add value), 3 are interaction-log prose with no
+durable donor fact worth promoting, and 4 (the bar-mitzvah/schnaps-style
+sentences plus Weinschneider) genuinely embed a real donor fact inside
+fundraiser-action wording that the current deterministic extractor
+cannot isolate without inference -- flagged for human review rather than
+auto-paraphrased into a cleaner fact, per explicit instruction. No code,
+D1, or deployment change in this task -- pure investigation. Flagged the
+open question this raises for the actual backfill script's own logic,
+without resolving it (out of scope for investigation-only). Awaiting
+approval.
+
+---
 
 2026-08-21T20:00:00Z (approximate)
 Claude (Sonnet 5) — Corrected three classification gaps the Phase 1
