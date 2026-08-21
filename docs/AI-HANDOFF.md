@@ -3845,6 +3845,122 @@ risk) and Option A (build the full review/accept UI now, larger scope)
 -- or explicit confirmation to leave this open pending further product
 input. No implementation should begin until one option is chosen.
 
+**UPDATE 2026-08-21 -- OPTION B IMPLEMENTED, TESTED, DEPLOYED, LIVE-
+VERIFIED.** See "Outcome-Route Fix -- Option B Implemented + Deployed
+(2026-08-21)" below for the full report.
+
+## Outcome-Route Fix -- Option B Implemented + Deployed (2026-08-21)
+
+Implements Option B from the investigation above: removed the
+unconditional `donors.relationship_summary`/`institutional_memory`
+write from `app/api/interactions/[id]/outcome/route.ts` entirely.
+
+**Implementation.** Deleted the write block (the old lines ~125-130:
+`if (nextStatus === "completed" || nextStatus === "no-response") { ...
+extractInteraction(...) ... UPDATE donors SET relationship_summary =
+..., institutional_memory = ... }`), replaced with an explanatory
+comment describing why (Option B, not a gate) and what re-adding this
+capability would require (real preview/accept UI + the
+`contextStatement()` CAS pattern from the sibling edit route). Removed
+the now-unused `extractInteraction` import; kept the `InteractionKind`
+type import (still used for the follow-up-type validation) and `kinds`
+(unchanged). Nothing else in the route changed -- interaction
+status/source/summary updates, `activity_status_audits` inserts,
+follow-up creation, the old-recommendation delete, undo handling, and
+the compare-and-swap on `results[0].meta?.changes` are all byte-for-byte
+untouched.
+
+**Regression tests.** New `tests/outcome-route-relationship-write-
+removed.test.mjs` (wired into `package.json`), following this repo's
+established convention for route-level behavior (structural assertions
+against the route source, since `env` from `cloudflare:workers` can't be
+invoked outside a Workers runtime -- confirmed no existing test in this
+repo does otherwise). Combines structural proof with the real
+`extractInteraction()` function run against the investigation's own
+realistic notes, so the test grounds "no write statement exists" in
+"here's concretely what it would have written." Covers: no `UPDATE
+donors SET relationship_summary` statement (or any SQL referencing
+either field) anywhere in the route; no `extractInteraction` import;
+reproduction of both the investigation's overwrite scenario (a routine
+note that extracts unrelated content) and its null scenario (a note
+that extracts nothing) as sanity checks that these are real, still-live
+risks the removal protects against; confirmation `ownedActivity()` has
+no shared-activity special-casing (the fix closes that gap structurally,
+not by adding a new exclusion); and unchanged-behavior assertions for
+the interaction-row update, `capture-completed:`/no-response source
+generation, status transitions, outcome-note persistence into the
+interaction's own summary, audit logging, old-recommendation deletion,
+follow-up creation, reopen/undo handling, and the stale-update
+compare-and-swap. Also re-confirms the main capture route's own
+`acceptRelationshipSnapshot` gate is unaffected. `pnpm test` (all
+suites, including the existing `tests/activity-outcome.test.mjs`,
+unmodified and still passing): exit 0, every suite `fail 0`. `pnpm exec
+tsc --noEmit`: clean (no unused-import errors after removing
+`extractInteraction`). `pnpm run build:staging-independent`: completed,
+full route manifest, no errors.
+
+**Commit and deployment.** Committed `e20e10d`, pushed to
+`feature/independent-cloudflare-sandbox`. Deployed via `pnpm run
+deploy:staging-independent`, started 2026-08-21T03:07:18Z. **Worker
+version `c73b2bf3-5283-435e-aabc-a2bb918a1f0f`**, deployed git SHA
+`e20e10d`. No asset upload needed (server-only change). No D1 schema
+change, no production access.
+
+**Live verification (real deployed endpoint, real donor, fully cleaned
+up afterward).** No safe disposable donor exists (confirmed in an
+earlier task), so this used donor 60830 (Zachter) -- chosen deliberately
+because his exact `relationship_summary` was already known precisely
+(the real, just-repaired good value from the prior grandchild/Zman
+task), making this the most direct possible proof that the fix protects
+real, already-good content, not just a synthetic fixture:
+1. Created a real, genuinely future-dated (`2026-08-25 12:00 PM`)
+   scheduled `call` interaction for Zachter via the actual `/capture`
+   UI, clearly labeled as a test in its note text.
+2. (An accidental manual click cancelled it during this process --
+   unrelated to the fix; reopened it via a direct `fetch()` call to the
+   same API endpoint the "Reopen activity" button uses, to avoid
+   triggering the page's `window.confirm()` dialogs through automated
+   clicks.)
+3. Completed the activity via a direct `fetch()` POST to `/api/
+   interactions/8b7234a9-.../outcome` (same authenticated session, same
+   deployed route -- `window.confirm()` is a client-side UX guard only,
+   not enforced server-side, so this exercises identical server logic to
+   clicking the real button) with `action: "complete"` and an outcome
+   note ("Confirmed, will attend the dinner.") chosen because it
+   contains "dinner" -- a real `FACT_SIGNAL_PATTERN` word -- specifically
+   to prove the fix holds even when the note WOULD have extracted
+   content under the old code, not just when extraction happens to
+   return null.
+4. **Result: `donors.relationship_summary`/`institutional_memory`/
+   `relationship_health`/`updated_at` for Zachter were completely
+   byte-for-byte unchanged after completion** -- `updated_at` identical
+   to the pre-test read (`1787276491`), still the exact grandchild/Zman
+   snapshot from the prior task. Meanwhile the interaction itself
+   behaved completely normally: reopened `cancelled -> scheduled`,
+   completed `scheduled -> completed`, correct `capture-completed:...`
+   source, outcome note correctly appended into the interaction's own
+   summary, both actions correctly logged in `activity_status_audits`.
+   **This is the exact scenario the investigation's reproduction warned
+   about, now proven fixed on the real deployed Worker.**
+5. **Cleanup:** deleted the 2 test `activity_status_audits` rows and the
+   1 test interaction directly via D1 (not a route call -- these were
+   fabricated for the test, not real donor history). Re-verified after
+   cleanup: Zachter's donor row unchanged, his interaction list back to
+   exactly the 1 real interaction, global `interactions`/
+   `activity_status_audits` counts back to the exact pre-test baseline
+   (68 interactions, 0 audits). No console errors at any point.
+
+**Confirmation.** No D1 schema change, no historical-data repair, no
+production access. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). This task's implementation
+matched the investigation's own findings exactly -- nothing discovered
+that contradicted or required broadening the fix beyond Option B as
+scoped. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Status: the outcome-route acceptance-gap issue is now closed.**
+Rebuilding a full review/accept capability for outcome notes (Option A)
+remains a separate, unscoped future task if wanted.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -4616,6 +4732,44 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-21T03:30:00Z (approximate)
+Claude (Sonnet 5) — Implemented and deployed Option B from the
+outcome-route investigation: removed the unconditional `donors.
+relationship_summary`/`institutional_memory` write (and its
+`extractInteraction` call) from `app/api/interactions/[id]/outcome/
+route.ts` entirely -- replaced with an explanatory comment, no gating
+flag added since the page has no review UI to give one meaning. All
+other outcome behavior (status transitions, audits, follow-ups,
+old-recommendation cleanup, undo, note persistence) untouched. New
+`tests/outcome-route-relationship-write-removed.test.mjs` (structural
+route-source assertions + the real `extractInteraction()` function
+reproducing the investigation's own scenarios), `pnpm test`/`tsc
+--noEmit`/`build:staging-independent` all passed. Committed `e20e10d`,
+deployed to Independent Staging (Worker
+`c73b2bf3-5283-435e-aabc-a2bb918a1f0f`). Live-verified on the real
+deployed endpoint using donor 60830 (Zachter, whose exact good
+`relationship_summary` was already known): created a real future-dated
+scheduled call, reopened and completed it via direct `fetch()` calls to
+the real API (avoiding the page's `window.confirm()` dialogs), with an
+outcome note deliberately containing "dinner" (a real fact-signal word)
+to prove the fix holds even when extraction would have produced content
+under the old code. Result: Zachter's `relationship_summary`/
+`institutional_memory`/`updated_at` were completely byte-for-byte
+unchanged after completion, while the interaction itself transitioned
+and logged normally -- the exact scenario the investigation warned
+about, now proven fixed live. Cleaned up the test interaction and its
+audit rows directly via D1 afterward; re-verified everything back to
+the exact pre-test baseline (68 interactions, 0 audits, Zachter
+unchanged). No D1 schema change, no historical-data repair, no
+production access, `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Nothing discovered
+contradicted the investigation -- Option B implemented exactly as
+scoped. Full report: "Outcome-Route Fix -- Option B Implemented +
+Deployed (2026-08-21)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-21T02:40:00Z (approximate)
 Claude (Sonnet 5) — Full investigation (no code/D1/deploy change) of the
