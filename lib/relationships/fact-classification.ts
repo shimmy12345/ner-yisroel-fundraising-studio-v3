@@ -39,7 +39,22 @@ export function isSingularStateCategory(category: FactCategory): boolean {
 // Sukkos", "next spring"). A sentence anchored to a specific date is, by
 // construction, going to become dated -- this is the primary time_bound
 // signal, independent of category.
-export const RELATIVE_TIME_PATTERN = /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b|\b(?:this|next|upcoming)\s+(?:week|month|year|spring|summer|fall|winter|Sukkos|Pesach|Chanukah|Purim|Rosh Hashanah|Yom Tov)\b/i;
+//
+// "Shabbos" added 2026-08-21 during the Phase 1 backfill preview review:
+// two real staging donors (Mark Danziger, Sonnenblick) have text reading
+// "called to wish mazel tov on [grand]son's bar mitzvah this shabbos" --
+// a genuinely near-term, dated event this pattern previously had no way
+// to catch at all, so both defaulted to `durable` (family_milestone's
+// conservative fallback) instead of `time_bound`. Deliberately just
+// "Shabbos" -- the exact evidenced word, in the same "this/next/
+// upcoming" + word position every other holiday name already uses -- not
+// a broader day-of-week list (no other day name is observed in this
+// corpus in this construction) and not a bare "after X" preposition
+// (also not needed to fix any actual misclassification here: the one
+// observed "after succos" instance, Weinschneider's, already resolves
+// correctly via COMMITMENT_PATTERN regardless -- see docs/AI-HANDOFF.md
+// for why that was investigated and deliberately not acted on).
+export const RELATIVE_TIME_PATTERN = /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b|\b(?:this|next|upcoming)\s+(?:week|month|year|spring|summer|fall|winter|Sukkos|Pesach|Chanukah|Purim|Rosh Hashanah|Yom Tov|Shabbos)\b/i;
 
 // A NARROW subset of HEALTH_FACT_PATTERN's terms (lib/capture/
 // interaction.ts) describing a transient STATE, not a permanent
@@ -138,6 +153,41 @@ export function classifyRelationshipFact(text: string): FactClassification {
   const category = classifyFactCategory(text);
   const lifecycle = classifyFactLifecycle(text, category);
   return { category, lifecycle };
+}
+
+// Detects a real, narrow information-loss risk found in a real staging
+// donor's text (Weinschneider: "Discussed Kollel donation and said to
+// follow up after succos.") while investigating whether sentence-level
+// lifecycle classification is sufficient. That sentence's COMMITMENT_
+// PATTERN match ("follow up") wins classifyFactLifecycle's priority
+// order, so the WHOLE sentence becomes `follow_up` -- which, per this
+// module's own design, never enters relationship_summary/institutional_
+// memory synthesis at all. But the same sentence ALSO matches
+// SOLICITATION_FACT_PATTERN ("donation") -- a second, genuinely
+// substantive, non-action fact ("he's discussing a Kollel donation")
+// that would be silently and permanently lost from the synthesized
+// Snapshot if the whole sentence is treated as pure follow_up.
+//
+// Deliberately NOT a general sentence-splitting or multi-fact-per-
+// sentence redesign (out of scope -- "the smallest safe handling", not
+// an NLP rework): this is a single boolean check, reusing the exact same
+// patterns classifyFactCategory() already consults, that answers one
+// narrow question -- "does this follow_up-classified text ALSO match a
+// real substantive category signal that would be dropped?" -- so a
+// caller (today: the backfill preview's safety checks; a natural,
+// still-unbuilt future caller: Phase 2's accept flow) can flag the case
+// for a human decision instead of silently discarding half the sentence.
+// Only meaningful for text whose lifecycle is already `follow_up`;
+// callers should gate on that first (calling this unconditionally is
+// harmless -- COMMITMENT_PATTERN.test() is cheap and idempotent -- but
+// pointless otherwise).
+//
+// Deliberately excludes `general` from the "substantive" check: general
+// is the weak, no-real-signal fallback category itself, not evidence of
+// a second real fact worth preserving.
+export function hasSubstantiveContentBesidesCommitment(text: string): boolean {
+  if (!COMMITMENT_PATTERN.test(text)) return false;
+  return SOLICITATION_FACT_PATTERN.test(text) || HEALTH_FACT_PATTERN.test(text) || FAMILY_MILESTONE_FACT_PATTERN.test(text) || ENGAGEMENT_EVENT_FACT_PATTERN.test(text) || ZMAN_APPRECIATION_PATTERN.test(text);
 }
 
 // Per-category decay window in days, used ONLY for `time_bound` facts

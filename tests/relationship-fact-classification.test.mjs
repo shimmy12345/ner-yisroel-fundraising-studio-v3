@@ -3,6 +3,7 @@ import {
   classifyFactCategory,
   classifyFactLifecycle,
   classifyRelationshipFact,
+  hasSubstantiveContentBesidesCommitment,
   isSingularStateCategory,
   CATEGORY_DECAY_WINDOW_DAYS,
   DURABLE_BASELINE_SCORE,
@@ -86,6 +87,56 @@ async function run() {
   // singular-state) -- the deliberate, safer failure mode, not silently
   // fixed by this test suite. ---
   assert.deepEqual(classifyRelationshipFact("His grandson had his bar mitzvah, a beautiful simcha."), { category: "family_milestone", lifecycle: "durable" });
+
+  // --- Regression: "solicited" is a real SOLICITATION_FACT_TERMS entry
+  // (2026-08-21, found via the real Phase 1 backfill preview against
+  // Independent Staging -- Klein/Pfeiffer/Rovinsky's text). Category
+  // must come out solicitation (not general), and lifecycle must come
+  // out time_bound via the singular-state category default (no other
+  // signal fires in any of these three real sentences). ---
+  assert.deepEqual(classifyRelationshipFact("Solicited for a plaque ($5k)"), { category: "solicitation", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("Solicited for $10k"), { category: "solicitation", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("Solicited for a plaque in memory of his wife ($5k)"), { category: "solicitation", lifecycle: "time_bound" });
+  // The literal word "solicit"/"solicitation" is deliberately NOT added
+  // -- not observed anywhere in the real corpus, so classification for
+  // those forms is unchanged (falls to the category-informed default via
+  // whatever other signal, if any, the sentence carries).
+  assert.equal(classifyFactCategory("Discussed a possible solicitation next year."), "general", "bare 'solicitation' (not observed in the real corpus) must not be treated as a solicitation-category signal -- only the evidenced 'solicited' is");
+
+  // --- Regression: "this Shabbos" is a real RELATIVE_TIME_PATTERN entry
+  // (2026-08-21, found via the same live preview -- Mark Danziger and
+  // Sonnenblick's text). Category stays family_milestone (bar mitzvah/
+  // grandson/son); lifecycle must now come out time_bound, not the
+  // family_milestone category's durable default, since the event is
+  // explicitly anchored to a near-term date. ---
+  assert.deepEqual(classifyRelationshipFact("called to wish mazel tov on grandson's bar mitzvah this shabbos."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("called to wish mazel tov on son's bar mitzvah this shabbos."), { category: "family_milestone", lifecycle: "time_bound" });
+  // Case-insensitivity, matching every other RELATIVE_TIME_PATTERN entry.
+  assert.equal(classifyFactLifecycle("Coming by this Shabbos to drop off a gift.", "general"), "time_bound");
+  // Sanity: without "this"/"next"/"upcoming" immediately before it, bare
+  // "Shabbos" must not itself trigger time_bound (matches every other
+  // holiday/season entry's own "this/next/upcoming + word" requirement,
+  // not a bare mention).
+  assert.equal(classifyFactLifecycle("He always looks forward to Shabbos.", "general"), "durable");
+
+  // --- Regression: hasSubstantiveContentBesidesCommitment -- the real
+  // Weinschneider case (Kollel donation + a follow-up instruction in one
+  // sentence) must be detected as bundling a real substantive fact with
+  // an action, so a caller can avoid silently losing the donation
+  // context by treating the whole sentence as pure follow_up. ---
+  assert.equal(hasSubstantiveContentBesidesCommitment("Discussed Kollel donation and said to follow up after succos."), true);
+  // A pure action sentence with no competing substantive signal must NOT
+  // be flagged -- "wedding" here is timing context for the follow-up,
+  // but is also a real FAMILY_MILESTONE_TERMS word, so this intentionally
+  // DOES flag too (see the test file/backfill script's own comment on
+  // why this conservative false-positive tradeoff -- flag rather than
+  // silently drop -- is deliberate).
+  assert.equal(hasSubstantiveContentBesidesCommitment("Follow up after Danielle's wedding."), true, "a commitment sentence that also happens to name a family-milestone word is deliberately flagged too, per the conservative fail-closed tradeoff");
+  // A genuinely pure action sentence with no competing signal at all must
+  // NOT be flagged.
+  assert.equal(hasSubstantiveContentBesidesCommitment("Promised to send the updated schedule."), false);
+  // Never flags text that isn't even follow_up-shaped in the first place.
+  assert.equal(hasSubstantiveContentBesidesCommitment("His daughter is Danielle."), false);
 
   // --- Category taxonomy: isSingularStateCategory is exactly {solicitation, health}. ---
   assert.equal(isSingularStateCategory("solicitation"), true);

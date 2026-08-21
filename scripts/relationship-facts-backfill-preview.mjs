@@ -37,7 +37,15 @@
 // durable relationship intelligence -- ingesting known machine-generated
 // junk as "durable" would preserve it forever. Any value that is empty
 // after trim, or implausibly long, is also flagged rather than guessed
-// at.
+// at. A value that classifies `follow_up` AND also matches a real
+// substantive category signal (lib/relationships/fact-classification.ts's
+// hasSubstantiveContentBesidesCommitment()) is ALSO flagged rather than
+// silently backfilled -- found and fixed via a real staging donor
+// (Weinschneider: "Discussed Kollel donation and said to follow up after
+// succos.") whose whole sentence would otherwise become a pure follow_up
+// fact, permanently excluded from Snapshot synthesis, silently dropping
+// the genuine "discussing a Kollel donation" fact it also contains. See
+// docs/AI-HANDOFF.md for the full investigation.
 //
 // Usage: node scripts/relationship-facts-backfill-preview.mjs
 // Reads fundraising-os-staging-db via `wrangler d1 execute --remote`.
@@ -45,7 +53,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { classifyRelationshipFact } from "../lib/relationships/fact-classification.ts";
+import { classifyRelationshipFact, hasSubstantiveContentBesidesCommitment } from "../lib/relationships/fact-classification.ts";
 import { computeRelationshipFactFingerprint } from "../lib/relationships/fact-fingerprint.ts";
 import { OLD_FORMAT_PREFIX } from "./relationship-summary-cleanup-preview.mjs";
 
@@ -118,6 +126,12 @@ function planBackfill(donors, existingFingerprints, backfillRunEpochSeconds) {
     }
 
     const { category, lifecycle } = classifyRelationshipFact(value);
+
+    if (lifecycle === "follow_up" && hasSubstantiveContentBesidesCommitment(value)) {
+      skipped.push({ donor, sourceField, value: rawValue, reason: `This text classifies as follow_up (an action-oriented commitment, per COMMITMENT_PATTERN) but ALSO matches a real substantive fact-category signal -- treating the whole sentence as follow_up would permanently exclude that other fact from Snapshot synthesis (follow_up facts never enter relationship_summary/institutional_memory at all). Needs a human decision (e.g. splitting into two separate accepted facts) rather than a one-size-fits-all automatic choice.` });
+      continue;
+    }
+
     const fingerprint = computeRelationshipFactFingerprint({ donorId: donor.id, factText: value, sourceInteractionId: null });
     const alreadyExists = existingFingerprints.has(`${donor.owner_user_id ?? donor.user_id ?? ""}:${fingerprint}`);
 

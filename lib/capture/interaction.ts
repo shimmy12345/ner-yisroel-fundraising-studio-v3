@@ -276,7 +276,20 @@ export const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly
 // change. "Engagement" naming note: ENGAGEMENT_EVENT_TERMS means donor
 // engagement/visit/event activity (campus tour, gala); the unrelated
 // "engaged"/"engagement" (marriage) words live in FAMILY_MILESTONE_TERMS.
-export const SOLICITATION_FACT_TERMS = "pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|proposal|request for support|funding request|ask amount";
+// "solicited" added 2026-08-21 during the Relationship Intelligence
+// Phase 1 backfill preview review: three real staging donors (Klein,
+// Pfeiffer, Rovinsky) have relationship-intelligence text reading
+// "Solicited for a plaque ($5k)" / "Solicited for $10k" / "Solicited for
+// a plaque in memory of his wife ($5k)" -- genuine solicitation language
+// this pattern previously had no term for at all (COMMUNICATION_ACTION_
+// VERBS' "Solicited" entry is a completely separate system -- it only
+// excludes the word from PEOPLE-mentioned matching, never from fact-
+// signal detection). Without this, these three donors' text produced no
+// fact-signal match under FACT_SIGNAL_PATTERN at all. Deliberately just
+// "solicited" -- the exact evidenced word -- not also "solicitation" or
+// bare "solicit", which are not observed anywhere in the real corpus;
+// see docs/AI-HANDOFF.md for the full evidence.
+export const SOLICITATION_FACT_TERMS = "pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|proposal|request for support|funding request|ask amount|solicited";
 export const PROGRAM_BENEFICIARY_TERMS = "scholarship|student|tuition|education|seminary";
 export const ENGAGEMENT_EVENT_TERMS = "campus|tour|school visit|site visit|event|gala|dinner|reception|parlor meeting";
 export const FAMILY_MILESTONE_TERMS = "family|spouse|son|daughter|grandsons?|granddaughters?|grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?|wedding|engaged|engagement|birthday|anniversary|yahrtzeits?";

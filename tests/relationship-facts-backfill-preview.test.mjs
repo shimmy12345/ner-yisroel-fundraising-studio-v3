@@ -69,6 +69,34 @@ async function run() {
     assert.match(skipped[0].reason, /pre-fix/);
   }
 
+  // --- 4b: backfill safety -- a Weinschneider-style sentence bundling a
+  // real substantive fact (a Kollel donation) with a follow-up
+  // instruction ("follow up after succos") must be flagged NEEDS_REVIEW,
+  // never silently backfilled as a pure follow_up fact -- doing so would
+  // permanently exclude the donation context from Snapshot synthesis
+  // (follow_up facts never enter it, at any age). This is the exact real
+  // donor text from the live Independent Staging preview, not a
+  // synthetic paraphrase. ---
+  {
+    const d = donor({ relationship_summary: "Discussed Kollel donation and said to follow up after succos." });
+    const { plan, skipped } = planBackfill([d], new Set(), RUN_AT);
+    assert.equal(plan.length, 0, "a sentence bundling a real substantive fact with a follow-up instruction must never be silently backfilled as pure follow_up");
+    assert.equal(skipped.length, 1);
+    assert.match(skipped[0].reason, /follow_up/);
+    assert.match(skipped[0].reason, /substantive/);
+  }
+  // A pure follow-up sentence with NO competing substantive signal is
+  // still backfilled normally (follow_up facts are stored, just excluded
+  // from synthesis by lifecycle -- see the design doc; they are not a
+  // backfill-safety concern on their own).
+  {
+    const d = donor({ relationship_summary: "Promised to send the updated schedule." });
+    const { plan, skipped } = planBackfill([d], new Set(), RUN_AT);
+    assert.equal(skipped.length, 0);
+    assert.equal(plan.length, 1);
+    assert.equal(plan[0].lifecycle, "follow_up");
+  }
+
   // --- 5: backfill safety -- empty-after-trim is flagged, not silently
   // skipped as "nothing to do" and not silently ingested as an empty
   // durable fact either. ---

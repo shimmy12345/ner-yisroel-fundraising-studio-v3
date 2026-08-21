@@ -43,7 +43,12 @@ function classifyOne(relationshipSummary, opts) {
 async function run() {
   const MESSAGED_NOTE = "Messaged about the building fund update.";
   const SOLICITED_CAMPAIGN_NOTE = "Solicited for the annual campaign.";
-  const SOLICITED_PLAQUE_NOTE = "Solicited for a plaque ($5k).";
+  // Deliberately NOT "solicited" -- as of 2026-08-21, "solicited" is a
+  // real SOLICITATION_FACT_TERMS entry (see interaction.ts), so a note
+  // using that word now produces a real fact, no longer exercising the
+  // "dollar amount present, no fact signal found" code path this fixture
+  // exists to test.
+  const DOLLAR_NO_SIGNAL_NOTE = "Mentioned a figure of $5k in passing.";
   const YESHIVA_NOTE = "Visited the Yeshiva today.";
   const DAVID_NOTE = "David Cohen mentioned that his daughter is starting seminary in Israel this fall.";
   const MIXED_NOTE = "Ran into Sarah Klein at the grocery store, said hello.";
@@ -61,14 +66,24 @@ async function run() {
   }
 
   // --- 2: old-format "Solicited" junk -- the CRM-status-verb false
-  // positive the extractor already excludes -- also traces cleanly and is
-  // safe to clear when the source note has nothing else worth keeping. ---
+  // positive the extractor already excludes from People mentioned (a
+  // completely separate system from fact-signal detection -- see
+  // lib/capture/interaction.ts's SOLICITATION_FACT_TERMS comment). As of
+  // the 2026-08-21 Relationship Intelligence Phase 1 backfill-preview
+  // review, "solicited" is now a real evidenced SOLICITATION_FACT_TERMS
+  // entry (three real staging donors' text: "Solicited for a plaque
+  // ($5k)"/"Solicited for $10k"/etc.), so the CURRENT extractor now finds
+  // a genuine specific fact here -- SAFE_TO_REGENERATE, not SAFE_TO_
+  // CLEAR. Updated from this test's own prior expectation deliberately,
+  // not silently: the old assertion (SAFE_TO_CLEAR, proposed: null) was
+  // correct only because "solicited" used to have no fact-signal term at
+  // all; that gap is exactly what was fixed. ---
   {
     const value = oldActionableRelationshipSnapshot(SOLICITED_CAMPAIGN_NOTE, "note");
     assert.doesNotMatch(value, /People mentioned:/, "the old generator's own CRM-status-verb exclusion already keeps 'Solicited' out of People mentioned");
     const { bucketName, item } = classifyOne(value, { note: SOLICITED_CAMPAIGN_NOTE, kind: "note" });
-    assert.equal(bucketName, "SAFE_TO_CLEAR");
-    assert.equal(item.proposed, null);
+    assert.equal(bucketName, "SAFE_TO_REGENERATE");
+    assert.equal(item.proposed, "Solicited for the annual campaign.", "the current extractor now correctly finds and preserves this specific solicitation fact, rather than discarding it as boilerplate");
   }
 
   // --- 3: pure boilerplate snapshot (an "Organizations mentioned: Yeshiva."
@@ -108,8 +123,8 @@ async function run() {
   // --- 5b: same needs-review protection for a bare dollar amount
   // ("$5k") the extractor's keyword list doesn't treat as a fact signal. ---
   {
-    const value = oldActionableRelationshipSnapshot(SOLICITED_PLAQUE_NOTE, "note");
-    const { bucketName, item } = classifyOne(value, { note: SOLICITED_PLAQUE_NOTE, kind: "note" });
+    const value = oldActionableRelationshipSnapshot(DOLLAR_NO_SIGNAL_NOTE, "note");
+    const { bucketName, item } = classifyOne(value, { note: DOLLAR_NO_SIGNAL_NOTE, kind: "note" });
     assert.equal(bucketName, "NEEDS_REVIEW");
     assert.equal(item.proposed, null);
     assert.match(item.reason, /dollar amount/);
