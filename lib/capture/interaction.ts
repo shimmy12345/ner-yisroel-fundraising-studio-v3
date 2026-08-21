@@ -92,6 +92,11 @@ const concise = (value: string, max = 180) => value.length <= max ? value : `${v
 const COMMUNICATION_ACTION_VERBS = [
   "Called", "Emailed", "Messaged", "Texted", "Spoke", "Met", "Discussed", "Asked", "Visited", "Contacted", "Reached", "Sent", "Shared", "Followed", "Send", "Follow",
   "Solicited", "Declined", "Confirmed", "Pending", "Requested", "Reviewed", "Completed", "Cancelled", "Rescheduled", "Postponed", "Attended", "Scheduled", "Reminded", "Thanked", "Updated", "Approved", "Rejected", "Received", "Processed",
+  // "Dropped" added 2026-08-21: a real donor note ("Dropped off bottle of
+  // schnaps for son's bar mitzvah") was misread as mentioning a person
+  // named "Dropped" -- the same class of sentence-initial disposition/
+  // action verb the rest of this list already covers, just missing.
+  "Dropped",
 ];
 // Three genuine closed grammatical categories, not fundraising-specific
 // jargon -- modal auxiliary verbs ("Will send...", "Would follow up..."),
@@ -101,7 +106,33 @@ const COMMUNICATION_ACTION_VERBS = [
 const MODAL_VERBS = ["Will", "Would", "Should", "Could", "Can", "May", "Might", "Must", "Shall"];
 const DAYS_OF_WEEK = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const INDEFINITE_PRONOUNS = ["Nothing", "Everything", "Something", "Anything"];
-const NON_NAME_WORDS = new Set(["Meeting", "Coffee", "Lunch", "Dinner", "The", "This", "That", "These", "Those", "She", "He", "They", "We", "I", "It", ...COMMUNICATION_ACTION_VERBS, ...MODAL_VERBS, ...DAYS_OF_WEEK, ...INDEFINITE_PRONOUNS]);
+// Closed, evidenced (not speculative) categories added 2026-08-21 during
+// the people-extraction false-positive investigation -- see
+// docs/AI-HANDOFF.md for the full corpus audit. Each entry below was
+// proven, not guessed: it actually appeared, capitalized, as a false
+// "person" in a real interaction note on Independent Staging.
+//
+// Jewish-calendar/communal terms: "Zman" (Yeshiva semester/term --
+// donor 60830/Zachter: "...first day of Zman and thanked him..."),
+// "Yahrtzeit" (death anniversary -- donor 72957/Semmelman: "...wife's
+// Yahrtzeit to acknowledge it"), "Kollel" (full-time Torah-study
+// fellowship -- donor 68390/Weinschneider: "Discussed Kollel donation
+// and said to follow up after succos"). The task's own broader candidate
+// list (Shabbos, Yom Tov, Purim, Pesach, Sukkos, Chanukah, Rosh
+// Hashanah, Torah, Beis Medrash, Mechina, Campaign) was explicitly
+// audited against the real corpus and NONE of them actually appeared as
+// a false-positive person -- not added, per the same evidence-only
+// standard. "Dinner" was already covered below before this task.
+const JEWISH_CALENDAR_AND_COMMUNAL_TERMS = ["Zman", "Yahrtzeit", "Kollel"];
+// Machine-generated import-provenance boilerplate, not donor-relevant
+// text at all: every Monday.com-imported interaction's summary has
+// "Imported from Monday.com pipeline export. Source due date: ..."
+// appended (see app/api/import/monday/commit/route.ts), and both
+// capitalized sentence-initial words in that fixed template were
+// misread as people on all 5 real imported interactions on Independent
+// Staging.
+const IMPORT_PROVENANCE_WORDS = ["Imported", "Source"];
+const NON_NAME_WORDS = new Set(["Meeting", "Coffee", "Lunch", "Dinner", "The", "This", "That", "These", "Those", "She", "He", "They", "We", "I", "It", ...COMMUNICATION_ACTION_VERBS, ...MODAL_VERBS, ...DAYS_OF_WEEK, ...INDEFINITE_PRONOUNS, ...JEWISH_CALENDAR_AND_COMMUNAL_TERMS, ...IMPORT_PROVENANCE_WORDS]);
 
 // Generalizes beyond the fixed verb list above: a bare capitalized word
 // immediately followed by one of these words is being used as a verb, not
@@ -110,6 +141,16 @@ const NON_NAME_WORDS = new Set(["Meeting", "Coffee", "Lunch", "Dinner", "The", "
 // particles at the start of a sentence in this note-writing style ("David
 // about the pledge" is not how these notes read). Catches a future
 // unlisted verb without needing the dictionary to be exhaustive.
+//
+// Deliberately restricted to a match at the very start of the note (see
+// the sentence-boundary check at its call site) -- as documented above,
+// this was only ever meant to catch a SENTENCE-INITIAL verb. Applied
+// unconditionally, it also caught real names in the object position of a
+// normal sentence: "Spoke with Yaakov about the new Zman" incorrectly
+// dropped "Yaakov" too, since "Yaakov" happens to be followed by "about"
+// -- even though "Yaakov" is clearly a person being discussed, not a
+// disposition verb. A verb-follower reading only makes sense when there
+// is no subject before it.
 const VERB_FOLLOWER_PATTERN = /^(about|regarding|with|via)\b/i;
 
 // Regular plurals matter here: real notes as often say "Yeshivas Ner
@@ -125,7 +166,21 @@ function mentionedPeople(note: string) {
   const matches = [...note.matchAll(/\b\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*)*/gu)];
   const names = matches
     .map((match) => {
-      const name = match[0].trim().replace(/[’']s$/u, "");
+      // A leading word already known to never be a name (a disposition
+      // verb, modal, day, pronoun...) doesn't make the WHOLE multi-word
+      // span a name either -- "Discussed Kollel donation..." is
+      // "Discussed" (excluded) + "Kollel" (a real word, evaluated on its
+      // own), not a two-word person name; "Met Rabbi Cohen" is "Met"
+      // (excluded) + "Rabbi Cohen" (a genuine name, kept intact). Proven
+      // by a real note (Weinschneider, 68390) where this previously
+      // produced "Discussed Kollel" as a fabricated person. Only LEADING
+      // words are stripped -- a genuine two-word name ("David Cohen") has
+      // no excluded word to strip and passes through completely
+      // unchanged.
+      let words = match[0].trim().split(/\s+/);
+      while (words.length > 1 && NON_NAME_WORDS.has(words[0])) words = words.slice(1);
+      const name = words.join(" ").replace(/[’']s$/u, "");
+      if (!name) return null;
       if (NON_NAME_WORDS.has(name)) return null;
       if (ORG_TYPE_TEST.test(name)) return null;
       // Only single-word matches are structurally ambiguous with a verb --
@@ -133,11 +188,23 @@ function mentionedPeople(note: string) {
       // sentence-initial verb, so this check only ever narrows single words.
       // Uses this specific match's own position (not indexOf) so a repeated
       // word elsewhere in the note can't be checked against the wrong
-      // occurrence's context.
+      // occurrence's context. Further restricted to a SENTENCE-initial
+      // match (start of the note, or immediately after a
+      // ./!/?/newline) -- matching VERB_FOLLOWER_PATTERN's own stated
+      // intent ("a real first name essentially never precedes these
+      // particles AT THE START OF A SENTENCE"), which the code
+      // previously didn't actually enforce. Without this, "Spoke with
+      // Yaakov about the new Zman" incorrectly dropped "Yaakov" too,
+      // since "about" happens to follow it mid-sentence -- a real name
+      // in the object position of "with", not a disposition verb.
       if (!name.includes(" ")) {
-        const afterIndex = (match.index ?? 0) + match[0].length;
-        const after = note.slice(afterIndex).replace(/^[.,!?]?\s*/, "");
-        if (VERB_FOLLOWER_PATTERN.test(after)) return null;
+        const beforeIndex = match.index ?? 0;
+        const sentenceInitial = beforeIndex === 0 || /[.!?\r\n]\s*$/.test(note.slice(0, beforeIndex));
+        if (sentenceInitial) {
+          const afterIndex = beforeIndex + match[0].length;
+          const after = note.slice(afterIndex).replace(/^[.,!?]?\s*/, "");
+          if (VERB_FOLLOWER_PATTERN.test(after)) return null;
+        }
       }
       return name;
     })

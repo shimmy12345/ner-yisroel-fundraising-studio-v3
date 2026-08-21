@@ -3961,6 +3961,192 @@ scoped. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
 Rebuilding a full review/accept capability for outcome notes (Option A)
 remains a separate, unscoped future task if wanted.
 
+## People-Extraction False-Positive Investigation and Fix (2026-08-21) -- CODE CHANGED, NO D1 WRITE, NOT DEPLOYED
+
+Investigates and fixes the known false-positive where `mentionedPeople()`
+in `lib/capture/interaction.ts` misreads capitalized non-person words
+(`Zman`, `Yahrtzeit`) as donor names. Separate from Relationship
+Snapshot extraction (`FACT_SIGNAL_PATTERN`/`ZMAN_APPRECIATION_PATTERN`
+are untouched) -- that work is not reopened.
+
+**Phase 1 -- trace.** `mentionedPeople()` is a pure regex function: it
+matches every run of capitalized words (`\b\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}
+[\p{L}'’-]*)*`) in the note and treats each as a candidate name unless it
+hits an exclusion (`NON_NAME_WORDS` exact-match set,
+`ORG_TYPE_TEST` for institution words, or `VERB_FOLLOWER_PATTERN` for a
+lone word followed by "about/regarding/with/via"). No AI, no NER, no
+persistence -- `people` is computed fresh every time
+`relationshipSnapshotDetails()` runs, and is never written to D1
+(confirmed: no `people`/`mentioned` column anywhere in `db/schema.ts`,
+no `INSERT`/`UPDATE` referencing it anywhere in the app). The ONLY
+consumer of `.people` in the entire codebase is
+`lib/relationships/meeting-brief-model.ts`'s `peopleMentioned`, rendered
+on `app/donors/[id]/meeting-brief/page.tsx` under "PEOPLE MENTIONED /
+Names to remember" -- confirmed by grep, zero other references.
+Relationship Snapshot, Institutional Memory, Suggested Action, Today,
+Assistant, and the donor page's stored fields are all unaffected --
+`specificFacts`/`actionableRelationshipSnapshot` never read `.people`,
+and `recommendation-candidates.ts` (which feeds Suggested Action/Today/
+Assistant) never calls `mentionedPeople()` at all. "Zman"/"Yahrtzeit"
+qualify purely because they're capitalized and hit no exclusion --
+capitalization alone is the evidence of personhood in this design; there
+is no name dictionary, no context understanding of what the word means.
+
+**Phase 2 -- read-only corpus audit.** Fetched all 13 real single-donor-
+capture/import interaction notes (`source LIKE 'capture:%'` or
+`'capture-completed:%'`/`'capture-scheduled:%'`/`'import-monday:%'`) and
+ran the real `mentionedPeople()` against each. Found a broader class
+than the two known examples:
+
+| Term(s) extracted | Real source note | Donor |
+|---|---|---|
+| `Yahrtzeit` | "Sent text on wife's Yahrtzeit to acknowledge it" | Semmelman (72957) |
+| `Zman` | "Texted video from first day of Zman and thanked him..." | Zachter (60830) |
+| `Discussed Kollel` | "Discussed Kollel donation and said to follow up after succos" | Weinschneider (68390) |
+| `Dropped` | "Dropped off bottle of schnaps for son's bar mitzvah" | Danziger (63618) |
+| `Imported`, `Source` | "Imported from Monday.com pipeline export. Source due date: ..." | all 5 Monday-imported donors |
+
+`Imported`/`Source` come from a machine-generated provenance line the
+Monday import route appends to every imported interaction's summary
+(`app/api/import/monday/commit/route.ts`) -- not donor-authored text at
+all. The task's own broader candidate list (Shabbos, Yom Tov, Purim,
+Pesach, Sukkos, Chanukah, Rosh Hashanah, Torah, Beis Medrash, Mechina,
+Campaign) was checked against this same real corpus and **none of them
+actually appear** -- not added, per the explicit instruction to use
+evidence, not a speculative blacklist. "Dinner" was already excluded
+before this task (already in `NON_NAME_WORDS`). All findings above are
+currently live/visible on Meeting Brief for the affected donors.
+
+**Phase 3 -- root cause class.** **B (capitalization treated as
+sufficient evidence of personhood) compounded by A (the exclusion list
+and how it's applied were both incomplete)** -- not a bad regex needing
+a rewrite, not a case for real NER. Two structural gaps, not just
+missing words, were found and proven with real notes:
+1. A multi-word capitalized span is checked only as a WHOLE string
+   against `NON_NAME_WORDS` -- a leading excluded word doesn't stop the
+   rest of the span from being swallowed into one "name". Proven:
+   "Discussed Kollel" (from Weinschneider's real note) was extracted as
+   a single fabricated person, even though "Discussed" alone was already
+   correctly excluded.
+2. `VERB_FOLLOWER_PATTERN` ("word followed by about/regarding/with/via")
+   was applied to any single-word match anywhere in the note, not just a
+   sentence-initial one -- contradicting its own code comment, which
+   explicitly says this was only ever meant to catch a verb "AT THE
+   START OF A SENTENCE". Proven: "Spoke with Yaakov about the new Zman"
+   dropped "Yaakov" too, since "about" happens to follow it mid-sentence
+   in the object position of "with" -- not a disposition verb at all.
+
+**Phase 4 -- false-negative risk, proven before implementing.** Ran
+every case the task specified against the CURRENT (pre-fix) code first,
+to establish the real baseline rather than assume: "Spoke with Yaakov
+about the new Zman." incorrectly produced `people: ["Zman"]` (Yaakov
+already missing, independent of this task); "Called David on his wife's
+Yahrtzeit." incorrectly produced `["Called David", "Yahrtzeit"]`; "Met
+Rabbi Cohen at the Yeshiva." incorrectly produced `["Met Rabbi Cohen"]`.
+All three are the SAME two structural gaps above, not new problems --
+fixing them was necessary to meet this task's own required acceptance
+cases, not scope creep.
+
+**Phase 5 -- implementation decision: IMPLEMENT.** Narrow, deterministic,
+evidence-backed. `lib/capture/interaction.ts` changes:
+- Added `"Dropped"` to `COMMUNICATION_ACTION_VERBS` (same category/
+  reasoning as its existing entries).
+- Added a new closed, evidenced `JEWISH_CALENDAR_AND_COMMUNAL_TERMS`
+  list: `["Zman", "Yahrtzeit", "Kollel"]` -- each tied to a real source
+  note in the comment, matching this file's existing convention for
+  named closed categories (`MODAL_VERBS`, `DAYS_OF_WEEK`,
+  `INDEFINITE_PRONOUNS`).
+- Added a new closed `IMPORT_PROVENANCE_WORDS` list: `["Imported",
+  "Source"]`, with a comment identifying the exact template text and
+  route responsible.
+- Fixed `mentionedPeople()` itself (not just the word list): strips
+  leading `NON_NAME_WORDS` tokens from a multi-word match before
+  evaluating it (`while (words.length > 1 && NON_NAME_WORDS.has(words[0]))
+  words = words.slice(1)`) -- fixes "Discussed Kollel"/"Met Rabbi Cohen"
+  without weakening genuine two-word names, since a real name has no
+  excluded leading word to strip.
+- Restricted `VERB_FOLLOWER_PATTERN`'s check to a sentence-initial match
+  only (start of note, or immediately after `.`/`!`/`?`/newline) --
+  matching the pattern's own already-documented intent, not a new
+  behavior.
+
+**Phase 6 -- required acceptance cases, all confirmed exactly as
+specified:**
+| Note | Result |
+|---|---|
+| Zachter's real note | `people: []` |
+| Semmelman's real note | `people: []` |
+| "Spoke with Yaakov about the new Zman." | `people: ["Yaakov"]` |
+| "Called David on his wife's Yahrtzeit." | `people: ["David"]` |
+| "Met Rabbi Cohen at the Yeshiva." | `people: ["Rabbi Cohen"]` |
+
+**Documented edge case, not fixed (no evidence to fix it against).**
+"Spoke with Mr. Zman about his pledge." produces `people: ["Mr"]` --
+"Zman" is correctly never included (excluded independently by both the
+new word-list entry and the existing "about" follower check), but the
+period after "Mr." breaks the capitalized-word regex before it can join
+"Zman" into one span, leaving "Mr" alone. This is a pre-existing,
+unrelated regex limitation (unchanged by this fix) -- and the deeper
+concern the task raised (what if "Zman" were someone's real surname?)
+is real and openly acknowledged: this rule-based design cannot
+distinguish "Zman" the calendar term from a hypothetical "Zman" surname,
+exactly the same theoretical risk every other `NON_NAME_WORDS` entry
+already carries (e.g. a donor surnamed "Monday" or "Will"). No such case
+exists in the real corpus, so nothing further was built against a
+hypothetical, per explicit instruction not to over-engineer.
+
+**Phase 7 -- Relationship Snapshot work protected.**
+`FACT_SIGNAL_PATTERN` and `ZMAN_APPRECIATION_PATTERN` were not touched
+(confirmed: zero occurrences of either name in this task's diff).
+Regression-tested directly: Zachter's and Semmelman's
+`actionableRelationshipSnapshot()` output and `institutional_memory`
+template output are byte-identical before and after this fix. Their
+stored D1 values were not read from or written to in this task at all.
+
+**Phase 8 -- historical effect: dynamically derived, no cleanup
+needed.** Proven, not assumed: `db/schema.ts` has no `people`/
+`mentioned`-related column anywhere, and no write statement anywhere in
+the app ever persists `mentionedPeople()`'s output. Meeting Brief
+recomputes it fresh from `interactions.summary` on every render.
+**Deploying this fix alone (no D1 write) will correct Meeting Brief for
+Zachter, Semmelman, Weinschneider, Danziger, and every Monday-imported
+donor immediately, with no historical-data repair required or
+performed.**
+
+**Phase 9 -- quality gates.** `pnpm test`: exit 0, every suite (existing
+and new) `fail 0`, including `tests/capture.test.mjs`,
+`tests/relationship-quality.test.mjs`,
+`tests/relationship-snapshot-yahrtzeit-zman.test.mjs`, and
+`tests/relationship-summary-cleanup-preview.test.mjs` unmodified and
+still passing. `pnpm exec tsc --noEmit`: clean. `pnpm run
+build:staging-independent`: completed, full route manifest, no errors.
+
+**New regression tests.** `tests/people-extraction-false-positives.test.mjs`
+(wired into `package.json`), exercising the real, unmodified extraction
+functions: every real corpus false positive now excluded; every Phase
+4/6 required legitimate-name case preserved; the existing repo's own
+Elena/Maya regression case unaffected; the documented "Mr. Zman" edge
+case asserted explicitly (not silently ignored); and Zachter's/
+Semmelman's exact `relationship_summary`/`institutional_memory` output
+proven byte-identical to before this fix.
+
+**Files changed.** `lib/capture/interaction.ts` (the fix),
+`package.json` (test wiring), `tests/people-extraction-false-positives.test.mjs`
+(new). `app/api/interactions/[id]/outcome/route.ts` was not touched --
+that issue remains closed/separate, per explicit instruction.
+
+**Confirmation: no D1 writes, no deploy.** Every D1 interaction in this
+task was a `SELECT` (the corpus audit) via `wrangler d1 execute
+--remote`. Per explicit instruction, this task stops before deployment
+-- the fix is committed to the feature branch but NOT deployed to
+Independent Staging. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Exact approval needed next.** Review of the implementation/audit
+result above; approval to deploy this fix to Independent Staging (not
+done in this task).
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -4732,6 +4918,52 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-21T04:15:00Z (approximate)
+Claude (Sonnet 5) — Investigated and fixed the people-extraction
+false-positive (`Zman`/`Yahrtzeit` misread as donor names), separate
+from and without touching Relationship Snapshot extraction. Traced the
+full path: `mentionedPeople()` is a pure capitalized-word regex with an
+exclusion list, no AI/NER, never persisted (no matching D1 column
+anywhere), consumed by exactly one surface --
+`lib/relationships/meeting-brief-model.ts`'s `peopleMentioned`, on the
+Meeting Brief page. Read-only corpus audit (13 real capture/import
+notes) found a broader class than the two known examples: `Zman`,
+`Yahrtzeit`, `Discussed Kollel` (Weinschneider), `Dropped` (Danziger),
+and `Imported`/`Source` (Monday-import provenance boilerplate, all 5
+imported rows) -- the task's own longer candidate list (Shabbos, Yom
+Tov, Purim, etc.) was checked and none of it actually appears in the
+corpus, so none was added. Root cause: capitalization alone treated as
+evidence of personhood, compounded by two structural gaps proven with
+real notes -- a leading excluded word didn't stop a whole multi-word
+span from being swallowed as one name ("Discussed Kollel"), and the
+verb-follower check applied anywhere in the note instead of only
+sentence-initially (dropping real names like "Yaakov" in "Spoke with
+Yaakov about the new Zman"). Fixed both structurally (strip leading
+excluded words from multi-word matches; restrict the follower check to
+sentence-initial position) plus added the evidenced words to the
+existing exclusion-list architecture -- no NER, no redesign. Proved
+false-negative safety first: baselined every required case against the
+UNFIXED code, then confirmed all pass post-fix, including "Yaakov"/
+"David"/"Rabbi Cohen" surviving next to Zman/Yahrtzeit/Yeshiva.
+Documented (not fixed, no evidence to fix against) the "Mr. Zman"
+period-truncation edge case. Confirmed Zachter's/Semmelman's
+`relationship_summary`/`institutional_memory` output byte-identical
+before and after (`FACT_SIGNAL_PATTERN`/`ZMAN_APPRECIATION_PATTERN`
+untouched). Since people are dynamically derived, this fix alone (no D1
+write) will correct Meeting Brief for every affected donor once
+deployed -- no historical cleanup needed or performed. New `tests/
+people-extraction-false-positives.test.mjs`; `pnpm test` (all suites,
+exit 0), `tsc --noEmit` (clean), `build:staging-independent` (succeeded)
+all pass. Did not touch `app/api/interactions/[id]/outcome/route.ts` --
+that issue stays closed/separate. **No D1 writes.** Per explicit
+instruction, **not deployed** in this task -- committed to the feature
+branch only, pending review. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Full report:
+"People-Extraction False-Positive Investigation and Fix (2026-08-21)"
+above. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-21T03:30:00Z (approximate)
 Claude (Sonnet 5) — Implemented and deployed Option B from the
