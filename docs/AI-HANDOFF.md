@@ -8,37 +8,48 @@ the repository/infrastructure disagree, trust the repository/infrastructure.
 
 ## Current Git State
 
-**Per this file's own preamble, git/deployed state is always the
-authoritative source if this section ever drifts again; do not trust a
-commit SHA here over a fresh `git fetch`.**
+**Corrected 2026-08-21 -- verified by a fresh `git fetch` + `wrangler
+deployments list` + live D1 read at the start of this task, per explicit
+instruction, not carried over from this section's own (stale) prior
+text. Per this file's own preamble, git/deployed state is always the
+authoritative source if this section ever drifts again.**
 
 Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`a30316f` -- "Add Option A: explicit review/accept flow for outcome-note
-Relationship Snapshots" (see "Outcome-Note Relationship Snapshot
-Review/Accept Flow -- Option A" below for full detail). On top of
-`b72895d`/`4ad8f3f` (docs-only cleanup), `befa0fb` (the people-extraction
-false-positive fix), `3f1cd3e`/`e20e10d` (outcome-route Option B fix +
-docs), `c29590a`/`faea921` (Zman/Yahrtzeit extraction implementation +
-investigation docs), `b687511`/`4126663` (Zman/Yahrtzeit historical
-repair + comprehensive audit tooling), `d48e1f2`/`d6e43ee`/`a59c8d5`
-(grandchild-gap fix, deployment, and donor 987 historical repair), and
-the branch-documentation-authority fix (`dc245fc`) before that.
-**Deployed to Independent Staging (Worker version
-`0673c91a-de71-4f29-950b-34f71fc3fbec`, still the current live version)
-and live-verified**: accepted/rejected/no-extraction/reopen/shared-
-activity scenarios all confirmed correct directly in D1, all test data
-cleaned up and reverted to baseline. No D1 schema change, no production
-access. `origin/main` untouched throughout every one of the above tasks.
+`e66005c` -- "Add Relationship Intelligence Phase 1: durable-facts schema
+and backfill preview" (see "Relationship Intelligence Phase 1" below for
+full detail). On top of `3dedd63`/`057decf`/`3d7ecb7` (the three
+investigation/design-only docs commits: Lifecycle Correction, Synthesis
+Design, Architecture Approval), `a30316f` (Option A implementation --
+**this remains the most recent commit that changed deployed application
+code**; the four commits since then are either docs-only or, for this
+one, a D1 schema-only addition that ships no new Worker code path -- see
+below), `b72895d`/`4ad8f3f` (docs-only cleanup), `befa0fb` (the
+people-extraction false-positive fix), and the full history recorded
+further down this section from earlier tasks.
+**Deployed Worker version remains
+`0673c91a-de71-4f29-950b-34f71fc3fbec`** (confirmed via a fresh
+`wrangler deployments list --config wrangler.staging.jsonc` at the start
+of this task -- unchanged since Option A's own deploy; this task's
+commit was never built/deployed, since it introduces no new route or
+behavior change, only additive schema + a backfill preview script never
+wired into the running app). **D1 schema state, confirmed live**:
+migration 0034 (`donor_relationship_facts`/`donor_relationship_fact_
+changes`) is applied to `fundraising-os-staging-db` -- both tables exist,
+both empty (0 rows each, confirmed directly), no other table touched. No
+production access. `origin/main` untouched throughout every task
+recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`a30316f` (pushed; matches local HEAD exactly, no divergence).
+`e66005c` (pushed; matches local HEAD exactly, no divergence -- verified
+via fresh `git fetch` at the start of this task).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
-recorded in this file since it was first confirmed at this SHA).
+recorded in this file since it was first confirmed at this SHA --
+reconfirmed via fresh fetch this task).
 
 Working tree:
 clean (after this docs update is committed).
@@ -5545,6 +5556,298 @@ backfill gains the one clamp described above, nothing else changes.
 HANDOFF.md` touched; no migration, D1 write, or deployment made.
 Awaiting explicit approval before Phase 1 begins.
 
+## Relationship Intelligence Phase 1 -- Durable-Facts Schema + Backfill Preview (2026-08-21) -- SCHEMA APPLIED, BACKFILL NOT APPLIED, AWAITING APPROVAL
+
+**Scope, per explicit instruction: implement ONLY Phase 1 of the
+already-approved migration plan** (see the three sections above:
+Architecture Approval, Synthesis Design, Lifecycle Correction). Schema
+and backfill machinery built and tested; the migration itself applied to
+Independent Staging (additive, zero rows); the backfill was run in
+**preview/dry-run mode only** against real staging data and is reported
+below -- **no historical D1 data was written**. Phase 2 (wiring any
+existing write path to the new table) was explicitly not started.
+
+**Pre-work verification, per explicit instruction to re-verify actual
+state rather than trust this file.** Fresh `git fetch`: local HEAD
+matched `origin/feature/independent-cloudflare-sandbox` exactly
+(`3dedd63`), zero divergence. `wrangler deployments list --config
+wrangler.staging.jsonc`: live version confirmed
+`0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own deploy, unchanged
+since). Direct D1 read: no `donor_relationship_fact%` tables existed yet.
+This file's own "Current Git State" header was indeed stale (still
+showing `a30316f` as HEAD) -- corrected above, per instruction that
+repository state wins.
+
+### Implementation
+
+- **`db/schema.ts`**: adds `donorRelationshipFacts`/
+  `donorRelationshipFactChanges`, exactly matching the approved design --
+  `category` (6 values) and `lifecycle` (`durable`/`time_bound`/
+  `follow_up`) as two independent NOT NULL columns, `sourceInteractionId`
+  nullable (backfilled facts never claim one), `sourceInteractionOccurredAt`
+  NOT NULL (the decay-clock field, clamped for backfilled rows -- see
+  below), `status` (`current`/`superseded`/`archived_with_source`),
+  `supersedesFactId` deliberately NOT a real FK (matching `donor_
+  research_findings.supersedesFindingId`'s own precedent exactly -- a
+  fact is never hard-deleted, so there is no dangling-reference risk to
+  guard against). `donorRelationshipFactChanges` mirrors `askChanges`/
+  `pledgePaymentPlanChanges` exactly.
+- **`drizzle/0034_donor_relationship_facts.sql`**: hand-authored (this
+  repo's real, established convention -- `drizzle-kit generate`'s own
+  journal has been stale since migration `0014` and was NOT trusted;
+  running it once during this task produced a bogus full-schema dump
+  treating every existing table as new, discarded before anything was
+  written). Purely additive: two new `CREATE TABLE` statements, four new
+  indexes, zero `ALTER`/rebuild of any existing table.
+- **`lib/relationships/fact-classification.ts`**: the approved
+  deterministic waterfall, implemented exactly as designed --
+  `classifyFactCategory()` (priority order: commitment → solicitation →
+  health → family → engagement → general) and `classifyFactLifecycle()`
+  (priority order: **a new step 0, `PERMANENT_LIFE_EVENT_PATTERN`
+  ("passed away") → always `durable`** -- found and fixed while writing
+  this module's own tests, see below -- then commitment → follow_up,
+  then relative-time/transient-health/relationship-change → time_bound,
+  then the category-informed default). `isSingularStateCategory()`,
+  `CATEGORY_DECAY_WINDOW_DAYS`, `DURABLE_BASELINE_SCORE` (0.3),
+  `RELEVANCE_FLOOR` (0.1) are all exported for Phase 2's synthesis
+  function to consume unchanged.
+- **`lib/capture/interaction.ts`** refactored, NOT reimplemented:
+  `FACT_SIGNAL_PATTERN`'s 48 terms are split into 5 named, exported term
+  groups (`SOLICITATION_FACT_TERMS`, `PROGRAM_BENEFICIARY_TERMS`,
+  `ENGAGEMENT_EVENT_TERMS`, `FAMILY_MILESTONE_TERMS`, `HEALTH_TERMS`) and
+  recomposed into the exact same combined pattern -- verified byte-
+  identical term coverage by hand and behavior-identical by running the
+  full test suite immediately before and after this specific change
+  (both green, zero regression) before building anything on top of it.
+  `COMMITMENT_PATTERN`, `RELATIONSHIP_CHANGE_PATTERN`, and
+  `ZMAN_APPRECIATION_PATTERN` gained `export` (no other change) for the
+  same reuse-not-reimplement reason.
+- **`lib/relationships/fact-fingerprint.ts`**: `computeRelationshipFact
+  Fingerprint()`, the same FNV-1a hash already used in `lib/research/
+  fingerprint.ts`/`lib/logger.ts`, duplicated locally per that file's own
+  admitted precedent for this exact tradeoff. Deliberately INCLUDES
+  `sourceInteractionId` (opposite of the research precedent, which
+  excludes source) -- documented reasoning: two different interactions
+  producing coincidentally-identical text are two separate accepted
+  moments here, never one corroborated fact.
+- **`scripts/relationship-facts-backfill-preview.mjs`**: modeled directly
+  on `scripts/relationship-summary-cleanup-preview.mjs`'s shape (the
+  established convention for this exact kind of read-only-preview-plus-
+  gated-apply tool) -- `wranglerJson()` I/O helper, a pure `planBackfill()`
+  core (unit-testable with zero D1 access), `run()` (preview, the only
+  path this task's CLI entry point invokes), and `applyBackfill()`
+  (built, fail-closed, conditional `INSERT ... WHERE NOT EXISTS` per row
+  -- **never invoked by this task**). Preference order: `relationship_
+  summary`, falling back to `institutional_memory` only when the former
+  is null -- mirrors the exact existing fallback already used in
+  `recommendation-candidates.ts`. Every backfilled row gets `source_
+  interaction_id = NULL` and `source_interaction_occurred_at` = the
+  backfill's own run timestamp -- the approved decay-clock clamp,
+  implemented as written: since a backfilled fact structurally has no
+  real source interaction to clamp away from, using the run time is
+  simply the only value that makes sense, and it is exactly what gives a
+  backfilled `time_bound` fact a full fresh decay window instead of
+  being born already stale.
+
+### Backfill safety: what gets flagged, not silently ingested
+
+Three checks before a donor's current text is proposed as a fact,
+reusing the already-proven `OLD_FORMAT_PREFIX` detection from the
+sibling cleanup script rather than re-deriving a new junk-detection
+heuristic:
+1. Empty after trim.
+2. Longer than 3000 characters (a generous sanity bound -- every real
+   value observed is a short sentence or two).
+3. **Matches the PROVEN pre-fix "Latest discussion topics: ..."
+   field-label-dump signature** -- ingesting known machine-generated
+   junk as a permanent, non-decaying `durable` fact would preserve it
+   forever; flagged for the existing cleanup script or manual review
+   instead.
+
+### A real bug caught while writing this module's own tests
+
+Writing `tests/relationship-fact-classification.test.mjs` against "His
+mother passed away" (the Lifecycle Correction's own explicit durable
+example) surfaced a genuine conflict the design pass had not resolved:
+"passed away" is itself one of `HEALTH_TERMS`, so the fact's `category`
+is `health` -- and `health` is a singular-state category whose step-4
+default is `time_bound`. Without a fix, "His mother passed away" would
+have been classified `time_bound`, decaying away in 180 days, directly
+contradicting the explicit requirement that this be durable. Fixed by
+adding `PERMANENT_LIFE_EVENT_PATTERN` (`\bpassed away\b`) as an
+unconditional, highest-priority check in `classifyFactLifecycle()` --
+checked even before the commitment check, so a death mentioned alongside
+a commitment word ("Promised to send flowers since his mother passed
+away") still keeps a `durable` lifecycle (its `category` still comes out
+`commitment_followup`, an honest, disclosed corner case for a single
+compound sentence carrying two distinct facts -- see the test file's own
+comment). This is exactly the kind of implementation-time discovery the
+design pass's own worked examples exist to catch, and it was caught
+before any data was written, not after.
+
+### Findings from the real live-data preview (not from synthetic fixtures)
+
+- Two donors' relationship_summary text reads "Solicited for a plaque
+  ($5k)" / "Solicited for $10k" -- the literal word "solicited" is NOT
+  one of `SOLICITATION_FACT_TERMS` (pledge/gift/donation/proposal/etc.),
+  so both classify `general` category rather than `solicitation`. Since
+  `general` is an additive category (not singular-state), this also
+  means their default lifecycle came out `durable` rather than the
+  `solicitation` category's `time_bound` default. Not silently absorbed:
+  flagged here as a real, evidenced gap in `SOLICITATION_FACT_TERMS`'s
+  coverage, a candidate for a future evidence-gated addition (this
+  codebase's own established convention -- Zman/Yahrtzeit/grandchild were
+  each added only after being proven against real corpus text, never
+  speculatively) -- not fixed in this task, since fixing it now would be
+  scope creep into tuning extraction behavior mid-schema-task without its
+  own review.
+- Of the 12 real backfill candidates (see below), 10 defaulted to
+  `durable` and only 1 came out `follow_up`; **zero** came out
+  `time_bound` on this real corpus. This is the disclosed conservative-
+  default limitation from the design pass showing up concretely, not
+  rarely: most of this donor base's existing accepted text describes a
+  past event or state with no explicit date/relative-time word the
+  waterfall can catch (e.g. "called to wish mazel tov on grandson's bar
+  mitzvah this shabbos" -- "this shabbos" is a genuine relative-time
+  reference, but `RELATIVE_TIME_PATTERN` does not currently include
+  "Shabbos" among its recognized terms). Reported honestly as a real
+  finding, not tuned away mid-task -- a future evidence-gated pattern
+  addition (matching this file's own established convention) is the
+  right next step if this proves to matter, not a same-task fix.
+
+### Migration applied (schema only, zero data)
+
+`wrangler d1 execute fundraising-os-staging-db --remote --file
+drizzle/0034_donor_relationship_facts.sql --config wrangler.staging.jsonc`
+-- 6 statements executed. Verified directly afterward: both tables exist
+with all 4 named indexes plus their 2 primary-key auto-indexes; `SELECT
+COUNT(*)` on both tables returns 0; no other table's schema objects were
+touched (this migration contains no `ALTER`/rebuild statement at all).
+
+### Backfill preview -- exact results (Independent Staging, live, read-only)
+
+`node scripts/relationship-facts-backfill-preview.mjs`:
+
+```
+Total live donors scanned: 248
+Candidates (non-null relationship_summary or institutional_memory): 12
+SAFE TO BACKFILL: 12
+NEEDS REVIEW / SKIPPED: 0
+```
+
+All 12 candidates, exactly as printed by the live run:
+
+| Donor | Source field | Category | Lifecycle |
+|---|---|---|---|
+| Dr. & Mrs. Yaakov Abdelhak | relationship_summary | engagement | durable |
+| Dr. & Mrs. Joel Danziger | relationship_summary | family_milestone | durable |
+| Dr. & Mrs. Mark Danziger | relationship_summary | family_milestone | durable |
+| Dr. & Mrs. Gavin Horn | relationship_summary | family_milestone | durable |
+| Mr. & Mrs. Mayer Simcha Klein | institutional_memory | general | durable |
+| Mr. & Mrs. Allen Pfeiffer | institutional_memory | general | durable |
+| Rabbi Michoel A. Rovinsky | institutional_memory | general | durable |
+| Dr. Jacques Semmelman | relationship_summary | family_milestone | durable |
+| Mr. & Mrs. Yaakov Sonnenblick | relationship_summary | family_milestone | durable |
+| Mr. & Mrs. Dovie Weinschneider | relationship_summary | commitment_followup | **follow_up** |
+| Mr. & Mrs. Yaakov Zachter | relationship_summary | engagement | durable |
+| Mr. & Mrs. Tzvi Shlionsky | relationship_summary | family_milestone | durable |
+
+Every row: `source_interaction_id = null`; `source_interaction_occurred_at`
+= the preview's own run timestamp (the decay-clock clamp, computed but
+not written); a unique 8-character fingerprint (spot-checked distinct
+across all 12). Klein/Pfeiffer/Rovinsky's `institutional_memory`-sourced
+text is the same "Note context: Solicited for..." wording their `asks`-
+feature historical backfill already left in place (see "Ask/Solicitation
+Feature -- HISTORICAL BACKFILL AND CLOSURE" above) -- their real
+solicitation amounts already live in the `asks` table; this preview
+proposes preserving the free-text color alongside that, not duplicating
+the structured data (consistent with the design's own non-duplication
+principle). Weinschneider's "Discussed Kollel donation and said to
+follow up after succos" is the one real `follow_up`-lifecycle case on
+this corpus -- a concrete, live demonstration that the classifier
+correctly identifies an action-oriented fact and would exclude it from
+Phase 2's synthesized Snapshot text, routing it conceptually toward the
+existing reminders surface instead.
+
+### Tests added
+
+`tests/relationship-facts-schema.test.mjs` (12 assertions: purely-
+additive schema-object comparison against a real local SQLite replay of
+every migration through 0034; every category/lifecycle/status/action
+CHECK constraint rejects an invalid value at the database level, not
+just in application code; the `(user_id, fingerprint)` unique index
+enforces idempotency at the database level and is correctly scoped
+per-user; a real multi-hop supersession chain is representable).
+`tests/relationship-fact-classification.test.mjs` (every example from
+all three design-pass conversations, including the passed-away fix and
+two coincidental-regex-collision fixes found while writing it -- see
+below). `tests/relationship-facts-backfill-preview.test.mjs` (11 cases:
+provenance -- source_interaction_id always null, decay-clock clamp;
+`relationship_summary`-preferred/`institutional_memory`-fallback
+selection; all three backfill-safety skip reasons; idempotency -- a
+fingerprint that already exists is skipped, scoped correctly per-user,
+not globally; duplicate prevention -- two different donors with
+coincidentally identical text never collide on fingerprint; fingerprint
+determinism across repeated runs; a mixed multi-donor batch). Also
+updated `tests/production-baseline.test.mjs` and `lib/data-health/
+production-baseline.ts` (the required per-migration checklist every
+prior migration in this file has also needed -- source-migration count
+34→35, new "picks up 0034" test matching the established one-per-
+migration pattern) and `lib/operations/workspace-backup.ts`/`lib/
+operations/staging-reset.ts` (the two new tables classified into
+`WORKSPACE_BACKUP_EXCLUDED_TABLES`, matching asks/pledge-payment-plans'
+own precedent exactly -- real donor-facing data added after that route
+was written, deliberately not added to the included list without its
+own separate owner-scoping review; and inserted into `STAGING_RESET_
+TABLE_ORDER` in FK-safe position).
+
+Two coincidental regex collisions were found and fixed IN THE TEST
+FIXTURES ONLY while writing `relationship-fact-classification.test.mjs`
+(never in the underlying, already-established, already-tested patterns
+themselves, which are correctly out of scope for this task): a synthetic
+sentence containing "...back to her normal schedule" incidentally
+matched `COMMITMENT_PATTERN`'s "schedule" keyword (meant for "let's
+schedule a call"), and a synthetic sentence using the word "solicitation"
+did not match `SOLICITATION_FACT_PATTERN` at all (which covers pledge/
+gift/donation/proposal-type words, not literally "solicit"/
+"solicitation" -- the same real gap reported in the live-preview findings
+above). Both test sentences were reworded to avoid the coincidental
+collision; nothing in `lib/capture/interaction.ts`'s established,
+already-tested regexes was touched to "fix" this.
+
+### Quality gates (all passing)
+
+`pnpm test`: exit 0, every suite `fail 0` (including all three new files
+and the two updated ones). `pnpm exec tsc --noEmit`: clean, zero output.
+`pnpm run build:staging-independent`: completed, full route manifest, no
+errors. **No deploy was run** -- this task introduces no new route or
+behavior change to the running Worker (the new schema/lib/script files
+are not imported by any existing app code path yet; that wiring is
+Phase 2), so there is nothing new for a deploy to ship.
+
+### Commit / push
+
+`e66005c` ("Add Relationship Intelligence Phase 1: durable-facts schema
+and backfill preview") on `feature/independent-cloudflare-sandbox`, on
+top of `3dedd63`. Pushed; `origin/feature/independent-cloudflare-
+sandbox` matches local HEAD exactly. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
+
+### Status -- STOPPED per explicit instruction
+
+**Schema migration applied to Independent Staging (zero rows). Backfill
+preview run and reported above -- NOT applied.** No historical D1 data
+has been written by this task. No existing write path (Capture, edit
+route, Outcome Option A, Monday `confirm_contact`) has been touched --
+`donors.relationship_summary`/`institutional_memory` continue to be
+written exactly as before this task. Phase 2 has not been started.
+Awaiting explicit approval before either applying the backfill (`node
+scripts/relationship-facts-backfill-preview.mjs` currently only exposes
+`applyBackfill()` as an exported function, not a CLI flag -- a
+deliberate extra friction point, matching this repo's own convention on
+`scripts/relationship-summary-cleanup-preview.mjs`'s `--apply` gate) or
+beginning Phase 2.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -6427,6 +6730,43 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T19:00:00Z (approximate)
+Claude (Sonnet 5) — Implemented Phase 1 of the approved Relationship
+Intelligence migration plan: the `donor_relationship_facts`/`donor_
+relationship_fact_changes` schema (migration 0034, modeled on
+`donor_research_findings`), the approved category/lifecycle
+classification waterfall (`lib/relationships/fact-classification.ts`,
+reusing `lib/capture/interaction.ts`'s real extraction regexes via a
+behavior-preserving refactor into named exported sub-patterns, verified
+by the full suite passing before and after that specific change), a
+fingerprint module for idempotency, and a read-only backfill preview
+script modeled on the existing `relationship-summary-cleanup-preview.mjs`
+tool. Fresh-verified actual git/deployed/D1 state before starting (the
+"Current Git State" section was indeed stale, now corrected) rather than
+trusting this file. Found and fixed a real classification bug while
+writing the module's own tests: "His mother passed away" would have
+wrongly decayed as `time_bound` (health is a singular-state category)
+without an explicit, highest-priority `PERMANENT_LIFE_EVENT_PATTERN`
+override — caught before any data was written. Applied the migration to
+Independent Staging (schema only, both tables confirmed empty) and ran
+the backfill preview against real live data: 12 real candidates, all
+classified cleanly (zero needing review), 10 durable / 1 follow_up / 0
+time_bound — reported two honest, disclosed findings from real data (a
+`SOLICITATION_FACT_TERMS` gap on the literal word "solicited"; the
+conservative-durable-default limitation showing up on the majority of
+real candidates, not rarely) rather than silently tuning them away
+mid-task. Did NOT apply the backfill and did NOT begin Phase 2, per
+explicit instruction — `donors.relationship_summary`/`institutional_
+memory` and every existing write path remain completely untouched.
+Updated the required per-migration checklist (production-baseline
+manifest, workspace-backup table coverage, staging-reset table order).
+`pnpm test`/`tsc --noEmit`/`build:staging-independent` all clean; no
+deploy run (no new route or runtime behavior shipped). Committed
+`e66005c`, pushed. Awaiting approval before applying the backfill or
+starting Phase 2.
+
+---
 
 2026-08-21T18:00:00Z (approximate)
 Claude (Sonnet 5) — Corrected the synthesis design per explicit review:
