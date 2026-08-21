@@ -4973,6 +4973,17 @@ only -- no file outside `docs/` touched.
 
 ### Category taxonomy and temporal character
 
+**SUPERSEDED 2026-08-21 -- see "Relationship Snapshot Synthesis Design
+-- Lifecycle Correction" below.** This subsection's per-category fixed
+decay windows conflated a fact's SUBJECT (category) with its DURABILITY
+(how long it stays relevant) -- caught by explicit user review before
+implementation. `category` is kept below exactly as designed (still
+correct for supersession-matching); a new, independent `lifecycle` field
+now governs decay, per the corrected section. Left in place, not
+deleted, per this file's own no-destruction convention -- the category
+table's four additive/two singular-state split is still accurate and
+reused as-is by the correction below.
+
 Every accepted fact is tagged with a `category`, assigned deterministically
 from which of the existing regex groups in `lib/capture/interaction.ts`
 matched it (`FACT_SIGNAL_PATTERN`'s sub-groups, `COMMITMENT_PATTERN`,
@@ -5252,6 +5263,287 @@ candidates.ts`, not a new rule introduced here.
 HANDOFF.md` touched; no migration, D1 write, or deployment made.
 Awaiting explicit approval before Phase 1 of the previously-approved
 migration plan begins.
+
+## Relationship Snapshot Synthesis Design -- Lifecycle Correction (2026-08-21) -- FINAL, INVESTIGATION ONLY, NO CODE/SCHEMA/D1/DEPLOY CHANGE
+
+**Correction, per explicit user review before implementation:** the
+prior section's per-category fixed decay windows conflated a fact's
+SUBJECT (`category`, used for supersession-matching) with its
+DURABILITY (how long it should stay relevant). "His daughter is
+Danielle" and "His daughter Danielle is getting married in November" are
+both `family_milestone`, but the first is permanent and the second is
+not. This section adds a second, independent field -- `lifecycle` --
+and reworks decay/synthesis/supersession around it. `category` is
+unchanged from the prior section.
+
+### The smallest deterministic model that supports this
+
+Three lifecycle values, per-fact, assigned once at accept time alongside
+`category`: **`durable`**, **`time_bound`**, **`follow_up`** -- the
+user's own suggested names, kept as-is: they already match this
+codebase's existing vocabulary (`RelationshipSnapshotDetails.
+openFollowUps`/`commitments` in `lib/capture/interaction.ts` already
+distinguish action-oriented content from descriptive facts; no better
+existing name was found). No fourth value was added -- three is the
+smallest set that separates "never expected to change" from "will
+naturally become dated" from "exists to trigger an action, not to
+describe the donor."
+
+**Assignment is a deterministic waterfall, reusing existing regex groups
+wherever possible, evaluated per matched sentence at extraction time
+(same point `category` is already assigned) -- not new NLP, a second,
+independent classification pass over the same sentence:**
+
+1. **`follow_up`** if the sentence matches the EXISTING
+   `COMMITMENT_PATTERN` (`promised|agreed|committed|will|would|send|
+   follow up|follow-up|call back|introduce|schedule|share|provide`) --
+   zero new regex; `relationshipSnapshotDetails()` already computes this
+   exact sentence set today as `commitments`, just not wired to
+   anything past the next-action suggestion. Checked first: an
+   unambiguous, already-proven signal.
+2. Else **`time_bound`** if the sentence contains an explicit relative-
+   or calendar-time reference (a month name; `this`/`next`/`upcoming` +
+   a season or a named Jewish holiday -- "this Sukkos," "next spring")
+   OR a transient-state verb from a narrow, evidenced subset of the
+   existing health keywords (`sick|illness|recovering|hospital` --
+   **deliberately excluding `passed away`**, which is permanent, not
+   transient) OR matches the EXISTING `RELATIONSHIP_CHANGE_PATTERN`
+   (`increased|decreased|changed|newly|no longer|ready|hesitant|more
+   involved|less involved|reconnected|stepped back` -- state-change
+   language is inherently a snapshot of a moment, not a standing fact).
+3. Else, **the default depends on category, not a single global
+   fallback**: for the two "singular-state" categories from the prior
+   section (`solicitation`, `health`) the default is `time_bound` -- an
+   ask-in-progress or a health status is inherently a point-in-time
+   state even when phrased without an explicit date word ("he wants to
+   think it over" has no date but is still clearly not a standing
+   identity fact). For every other category the default is `durable`
+   ("His daughter is Danielle," "Very close with Rabbi Cohen" -- neither
+   contains a date, health, or change signal, and neither category
+   implies transience). **This is the one place `category` still
+   informs `lifecycle`** -- as a sensible prior when no textual signal
+   fires, never overriding an explicit signal, and never used for
+   supersession matching (that stays category-only, corrected below).
+   This is deliberate and narrow, not a re-conflation of the two axes.
+
+**Disclosed limitation, not silently absorbed:** a past, one-off event
+described with no explicit date/relative-time word ("His grandson had
+his bar mitzvah") has no signal to catch it and defaults to `durable`
+via rule 3 -- it will not decay, even though it is, strictly, an event.
+This is the deliberate, safer failure mode of a text-only deterministic
+system (erring toward "stays visible longer than ideal" rather than
+"silently vanishes"), not a design flaw being ignored. If real usage
+ever evidences this as a recurring problem, a narrower additional signal
+(past-tense event verb + `FACT_SIGNAL_PATTERN` event noun) could be
+added later -- exactly this codebase's own established convention of
+only adding a pattern after a real, evidenced staging incident (Zman,
+Yahrtzeit, grandchild), never speculatively.
+
+### Does the fundraiser see or correct lifecycle at accept time?
+
+**Sees it, and can correct it, without a new review screen.** The
+existing accept-time preview (`OutcomeExperience.tsx`/
+`CaptureExperience.tsx`'s single checkbox + proposed-text display)
+gains one small, non-blocking addition: a label next to the proposed
+fact showing its deterministic classification (e.g. "Durable" /
+"Time-bound" / "Follow-up"), with a lightweight control (a 3-way toggle,
+not a modal) defaulting to the waterfall's guess. Zero extra clicks if
+the guess is right (the fundraiser just accepts, exactly as today); one
+extra click to correct it if wrong. Justified by the stakes: getting
+this wrong has multi-year consequences (a wrongly-`durable` event fact
+never decays; a wrongly-`time_bound` identity fact fades prematurely),
+so letting the human confirm it at the one moment they already have full
+context -- while reviewing the proposal -- is more defensible than
+trusting the regex guess unconditionally, and it extends the existing
+explicit-acceptance pattern rather than inventing a new one.
+
+### How each lifecycle affects synthesis/relevance
+
+- **`durable`: does not decay.** Gets a fixed, non-time-decaying
+  baseline relevance score (0.3 -- a constant, reasoned not derived,
+  matching this codebase's own "not a claim worth making" convention
+  for `recencyScore`). Always eligible for `institutional_memory`
+  (clears the floor by construction); ranks below a genuinely fresh
+  `time_bound` fact for the terse `relationship_summary` top-2 cut, but
+  above any `time_bound` fact that has decayed past its own window.
+  Ties among multiple durable facts (when more exist than the cap
+  allows) break by acceptance recency -- there is no principled way to
+  rank durable-vs-durable content itself; a fuller history view (Phase
+  4, deferred) is the right long-term answer if a donor ever
+  accumulates many.
+- **`time_bound`: decays exactly as the prior section's per-category
+  windows described** (`recencyScore`'s existing linear formula,
+  `clamp01(1 - daysAgo / window)`), now applied ONLY to `time_bound`
+  facts -- `solicitation` 90 days (pinned to 1.0 while a linked `asks`
+  row stays `pending`, unchanged from the prior section), `health` 180,
+  `engagement` 120, `family_milestone` 180 (revised down from the prior
+  section's 365 -- now that permanence is durable's job, the time-bound
+  window for a dated family EVENT can be realistically shorter than the
+  window that used to have to cover both cases at once), `general` 120.
+  Ages below the floor exactly as before: excluded from synthesis,
+  never deleted from `donor_relationship_facts`.
+- **`follow_up`: never enters `relationship_summary`/`institutional_
+  memory` synthesis at all, regardless of age or status.** This is the
+  direct answer to "how follow-up facts interact with reminders/asks
+  rather than lingering as relationship intelligence": their job is not
+  to describe the donor, it's to prompt an action, and this codebase
+  already has a dedicated, separate surface for that -- the
+  `recommendations` table (Meeting Brief's `openReminders`, Suggested
+  Action) and Capture's own existing reminder picker. A `follow_up`
+  fact is still stored in `donor_relationship_facts` (provenance/audit,
+  same explicit-acceptance gate as any other fact), just excluded from
+  the synthesis input by lifecycle -- structurally, not by decay, so it
+  can never linger as stale prose even on day one. **Not proposed here:
+  automatically creating a reminder from an accepted `follow_up` fact.**
+  Consistent with this codebase's existing "never infer, always
+  explicit" convention (`madeAsk` must be exactly `true`, never inferred
+  from note text) -- the natural, optional product opportunity (turning
+  `recommendedNextAction`'s already-computed text into a one-click
+  reminder-creation suggestion) is flagged as a real but separate,
+  deferred enhancement, not assumed as part of this design.
+
+### Supersession, corrected to require lifecycle too
+
+The prior section's rule ("auto-supersede same-category, singular-state
+categories only") is refined: **automatic supersession now requires
+same `category` AND same `lifecycle`, and only within the two singular-
+state categories** (`solicitation`, `health`) -- OR an exact
+`sourceInteractionId` match (always wins, category/lifecycle-agnostic,
+unchanged from the prior section -- an edited note's re-accept always
+supersedes its own prior contribution). **This is the direct fix for
+the exact failure the user's examples describe:** "His daughter is
+Danielle" (`family_milestone`, `durable`) and "His daughter Danielle is
+getting married in November" (`family_milestone`, `time_bound`) share a
+category but not a lifecycle -- under the corrected rule they
+structurally cannot supersede each other, where a category-only rule
+would have wrongly let the event fact destroy the identity fact.
+Everything else (a genuine cross-category or same-category-different-
+lifecycle contradiction) still relies on decay plus the explicit human
+"mark no longer current" override from the prior section, unchanged.
+
+### Migration/backfill when lifecycle cannot be inferred confidently
+
+Phase 1's backfill (one fact per live donor's current `relationship_
+summary` text) runs the SAME deterministic waterfall used for new
+extraction -- not a blanket override -- since the waterfall's own
+default is already conservative (`durable` for most categories,
+`time_bound` only for the two singular-state categories, both safe
+failure modes). **One backfill-specific safeguard, not a classification
+change:** any backfilled fact the waterfall classifies as `time_bound`
+gets its decay clock's start date **clamped to the migration date, not
+the original interaction's true historical date.** Without this, a
+years-old accepted sentence that happens to be `time_bound`-shaped could
+be born already past its own decay window on day one of the new system
+-- silently vanishing from every donor's Snapshot the moment Phase 2
+ships, which would be a real regression, not a neutral migration
+artifact. The clamp gives every backfilled fact the same full decay
+grace period a brand-new fact would get, while still preserving the
+waterfall's real classification (a backfilled `durable` fact still never
+decays; a backfilled `time_bound` fact still eventually fades, just not
+immediately).
+
+### Reworked worked example (12 facts, covering every example given)
+
+Same fictional donor, structured data (asks/yahrtzeit/giving/payment
+plan), and "now" = 2026-08-21 as the prior section, with the fact list
+revised to show every example given: an identity fact, its paired event
+fact, a paired follow-up fact, a standing non-family relationship fact,
+a health contradiction, a solicitation supersession chain, and the
+disclosed durable-by-default limitation.
+
+| # | Date | Text | Category | Lifecycle | Status |
+|---|---|---|---|---|---|
+| 1 | 2024-03 | "His grandson had his bar mitzvah, a beautiful simcha." | family_milestone | **durable** (disclosed default -- see limitation above) | current |
+| 2 | 2024-06 | "Discussed a $10,000 solicitation for the building fund; he wants to think it over." | solicitation | time_bound (category default) | superseded (by #4) |
+| 3 | 2024-09 | "Promised to send him the updated campus tour schedule." | commitment_followup | follow_up | current (never shown in Snapshot) |
+| 4 | 2024-11 | "He confirmed the $10,000 building fund gift and asked for a plaque acknowledgment." | solicitation | time_bound | superseded (by #12) |
+| 5 | 2025-02 | "She mentioned she's recovering from hip surgery." | health | time_bound (transient-state signal) | superseded (by #6) |
+| 6 | 2025-08 | "Confirmed she's no longer recovering and is back to her normal schedule." | health | time_bound (`RELATIONSHIP_CHANGE_PATTERN`: "no longer") | current (decayed) |
+| 7 | 2025-10 | "His daughter is Danielle." | family_milestone | **durable** | current |
+| 8 | 2025-10 | "His daughter Danielle is getting married in November." | family_milestone | **time_bound** (month-name signal) | current (decayed) |
+| 9 | 2025-10 | "Follow up after Danielle's wedding." | commitment_followup | follow_up | current (never shown in Snapshot) |
+| 10 | 2026-06 | "He's planning a trip to Israel this Sukkos and asked about visiting campus." | engagement | time_bound ("this Sukkos" signal) | current (fresh) |
+| 11 | 2026-07 | "Very close with Rabbi Cohen; mentioned they study together weekly." | general | **durable** | current |
+| 12 | 2026-07 | "Asked about renewing/expanding gala support at $5,000; wants to finalize after this year's program." | solicitation | time_bound, pinned fresh (linked `asks` row still `pending`) | current (fresh) |
+
+**#7 and #8, side by side, are the direct proof this correction works:**
+same donor, same daughter, same category -- #7 (identity, durable) and
+#8 (wedding date, time_bound) never supersede each other, and age
+completely independently.
+
+**Scores at "now" among the 9 `current` facts (`durable` = fixed 0.3;
+`time_bound` = `recencyScore` against its category window; `follow_up`
+excluded from scoring entirely, never competes for a slot):** #12 = 1.0
+(pinned). #10 ≈ 0.44 (~67 of 120 days). #11/#7/#1 = 0.3 each (durable,
+tie broken by acceptance recency: #11 > #7 > #1). #6 = 0.0 (~365 of 180
+days, fully decayed). #8 = 0.0 (~310 of 180 days, fully decayed -- the
+wedding has already passed).
+
+**Resulting `relationship_summary` (top 2):** "Asked about renewing/
+expanding gala support at $5,000; wants to finalize after this year's
+program. He's planning a trip to Israel this Sukkos and asked about
+visiting campus." -- unchanged in shape from the prior section (the two
+freshest facts), now correctly excluding both `follow_up` facts by
+construction.
+
+**Resulting `institutional_memory` (floor-qualifying, capped 5 --
+exactly 5 qualify here):** "...gala support... Israel this Sukkos...
+Very close with Rabbi Cohen; mentioned they study together weekly. His
+daughter is Danielle. His grandson had his bar mitzvah, a beautiful
+simcha." **Note what this list does NOT contain:** the wedding date
+fact (#8, decayed -- correctly, the event is long past) and both
+follow-up facts (#3, #9 -- structurally excluded, not merely decayed).
+**Note what it DOES still contain after 2.5 years:** the plain fact that
+he has a daughter named Danielle, and that the fundraiser has a close,
+ongoing relationship with Rabbi Cohen -- exactly the standing
+relationship intelligence that should survive, sitting right next to
+the still-fresh gala ask and trip.
+
+### What remains useful after 2-3 years -- direct answer
+
+- **Still visible, indefinitely (durable):** "His daughter is Danielle."
+  "Very close with Rabbi Cohen..." "His grandson had his bar mitzvah..."
+  (the last one present via the disclosed conservative-default
+  limitation, not a misclassification the design pretends doesn't
+  exist).
+- **Still visible, because still fresh (time-bound, within window):**
+  the gala ask and the Israel trip -- will themselves fade on the same
+  schedule once enough time passes, exactly like #8 and #6 already did.
+- **Faded from both synthesized surfaces, never deleted (time-bound,
+  decayed):** the wedding date, the health-resolution sentence, both
+  superseded solicitation facts -- all permanently retrievable in
+  `donor_relationship_facts`/Phase 4's history view.
+- **Never shown as Snapshot prose at any point, regardless of age
+  (follow-up):** both commitment sentences -- their only intended path
+  to visibility is the existing reminders surface, not the Snapshot.
+
+This is a strictly better outcome than the prior section's version of
+this same example: there, the Danielle-is-my-daughter identity would
+never have existed as a separate fact at all (it was folded into the
+single now-decayed wedding sentence), so after 2.5 years NOTHING about
+Danielle would have remained visible. Here, the identity survives and
+the event correctly fades -- precisely the distinction the user asked
+for.
+
+### Everything already approved stays intact
+
+Dedicated `donor_relationship_facts`/`donor_relationship_fact_changes`
+tables (now with one added `lifecycle` column); provenance via
+`sourceInteractionId`; deterministic, non-generative v1 synthesis;
+structured data (asks/yahrtzeits/giving/payment plans) staying in its
+own dedicated fields, never duplicated into facts; materialized
+`relationship_summary`/`institutional_memory` caches, regenerated
+atomically on every fact status transition; explicit human acceptance
+at the fact level (now additionally covering lifecycle); and no
+destruction of historical facts at any point. Nothing in this correction
+touches the already-approved 4-phase migration plan's shape -- Phase 1's
+backfill gains the one clamp described above, nothing else changes.
+
+### Status
+
+**Correction complete. Not implemented.** No files outside `docs/AI-
+HANDOFF.md` touched; no migration, D1 write, or deployment made.
+Awaiting explicit approval before Phase 1 begins.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -6135,6 +6427,34 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T18:00:00Z (approximate)
+Claude (Sonnet 5) — Corrected the synthesis design per explicit review:
+the prior pass's per-category fixed decay windows conflated a fact's
+subject (category) with its durability, so "his daughter is Danielle"
+and "his daughter is getting married in November" — same category —
+would have decayed identically. Added an independent `lifecycle` field
+(`durable`/`time_bound`/`follow_up`, the user's own suggested names,
+already matching this codebase's existing `openFollowUps`/`commitments`
+vocabulary) with a deterministic assignment waterfall reusing existing
+`COMMITMENT_PATTERN`/`RELATIONSHIP_CHANGE_PATTERN` regexes plus one new,
+narrow calendar/relative-time signal. Defined that the fundraiser sees
+and can lightly correct the assigned lifecycle at the existing
+accept-time preview (one small addition, not a new screen); that durable
+facts never decay (fixed baseline score); that follow-up facts never
+enter Snapshot synthesis at all (excluded structurally, not by decay,
+routed conceptually toward the existing reminders surface instead);
+that supersession now requires matching category AND lifecycle, fixing
+the exact identity-vs-event collision the user's examples described; and
+a migration safeguard (clamp backfilled time-bound facts' decay clock to
+the migration date, not their true historical date, so nothing vanishes
+on day one). Reworked the worked example to 12 facts covering every
+example given, showing the identity fact surviving 2.5 years while its
+paired wedding-date fact correctly fades — the direct, concrete proof
+this correction does what was asked. No code, schema, D1, or deployment
+touched. Awaiting approval before implementation.
+
+---
 
 2026-08-21T17:00:00Z (approximate)
 Claude (Sonnet 5) — Final design pass on Relationship Snapshot synthesis
