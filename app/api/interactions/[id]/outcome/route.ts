@@ -1,24 +1,13 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../lib/auth/profile";
-import { extractInteraction, type InteractionKind } from "../../../../../lib/capture/interaction";
+import { type InteractionKind } from "../../../../../lib/capture/interaction";
 import { activityStatus, completedPlannedAt, originalActivitySource, reopenActivitySource } from "../../../../../lib/workspace/scheduled-activity";
 import { logger } from "../../../../../lib/logger";
+import { planFactAcceptance, planFactArchival } from "../../../../../lib/relationships/fact-accept";
 
 type InteractionRow = {
   id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number;
-  // Read in the SAME query as the interaction row (single round trip),
-  // and used as the compare-and-swap "expected current value" for the
-  // Option A relationship-snapshot write below -- exactly the same
-  // freshness guarantee this file already gives the interaction row
-  // itself (compared against `existing.source`/`existing.occurred_at`
-  // at write time). Possibly null; every comparison against these two
-  // fields below uses `IS`, not `=`, specifically so a null current
-  // value participates correctly in the compare-and-swap (`x = NULL`
-  // is never true in SQLite, which would silently break the very case
-  // -- a donor with no existing snapshot yet -- this feature exists to
-  // handle safely).
-  relationship_summary: string | null; institutional_memory: string | null;
 };
 type AuditRow = { id: string; previous_source: string; previous_occurred_at: number; previous_summary: string; follow_up_id: string | null };
 type OutcomeAction = "complete" | "cancel" | "reschedule" | "no-response" | "reopen" | "undo";
@@ -46,7 +35,7 @@ const splitSummary = (summary: string) => {
 };
 
 async function ownedActivity(id: string, userId: string) {
-  return env.DB.prepare(`SELECT i.id, i.donor_id, i.type, i.occurred_at, i.summary, i.source, i.created_at, d.relationship_summary, d.institutional_memory
+  return env.DB.prepare(`SELECT i.id, i.donor_id, i.type, i.occurred_at, i.summary, i.source, i.created_at
     FROM interactions i JOIN donors d ON d.id = i.donor_id
     WHERE i.id = ? AND i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live' LIMIT 1`)
     .bind(id, userId, userId).first<InteractionRow>();
@@ -145,72 +134,72 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(auditId, id, profile.id, body.action, currentStatus, nextStatus, existing.source, nextSource, existing.occurred_at, nextOccurredAt, existing.summary, nextSummary, followUpId, now));
 
-  // Option A (2026-08-21 -- see docs/AI-HANDOFF.md "Outcome-Note
-  // Relationship Snapshot Review/Accept Flow"). Restores the write
-  // Option B removed, but now behind the same two gates the main capture
-  // route already enforces, never restoring the old unconditional
-  // write:
-  //   (1) only ever considered when this outcome genuinely closes the
-  //       activity (`nextStatus` completed/no-response) -- cancel,
-  //       reschedule, and reopen never reach this block, so they can
-  //       never touch relationship data (satisfies "reopening must not
-  //       accidentally reapply/overwrite").
-  //   (2) `body.acceptRelationshipSnapshot === true` AND the extractor
-  //       actually found something (`extracted.relationshipSummary !==
-  //       null`) -- identical double-gate to
-  //       `acceptRelationshipSnapshot && preview.relationshipSummary !==
-  //       null` in CaptureExperience.tsx's saveInteraction(). The client
-  //       must have shown the user this exact proposal and gotten an
-  //       explicit, unchecked-by-default checkbox click; nothing here
-  //       infers acceptance from note content.
-  // The write itself is a compare-and-swap against the donor's CURRENT
-  // relationship_summary/institutional_memory, read in the same query as
-  // the interaction row at the top of this request (`existing.
-  // relationship_summary`/`existing.institutional_memory`) -- if either
-  // field changed between that read and this write (a concurrent accept
-  // from elsewhere), the WHERE clause fails to match and the whole batch
-  // fails closed via the existing `results[0].meta.changes === 0` check
-  // below, exactly like the interaction-row CAS already does. Uses `IS`
-  // rather than `=` (see the InteractionRow type comment) so a donor
-  // with no existing snapshot -- the common case -- is handled
-  // correctly, unlike the `=`-based CASE WHEN in
-  // app/api/interactions/[id]/route.ts's contextStatement(), which this
-  // route deliberately does not call as-is: that helper's CASE WHEN
-  // pattern proves "the stored value still traces back to THIS
-  // interaction's own prior contribution" (needed when editing/
-  // archiving an interaction that may have contributed before) -- this
-  // interaction has never contributed to relationship_summary before
-  // (Option A only ever fires on an explicit new accept), so there is no
-  // prior contribution to trace; a plain freshness compare-and-swap
-  // against what was just read is the correct, simpler analogue for that
-  // case, not the same helper. This also means acceptance always
-  // REPLACES the donor's current relationship_summary/institutional_
-  // memory wholesale, never merges old and new text -- the exact same
-  // "most recent accepted summary" behavior as every other accept path
-  // in this app (main capture route, edit route); nothing in the
-  // existing capture/edit implementation does field-level merging, so
-  // this route matches established behavior rather than inventing new
-  // semantics. This is intentionally what makes replacement non-silent:
-  // OutcomeExperience.tsx shows the user the CURRENT stored value
-  // alongside the proposed one before they can accept (a real UI
-  // improvement over the main capture form, which shows neither) -- see
-  // that file.
-  // Reaches exactly one donor (`existing.donor_id`, the donor tied to
-  // THIS interaction row) regardless of whether the interaction is
-  // linked to a shared_activity_id -- no fan-out to other recipients is
-  // structurally possible, since the whole request is scoped to one
-  // interaction id from the start.
+  // Relationship Intelligence Phase 2 (see docs/AI-HANDOFF.md's
+  // "Relationship Intelligence Phase 2" section). Two independent
+  // concerns:
+  //
+  // 1. Cancellation invalidation (body.action === "cancel", REGARDLESS
+  //    of currentStatus -- this route's own established convention
+  //    already allows cancelling a previously-completed activity, not
+  //    just a scheduled one: `nextSource` wraps a `cancelled:` prefix
+  //    around whatever source was there before, including a
+  //    `capture-completed:...` one, and activityStatus() resolves
+  //    `cancelled:` before `capture-completed:`, so the result is
+  //    unconditionally "cancelled" -- see
+  //    lib/workspace/scheduled-activity.ts and the pre-existing
+  //    `cancelled:${completedSource}` fixture in
+  //    tests/activity-outcome.test.mjs). Traced (not inferred from the
+  //    word "cancel" alone) against every downstream consumer: the
+  //    donor's "Last Contact"/lastCompletedInteraction computation in
+  //    lib/relationships/meeting-brief.ts explicitly excludes any
+  //    interaction whose source matches `cancelled:%` (`AND i.source NOT
+  //    LIKE 'cancelled:%'`) -- so a cancelled activity, even one that
+  //    was previously completed and had its outcome accepted, no longer
+  //    counts as real contact for relationship-recency purposes, even
+  //    though the interaction row itself is preserved (never deleted)
+  //    and still visible in the timeline, correctly labeled "cancelled"
+  //    (see lib/relationships/unified-timeline.ts). This means
+  //    cancellation genuinely INVALIDATES the source interaction as
+  //    something that should still count as having happened -- so any
+  //    CURRENT fact this interaction sourced must stop being current,
+  //    exactly like the edit route's own archive/reassignment paths.
+  //    planFactArchival() is a safe no-op when this interaction never
+  //    had a current fact to begin with (nothing to cancel from a
+  //    still-scheduled activity), so this call is unconditional on
+  //    action === "cancel", never gated on currentStatus.
+  // 2. Explicit-acceptance gate, UNCHANGED: only ever considered when
+  //    this outcome genuinely closes the activity (`nextStatus`
+  //    completed/no-response -- cancel/reschedule/reopen never reach
+  //    THIS block), AND `body.acceptRelationshipSnapshot === true`. What
+  //    changed in Phase 2 is what happens once both gates pass: instead
+  //    of a bespoke CAS overwrite of donors.relationship_summary/
+  //    institutional_memory with just this note's own text, the shared
+  //    planFactAcceptance() pipeline (lib/relationships/fact-accept.ts)
+  //    creates a durable, provenance-carrying fact (this interaction's
+  //    own id + occurred_at) and resynthesizes the Snapshot from the
+  //    donor's full current-fact set -- an accepted fact now ADDS to
+  //    durable intelligence rather than replacing it. sourceInteractionId
+  //    is this existing interaction's own `id` -- an outcome always
+  //    attributes its fact to the activity being closed, never a
+  //    different one.
+  //
+  // Both reach exactly one donor (`existing.donor_id`) regardless of
+  // shared_activity_id linkage -- neither planFactAcceptance() nor
+  // planFactArchival() has any shared-activity concept at all.
+  if (body.action === "cancel") {
+    const archival = await planFactArchival({ donorId: existing.donor_id, userId: profile.id, sourceInteractionId: id, now });
+    statements.push(...archival.statements);
+  }
   let relationshipStatementIndex = -1;
   if ((nextStatus === "completed" || nextStatus === "no-response") && body.acceptRelationshipSnapshot === true) {
     const kind = kinds.has(existing.type as InteractionKind) ? existing.type as InteractionKind : "note";
     const outcomeText = body.action === "no-response" ? (body.outcome?.trim() || "No response") : body.outcome?.trim() ?? "";
-    const extracted = extractInteraction(`${notes}\nOutcome: ${outcomeText}`, kind, subject);
-    if (extracted.relationshipSummary !== null) {
-      relationshipStatementIndex = statements.length;
-      statements.push(env.DB.prepare(`UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = 86, updated_at = ?
-        WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND relationship_summary IS ? AND institutional_memory IS ?`)
-        .bind(extracted.relationshipSummary, extracted.memory, now, existing.donor_id, profile.id, existing.relationship_summary, existing.institutional_memory));
-    }
+    const plan = await planFactAcceptance({
+      donorId: existing.donor_id, userId: profile.id, sourceInteractionId: id, sourceInteractionOccurredAt: nextOccurredAt,
+      noteText: `${notes}\nOutcome: ${outcomeText}`, kind, subject, now,
+    });
+    if (plan.relationshipStatementIndex >= 0) relationshipStatementIndex = statements.length + plan.relationshipStatementIndex;
+    statements.push(...plan.statements);
   }
 
   let relationshipUpdated = false;

@@ -14,7 +14,7 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (this commit):
+Current HEAD (committed):
 `ddfc531` -- "Fix applyBackfill()'s INSERT statements breaking on Windows
 shell argument passing" (see "Relationship Intelligence Phase 1 --
 Historical Backfill Applied" below for full detail). On top of `c2a6837`
@@ -23,21 +23,49 @@ implementation), `f1d08af` (the semantic backfill review), `4176860`
 (the classification correction), `e66005c` (Phase 1 schema + backfill
 preview machinery), `a30316f` (Option A implementation), and the full
 history recorded further down this section from earlier tasks.
+
+**Relationship Intelligence Phase 2, including its 2026-08-22 checkpoint
+(all three flagged edge cases resolved -- see "Relationship Intelligence
+Phase 2 -- Deterministic Fact-Based Synthesis" below for full detail),
+was committed and pushed to `feature/independent-cloudflare-sandbox` in
+this checkpoint -- see `git log` for the exact commit SHA on top of
+`ddfc531` (this file's own preamble is authoritative if this note ever
+drifts; the dated Phase 2 section below is the full record).** New files:
+`lib/relationships/fact-synthesis.ts`, `fact-supersession.ts`,
+`fact-accept-plan.ts` (the pure planning core factored out during the
+checkpoint's Monday-race fix), and `fact-accept.ts` (restructured during
+the checkpoint into `loadFactAcceptanceDonorState()` +
+`materializeFactAcceptanceIntent()` + the thin `planFactAcceptance()`
+wrapper). Capture, Outcome Option A, the edit route, and Monday
+`confirm_contact` all rewired to the shared pipeline (Monday's own
+decision loop threads an in-memory per-donor working state, the
+checkpoint's race fix); `package.json`'s test script updated; existing
+test files' stale assertions fixed across both the initial
+implementation and the checkpoint; new regression test files added for
+all ten originally-specified scenarios plus the three checkpoint fixes.
+All three quality gates pass. Not deployed. No Phase 2 D1 mutation
+beyond the already-applied Phase 1 Zachter row at any point.
+
 **Deployed Worker version remains
 `0673c91a-de71-4f29-950b-34f71fc3fbec`** (Option A's own deploy, still
-unchanged). **`4176860` still modifies a live application code path**
+unchanged -- reconfirmed live during Phase 2, see below). **`4176860`
+still modifies a live application code path**
 (`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) -- still
 deliberately not deployed, for the same reason recorded when that commit
-landed. **`ddfc531` (this task's own commit) touches only a Node script**
+landed; it will be included automatically whenever this branch is next
+deployed, since it already sits in the committed history Phase 2's own
+commits (this checkpoint's included) now sit on top of. **`ddfc531`
+touches only a Node script**
 (`scripts/relationship-facts-backfill-preview.mjs`'s `applyBackfill()`
-SQL) -- not part of the deployed Worker bundle -- so there is nothing new
-for this task to have deployed even if it wanted to. **D1 data state,
-confirmed live, changed by this task for the first time in Phase 1**:
-`donor_relationship_facts` now holds exactly 1 row (Mr. & Mrs. Yaakov
+SQL) -- not part of the deployed Worker bundle -- so there was nothing
+new for that task to have deployed even if it wanted to. **D1 data
+state, confirmed live, unchanged since Phase 1's backfill**:
+`donor_relationship_facts` holds exactly 1 row (Mr. & Mrs. Yaakov
 Zachter) and `donor_relationship_fact_changes` holds its matching 1
-audit row -- see "Relationship Intelligence Phase 1 -- Historical
-Backfill Applied" below for full verification detail. No other donor
-received a row; no `donors.relationship_summary`/`institutional_memory`
+audit row -- re-verified live during Phase 2 with no new mutation -- see
+"Relationship Intelligence Phase 1 -- Historical Backfill Applied" below
+for full original verification detail. No other donor received a row; no
+`donors.relationship_summary`/`institutional_memory`
 value was altered by this backfill. No production access. `origin/main`
 untouched throughout every task recorded in this file.
 
@@ -6525,6 +6553,383 @@ facts) has NOT been started. Not deployed. No production/main access at
 any point in this task. Awaiting explicit approval before beginning
 Phase 2.
 
+## Relationship Intelligence Phase 2 -- Deterministic Fact-Based Synthesis (2026-08-21/22) -- ALL THREE FLAGGED EDGE CASES RESOLVED, ALL GATES PASSING, NOT DEPLOYED, NO NEW D1 MUTATION -- SEE COMMIT BELOW
+
+**Scope, per explicit instruction: transition the existing accepted
+Relationship Snapshot write paths (Capture, Outcome Option A, the edit
+route, Monday `confirm_contact`) from directly overwriting `donors.
+relationship_summary`/`institutional_memory` to instead creating
+accepted, durable relationship facts and deterministically synthesizing
+the Snapshot from the fact store -- schema unchanged (migration 0034,
+already live from Phase 1), no new migration, no D1 write beyond the
+already-applied Phase 1 Zachter row. Also incorporate the already-
+reviewed `4176860` extraction-classification correction into this
+deployment.**
+
+### Pre-work verification (all conditions matched -- proceeded)
+
+Fresh `git fetch`: local HEAD matched `origin/feature/independent-
+cloudflare-sandbox` exactly, working tree clean before starting.
+Deployed Worker version confirmed unchanged: `0673c91a-
+de71-4f29-950b-34f71fc3fbec` (Option A's own deploy). D1 read:
+`donor_relationship_facts` = 1 row, `donor_relationship_fact_changes` =
+1 row -- Zachter's Phase 1 fact, byte-for-byte the values recorded in
+"Relationship Intelligence Phase 1 -- Historical Backfill Applied"
+above. `lib/relationships/fact-classification.ts` (Phase 1's
+deterministic classifier -- `classifyFactCategory()`,
+`classifyFactLifecycle()`, `classifyRelationshipFact()`,
+`CATEGORY_DECAY_WINDOW_DAYS`, `DURABLE_BASELINE_SCORE`,
+`RELEVANCE_FLOOR`) read in full and used unchanged -- this task builds
+synthesis and the accept pipeline on top of it, never modifies it.
+
+### What was built
+
+- **`lib/relationships/fact-synthesis.ts`** (new, pure, no D1) --
+  `synthesizeRelationshipSnapshot(facts, now, pinnedFresh?)`. Scores
+  every current, non-`follow_up` fact (durable = fixed `0.3`; time_bound
+  = recency against its category's decay window, with a solicitation
+  fact linked to a still-pending ask pinned to `1.0`), sorts by score
+  then recency, and produces `relationship_summary` (top 2 facts
+  clearing the relevance floor) and `institutional_memory` (top 5).
+  "Never blank while any accepted fact exists": if every current fact is
+  fully decayed, falls back to the single most recent one rather than
+  emitting `null`. `follow_up` facts and non-`current` facts are
+  excluded from participation entirely, not merely deprioritized.
+- **`lib/relationships/fact-supersession.ts`** (new, pure, no D1) --
+  `selectSupersessionTarget(currentFacts, newFact)`, the "accumulate,
+  don't erase" decision core: an exact same-`source_interaction_id`
+  match (a correction to what this interaction already contributed)
+  always wins first, regardless of category/lifecycle; otherwise a
+  singular-state category (`solicitation`, `health`) with a matching
+  lifecycle may auto-supersede; every other additive category
+  (`family_milestone`, `engagement`, `commitment_followup`, `general`)
+  never auto-supersedes on category match alone, so accepting fact B
+  after fact A leaves both current. Byte-identical re-proposals are
+  flagged `isNoOp` so the caller writes nothing at all. Deliberately
+  kept in its own module with no `cloudflare:workers` import (matching
+  the Phase 1 `classifyCandidate()`/`planBackfill()` precedent) so it
+  stays directly unit-testable outside a Workers runtime, since
+  `fact-accept.ts` (below) cannot be imported in plain Node at all --
+  confirmed live: importing it throws `ERR_UNSUPPORTED_ESM_URL_SCHEME`,
+  and this affects the whole module, not just the parts that touch
+  `env`.
+- **`lib/relationships/fact-accept.ts`** (new) -- the shared pipeline
+  every explicit-acceptance route now delegates to.
+  `planFactAcceptance(input)`: extracts via the existing
+  `extractInteraction()`, classifies via the existing
+  `classifyRelationshipFact()`, computes the existing fingerprint,
+  reads current facts + the donor row + pending-ask
+  `source_interaction_id`s for the pin, decides supersession, builds
+  INSERT-fact + INSERT-audit (+ supersede-target UPDATE + its own audit
+  row when applicable) statements, resynthesizes from the resulting
+  current-fact set, and appends a NULL-safe (`IS`, not `=`)
+  compare-and-swap `UPDATE donors SET relationship_summary = ?,
+  institutional_memory = ?, relationship_health = 86, updated_at = ?`
+  against the donor row read at the top of the same call.
+  `planFactArchival(input)`: transitions every current fact sourced from
+  a given interaction to `archived_with_source`, resynthesizes from
+  whatever remains, and CAS-writes the donors row (without bumping
+  `relationship_health` -- archival is not a new positive signal).
+  Neither function calls `env.DB.batch()` itself -- both return a
+  `{statements, relationshipStatementIndex}` pair for the caller to
+  append to its own existing batch array and offset by that array's
+  prior length, exactly mirroring Option A's own established
+  `relationshipStatementIndex` convention -- so every route keeps its
+  pre-existing atomicity (interaction/activity update + fact write(s) +
+  audit row(s), all-or-nothing) unchanged. Never deletes a fact row --
+  every transition is a `status` UPDATE.
+
+### Routes rewired to the shared pipeline
+
+- **Capture** (`app/api/interactions/route.ts`) -- the old unconditional
+  `donors.relationship_summary`/`institutional_memory` overwrite inside
+  the `acceptRelationshipSnapshot === true` block is replaced by
+  `planFactAcceptance()`, attributed to the interaction this same
+  request creates.
+- **Outcome Option A** (`app/api/interactions/[id]/outcome/route.ts`) --
+  same replacement inside its existing double gate (activity genuinely
+  closing AND explicit accept); `ownedActivity()` no longer needs to
+  select `relationship_summary`/`institutional_memory` at all, since the
+  CAS baseline is now read fresh inside `fact-accept.ts` itself.
+- **Edit route** (`app/api/interactions/[id]/route.ts`, PATCH + DELETE)
+  -- the most structurally different change. The old 3-branch
+  `contextStatement()`/`latestOther()` logic (which could pull in
+  another interaction's never-explicitly-accepted extraction as a
+  "replacement") is removed entirely, along with the now-dead
+  `extraction()`/`latestOther()`/`contextStatement()`/`DonorContext`
+  helpers. PATCH now does two independent things: (1) if the donor
+  assignment changes, archive this interaction's own current fact(s) for
+  the *old* donor via `planFactArchival()`; (2) if
+  `acceptRelationshipSnapshot === true` and not scheduled, call
+  `planFactAcceptance()` for the (possibly new) donor, attributed to
+  this interaction's own id -- `planFactAcceptance()`'s own
+  same-source-interaction-first rule makes the old "is this
+  chronologically the latest interaction" branching unnecessary, since
+  an edit's re-accept now correctly targets its own prior contribution
+  by construction. DELETE's `archive` branch now calls
+  `planFactArchival()` directly, which structurally closes the same
+  never-explicitly-accepted-extraction gap for archival.
+- **Monday import `confirm_contact`** (`app/api/import/monday/commit/
+  route.ts`) -- same replacement, still gated behind the pre-existing,
+  unaltered `occurredAt >= latestOther` recency precondition ("only to
+  the extent already approved by the architecture").
+
+### `4176860` incorporation
+
+`4176860` (the extraction-classification correction to
+`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) was already
+committed on this branch before this task began and is untouched by this
+task's own changes -- it sits in the same commit history this task's new
+commits (once made) will sit on top of, so it will be included
+automatically whenever this branch is next deployed. No separate action
+was needed or taken; its vocabulary was not broadened.
+
+### Test files updated for the new write-path shape (structural
+assertions only -- these test files touch no D1 data)
+
+Several existing structural tests asserted on the literal OLD SQL text
+(`UPDATE donors SET relationship_summary...`) or the old
+`extractInteraction(text, "note")` call that used to live directly in
+each route file; all now assert (a) the route delegates to
+`planFactAcceptance(`/`planFactArchival(`, (b) the route itself contains
+no direct `UPDATE donors SET` of its own, and where the original test's
+intent was a donor-column-scoping safety property, (c) that property
+re-checked directly against `lib/relationships/fact-accept.ts`, the one
+place the statement now lives:
+`tests/monday-import-safety.test.mjs`, `tests/monday-historical-
+context.test.mjs`, `tests/gift-acknowledgment-safety.test.mjs`,
+`tests/relationship-snapshot-family-terms.test.mjs`,
+`tests/outcome-route-relationship-write-removed.test.mjs`,
+`tests/outcome-relationship-snapshot-accept.test.mjs`.
+
+### New regression coverage added
+
+- **`tests/relationship-fact-synthesis.test.mjs`** (pure, direct import)
+  -- proves, against the real `synthesizeRelationshipSnapshot()`:
+  accepting fact B after fact A leaves both durable and synthesizes both
+  (never replacing A); a fact that was never added does not appear and
+  the existing set's synthesis is unaffected; durable/fresh-time_bound/
+  decayed-time_bound rank in the approved order (the exact Zachter-
+  corpus-derived worked example from the synthesis design); `follow_up`
+  facts never enter Snapshot prose even when nothing else is current
+  (blank Snapshot in that case, not a fallback to the follow_up text);
+  `superseded`/`archived_with_source` facts disappear from current
+  synthesis; the pinned-freshness ask channel is the only structural way
+  Ask data can influence scoring, and no ask amount/purpose text is ever
+  emitted (the function never even receives that data); a `null`
+  `source_interaction_id` (Phase 1 backfill shape) participates
+  identically to a real one; the `institutional_memory` 5-fact cap; and
+  Zachter's exact real Phase 1 row, reproduced verbatim, synthesizes
+  correctly as a donor's sole current fact.
+- **`tests/relationship-fact-accept-core.test.mjs`** (pure, direct
+  import) -- proves, against the real `selectSupersessionTarget()`:
+  every additive category never auto-supersedes on category match alone
+  (fact B after fact A); singular-state categories do auto-supersede on
+  category+lifecycle match, but never on category match with a
+  *different* lifecycle (the Lifecycle Correction's own fix,
+  re-verified at this layer); a donor with no existing facts finds no
+  target and is not a no-op; an exact same-source-interaction match
+  always wins first, even over an available singular-state match on a
+  *different* fact, and even when category/lifecycle both changed (a
+  genuine edit correction); byte-identical re-proposals are flagged
+  `isNoOp`, genuine changes from the same interaction are not.
+- **`tests/relationship-fact-accept-wiring.test.mjs`** (new, structural,
+  whole-tree) -- cross-cutting properties true of the wired system as a
+  whole, not any one file: exactly two `UPDATE donors SET ...
+  relationship_summary` statements exist anywhere in `app/` + `lib/`,
+  both inside `lib/relationships/fact-accept.ts` -- no legacy or second
+  overwrite path remains anywhere; no file anywhere issues `DELETE FROM
+  donor_relationship_facts`; the shared pipeline's fact-text INSERT
+  binds only to `extracted.relationshipSummary` and never references any
+  Ask/yahrtzeit/pledge/payment-plan field or table (grepped by name);
+  each of the four wired call sites attributes its fact to the correct
+  interaction id and occurred-at (provenance); and each of the four call
+  sites is unconditionally nested inside its route's own explicit-accept
+  gate, so there is no path to a write without it (the rejection case:
+  simply never calling the pipeline, which is what not sending
+  `acceptRelationshipSnapshot: true` produces).
+- **`relationship-fact-synthesis.test.mjs`** and
+  **`relationship-fact-accept-core.test.mjs`** already existed in the
+  working tree from earlier in this task but had never been added to
+  `package.json`'s `test` script -- confirmed passing standalone, then
+  wired in alongside the new wiring test, so `pnpm test` now actually
+  exercises all three.
+
+### D1 re-verification after all code changes -- zero new mutation
+
+Direct D1 reads after every file change, before any gate was declared
+passing: `donor_relationship_facts` = 1 row (still exactly Zachter's:
+`id 1550c6b7-ba7d-4bce-a819-a9cbfb320ee7`, `category engagement`,
+`lifecycle durable`, `status current`, `fingerprint 50edf919`,
+byte-for-byte unchanged), `donor_relationship_fact_changes` = 1 row.
+`wrangler deployments list` re-confirmed the most recent deployed
+version is still `0673c91a-de71-4f29-950b-34f71fc3fbec`, matching the
+pre-work check exactly -- no deploy occurred at any point in this task.
+
+### Quality gates (all passing)
+
+`pnpm test`: exit 0, all 104 test files report pass (including the
+three newly-wired Phase 2 test files). `pnpm exec tsc --noEmit`: clean,
+zero output. `pnpm run build:staging-independent`: completed, full route
+manifest printed, no errors.
+
+### The three flagged edge cases -- resolutions (2026-08-22 checkpoint, per explicit instruction)
+
+**1. Edit-route donor reassignment.** Approved principle: when an
+interaction moves from Donor A to Donor B, any current fact it sourced
+for Donor A must stop being current (`archived_with_source`, never
+deleted) -- but Donor B must NOT automatically receive a
+transferred/recreated fact merely because the interaction moved; Donor B
+can only get a new fact through the normal explicit-acceptance flow.
+**No code change was needed** -- the implementation already in place
+(PATCH's `if (donorId !== existing.donor_id) { const archival = await
+planFactArchival(...) }` scoped to `existing.donor_id`, independently
+followed by the unchanged `acceptRelationshipSnapshot === true` gate
+scoped to the new `donorId`) already satisfies this exactly:
+`planFactArchival()` never touches `donor_id` on the archived row, and
+`planFactAcceptance()` always creates a brand-new fact row (a fresh
+`crypto.randomUUID()`), never reuses or repurposes the old donor's row.
+Added `tests/relationship-fact-edit-donor-reassignment.test.mjs`: a real
+SQLite-backed regression (matching this repo's own established
+convention for D1-shaped correctness questions) proving, against actual
+resulting rows, all five required properties -- old donor's fact becomes
+non-current; the archived fact's own text/row is preserved, never
+deleted; Donor B gets zero facts from a bare reassignment with no
+acceptance call; with explicit acceptance, Donor B gets a genuinely new
+fact row (different id) with correct provenance (`source_interaction_id`
+= the edited interaction's own id); and the fact row count only ever
+grows (never shrinks), with `donor_id` never changed on any row -- plus
+a structural check confirming the route itself is wired this way.
+
+**2. Outcome-route cancellation.** Investigated (not inferred from the
+word "cancel") what cancelling an already-completed activity actually
+means in this app, tracing the route, the UI, `activityStatus()`, Last
+Contact, and timeline visibility:
+- The Outcome route's own `cancel` action is reachable on an
+  already-completed activity, not just a scheduled one -- this is a
+  pre-existing, already-tested convention (`nextSource` wraps a
+  `cancelled:` prefix around whatever source was there, including a
+  `capture-completed:...` one; `activityStatus()` in
+  `lib/workspace/scheduled-activity.ts` resolves `cancelled:` BEFORE
+  `capture-completed:`, so the result is unconditionally `"cancelled"` --
+  the exact fixture `cancelled:${completedSource}` already existed in
+  `tests/activity-outcome.test.mjs` before this task).
+- Timeline visibility: the interaction row itself is never deleted and
+  remains visible, correctly labeled "cancelled" (`lib/relationships/
+  unified-timeline.ts`'s own status mapping).
+- Last Contact: `lib/relationships/meeting-brief.ts`'s
+  `lastCompletedInteraction`/`lastContactAt` computation explicitly
+  excludes any interaction whose source matches `cancelled:%`
+  (`AND i.source NOT LIKE 'cancelled:%'`) -- so a cancelled activity,
+  even a previously-completed, previously-accepted one, no longer counts
+  as real contact for relationship-recency purposes anywhere in the app.
+- **Conclusion: cancellation genuinely INVALIDATES the source
+  interaction** as something that should still count as having happened
+  -- it is not merely a workflow-state change while the historical
+  interaction remains valid. Therefore any current fact that interaction
+  sourced must become `archived_with_source` and synthesis must
+  regenerate, exactly like the edit route's own archive/reassignment
+  paths (a third, now-traced trigger for the same already-approved
+  archive semantics, not a new invented behavior).
+- **Implemented**: `app/api/interactions/[id]/outcome/route.ts` now
+  calls `planFactArchival()` unconditionally whenever
+  `body.action === "cancel"`, regardless of `currentStatus` (the archive
+  is a safe no-op when the activity never had an accepted fact, which is
+  the common case). `undo` remains untouched (pre-existing scope; it
+  never touched relationship data even before Phase 2, and restoring a
+  prior interaction state is a different, already-audited path).
+- Added `tests/relationship-fact-outcome-cancel-invalidation.test.mjs`:
+  re-verifies the traced evidence directly (the `cancelled:` status
+  resolution and Last Contact's own exclusion query), then a real
+  SQLite-backed regression proving cancelling an activity WITH an
+  accepted current fact archives it (preserved, not deleted) and
+  resynthesizes the donor's Snapshot to `null`, while cancelling an
+  activity with no accepted fact is a safe no-op -- plus a structural
+  check that the route's archival call is unconditional on
+  `currentStatus`.
+
+**3. Monday `confirm_contact`'s same-request, same-donor supersession
+race -- treated as a correctness bug and fixed**, not merely documented.
+Root cause: `planFactAcceptance()` (the original all-in-one
+implementation) did its own fresh D1 read per call; two decisions for
+the same donor in one commit request each read D1 BEFORE either had
+executed, so the second could never see the first's own not-yet-executed
+statements from the same batch. Fix (the smallest deterministic
+approach, as directed): the decide-and-synthesize core was factored out
+into a new pure module, **`lib/relationships/fact-accept-plan.ts`**
+(`planFactAcceptanceStep()`, `FactAcceptanceWorkingState` -- no
+`cloudflare:workers` import at all, matching the Phase 1 `classify
+Candidate()`/`planBackfill()` and this phase's own `fact-supersession.ts`
+precedent), which takes an explicit working state instead of reading D1
+itself. `lib/relationships/fact-accept.ts` was restructured into three
+pieces: `loadFactAcceptanceDonorState()` (the D1 read, unchanged in
+substance), `materializeFactAcceptanceIntent()` (turns a planned intent
+into the same literal D1 statements as before -- byte-identical SQL, so
+this is not a rewrite of the write shape, only where the decision logic
+lives), and `planFactAcceptance()` (now a thin single-decision wrapper:
+load once, plan once, materialize once -- unchanged behavior for
+Capture, Outcome, and Edit, none of which have a same-donor sequencing
+concern). `app/api/import/monday/commit/route.ts`'s decision loop now
+maintains a `factStateByDonor` `Map`, loading each donor's state ONCE
+(lazily, on first use) and threading `planFactAcceptanceStep()`'s own
+returned `nextState` into the next decision for that same donor --
+`donorFactState.workingState = nextState;` -- exactly the "maintain an
+in-memory per-donor working fact state while building the D1 batch"
+approach directed, preserving the route's existing atomicity (still one
+`env.DB.batch(statements)` call, unchanged) and never weakening
+supersession rules or relying on a later cleanup pass. Added
+`tests/relationship-fact-monday-supersession-race.test.mjs`: a real
+SQLite-backed regression with two accepted same-donor decisions (both
+classifying as `solicitation`/`time_bound`, the singular-state
+auto-supersede pairing) in one simulated batch, proving (a) WITH
+threading, decision 2 correctly supersedes decision 1; (b) the batch
+result -- current facts, supersession chain, synthesized
+`relationship_summary`/`institutional_memory`, and the audit-row-action
+shape -- is structurally IDENTICAL to running the two decisions as two
+genuinely separate, sequential requests (the second re-reading real
+post-commit D1 state, an entirely independent code path from the batch
+scenario); and (c) the bug is real -- re-planning decision 2 against the
+stale pre-batch state (what the old code effectively did) produces a
+different, wrong result (both facts left current, no supersession at
+all), proving this is a genuine behavior fix, not a no-op refactor.
+
+### Full quality gates, re-run after all three resolutions
+
+`pnpm test`: exit 0, all 115 test files (per `package.json`'s own `test`
+script) report pass -- the pre-Phase-2 baseline plus the 3 wired in at
+the initial Phase 2 implementation plus 4 new from this checkpoint:
+`relationship-fact-monday-supersession-race`,
+`relationship-fact-edit-donor-reassignment`,
+`relationship-fact-outcome-cancel-invalidation`, plus the pre-existing
+`relationship-fact-synthesis`/`relationship-fact-accept-core`/
+`relationship-fact-accept-wiring` still passing against the refactored
+`fact-accept.ts`). `pnpm exec tsc --noEmit`: clean, zero output.
+`pnpm run build:staging-independent`: completed, full route manifest, no
+errors. D1 re-verified live, immediately before commit: `donor_
+relationship_facts` = 1 row, `donor_relationship_fact_changes` = 1 row --
+still exactly Zachter's Phase 1 fact, byte-for-byte unchanged (`id
+1550c6b7-ba7d-4bce-a819-a9cbfb320ee7`, `category engagement`, `lifecycle
+durable`, `status current`, `fingerprint 50edf919`,
+`source_interaction_id null`). `wrangler deployments list` re-confirmed
+the deployed Worker version is still `0673c91a-de71-4f29-950b-
+34f71fc3fbec` -- no deploy occurred at any point in this task or its
+checkpoint.
+
+### Status -- COMMITTED, NOT DEPLOYED, per explicit instruction
+
+**All three flagged edge cases are resolved (two by proving the existing
+implementation already satisfied the approved principle, with new
+regression coverage; one -- the Monday race -- by a real correctness fix
+plus regression coverage proving it against the exact bug it closes).
+All three quality gates pass. Zero D1 mutation beyond the already-applied
+Phase 1 Zachter row (re-verified live, immediately before commit). No
+deploy. No production/main access at any point.** Per this checkpoint's
+own explicit instruction ("commit and push... but do not deploy and do
+not make any Phase 2 D1 mutation yet"), the implementation was committed
+and pushed to `feature/independent-cloudflare-sandbox` -- see "Current
+Git State" at the top of this file for the exact commit SHA. Awaiting
+further explicit approval before any deploy or Phase 2 D1 mutation.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -6957,6 +7362,15 @@ that had said "no migration beyond 0032" through several later
 completed tasks -- fixed 2026-08-21.)**
 
 No migration beyond 0033 exists or has been applied.
+
+Migration `0034_donor_relationship_facts.sql` (Relationship Intelligence
+Phase 1's schema): **APPLIED** to `fundraising-os-staging-db`
+(Independent Staging) on 2026-08-21 -- see "Relationship Intelligence
+Phase 1 -- Historical Backfill Applied" above. Relationship Intelligence
+Phase 2 (see "Relationship Intelligence Phase 2 -- Deterministic
+Fact-Based Synthesis" above) reuses this schema **unchanged** -- no new
+migration was needed or added; Phase 2 is a write-path/synthesis change
+only.
 
 ## Deployment State
 
@@ -7407,6 +7821,39 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-22T00:30:00Z (approximate)
+Claude (Sonnet 5) — Implemented Relationship Intelligence Phase 2:
+deterministic fact-based synthesis on top of Phase 1's schema. Added
+lib/relationships/fact-synthesis.ts (pure scoring/synthesis),
+fact-supersession.ts (pure "accumulate, don't erase" decision core,
+kept cloudflare:workers-free for direct unit-testability), and
+fact-accept.ts (the shared D1 pipeline every explicit-acceptance route
+now delegates to). Rewired Capture, Outcome Option A, the edit route
+(PATCH+DELETE, removing the old contextStatement()/latestOther() logic
+entirely), and Monday confirm_contact to the shared pipeline, preserving
+each route's own pre-existing atomicity and acceptance gates unchanged.
+4176860 already sits on this branch's history and needed no separate
+action. Fixed six existing structural tests whose assertions targeted
+the old literal write-path SQL; added three new regression test files
+(fact-synthesis, fact-accept-core, fact-accept-wiring) covering all ten
+of the task's explicitly-numbered scenarios; discovered and fixed that
+two of those three test files existed but were never wired into
+package.json's test script. All three quality gates (pnpm test — 104
+files, exit 0; tsc --noEmit — clean; build:staging-independent — clean)
+pass. Re-verified live in D1 after every change: donor_relationship_facts
+still holds exactly the one Phase 1 Zachter row, byte-for-byte unchanged
+— zero new mutation. Re-confirmed the deployed Worker version is
+unchanged (0673c91a-...). Flagged three genuine design edge cases for
+explicit review rather than silently deciding them (edit-route
+donor-reassignment archival, outcome-route cancel-after-completion, a
+narrow Monday same-request/same-donor supersession race — see the dated
+section above for full detail). Per instruction, stopped here: changes
+are complete and gate-clean in the working tree but deliberately NOT
+committed, NOT deployed, and no D1 mutation beyond the pre-existing
+Phase 1 row was made, pending review.
+
+---
 
 2026-08-21T23:00:00Z (approximate)
 Claude (Sonnet 5) — Applied the gated Phase 1 historical backfill to

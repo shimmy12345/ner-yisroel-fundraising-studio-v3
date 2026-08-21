@@ -48,9 +48,11 @@ async function run() {
 
   // --- 8: a real interaction (the normal capture flow) is completely
   // unmodified by this feature -- it still writes interactions and, when
-  // accepted, relationship_summary/institutional_memory, exactly as before. ---
+  // accepted, still feeds durable relationship intelligence (via the
+  // shared planFactAcceptance() pipeline, Relationship Intelligence
+  // Phase 2 -- see lib/relationships/fact-accept.ts). ---
   assert.match(captureRoute, /INSERT INTO interactions/);
-  assert.match(captureRoute, /relationship_summary = \?, institutional_memory = \?/);
+  assert.match(captureRoute, /planFactAcceptance\(/);
   assert.doesNotMatch(captureRoute, /gift_acknowledgments/, "the normal capture flow must never reference gift acknowledgment state");
 
   // --- new table is included in the independent-staging reset, so a

@@ -4,40 +4,18 @@ import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { extractInteraction, reminderDueAt, type InteractionKind, type ReminderChoice } from "../../../../lib/capture/interaction";
 import { completedPlannedAt, isCompletedActivity, isNoResponseActivity, isScheduledActivity } from "../../../../lib/workspace/scheduled-activity";
 import { logger } from "../../../../lib/logger";
+import { planFactAcceptance, planFactArchival } from "../../../../lib/relationships/fact-accept";
 
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
-type DonorContext = { relationship_summary: string | null; institutional_memory: string | null };
 type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string; acceptRelationshipSnapshot?: boolean };
 const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 const reminders = new Set<ReminderChoice>(["none", "tomorrow", "next-week", "custom"]);
-
-function extraction(row: Pick<InteractionRow, "type" | "summary">) {
-  const [subject = "Interaction", ...noteParts] = row.summary.split("\n");
-  const kind = kinds.has(row.type as InteractionKind) ? row.type as InteractionKind : "note";
-  return extractInteraction(noteParts.join("\n") || subject, kind, subject);
-}
 
 async function ownedInteraction(id: string, userId: string) {
   return env.DB.prepare(`SELECT i.id, i.donor_id, i.type, i.occurred_at, i.summary, i.source, i.created_at
     FROM interactions i JOIN donors d ON d.id = i.donor_id
     WHERE i.id = ? AND i.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live' LIMIT 1`)
     .bind(id, userId, userId).first<InteractionRow>();
-}
-
-async function latestOther(donorId: string, userId: string, excludeId: string) {
-  return env.DB.prepare(`SELECT id, donor_id, type, occurred_at, summary, source, created_at FROM interactions
-    WHERE donor_id = ? AND user_id = ? AND id != ?
-      AND source NOT LIKE 'archived:%' AND source NOT LIKE 'cancelled:%'
-      AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))
-    ORDER BY occurred_at DESC LIMIT 1`).bind(donorId, userId, excludeId).first<InteractionRow>();
-}
-
-function contextStatement(donorId: string, userId: string, oldContext: ReturnType<typeof extraction>, replacement: ReturnType<typeof extraction> | null) {
-  return env.DB.prepare(`UPDATE donors SET
-    relationship_summary = CASE WHEN relationship_summary = ? THEN ? ELSE relationship_summary END,
-    institutional_memory = CASE WHEN institutional_memory = ? THEN ? ELSE institutional_memory END,
-    updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'`)
-    .bind(oldContext.relationshipSummary, replacement?.relationshipSummary ?? null, oldContext.memory, replacement?.memory ?? null, Math.floor(Date.now() / 1000), donorId, userId);
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -65,7 +43,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const dueAt = reminderDueAt(reminder, body.customDate, nowDate, profile.timezone);
   if (reminder === "custom" && !dueAt) return Response.json({ error: "Choose a custom reminder date" }, { status: 422 });
   const next = extractInteraction(note, body.type, body.subject);
-  const old = extraction(existing);
   const occurredAtEpoch = Math.floor(occurredAt.getTime() / 1000);
   const plannedAt = completedPlannedAt(existing.source);
   const source = wasCompleted && plannedAt
@@ -82,19 +59,54 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     .bind(reminderId, donorId, profile.id, next.nextAction, "Reminder requested for this activity.", Math.floor(dueAt.getTime() / 1000), now, now));
   else statements.push(env.DB.prepare("DELETE FROM recommendations WHERE id = ? AND user_id = ?").bind(reminderId, profile.id));
 
-  const oldOther = await latestOther(existing.donor_id, profile.id, id);
-  const newOther = donorId === existing.donor_id ? oldOther : await latestOther(donorId, profile.id, id);
-  if (body.acceptRelationshipSnapshot === true && donorId !== existing.donor_id) statements.push(contextStatement(existing.donor_id, profile.id, old, oldOther ? extraction(oldOther) : null));
-  if (body.acceptRelationshipSnapshot === true && !scheduled && (!newOther || occurredAtEpoch >= newOther.occurred_at)) {
-    statements.push(env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = 86, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'").bind(next.relationshipSummary, next.memory, now, donorId, profile.id));
-  } else if (body.acceptRelationshipSnapshot === true && donorId === existing.donor_id) {
-    statements.push(contextStatement(donorId, profile.id, old, newOther ? extraction(newOther) : null));
+  // Relationship Intelligence Phase 2 (see docs/AI-HANDOFF.md's
+  // "Relationship Intelligence Phase 2" section). Two independent
+  // concerns, replacing the old contextStatement()/latestOther()-based
+  // logic entirely:
+  //
+  // 1. Donor reassignment (donorId !== existing.donor_id): this
+  //    interaction is leaving its old donor's history. Any CURRENT fact
+  //    it sourced for that donor is archived (archived_with_source) --
+  //    provenance integrity, never deletion -- independent of whether a
+  //    new acceptance is also happening for the new donor below. This is
+  //    an extension of the design's own already-approved archive
+  //    semantics to a structurally analogous trigger (a source
+  //    interaction no longer belonging to the donor), not a new
+  //    invented behavior; flagged explicitly in docs/AI-HANDOFF.md as a
+  //    case the original worked examples did not literally cover.
+  // 2. Re-acceptance (acceptRelationshipSnapshot === true, and not
+  //    scheduled): a genuine new accept event for the interaction's
+  //    (possibly new) donor, attributed to this interaction's own id.
+  //    planFactAcceptance()'s own same-source-interaction-first
+  //    supersession rule means this correctly targets THIS interaction's
+  //    own prior contribution (an edit correction) without needing the
+  //    old "is this chronologically the latest interaction" branching at
+  //    all -- that whole distinction is now irrelevant. Not accepting
+  //    (the common edit case -- just fixing a typo) writes nothing here
+  //    at all, exactly matching "editing without accepting must not
+  //    silently reapply or overwrite."
+  if (donorId !== existing.donor_id) {
+    const archival = await planFactArchival({ donorId: existing.donor_id, userId: profile.id, sourceInteractionId: id, now });
+    statements.push(...archival.statements);
+  }
+  let relationshipStatementIndex = -1;
+  if (body.acceptRelationshipSnapshot === true && !scheduled) {
+    const plan = await planFactAcceptance({
+      donorId, userId: profile.id, sourceInteractionId: id, sourceInteractionOccurredAt: occurredAtEpoch,
+      noteText: note, kind: next.type, subject: body.subject ?? "", now,
+    });
+    if (plan.relationshipStatementIndex >= 0) relationshipStatementIndex = statements.length + plan.relationshipStatementIndex;
+    statements.push(...plan.statements);
   }
 
-  try { await env.DB.batch(statements); }
+  let relationshipUpdated = false;
+  try {
+    const results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
+    if (relationshipStatementIndex >= 0) relationshipUpdated = (results[relationshipStatementIndex]?.meta?.changes ?? 0) > 0;
+  }
   catch (error) { logger.error("activity_edit_failed", error, { interactionId: id, userId: profile.id }); return Response.json({ error: "Activity could not be updated" }, { status: 500 }); }
   logger.info("activity_edited", { interactionId: id, userId: profile.id });
-  return Response.json({ interactionId: id, occurredAt: occurredAt.toISOString(), scheduled, reminderAt: dueAt?.toISOString() ?? null, relationshipUpdated: body.acceptRelationshipSnapshot === true && !scheduled, extracted: next });
+  return Response.json({ interactionId: id, occurredAt: occurredAt.toISOString(), scheduled, reminderAt: dueAt?.toISOString() ?? null, relationshipUpdated, extracted: next });
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -116,9 +128,17 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     env.DB.prepare("UPDATE interactions SET source = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(`${prefix}${existing.source}`, now, id, profile.id),
     env.DB.prepare("DELETE FROM recommendations WHERE id = ? AND user_id = ?").bind(`activity-${id}`, profile.id),
   ];
+  // Relationship Intelligence Phase 2: archiving the source interaction
+  // transitions any CURRENT fact it sourced to archived_with_source and
+  // resynthesizes from whatever current facts remain -- NEVER promoting
+  // some other, never-explicitly-accepted interaction's extraction to
+  // fill the gap, per the approved design. This structurally closes the
+  // pre-existing gap the old contextStatement()/latestOther() pairing
+  // had (which pulled in another interaction's raw, unaccepted
+  // extraction as the "replacement").
   if (body.action === "archive") {
-    const replacement = await latestOther(existing.donor_id, profile.id, id);
-    statements.push(contextStatement(existing.donor_id, profile.id, extraction(existing), replacement ? extraction(replacement) : null));
+    const archival = await planFactArchival({ donorId: existing.donor_id, userId: profile.id, sourceInteractionId: id, now });
+    statements.push(...archival.statements);
   }
   try { await env.DB.batch(statements); }
   catch (error) { logger.error("activity_state_failed", error, { interactionId: id, userId: profile.id, action: body.action }); return Response.json({ error: "Activity could not be updated" }, { status: 500 }); }

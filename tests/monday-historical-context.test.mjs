@@ -72,16 +72,25 @@ async function run() {
   const confirmContactBranch = commit.slice(confirmContactStart, confirmContactEnd);
   assert.doesNotMatch(confirmContactBranch, /donor_historical_context/, "confirming a real contact must never also write historical context");
 
-  // --- 4 (relationship-snapshot fix): a row explicitly confirmed as an
-  // interaction must feed the same relationship-intelligence pipeline a
-  // normal capture-and-accept does, via the same pure extractInteraction()
-  // function -- never a Monday-specific summary generator -- and only when
-  // it's actually the donor's most recent completed contact, so an old
-  // imported row can never regress a fresher genuine snapshot. ---
-  assert.match(confirmContactBranch, /extractInteraction\(text, "note"\)/, "confirm_contact must reuse the exact same extraction pipeline a normal capture accept uses");
+  // --- 4 (relationship-snapshot fix, Relationship Intelligence Phase 2):
+  // a row explicitly confirmed as an interaction must feed the same
+  // shared decision/synthesis logic (lib/relationships/fact-accept.ts +
+  // fact-accept-plan.ts) a normal capture-and-accept now uses -- never a
+  // Monday-specific summary generator, and never a direct donors UPDATE
+  // of its own -- and only when it's actually the donor's most recent
+  // completed contact, so an old imported row can never regress a
+  // fresher genuine snapshot. This recency precondition is UNCHANGED
+  // from before Phase 2. Unlike the other three accept paths,
+  // confirm_contact calls the pure, state-threading
+  // planFactAcceptanceStep() (never the single-shot planFactAcceptance())
+  // against an in-memory per-donor working state, fixing a real
+  // same-request/same-donor supersession race -- see docs/AI-HANDOFF.md's
+  // Phase 2 section. ---
+  assert.match(confirmContactBranch, /planFactAcceptanceStep\(/, "confirm_contact must reuse the shared pure planning core a normal capture accept's own pipeline is built on");
+  assert.doesNotMatch(confirmContactBranch, /planFactAcceptance\(/, "confirm_contact must never call the single-shot planFactAcceptance() -- it would re-read D1 per decision and miss an earlier same-donor decision in this same request");
+  assert.doesNotMatch(confirmContactBranch, /UPDATE donors SET/, "confirm_contact must never build its own donors UPDATE -- that responsibility now belongs entirely to lib/relationships/fact-accept.ts");
   assert.match(confirmContactBranch, /MAX\(occurred_at\) AS value FROM interactions WHERE donor_id=\? AND user_id=\? AND id!=\?/, "must compare against the donor's other completed interactions before touching the snapshot");
   assert.match(confirmContactBranch, /if \(occurredAt >= latestOther\)/, "the snapshot must only be updated when this confirmed row is the most recent completed contact");
-  assert.match(confirmContactBranch, /UPDATE donors SET relationship_summary=\?, institutional_memory=\?, relationship_health=\?, updated_at=\? WHERE id=\? AND owner_user_id=\? AND data_source='live'/);
   // Date-only precision: confirm_contact always marks the interaction it
   // writes as date-only (Monday supplies a calendar date, never a time).
   assert.match(commit, /UPDATE interactions SET occurred_at=\?, occurred_at_date_only=1, summary=\?, updated_at=\? WHERE id=\? AND user_id=\?/);

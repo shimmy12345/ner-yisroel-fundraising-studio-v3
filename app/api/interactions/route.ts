@@ -9,6 +9,7 @@ import {
 } from "../../../lib/capture/interaction";
 import { validateAskAmountCents, validateAskPurpose, validateAskNote, askFollowUpAction } from "../../../lib/capture/ask";
 import { ensureUserProfile } from "../../../lib/auth/profile";
+import { planFactAcceptance } from "../../../lib/relationships/fact-accept";
 
 type RequestBody = {
   donorId?: string;
@@ -83,11 +84,22 @@ export async function POST(request: Request) {
       .bind(interactionId, donorId, userId, storedType, occurredAtEpoch, `${extracted.subject}\n${extracted.summary}`, source, now, now),
   ];
 
+  // Relationship Intelligence Phase 2: an accepted proposal creates a
+  // durable, provenance-carrying fact and resynthesizes the donor's
+  // Snapshot from the full current-fact set -- it no longer overwrites
+  // donors.relationship_summary/institutional_memory directly with just
+  // this note's own text. See lib/relationships/fact-accept.ts.
+  // sourceInteractionId is this newly-created interaction's own id
+  // (bound above as `interactionId`) -- a genuine first-time acceptance,
+  // never null (null is reserved for Phase 1's historical backfill).
+  let relationshipStatementIndex = -1;
   if (!scheduled && body.acceptRelationshipSnapshot === true) {
-    statements.push(
-      env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
-        .bind(extracted.relationshipSummary, extracted.memory, 86, now, donorId, userId),
-    );
+    const plan = await planFactAcceptance({
+      donorId, userId, sourceInteractionId: interactionId, sourceInteractionOccurredAt: occurredAtEpoch,
+      noteText: note, kind: extracted.type, subject: body.subject ?? "", now,
+    });
+    if (plan.relationshipStatementIndex >= 0) relationshipStatementIndex = statements.length + plan.relationshipStatementIndex;
+    statements.push(...plan.statements);
   }
 
   const askId = madeAsk ? crypto.randomUUID() : null;
@@ -127,8 +139,10 @@ export async function POST(request: Request) {
     );
   }
 
+  let relationshipUpdated = false;
   try {
-    await env.DB.batch(statements);
+    const results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
+    if (relationshipStatementIndex >= 0) relationshipUpdated = (results[relationshipStatementIndex]?.meta?.changes ?? 0) > 0;
   } catch (error) {
     logger.error("interaction_capture_failed", error, { donorId, userId });
     return Response.json({ error: "Interaction could not be saved" }, { status: 500 });
@@ -140,7 +154,7 @@ export async function POST(request: Request) {
     occurredAt: occurredAt.toISOString(),
     scheduled,
     reminderAt: dueAt?.toISOString() ?? null,
-    relationshipUpdated: !scheduled && body.acceptRelationshipSnapshot === true,
+    relationshipUpdated,
     askId,
     extracted,
   }, { status: 201 });

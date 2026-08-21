@@ -48,15 +48,30 @@ async function run() {
     assert.doesNotMatch(code, /INSERT INTO donors/i, "must never create a donor row");
     assert.doesNotMatch(code, /DELETE FROM/i, "must never delete anything");
   }
-  // The one exception is confirm_contact feeding the same relationship-
-  // snapshot fields a normal captured-and-accepted interaction feeds
-  // (app/api/interactions/route.ts) -- never donor identity fields like
-  // display_name, email, donor_code, or external_id.
-  const donorUpdateMatch = /UPDATE donors SET ([^"]+) WHERE id=\? AND owner_user_id=\? AND data_source='live'/.exec(commit);
-  assert.ok(donorUpdateMatch, "the commit route's donors UPDATE statement must exist and be readable");
-  assert.equal(donorUpdateMatch[1].trim(), "relationship_summary=?, institutional_memory=?, relationship_health=?, updated_at=?", "confirm_contact may only ever touch these four donor columns");
+  // Relationship Intelligence Phase 2: confirm_contact no longer writes
+  // donors.relationship_summary/institutional_memory directly -- it
+  // delegates to the shared accept pipeline (lib/relationships/
+  // fact-accept.ts + fact-accept-plan.ts), the same decision/synthesis
+  // logic every other explicit-acceptance path uses. Unlike the other
+  // three routes (which call the single-shot planFactAcceptance()
+  // directly), confirm_contact calls the pure planFactAcceptanceStep()
+  // against an in-memory per-donor working state it threads across its
+  // own decision loop -- the fix for the same-request/same-donor
+  // supersession race (see docs/AI-HANDOFF.md's Phase 2 section) -- so
+  // it must never call planFactAcceptance() itself. The commit route
+  // itself must contain NO direct UPDATE of the donors table at all
+  // (confirmed below); the actual donor-column-scoping guarantee
+  // ("never donor identity fields like display_name, email, donor_code,
+  // or external_id") is checked against fact-accept.ts, the one place
+  // that statement now lives.
+  assert.match(commit, /planFactAcceptanceStep\(/, "confirm_contact must delegate to the shared pure planning core");
+  assert.doesNotMatch(commit, /planFactAcceptance\(/, "confirm_contact must use the state-threading planFactAcceptanceStep(), never the single-shot planFactAcceptance() which would re-read D1 per decision and miss an earlier same-donor decision in this same request");
+  assert.doesNotMatch(commit, /UPDATE donors SET/, "confirm_contact must never build its own donors UPDATE statement -- that responsibility now belongs entirely to lib/relationships/fact-accept.ts");
+  const factAccept = await readFile(new URL("../lib/relationships/fact-accept.ts", import.meta.url), "utf8");
+  const donorUpdateMatch = /UPDATE donors SET relationship_summary = \?, institutional_memory = \?, relationship_health = 86, updated_at = \?\s*WHERE id = \? AND owner_user_id = \? AND data_source = 'live' AND relationship_summary IS \? AND institutional_memory IS \?/.exec(factAccept);
+  assert.ok(donorUpdateMatch, "the shared pipeline's donors CAS UPDATE statement must exist and be readable");
   for (const identityField of ["display_name", "email", "donor_code", "external_id", "phone", "address_line_1"]) {
-    assert.doesNotMatch(commit, new RegExp(`UPDATE donors SET[^;]*\\b${identityField}\\b`), `confirm_contact must never touch donor identity field ${identityField}`);
+    assert.doesNotMatch(factAccept, new RegExp(`UPDATE donors SET[^;]*\\b${identityField}\\b`), `the shared accept pipeline must never touch donor identity field ${identityField}`);
   }
 
   // Idempotent upsert: both interactions and recommendations are written

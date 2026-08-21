@@ -67,16 +67,25 @@ async function run() {
     "acceptRelationshipSnapshot must default to false",
   );
 
-  // Once accepted and sent, the server's write REPLACES the donor's
-  // current relationship_summary/institutional_memory wholesale (the
-  // established, existing behavior of every other accept path in this
-  // app -- see route.ts's own comment on why merging was rejected),
-  // gated by a CAS against the exact value read at request start so a
-  // concurrent change elsewhere is never silently clobbered.
+  // Once accepted and sent, the server delegates into the shared
+  // Relationship Intelligence Phase 2 accept pipeline (lib/relationships/
+  // fact-accept.ts, the same one every other explicit-acceptance path
+  // now uses), which creates a durable, provenance-carrying fact and
+  // resynthesizes relationship_summary/institutional_memory from the
+  // donor's full current-fact set -- never a bespoke overwrite of just
+  // this note's own text -- gated by a CAS against the exact donor row
+  // value read at request start so a concurrent change elsewhere is
+  // never silently clobbered.
   assert.match(
     outcomeRoute,
+    /const plan = await planFactAcceptance\(\{\s*donorId: existing\.donor_id, userId: profile\.id, sourceInteractionId: id, sourceInteractionOccurredAt: nextOccurredAt,/,
+    "an accepted proposal must delegate into the shared accept pipeline, attributed to this interaction's own id and occurred-at",
+  );
+  const factAccept = await read("lib/relationships/fact-accept.ts");
+  assert.match(
+    factAccept,
     /UPDATE donors SET relationship_summary = \?, institutional_memory = \?, relationship_health = 86, updated_at = \?\s*WHERE id = \? AND owner_user_id = \? AND data_source = 'live' AND relationship_summary IS \? AND institutional_memory IS \?/,
-    "an accepted proposal must replace relationship_summary/institutional_memory (and bump relationship_health to 86, matching every other accept path) via a CAS against the donor row read at request start",
+    "the shared pipeline must write the synthesized relationship_summary/institutional_memory (and bump relationship_health to 86, matching every other accept path) via a CAS against the donor row read at request start",
   );
 
   // Concrete extractor proof: a note containing a real, specific
@@ -142,14 +151,20 @@ async function run() {
   assert.equal(genericExtracted.relationshipSummary, null, "sanity check: a generic note with no relationship-relevant content must extract null under the real extractor");
 
   // Server-side, even a maliciously/mistakenly sent acceptRelationshipSnapshot:
-  // true for such a note cannot write anything -- the extractor result is
-  // recomputed server-side from the actual submitted notes/outcome text,
-  // never trusted from the client, and the inner null-check gates the
-  // write a second time.
+  // true for such a note cannot write anything -- the route passes the
+  // actual submitted notes/outcome text into the shared accept pipeline,
+  // which independently re-runs extraction on it (never trusting the
+  // client's own preview) and gates the write on a non-null result.
   assert.match(
     outcomeRoute,
-    /const extracted = extractInteraction\(`\$\{notes\}\\nOutcome: \$\{outcomeText\}`, kind, subject\);\s*if \(extracted\.relationshipSummary !== null\) \{/,
-    "the server must independently re-run extraction on the submitted text and gate the write on a non-null result, never trusting the client's preview",
+    /noteText: `\$\{notes\}\\nOutcome: \$\{outcomeText\}`, kind, subject, now,/,
+    "the route must pass the actual submitted notes/outcome text into the shared accept pipeline, never a client-supplied preview string",
+  );
+  const factAcceptPlan = await read("lib/relationships/fact-accept-plan.ts");
+  assert.match(
+    factAcceptPlan,
+    /const extracted = extractInteraction\(input\.noteText, input\.kind, input\.subject\);\s*if \(extracted\.relationshipSummary === null\) return \{ intent: null, nextState: state \};/,
+    "the shared pure planning core must independently re-run extraction on the submitted text and gate the write on a non-null result, never trusting the client's preview",
   );
 
   // ================================================================

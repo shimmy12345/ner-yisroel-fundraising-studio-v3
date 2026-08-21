@@ -62,12 +62,18 @@ async function run() {
   assert.match(
     interactionRoute,
     /if \(!scheduled && body\.acceptRelationshipSnapshot === true\) \{/,
-    "relationship_summary/institutional_memory must still only be written when the caller explicitly sent acceptRelationshipSnapshot: true -- a fixed extraction pattern must never make this write unconditional",
+    "relationship facts must still only be created when the caller explicitly sent acceptRelationshipSnapshot: true -- a fixed extraction pattern must never make this write unconditional",
   );
   assert.match(
     interactionRoute,
-    /UPDATE donors SET relationship_summary = \?, institutional_memory = \?, relationship_health = \?, updated_at = \?/,
-    "the accept-gated write must still update both relationship_summary and institutional_memory together, not just one field",
+    /planFactAcceptance\(/,
+    "the accept-gated path must delegate to the shared Relationship Intelligence Phase 2 pipeline (lib/relationships/fact-accept.ts), which synthesizes relationship_summary and institutional_memory together from the current fact set -- not a direct donors UPDATE in this route",
+  );
+  const factAccept = await read("lib/relationships/fact-accept.ts");
+  assert.match(
+    factAccept,
+    /UPDATE donors SET relationship_summary = \?, institutional_memory = \?, relationship_health = 86, updated_at = \?/,
+    "the shared pipeline's donors write must still update both relationship_summary and institutional_memory together, not just one field",
   );
 
   console.log("relationship-snapshot-family-terms: ok");

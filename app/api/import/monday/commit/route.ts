@@ -6,8 +6,9 @@ import { numericDonorCode } from "../../../../../lib/relationships/donor-identit
 import { classifyMondayDisposition } from "../../../../../lib/import/monday-classify";
 import { mondayHistoricalContextId, mondayInteractionId, mondayRecommendationId, mondaySourceFingerprint } from "../../../../../lib/import/monday-fingerprint";
 import { excelSerialToIsoDate } from "../../../../../lib/import/monday-workbook";
-import { extractInteraction } from "../../../../../lib/capture/interaction";
 import { logger } from "../../../../../lib/logger";
+import { loadFactAcceptanceDonorState, materializeFactAcceptanceIntent, type FactAcceptanceDonorState } from "../../../../../lib/relationships/fact-accept";
+import { planFactAcceptanceStep } from "../../../../../lib/relationships/fact-accept-plan";
 
 // Writes only what was explicitly, individually approved -- there is no
 // bulk "confirm contact" path anywhere in this file, and no code path
@@ -93,6 +94,22 @@ export async function POST(request: Request) {
   // what's already on disk.
   const donorLatestConfirmedInBatch = new Map<string, number>();
   const HISTORICAL_CONTEXT_ALLOWED_DISPOSITIONS = new Set(["confirm_contact_candidate", "historical_planned", "ambiguous"]);
+  // Relationship Intelligence Phase 2 correctness fix: two confirm_contact
+  // decisions for the SAME donor within this one request must behave as
+  // if processed sequentially -- a fresh D1 read for decision 2 cannot
+  // see decision 1's own not-yet-executed statements from this same
+  // batch, so a same-category/lifecycle supersession between them would
+  // otherwise be silently missed (each inserting as its own separate
+  // current fact instead of the second correctly superseding the first).
+  // Fixed by loading each donor's fact-acceptance state ONCE, lazily, on
+  // first use, and threading planFactAcceptanceStep()'s own returned
+  // nextState into the next decision for that same donor -- so every
+  // subsequent decision sees exactly the effective state the prior
+  // decision(s) in this request would have produced, without weakening
+  // supersession rules or relying on a later cleanup pass. See
+  // lib/relationships/fact-accept-plan.ts for the pure planning core this
+  // relies on.
+  const factStateByDonor = new Map<string, FactAcceptanceDonorState>();
 
   for (const decision of decisions) {
     const code = decision.code?.trim();
@@ -127,20 +144,31 @@ export async function POST(request: Request) {
 
       // A row explicitly confirmed here is no longer uncertain -- it must
       // satisfy the same completed-interaction contract a normal capture
-      // does, including feeding the Relationship Snapshot the same way
-      // app/api/interactions/route.ts does when its own AI-suggested
-      // snapshot is accepted. Only update the snapshot when this is
+      // does, including contributing to durable relationship intelligence
+      // the same shared pipeline every other accept path now uses (see
+      // lib/relationships/fact-accept.ts). Only attempted when this is
       // actually the donor's most recent completed contact, so importing
       // an old historical row can never regress a fresher, genuinely
-      // captured one.
+      // captured one -- this precondition is UNCHANGED from before Phase
+      // 2 and is preserved exactly, not broadened: it is what "already
+      // approved by the architecture" scopes this route's migration to.
       const latestOtherRow = await env.DB.prepare(
         `SELECT MAX(occurred_at) AS value FROM interactions WHERE donor_id=? AND user_id=? AND id!=? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))`,
       ).bind(donor.id, profile.id, id).first<{ value: number | null }>();
       const latestOther = Math.max(latestOtherRow?.value ?? 0, donorLatestConfirmedInBatch.get(donor.id) ?? 0);
       if (occurredAt >= latestOther) {
-        const extracted = extractInteraction(text, "note");
-        statements.push(env.DB.prepare("UPDATE donors SET relationship_summary=?, institutional_memory=?, relationship_health=?, updated_at=? WHERE id=? AND owner_user_id=? AND data_source='live'")
-          .bind(extracted.relationshipSummary, extracted.memory, 86, now, donor.id, profile.id));
+        let donorFactState = factStateByDonor.get(donor.id);
+        if (!donorFactState) {
+          donorFactState = await loadFactAcceptanceDonorState(donor.id, profile.id);
+          factStateByDonor.set(donor.id, donorFactState);
+        }
+        const { intent, nextState } = planFactAcceptanceStep(donorFactState.workingState, {
+          donorId: donor.id, userId: profile.id, sourceInteractionId: id, sourceInteractionOccurredAt: occurredAt,
+          noteText: text, kind: "note", subject: "", now, pinnedFresh: donorFactState.pinnedFresh,
+        });
+        donorFactState.workingState = nextState;
+        const plan = materializeFactAcceptanceIntent(intent, donor.id, profile.id, now);
+        statements.push(...plan.statements);
       }
       donorLatestConfirmedInBatch.set(donor.id, Math.max(occurredAt, donorLatestConfirmedInBatch.get(donor.id) ?? 0));
     } else if (decision.action === "accept_future_planned" || decision.action === "create_followup") {
