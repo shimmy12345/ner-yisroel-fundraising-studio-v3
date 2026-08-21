@@ -15,34 +15,31 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`4176860` -- "Correct Relationship Intelligence classification gaps found
-in the live preview" (see "Relationship Intelligence Phase 1 --
-Classification Correction" below for full detail). On top of `e66005c`
-(Phase 1 schema + backfill preview machinery), `3dedd63`/`057decf`/
-`3d7ecb7` (the three investigation/design-only docs commits), `a30316f`
-(Option A implementation), `b72895d`/`4ad8f3f` (docs-only cleanup),
-`befa0fb` (the people-extraction false-positive fix), and the full
-history recorded further down this section from earlier tasks.
+`cf3d903` -- "Add explicit historical-corpus disposition gate to the
+Phase 1 backfill" (see "Relationship Intelligence Phase 1 -- Historical
+Migration Gate" below for full detail). On top of `f1d08af` (the
+semantic backfill review, investigation-only docs), `4176860` (the
+classification correction), `e66005c` (Phase 1 schema + backfill preview
+machinery), `3dedd63`/`057decf`/`3d7ecb7` (the three investigation/
+design-only docs commits), `a30316f` (Option A implementation), and the
+full history recorded further down this section from earlier tasks.
 **Deployed Worker version remains
 `0673c91a-de71-4f29-950b-34f71fc3fbec`** (Option A's own deploy, still
-unchanged). **This commit DOES modify a live application code path**
-(`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`, consumed by
-`extractInteraction()`, which Capture/edit-route/Outcome-route/Monday-
-import's `confirm_contact` all call live) -- **deliberately not deployed
-in this task**: nothing this task's own deliverable depends on (the
-preview reads D1 directly and imports the local module, neither goes
-through the deployed Worker) required it, and shipping an extraction-
-behavior widening to live fundraiser interactions is a separate decision
-from correcting a backfill-preview classifier, not bundled in here
-without its own explicit review. Flagged for the user to decide when to
-deploy -- alongside Phase 2, or standalone. **D1 schema state, confirmed
-live**: migration 0034 tables still exist, still both empty (0 rows
-each, reconfirmed after this task's preview re-run) -- no other table
-touched. No production access. `origin/main` untouched throughout every
-task recorded in this file.
+unchanged). **`4176860` still modifies a live application code path**
+(`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) -- still
+deliberately not deployed, for the same reason recorded when that commit
+landed. **This task's own commit (`cf3d903`) touches only Node scripts
+and tests (`scripts/relationship-facts-backfill-preview.mjs`, the new
+`scripts/relationship-facts-historical-corpus-review.mjs`, and their
+tests) -- none of it is part of the deployed Worker bundle at all**, so
+there is nothing new for this task to have deployed even if it wanted
+to. **D1 schema state, confirmed live**: migration 0034 tables still
+exist, still both empty (0 rows each, reconfirmed after this task's
+final preview run) -- no other table touched. No production access.
+`origin/main` untouched throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`4176860` (pushed; matches local HEAD exactly, no divergence).
+`cf3d903` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -6263,6 +6260,132 @@ Awaiting approval before deciding how (or whether) this semantic review
 changes the backfill script's own logic, applying any backfill, or
 beginning Phase 2.
 
+## Relationship Intelligence Phase 1 -- Historical Migration Gate (2026-08-21) -- FINAL PREVIEW: 1 ELIGIBLE ROW (ZACHTER), AWAITING APPROVAL TO APPLY
+
+**Scope, per explicit instruction: turn the semantic-review disposition
+from the prior task into an explicit, enforced gate on the Phase 1
+backfill -- no D1 write, no Phase 2, no deploy.**
+
+### Implementation
+
+**`scripts/relationship-facts-historical-corpus-review.mjs`** (new): a
+hand-reviewed, hardcoded `donorId -> { disposition, donorName, reason }`
+map covering exactly the 12 known legacy corpus donors from the prior
+semantic review -- **explicitly not a generalizable classifier**. Its own
+header comment states plainly: a donor whose id is absent is never
+automatically eligible for this migration, "regardless of what the
+mechanical category/lifecycle classifier would produce for their text,"
+and any future growth of the legacy corpus requires its own explicit
+review and its own new map entry, never automatic inclusion.
+
+**`planBackfill()`** (`scripts/relationship-facts-backfill-preview.mjs`)
+now consults this map FIRST, before any other check -- a donor with no
+reviewed entry, or a disposition other than `BACKFILL_AS_RELATIONSHIP_
+FACT`, is skipped immediately with a reason naming the exact disposition
+and quoting the review's own reasoning. Only a `BACKFILL`-dispositioned
+donor proceeds to the mechanical safety pipeline (empty/too-long/junk-
+format/follow_up-plus-substantive-signal/fingerprint idempotency) that
+already existed. **Refactored** the mechanical pipeline out into its own
+`classifyCandidate()` function specifically so it remains independently
+testable from the new gate -- `tests/relationship-facts-backfill-
+preview.test.mjs`'s general safety-mechanism tests now call `classify
+Candidate()` directly (bypassing the gate on purpose, since those tests
+exercise a different, general concern), while `planBackfill()`'s own
+end-to-end behavior (gate + pipeline together) is tested by both that
+file's case 11 (synthetic, unreviewed donors -- all must be skipped by
+the gate regardless of clean text) and the new dedicated gate test file
+below (the real reviewed corpus).
+
+### Tests added -- `tests/relationship-facts-historical-migration-gate.test.mjs`
+
+Uses the REAL donor ids and REAL legacy text from the live corpus (not
+synthetic stand-ins), proving every explicitly requested property:
+- Zachter is the only donor in the eligible plan; all other 11 are
+  skipped.
+- Klein/Pfeiffer/Rovinsky/Semmelman are skipped with a reason naming
+  `STRUCTURED_DATA_ALREADY_COVERS_IT`.
+- Abdelhak/Horn/Shlionsky are skipped with a reason naming `INTERACTION_
+  HISTORY_ONLY`.
+- Joel Danziger/Mark Danziger/Sonnenblick/Weinschneider are skipped with
+  a reason naming `NEEDS_REVIEW`.
+- Re-running is idempotent: after simulating Zachter's fact having been
+  created (his real computed fingerprint pre-populated into `existing
+  Fingerprints`), a second run produces zero new eligible rows and
+  reports Zachter via the pre-existing idempotency mechanism, with the
+  other 11 still correctly gated the same way.
+- **No skipped donor can enter the fact table merely because it still
+  passes the mechanical classifier** -- proven two ways: (a) every one of
+  the 11 non-Zachter donors' real text is confirmed to still produce a
+  structurally valid category/lifecycle from the mechanical classifier
+  alone (proving they are excluded by the DISPOSITION gate, not because
+  the classifier happens to reject them -- without the gate, all 11
+  would sail through the same way Zachter does); (b) a hypothetical 13th
+  donor with text mechanically IDENTICAL in shape to Zachter's own
+  eligible case (the same Zman-appreciation pattern) but with no entry
+  in the reviewed map is still excluded -- proving the gate decides by
+  review status, never by re-deriving eligibility from text.
+- A sanity check that the reviewed map itself has exactly 12 entries,
+  exactly 1 of which is `BACKFILL_AS_RELATIONSHIP_FACT`, and every
+  disposition value used is one of the four defined constants (no silent
+  typo/drift possible).
+
+### Quality gates (all passing)
+
+`pnpm test`: exit 0, every suite `fail 0` (including the new gate test
+file and the refactored backfill-preview tests). `pnpm exec tsc
+--noEmit`: clean, zero output. `pnpm run build:staging-independent`:
+completed, full route manifest, no errors. **No deploy** -- this task's
+entire change is confined to Node scripts and tests, none of which are
+part of the deployed Worker bundle; there was nothing new to ship even
+if deployment had been considered.
+
+### Final dry-run preview -- Independent Staging, live, read-only
+
+`node scripts/relationship-facts-backfill-preview.mjs`:
+
+```
+Total live donors scanned: 248
+Candidates (non-null relationship_summary or institutional_memory): 12
+SAFE TO BACKFILL: 1
+NEEDS REVIEW / SKIPPED: 11
+```
+
+**The one eligible row:**
+
+| Donor | Fact text | Category | Lifecycle | Fingerprint |
+|---|---|---|---|---|
+| Mr. & Mrs. Yaakov Zachter | "Texted video from first day of Zman and thanked him for his support that makes it happen." | engagement | durable | `50edf919` |
+
+**All 11 skipped, with the exact disposition-gate reason each now
+carries** (identical in substance to the prior task's semantic review,
+now enforced in code rather than only documented):
+
+| Donor | Disposition |
+|---|---|
+| Abdelhak | INTERACTION_HISTORY_ONLY |
+| Joel Danziger | NEEDS_REVIEW |
+| Mark Danziger | NEEDS_REVIEW |
+| Horn | INTERACTION_HISTORY_ONLY |
+| Klein | STRUCTURED_DATA_ALREADY_COVERS_IT |
+| Pfeiffer | STRUCTURED_DATA_ALREADY_COVERS_IT |
+| Rovinsky | STRUCTURED_DATA_ALREADY_COVERS_IT |
+| Semmelman | STRUCTURED_DATA_ALREADY_COVERS_IT |
+| Sonnenblick | NEEDS_REVIEW |
+| Weinschneider | NEEDS_REVIEW |
+| Shlionsky | INTERACTION_HISTORY_ONLY |
+
+D1 reconfirmed empty (0 rows in both `donor_relationship_facts` and
+`donor_relationship_fact_changes`) immediately after this preview run.
+
+### Status -- STOPPED per explicit instruction
+
+**The preview contains exactly 1 eligible row, Zachter, matching the
+explicit expected outcome.** No D1 write made. No backfill applied. No
+existing donor field altered. Phase 2 not started. Not deployed.
+Awaiting explicit approval before applying this now-gated backfill (which
+would create exactly one `donor_relationship_facts` row, for Zachter) or
+beginning Phase 2.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -7145,6 +7268,33 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T22:00:00Z (approximate)
+Claude (Sonnet 5) — Turned the semantic-review disposition from the
+prior task into an explicit, enforced gate on the Phase 1 backfill.
+Added `scripts/relationship-facts-historical-corpus-review.mjs`: a
+hand-reviewed, hardcoded allowlist (deliberately not a generalizable
+classifier) mapping each of the exact 12 known legacy corpus donors to
+its disposition. `planBackfill()` now consults this map first, before
+any mechanical check — a donor with no reviewed entry, or a disposition
+other than BACKFILL, is excluded regardless of what the mechanical
+classifier would say about their text. Refactored the mechanical safety
+pipeline into its own `classifyCandidate()` function so it stays
+independently testable from the new gate. Added a dedicated test file
+using the real donor ids/text proving: Zachter is the only eligible row;
+the 4 structured-data, 3 interaction-history, and 4 needs-review donors
+are all correctly and specifically skipped; re-running is idempotent;
+and — the key safety property — a hypothetical unreviewed donor with
+text mechanically identical to Zachter's own eligible case is still
+excluded, proving the gate decides by review status, never by
+re-deriving eligibility from text. Ran the full suite/tsc/build (all
+clean) and a final live dry-run preview: exactly 1 eligible row
+(Zachter), matching the expected outcome exactly. D1 confirmed empty
+throughout. No backfill applied, no donor field touched, Phase 2 not
+started, no deploy (this task's change is confined to Node scripts/tests
+outside the deployed Worker bundle). Awaiting approval.
+
+---
 
 2026-08-21T21:00:00Z (approximate)
 Claude (Sonnet 5) — Semantic backfill review of the exact 12 staging
