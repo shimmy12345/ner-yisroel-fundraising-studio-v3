@@ -18,28 +18,33 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`befa0fb` -- the people-extraction false-positive fix (see
-"People-Extraction False-Positive Investigation and Fix" below), on top
-of (most recent first): `3f1cd3e`/`e20e10d` (outcome-route Option B fix
-+ docs), `c29590a`/`faea921` (Zman/Yahrtzeit extraction implementation +
-investigation docs), `b687511`/`4126663` (Zman/Yahrtzeit historical
-repair + comprehensive audit tooling), `d48e1f2`/`d6e43ee`/`a59c8d5`
-(grandchild-gap fix, deployment, and donor 987 historical repair), and
-the branch-documentation-authority fix (`dc245fc`) before that.
-**Deployed to Independent Staging (Worker version
-`70dd7081-0fb3-4e69-8329-e115685f09fc`, 2026-08-21T12:40:27Z) and
-live-verified**: Zachter/Semmelman/Weinschneider's Meeting Brief pages
-no longer show `Zman`/`Yahrtzeit`/`Discussed Kollel` under "People
-Mentioned"; a live temporary test note ("Spoke with Yaakov about the
-new Zman...") confirmed `Yaakov` still correctly appears while `Zman`
-does not (test interaction cleaned up afterward, no residue); both
-donors' Relationship Snapshot/Suggested Action text confirmed unchanged
-on the same live pages. No D1 schema change, no historical-data repair,
-no production access. `origin/main` untouched throughout every one of
-the above tasks.
+`4ad8f3f` -- a documentation-only cleanup of this file's stale current-
+state/outstanding-work sections (see the "Last Updated" log's newest
+entry for exactly what changed; no application code, D1, or deployment
+touched by that commit). On top of `befa0fb`, the people-extraction
+false-positive fix (see "People-Extraction False-Positive Investigation
+and Fix" below) -- **this is still the most recent code/deploy-affecting
+commit; `4ad8f3f` changed no code and triggered no new deployment.** On
+top of (most recent first): `3f1cd3e`/`e20e10d` (outcome-route Option B
+fix + docs), `c29590a`/`faea921` (Zman/Yahrtzeit extraction
+implementation + investigation docs), `b687511`/`4126663` (Zman/
+Yahrtzeit historical repair + comprehensive audit tooling),
+`d48e1f2`/`d6e43ee`/`a59c8d5` (grandchild-gap fix, deployment, and donor
+987 historical repair), and the branch-documentation-authority fix
+(`dc245fc`) before that. **Deployed to Independent Staging (Worker
+version `70dd7081-0fb3-4e69-8329-e115685f09fc`, 2026-08-21T12:40:27Z,
+still the current live version as of `4ad8f3f`) and live-verified**:
+Zachter/Semmelman/Weinschneider's Meeting Brief pages no longer show
+`Zman`/`Yahrtzeit`/`Discussed Kollel` under "People Mentioned"; a live
+temporary test note ("Spoke with Yaakov about the new Zman...")
+confirmed `Yaakov` still correctly appears while `Zman` does not (test
+interaction cleaned up afterward, no residue); both donors' Relationship
+Snapshot/Suggested Action text confirmed unchanged on the same live
+pages. No D1 schema change, no historical-data repair, no production
+access. `origin/main` untouched throughout every one of the above tasks.
 
 origin/feature/independent-cloudflare-sandbox:
-`befa0fb` (pushed; matches local HEAD exactly, no divergence).
+`4ad8f3f` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -5172,9 +5177,13 @@ report:
   cleanup's own commit.
 No new tasks were invented; every correction above points to a
 follow-up decision only if the user wants one, not a task this session
-decided needed doing. Docs-only commit(s), pushed to
-`feature/independent-cloudflare-sandbox`; no staging deployment
-performed or needed. `origin/main` unchanged
+decided needed doing. Two docs-only commits, pushed to
+`feature/independent-cloudflare-sandbox`: `4ad8f3f` (the cleanup itself)
+and a small immediate follow-up (this "Current Git State" section's own
+pointer needed to reflect `4ad8f3f` as the new HEAD, per explicit
+instruction) -- see "Current Git State" at the top of this file for
+the final resulting SHA. No staging deployment performed or needed.
+`origin/main` unchanged
 (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Session
 `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
 
