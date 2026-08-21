@@ -68,6 +68,12 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // Monthly Payment Plan feature -- same reason as asks/ask_changes above.
   "pledge_payment_plans",
   "pledge_payment_plan_changes",
+  // Relationship Intelligence Phase 1 -- same reason as asks/
+  // pledge_payment_plans above: real donor-facing durable relationship
+  // data added after this route was written. Deliberately not added to
+  // WORKSPACE_BACKUP_TABLES in this phase.
+  "donor_relationship_facts",
+  "donor_relationship_fact_changes",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",

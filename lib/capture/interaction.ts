@@ -236,8 +236,13 @@ function commitmentAction(sentence: string) {
   return direct ? concise(`${direct[1]}${direct[2]}`.replace(/[.!?]+$/, ""), 120) : null;
 }
 
-const COMMITMENT_PATTERN = /\b(promised|agreed|committed|will|would|send|follow up|follow-up|call back|introduce|schedule|share|provide)\b/i;
-const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly|no longer|ready|hesitant|more involved|less involved|reconnected|stepped back)\b/i;
+// Exported (not just used internally) for reuse by
+// lib/relationships/fact-classification.ts's lifecycle waterfall --
+// Relationship Intelligence Phase 1, see docs/AI-HANDOFF.md. Reused
+// verbatim, never reimplemented, matching this codebase's own established
+// convention for every other feature that builds on this extractor.
+export const COMMITMENT_PATTERN = /\b(promised|agreed|committed|will|would|send|follow up|follow-up|call back|introduce|schedule|share|provide)\b/i;
+export const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly|no longer|ready|hesitant|more involved|less involved|reconnected|stepped back)\b/i;
 // The same closed vocabulary inferSubject() already uses to classify a
 // note into a coarse category (pledge/gift/scholarship/campus/proposal/
 // event/personal) -- reused here not to produce another label, but to
@@ -260,7 +265,28 @@ const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly|no lon
 // A corpus-wide read-only audit found no alternate spelling
 // (yahrzeit/yartzeit/yortzeit) anywhere in real data, so none is added
 // speculatively; see docs/AI-HANDOFF.md.
-const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|scholarship|student|tuition|education|campus|tour|school visit|site visit|proposal|request for support|funding request|ask amount|event|gala|dinner|reception|parlor meeting|family|spouse|son|daughter|grandsons?|granddaughters?|grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?|wedding|engaged|engagement|seminary|birthday|anniversary|yahrtzeits?|sick|illness|recovering|hospital|passed away)\b/i;
+// Broken into named, exported term groups (Relationship Intelligence
+// Phase 1, see docs/AI-HANDOFF.md) so lib/relationships/fact-
+// classification.ts can determine WHICH cluster matched -- FACT_SIGNAL_
+// PATTERN itself only ever answers "does something specific match",
+// never which -- for category assignment, without re-deriving or
+// duplicating this list. Recomposed below into the exact same combined
+// pattern as before this refactor (verified byte-identical term set,
+// same test suite green) -- this is a structural split, not a behavior
+// change. "Engagement" naming note: ENGAGEMENT_EVENT_TERMS means donor
+// engagement/visit/event activity (campus tour, gala); the unrelated
+// "engaged"/"engagement" (marriage) words live in FAMILY_MILESTONE_TERMS.
+export const SOLICITATION_FACT_TERMS = "pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|proposal|request for support|funding request|ask amount";
+export const PROGRAM_BENEFICIARY_TERMS = "scholarship|student|tuition|education|seminary";
+export const ENGAGEMENT_EVENT_TERMS = "campus|tour|school visit|site visit|event|gala|dinner|reception|parlor meeting";
+export const FAMILY_MILESTONE_TERMS = "family|spouse|son|daughter|grandsons?|granddaughters?|grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?|wedding|engaged|engagement|birthday|anniversary|yahrtzeits?";
+export const HEALTH_TERMS = "sick|illness|recovering|hospital|passed away";
+export const SOLICITATION_FACT_PATTERN = new RegExp(`\\b(?:${SOLICITATION_FACT_TERMS})\\b`, "i");
+export const PROGRAM_BENEFICIARY_FACT_PATTERN = new RegExp(`\\b(?:${PROGRAM_BENEFICIARY_TERMS})\\b`, "i");
+export const ENGAGEMENT_EVENT_FACT_PATTERN = new RegExp(`\\b(?:${ENGAGEMENT_EVENT_TERMS})\\b`, "i");
+export const FAMILY_MILESTONE_FACT_PATTERN = new RegExp(`\\b(?:${FAMILY_MILESTONE_TERMS})\\b`, "i");
+export const HEALTH_FACT_PATTERN = new RegExp(`\\b(?:${HEALTH_TERMS})\\b`, "i");
+const FACT_SIGNAL_PATTERN = new RegExp(`\\b(?:${SOLICITATION_FACT_TERMS}|${PROGRAM_BENEFICIARY_TERMS}|${ENGAGEMENT_EVENT_TERMS}|${FAMILY_MILESTONE_TERMS}|${HEALTH_TERMS})\\b`, "i");
 
 // Deliberately NOT a bare `\bzman\b` addition to FACT_SIGNAL_PATTERN above
 // -- a read-only corpus audit (2026-08-20) found "zman" in 39 of 42 real
@@ -282,7 +308,9 @@ const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|paymen
 // also correctly excluded (thanks alone was never the signal). See
 // docs/AI-HANDOFF.md for the full corpus evidence and false-positive
 // design.
-const ZMAN_APPRECIATION_PATTERN = /(?=.*\bzman\b)(?=.*\b(?:thanks?|thanked|thanking|support)\b)/i;
+// Exported for reuse by lib/relationships/fact-classification.ts's
+// category waterfall (folded into "engagement" -- see that file).
+export const ZMAN_APPRECIATION_PATTERN = /(?=.*\bzman\b)(?=.*\b(?:thanks?|thanked|thanking|support)\b)/i;
 
 export type RelationshipSnapshotDetails = {
   people: string[];

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "0ee3351a151c0ed1c59d38c86419c310bc77bad760ce9409b64a0488658611fa",
+  "schemaHash": "438970f3383cc52ae27dea859a1235a50ea03dc31a7adb82c2aa147212db5ec9",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -35,7 +35,8 @@
     "0030_shared_activities.sql",
     "0031_interactions_text_type.sql",
     "0032_asks.sql",
-    "0033_pledge_payment_plans.sql"
+    "0033_pledge_payment_plans.sql",
+    "0034_donor_relationship_facts.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -1181,6 +1182,291 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "donor_relationship_fact_changes",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "fact_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "action",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "changed_fields",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "before_json",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "after_json",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "fact_id",
+            "toTable": "donor_relationship_facts",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_relationship_fact_changes_fact_idx",
+            "columns": [
+              "fact_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_relationship_fact_changes_fact_idx` ON `donor_relationship_fact_changes` (`fact_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`action` IN ('created','superseded','archived_with_source','restored'))"
+        ]
+      },
+      {
+        "name": "donor_relationship_facts",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "category",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "lifecycle",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fact_text",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_interaction_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_interaction_occurred_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'current'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "supersedes_fact_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "source_interaction_id",
+            "toTable": "interactions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_relationship_facts_donor_status_idx",
+            "columns": [
+              "donor_id",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_relationship_facts_donor_status_idx` ON `donor_relationship_facts` (`donor_id`,`status`)"
+          },
+          {
+            "name": "donor_relationship_facts_supersedes_idx",
+            "columns": [
+              "supersedes_fact_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_relationship_facts_supersedes_idx` ON `donor_relationship_facts` (`supersedes_fact_id`)"
+          },
+          {
+            "name": "donor_relationship_facts_user_fingerprint_uidx",
+            "columns": [
+              "user_id",
+              "fingerprint"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_relationship_facts_user_fingerprint_uidx` ON `donor_relationship_facts` (`user_id`,`fingerprint`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`category` IN ('family_milestone','solicitation','health','commitment_followup','engagement','general'))",
+          "CHECK (`lifecycle` IN ('durable','time_bound','follow_up'))",
+          "CHECK (`status` IN ('current','superseded','archived_with_source'))"
+        ]
       },
       {
         "name": "donor_research_finding_sources",
@@ -5653,6 +5939,16 @@
     },
     {
       "type": "table",
+      "name": "donor_relationship_fact_changes",
+      "sql": "CREATE TABLE `donor_relationship_fact_changes` ( `id` text PRIMARY KEY NOT NULL, `fact_id` text NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `action` text NOT NULL, `changed_fields` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`fact_id`) REFERENCES `donor_relationship_facts`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`action` IN ('created','superseded','archived_with_source','restored')) )"
+    },
+    {
+      "type": "table",
+      "name": "donor_relationship_facts",
+      "sql": "CREATE TABLE `donor_relationship_facts` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `category` text NOT NULL, `lifecycle` text NOT NULL, `fact_text` text NOT NULL, `source_interaction_id` text, `source_interaction_occurred_at` integer NOT NULL, `status` text DEFAULT 'current' NOT NULL, `supersedes_fact_id` text, `fingerprint` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`source_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`category` IN ('family_milestone','solicitation','health','commitment_followup','engagement','general')), CHECK (`lifecycle` IN ('durable','time_bound','follow_up')), CHECK (`status` IN ('current','superseded','archived_with_source')) )"
+    },
+    {
+      "type": "table",
       "name": "donor_research_finding_sources",
       "sql": "CREATE TABLE `donor_research_finding_sources` ( `finding_id` text NOT NULL, `source_id` text NOT NULL, PRIMARY KEY (`finding_id`,`source_id`), FOREIGN KEY (`finding_id`) REFERENCES `donor_research_findings`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`source_id`) REFERENCES `donor_research_sources`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -5890,6 +6186,26 @@
       "type": "index",
       "name": "donor_merge_audits_user_date_idx",
       "sql": "CREATE INDEX `donor_merge_audits_user_date_idx` ON `donor_merge_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_relationship_fact_changes_fact_idx",
+      "sql": "CREATE INDEX `donor_relationship_fact_changes_fact_idx` ON `donor_relationship_fact_changes` (`fact_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_relationship_facts_donor_status_idx",
+      "sql": "CREATE INDEX `donor_relationship_facts_donor_status_idx` ON `donor_relationship_facts` (`donor_id`,`status`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_relationship_facts_supersedes_idx",
+      "sql": "CREATE INDEX `donor_relationship_facts_supersedes_idx` ON `donor_relationship_facts` (`supersedes_fact_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_relationship_facts_user_fingerprint_uidx",
+      "sql": "CREATE UNIQUE INDEX `donor_relationship_facts_user_fingerprint_uidx` ON `donor_relationship_facts` (`user_id`,`fingerprint`)"
     },
     {
       "type": "index",

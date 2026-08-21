@@ -143,6 +143,44 @@ CREATE TABLE `donor_merge_audits` (
   FOREIGN KEY (`archived_donor_id`) REFERENCES `donors`(`id`)
 );
 
+CREATE TABLE `donor_relationship_fact_changes` (
+	`id` text PRIMARY KEY NOT NULL,
+	`fact_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`donor_id` text NOT NULL,
+	`action` text NOT NULL,
+	`changed_fields` text NOT NULL,
+	`before_json` text,
+	`after_json` text NOT NULL,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`fact_id`) REFERENCES `donor_relationship_facts`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+	CHECK (`action` IN ('created','superseded','archived_with_source','restored'))
+);
+
+CREATE TABLE `donor_relationship_facts` (
+	`id` text PRIMARY KEY NOT NULL,
+	`donor_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`category` text NOT NULL,
+	`lifecycle` text NOT NULL,
+	`fact_text` text NOT NULL,
+	`source_interaction_id` text,
+	`source_interaction_occurred_at` integer NOT NULL,
+	`status` text DEFAULT 'current' NOT NULL,
+	`supersedes_fact_id` text,
+	`fingerprint` text NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`source_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action,
+	CHECK (`category` IN ('family_milestone','solicitation','health','commitment_followup','engagement','general')),
+	CHECK (`lifecycle` IN ('durable','time_bound','follow_up')),
+	CHECK (`status` IN ('current','superseded','archived_with_source'))
+);
+
 CREATE TABLE `donor_research_finding_sources` (
   `finding_id` text NOT NULL,
   `source_id` text NOT NULL,
@@ -665,6 +703,14 @@ ON `donor_merge_audits` (`archived_donor_id`);
 CREATE INDEX `donor_merge_audits_user_date_idx`
 ON `donor_merge_audits` (`user_id`,`created_at`);
 
+CREATE INDEX `donor_relationship_fact_changes_fact_idx` ON `donor_relationship_fact_changes` (`fact_id`,`created_at`);
+
+CREATE INDEX `donor_relationship_facts_donor_status_idx` ON `donor_relationship_facts` (`donor_id`,`status`);
+
+CREATE INDEX `donor_relationship_facts_supersedes_idx` ON `donor_relationship_facts` (`supersedes_fact_id`);
+
+CREATE UNIQUE INDEX `donor_relationship_facts_user_fingerprint_uidx` ON `donor_relationship_facts` (`user_id`,`fingerprint`);
+
 CREATE INDEX `donor_research_finding_sources_source_idx` ON `donor_research_finding_sources` (`source_id`);
 
 CREATE UNIQUE INDEX `donor_research_findings_donor_fingerprint_active_uidx` ON `donor_research_findings` (`donor_id`,`fingerprint`) WHERE `status` IN ('current','unverified');
@@ -793,5 +839,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','0ee3351a151c0ed1c59d38c86419c310bc77bad760ce9409b64a0488658611fa',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','438970f3383cc52ae27dea859a1235a50ea03dc31a7adb82c2aa147212db5ec9',1785944072);
 PRAGMA optimize;

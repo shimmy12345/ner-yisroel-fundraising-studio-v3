@@ -791,3 +791,88 @@ export const pledgePaymentPlanChanges = sqliteTable("pledge_payment_plan_changes
   afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [index("pledge_payment_plan_changes_plan_idx").on(table.planId, table.createdAt)]);
+
+// Relationship Intelligence Phase 1 (see docs/AI-HANDOFF.md's "Relationship
+// Snapshot Synthesis Design" sections, Architecture + Synthesis + Lifecycle
+// Correction) -- durable accepted relationship facts, one row per accepted
+// fact, never overwritten in place. donors.relationship_summary/
+// institutional_memory become a SYNTHESIZED, regenerated view derived from
+// this table (Phase 2+); this table is the actual durable store. Modeled
+// directly on donor_research_findings' proven status/supersession shape
+// (status/supersedesFindingId), not a novel pattern.
+export const donorRelationshipFacts = sqliteTable("donor_relationship_facts", {
+  id: text("id").primaryKey(),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  // WHAT the fact is about -- used for supersession-matching, never for
+  // decay. "engagement" means donor engagement/visit/event activity
+  // (campus tour, gala, zman-appreciation), never "engaged to be married"
+  // (that's family_milestone) -- see lib/relationships/fact-classification.ts.
+  category: text("category", { enum: ["family_milestone", "solicitation", "health", "commitment_followup", "engagement", "general"] }).notNull(),
+  // HOW LONG the fact stays relevant -- deliberately independent of
+  // category (the Lifecycle Correction's whole point: "his daughter is
+  // Danielle" and "his daughter is getting married in November" share a
+  // category but must not share a lifecycle). durable = never decays,
+  // fixed baseline relevance (a standing identity/relationship trait).
+  // time_bound = decays per category's window (a dated event/state).
+  // follow_up = never enters Snapshot synthesis at all -- an
+  // action-oriented fact, not descriptive of the donor; its natural home
+  // is the existing recommendations/reminder surface, not this table's
+  // synthesized output.
+  lifecycle: text("lifecycle", { enum: ["durable", "time_bound", "follow_up"] }).notNull(),
+  factText: text("fact_text").notNull(),
+  // Null only for Phase 1 backfilled facts, where no single real
+  // interaction can be proven as the source (today's donors.
+  // relationship_summary has no provenance column at all -- see
+  // scripts/relationship-facts-backfill-preview.mjs's own header comment).
+  // Every fact accepted through a real write path from Phase 2 onward
+  // always sets this.
+  sourceInteractionId: text("source_interaction_id").references(() => interactions.id),
+  // Decay-clock start. For a normally-accepted fact (Phase 2+) this is the
+  // source interaction's own occurred_at, snapshotted at accept time so a
+  // later edit to that interaction's date never retroactively changes when
+  // the fact was true. For a Phase 1 backfilled fact this is CLAMPED to
+  // the backfill's own run time, never the donor's true historical
+  // interaction date -- so a backfilled time_bound fact gets the same full
+  // decay grace period a brand-new fact would, instead of potentially
+  // being born already past its own window.
+  sourceInteractionOccurredAt: integer("source_interaction_occurred_at", { mode: "timestamp" }).notNull(),
+  status: text("status", { enum: ["current", "superseded", "archived_with_source"] }).notNull().default("current"),
+  // Self-reference on the NEW row pointing at what it replaced, mirroring
+  // donor_research_findings.supersedesFindingId exactly -- including that
+  // precedent's own choice not to declare this a real FK (a fact is never
+  // hard-deleted, so there is no dangling-reference risk to guard against
+  // with one).
+  supersedesFactId: text("supersedes_fact_id"),
+  // Identifies "the same accepted fact" for idempotent re-runs (the
+  // backfill script's own safeguard) -- see
+  // lib/relationships/fact-fingerprint.ts. Deliberately INCLUDES
+  // sourceInteractionId (unlike donor_research_findings' fingerprint,
+  // which deliberately excludes source): two different interactions that
+  // happen to produce coincidentally-identical fact text are two separate
+  // accepted moments here, not one corroborated fact -- provenance matters
+  // per-row in this table.
+  fingerprint: text("fingerprint").notNull(),
+  ...timestamps,
+}, (table) => [
+  index("donor_relationship_facts_donor_status_idx").on(table.donorId, table.status),
+  uniqueIndex("donor_relationship_facts_user_fingerprint_uidx").on(table.userId, table.fingerprint),
+  index("donor_relationship_facts_supersedes_idx").on(table.supersedesFactId),
+]);
+
+// Append-only audit trail for donor_relationship_facts, matching
+// ask_changes/pledge_payment_plan_changes' shape exactly. factId IS a real
+// foreign key -- facts are never hard-deleted, only status-transitioned,
+// so an audit row can never outlive the fact it describes (same reasoning
+// as askId on ask_changes).
+export const donorRelationshipFactChanges = sqliteTable("donor_relationship_fact_changes", {
+  id: text("id").primaryKey(),
+  factId: text("fact_id").notNull().references(() => donorRelationshipFacts.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  action: text("action", { enum: ["created", "superseded", "archived_with_source", "restored"] }).notNull(),
+  changedFields: text("changed_fields", { mode: "json" }).$type<string[]>().notNull(),
+  beforeJson: text("before_json", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [index("donor_relationship_fact_changes_fact_idx").on(table.factId, table.createdAt)]);

@@ -38,6 +38,13 @@ export const STAGING_RESET_TABLE_ORDER = [
   // so it's deleted before both of those, further down.
   "pledge_payment_plan_changes",
   "pledge_payment_plans",
+  // donor_relationship_fact_changes references fact_id (a real FK, same
+  // pattern as ask_changes/pledge_payment_plan_changes above), so it's
+  // deleted first. donor_relationship_facts references donors.id,
+  // users.id, and interactions.id (nullable), so it's deleted before all
+  // three, further down.
+  "donor_relationship_fact_changes",
+  "donor_relationship_facts",
   "donor_contact_audits",
   "donor_historical_context",
   "donor_merge_audits",
