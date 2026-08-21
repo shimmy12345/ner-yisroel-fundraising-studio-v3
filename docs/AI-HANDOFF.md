@@ -2933,6 +2933,195 @@ this donor's data straight from D1). Session
 deployment, and the one confirmed historical case (donor 987) are now
 all complete.**
 
+## Comprehensive Historical Audit -- relationship_summary / institutional_memory (2026-08-20) -- READ-ONLY, NO WRITES
+
+Prompted by a live donor page still showing clearly bad historical
+content (`donor 60830` -- see "Special check" below), proving the prior
+cleanup work (the `scripts/relationship-summary-cleanup-preview.mjs`
+tool, and the grandchild-gap fix/repair above) did not comprehensively
+identify every malformed historical snapshot already stored in D1. This
+task is a complete, read-only audit of every live donor's stored
+`relationship_summary`/`institutional_memory` -- no writes of any kind.
+
+**Scope.** Every donor with `data_source='live'`, `archived_at IS NULL`,
+and either `relationship_summary IS NOT NULL` or `institutional_memory
+IS NOT NULL` -- not limited to donors visible in any screenshot, and not
+assuming any non-null value is bad without inspecting its actual text.
+
+**Tooling.** New, separate, read-only-only script
+`scripts/relationship-context-audit.mjs` (does NOT modify or extend
+`scripts/relationship-summary-cleanup-preview.mjs`, per explicit
+instruction). It reuses that script's own exported pure helpers
+(`candidateTexts`, `oldActionableRelationshipSnapshot`, `normalizeKind`)
+for source-tracing rather than reimplementing them, but classifies BOTH
+fields independently across every non-null donor (the existing tool
+only classifies `relationship_summary`, and only for donors where it's
+non-null) against a broader set of legacy-scaffolding signals than just
+the exact `"Latest discussion topics: "` prefix (`People mentioned:`,
+`Organizations mentioned:`, `Recommended next action:`, `Review this
+note before the next interaction`, `Commitments:`, `Open follow-ups:`,
+`Relationship changes:` -- every distinct field-label the pre-fix
+generator ever emitted, checked independently of each other). Contains
+no `UPDATE`/`INSERT`/`DELETE` statement and no `--apply` flag anywhere
+in the file -- verified both by direct inspection and by a new test
+(`tests/relationship-context-audit.test.mjs`) that greps the script's
+own source for exactly that. That test file also proves: classification
+is deterministic; every legacy scaffolding fragment listed above is
+caught (both as part of a full dump and in isolation); every real
+donor-relevant example on file (grandchild/family-milestone notes,
+solicitation notes) is NOT falsely flagged; a donor with one malformed
+field and one good field is surfaced as `C_MIXED`, never silently
+cleared; and the Suggested-Action-impact check exactly matches
+`relationshipOpportunityCandidate`'s real fallback chain. `pnpm test`
+(all suites, exit 0) and `pnpm exec tsc --noEmit` (clean) both pass with
+this script and test added.
+
+**Counts.**
+1. Total live donors: **248**
+2. `relationship_summary` non-null: **9**
+3. `institutional_memory` non-null: **12**
+4. Clearly good (A): **10**
+5. Clearly malformed (B): **0**
+6. Mixed (C): **2**
+7. Uncertain (D): **0**
+8. Donors where malformed relationship context currently affects
+   Suggested Action: **2** (both mixed donors below)
+9. Donors where the source interaction could be confidently identified:
+   **2** (both malformed `relationship_summary` values reproduce, byte-
+   for-byte, under the OLD pre-1487a8b generator applied to a real
+   interaction note on file -- proven, not inferred)
+10. Donors where provenance could not be identified: **0**
+
+**Every donor NOT clearly good (both, in full):**
+
+| Donor | Code | relationship_summary | institutional_memory | Exact problematic text | Likely source interaction/date | Suggested Action affected? | Recommended disposition | Confidence |
+|---|---|---|---|---|---|---|---|---|
+| Mr. & Mrs. Yaakov Zachter | 60830 | MALFORMED | GOOD | `"Latest discussion topics: Text message follow-up.\nPeople mentioned: Texted, Zman.\nRecommended next action: Review this note before the next interaction."` | `8b502028-6a6e-4ee8-aa3f-9903a1d75af2` (Text Message, 2026-08-18; created 2026-08-19T02:29:35Z, ~2h before the 1487a8b fix deployed) | **YES** | `relationship_summary`: NEEDS REVIEW (see reasoning below). `institutional_memory`: LEAVE UNCHANGED | High |
+| Dr. Jacques Semmelman | 72957 | MALFORMED | GOOD | `"Latest discussion topics: Personal update.\nPeople mentioned: Sent, Yahrtzeit.\nRecommended next action: Review this note before the next interaction."` | `544721ad-ceb3-4078-bbd6-ef90c0093a1b` (Personal interaction, 2026-08-07; created 2026-08-14T14:39:09Z) | **YES** | `relationship_summary`: NEEDS REVIEW (see reasoning below). `institutional_memory`: LEAVE UNCHANGED | High |
+
+Both donors are `C_MIXED`: `relationship_summary` is pre-fix scaffolding
+junk, `institutional_memory` is genuinely good (a real quoted note --
+"Texted video from first day of Zman and thanked him for his support
+that makes it happen" / "Sent text on wife's Yahrtzeit to acknowledge
+it"). Per explicit instruction, mixed records must not be silently
+deleted without review -- neither field was touched.
+
+**Why "NEEDS REVIEW" rather than "CLEAR TO NULL" for these two
+`relationship_summary` values.** The current (fixed) extractor, run
+against each real source note, ALSO finds no fact signal and would
+produce `null` -- but both notes contain a real, named, donor-relevant
+term ("Zman" -- a school-calendar term; "Yahrtzeit" -- a death
+anniversary) that `FACT_SIGNAL_PATTERN` doesn't recognize as a fact
+signal, the same class of gap as the grandchild/grandparent case fixed
+earlier in this branch. Clearing to null would silently discard that a
+donor-relevant term is on file at all (even though `institutional_memory`
+already preserves the actual sentence). This is flagged for human
+review, not resolved here -- **per explicit instruction, extraction
+logic was NOT changed in this task**, and whether `FACT_SIGNAL_PATTERN`
+should also learn "Zman"/"Yahrtzeit" (or these two should simply be
+cleared to null once reviewed) is a separate decision.
+
+**Source trace detail.** Both source interactions: single-donor capture
+route (`source = 'capture:text'` / `'capture:personal'`),
+`shared_activity_id`/`role` both null (not a shared/broadcast
+interaction), `created_at == updated_at` (never edited), zero
+`activity_status_audits` rows. Both interactions' `created_at` exactly
+equals the donor's `updated_at` at the time of this audit, confirming a
+direct, single-request causal link between that capture and the stored
+value -- not a coincidence or a later unrelated edit.
+
+**Explicit acceptance history.** Both malformed `relationship_summary`
+values were written through `app/api/interactions/route.ts`'s normal
+capture flow, which -- both before and after commit 1487a8b -- only
+ever writes `relationship_summary`/`institutional_memory` when
+`!scheduled && body.acceptRelationshipSnapshot === true`. Since this
+gating condition itself was not changed by 1487a8b (only the
+*generator's output quality* changed), both values were **genuinely,
+explicitly accepted by the user at capture time** -- real acceptance of
+malformed content the pre-fix generator produced, not an import, not
+silent automation, and not something to assume should be discarded
+merely because provenance is "just user acceptance of bad output."
+Both interactions' `created_at` predate the 1487a8b fix's staging deploy
+(2026-08-19T04:23:33Z), confirming both are historical (pre-fix), not a
+regression of the current extractor.
+
+**Side finding (not malformed content, but relevant provenance
+context): a second, ungated write path exists.**
+`app/api/interactions/[id]/outcome/route.ts` (lines ~125-129, the
+"mark this scheduled activity complete/no-response" flow) writes
+`relationship_summary`/`institutional_memory` **unconditionally** --
+with NO `acceptRelationshipSnapshot` gate at all -- whenever an activity
+transitions to `completed`/`no-response`. This explains three donors in
+this audit whose `institutional_memory` is non-null while
+`relationship_summary` is null (37064 Rovinsky, 42818 Klein, 78289
+Pfeiffer): their outcome notes ("Solicited for a plaque ($5k)",
+"Solicited for $10k") contain no `FACT_SIGNAL_PATTERN` match, so
+`relationship_summary` came back null, but `institutional_memory`
+(always a non-null template) got written anyway through this route with
+no accept step. All three donors' actual stored `institutional_memory`
+content is genuinely good (real solicitation facts, not scaffolding),
+so none of the three appear in the flagged table above -- but the
+architecture gap itself (this route bypasses explicit acceptance
+entirely, unlike the main capture route) is worth flagging for a future
+task, since it could just as easily write scaffolding-quality content
+without any accept step if a future outcome note happened to trip the
+old-format-style edge cases. **Not fixed in this task** (would be an
+extraction/write-path logic change, out of scope here).
+
+**Suggested Action impact -- proven from source, not assumed.**
+`lib/relationships/recommendation-candidates.ts`'s
+`relationshipOpportunityCandidate()`/`solicitCandidate()` both compute
+`text = evidence.narrative.relationshipSummary || evidence.narrative.institutionalMemory`
+-- `relationship_summary` wins whenever non-null, **regardless of its
+own quality**, only falling back to `institutional_memory` when
+`relationship_summary` is null. For both Zachter and Semmelman,
+`relationship_summary` is non-null (the malformed dump), so it directly
+becomes `action: "Reach out and reference: ${text}"` and `evidence:
+["Recorded relationship note: \"${text}\""]` -- the exact mechanism
+behind the screenshot's "Suggested Action then repeats that text as
+though it were meaningful donor knowledge." This candidate feeds
+`generateCandidates()`, the single function shared by the donor page,
+Today, Meeting Brief, and Assistant (per this file's own prior
+established description of that engine) -- so the malformed text is
+currently eligible to surface anywhere that engine runs, not merely on
+the donor page. (Note: the code comment directly above this function
+claims narrative text "is now always a specific, quoted fact" -- true
+for anything the *current* extractor produces, but that invariant does
+not hold retroactively for already-stored pre-fix values like these
+two.)
+
+**Special check -- the screenshot donor, confirmed.** Exact donor: **Mr.
+& Mrs. Yaakov Zachter, donor code 60830**
+(`19af69d6-f147-474b-88ad-f6358ff65b9a`). Stored `relationship_summary`
+matches the screenshot's quoted text byte-for-byte:
+`"Latest discussion topics: Text message follow-up.\nPeople mentioned:
+Texted, Zman.\nRecommended next action: Review this note before the
+next interaction."` Source interaction identified with proof:
+`8b502028-6a6e-4ee8-aa3f-9903a1d75af2` (Text Message, occurred
+2026-08-18, note: "Texted video from first day of Zman and thanked him
+for his support that makes it happen"). Suggested Action is confirmed
+**currently consuming this bad summary** (see mechanism above). **Not
+repaired in this task, per explicit instruction.**
+
+**Confirmation: no data was changed.** Every query in this audit was a
+`SELECT` (via `wrangler d1 execute --remote`) or a pure in-process
+function call against already-fetched data. No `donors`/`interactions`/
+`recommendations` row was written, cleared, regenerated, or created. No
+extraction code changed. No schema change. No deploy. `origin/main`
+unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout.
+Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Exact approval needed next.** Review of the full flagged set above (2
+donors, both `C_MIXED`) before any cleanup is applied. Specifically:
+(1) whether to clear `relationship_summary` to null for Zachter (60830)
+and Semmelman (72957) now, accepting the loss of the
+"Zman"/"Yahrtzeit" mention (already preserved in
+`institutional_memory`), or hold for a separate `FACT_SIGNAL_PATTERN`
+vocabulary decision first; (2) whether the `outcome/route.ts` ungated
+write path (side finding above) should be scoped as a separate future
+task. `institutional_memory` for both flagged donors, and every field
+for all 10 clearly-good donors, needs no action.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -3704,6 +3893,50 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T21:20:00Z (approximate)
+Claude (Sonnet 5) — Read-only, comprehensive audit of every live donor's
+stored `relationship_summary`/`institutional_memory` on Independent
+Staging, prompted by a live donor page (60830, Zachter) still showing
+old-format "Latest discussion topics: .../People mentioned: .../
+Recommended next action: ..." scaffolding, proving the earlier cleanup
+work wasn't comprehensive. Audited all 12 donors with either field
+non-null (of 248 total live donors; 9 with `relationship_summary`
+non-null, 12 with `institutional_memory` non-null). Found exactly 2
+`C_MIXED` donors -- Zachter (60830) and Semmelman (72957) -- both with a
+pre-1487a8b malformed `relationship_summary` dump and a genuinely good
+`institutional_memory`; 10 donors fully clearly-good; 0 clearly
+malformed; 0 uncertain. Proved via source-tracing (byte-for-byte
+reproduction under the old generator) that both malformed values came
+from real single-donor `capture:text`/`capture:personal` interactions,
+explicitly accepted by the user before the fix deployed, never edited
+since. Proved via direct code inspection
+(`relationshipOpportunityCandidate`/`solicitCandidate` in
+`lib/relationships/recommendation-candidates.ts`) that both malformed
+values are currently eligible to surface as Suggested Action anywhere
+the shared recommendation engine runs (donor page, Today, Meeting Brief,
+Assistant) -- confirming the screenshot's "Suggested Action repeats the
+bad text" behavior is real and systemic to that donor, not cosmetic.
+Also found a side architecture gap (not fixed): `app/api/interactions/
+[id]/outcome/route.ts` writes both fields with no
+`acceptRelationshipSnapshot` gate at all, explaining 3 other donors
+whose `institutional_memory` is set while `relationship_summary` stayed
+null (their content is fine, so not flagged, but the gap itself is
+noted for a future task). Built a new, separate, read-only-only script
+(`scripts/relationship-context-audit.mjs` -- does not modify or extend
+the existing apply-capable `relationship-summary-cleanup-preview.mjs`)
+plus `tests/relationship-context-audit.test.mjs` (deterministic
+classification, malformed-pattern coverage, false-positive-safe on real
+family-context examples, mixed records surfaced not auto-deleted,
+Suggested-Action-impact matches the real fallback chain, and the script
+itself proven to contain no write path). `pnpm test` (all suites, exit
+0) and `pnpm exec tsc --noEmit` (clean) both pass. **No D1 writes, no
+extraction-code change, no deploy** -- strictly read-only throughout.
+Full report: "Comprehensive Historical Audit -- relationship_summary /
+institutional_memory (2026-08-20)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T20:45:00Z (approximate)
 Claude (Sonnet 5) — Applied the user-approved donor 987 historical
