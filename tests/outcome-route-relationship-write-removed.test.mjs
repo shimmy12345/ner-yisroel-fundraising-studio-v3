@@ -4,8 +4,12 @@ import { extractInteraction } from "../lib/capture/interaction.ts";
 
 // Regression for the 2026-08-21 outcome-route acceptance-gap fix (Option
 // B -- see docs/AI-HANDOFF.md "Outcome-Route Acceptance-Gap
-// Investigation" and its follow-up implementation entry). Before this
-// fix, app/api/interactions/[id]/outcome/route.ts wrote
+// Investigation" and its follow-up implementation entry), UPDATED for
+// the same-day Option A implementation ("Outcome-Note Relationship
+// Snapshot Review/Accept Flow") that re-adds a relationship-snapshot
+// write to this route.
+//
+// Before Option B, app/api/interactions/[id]/outcome/route.ts wrote
 // donors.relationship_summary/institutional_memory UNCONDITIONALLY
 // whenever an activity was marked completed/no-response -- no
 // acceptRelationshipSnapshot gate (unlike the main capture route), no
@@ -15,109 +19,146 @@ import { extractInteraction } from "../lib/capture/interaction.ts";
 // replace or null an already-good, previously human-accepted
 // Relationship Snapshot, regardless of the activity's content or which
 // donor it belonged to (including shared-activity-linked interactions
-// that later reach "scheduled" status for one recipient). The fix
-// removes the write entirely rather than gating it, since the outcome
-// page has no review/accept UI to give an acceptance flag real meaning.
+// that later reach "scheduled" status for one recipient). Option B fixed
+// this by removing the write entirely, since the outcome page had no
+// review/accept UI to give an acceptance flag real meaning.
+//
+// Option A gives the outcome page that review/accept UI (a live preview
+// plus an explicit, default-unchecked checkbox in OutcomeExperience.tsx,
+// mirroring CaptureExperience.tsx) and, ONLY once that UI exists,
+// restores the write -- but strictly behind the same double-gate the
+// main capture route already uses, plus a NULL-safe compare-and-swap
+// against the donor row read at the top of the same request. This file
+// now proves the SPECIFIC danger Option B fixed -- an unconditional or
+// silently-inferred write -- still cannot happen, not that the write is
+// categorically absent.
 //
 // This repo tests route-level behavior structurally (see the existing
 // tests/activity-outcome.test.mjs and tests/capture.test.mjs), since the
 // actual route handlers depend on the cloudflare:workers `env` binding
 // and can't be invoked directly outside a Workers runtime. Combined with
 // running the REAL extractInteraction() function (not a reimplementation)
-// against the same realistic notes used in the investigation's own
-// reproduction, this proves both WHAT would have been written and THAT
-// the route no longer writes it, for every scenario the investigation
-// identified.
+// against realistic notes, this proves both WHAT would be proposed and
+// THAT the route can only ever write it behind an explicit, per-request
+// acceptance flag the user must have seen a matching preview for.
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 async function run() {
   const outcomeRoute = await read("app/api/interactions/[id]/outcome/route.ts");
 
-  // ---- The write is gone, structurally, for every action/status this
-  // route can produce -- not merely gated behind a condition that could
-  // still be true. This alone proves every scenario below by
-  // construction: there is no code path left that can write these
-  // fields, so nothing can overwrite or null an existing value,
-  // regardless of whether the interaction is being completed for the
-  // first time, re-edited after already being completed, marked
-  // no-response, or is linked to a shared activity. ----
-  assert.doesNotMatch(
+  // ---- The write exists again (Option A), but ONLY inside a block
+  // gated on both (a) the activity genuinely closing (completed/
+  // no-response -- cancel/reschedule/reopen never reach it) and (b) an
+  // explicit acceptRelationshipSnapshot === true flag from the client.
+  // This is the same shape as the main capture route's own gate, checked
+  // below. ----
+  assert.match(
     outcomeRoute,
-    /UPDATE donors SET relationship_summary/,
-    "the outcome route must never write donors.relationship_summary/institutional_memory -- this was the exact unconditional overwrite this fix removes",
+    /if \(\(nextStatus === "completed" \|\| nextStatus === "no-response"\) && body\.acceptRelationshipSnapshot === true\) \{/,
+    "the relationship-snapshot write must remain gated on BOTH the activity closing and an explicit acceptRelationshipSnapshot === true flag -- never unconditional, never inferred from action alone",
   );
-  // Checks actual CODE usage (a real reference the route could act on),
-  // not prose -- this route's own explanatory comment about the removed
-  // write legitimately mentions these field/function names in English,
-  // which must not itself fail the test.
-  assert.doesNotMatch(
-    outcomeRoute,
-    /env\.DB\.prepare\([^)]*(relationship_summary|institutional_memory)/s,
-    "no SQL statement in this route may reference relationship_summary/institutional_memory",
-  );
-  assert.doesNotMatch(
-    outcomeRoute,
-    /extracted\.relationshipSummary|extracted\.memory/,
-    "no extracted.relationshipSummary/extracted.memory value may be bound anywhere in this route",
-  );
-  assert.doesNotMatch(
-    outcomeRoute,
-    /import \{[^}]*extractInteraction/,
-    "extractInteraction must no longer be imported from lib/capture/interaction -- the extraction step that fed the removed write is gone too, not just the write statement",
+  // The gate must appear strictly before the one and only UPDATE donors
+  // statement in this route -- i.e. there is no second, ungated write
+  // path that bypasses the check above.
+  const gateIndex = outcomeRoute.indexOf('body.acceptRelationshipSnapshot === true');
+  const writeIndex = outcomeRoute.indexOf('UPDATE donors SET relationship_summary');
+  assert.ok(gateIndex >= 0 && writeIndex >= 0 && gateIndex < writeIndex, "the acceptance gate must appear before the donors UPDATE, and both must exist exactly once");
+  assert.equal(
+    (outcomeRoute.match(/UPDATE donors SET relationship_summary/g) ?? []).length,
+    1,
+    "there must be exactly one relationship-snapshot write path in this route -- no second, ungated one",
   );
 
-  // ---- Reproduce the investigation's own scenarios with the REAL
-  // extractInteraction() function, to prove what WOULD have been written
-  // -- grounding the structural assertions above in the actual concrete
-  // risk, not just an abstract absence check. ----
+  // ---- The write additionally requires the extractor to have found
+  // something concrete -- an accepted checkbox alone, with nothing
+  // meaningful in the note, must not write. ----
+  assert.match(
+    outcomeRoute,
+    /if \(extracted\.relationshipSummary !== null\) \{/,
+    "even with acceptRelationshipSnapshot === true, the write must not proceed unless the extractor actually found something",
+  );
 
-  // Scenario 1/3: an unrelated, routine outcome note. If the old write
-  // still existed, this would have overwritten a donor's real,
-  // previously-accepted grandchild-milestone snapshot with unrelated
-  // RSVP text (matching the investigation's own reproduction).
+  // ---- The write is a NULL-safe compare-and-swap against the donor row
+  // read at the top of THIS request, not an unconditional replace --
+  // this is what stands in for Option B's removed write's safety net. ----
+  assert.match(
+    outcomeRoute,
+    /WHERE id = \? AND owner_user_id = \? AND data_source = 'live' AND relationship_summary IS \? AND institutional_memory IS \?/,
+    "the relationship-snapshot write must be a NULL-safe (IS, not =) compare-and-swap against the donor's current relationship_summary/institutional_memory read at request start",
+  );
+  assert.match(
+    outcomeRoute,
+    /relationshipUpdated = \(results\[relationshipStatementIndex\]\?\.meta\?\.changes \?\? 0\) > 0/,
+    "a failed compare-and-swap (stale donor row) must fail closed -- reported honestly as not updated, not silently treated as success",
+  );
+
+  // ---- Never inferred: the write must depend on the client-sent flag,
+  // never on note content alone (e.g. no code path that sets
+  // acceptRelationshipSnapshot itself, or writes whenever `extracted...
+  // !== null` regardless of the flag). ----
+  assert.doesNotMatch(
+    outcomeRoute,
+    /body\.acceptRelationshipSnapshot\s*=(?!=)/,
+    "the route must never assign/infer acceptRelationshipSnapshot itself -- it must only ever read the client-sent value",
+  );
+
+  // ---- Reopen/cancel/reschedule structurally cannot reach the write:
+  // the gate above requires nextStatus to be completed/no-response,
+  // which those three actions never set (see the action branches). ----
+  assert.match(outcomeRoute, /nextStatus = "scheduled";[\s\S]*?\} else if \(body\.action === "cancel"\)/, "reopen must set nextStatus to \"scheduled\", which the relationship-write gate excludes");
+  assert.match(outcomeRoute, /nextStatus = "cancelled";/, "cancel must set nextStatus to \"cancelled\", which the relationship-write gate excludes");
+  assert.match(outcomeRoute, /nextOccurredAt = Math\.floor\(rescheduledAt\.getTime\(\) \/ 1000\);\s*nextSource = `capture-scheduled:rescheduled:/, "reschedule keeps the activity scheduled, which the relationship-write gate excludes");
+
+  // ---- Reproduce realistic scenarios with the REAL extractInteraction()
+  // function, to prove what the route would propose (not write, since
+  // this route only ever writes on explicit accept) -- grounding the
+  // gate assertions above in concrete extractor behavior, not just an
+  // abstract presence check. ----
+
+  // A routine outcome note that DOES extract non-null content -- proves
+  // the route would only write this if the user explicitly accepted it
+  // (the gate assertions above), never automatically.
   const routineNote = "Called to confirm he's coming to the dinner.\nOutcome: Confirmed, will attend.";
   const routineExtracted = extractInteraction(routineNote, "call", "Dinner RSVP confirmation call");
   assert.notEqual(
     routineExtracted.relationshipSummary,
     null,
-    "sanity check: this routine note does extract non-null content under the real extractor, matching the investigation's finding -- the fix must prevent this from EVER being written by this route, not rely on the extractor happening to return null",
+    "sanity check: this routine note extracts non-null content under the real extractor -- the route must never write this without an explicit accept, per the gate assertions above",
   );
 
-  // Scenario 2: a fully generic outcome note that extracts nothing.
-  // If the old write still existed, this would have silently NULLED an
-  // existing relationship_summary.
+  // A fully generic outcome note that extracts nothing -- proves that
+  // even with acceptRelationshipSnapshot === true, this route (and the
+  // client, which only ever sends true when its own preview is non-null)
+  // would never write anything for this note.
   const genericNote = "Left a voicemail.\nOutcome: No answer.";
   const genericExtracted = extractInteraction(genericNote, "call", "Follow-up call");
   assert.equal(
     genericExtracted.relationshipSummary,
     null,
-    "sanity check: this generic note extracts nothing under the real extractor, matching the investigation's finding -- the fix must prevent this null from EVER reaching donors.relationship_summary via this route",
+    "sanity check: this generic note extracts nothing under the real extractor -- confirms the `extracted.relationshipSummary !== null` gate above is not vacuous",
   );
-
-  // Both scenarios above are real, reproducible extractor outputs; the
-  // route-source assertions already proved neither can reach D1 through
-  // this route any more, for a first completion OR a later edit of an
-  // already-completed outcome (the same code path handles both -- see
-  // the single `else` branch generating capture-completed:/no-response
-  // sources for both a fresh close and OutcomeExperience.tsx's "Save
-  // Outcome Changes" re-submission).
 
   // ---- Shared-activity-linked interactions: the route's own donor
   // lookup has no special case for shared_activity_id, so a shared/
   // broadcast-originated interaction that reaches "scheduled" status
   // for one recipient (isScheduledActivity/activityStatus depend only
-  // on source/occurredAt/createdAt, never shared_activity_id -- proven
-  // in the investigation) can still reach this route via ownedActivity().
-  // The absence of any relationship-field write above means this can no
-  // longer write donor relationship context regardless -- confirmed here
-  // that ownedActivity() itself still has no shared_activity_id branch
-  // (the fix closes the gap structurally, not by adding a new
-  // exclusion). ----
+  // on source/occurredAt/createdAt, never shared_activity_id) can still
+  // reach this route via ownedActivity(). The write is still scoped to
+  // exactly `existing.donor_id` -- the one donor tied to the one
+  // interaction id this request already resolved -- with no fan-out
+  // possible to other recipients of the same shared_activity_id, and
+  // still requires that donor's OWN explicit accept from OutcomeExperience.
+  // tsx before anything is written. ----
   assert.match(
     outcomeRoute,
-    /async function ownedActivity\(id: string, userId: string\) \{\s*return env\.DB\.prepare\(`SELECT i\.id, i\.donor_id, i\.type, i\.occurred_at, i\.summary, i\.source, i\.created_at/,
-    "ownedActivity must still operate uniformly on any owned interaction row, with no shared_activity_id special-casing needed -- the write removal above is what actually closes the shared-activity gap",
+    /async function ownedActivity\(id: string, userId: string\) \{\s*return env\.DB\.prepare\(`SELECT i\.id, i\.donor_id, i\.type, i\.occurred_at, i\.summary, i\.source, i\.created_at, d\.relationship_summary, d\.institutional_memory/,
+    "ownedActivity must still operate uniformly on any owned interaction row, with no shared_activity_id special-casing needed -- the write is scoped to existing.donor_id from a single resolved interaction id, so no fan-out is structurally possible",
+  );
+  assert.match(
+    outcomeRoute,
+    /existing\.donor_id, profile\.id, existing\.relationship_summary, existing\.institutional_memory/,
+    "the relationship-snapshot write must bind to existing.donor_id -- the single donor already resolved for this one interaction id, never a broader shared-activity scope",
   );
 
   // ---- Ordinary completion/no-response/status/persistence behavior
