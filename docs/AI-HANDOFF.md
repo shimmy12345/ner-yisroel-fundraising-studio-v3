@@ -2829,6 +2829,110 @@ occurred in this task. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
 `relationship_summary`/`institutional_memory` values above for donor
 987 before any write is made -- this task ends at preview.
 
+**UPDATE 2026-08-20 -- APPLIED.** The user approved the exact previewed
+values verbatim. Repair applied to Independent Staging. See "Donor 987
+Historical Grandchild-Gap Repair -- APPLIED (2026-08-20)" below for the
+full write/verification report. This donor's grandchild-gap repair is
+now **complete**, not merely previewed.
+
+## Donor 987 Historical Grandchild-Gap Repair -- APPLIED (2026-08-20)
+
+Applied the previously-previewed, user-approved repair. Per explicit
+instruction, did not broaden or modify `scripts/relationship-summary-
+cleanup-preview.mjs` (that tool's candidate set requires
+`relationship_summary IS NOT NULL` and structurally cannot represent a
+null-backfill case -- see the preview task above). Instead used the
+smallest auditable mechanism: a single, hand-reviewed, compare-and-swap
+`UPDATE` executed directly via `wrangler d1 execute --remote`, with the
+CAS condition embedded in its own `WHERE` clause (self-auditable from
+the SQL text itself, reproduced below) rather than a new permanent
+script.
+
+**Pre-write CAS verification (fresh read, immediately before the
+write).** Donor 987 (`bb929584-0ba8-4741-84b6-746427724bc4`):
+`relationship_summary` NULL, `institutional_memory` NULL,
+`relationship_health` NULL, `updated_at` still `1786123132` -- identical
+to every prior read in this donor's investigation/preview. Source
+interaction `1c69f90a-59b4-431a-bbf4-eabee0bd6d36`: `created_at ==
+updated_at == 1787255047` (never edited), `shared_activity_id`/`role`
+still null, summary text byte-identical to the original audit. Baseline
+snapshot taken for the "no other row changed" check: 248 total donors, 7
+with non-null `relationship_summary`, 10 with non-null
+`institutional_memory`, 67 total interactions, 5 recommendations. All
+preconditions held -- proceeded.
+
+**The write.** Single SQL statement, executed via `wrangler d1 execute
+fundraising-os-staging-db --remote --config wrangler.staging.jsonc
+--json --command`:
+
+```sql
+UPDATE donors
+SET relationship_summary = 'called to wish mazel tov on grandson''s bar mitzvah this shabbos.',
+    institutional_memory = 'Call context: called to wish mazel tov on grandson''s bar mitzvah this shabbos',
+    updated_at = 1787271522
+WHERE id = 'bb929584-0ba8-4741-84b6-746427724bc4'
+  AND owner_user_id = 'user_sgoldstein@nirc.edu'
+  AND data_source = 'live'
+  AND relationship_summary IS NULL
+  AND institutional_memory IS NULL
+```
+
+Scoped to exactly one row by primary key, further gated by
+`owner_user_id`/`data_source = 'live'`, and the CAS condition
+(`relationship_summary IS NULL AND institutional_memory IS NULL`) means
+this statement is naturally idempotent -- re-running it after the first
+successful application would match zero rows and write nothing.
+Deliberately writes only the two user-approved fields plus `updated_at`
+(the same bookkeeping column every existing write path in this app
+already updates on a relationship_summary/institutional_memory change);
+`relationship_health` was intentionally left untouched -- it was not
+part of the exact approval, so this repair does not set it, unlike the
+normal capture-time write path which sets it to 86.
+
+D1 response: `"changes": 1, "rows_written": 1` -- exactly one row
+affected, matching the CAS precondition exactly.
+
+**Post-write verification (direct D1 reads).**
+1. `relationship_summary` = `"called to wish mazel tov on grandson's bar
+   mitzvah this shabbos."` -- exact byte match to the approved value.
+2. `institutional_memory` = `"Call context: called to wish mazel tov on
+   grandson's bar mitzvah this shabbos"` -- exact byte match to the
+   approved value.
+3. Source interaction re-read: every column (`type`, `source`,
+   `occurred_at`, `shared_activity_id`, `role`, `created_at`,
+   `updated_at`, `summary`) byte-for-byte identical to the pre-write
+   read -- untouched.
+4. No other donor modified: `relationship_summary` non-null count went
+   from 7 to exactly 8 (+1); `institutional_memory` non-null count went
+   from 10 to exactly 11 (+1); total donor count unchanged at 248.
+5. No unrelated rows created: total interaction count unchanged at 67;
+   recommendation count unchanged at 5.
+
+**Donor-page verification.** Navigated to
+`/donors/bb929584-0ba8-4741-84b6-746427724bc4` (Dr. & Mrs. Mark
+Danziger, JL 987) on Independent Staging. The Relationship Snapshot card
+now renders "called to wish mazel tov on grandson's bar mitzvah this
+shabbos." -- exact match to the applied `relationship_summary` -- and a
+derived Suggested Action referencing the same text. Confirms the donor
+page reads `donors.relationship_summary` directly with no cache/staleness
+between the D1 write and the render, consistent with this donor page's
+already-documented read path (see the original investigation report
+above).
+
+**Confirmation: nothing else touched.** No source-interaction edit, no
+other donor, no recommendation/reminder created, no giving data, no
+schema change, no production access, `origin/main` untouched
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). This was a single D1
+`UPDATE` against Independent Staging only; no `wrangler deploy` was run
+in this task (the Worker deployed in the prior task, version
+`e846f522-161e-48ea-a556-4b575db27be5`, is unchanged and already serves
+this donor's data straight from D1). Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Status: the grandchild/grandparent extraction-gap investigation, fix,
+deployment, and the one confirmed historical case (donor 987) are now
+all complete.**
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -3600,6 +3704,39 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T20:45:00Z (approximate)
+Claude (Sonnet 5) — Applied the user-approved donor 987 historical
+grandchild-gap repair to Independent Staging D1. Freshly re-read donor
+987 and its source interaction immediately before writing -- unchanged
+from the prior preview (both target fields still NULL, interaction still
+unedited) -- so proceeded. Did not broaden `scripts/relationship-
+summary-cleanup-preview.mjs` (it cannot represent a null-backfill case);
+instead ran a single, hand-reviewed, compare-and-swap `UPDATE` directly
+via `wrangler d1 execute --remote`, scoped to donor 987's exact id +
+`owner_user_id` + `data_source='live'`, gated on `relationship_summary
+IS NULL AND institutional_memory IS NULL` (naturally idempotent --
+re-running it now would match zero rows). D1 confirmed `changes: 1`.
+Post-write, verified directly from D1: `relationship_summary`/
+`institutional_memory` exact byte matches to the approved values; source
+interaction byte-for-byte unchanged; `relationship_summary`/
+`institutional_memory` non-null counts each moved by exactly +1 (7->8,
+10->11) with total donor/interaction/recommendation counts unchanged --
+no other row touched, nothing unrelated created.
+`relationship_health` deliberately left untouched (not part of the exact
+approval). Verified the donor page (`/donors/bb929584-...`, Dr. & Mrs.
+Mark Danziger) renders the repaired Relationship Snapshot correctly,
+reading straight from D1 with no staleness. No source-interaction edit,
+no other donor, no schema/production/`origin/main` change; no new
+Worker deploy in this task (the already-deployed version
+`e846f522-161e-48ea-a556-4b575db27be5` already serves this donor's data
+from D1). The grandchild/grandparent extraction-gap work (investigation,
+fix, deployment, and the one confirmed historical case) is now
+**complete**. Full report: "Donor 987 Historical Grandchild-Gap Repair --
+APPLIED (2026-08-20)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T20:10:00Z (approximate)
 Claude (Sonnet 5) — Two-phase task: (A) deployed the already-committed
