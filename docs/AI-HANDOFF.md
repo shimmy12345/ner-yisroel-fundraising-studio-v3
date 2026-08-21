@@ -14,23 +14,32 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (committed):
-`ddfc531` -- "Fix applyBackfill()'s INSERT statements breaking on Windows
-shell argument passing" (see "Relationship Intelligence Phase 1 --
-Historical Backfill Applied" below for full detail). On top of `c2a6837`
-(historical migration gate docs), `cf3d903` (the disposition-gate
-implementation), `f1d08af` (the semantic backfill review), `4176860`
-(the classification correction), `e66005c` (Phase 1 schema + backfill
-preview machinery), `a30316f` (Option A implementation), and the full
-history recorded further down this section from earlier tasks.
+Current HEAD (committed and pushed):
+**`3c4ff6c`** -- "Relationship Intelligence Phase 2: fact-based
+synthesis, replacing direct relationship_summary overwrites" (see
+"Relationship Intelligence Phase 2 -- Deterministic Fact-Based
+Synthesis" below for full detail -- this single commit carries both the
+initial Phase 2 implementation and its 2026-08-22 checkpoint's
+resolution of all three flagged edge cases, since neither had been
+committed separately before the checkpoint). **Corrected 2026-08-22 --
+this line previously still named `ddfc531` as current HEAD through the
+entire Phase 2 checkpoint task, which had already advanced HEAD to
+`3c4ff6c`; caught and fixed during that checkpoint's own explicit
+test-harness-audit instruction.** On top of `ddfc531` ("Fix
+applyBackfill()'s INSERT statements breaking on Windows shell argument
+passing" -- see "Relationship Intelligence Phase 1 -- Historical
+Backfill Applied" below), `c2a6837` (historical migration gate docs),
+`cf3d903` (the disposition-gate implementation), `f1d08af` (the semantic
+backfill review), `4176860` (the classification correction), `e66005c`
+(Phase 1 schema + backfill preview machinery), `a30316f` (Option A
+implementation), and the full history recorded further down this
+section from earlier tasks.
 
 **Relationship Intelligence Phase 2, including its 2026-08-22 checkpoint
 (all three flagged edge cases resolved -- see "Relationship Intelligence
 Phase 2 -- Deterministic Fact-Based Synthesis" below for full detail),
-was committed and pushed to `feature/independent-cloudflare-sandbox` in
-this checkpoint -- see `git log` for the exact commit SHA on top of
-`ddfc531` (this file's own preamble is authoritative if this note ever
-drifts; the dated Phase 2 section below is the full record).** New files:
+is commit `3c4ff6c`, committed and pushed to `feature/independent-
+cloudflare-sandbox`.** New files:
 `lib/relationships/fact-synthesis.ts`, `fact-supersession.ts`,
 `fact-accept-plan.ts` (the pure planning core factored out during the
 checkpoint's Monday-race fix), and `fact-accept.ts` (restructured during
@@ -53,12 +62,13 @@ still modifies a live application code path**
 (`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) -- still
 deliberately not deployed, for the same reason recorded when that commit
 landed; it will be included automatically whenever this branch is next
-deployed, since it already sits in the committed history Phase 2's own
-commits (this checkpoint's included) now sit on top of. **`ddfc531`
-touches only a Node script**
+deployed, since it already sits in the committed history `3c4ff6c` now
+sits on top of. **`3c4ff6c` DOES modify live application code paths**
+(the four rewired routes plus the new `lib/relationships/fact-*.ts`
+modules) -- unlike `ddfc531`, which touched only a Node script
 (`scripts/relationship-facts-backfill-preview.mjs`'s `applyBackfill()`
-SQL) -- not part of the deployed Worker bundle -- so there was nothing
-new for that task to have deployed even if it wanted to. **D1 data
+SQL, not part of the deployed Worker bundle). `3c4ff6c` has NOT been
+deployed -- the deployed Worker version below still predates it. **D1 data
 state, confirmed live, unchanged since Phase 1's backfill**:
 `donor_relationship_facts` holds exactly 1 row (Mr. & Mrs. Yaakov
 Zachter) and `donor_relationship_fact_changes` holds its matching 1
@@ -70,7 +80,8 @@ value was altered by this backfill. No production access. `origin/main`
 untouched throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`ddfc531` (pushed; matches local HEAD exactly, no divergence).
+`3c4ff6c` (pushed; matches local HEAD exactly, no divergence -- fetched
+and confirmed during the 2026-08-22 checkpoint's test-harness audit).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -6926,9 +6937,66 @@ Phase 1 Zachter row (re-verified live, immediately before commit). No
 deploy. No production/main access at any point.** Per this checkpoint's
 own explicit instruction ("commit and push... but do not deploy and do
 not make any Phase 2 D1 mutation yet"), the implementation was committed
-and pushed to `feature/independent-cloudflare-sandbox` -- see "Current
-Git State" at the top of this file for the exact commit SHA. Awaiting
-further explicit approval before any deploy or Phase 2 D1 mutation.
+and pushed to `feature/independent-cloudflare-sandbox` as **`3c4ff6c`**
+-- see "Current Git State" at the top of this file. Awaiting further
+explicit approval before any deploy or Phase 2 D1 mutation.
+
+### Test-Harness Audit (2026-08-22) -- pre-deploy checkpoint, approved and NOT yet deployed
+
+**Scope, per explicit instruction: before deploying, enumerate every
+test file in the repository and compare that set against what `pnpm
+test` actually executes (via `package.json` and anything it invokes),
+identify any orphaned test files, and either wire a valid orphan into
+the suite or document specifically why it's obsolete before excluding
+it. Do not change application behavior.**
+
+**Finding: zero orphans.** `find ./tests -maxdepth 1 -iname "*.test.mjs"`
+enumerated exactly 115 files; parsing `package.json`'s own `test` script
+for every `node tests/*.test.mjs` invocation also produced exactly 115
+entries, with no duplicates. A two-way `comm` diff between the sorted
+disk listing and the sorted wired listing was empty in both directions
+-- every file on disk is wired in, and nothing wired in is missing from
+disk. A broader repo-wide search for any test-like file NOT matching
+`*.test.mjs` (`*.spec.*`, or any filename containing "test") found only
+three unrelated application-code hits (`app/settings/
+LegacyTestOrphanCleanup.tsx`, `drizzle/0019_legacy_test_orphan_
+cleanup.sql`, `lib/data-health/legacy-test-cleanup.ts` -- a donor-data
+"legacy test record cleanup" feature, unrelated to this repo's own test
+suite). No alternate test-directory (`__tests__`, `e2e`, etc.), no
+alternate test-runner config (no `jest.config`/`vitest.config`/
+`playwright.config` anywhere in the repo), and no CI workflow invokes
+`pnpm test` or any `node tests/...` file at all (`.github/workflows/`
+contains only the two D1 backup/restore-verification workflows) --
+`pnpm test` is confirmed to be the repo's sole test-execution surface,
+and it already covers every test file that exists.
+
+This clean result is itself a direct consequence of Phase 2's own prior
+checkpoint work: two of these 115 files
+(`relationship-fact-synthesis.test.mjs`,
+`relationship-fact-accept-core.test.mjs`) were discovered mid-
+implementation to exist on disk but never have been wired into
+`package.json`'s `test` script, and were fixed at that time (see
+"Relationship Intelligence Phase 2" above); every test file added since
+(the checkpoint's own three new regression files) was wired in
+immediately as part of the same commit that added it. **No test-harness
+change was needed or made during this audit** -- `package.json` is
+unchanged by this audit; the only file touched was this doc's own
+"Current Git State" section (see below).
+
+**Corrected `docs/AI-HANDOFF.md`'s "Current Git State"**: it had
+continued to name `ddfc531` as current HEAD all the way through the
+prior checkpoint (which had already advanced HEAD to `3c4ff6c`) --
+caught and fixed by this same audit task's explicit instruction. See
+"Current Git State" at the top of this file for the corrected text.
+
+**Gates re-run after the audit (no code changed, doc-only correction)**:
+`pnpm test`: exit 0, all 115 files pass. `pnpm exec tsc --noEmit`:
+clean. `pnpm run build:staging-independent`: completed, full route
+manifest, no errors. D1 re-verified live: `donor_relationship_facts` = 1
+row, `donor_relationship_fact_changes` = 1 row -- still exactly
+Zachter's Phase 1 fact, byte-for-byte unchanged. Deployed Worker version
+re-confirmed unchanged (still predates `3c4ff6c`). **Not deployed** --
+awaiting explicit approval, per instruction.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
