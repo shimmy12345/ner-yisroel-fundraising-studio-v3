@@ -3317,6 +3317,171 @@ Zachter and/or Semmelman -- still not done in this task; (4) whether the
 `meeting-brief-model.ts` people-mention leak and the `outcome/route.ts`
 ungated-write gap should be scoped as their own future tasks.
 
+**UPDATE 2026-08-20 -- IMPLEMENTED (not yet applied to either donor).**
+The user clarified the domain meaning of "Zman" (Yeshiva semester/term)
+and approved implementing both the Yahrtzeit fact signal and a narrow
+contextual Zman rule. See "Zman/Yahrtzeit Extraction Implementation +
+Historical Preview (2026-08-20)" below for the full report -- the
+extraction code is now changed and deployed to neither staging nor the
+two historical donors; both remain untouched pending explicit approval
+of the previewed replacement values.
+
+## Zman/Yahrtzeit Extraction Implementation + Historical Preview (2026-08-20) -- CODE CHANGED, NO D1 WRITE, NO DEPLOY
+
+Implements the design approved after the domain clarification that
+"Zman" means the Yeshiva semester/term in this context. Per explicit
+instruction: implement the smallest defensible extraction change for
+Yahrtzeit and (if safely possible) Zman, then preview -- but do not
+apply -- the two historical repairs.
+
+**1. Yahrtzeit -- exact change.** `lib/capture/interaction.ts`'s
+`FACT_SIGNAL_PATTERN` gained `yahrtzeits?`, inserted after `anniversary`
+(the same family-event tier as `birthday`/`anniversary`/the earlier
+grandchild terms). One-line regex addition plus a doc comment; no other
+logic touched.
+
+**2. Corpus evidence for appreciation/impact language.** Read-only scan
+of every interaction row containing "thank" (any form) or "support":
+**exactly 1 row in the entire 42-row Zman/Yahrtzeit-adjacent corpus
+contains either word, and it is Zachter's own note.** Neither word
+appears anywhere else -- not in any of the 40 broadcast/shared-route
+rows, not in any other single-donor capture. This is the direct
+evidence base for the Zman rule below: requiring co-occurrence of these
+already-rare words with "zman" is a conservative, evidence-backed
+filter, not speculative phrase engineering from one example.
+
+**3. Was a safe contextual Zman rule possible?** **Yes.** The existing
+`relationshipSnapshotDetails()` architecture already filters
+notes/sentences independently against multiple named patterns
+(`COMMITMENT_PATTERN`, `RELATIONSHIP_CHANGE_PATTERN`,
+`FACT_SIGNAL_PATTERN`) and unions the matching sentences into
+`specificFacts`. Adding one more narrowly-scoped pattern, filtered and
+unioned the same way, required no new framework, taxonomy, classifier,
+or vocabulary system -- exactly the "smallest defensible" constraint.
+
+**4. Exact contextual rule implemented.** New pattern
+`ZMAN_APPRECIATION_PATTERN` in `lib/capture/interaction.ts`:
+```js
+const ZMAN_APPRECIATION_PATTERN = /(?=.*\bzman\b)(?=.*\b(?:thanks?|thanked|thanking|support)\b)/i;
+```
+Deliberately NOT a bare `\bzman\b` addition to `FACT_SIGNAL_PATTERN` --
+requires a zman/semester mention AND a thank-word-or-"support" mention
+in the same sentence (two independent lookaheads, order-independent).
+Wired into `relationshipSnapshotDetails()` as a fourth sentence-filter
+category (`zmanAppreciationSentences`), unioned into `specificFacts`
+alongside the existing three categories -- same verbatim-sentence-quote
+behavior as every other signal, no new output shape.
+
+**5. False-positive protections (evidence-based, not merely
+regex-matches-a-string):**
+- Every real broadcast "zman" sentence in the corpus (26 + 14 rows, 2
+  distinct mass-broadcast templates) lacks both "thank" and "support" --
+  correctly excluded.
+- A bare "Thanked him" with no zman/semester mention is correctly
+  excluded -- thanks alone was never the signal.
+- Requiring co-occurrence in the SAME sentence (not just the same note)
+  keeps the rule narrow; `sentenceList()` already splits on
+  `.`/`!`/`?`/newlines, so this falls out of the existing architecture
+  for free.
+- **One honest caveat, found during verification, NOT caused by this
+  change:** the real broadcast template "Sent message to welcome son (or
+  grandson) back for the new zman" DOES still produce a fact under the
+  full pipeline -- but proven (isolated and tested explicitly) to be
+  entirely because of the pre-existing `\bson\b` entry in
+  `FACT_SIGNAL_PATTERN` (added during the earlier grandchild-fix task,
+  unrelated to Zman/Yahrtzeit); `ZMAN_APPRECIATION_PATTERN` alone does
+  NOT match this sentence (no thank/support word). Not fixed here --
+  this specific content only ever arrives via the shared/broadcast route
+  in production, which never calls the extraction functions for any
+  recipient, so it is not a live regression risk today, but the
+  underlying `\bson\b` breadth is a real, separate, pre-existing
+  correctness question worth a future look.
+
+**6. Regression-test results.** New file
+`tests/relationship-snapshot-yahrtzeit-zman.test.mjs` (wired into
+`package.json`'s `test` script), exercising the real, unmodified
+extraction functions -- never a reimplementation of the regexes.
+Covers: Semmelman's actual note (qualifies); a different-donor Yahrtzeit
+phrasing (qualifies); existing birthday/anniversary/son/grandson
+behavior (unchanged); an unrelated voicemail note and a commitment
+note (unaffected); Zachter's actual note (qualifies); an equivalent
+Zman+support phrasing (qualifies); the 4 "should not qualify merely
+because of Zman" cases from the task (all correctly null); 3 "should
+not qualify merely because of thanks" cases (all correctly null,
+carefully chosen to avoid the unrelated pre-existing
+gift/donation/contribution signal); the real broadcast-safety case
+(correctly null); the caveat case above (asserted honestly, not
+papered over); and a check that neither new snapshot ever surfaces
+`"People mentioned"` text. `pnpm test` (all suites): exit 0, every
+suite `fail 0`. `pnpm exec tsc --noEmit`: clean. `pnpm run
+build:staging-independent`: completed, full route manifest, no errors.
+
+**7-8. Zachter (60830) -- source note and new extractor output.**
+Source note (unchanged from every prior read): "Texted video from first
+day of Zman and thanked him for his support that makes it happen."
+**Exact NEW `relationshipSummary`, produced by the real, unmodified-
+except-for-this-task extractor, run against the exact stored note:**
+`"Texted video from first day of Zman and thanked him for his support
+that makes it happen."` -- matches the desired target exactly.
+
+**9-10. Semmelman (72957) -- source note and new extractor output.**
+Source note (unchanged): "Sent text on wife's Yahrtzeit to acknowledge
+it." **Exact NEW `relationshipSummary`:** `"Sent text on wife's
+Yahrtzeit to acknowledge it."` -- matches the desired target exactly.
+
+**11. institutional_memory confirmation.** Not read from, not written
+to, not part of the extraction change (the extraction functions this
+task touched only affect `actionableRelationshipSnapshot`/
+`relationshipSnapshotDetails`'s `specificFacts`, never `extracted.memory`,
+which remains the unconditional `${label} context: ${note}` template,
+byte-identical before and after this task). Fresh D1 re-read confirmed
+both donors' `institutional_memory` values are unchanged from the prior
+audit.
+
+**12. People false-positive status.** Re-verified: `details.people`
+still returns `["Zman"]`/`["Yahrtzeit"]` for both notes (the bug is
+unchanged). Confirmed this does NOT affect either newly-generated
+snapshot -- `specificFacts`/`actionableRelationshipSnapshot` never read
+from `details.people` at all, and both new snapshot strings were
+explicitly checked to contain no `"People mentioned"` text. Per
+explicit instruction, since the bug does not affect the new snapshot's
+correctness, it is left untouched and remains a separate, already-
+recorded open task.
+
+**13. outcome/route.ts confirmation.** Not touched, not re-investigated
+beyond what the prior task already confirmed; still a separate,
+recorded open task.
+
+**Pre-write CAS verification for the historical preview (fresh reads,
+immediately before generating the preview).** Both donors and both
+source interactions re-read fresh from D1: identical to every prior
+read in this donor pair's investigation (same malformed
+`relationship_summary`, same good `institutional_memory`, same
+`updated_at`, interactions still `created_at == updated_at`, unedited).
+No discrepancy -- proceeded to preview generation. **No D1 write of any
+kind was made for either donor or interaction in this task.**
+
+**Files changed.** `lib/capture/interaction.ts` (the two extraction
+additions), `package.json` (test wiring), `tests/relationship-snapshot-
+yahrtzeit-zman.test.mjs` (new).
+
+**Confirmation: no D1 writes, no deploy.** Every D1 interaction in this
+task was a `SELECT` (fresh re-reads) via `wrangler d1 execute
+--remote`. The extraction code change is committed to the feature
+branch but was NOT deployed to Independent Staging in this task (no
+`wrangler deploy` was run). `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Exact approval needed next.** (1) Approve the exact previewed
+`relationshipSummary` values above for Zachter and Semmelman before any
+historical D1 write is made (this task stops at preview, per explicit
+instruction); (2) approve deployment of the extraction change itself to
+Independent Staging (not done in this task); (3) `meeting-brief-
+model.ts`'s people-mention leak and `outcome/route.ts`'s ungated-write
+gap remain separate, explicitly out-of-scope, open tasks -- no action
+requested on them here.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -4088,6 +4253,50 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T22:30:00Z (approximate)
+Claude (Sonnet 5) — Implemented the approved Yahrtzeit/Zman extraction
+design (domain-clarified: "Zman" = Yeshiva semester/term).
+`lib/capture/interaction.ts`: (1) added `yahrtzeits?` to
+`FACT_SIGNAL_PATTERN` (simple fact signal, same tier as birthday/
+anniversary); (2) added a new `ZMAN_APPRECIATION_PATTERN` --
+`/(?=.*\bzman\b)(?=.*\b(?:thanks?|thanked|thanking|support)\b)/i` --
+wired into `relationshipSnapshotDetails()` as a fourth sentence-filter
+category, deliberately NOT a bare `zman` addition to
+`FACT_SIGNAL_PATTERN`. Corpus evidence: "thank"/"support" each appear
+in exactly 1 of 42 relevant rows (Zachter's own), making the
+co-occurrence requirement a conservative, evidence-backed filter, not
+speculative engineering. Verified every regression case from the task
+against the real extractor: Zachter's and Semmelman's actual notes
+qualify; 4 Zman-only and 3 thanks-only synthetic cases correctly don't;
+the real broadcast Zman template correctly doesn't; one honest caveat
+found and documented (a different real broadcast template still
+qualifies, but proven to be from the pre-existing, unrelated `\bson\b`
+entry, not this task's change -- not fixed, not a live production risk
+since that content only ever arrives via the non-extracting shared
+route). New `tests/relationship-snapshot-yahrtzeit-zman.test.mjs`
+(wired into `package.json`), `pnpm test` (exit 0, all suites `fail 0`),
+`pnpm exec tsc --noEmit` (clean), `pnpm run build:staging-independent`
+(succeeded) all pass. Freshly re-read Zachter/Semmelman from D1
+immediately before generating the historical preview -- both unchanged
+from every prior read. Ran the NEW extractor against both exact source
+notes (read-only, no write): Zachter's new `relationshipSummary` =
+`"Texted video from first day of Zman and thanked him for his support
+that makes it happen."`; Semmelman's = `"Sent text on wife's Yahrtzeit
+to acknowledge it."` -- both match the desired targets exactly. Neither
+donor's `relationship_summary`/`institutional_memory` was written to;
+`institutional_memory` untouched by the code change itself. The
+"Zman"/"Yahrtzeit" people-extraction false positive was confirmed to
+NOT affect either new snapshot (verified neither contains "People
+mentioned" text) and remains untouched, per instruction, as a separate
+open task -- same for the `outcome/route.ts` ungated-write gap, neither
+re-investigated nor touched beyond re-confirming it in the prior task.
+**No D1 writes, no deploy** -- the extraction code change is committed
+to the feature branch but not deployed to staging in this task. Full
+report: "Zman/Yahrtzeit Extraction Implementation + Historical Preview
+(2026-08-20)" above. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T21:50:00Z (approximate)
 Claude (Sonnet 5) — Narrow, read-only design investigation into "Zman"

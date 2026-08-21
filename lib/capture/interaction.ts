@@ -185,7 +185,37 @@ const RELATIONSHIP_CHANGE_PATTERN = /\b(increased|decreased|changed|newly|no lon
 // silently produced no relationship-snapshot facts. Proven via a real
 // donor pair (987 vs 67909, near-identical notes differing only in
 // "grandson's" vs "son's"); see docs/AI-HANDOFF.md.
-const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|scholarship|student|tuition|education|campus|tour|school visit|site visit|proposal|request for support|funding request|ask amount|event|gala|dinner|reception|parlor meeting|family|spouse|son|daughter|grandsons?|granddaughters?|grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?|wedding|engaged|engagement|seminary|birthday|anniversary|sick|illness|recovering|hospital|passed away)\b/i;
+// yahrtzeit/yahrtzeits added 2026-08-20: a death anniversary of a family
+// member (like birthday/anniversary above) is exactly the class of
+// durable personal fact this pattern exists to catch. Proven via a real
+// donor (Semmelman, 72957) whose note -- "Sent text on wife's Yahrtzeit
+// to acknowledge it" -- produced no fact because this word was missing.
+// A corpus-wide read-only audit found no alternate spelling
+// (yahrzeit/yartzeit/yortzeit) anywhere in real data, so none is added
+// speculatively; see docs/AI-HANDOFF.md.
+const FACT_SIGNAL_PATTERN = /\b(pledge|pledged|pledge balance|installment|payment|gift|giving|donation|contribution|scholarship|student|tuition|education|campus|tour|school visit|site visit|proposal|request for support|funding request|ask amount|event|gala|dinner|reception|parlor meeting|family|spouse|son|daughter|grandsons?|granddaughters?|grandchild(?:ren)?|grandparents?|grandmothers?|grandfathers?|wedding|engaged|engagement|seminary|birthday|anniversary|yahrtzeits?|sick|illness|recovering|hospital|passed away)\b/i;
+
+// Deliberately NOT a bare `\bzman\b` addition to FACT_SIGNAL_PATTERN above
+// -- a read-only corpus audit (2026-08-20) found "zman" in 39 of 42 real
+// interaction notes, and all but one of those are identical mass-broadcast
+// templates sent to dozens of donors ("Sent time lapse video from first
+// name of the zman", "...welcome son (or grandson) back for the new
+// zman"), not donor-specific facts. "Zman" (the Yeshiva semester/term) is
+// only a meaningful STEWARDSHIP fact when the note explicitly ties it to
+// this donor's own support -- e.g. "Texted video from first day of Zman
+// and thanked him for his support that makes it happen" (the one real
+// exception, donor 60830). The same audit found "thank"/"support" each
+// occur in exactly that one note, and nowhere else, in the whole corpus.
+// Given how rare both words already are on their own, requiring a
+// zman/semester mention AND (a thank-word OR "support") together in one
+// sentence is a conservative rule backed directly by that evidence, not a
+// speculative phrase-engineering exercise from a single example: every
+// real broadcast "zman" sentence lacks both words and is correctly
+// excluded, and a bare "Thanked him" with no zman/semester mention is
+// also correctly excluded (thanks alone was never the signal). See
+// docs/AI-HANDOFF.md for the full corpus evidence and false-positive
+// design.
+const ZMAN_APPRECIATION_PATTERN = /(?=.*\bzman\b)(?=.*\b(?:thanks?|thanked|thanking|support)\b)/i;
 
 export type RelationshipSnapshotDetails = {
   people: string[];
@@ -219,9 +249,10 @@ export function relationshipSnapshotDetails(note: string, kind: InteractionKind)
   const commitmentSentences = sentences.filter((sentence) => COMMITMENT_PATTERN.test(sentence)).slice(0, 3);
   const relationshipChangeSentences = sentences.filter((sentence) => RELATIONSHIP_CHANGE_PATTERN.test(sentence)).slice(0, 2);
   const factSignalSentences = sentences.filter((sentence) => FACT_SIGNAL_PATTERN.test(sentence));
+  const zmanAppreciationSentences = sentences.filter((sentence) => ZMAN_APPRECIATION_PATTERN.test(sentence));
   const nextAction = commitmentSentences.map(commitmentAction).find(Boolean) ?? null;
   const cleanSentence = (sentence: string) => concise(sentence).replace(/[.!?]+$/, "");
-  const specificFacts = [...new Set([...commitmentSentences, ...relationshipChangeSentences, ...factSignalSentences].map(cleanSentence))].slice(0, 2);
+  const specificFacts = [...new Set([...commitmentSentences, ...relationshipChangeSentences, ...factSignalSentences, ...zmanAppreciationSentences].map(cleanSentence))].slice(0, 2);
   return {
     people,
     organizations,
