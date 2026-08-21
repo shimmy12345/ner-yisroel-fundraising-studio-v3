@@ -3122,6 +3122,201 @@ write path (side finding above) should be scoped as a separate future
 task. `institutional_memory` for both flagged donors, and every field
 for all 10 clearly-good donors, needs no action.
 
+## Zman / Yahrtzeit Extraction-Vocabulary Investigation (2026-08-20) -- DESIGN ONLY, NO CODE CHANGE, NO D1 WRITE
+
+Narrow, read-only design investigation for the 2 mixed donors flagged in
+the comprehensive audit above, per explicit instruction: determine
+correct extraction behavior for "Zman" and "Yahrtzeit" BEFORE touching
+`FACT_SIGNAL_PATTERN` or either donor's data. Nothing was written, no
+extraction code changed, no deploy.
+
+**Step 1 -- fresh re-verification.** Both donors and both source
+interactions re-read fresh from D1: identical in every field to the
+prior audit (same `relationship_summary`/`institutional_memory` text,
+same `updated_at`, same interaction `created_at == updated_at`, zero
+`activity_status_audits` rows for either). No discrepancy -- proceeded.
+
+**Step 2/3 -- actual semantics, current extractor (real functions,
+not reimplemented).**
+
+*Zachter (60830), note: "Texted video from first day of Zman and
+thanked him for his support that makes it happen."* Current extractor
+output: `relationshipSummary: null` (zero `specificFacts`),
+`institutionalMemory: "Text Message context: Texted video from first
+day of Zman and thanked him for his support that makes it happen"`,
+`people: ["Zman"]` (false-positive name detection -- `mentionedPeople()`
+still treats the capitalized word "Zman" as a candidate name; this no
+longer leaks into `actionableRelationshipSnapshot`'s output post-1487a8b
+since `specificFacts` never includes the `people` list any more, but it
+DOES still leak into `lib/relationships/meeting-brief-model.ts`'s
+`peopleMentioned` list, which independently calls
+`relationshipSnapshotDetails()` and flattens `.people` -- a live, minor,
+separate bug noted for awareness, not investigated or fixed here, out
+of this task's scope). `organizations: []`, `commitments: []`,
+`recommendedNextAction: null`. **The actual donor-relevant fact is NOT
+"Zman" itself** -- it's the fundraiser sending a video documenting
+tangible impact and explicitly thanking the donor for support that
+"makes it happen." "Zman" (a generic yeshiva/school-calendar term
+meaning roughly "term/semester") is scene-setting, not the fact.
+Interaction mechanics that should never be preserved: the channel verb
+"Texted" (already excluded from name-detection) and the "Text message
+follow-up" activity-label the OLD generator surfaced (architecturally
+impossible under the current generator, which never emits category
+labels at all, regardless of what happens with "Zman").
+
+*Semmelman (72957), note: "Sent text on wife's Yahrtzeit to acknowledge
+it."* Current extractor output: `relationshipSummary: null` (zero
+`specificFacts`), `institutionalMemory: "Personal interaction context:
+Sent text on wife's Yahrtzeit to acknowledge it"`, `people:
+["Yahrtzeit"]` (same false-positive class as above, same Meeting Brief
+caveat). **"Yahrtzeit" IS essentially the fact itself** -- like
+`birthday`/`anniversary` (already in `FACT_SIGNAL_PATTERN`), the mere
+presence of "[relative]'s Yahrtzeit" reliably signals a specific,
+meaningful, recurring personal-loss date. Nothing here is mere
+mechanics beyond the already-excluded "Sent" verb.
+
+**Step 4 -- real corpus check (read-only, `interactions.summary LIKE
+'%zman%'` / yahrtzeit + spelling variants, case-insensitive).** 42 total
+rows matched. Grouped by `source`:
+
+| source | rows | distinct donors |
+|---|---|---|
+| `capture:personal` (Semmelman's own) | 1 | 1 |
+| `capture:text` (Zachter's own) | 1 | 1 |
+| `manual` (shared/broadcast route) | 40 | 38 |
+
+**Only these exact 2 rows are single-donor-capture (`source LIKE
+'capture:%'`) -- i.e. the ONLY two rows in the entire corpus that ever
+ran, or could have run, through `FACT_SIGNAL_PATTERN` at all.** No other
+historical donor is affected by a vocabulary change to either term. The
+other 40 rows are all `source = 'manual'` (the shared/broadcast route,
+`app/api/interactions/shared/route.ts`), which never calls the
+extraction functions for any recipient regardless of content -- already
+established, separate, deliberate design from the earlier grandchild-fix
+task -- so they are read here purely as real-world usage EVIDENCE for
+the vocabulary question, not as extraction-eligible rows themselves. No
+spelling variants of "yahrtzeit" (`yahrzeit`/`yarzeit`/`yortzeit`) appear
+anywhere in the corpus -- only the single consistent spelling
+"Yahrtzeit".
+
+*Zman contexts (26 + 14 = 40 of the 42 total rows; bare `\bzman\b`
+matches 39/42):* two distinct, identical, mass-broadcast templates sent
+to dozens of donors verbatim: "Sent time lapse video from first name of
+the zman" (26 rows, likely "name" is a typo/garble for "day") and "Sent
+message to welcome son (or grandson) back for the new zman" (14 rows).
+Every one of these is generic institutional messaging, not a
+donor-specific fact -- strong, direct evidence that "zman" alone is
+**not** a reliable per-donor signal in this donor base's real
+communications. Zachter's own note is the only genuinely donor-specific
+"zman" occurrence in the whole corpus, and even there the donor-relevant
+element is the appreciation language around it, not the word itself.
+
+*Yahrtzeit contexts (3 of 42 rows; bare `\byahrtzeits?\b` matches
+3/42):* Semmelman's own ("wife's Yahrtzeit," genuinely personal/family);
+and 2 identical `manual`-route rows, "Sent message to let them know that
+it was rabbi Mintz's mother's first Yahrtzeit, they appreciated it" --
+donor-relevant institutional/community content (informing recipients of
+a third party's family yahrtzeit), not the recipient's own family fact,
+but still a real, meaningful, non-mechanical use of the word -- no
+purely mundane/scheduling use of "yahrtzeit" was found anywhere in the
+corpus. Because the extractor quotes matching sentences verbatim rather
+than attributing facts to named entities, even this third-party example
+would not become misleading if it were ever captured single-donor: the
+full sentence self-identifies whose yahrtzeit it is.
+
+**Step 5 -- recommended classification (per concept, independently).**
+
+- **Yahrtzeit: A. SIMPLE FACT SIGNAL.** Proposed pattern fragment (NOT
+  implemented): add `yahrtzeits?` to `FACT_SIGNAL_PATTERN`'s
+  alternation, alongside the existing `birthday|anniversary` family-event
+  terms. Open question for whoever approves this: whether to also cover
+  unevidenced-but-plausible alternate transliterations (`yahrzeit`,
+  `yartzeit`) pre-emptively -- no evidence either way in this corpus, so
+  not recommended without a separate decision.
+- **Zman: D. DIFFERENT EXTRACTION CHANGE REQUIRED (not A/B/C as a bare
+  word).** Corpus evidence (39/42 matching rows nearly all generic
+  broadcast content) shows the word itself is not a reliable signal.
+  Zachter's note is donor-relevant only because of the surrounding
+  appreciation/impact language ("thanked him for his support that makes
+  it happen"), which `FACT_SIGNAL_PATTERN` does not currently recognize
+  as a category at all (no "thank"/"grateful"/"appreciate"/"support"
+  terms exist in it today). If this class of note is worth capturing
+  going forward, the correct change would be a new, independent
+  appreciation/impact-acknowledgment fact-signal category -- entirely
+  unrelated to the word "zman" -- which would need its own
+  evidence-gathering and false-positive analysis (e.g. "thanked him for
+  coming to the event" is routine and probably should NOT qualify) before
+  being proposed. That is explicitly out of scope here, per instruction
+  not to broaden this task into a general vocabulary audit.
+
+**Step 6 -- false-positive regression cases (for future implementation,
+not applied):**
+- Yahrtzeit: genuine case = Semmelman's real note (must produce a
+  non-null snapshot). No spelling variant is evidenced, so none is
+  proposed as a required case. No misleading-context case was found in
+  real evidence -- flagged as "none identified," not asserted as
+  impossible.
+- Zman: the exact real Zachter note (illustrates why a bare-word rule
+  would be both necessary-looking and insuffient -- matching "zman" alone
+  would not, by itself, explain why THIS note is meaningful); the two
+  real generic/broadcast templates above (must NOT be treated as
+  donor-specific facts if a future rule is proposed, even though they
+  never reach extraction today); and an illustrative (not corpus-derived)
+  calendar-only sentence such as "Reminded him zman starts Monday" or
+  "Confirmed the zman dates for the mailing," labeled explicitly as
+  hypothetical, showing the word alone conveys no personal relationship
+  content.
+
+**Step 7 -- desired Relationship Snapshot content (DESIRED BEHAVIOR
+ONLY, not generated, not written, not current extractor output):**
+- Zachter (60830), desired: `"Texted video from first day of Zman and
+  thanked him for his support that makes it happen."` -- the same
+  verbatim-quoted-sentence style every other successful case already
+  uses. **Achievable via `FACT_SIGNAL_PATTERN` alone? No.** A narrowly
+  correct fix requires recognizing the appreciation/impact language, not
+  "zman" -- a materially different, separately-scoped extraction change
+  (see Step 5).
+- Semmelman (72957), desired: `"Sent text on wife's Yahrtzeit to
+  acknowledge it."` -- same verbatim style. **Achievable via
+  `FACT_SIGNAL_PATTERN` alone? Yes.** Adding `yahrtzeits?` as a simple
+  fact signal would make the existing, unmodified
+  `actionableRelationshipSnapshot()` produce exactly this sentence from
+  the real source note, with no other code change.
+
+**Step 9 -- outcome/route.ts ungated-write finding: re-confirmed
+accurate from current source, unchanged.** `app/api/interactions/[id]/
+outcome/route.ts` line 128 still writes `relationship_summary`/
+`institutional_memory` unconditionally whenever an activity transitions
+to `completed`/`no-response` -- confirmed via direct grep of the current
+file: zero occurrences of `acceptRelationshipSnapshot` anywhere in it,
+and the `UPDATE donors SET relationship_summary = ?, institutional_memory
+= ?, ...` statement is gated only on `nextStatus === "completed" ||
+nextStatus === "no-response"`, not on any explicit-acceptance check.
+Recorded as a separate, still-open architecture/safety issue -- **not
+touched, not expanded, not fixed in this task.**
+
+**Confirmation: no data changed, no code changed.** Every query in this
+investigation was a `SELECT` or a call to the real, unmodified
+`extractInteraction`/`relationshipSnapshotDetails`/
+`actionableRelationshipSnapshot` functions against already-fetched note
+text. Neither donor's `relationship_summary` or `institutional_memory`
+was cleared, regenerated, or written. `FACT_SIGNAL_PATTERN` and every
+other extraction file are byte-identical to before this task. No
+schema/deploy/production/`origin/main` change. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Exact decision needed next.** (1) Approve or reject adding
+`yahrtzeits?` to `FACT_SIGNAL_PATTERN` (Semmelman's case -- would make
+the existing extractor produce the desired snapshot above with no other
+change); (2) explicitly confirm NOT adding a bare `zman` term (strong
+evidence against it) and decide whether a separate
+appreciation/impact-acknowledgment extraction category is worth scoping
+as its own future task (Zachter's case has no narrow fix); (3) once (1)
+is decided, whether to then clear/regenerate `relationship_summary` for
+Zachter and/or Semmelman -- still not done in this task; (4) whether the
+`meeting-brief-model.ts` people-mention leak and the `outcome/route.ts`
+ungated-write gap should be scoped as their own future tasks.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -3893,6 +4088,46 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T21:50:00Z (approximate)
+Claude (Sonnet 5) — Narrow, read-only design investigation into "Zman"
+and "Yahrtzeit" for the 2 mixed donors flagged in the prior
+comprehensive audit (Zachter 60830, Semmelman 72957), per explicit
+instruction: determine correct extraction behavior BEFORE touching
+`FACT_SIGNAL_PATTERN` or either donor's data. Fresh re-read confirmed
+both donors/interactions unchanged from the prior audit. Ran the real,
+unmodified extraction functions against both source notes: both
+currently produce `relationshipSummary: null` (zero specific facts);
+both also show a live, minor, separate bug where `mentionedPeople()`
+misdetects "Zman"/"Yahrtzeit" as person names, which no longer leaks
+into `actionableRelationshipSnapshot` (fixed by the quoted-sentence
+redesign) but does still leak into `meeting-brief-model.ts`'s
+`peopleMentioned` list -- noted, not investigated further, out of scope.
+Corpus-scanned (read-only) all 42 interaction rows containing
+"zman"/"yahrtzeit"/spelling variants: only 2 rows in the ENTIRE corpus
+are single-donor-capture (Zachter's and Semmelman's own) -- the other 40
+are all shared/broadcast-route rows (2 identical mass-template
+messages sent to 38 distinct donors) that never run extraction at all,
+confirming no other historical donor is affected by either vocabulary
+question. Recommendation: **Yahrtzeit = SIMPLE FACT SIGNAL** (add
+`yahrtzeits?` to `FACT_SIGNAL_PATTERN`; corpus evidence is uniformly
+personal/meaningful, 3/42 rows, no mundane use found; would make the
+existing unmodified extractor produce Semmelman's desired snapshot with
+no other change). **Zman = DIFFERENT EXTRACTION CHANGE REQUIRED, not a
+simple word addition** (39/42 corpus rows are generic broadcast
+templates; Zachter's note is donor-relevant only because of surrounding
+appreciation/impact language the pattern doesn't recognize at all today
+-- a materially different, separately-scoped gap, not fixable by adding
+"zman" itself). Desired (not generated, not written) snapshots for both
+donors documented and clearly labeled as design targets. Re-confirmed
+from current source that the `outcome/route.ts` ungated-write finding
+from the prior audit is still accurate and unchanged -- not touched or
+expanded in this task. **No D1 writes, no extraction-code change, no
+deploy** -- strictly investigation/design only. Full report: "Zman /
+Yahrtzeit Extraction-Vocabulary Investigation (2026-08-20)" above.
+Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T21:20:00Z (approximate)
 Claude (Sonnet 5) — Read-only, comprehensive audit of every live donor's
