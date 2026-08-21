@@ -2690,6 +2690,145 @@ investigation and this audit. No `wrangler deploy` was run. `origin/main`
 unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout. Session
 `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
 
+## Grandchild Fix Deployment + Donor 987 Repair Preview (2026-08-20)
+
+Two phases, per explicit instruction: (A) deploy the already-committed
+forward fix and live-verify it; (B) preview -- not apply -- donor 987's
+historical repair.
+
+**Phase A -- deploy.** Fetched origin, confirmed `HEAD ==
+origin/feature/independent-cloudflare-sandbox == a59c8d5` (the commit
+containing the approved `FACT_SIGNAL_PATTERN` fix), working tree clean,
+`origin/main` unchanged. Re-ran `pnpm test` (exit 0, every suite `fail
+0`), `pnpm exec tsc --noEmit` (clean), `pnpm run build:staging-
+independent` (completed, full route manifest, no errors). Deployed via
+`pnpm run deploy:staging-independent` (`wrangler deploy --config
+wrangler.staging.jsonc`) at 2026-08-20T23:52:18Z (UTC, deploy command
+start). **Worker version `e846f522-161e-48ea-a556-4b575db27be5`**,
+deployed git SHA `a59c8d5`. No D1 schema/data, R2, workflow, CPU-limit,
+or account-setting change; production untouched.
+
+**Live forward-behavior verification.** No safe disposable/test donor
+exists among live donors (checked: zero donors with display_name
+matching test/QA/dummy/disposable/sample/zzz patterns) -- per explicit
+instruction, did not fabricate an interaction against real donor
+history. `CaptureExperience.tsx`'s preview (`useMemo(() =>
+extractInteraction(note, activeKind, subject), ...)`) is computed
+entirely client-side from note/type/subject alone, with no dependency on
+`donorId` and no network round-trip -- so the acceptance-UX check could
+be exercised live against the real deployed bundle on `/capture` without
+selecting any donor and without ever clicking Save, guaranteeing zero
+persistence by construction (not merely by choosing not to click
+accept). Verified on `https://fundraising-os-staging.sgoldstein.workers.dev/capture`:
+- A grandson note ("Spoke about his grandson's upcoming bar mitzvah.")
+  now offers the "Use this relationship snapshot" checkbox, unchecked by
+  default, with the exact preview text "Spoke about his grandson's
+  upcoming bar mitzvah." shown -- a real quoted sentence, not a
+  mechanical field-label dump.
+- A parallel son note ("Spoke about his son's upcoming bar mitzvah.")
+  produces the structurally identical checkbox/preview UI -- confirmed
+  parity between the grandchild and existing son/daughter paths.
+- A granddaughter note ("Spoke about his granddaughter's engagement.")
+  also correctly triggers the checkbox.
+- An unrelated note ("Left a voicemail, no answer.") correctly shows "No
+  meaningful relationship details detected." with no checkbox -- no
+  regression to the negative case.
+- `Save interaction` stayed disabled throughout (no donor selected);
+  `read_console_messages` (pattern `.`, all message types) returned zero
+  messages across page load and every interaction -- no console errors.
+- No server round-trip was exercised (no POST was ever sent, by design,
+  to avoid writing a fabricated interaction into real donor history) --
+  server-side error-free behavior for a real donorId + accepted checkbox
+  was not directly observed live in this task; it is covered by the
+  existing structural test in `tests/capture.test.mjs` (asserts the
+  `acceptRelationshipSnapshot === true` gate in `app/api/interactions/
+  route.ts`) and by the new `tests/relationship-snapshot-family-terms.
+  test.mjs`, but not by a live end-to-end write in this session.
+
+**Phase B -- donor 987 preview (NO WRITE).** Re-read fresh from D1
+immediately before generating the preview:
+- Donor 987 (`bb929584-0ba8-4741-84b6-746427724bc4`): `relationship_
+  summary` and `institutional_memory` both still NULL,
+  `relationship_health` still NULL, `updated_at` still `1786123132`
+  (unchanged from every prior read in this session's earlier
+  investigation).
+- Source interaction `1c69f90a-59b4-431a-bbf4-eabee0bd6d36`: same donor,
+  type `call`, source `capture:call`, `shared_activity_id`/`role` still
+  null, `created_at == updated_at == 1787255047` (never edited), zero
+  `activity_status_audits` rows, summary text byte-identical to the
+  original audit ("grandson bar mitzvah mazel tov call\ncalled to wish
+  mazel tov on grandson's bar mitzvah this shabbos"). All pre-write
+  assumptions held -- proceeded to preview generation.
+
+**Existing tooling audit.** `scripts/relationship-summary-cleanup-
+preview.mjs` (the established preview/apply architecture) selects its
+candidate set as `donors WHERE relationship_summary IS NOT NULL` --
+built specifically to regenerate/clear *stale-format, already-non-null*
+values (pre-fix "Latest discussion topics: ..." dumps), not to backfill
+a field that is currently NULL. Donor 987's `relationship_summary` is
+NULL, so this donor would never appear in that script's candidate set at
+all -- **the existing tooling cannot express this specific repair
+(null -> populated) as-is.** Per explicit instruction not to bypass the
+safety model or write a one-off SQL UPDATE, this was reported rather
+than worked around; the preview below was generated by calling the same
+real, unmodified `actionableRelationshipSnapshot()`/
+`relationshipSnapshotDetails()` functions this script itself uses,
+directly, with no D1 write of any kind. Extending the script to handle a
+null-backfill case (with its own compare-and-swap safety, matching the
+existing apply-mode pattern) would be a separate, explicitly-scoped
+follow-up if this preview is approved and a repeatable/backfill path is
+wanted later.
+
+**Preview (read-only, not applied):**
+
+| | Value |
+|---|---|
+| Donor | 987 (`bb929584-0ba8-4741-84b6-746427724bc4`) |
+| Source interaction | `1c69f90a-59b4-431a-bbf4-eabee0bd6d36`, type `call`, occurred 2026-08-20 |
+| Source note (relevant excerpt) | "called to wish mazel tov on grandson's bar mitzvah this shabbos" |
+| Current relationship_summary | `null` |
+| Proposed relationship_summary | `"called to wish mazel tov on grandson's bar mitzvah this shabbos."` |
+| Current institutional_memory | `null` |
+| Proposed institutional_memory | `"Call context: called to wish mazel tov on grandson's bar mitzvah this shabbos"` |
+
+**Quality assessment.** Compared directly against donor 67909's real,
+already-live, already-accepted values for the parallel son note: `"called
+to wish mazel tov on son's bar mitzvah this shabbos."` /
+`"Call context: called to wish mazel tov on son's bar mitzvah this
+shabbos"`. Donor 987's proposed values are structurally identical in
+form, differing only in "grandson's" vs "son's" -- the same style already
+live in production for this exact capture path, not a "People mentioned:
+Grandson"-style mechanical dump (that failure mode was the pre-1487a8b
+generator, already retired). `people`/`organizations` both extract empty
+(no false "Grandson" name-mention), consistent with the note's lowercase
+possessive not matching the capitalized-name pattern. One minor,
+pre-existing, non-grandchild-specific cosmetic trait: the proposed
+relationship_summary starts lowercase ("called to wish...") because it
+quotes the note verbatim and this particular note itself starts
+lowercase -- identical behavior to what already happened for 67909, not
+a defect introduced by this fix. **Assessment: useful, consistent with
+the already-accepted production bar for this exact note style --
+recommended for approval, pending explicit human sign-off (not applied
+in this task).**
+
+**Confirmation: donor 987 remains unmodified.** Re-read after generating
+the preview: `relationship_summary`/`institutional_memory` still NULL,
+`updated_at` still `1786123132`; source interaction `updated_at` still
+`1787255047`. No `UPDATE` statement of any kind was executed against
+donor 987 or its interaction in this task. The other 14 shared-activity
+rows from the historical audit were not touched or re-examined.
+
+**Confirmation: git/deploy state.** `origin/feature/independent-
+cloudflare-sandbox` and local `HEAD` both `a59c8d5` before this task's
+docs-only commit; `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`) throughout. Only the
+Worker was deployed (Independent Staging); no D1 write of any kind
+occurred in this task. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Next approval needed:** explicit sign-off on the exact previewed
+`relationship_summary`/`institutional_memory` values above for donor
+987 before any write is made -- this task ends at preview.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -3461,6 +3600,46 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-20T20:10:00Z (approximate)
+Claude (Sonnet 5) — Two-phase task: (A) deployed the already-committed
+grandchild extraction fix (`a59c8d5`) to Independent Staging (Worker
+`e846f522-161e-48ea-a556-4b575db27be5`) after re-passing `pnpm test`/
+`tsc --noEmit`/`build:staging-independent`, then live-verified the UI on
+the real deployed bundle: a grandson note and a granddaughter note both
+now correctly offer the "Use this relationship snapshot" checkbox with a
+sensible quoted-sentence preview, at parity with an equivalent son note;
+an unrelated note still correctly shows no checkbox; zero console
+errors. No donor was written to during verification -- no safe
+disposable test donor exists, and the preview computation is entirely
+client-side with no donorId dependency, so the check was done without
+selecting a donor or ever clicking Save, guaranteeing no persistence by
+construction. (B) Previewed -- did NOT apply -- donor 987's historical
+repair: re-confirmed fresh from D1 that the donor and its source
+interaction are unchanged from the original audit (`relationship_
+summary`/`institutional_memory` still NULL, interaction never edited,
+no audit rows). Found the existing `scripts/relationship-summary-
+cleanup-preview.mjs` tool's candidate set is `relationship_summary IS
+NOT NULL` -- it cannot see a currently-NULL donor like 987 at all, so it
+structurally can't express this null-backfill repair; reported this gap
+rather than writing a one-off UPDATE or bypassing the safety model.
+Generated the proposed values directly from the real, unmodified
+extraction functions: relationship_summary `"called to wish mazel tov
+on grandson's bar mitzvah this shabbos."`, institutional_memory `"Call
+context: called to wish mazel tov on grandson's bar mitzvah this
+shabbos"`. Compared against donor 67909's real, already-live values for
+the parallel son note (identical structure, differing only in
+"grandson's"/"son's") and assessed the proposed content as useful and
+consistent with the already-accepted production bar, not mechanical
+junk -- recommended for approval, explicitly not applied. Donor 987
+re-confirmed unmodified after generating the preview (`updated_at`
+unchanged on both the donor row and the source interaction). `origin/
+main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`); no D1
+write of any kind occurred in this task. Full report: "Grandchild Fix
+Deployment + Donor 987 Repair Preview (2026-08-20)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-20T19:00:00Z (approximate)
 Claude (Sonnet 5) — Implemented the approved forward fix for the
