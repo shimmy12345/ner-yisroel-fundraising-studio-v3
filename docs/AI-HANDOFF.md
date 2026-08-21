@@ -8,43 +8,41 @@ the repository/infrastructure disagree, trust the repository/infrastructure.
 
 ## Current Git State
 
-**Corrected 2026-08-21 -- verified by a fresh `git fetch` + `wrangler
-deployments list` + live D1 read at the start of this task, per explicit
-instruction, not carried over from this section's own (stale) prior
-text. Per this file's own preamble, git/deployed state is always the
+**Per this file's own preamble, git/deployed state is always the
 authoritative source if this section ever drifts again.**
 
 Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`e66005c` -- "Add Relationship Intelligence Phase 1: durable-facts schema
-and backfill preview" (see "Relationship Intelligence Phase 1" below for
-full detail). On top of `3dedd63`/`057decf`/`3d7ecb7` (the three
-investigation/design-only docs commits: Lifecycle Correction, Synthesis
-Design, Architecture Approval), `a30316f` (Option A implementation --
-**this remains the most recent commit that changed deployed application
-code**; the four commits since then are either docs-only or, for this
-one, a D1 schema-only addition that ships no new Worker code path -- see
-below), `b72895d`/`4ad8f3f` (docs-only cleanup), `befa0fb` (the
-people-extraction false-positive fix), and the full history recorded
-further down this section from earlier tasks.
+`4176860` -- "Correct Relationship Intelligence classification gaps found
+in the live preview" (see "Relationship Intelligence Phase 1 --
+Classification Correction" below for full detail). On top of `e66005c`
+(Phase 1 schema + backfill preview machinery), `3dedd63`/`057decf`/
+`3d7ecb7` (the three investigation/design-only docs commits), `a30316f`
+(Option A implementation), `b72895d`/`4ad8f3f` (docs-only cleanup),
+`befa0fb` (the people-extraction false-positive fix), and the full
+history recorded further down this section from earlier tasks.
 **Deployed Worker version remains
-`0673c91a-de71-4f29-950b-34f71fc3fbec`** (confirmed via a fresh
-`wrangler deployments list --config wrangler.staging.jsonc` at the start
-of this task -- unchanged since Option A's own deploy; this task's
-commit was never built/deployed, since it introduces no new route or
-behavior change, only additive schema + a backfill preview script never
-wired into the running app). **D1 schema state, confirmed live**:
-migration 0034 (`donor_relationship_facts`/`donor_relationship_fact_
-changes`) is applied to `fundraising-os-staging-db` -- both tables exist,
-both empty (0 rows each, confirmed directly), no other table touched. No
-production access. `origin/main` untouched throughout every task
-recorded in this file.
+`0673c91a-de71-4f29-950b-34f71fc3fbec`** (Option A's own deploy, still
+unchanged). **This commit DOES modify a live application code path**
+(`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`, consumed by
+`extractInteraction()`, which Capture/edit-route/Outcome-route/Monday-
+import's `confirm_contact` all call live) -- **deliberately not deployed
+in this task**: nothing this task's own deliverable depends on (the
+preview reads D1 directly and imports the local module, neither goes
+through the deployed Worker) required it, and shipping an extraction-
+behavior widening to live fundraiser interactions is a separate decision
+from correcting a backfill-preview classifier, not bundled in here
+without its own explicit review. Flagged for the user to decide when to
+deploy -- alongside Phase 2, or standalone. **D1 schema state, confirmed
+live**: migration 0034 tables still exist, still both empty (0 rows
+each, reconfirmed after this task's preview re-run) -- no other table
+touched. No production access. `origin/main` untouched throughout every
+task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`e66005c` (pushed; matches local HEAD exactly, no divergence -- verified
-via fresh `git fetch` at the start of this task).
+`4176860` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -5848,6 +5846,201 @@ deliberate extra friction point, matching this repo's own convention on
 `scripts/relationship-summary-cleanup-preview.mjs`'s `--apply` gate) or
 beginning Phase 2.
 
+## Relationship Intelligence Phase 1 -- Classification Correction (2026-08-21) -- BACKFILL STILL NOT APPLIED, AWAITING APPROVAL
+
+**Scope, per explicit instruction: a narrow, evidence-driven correction
+to the classification gaps the Phase 1 preview itself exposed -- nothing
+more.** No backfill applied, no relationship-fact rows written, no
+existing donor field altered, Phase 2 not started. Deployment
+deliberately withheld even though one file in this change does touch a
+live application code path -- see "Current Git State" above for the full
+reasoning.
+
+### The three fixes, each traced to real staging text
+
+1. **`SOLICITATION_FACT_TERMS` gains "solicited"** (`lib/capture/
+   interaction.ts`). Three real donors (Klein, Pfeiffer, Rovinsky) have
+   text reading "Solicited for a plaque ($5k)" / "Solicited for $10k" /
+   "Solicited for a plaque in memory of his wife ($5k)" -- genuine
+   solicitation language with no prior fact-signal term to catch it at
+   all (`COMMUNICATION_ACTION_VERBS`' own "Solicited" entry is a
+   completely separate system -- it only excludes the word from PEOPLE-
+   mentioned matching, never from fact-signal detection). Deliberately
+   just the evidenced word: not "solicitation" or bare "solicit", neither
+   of which appears anywhere in the real corpus.
+2. **`RELATIVE_TIME_PATTERN` gains "Shabbos"** (`lib/relationships/fact-
+   classification.ts`, same `this/next/upcoming` + word construction
+   every other holiday name already uses). Two real donors (Mark
+   Danziger, Sonnenblick) have text reading "...bar mitzvah this
+   shabbos." -- a genuinely near-term, dated event the pattern had no way
+   to catch. Investigated the full 12-candidate corpus for other missed
+   relative-time language per the explicit instruction to look beyond
+   just this one example: found one more instance ("after succos",
+   Weinschneider) but declined to add "after" as a general trigger --
+   that sentence already resolves correctly via `COMMITMENT_PATTERN`
+   regardless of this pattern, so adding it would fix zero actual
+   misclassifications in the observed data, which is exactly the
+   speculative-coverage line the evidence-gated principle draws.
+3. **`hasSubstantiveContentBesidesCommitment()`** (new, `lib/
+   relationships/fact-classification.ts`), wired into the backfill
+   preview's safety checks -- see the Weinschneider investigation below.
+
+### Reviewing every one of the 12 candidates individually, not trusting the mechanical output
+
+Per explicit instruction not to assume the remaining `durable`
+classifications are correct merely because they passed the safety
+checks, each was reviewed on its own:
+
+- **Abdelhak** ("Personal invite to Teaneck event.") -- `engagement`/
+  `durable`. No date/relative-time word at all; `durable`-by-conservative-
+  default is the correct, disclosed behavior here, not an oversight --
+  inventing a "bare 'event' implies time_bound" rule with zero textual
+  evidence for it would itself be the kind of speculative vocabulary
+  this task was told not to add.
+- **Joel Danziger** ("Dropped off bottle of schnaps for son's bar
+  mitzvah.") -- `family_milestone`/`durable`. The SAME disclosed
+  conservative-default case the design doc's own worked example already
+  named explicitly (a past one-off event with no date word). Reviewed
+  and left as-is, not silently accepted -- a bespoke "bar mitzvah always
+  means time_bound" rule has no textual signal behind it either.
+- **Mark Danziger** / **Sonnenblick** -- **CHANGED** by fix #2, see table
+  below.
+- **Horn** ("Messaged to welcome son back to Yeshiva.") --
+  `family_milestone`/`durable`. No date signal; a recurring-but-
+  unanchored situation (which semester, which year, is not stated) --
+  correctly conservative.
+- **Klein / Pfeiffer / Rovinsky** -- **CHANGED** by fix #1, see table
+  below.
+- **Semmelman** ("Sent text on wife's Yahrtzeit to acknowledge it.") --
+  `family_milestone`/`durable`. Reviewed against the design's own
+  explicit yahrtzeit principle directly: this is genuinely durable family
+  context (an acknowledgment of an ongoing, recurring relationship fact),
+  and the real recurring date already lives in the separate, structured
+  `yahrtzeits` table (not duplicated here) -- this is the design working
+  exactly as intended, not a gap.
+- **Weinschneider** -- **CHANGED to NEEDS_REVIEW**, see the dedicated
+  investigation below.
+- **Zachter** ("Texted video from first day of Zman and thanked him for
+  his support...") -- `engagement`/`durable`. Considered whether "first
+  day of Zman" should trigger time_bound; declined -- "Zman" is not a
+  single calendar date the way a month or a named holiday is (it recurs
+  twice yearly, unanchored without a year), and this donor is already the
+  intentionally narrow, single documented exception the existing
+  `ZMAN_APPRECIATION_PATTERN` was built for (see the Zman/Yahrtzeit
+  extraction-vocabulary investigation earlier in this file) -- extending
+  it further here would be exactly the kind of broadening this task was
+  told not to do.
+- **Shlionsky** ("Sent him an email with photo of his son.") --
+  `family_milestone`/`durable`. No date signal; correctly conservative.
+
+### Weinschneider, investigated directly as instructed
+
+"Discussed Kollel donation and said to follow up after succos." genuinely
+bundles two distinct pieces of information in one sentence: (a)
+substantive relationship/giving context -- the donor is discussing a
+Kollel donation -- and (b) an action instruction -- circle back after
+Succos. Under sentence-level classification, `COMMITMENT_PATTERN`'s
+"follow up" match wins the lifecycle waterfall's priority order, so the
+WHOLE sentence becomes `follow_up` -- and per this module's own design,
+`follow_up` facts never enter `relationship_summary`/`institutional_
+memory` synthesis, at any age. Backfilling this sentence as pure
+`follow_up` would silently and permanently drop the "discussing a Kollel
+donation" fact from every future synthesized Snapshot. **Confirmed: yes,
+sentence-level lifecycle classification is insufficient for this real
+case.**
+
+**Smallest safe handling, not a general redesign:** `hasSubstantiveContent
+BesidesCommitment()` -- one boolean check, reusing the exact same category
+patterns `classifyFactCategory()` already consults (no new vocabulary at
+all) -- asks only "does this `follow_up`-classified text ALSO match a
+real substantive category signal that would be lost?" Weinschneider's
+sentence also matches `SOLICITATION_FACT_PATTERN` ("donation"), so it now
+routes to the backfill preview's existing `NEEDS_REVIEW` mechanism
+(alongside the pre-fix-junk/empty/too-long checks already there) instead
+of being silently backfilled. **Deliberately NOT a sentence-splitting or
+multi-fact-per-sentence mechanism** -- no attempt to auto-derive two
+separate facts from one sentence; a human reviews and decides (e.g.
+manually entering the donation context and the follow-up separately)
+rather than the system guessing. **Disclosed, conservative tradeoff**:
+this check can also flag a sentence where the "competing" word is really
+just timing context for the follow-up itself (e.g. "Follow up after
+Danielle's wedding" also matches `FAMILY_MILESTONE_FACT_PATTERN` on
+"wedding" and would be flagged too, even though nothing is really being
+lost there if the wedding fact was already captured in its own separate
+sentence) -- accepted deliberately: occasionally asking a human to
+confirm a borderline case is a better failure mode than silently
+dropping real donor intelligence, matching this whole task's fail-closed
+philosophy.
+
+### Tests added (all three explicitly requested)
+
+`tests/relationship-fact-classification.test.mjs`: `solicited` →
+`solicitation` category for all three real sentences, plus a sanity check
+that bare "solicitation" (not evidenced) does NOT trigger it;
+`this shabbos` → `time_bound` for both real sentences, plus case-
+insensitivity and a sanity check that bare "Shabbos" alone (no
+`this`/`next`/`upcoming`) does not; `hasSubstantiveContentBesidesCommitment`
+against the real Weinschneider sentence (true), the deliberate false-
+positive-by-design wedding case (true, documented why), a genuinely pure
+commitment sentence (false), and non-`follow_up` text (false).
+`tests/relationship-facts-backfill-preview.test.mjs`: the real
+Weinschneider sentence produces zero plan entries and one `NEEDS_REVIEW`
+skip whose reason mentions both "follow_up" and "substantive"; a pure
+follow-up sentence with no competing signal is still backfilled normally
+(confirming this is a narrow, targeted check, not a blanket "never
+backfill follow_up" rule).
+`tests/relationship-summary-cleanup-preview.test.mjs` updated: the
+"Solicited for the annual campaign" fixture now correctly classifies
+`SAFE_TO_REGENERATE` (the current extractor now finds a real fact there)
+instead of the pre-fix `SAFE_TO_CLEAR` expectation, which was only ever
+correct because "solicited" had no fact-signal term before; the "dollar
+amount present but no fact signal" fixture was swapped to text that
+doesn't contain "solicited" (since that code path needs a note the
+CURRENT extractor still finds nothing in, which "Solicited for a plaque
+($5k)" no longer is).
+
+### Quality gates (all passing)
+
+`pnpm test`: exit 0, every suite `fail 0` (including the newly-added
+cases above and the one pre-existing-test regression found and fixed
+correctly, not suppressed). `pnpm exec tsc --noEmit`: clean, zero
+output. `pnpm run build:staging-independent`: completed, full route
+manifest, no errors. **No deploy** -- see "Current Git State" above.
+
+### Fresh backfill preview -- before vs. after, all 12 candidates
+
+Re-run against Independent Staging, read-only, zero D1 writes (D1 tables
+reconfirmed empty at 0 rows both before and after this run).
+
+| Donor | Fact text | Category (before → after) | Lifecycle (before → after) | Changed? / reason |
+|---|---|---|---|---|
+| Abdelhak | "Personal invite to Teaneck event." | engagement | durable | No -- reviewed, correctly conservative (no date signal). |
+| Joel Danziger | "Dropped off bottle of schnaps for son's bar mitzvah." | family_milestone | durable | No -- reviewed, the disclosed conservative-default case. |
+| Mark Danziger | "called to wish mazel tov on grandson's bar mitzvah this shabbos." | family_milestone | durable → **time_bound** | **Yes -- fix #2 (Shabbos).** |
+| Horn | "Messaged to welcome son back to Yeshiva." | family_milestone | durable | No -- reviewed, no date signal. |
+| Klein | "Note context: Solicited for a plaque ($5k)" | general → **solicitation** | durable → **time_bound** | **Yes -- fix #1 (solicited).** |
+| Pfeiffer | "Note context: Solicited for $10k" | general → **solicitation** | durable → **time_bound** | **Yes -- fix #1 (solicited).** |
+| Rovinsky | "Note context: Solicited for a plaque in memory of his wife ($5k)" | general → **solicitation** | durable → **time_bound** | **Yes -- fix #1 (solicited).** |
+| Semmelman | "Sent text on wife's Yahrtzeit to acknowledge it." | family_milestone | durable | No -- reviewed, matches the design's own yahrtzeit principle. |
+| Sonnenblick | "called to wish mazel tov on son's bar mitzvah this shabbos." | family_milestone | durable → **time_bound** | **Yes -- fix #2 (Shabbos).** |
+| Weinschneider | "Discussed Kollel donation and said to follow up after succos." | commitment_followup | follow_up → **NEEDS_REVIEW** | **Yes -- fix #3, moved out of SAFE TO BACKFILL entirely.** |
+| Zachter | "Texted video from first day of Zman and thanked him for his support that makes it happen." | engagement | durable | No -- reviewed, the existing narrow Zman exception, not extended. |
+| Shlionsky | "Sent him an email with photo of his son." | family_milestone | durable | No -- reviewed, no date signal. |
+
+**Totals: SAFE TO BACKFILL 12 → 11. NEEDS REVIEW 0 → 1. 5 of 12
+candidates changed; 6 were individually reviewed and confirmed correct
+as `durable`, not merely left alone by default; 1 (Weinschneider) moved
+out of the safe set entirely.**
+
+### Status -- STOPPED per explicit instruction
+
+**No backfill applied. No `donor_relationship_facts` row written. No
+existing donor field altered. Phase 2 not started. Not deployed** (one
+file does touch a live application code path -- flagged explicitly in
+"Current Git State" above, left for explicit approval). Awaiting
+approval before applying the (now-corrected) backfill or beginning
+Phase 2.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -6730,6 +6923,35 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T20:00:00Z (approximate)
+Claude (Sonnet 5) — Corrected three classification gaps the Phase 1
+backfill preview itself exposed, per explicit instruction to make a
+narrow, evidence-driven fix based only on the real staging corpus: added
+"solicited" to `SOLICITATION_FACT_TERMS` (3 real donors), added
+"Shabbos" to `RELATIVE_TIME_PATTERN` (2 real donors), and added
+`hasSubstantiveContentBesidesCommitment()` after investigating
+Weinschneider's "Discussed Kollel donation and said to follow up after
+succos." directly — confirmed sentence-level lifecycle classification
+would silently drop the donation context by classifying the whole
+sentence `follow_up`, and fixed it with the smallest safe handling (a
+`NEEDS_REVIEW` flag, not a sentence-splitting redesign). Reviewed all 12
+candidates individually rather than trusting the mechanical output,
+including declining two tempting-but-unevidenced extensions (an "after
+X" relative-time trigger and extending the Zman exception) since neither
+fixes an actual observed misclassification. Fixed one real pre-existing
+test regression correctly (updated its expectation to the now-correct
+behavior, not suppressed). Added regression tests for all three fixes.
+Re-ran `pnpm test`/`tsc --noEmit`/`build:staging-independent` (all
+clean) and a fresh read-only backfill preview: SAFE TO BACKFILL 12→11,
+NEEDS REVIEW 0→1, full before/after table for all 12 candidates recorded
+above. Zero D1 writes at any point (both new tables still empty). Did
+not deploy — flagged that `lib/capture/interaction.ts`'s change does
+touch a live application code path, left for a separate explicit
+decision. No backfill applied, no existing donor field touched, Phase 2
+not started. Corrected "Current Git State". Awaiting approval.
+
+---
 
 2026-08-21T19:00:00Z (approximate)
 Claude (Sonnet 5) — Implemented Phase 1 of the approved Relationship
