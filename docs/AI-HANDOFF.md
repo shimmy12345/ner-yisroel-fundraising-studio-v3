@@ -4962,6 +4962,297 @@ outside `docs/AI-HANDOFF.md` were touched in this task; no migration
 written; no D1 write made; nothing deployed. Awaiting explicit approval
 before Phase 1 (or any phase) begins.
 
+## Relationship Snapshot Synthesis Design (2026-08-21) -- FINAL DESIGN PASS, INVESTIGATION ONLY, NO CODE/SCHEMA/D1/DEPLOY CHANGE
+
+**Approved:** the dedicated `donor_relationship_facts` architecture from
+the section above, reusing `donor_research_findings`'s status/
+supersession model. This section is the final design pass on exactly
+how the current Relationship Snapshot is *derived* from durable facts,
+per explicit instruction, before any implementation. Still investigation
+only -- no file outside `docs/` touched.
+
+### Category taxonomy and temporal character
+
+Every accepted fact is tagged with a `category`, assigned deterministically
+from which of the existing regex groups in `lib/capture/interaction.ts`
+matched it (`FACT_SIGNAL_PATTERN`'s sub-groups, `COMMITMENT_PATTERN`,
+`RELATIONSHIP_CHANGE_PATTERN`, `ZMAN_APPRECIATION_PATTERN`) -- no new
+extraction logic, a coarsening of what already exists. Each category
+gets two fixed properties, reasoned below, not claimed as scientifically
+derived (matching this codebase's own explicit convention for
+`recencyScore`'s comment: "deliberately linear and simple... not a claim
+worth making"):
+
+| Category | Supersession | Decay window (days) |
+|---|---|---|
+| `solicitation` | **singular-state** (auto-supersede same-category) | 90, pinned to fully-fresh while a linked `asks` row stays `status='pending'` |
+| `health` | **singular-state** (auto-supersede same-category) | 180 |
+| `commitment_followup` | additive (no auto-supersede by category) | 30 -- reuses the exact window `continue_conversation` already uses (`recencyScore(interaction.daysAgo, 30)`, `recommendation-candidates.ts`) |
+| `engagement` | additive | 120 |
+| `general` | additive | 90 |
+| `family_milestone` | additive | 365 |
+
+**Why the singular-state/additive split, not category-match-always:**
+working the donor example below caught a real design bug before it
+shipped -- `donor_research_findings`' own real supersession rule is
+`(category, organizationNormalized)`, a category **plus a second,
+specific key**, not category alone (re-read directly from `lib/
+research/pipeline.ts` for this pass, correcting an oversimplification in
+the prior section). Relationship facts have no reliable equivalent
+second key (`mentionedPeople()` is best-effort/capped, not a stable
+identity across two independently-phrased notes). Applying category-
+match supersession to a broad, multi-subject category like
+`family_milestone` would wrongly treat "grandson's bar mitzvah" and
+"daughter's wedding" as the same claim and destroy the older one. The
+fix: **automatic category-match supersession is scoped only to
+categories where "same category" genuinely means "same evolving state of
+one thing"** -- a donor has one live solicitation narrative and one
+current health status, but can have many simultaneous, unrelated family
+facts, commitments, and engagements. For every category, an exact
+`sourceInteractionId` match (the SAME interaction re-accepted after an
+edit -- a correction to what was already said) always supersedes
+preferentially, before the category rule is even consulted.
+
+### How each open question is answered
+
+- **Which facts are eligible for the Snapshot?** Only `status: current`
+  rows -- `superseded`/`archived_with_source` are structurally excluded
+  from synthesis input, never a scoring question.
+- **How many facts surface?** `relationship_summary`: top 2 by priority
+  score (unchanged cap from the prior section, now score-ranked instead
+  of just recency-of-acceptance-ranked). `institutional_memory`: every
+  current fact clearing a minimum relevance floor (score > 0.1),
+  capped at 5 -- often fewer than 5, never padded with stale facts just
+  to hit a count. If literally nothing clears the floor (a donor whose
+  only current facts are all very old), both surfaces fall back to the
+  single most recent current fact regardless of score, so the Snapshot
+  is never blank while any accepted fact exists.
+- **How does recency affect relevance?** Reuses `recencyScore`'s exact
+  existing formula and shape (`clamp01(1 - daysAgo / window)`, linear to
+  zero at the category's window, per the table above) rather than
+  inventing a new decay curve -- the same function/precedent
+  `recommendation-candidates.ts` already uses for gift/reminder/
+  relationship-date recency. Measured from `sourceInteractionOccurredAt`
+  (accept time), never from any event date the fact's own text might
+  reference ("this Sukkos") -- date-parsing free text is out of scope,
+  and is stated as a disclosed simplification, not a silent gap.
+- **Should an old but important family fact remain visible?** Yes, for
+  longer than any other category (365-day window, vs. 30-180 for
+  everything else) -- the direct, structural answer to this question.
+  But not forever unconditionally: it fades from `relationship_summary`
+  first, then from `institutional_memory` once its score drops below the
+  floor, while never being deleted from `donor_relationship_facts` (see
+  the worked example below for a concrete before/after).
+- **How are superseded/contradicted facts excluded?** Structural status
+  filter for the synthesis input (never `status != 'current'`). Auto-
+  supersession is deliberately narrow (singular-state categories only,
+  or an exact source-interaction match) to avoid the false-positive
+  collision documented above; broader contradictions rely on decay (an
+  old, unresolved fact naturally fades) plus an explicit, human-driven
+  "mark this fact no longer current" override (mirrors `pledge_payment_
+  plans.endedAt`'s existing convention of only ever being set by explicit
+  fundraiser action) -- the v1 answer for cross-category contradiction,
+  flagged as a known limitation in the prior section and unchanged here.
+- **How are temporary facts distinguished from durable ones?** Not a
+  separate flag -- an emergent property of category alone (its
+  supersession behavior + decay window). No new column beyond
+  `category`, which the extraction step already assigns.
+- **How do structured facts (Asks, yahrtzeits, birthdays, giving,
+  payment plans) influence the Snapshot without being duplicated?** Two
+  sanctioned, narrow channels, nothing broader:
+  1. **Display separation, unchanged from today.** `askLine()`/
+     `familyDateLine()`/`pledgePlanLine()` (already existing, already
+     shared across Meeting Brief/donor page/Assistant) remain the sole
+     display surface for structured data, shown ALONGSIDE the Snapshot
+     in Meeting Brief's already-separate fields (`openAsks`,
+     `familyImportantDates`, giving totals) -- never folded into
+     `relationship_summary`/`institutional_memory` text. This is already
+     correct in the current Meeting Brief data model (confirmed by
+     direct read in the prior section); this design's job is to
+     preserve that separation, not introduce it.
+  2. **Decay modulation, one category only.** A `solicitation` fact
+     linked (via its own `sourceInteractionId` matching an
+     `asks.sourceInteractionId`) to a still-`pending` ask is pinned to
+     full freshness (score 1.0) regardless of age; once that ask
+     resolves (`committed`/`declined`/`withdrawn`), the fact decays
+     normally from that point. This is the only place structured state
+     is allowed to affect the free-text layer, and it never copies the
+     ask's own amount/purpose text into the fact -- only its `pending`/
+     resolved status.
+- **Deterministic, AI-generated, or hybrid?** **Deterministic for v1.**
+  Synthesis is selection + priority scoring + capping + verbatim
+  sentence-join over already-accepted text -- the same join logic
+  `actionableRelationshipSnapshot()` already uses, never new prose. This
+  directly satisfies "prevent hallucination or unsupported inference" by
+  construction: nothing is generated, so there is nothing to hallucinate.
+  Each fact was already explicitly human-accepted at insert time;
+  synthesis never introduces a new claim requiring separate review.
+  **AI-generated smoothing is explicitly deferred, not recommended for
+  v1.** If ever pursued: the AI-authored paragraph must be shown as a
+  preview and separately, explicitly accepted (same default-unchecked
+  checkbox pattern used everywhere else in this codebase) before
+  replacing the deterministic display; the underlying facts table stays
+  authoritative regardless, so the AI-authored text is always a
+  discardable, re-derivable display cache, never a second source of
+  truth.
+- **Persisted, cached, or generated on read?** **Persisted/materialized**
+  into the existing `donors.relationship_summary`/`institutional_memory`
+  columns, regenerated synchronously in the SAME `env.DB.batch()` as any
+  fact status transition (insert/supersede/archive) -- never a separate
+  async job, never independently editable. This is a cache, explicitly
+  not a second source of truth: always exactly reproducible by
+  re-running the synthesis function over `donor_relationship_facts`,
+  unlike today's system where the "true" value has no other
+  representation to regenerate from if it ever drifted. Chosen over
+  read-time-only generation (which Meeting Brief's `peopleMentioned`/
+  `recentDiscussionTopics` already do for raw interactions) specifically
+  because the already-approved architecture requires zero changes to
+  Meeting Brief/Today/Assistant -- materialize-on-write is what delivers
+  that property; read-time generation would not.
+- **What happens when a source fact is edited, archived, or
+  superseded?** Facts are immutable once accepted -- editing the SOURCE
+  INTERACTION never mutates an existing fact row; a fresh re-accept from
+  the edited note is a new accept event, going through the same
+  classify → supersede-or-insert → resynthesize pipeline as any other.
+  Archiving the source interaction transitions its fact(s) to `status:
+  archived_with_source` (distinct from `superseded` -- provenance loss,
+  not a contradiction) and immediately triggers resynthesis. Every
+  status transition (insert-current / supersede / archive_with_source)
+  is followed, in the same batch, by a resynthesis-and-CAS-write of the
+  two materialized columns -- mirroring how Option A already bundles the
+  interaction update + relationship write + audit row in one
+  `env.DB.batch()`. The cache can never observably lag its source.
+- **How do Meeting Brief, Suggested Action, and Assistant stay in sync?**
+  All three continue reading the SAME two materialized columns,
+  unchanged from today's read sites. Because there is exactly one
+  synthesis function and exactly one write site for those columns (the
+  shared accept/supersede/archive pipeline), the three consumers are
+  structurally incapable of drifting from each other -- not "kept in
+  sync," but reading the literal same values by construction.
+  `peopleMentioned`/`recentDiscussionTopics` stay explicitly OUT of this
+  design: they already don't read these columns today (independently
+  re-extracted from the last 5 raw interactions, no acceptance gate at
+  all) and remain a deliberately separate, complementary, lower-bar
+  signal -- not something this design merges in or must keep consistent
+  with the Snapshot.
+
+### Worked example: 2.5 years, 10 facts, a contradiction, an ask, a yahrtzeit, giving history
+
+Fictional donor for illustration only. "Now" = 2026-08-21, matching
+today's date.
+
+**Structured data on file (never duplicated into facts):** one resolved
+ask ($10,000 building fund, `status: committed`, `askedAt` 2024-11);
+one open ask ($5,000 gala sponsorship, `status: pending`, `askedAt`
+2026-07-20, `sourceInteractionId` = the same interaction as fact #10
+below); one yahrtzeit (mother-in-law); an open $2,000 pledge with an
+active monthly payment plan; several paid gifts, most recent 3 months
+ago.
+
+**Durable facts, in acceptance order:**
+
+| # | Date | Text | Category | Status |
+|---|---|---|---|---|
+| 1 | 2024-03 | "His grandson had his bar mitzvah, a beautiful simcha." | family_milestone | **current** |
+| 2 | 2024-06 | "Discussed a $10,000 solicitation for the building fund; he wants to think it over." | solicitation | superseded (by #4) |
+| 3 | 2024-09 | "Promised to send him the updated campus tour schedule." | commitment_followup | **current** (stale) |
+| 4 | 2024-11 | "He confirmed the $10,000 building fund gift and asked for a plaque acknowledgment." | solicitation | superseded (by #10) |
+| 5 | 2025-02 | "She mentioned she's recovering from hip surgery." | health | superseded (by #7) |
+| 6 | 2025-05 | "Promised to introduce him to another board member." | commitment_followup | **current** (stale) |
+| 7 | 2025-08 | "Confirmed she's fully recovered and back to her normal schedule." | health | **current** (stale) |
+| 8 | 2025-10 | "His daughter is getting married in November." | family_milestone | **current** (fading) |
+| 9 | 2026-06 | "He's planning a trip to Israel this Sukkos and asked about visiting campus." | engagement | **current** (fresh) |
+| 10 | 2026-07 | "Asked about renewing/expanding gala support at $5,000; wants to finalize after seeing this year's program." | solicitation | **current** (fresh, pinned by pending ask) |
+
+**Supersession chain:** #2 → superseded by #4 (same category, both
+solicitation) → #4 itself later superseded by #10 (same category again).
+All three remain permanently in `donor_relationship_facts`, fully
+readable in order, with their own `donor_relationship_fact_changes`
+audit rows -- three hops of history, nothing destroyed. #5 → superseded
+by #7 (health, singular-state) is the contradiction case: "recovering"
+directly replaced by "fully recovered," cleanly captured, not blindly
+concatenated into a paragraph that would read "recovering... fully
+recovered" side by side.
+
+**Priority scores at "now" (illustrative arithmetic, `1 - daysAgo /
+window`):** #10 = 1.0 (pinned, linked ask still pending). #9 ≈ 0.44
+(~67 days into a 120-day engagement window). #8 ≈ 0.15 (~310 days into a
+365-day family_milestone window -- still just barely present). #1, #3,
+#6, #7 all ≈ 0.0 (each well past its own category's window -- #1 at ~2.5
+years vs. a 1-year family window; #3/#6 at well over a year vs. a
+30-day commitment window; #7 at ~1 year vs. a 180-day health window).
+
+**Resulting `relationship_summary` (top 2):** "Asked about renewing/
+expanding gala support at $5,000; wants to finalize after seeing this
+year's program. He's planning a trip to Israel this Sukkos and asked
+about visiting campus." -- #10 and #9 only.
+
+**Resulting `institutional_memory` (floor-qualifying, capped 5):** the
+same two facts, plus #8: "...gala support... Israel this Sukkos...
+His daughter is getting married in November." **#1 (the ~2.5-year-old
+bar mitzvah) does not appear in either surface** -- fully decayed, but
+still permanently retrievable in `donor_relationship_facts` (Phase 4's
+donor-page history view). This is the concrete, non-hypothetical answer
+to "should an old but important family fact remain visible": #8 (10
+months old) still is, faintly; #1 (2.5 years old) no longer is, in the
+synthesized view, though it is never deleted.
+
+**Honest, disclosed limitation surfaced by this example:** fact #8's
+text ("getting married in November") is now temporally stale in a
+subtler way than mere irrelevance -- the wedding has already happened by
+"now," but deterministic synthesis reproduces accepted text verbatim and
+has no way to know that, since re-phrasing would require generation
+(explicitly rejected for v1, see above). Decay is doing double duty
+here: aging #8 out of the top-priority slots is also, incidentally, what
+keeps this stale phrasing from dominating the Snapshot -- but it is not
+a semantic fix, and a fact that decays slowly (family_milestone, 365
+days) could still show dated phrasing for a while. Flagged here as a
+known v1 limitation, not silently absorbed into the design as solved.
+
+**What Meeting Brief should use:** `relationship_summary`/
+`institutional_memory` exactly as synthesized above (via `narrative.
+relationshipSummary || narrative.institutionalMemory`, unchanged
+fallback). `openAsks`: only the $5,000 gala ask (`status: pending`) via
+`askLine()` -- the resolved $10,000 ask never appears here, unchanged
+existing behavior. `familyImportantDates`: the yahrtzeit, via
+`familyDateLine()`, shown regardless of Snapshot content (existing
+always-shown rule). Giving totals/pledge/payment-plan line: from
+`giving_activities`/`pledge_payment_plans` directly, untouched by any of
+this. `peopleMentioned`/`recentDiscussionTopics`: still independently
+computed from the last 5 raw interactions, out of scope as above.
+
+**What Suggested Action should use:** the real `openAsk` evidence (the
+pending $5,000 gala ask) as genuine, structured, dated evidence --
+already documented in `recommendation-evidence.ts` as more trustworthy
+than narrative text ("More trustworthy than an imported note, less than
+a confirmed database row"); this design doesn't change that hierarchy,
+only confirms the synthesized narrative still sits below it. The
+synthesized `relationship_summary` (facts #10/#9) as the `narrative`
+fallback signal for `relationshipOpportunityCandidate`/`solicitCandidate`
+-- unchanged mechanism, now fed cleaner input.
+
+**What Suggested Action should NOT use:** the superseded #2/#4
+solicitation facts (already excluded from the narrative -- structurally
+invisible to `solicitCandidate`, so a resolved 21-month-old ask can no
+longer keep re-suggesting "make a solicitation ask" the way today's
+undecaying system could). The stale #3/#6 commitment facts (decayed out
+of both surfaces, so `relationshipOpportunityCandidate` can no longer
+prompt "reach out and reference: promised to send the campus tour
+schedule" nearly two years after the fact -- a genuine correctness
+improvement over today's no-decay system). #8's now-outdated wedding
+fact does not reach Suggested Action at all in this example, since
+`relationship_summary` is non-null and the `institutional_memory`
+fallback is therefore never consulted -- traced directly from the
+existing `||` fallback expression already in `recommendation-
+candidates.ts`, not a new rule introduced here.
+
+### Status
+
+**Design complete. Not implemented.** No files outside `docs/AI-
+HANDOFF.md` touched; no migration, D1 write, or deployment made.
+Awaiting explicit approval before Phase 1 of the previously-approved
+migration plan begins.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -5844,6 +6135,35 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T17:00:00Z (approximate)
+Claude (Sonnet 5) — Final design pass on Relationship Snapshot synthesis
+behavior, per explicit approval of the durable-facts architecture and a
+request to define synthesis precisely before implementation. Defined a
+category taxonomy (6 categories, each with a supersession rule and a
+decay window reusing `recencyScore`'s exact existing linear-decay
+formula) and, while working the required donor example, caught and
+corrected an oversimplification from the prior pass: `donor_research_
+findings`' real supersession key is (category, a second specific field),
+not category alone, which would have wrongly superseded unrelated
+same-category family facts (a bar mitzvah vs. a later, unrelated
+wedding). Fixed by scoping automatic same-category supersession to only
+two "singular-state" categories (solicitation, health) where it's
+actually valid, with every other category relying on decay plus an
+explicit human override. Worked a full 10-fact, 2.5-year donor example
+(a supersession chain, a contradiction, a pending vs. resolved ask, a
+yahrtzeit, giving history) showing the exact resulting `relationship_
+summary`/`institutional_memory`, and traced precisely what Meeting Brief
+and Suggested Action should and should not consume. Answered every
+explicit question asked (eligibility, count, recency, old-fact
+visibility, exclusion of superseded facts, temporary-vs-durable,
+structured-data influence without duplication, deterministic-vs-AI
+synthesis with an explicit hallucination-prevention argument,
+persistence model, edit/archive/supersede consequences, and cross-
+surface consistency). No code, schema, D1, or deployment touched.
+Awaiting approval before implementation.
+
+---
 
 2026-08-21T16:00:00Z (approximate)
 Claude (Sonnet 5) — Investigation/design only, per explicit instruction
