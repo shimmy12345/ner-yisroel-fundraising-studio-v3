@@ -8,50 +8,40 @@ the repository/infrastructure disagree, trust the repository/infrastructure.
 
 ## Current Git State
 
-**This section was stale for some time (still showing `0f75ad0`, the
-2026-08-20 Monthly Payment Plan tip, through many subsequent completed
-tasks) -- corrected 2026-08-21. Per this file's own preamble, git/
-deployed state is always the authoritative source if this section ever
-drifts again; do not trust a commit SHA here over a fresh `git fetch`.**
+**Per this file's own preamble, git/deployed state is always the
+authoritative source if this section ever drifts again; do not trust a
+commit SHA here over a fresh `git fetch`.**
 
 Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`4ad8f3f` -- a documentation-only cleanup of this file's stale current-
-state/outstanding-work sections (see the "Last Updated" log's newest
-entry for exactly what changed; no application code, D1, or deployment
-touched by that commit). On top of `befa0fb`, the people-extraction
-false-positive fix (see "People-Extraction False-Positive Investigation
-and Fix" below) -- **this is still the most recent code/deploy-affecting
-commit; `4ad8f3f` changed no code and triggered no new deployment.** On
-top of (most recent first): `3f1cd3e`/`e20e10d` (outcome-route Option B
-fix + docs), `c29590a`/`faea921` (Zman/Yahrtzeit extraction
-implementation + investigation docs), `b687511`/`4126663` (Zman/
-Yahrtzeit historical repair + comprehensive audit tooling),
-`d48e1f2`/`d6e43ee`/`a59c8d5` (grandchild-gap fix, deployment, and donor
-987 historical repair), and the branch-documentation-authority fix
-(`dc245fc`) before that. **Deployed to Independent Staging (Worker
-version `70dd7081-0fb3-4e69-8329-e115685f09fc`, 2026-08-21T12:40:27Z,
-still the current live version as of `4ad8f3f`) and live-verified**:
-Zachter/Semmelman/Weinschneider's Meeting Brief pages no longer show
-`Zman`/`Yahrtzeit`/`Discussed Kollel` under "People Mentioned"; a live
-temporary test note ("Spoke with Yaakov about the new Zman...")
-confirmed `Yaakov` still correctly appears while `Zman` does not (test
-interaction cleaned up afterward, no residue); both donors' Relationship
-Snapshot/Suggested Action text confirmed unchanged on the same live
-pages. No D1 schema change, no historical-data repair, no production
+`a30316f` -- "Add Option A: explicit review/accept flow for outcome-note
+Relationship Snapshots" (see "Outcome-Note Relationship Snapshot
+Review/Accept Flow -- Option A" below for full detail). On top of
+`b72895d`/`4ad8f3f` (docs-only cleanup), `befa0fb` (the people-extraction
+false-positive fix), `3f1cd3e`/`e20e10d` (outcome-route Option B fix +
+docs), `c29590a`/`faea921` (Zman/Yahrtzeit extraction implementation +
+investigation docs), `b687511`/`4126663` (Zman/Yahrtzeit historical
+repair + comprehensive audit tooling), `d48e1f2`/`d6e43ee`/`a59c8d5`
+(grandchild-gap fix, deployment, and donor 987 historical repair), and
+the branch-documentation-authority fix (`dc245fc`) before that.
+**Deployed to Independent Staging (Worker version
+`0673c91a-de71-4f29-950b-34f71fc3fbec`, still the current live version)
+and live-verified**: accepted/rejected/no-extraction/reopen/shared-
+activity scenarios all confirmed correct directly in D1, all test data
+cleaned up and reverted to baseline. No D1 schema change, no production
 access. `origin/main` untouched throughout every one of the above tasks.
 
 origin/feature/independent-cloudflare-sandbox:
-`4ad8f3f` (pushed; matches local HEAD exactly, no divergence).
+`a30316f` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
 recorded in this file since it was first confirmed at this SHA).
 
 Working tree:
-clean.
+clean (after this docs update is committed).
 
 ## Independent Staging Incident -- Error 1102 (2026-08-19 16:59:03 UTC / 12:59:03 EDT) -- INVESTIGATION ONLY, NO FIX APPLIED
 
@@ -4258,6 +4248,213 @@ of the already-committed, already-reviewed fix. `origin/main` unchanged
 **Status: the people-extraction false-positive issue is now closed** --
 investigated, fixed, tested, deployed, and live-verified.
 
+## Outcome-Note Relationship Snapshot Review/Accept Flow -- Option A -- IMPLEMENTED, TESTED, DEPLOYED, LIVE-VERIFIED (2026-08-21)
+
+Approved by explicit user instruction as the follow-up to "Outcome-Route
+Fix -- Option B Implemented + Deployed" above: Option B removed the
+outcome route's unconditional relationship-snapshot write entirely (a
+safety fix, but a capability regression -- outcome notes could no longer
+ever contribute to a donor's Relationship Snapshot at all). This task
+restores that capability, but gated behind an explicit review/accept UI
+-- the same pattern `CaptureExperience.tsx`/`app/api/interactions/[id]/
+route.ts` already use for the main capture form, reused rather than
+reinvented.
+
+**Investigation finding, reported per explicit instruction before
+writing any destructive code.** The task asked whether the existing
+Capture accept flow "intelligently incorporates" a donor's existing
+accepted Relationship Snapshot or replaces it outright. Direct inspection
+of `CaptureExperience.tsx` and `app/api/interactions/[id]/route.ts`
+confirmed: **full replacement is the deliberate, established, existing
+behavior everywhere in this codebase already** -- there is no merge/
+incorporation logic anywhere; `relationship_summary` is documented (in
+code) as reflecting the donor's most recently accepted summary, and both
+the main capture route (unconditional replace on accept, no CAS) and the
+edit route (CAS-guarded replace) already work this way. Neither Capture
+UI shows the donor's *current* value before accepting a replacement --
+this task's implementation goes further than existing UI, additively
+showing the current stored value alongside the proposal, so an outcome's
+higher-risk replacement (of a donor who may already have real accepted
+history) is never silent. No materially different architecture was
+required; the existing acceptance/CAS pattern was reused as-is with one
+adaptation (see below).
+
+**Implementation.**
+- `app/api/interactions/[id]/outcome/route.ts`: re-imports
+  `extractInteraction`; `ownedActivity()`'s single query now also reads
+  `d.relationship_summary`/`d.institutional_memory` alongside the
+  interaction row (one round trip, used as both the CAS baseline and,
+  via `page.tsx`, the client's "current value" display); `OutcomeBody`
+  gained `acceptRelationshipSnapshot?: boolean` (identical name/semantics
+  to the capture route's own flag). The write itself sits in a new block
+  gated on `(nextStatus === "completed" || nextStatus === "no-response")
+  && body.acceptRelationshipSnapshot === true` -- structurally
+  unreachable from cancel/reschedule/reopen, since none of those three
+  actions ever set `nextStatus` to `"completed"`/`"no-response"`. Inside
+  that gate, extraction is re-run **server-side** on the actual submitted
+  text (never trusting the client's own preview), and the write only
+  proceeds `if (extracted.relationshipSummary !== null)`. The `UPDATE
+  donors` statement is a **NULL-safe compare-and-swap** (`relationship_
+  summary IS ? AND institutional_memory IS ?`, using `IS` not `=`)
+  against the donor row read at the very start of the request --
+  deliberately NOT the existing `contextStatement()` CASE-WHEN helper
+  from the edit/archive route, since that helper's semantics ("the
+  stored value still traces to THIS interaction's own prior
+  contribution") don't apply to a first-ever acceptance; a plain
+  freshness CAS against the just-read value is the correct analogue
+  here, and `IS` (rather than `=`) is required because the common case --
+  a donor with no existing snapshot yet -- has a NULL current value,
+  which `=` can never match. A failed CAS (concurrent accept elsewhere)
+  fails closed: the batch statement itself reports `changes: 0`, surfaced
+  to the client as `relationshipUpdated: false` without failing the whole
+  request (the activity itself still closes out normally). The write
+  reaches exactly `existing.donor_id` -- the one donor already resolved
+  from the one interaction id in the URL -- with no `shared_activity_id`
+  branch anywhere in the route, so no fan-out to other recipients of a
+  shared/broadcast activity is structurally possible.
+- `app/interactions/[id]/outcome/page.tsx`: SQL SELECT extended with
+  `d.relationship_summary, d.institutional_memory`; passed through to the
+  client as `currentRelationshipSummary`/`currentInstitutionalMemory`.
+- `app/interactions/[id]/outcome/OutcomeExperience.tsx`: adds a live
+  `preview = useMemo(() => extractInteraction(...))` computed from the
+  same inputs the server extracts from (`${notes}\nOutcome: ${outcome}`,
+  same kind-fallback rule, same subject) -- mirrors `CaptureExperience.
+  tsx`'s own pattern exactly. A new `acceptRelationshipSnapshot` state
+  defaults `false` (fresh on every page load/edit/reopen -- there is no
+  prop or stored value that could pre-check it). The submitted
+  `acceptRelationshipSnapshot` is gated identically to Capture:
+  `acceptRelationshipSnapshot && preview.relationshipSummary !== null`.
+  New UI block (placed where Capture places its own `extraction-preview`
+  div, just before the save button): when `preview.relationshipSummary
+  === null`, shows "No meaningful relationship details detected." with no
+  checkbox at all (matching Capture exactly); otherwise shows the
+  donor's **current** stored Relationship Snapshot/Institutional Memory
+  (if any) directly above an unchecked "Use this relationship snapshot"
+  checkbox and the proposed text -- the additive safety improvement
+  beyond Capture's own UI. The post-save confirmation panel now reports
+  `relationshipUpdated` honestly, including a distinct message when an
+  accepted proposal failed to apply because of a concurrent CAS miss.
+
+**Tests added** (`tests/outcome-relationship-snapshot-accept.test.mjs`,
+new; `tests/outcome-route-relationship-write-removed.test.mjs`, updated
+in place -- its historical name/git-blame predates this feature, but its
+assertions now cover the Option A gate shape rather than asserting the
+write is categorically absent, since Option A intentionally restores a
+*gated* write). Structural regex assertions against the real route/page/
+component source, combined with running the real, unmodified
+`extractInteraction()` (never a reimplementation) for concrete scenario
+grounding -- the established convention in this repo, since route
+handlers need the `cloudflare:workers` `env` binding and a live D1 this
+test suite doesn't have. Covers exactly the six scenarios requested:
+existing snapshot + accepted proposal (replaces, with the current value
+shown first), existing snapshot + rejected proposal (never sent, nothing
+written), no meaningful extraction (no checkbox rendered; even a
+maliciously-sent `true` flag can't write since the server re-extracts and
+gates a second time), editing an outcome (same code path as first close,
+fresh unchecked state every load, no pre-checked/inherited acceptance),
+reopening an outcome (`nextStatus` becomes `"scheduled"`, structurally
+outside the write gate regardless of what the shared request body
+carries), and shared-activity-linked interactions (no `shared_activity_id`
+branch in the route; the write binds to `existing.donor_id`, the single
+donor already resolved for the one interaction id).
+
+**Quality gates (all passing).** `pnpm test`: exit 0, every suite `fail
+0` (including the two new/updated files above). `pnpm exec tsc
+--noEmit`: clean, zero output. `pnpm run build:staging-independent`:
+completed, full route manifest, no errors.
+
+**Commit/push.** `a30316f` ("Add Option A: explicit review/accept flow
+for outcome-note Relationship Snapshots") on
+`feature/independent-cloudflare-sandbox`, on top of `b72895d`. Pushed;
+`origin/feature/independent-cloudflare-sandbox` matches local HEAD
+exactly. `origin/main` unchanged throughout
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
+
+**Deployment.** `pnpm run deploy:staging-independent` (`wrangler deploy
+--config wrangler.staging.jsonc`). **Worker version
+`0673c91a-de71-4f29-950b-34f71fc3fbec`**, deployed git SHA `a30316f`. No
+D1 schema/migration change, no production access.
+
+**Live verification (Independent Staging, real donors, controlled
+interactions, all cleaned up afterward).** No disposable test donor
+exists on staging, so this reused Semmelman (`5c35437c-...`, known
+baseline `relationship_summary`: "Sent text on wife's Yahrtzeit to
+acknowledge it.") and Zachter (`19af69d6-...`, known baseline: "Texted
+video from first day of Zman and thanked him for his support that makes
+it happen."), plus one synthetic `shared_activities` row linking one
+interaction on each donor. Five scheduled interactions inserted directly
+via D1 (`optiona-test-accept`, `optiona-test-reject`, `optiona-test-
+noextract`, `optiona-test-shared-a`/`-b`), driven through the real
+outcome API via authenticated `fetch()` calls executed in-page (`window.
+confirm()` in `OutcomeExperience.tsx` blocks automated UI clicks, the
+same established workaround as the prior people-extraction live
+verification):
+- **Accepted proposal, donor with an existing snapshot** (Semmelman,
+  `acceptRelationshipSnapshot: true`, note about a granddaughter's bat
+  mitzvah): response reported `relationshipUpdated: true`; D1 confirmed
+  `relationship_summary`/`institutional_memory` replaced with the
+  proposed text, `relationship_health` still 86.
+- **Rejected proposal, donor with an existing snapshot** (Zachter,
+  `acceptRelationshipSnapshot: false`, note about a son's wedding -- a
+  note that does contain a real fact, proving the gate genuinely blocks
+  it rather than the note happening to extract nothing): response
+  reported `relationshipUpdated: false`; D1 confirmed `relationship_
+  summary`/`institutional_memory` byte-for-byte unchanged from baseline.
+- **No meaningful extraction** (Zachter again, `acceptRelationshipSnapshot:
+  true` deliberately sent despite a fully generic note -- "Left a
+  voicemail." / "No answer." -- to prove server-side re-extraction, not
+  just client-side gating, blocks the write): response reported
+  `relationshipUpdated: false`; D1 confirmed no change.
+- **Reopen, then re-edit without re-accepting** (the Semmelman
+  interaction): `action: "reopen"` reported `relationshipUpdated: false`
+  and D1 confirmed the donor row untouched by the reopen itself; then
+  re-completing the same interaction with a note that *would* extract
+  (a grandson's engagement) but `acceptRelationshipSnapshot: false`
+  reported `relationshipUpdated: false` and D1 confirmed the donor's
+  snapshot was still exactly the earlier accepted value -- editing/
+  reopening an outcome never silently reapplies or overwrites.
+- **Shared-activity fan-out check**: completed and accepted the
+  Semmelman-side interaction of the shared pair (`relationshipUpdated:
+  true`, D1 confirmed Semmelman's snapshot updated); Zachter's row --
+  the other recipient of the identical `shared_activity_id` -- was
+  re-queried immediately after and confirmed byte-for-byte unchanged. No
+  fan-out.
+- **Option B regression reconfirmed live**: every non-accepted completion
+  above (reject, no-extraction, re-edit-without-accept) left relationship
+  fields completely untouched despite notes containing real, extractable
+  content in two of the three cases -- the exact unconditional-write
+  danger Option B fixed remains fixed under Option A's gated write.
+
+**Cleanup.** All five test interactions, the synthetic `shared_
+activities` row, and their `activity_status_audits` rows deleted directly
+via D1. Semmelman's `relationship_summary`/`institutional_memory`
+explicitly reverted to the exact original baseline text (Zachter's was
+never actually written to, so needed no reversion). Re-verified after
+cleanup: both donors' `relationship_summary`/`institutional_memory`/
+`relationship_health` match their original baseline exactly; zero rows
+remain matching the `optiona-test-%` id prefix in `interactions` or
+`activity_status_audits`; zero rows remain in `shared_activities` for the
+test id.
+
+**Known limitations.** (1) The compare-and-swap protects against a
+concurrent *write* to the donor's relationship fields between page load
+and submit, but not against the user's own preview going stale if they
+leave the outcome page open a long time without refreshing after someone
+else accepts a change elsewhere -- the CAS still fails closed in that
+case (confirmed above), it just surfaces as "refresh and try again"
+rather than a merge. (2) Like every existing accept path in this
+codebase, acceptance replaces `relationship_summary`/`institutional_
+memory` wholesale rather than merging old and new text -- this matches
+established, deliberate behavior everywhere else (see the investigation
+finding above), not a gap specific to this task. (3) No disposable test
+donor exists on staging; live verification reused real donor records
+(Semmelman/Zachter), fully reverted afterward and re-verified
+byte-for-byte against baseline.
+
+**Confirmation.** No production/main access at any point.
+`origin/main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`).
+Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -4701,18 +4898,19 @@ fix, each of which has its own full deployment record in its own dated
 section above). This section is now a pointer to the true current state,
 not a duplicate of it.**
 
-**Live -- current as of 2026-08-21T12:40:27Z.** Deployed commit
-`befa0fb` ("Fix people-extraction false positives" -- see "People-
-Extraction Fix -- Deployed + Live-Verified" above), Worker version
-`70dd7081-0fb3-4e69-8329-e115685f09fc`, confirmed via the deploy
-command's own printed Version ID and live-verified against real donor
-pages. This supersedes every earlier version ID recorded anywhere in
-this file. For the exact current git SHA (which may have advanced past
-`befa0fb` by documentation-only commits that touch no application
-code -- the deployed Worker always reflects the latest actual code
-change, not necessarily the latest commit), see "Current Git State" at
-the top of this file, which is the authoritative pointer kept in sync
-going forward.
+**Live -- current as of this deploy.** Deployed commit `a30316f` ("Add
+Option A: explicit review/accept flow for outcome-note Relationship
+Snapshots" -- see "Outcome-Note Relationship Snapshot Review/Accept Flow
+-- Option A" above), Worker version
+`0673c91a-de71-4f29-950b-34f71fc3fbec`, confirmed via the deploy
+command's own printed Version ID and live-verified directly against D1
+on real donor records. This supersedes every earlier version ID recorded
+anywhere in this file. For the exact current git SHA (which may have
+advanced past `a30316f` by documentation-only commits that touch no
+application code -- the deployed Worker always reflects the latest
+actual code change, not necessarily the latest commit), see "Current Git
+State" at the top of this file, which is the authoritative pointer kept
+in sync going forward.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
@@ -4725,10 +4923,12 @@ pass and its later extraction fixes (grandchild/grandparent, Yahrtzeit,
 Zman, people-extraction false positives), the Ask/Solicitation Phase 1
 feature and its historical backfill, the request-scoped duplicate-loader
 fix, the Today's-Agenda birthday-bucketing + open-pledge payment-recency
-fixes, the Pledge Payment Plan feature, and the outcome-route
-acceptance-gap fix (Option B). Each has its own dated section above with
-full live-verification detail -- this section intentionally does not
-repeat it.
+fixes, the Pledge Payment Plan feature, the outcome-route acceptance-gap
+fix (Option B), and the outcome-note Relationship Snapshot review/accept
+flow (Option A, which restores a gated write on top of Option B's
+removal -- see that section above for why these are not in conflict).
+Each has its own dated section above with full live-verification detail
+-- this section intentionally does not repeat it.
 
 Historical note (kept for continuity, not current): the 2026-08-20
 deploy referenced above by the now-superseded version ID required two
@@ -5022,6 +5222,14 @@ relationship-intelligence quality work):
   MENTIONED" card is still the only reader of this field, and this class
   of imprecision still doesn't affect the main Relationship Snapshot
   text, which is driven by `specificFacts`, not `people`.
+- **RESOLVED 2026-08-21 (was: outcome notes could no longer contribute to
+  a donor's Relationship Snapshot at all, since Option B removed the
+  write entirely rather than gating it).** Option A restores that
+  capability behind an explicit review/accept flow, live-verified -- see
+  "Outcome-Note Relationship Snapshot Review/Accept Flow -- Option A"
+  above. Its own known limitations (replace-not-merge on accept, matching
+  every other accept path in this codebase; no disposable test donor on
+  staging) are recorded in that section, not repeated here.
 - The fact-signal sentence extraction (`specificFacts`) can occasionally
   promote a sentence that's technically "specific" (contains a signal
   keyword like "family") but still fairly generic in substance (e.g. "A
@@ -5129,6 +5337,31 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T15:00:00Z (approximate)
+Claude (Sonnet 5) — Implemented, tested, deployed, and live-verified
+Option A: the outcome-note Relationship Snapshot review/accept flow (see
+"Outcome-Note Relationship Snapshot Review/Accept Flow -- Option A"
+above). Reused the existing Capture accept/CAS pattern rather than
+inventing a new architecture, per explicit instruction; reported the
+replacement-vs-incorporation investigation finding before writing any
+destructive code (full replacement is this codebase's existing,
+deliberate behavior everywhere, not something newly introduced here).
+Added `tests/outcome-relationship-snapshot-accept.test.mjs` and updated
+`tests/outcome-route-relationship-write-removed.test.mjs` in place to
+match the new gated-write shape. `pnpm test`/`tsc --noEmit`/`build:
+staging-independent` all clean. Committed `a30316f`, pushed, deployed to
+Independent Staging only (Worker `0673c91a-de71-4f29-950b-34f71fc3fbec`).
+Live-verified accept/reject/no-extraction/reopen-then-re-edit/shared-
+activity-fan-out scenarios directly against D1 on real donors (Semmelman,
+Zachter), all test data cleaned up and both donors' rows reverted to
+their exact original baseline afterward. Reconfirmed the Option B
+regression protection holds live (non-accepted completions with real
+extractable content still leave relationship fields untouched). No
+production/main access. Updated "Current Git State" to reflect this
+commit/deployment.
+
+---
 
 2026-08-21T14:00:00Z (approximate)
 Claude (Sonnet 5) — Documentation-only cleanup pass over this whole
