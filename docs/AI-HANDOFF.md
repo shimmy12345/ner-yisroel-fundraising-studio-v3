@@ -15,31 +15,34 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`cf3d903` -- "Add explicit historical-corpus disposition gate to the
-Phase 1 backfill" (see "Relationship Intelligence Phase 1 -- Historical
-Migration Gate" below for full detail). On top of `f1d08af` (the
-semantic backfill review, investigation-only docs), `4176860` (the
-classification correction), `e66005c` (Phase 1 schema + backfill preview
-machinery), `3dedd63`/`057decf`/`3d7ecb7` (the three investigation/
-design-only docs commits), `a30316f` (Option A implementation), and the
-full history recorded further down this section from earlier tasks.
+`ddfc531` -- "Fix applyBackfill()'s INSERT statements breaking on Windows
+shell argument passing" (see "Relationship Intelligence Phase 1 --
+Historical Backfill Applied" below for full detail). On top of `c2a6837`
+(historical migration gate docs), `cf3d903` (the disposition-gate
+implementation), `f1d08af` (the semantic backfill review), `4176860`
+(the classification correction), `e66005c` (Phase 1 schema + backfill
+preview machinery), `a30316f` (Option A implementation), and the full
+history recorded further down this section from earlier tasks.
 **Deployed Worker version remains
 `0673c91a-de71-4f29-950b-34f71fc3fbec`** (Option A's own deploy, still
 unchanged). **`4176860` still modifies a live application code path**
 (`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) -- still
 deliberately not deployed, for the same reason recorded when that commit
-landed. **This task's own commit (`cf3d903`) touches only Node scripts
-and tests (`scripts/relationship-facts-backfill-preview.mjs`, the new
-`scripts/relationship-facts-historical-corpus-review.mjs`, and their
-tests) -- none of it is part of the deployed Worker bundle at all**, so
-there is nothing new for this task to have deployed even if it wanted
-to. **D1 schema state, confirmed live**: migration 0034 tables still
-exist, still both empty (0 rows each, reconfirmed after this task's
-final preview run) -- no other table touched. No production access.
-`origin/main` untouched throughout every task recorded in this file.
+landed. **`ddfc531` (this task's own commit) touches only a Node script**
+(`scripts/relationship-facts-backfill-preview.mjs`'s `applyBackfill()`
+SQL) -- not part of the deployed Worker bundle -- so there is nothing new
+for this task to have deployed even if it wanted to. **D1 data state,
+confirmed live, changed by this task for the first time in Phase 1**:
+`donor_relationship_facts` now holds exactly 1 row (Mr. & Mrs. Yaakov
+Zachter) and `donor_relationship_fact_changes` holds its matching 1
+audit row -- see "Relationship Intelligence Phase 1 -- Historical
+Backfill Applied" below for full verification detail. No other donor
+received a row; no `donors.relationship_summary`/`institutional_memory`
+value was altered by this backfill. No production access. `origin/main`
+untouched throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`cf3d903` (pushed; matches local HEAD exactly, no divergence).
+`ddfc531` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -6386,6 +6389,142 @@ Awaiting explicit approval before applying this now-gated backfill (which
 would create exactly one `donor_relationship_facts` row, for Zachter) or
 beginning Phase 2.
 
+## Relationship Intelligence Phase 1 -- Historical Backfill Applied (2026-08-21) -- LIVE ON INDEPENDENT STAGING, AWAITING APPROVAL FOR PHASE 2
+
+**Scope, per explicit instruction: apply the gated Phase 1 backfill to
+Independent Staging only, using the reviewed migration gate exactly as
+implemented in `cf3d903`, with pre-write verification, immediate post-
+write D1 verification, and a live idempotency proof.**
+
+### Pre-write verification (all conditions matched -- proceeded)
+
+Fresh `git fetch`: local HEAD matched `origin/feature/independent-
+cloudflare-sandbox` exactly (`c2a6837`), zero divergence. Direct D1
+reads: both migration 0034 tables (`donor_relationship_facts`, `donor_
+relationship_fact_changes`) exist; both held exactly 0 rows. A fresh
+`node scripts/relationship-facts-backfill-preview.mjs` run reproduced
+the exact same result as the prior task's final preview: `SAFE TO
+BACKFILL: 1` (Mr. & Mrs. Yaakov Zachter, fingerprint `50edf919`),
+`NEEDS REVIEW / SKIPPED: 11`, every one of the 11 still carrying its own
+specific disposition-gate reason. All five stated conditions matched --
+proceeded to apply.
+
+### A real bug found and fixed while actually applying (not caught by any prior test)
+
+The first live `applyBackfill()` invocation failed: `wrangler d1
+execute` returned `incomplete input: SQLITE_ERROR [code: 7500]`. Root
+cause: both INSERT statements in `applyBackfill()` were written as
+multi-line template literals -- literal newlines in the SQL's own
+formatting/indentation, not just in a bound value. This breaks
+`child_process.spawnSync`'s `shell: true` argument passing on Windows,
+the exact class of problem `scripts/relationship-summary-cleanup-
+preview.mjs`'s own header comment already documents for embedded
+newlines in VALUES (its `sqlLiteral()` hex-encoding exists specifically
+because of this) -- but that protection only covers bound values, not
+newlines in the surrounding SQL keyword structure itself, which this
+code still had. **No D1 write occurred on the failed attempt** (verified:
+both tables still held 0 rows immediately after) -- the error surfaced
+before wrangler successfully parsed the command, so nothing partial was
+written. Fixed by collapsing both INSERT statements to single-line SQL,
+matching the sibling script's own established convention exactly.
+`pnpm test` (all suites still `fail 0`), `tsc --noEmit` (clean), and
+`build:staging-independent` (clean) all re-run and passing after the
+fix, before retrying the apply. Committed as `ddfc531`. This is a real,
+disclosed finding: the migration-gate logic itself (`cf3d903`) was
+correct and fully tested; the bug was specifically in `applyBackfill()`'s
+own SQL-construction code, a code path no prior test exercised against
+real `wrangler d1 execute` (the existing tests correctly test the pure
+`planBackfill()`/`classifyCandidate()` logic without any D1 round-trip,
+by design -- this is the first time `applyBackfill()` itself had ever
+actually run).
+
+### Apply result
+
+`applyBackfill()`, re-invoked after the fix:
+```json
+[
+  {
+    "donorId": "19af69d6-f147-474b-88ad-f6358ff65b9a",
+    "status": "APPLIED",
+    "factId": "1550c6b7-ba7d-4bce-a819-a9cbfb320ee7"
+  }
+]
+```
+Exactly one row planned, exactly one applied -- matching the gate's own
+guarantee.
+
+### Immediate post-write D1 verification -- every requested check
+
+- **Row counts**: `donor_relationship_facts` = 1, `donor_relationship_
+  fact_changes` = 1.
+- **The fact row, read directly**:
+  | Field | Value |
+  |---|---|
+  | `id` | `1550c6b7-ba7d-4bce-a819-a9cbfb320ee7` |
+  | `donor_id` | `19af69d6-f147-474b-88ad-f6358ff65b9a` (joined `display_name`: "Mr. & Mrs. Yaakov Zachter") |
+  | `user_id` | `user_sgoldstein@nirc.edu` (matches the donor's own `owner_user_id`) |
+  | `category` | `engagement` |
+  | `lifecycle` | `durable` |
+  | `fact_text` | "Texted video from first day of Zman and thanked him for his support that makes it happen." -- byte-for-byte match to the reviewed preview |
+  | `source_interaction_id` | `null` -- the approved historical-backfill provenance value (no single real interaction can be proven as the source of pre-existing text) |
+  | `source_interaction_occurred_at` | `1787336520` -- the backfill's own run time (the approved decay-clock clamp; not a real historical date) |
+  | `status` | `current` |
+  | `supersedes_fact_id` | `null` (correct -- nothing prior to supersede) |
+  | `fingerprint` | `50edf919` -- **exact match to the reviewed preview's fingerprint** |
+- **The audit row, read directly**: `action: "created"`, `fact_id`
+  correctly points at the fact row above, `donor_id` matches Zachter,
+  `after_json` correctly captures `{factText, category, lifecycle,
+  source: "phase1-backfill"}`, `before_json: null` (correct -- nothing
+  existed before), `created_at` matches the fact row's own timestamp.
+  Exactly one such row exists, matching the Phase 1 design's requirement
+  of one audit row per fact-status transition.
+- **No other donor received a row**: `SELECT DISTINCT donor_id FROM
+  donor_relationship_facts` returned exactly one value -- Zachter's.
+- **`donors.relationship_summary`/`institutional_memory` untouched by
+  this backfill**: read directly for all 12 reviewed donors (including
+  Zachter's own row) immediately after the write -- every value matches
+  the pre-apply preview exactly, byte-for-byte, including the 3 donors
+  whose `relationship_summary` is `null` (Klein/Pfeiffer/Rovinsky,
+  already cleared by the earlier, unrelated Ask historical backfill) and
+  Zachter's own `relationship_summary`/`institutional_memory`, which
+  remain exactly what they were -- this backfill writes only to the new
+  facts table, never to the `donors` row itself (that's a Phase 2
+  concern -- synthesis back into these columns hasn't been built yet).
+
+### Idempotency -- proven live against real D1, not just synthetic tests
+
+`applyBackfill()` invoked a second time: returned `[]` (an empty
+array) -- `fetchLivePlan()`'s own fresh re-read found Zachter's
+fingerprint already present in `donor_relationship_facts`, so
+`planBackfill()`'s existing idempotency check correctly excluded him
+from the plan before `applyBackfill()`'s write loop ever ran, meaning
+**zero SQL statements were even attempted** on the second invocation, let
+alone executed. Verified directly afterward: row counts still exactly
+1/1; the fact row's own `id`/`created_at`/`updated_at` are byte-for-byte
+identical to the first apply's -- no re-write, no new row, no touched
+timestamp. Re-running this exact command in the future remains safe.
+
+### Quality gates (all passing, re-run after the live-discovered fix)
+
+`pnpm test`: exit 0, every suite `fail 0`. `pnpm exec tsc --noEmit`:
+clean, zero output. `pnpm run build:staging-independent`: completed,
+full route manifest, no errors. No deploy -- this task's fix touches
+only a Node script outside the deployed Worker bundle.
+
+### Status -- STOPPED per explicit instruction
+
+**The Phase 1 historical backfill is now live on Independent Staging:
+exactly one `donor_relationship_facts` row (Zachter), exactly one
+matching audit row, verified byte-for-byte against the reviewed preview,
+idempotency proven live.** No other donor's data touched. No `donors`
+table column altered. Phase 2 (wiring any existing write path -- Capture,
+edit route, Outcome Option A, Monday `confirm_contact` -- to read from or
+write into this new table, or building the synthesis function that
+regenerates `relationship_summary`/`institutional_memory` from current
+facts) has NOT been started. Not deployed. No production/main access at
+any point in this task. Awaiting explicit approval before beginning
+Phase 2.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -7268,6 +7407,32 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T23:00:00Z (approximate)
+Claude (Sonnet 5) — Applied the gated Phase 1 historical backfill to
+Independent Staging. Pre-write: fresh-fetched and verified branch HEAD
+matched origin, migration 0034 tables existed and were empty, and a
+fresh dry-run preview reproduced exactly 1 eligible row (Zachter,
+fingerprint 50edf919) with the other 11 still disposition-gated — all
+conditions matched, proceeded. Found and fixed a real bug live: both
+INSERT statements in applyBackfill() used multi-line template literals,
+which broke Windows shell argument passing (no D1 write occurred on the
+failed attempt, confirmed). Fixed by collapsing to single-line SQL,
+matching the sibling cleanup script's own established convention;
+re-ran all three gates clean before retrying. Applied successfully:
+exactly one donor_relationship_facts row (Zachter) plus its matching
+audit row, verified byte-for-byte against the reviewed preview directly
+in D1 — donor_id, category (engagement), lifecycle (durable), status
+(current), fact_text, fingerprint, and null source_interaction_id all
+confirmed; no other donor received a row; every donor's
+relationship_summary/institutional_memory confirmed unchanged. Re-ran
+applyBackfill() a second time: returned zero rows, proving idempotency
+live against real D1 (not just synthetic tests) — the pre-existing
+fingerprint check excluded Zachter before any SQL was even attempted.
+Corrected Current Git State. Phase 2 not started, not deployed, no
+production/main access. Awaiting approval.
+
+---
 
 2026-08-21T22:00:00Z (approximate)
 Claude (Sonnet 5) — Turned the semantic-review disposition from the
