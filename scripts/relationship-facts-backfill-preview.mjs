@@ -9,6 +9,22 @@
 // regeneration, no cleanup -- classified via the real, imported
 // classifyRelationshipFact() (never a reimplementation).
 //
+// EXPLICIT HISTORICAL-CORPUS GATE (2026-08-21, see docs/AI-HANDOFF.md's
+// "Semantic Backfill Review"): mechanically valid classification is not
+// the same as appropriate to enshrine permanently. Before any other
+// check, every candidate is looked up in scripts/relationship-facts-
+// historical-corpus-review.mjs's hand-reviewed disposition map --
+// covering the exact known 12-donor legacy corpus. Only a donor whose
+// reviewed disposition is BACKFILL_AS_RELATIONSHIP_FACT proceeds past
+// this gate; a donor with no reviewed entry at all, or a reviewed
+// disposition of STRUCTURED_DATA_ALREADY_COVERS_IT/INTERACTION_HISTORY_
+// ONLY/NEEDS_REVIEW, is skipped here regardless of what the mechanical
+// classifier below would produce for their text. This is NOT a
+// generalizable semantic classifier -- it is a one-time allowlist for
+// this specific historical migration; see that file's own header
+// comment for why a new/unreviewed donor is never automatically
+// eligible.
+//
 // PREVIEW MODE (default, `node scripts/relationship-facts-backfill-
 // preview.mjs`) is READ-ONLY: it queries donors via `wrangler d1 execute
 // --remote --json` (the same pattern scripts/relationship-summary-
@@ -56,6 +72,7 @@ import { pathToFileURL } from "node:url";
 import { classifyRelationshipFact, hasSubstantiveContentBesidesCommitment } from "../lib/relationships/fact-classification.ts";
 import { computeRelationshipFactFingerprint } from "../lib/relationships/fact-fingerprint.ts";
 import { OLD_FORMAT_PREFIX } from "./relationship-summary-cleanup-preview.mjs";
+import { DISPOSITION, getReviewedHistoricalDisposition } from "./relationship-facts-historical-corpus-review.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const DB_NAME = "fundraising-os-staging-db";
@@ -95,52 +112,47 @@ function sqlLiteral(value) {
   return `CAST(X'${Buffer.from(String(value), "utf8").toString("hex")}' AS TEXT)`;
 }
 
-// Pure classification core -- takes already-fetched donor rows and the
-// set of fingerprints already present in donor_relationship_facts for
-// this run's users (empty on a first run; populated on a safe re-run),
-// plus the backfill's own run timestamp (the decay-clock clamp value for
-// any time_bound-classified row). No D1 access here, so this is directly
-// unit-testable against synthetic fixtures.
-function planBackfill(donors, existingFingerprints, backfillRunEpochSeconds) {
-  const plan = [];
-  const skipped = [];
+// The GENERAL mechanical safety pipeline for one already-gate-cleared
+// candidate: empty/too-long/junk-format checks, classification, the
+// follow_up-plus-substantive-signal check, and fingerprint/idempotency.
+// Deliberately factored out from the historical-corpus review gate below
+// -- this pipeline is a general property of "how any candidate text is
+// safely turned into a fact," independent of which specific donors this
+// one historical migration happens to be scoped to, and is exercised on
+// its own (bypassing the review gate on purpose) by tests/relationship-
+// facts-backfill-preview.test.mjs's general safety-mechanism tests. The
+// review gate itself (does this donor id even get to this pipeline at
+// all) is tested separately and specifically by tests/relationship-
+// facts-historical-migration-gate.test.mjs. No D1 access here, so this
+// is directly unit-testable against synthetic fixtures.
+function classifyCandidate(donor, sourceField, rawValue, existingFingerprints, backfillRunEpochSeconds) {
+  const value = rawValue.trim();
 
-  for (const donor of donors) {
-    const sourceField = donor.relationship_summary !== null ? "relationship_summary" : donor.institutional_memory !== null ? "institutional_memory" : null;
-    if (sourceField === null) continue; // nothing to backfill -- not a candidate, not a skip
+  if (value.length === 0) {
+    return { skip: { donor, sourceField, value: rawValue, reason: "Value is empty after trim -- nothing to preserve, but also not safely nullable here without a human decision (a non-null empty-after-trim value is itself unexpected)." } };
+  }
+  if (value.length > MAX_SANE_LENGTH) {
+    return { skip: { donor, sourceField, value: rawValue, reason: `Value is ${value.length} characters, exceeding the ${MAX_SANE_LENGTH}-character sanity bound -- flagged for human review rather than silently ingested as a single durable fact.` } };
+  }
+  if (value.startsWith(OLD_FORMAT_PREFIX)) {
+    return { skip: { donor, sourceField, value: rawValue, reason: "Matches the PROVEN pre-fix \"Latest discussion topics: ...\" field-label-dump signature (see scripts/relationship-summary-cleanup-preview.mjs) -- known machine-generated junk, not real relationship intelligence; ingesting it as a permanent durable fact would preserve it forever. Run the cleanup script first, or route to manual review." } };
+  }
 
-    const rawValue = sourceField === "relationship_summary" ? donor.relationship_summary : donor.institutional_memory;
-    const value = rawValue.trim();
+  const { category, lifecycle } = classifyRelationshipFact(value);
 
-    if (value.length === 0) {
-      skipped.push({ donor, sourceField, value: rawValue, reason: "Value is empty after trim -- nothing to preserve, but also not safely nullable here without a human decision (a non-null empty-after-trim value is itself unexpected)." });
-      continue;
-    }
-    if (value.length > MAX_SANE_LENGTH) {
-      skipped.push({ donor, sourceField, value: rawValue, reason: `Value is ${value.length} characters, exceeding the ${MAX_SANE_LENGTH}-character sanity bound -- flagged for human review rather than silently ingested as a single durable fact.` });
-      continue;
-    }
-    if (value.startsWith(OLD_FORMAT_PREFIX)) {
-      skipped.push({ donor, sourceField, value: rawValue, reason: "Matches the PROVEN pre-fix \"Latest discussion topics: ...\" field-label-dump signature (see scripts/relationship-summary-cleanup-preview.mjs) -- known machine-generated junk, not real relationship intelligence; ingesting it as a permanent durable fact would preserve it forever. Run the cleanup script first, or route to manual review." });
-      continue;
-    }
+  if (lifecycle === "follow_up" && hasSubstantiveContentBesidesCommitment(value)) {
+    return { skip: { donor, sourceField, value: rawValue, reason: `This text classifies as follow_up (an action-oriented commitment, per COMMITMENT_PATTERN) but ALSO matches a real substantive fact-category signal -- treating the whole sentence as follow_up would permanently exclude that other fact from Snapshot synthesis (follow_up facts never enter relationship_summary/institutional_memory at all). Needs a human decision (e.g. splitting into two separate accepted facts) rather than a one-size-fits-all automatic choice.` } };
+  }
 
-    const { category, lifecycle } = classifyRelationshipFact(value);
+  const fingerprint = computeRelationshipFactFingerprint({ donorId: donor.id, factText: value, sourceInteractionId: null });
+  const alreadyExists = existingFingerprints.has(`${donor.owner_user_id ?? donor.user_id ?? ""}:${fingerprint}`);
 
-    if (lifecycle === "follow_up" && hasSubstantiveContentBesidesCommitment(value)) {
-      skipped.push({ donor, sourceField, value: rawValue, reason: `This text classifies as follow_up (an action-oriented commitment, per COMMITMENT_PATTERN) but ALSO matches a real substantive fact-category signal -- treating the whole sentence as follow_up would permanently exclude that other fact from Snapshot synthesis (follow_up facts never enter relationship_summary/institutional_memory at all). Needs a human decision (e.g. splitting into two separate accepted facts) rather than a one-size-fits-all automatic choice.` });
-      continue;
-    }
+  if (alreadyExists) {
+    return { skip: { donor, sourceField, value: rawValue, reason: "A fact with this exact fingerprint already exists for this user (already backfilled in an earlier run) -- skipped, not duplicated. This is the idempotency safeguard: a re-run of this script is always safe." } };
+  }
 
-    const fingerprint = computeRelationshipFactFingerprint({ donorId: donor.id, factText: value, sourceInteractionId: null });
-    const alreadyExists = existingFingerprints.has(`${donor.owner_user_id ?? donor.user_id ?? ""}:${fingerprint}`);
-
-    if (alreadyExists) {
-      skipped.push({ donor, sourceField, value: rawValue, reason: "A fact with this exact fingerprint already exists for this user (already backfilled in an earlier run) -- skipped, not duplicated. This is the idempotency safeguard: a re-run of this script is always safe." });
-      continue;
-    }
-
-    plan.push({
+  return {
+    plan: {
       donorId: donor.id,
       donorName: donor.display_name,
       sourceField,
@@ -156,7 +168,48 @@ function planBackfill(donors, existingFingerprints, backfillRunEpochSeconds) {
       // all, but it is still recorded for every row (a NOT NULL column).
       sourceInteractionOccurredAt: backfillRunEpochSeconds,
       fingerprint,
-    });
+    },
+  };
+}
+
+// Full pipeline for THIS historical migration: the explicit, hand-
+// reviewed historical-corpus gate (checked FIRST, before any mechanical
+// check) layered on top of classifyCandidate()'s general safety
+// pipeline. This migration is scoped to the known, reviewed 2026-08-21
+// legacy corpus (see scripts/relationship-facts-historical-corpus-
+// review.mjs's own header comment); a donor with no reviewed entry, or
+// whose reviewed disposition is not BACKFILL, is never eligible here no
+// matter what the mechanical category/lifecycle classifier would produce
+// for their text -- this gate is the actual eligibility decision;
+// classifyCandidate() is an ADDITIONAL safety layer for donors that
+// already cleared it, never a way around it. Takes already-fetched donor
+// rows and the set of fingerprints already present in donor_
+// relationship_facts for this run's users (empty on a first run;
+// populated on a safe re-run), plus the backfill's own run timestamp. No
+// D1 access here, so this is directly unit-testable against synthetic
+// fixtures.
+function planBackfill(donors, existingFingerprints, backfillRunEpochSeconds) {
+  const plan = [];
+  const skipped = [];
+
+  for (const donor of donors) {
+    const sourceField = donor.relationship_summary !== null ? "relationship_summary" : donor.institutional_memory !== null ? "institutional_memory" : null;
+    if (sourceField === null) continue; // nothing to backfill -- not a candidate, not a skip
+
+    const rawValue = sourceField === "relationship_summary" ? donor.relationship_summary : donor.institutional_memory;
+
+    const reviewed = getReviewedHistoricalDisposition(donor.id);
+    if (!reviewed) {
+      skipped.push({ donor, sourceField, value: rawValue, reason: "Not part of the explicitly reviewed 2026-08-21 historical corpus -- this migration is scoped to the known, hand-reviewed donor set, never a general future backfill mechanism. A new candidate requires its own explicit semantic review and its own entry in scripts/relationship-facts-historical-corpus-review.mjs before it can be eligible here." });
+      continue;
+    }
+    if (reviewed.disposition !== DISPOSITION.BACKFILL) {
+      skipped.push({ donor, sourceField, value: rawValue, reason: `Reviewed disposition: ${reviewed.disposition}. ${reviewed.reason}` });
+      continue;
+    }
+
+    const result = classifyCandidate(donor, sourceField, rawValue, existingFingerprints, backfillRunEpochSeconds);
+    if (result.skip) skipped.push(result.skip); else plan.push(result.plan);
   }
 
   return { plan, skipped };
@@ -276,4 +329,4 @@ async function applyBackfill() {
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) await run();
 
-export { run, planBackfill, fetchLivePlan, applyBackfill, MAX_SANE_LENGTH };
+export { run, planBackfill, classifyCandidate, fetchLivePlan, applyBackfill, MAX_SANE_LENGTH };
