@@ -3607,6 +3607,244 @@ data, no schema was touched. No `main` merge, no production access.
 `origin/main` unchanged (`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`)
 throughout. Session `0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
 
+## Outcome-Route Acceptance-Gap Investigation (2026-08-21) -- INVESTIGATION ONLY, NO CODE/D1/DEPLOY CHANGE
+
+Full investigation of the previously-recorded open finding: `app/api/
+interactions/[id]/outcome/route.ts` can write `relationship_summary`/
+`institutional_memory` without the explicit-acceptance gate the main
+capture route enforces. Read-only throughout -- no code, D1, schema, or
+deployment changed.
+
+**1. Every caller of the outcome route, traced through the real UI.**
+`POST /api/interactions/[id]/outcome` has exactly ONE caller in the
+entire codebase: `app/interactions/[id]/outcome/OutcomeExperience.tsx`
+(verified by grepping every `fetch` call against this literal path).
+Three UI entry points navigate a user TO that page (never call the API
+directly):
+- `app/components/ActivityActions.tsx` -- "Edit outcome" link, shown for
+  any non-scheduled (already logged/completed) single-donor interaction
+  on a donor page.
+- `app/donors/[id]/UnifiedRelationshipTimeline.tsx` -- "Log Outcome" link
+  for any `scheduled` timeline item, and "Edit or reopen" for any
+  `cancelled` item. **Rendered unconditionally regardless of
+  `shared_activity_id`** -- see finding 1a below.
+- `lib/workspace/live-data.ts` -- Today's schedule builds a
+  `logOutcomeHref` pointing to the same page for any scheduled activity.
+
+**User workflow.** The outcome page (`OutcomeExperience.tsx`) shows two
+plain textareas -- "Activity notes" and "Outcome / result" -- a
+completed-date picker, an optional follow-up toggle, and a "Close
+Activity"/"Save Outcome Changes" button. **There is no Relationship
+Snapshot preview anywhere on this page** -- no `useMemo` computing
+`extractInteraction()` client-side (unlike `CaptureExperience.tsx`'s
+`preview = useMemo(() => extractInteraction(...), ...)`), no "Use this
+relationship snapshot" checkbox, nothing shown to the user about what
+will be written to `relationship_summary`/`institutional_memory`. The
+request body sent (`{ action, auditId, outcome, notes, completedAt,
+rescheduledAt, followUpEnabled, followUpType, followUpSubject,
+followUpNotes, followUpAt }`) **has no `acceptRelationshipSnapshot`
+field at all, in the UI or the server's `OutcomeBody` type.**
+Relationship extraction happens **only server-side**, and only at the
+moment of submission -- the user never sees it before it's written.
+
+**1a. Finding: shared/multi-donor interactions CAN reach this path.**
+Proven from `lib/workspace/scheduled-activity.ts`: `isScheduledActivity`/
+`activityStatus` are computed purely from `source`/`occurredAt`/
+`createdAt`, with **no dependency on `shared_activity_id`**. The shared
+route (`app/api/interactions/shared/route.ts`) sets `occurredAt` from
+`body.occurredAt` with no restriction against a future date, so a
+shared/broadcast-captured interaction CAN show status `scheduled` for an
+individual recipient. `UnifiedRelationshipTimeline.tsx`'s "Log Outcome"
+link renders for `scheduled` items **regardless of
+`activity.shared_activity_id`** (the shared-vs-single branch only
+affects the separate edit/cancel controls below it, not this link). If
+such an interaction is later completed via this page, `ownedActivity()`
+in the outcome route operates on that one interaction row and writes
+straight to that one recipient's `donors` row -- **bypassing the shared
+route's own explicit, documented guarantee that shared/broadcast
+activities never touch `relationship_summary`/`institutional_memory` for
+any recipient.** Not observed in real staging data (see finding 3), but
+a real, code-proven gap, not theoretical.
+
+**2. Comparison with the main capture path.** `app/api/interactions/
+route.ts` gates its write with `if (!scheduled && body.
+acceptRelationshipSnapshot === true)` (unchanged from prior
+investigations); the client only ever sends that flag `true` when the
+user has checked a box AND the locally-computed preview is non-null.
+`app/api/interactions/[id]/outcome/route.ts` has **no equivalent
+protection under any name** -- its write (lines 125-130) is gated only
+on `nextStatus === "completed" || nextStatus === "no-response"`, which
+covers BOTH the "complete" action button and the "No response" button.
+
+**Comparison finding, not previously documented: the codebase already
+has a SAFE pattern for this, elsewhere.** `app/api/interactions/[id]/
+route.ts` (the single-donor EDIT route -- distinct from the outcome
+route) does two things the outcome route does neither of:
+- Requires `body.acceptRelationshipSnapshot === true` before touching
+  either field at all (line 87-91), same gate/name as the capture route.
+- Even when accepted, never blindly overwrites: `contextStatement()`
+  (line 35-41) issues `UPDATE donors SET relationship_summary = CASE
+  WHEN relationship_summary = <exactly what THIS interaction previously
+  contributed> THEN <new value> ELSE relationship_summary END` -- a real
+  compare-and-swap that only replaces the donor's stored value if it
+  still equals what this specific interaction produced, and otherwise
+  leaves it untouched. The `DELETE` (archive) handler in the same file
+  calls the same helper when archiving an interaction, replacing the
+  donor's context with the *next most recent* interaction's own
+  extraction rather than nulling it. This exact machinery is reusable.
+
+**3. Real-world exposure -- read-only D1 audit of Independent Staging.**
+- Interactions with `source LIKE '%capture-completed:%'` (i.e. ever
+  closed via this route's "complete"/"no-response" action): **0**.
+- `activity_status_audits` rows, ANY action (`complete`, `no-response`,
+  `cancel`, `reschedule`, `reopen`, `undo`): **0 total**.
+- Interactions currently in `scheduled` status: **0** -- nothing is even
+  currently eligible to go through this workflow.
+- Source-prefix distribution across all 68 interactions: `manual` (40,
+  shared route), `capture` (8), `cancelled` (8), `archived` (7),
+  `import-monday:confirmed` (5) -- the `cancelled`/`archived` rows come
+  from the separate, simpler `DELETE /api/interactions/[id]` route (no
+  `activity_status_audits` write, confirmed by reading that route), not
+  from the outcome route.
+- **Conclusion: this workflow has never been exercised on Independent
+  Staging.** No currently-stored `relationship_summary`/
+  `institutional_memory` value can be traced to it -- both malformed
+  historical values fixed in the prior task came from `source =
+  'capture:text'`/`'capture:personal'` (the main capture route), not
+  this one. **No malformed historical data was produced through this
+  path.** This is a real, latent, code-proven bug with zero actual
+  historical damage so far -- it activates the first time a fundraiser
+  schedules a future activity and later closes it out.
+
+**4. Reproduction (real `extractInteraction()`, no D1, no real donor).**
+Simulated a donor with a good, previously-accepted
+`relationship_summary`/`institutional_memory` (a real grandchild
+bar-mitzvah note, matching this app's own established good-output
+pattern), then simulated completing an unrelated, routine scheduled
+activity ("Called to confirm he's coming to the dinner. Outcome:
+Confirmed, will attend.") through the outcome route's exact extraction
+call (`extractInteraction(`${notes}\nOutcome: ${outcome}`, kind,
+subject)`, same template as route.ts line 127). Result: both fields were
+overwritten with the new, unrelated, lower-quality content -- **the
+prior good, explicitly-accepted content was destroyed**, with no
+opportunity for review. A second reproduction with a fully generic note
+("Left a voicemail. Outcome: No answer.") produced
+`relationshipSummary: null` -- confirming the route's unconditional
+write would, in that case, **silently NULL OUT** an existing good
+`relationship_summary` entirely, while still overwriting
+`institutional_memory` with generic boilerplate. **Answer: yes, the
+donor's relationship fields are updated (and can be destroyed) with zero
+explicit approval, in every outcome-completion, regardless of what the
+extractor finds.**
+
+**5. Snapshot vs. Institutional Memory semantics in this route.** Both
+fields are written **together, in a single unconditional statement**
+(line 128-129) -- there is no independent-write path for either field.
+`extracted.relationshipSummary` can be `null` (from
+`actionableRelationshipSnapshot`) and gets written as `NULL` verbatim;
+`extracted.memory` is never null (the unconditional `${label} context:
+${note}` template) and always overwrites. **Neither field's previous
+value is preserved when extraction returns null or produces different
+content -- both are unconditionally replaced every time.** Confirmed via
+reproduction (4): **completing ANY scheduled/reopened interaction for a
+donor -- even one utterly unrelated in topic to their existing
+Relationship Snapshot -- silently replaces or erases already-good,
+previously human-accepted content.** This is not limited to first-time
+completion: `OutcomeExperience.tsx`'s "Save Outcome Changes" button
+calls the identical `submit("complete")` path for an already-completed
+activity being edited, so **every edit of an outcome note re-triggers
+the same unconditional overwrite again.**
+
+**6. Recommended fix -- comparison of options (not implemented).**
+- **A. Require explicit acceptance in the outcome workflow, matching
+  capture.** Would need real UI work, not a bare flag: a client-side
+  preview (`useMemo(() => extractInteraction(...))`, mirroring
+  `CaptureExperience.tsx`), an accept checkbox, and -- since this route
+  can OVERWRITE existing content rather than only ever adding to an
+  empty field -- the UI arguably needs to show what's currently stored
+  so the user knows what they'd be replacing. Server-side: add
+  `acceptRelationshipSnapshot` to `OutcomeBody`, gate the write on it
+  (matching the capture route's exact condition name), and reuse
+  `contextStatement()`'s existing CAS pattern instead of the current
+  blind `UPDATE` (so even an accepted write can't clobber a value that
+  changed since the page loaded).
+- **B. Stop the outcome route from writing these fields at all, until a
+  real review/accept UI exists.** Delete the unconditional write block
+  (lines 125-130) entirely. Given finding 3 (zero historical use, zero
+  currently-scheduled interactions), this costs nothing today and
+  immediately satisfies the governing rule ("AI/extracted Relationship
+  Snapshot content must not be persisted as donor relationship knowledge
+  without explicit user review and acceptance") with the smallest
+  possible code change -- a deletion, not new code. Institutional
+  memory's own doc comment already treats it as equally
+  "human-reviewed, AI-suggested-then-accepted" as relationship_summary
+  (`lib/relationships/recommendation-evidence.ts`), so there is no
+  principled basis for exempting it from the same requirement.
+- **C. Differential treatment (write institutional_memory unconditionally,
+  gate only relationship_summary).** Considered and set aside: nothing
+  in the codebase treats `institutional_memory` as a lower-trust,
+  always-overwritable log -- every other write path (capture, edit,
+  archive) treats both fields as a single accepted-together pair, and
+  the existing `contextStatement()` CAS logic already protects both
+  identically. Introducing a new asymmetric rule here would be
+  inconsistent with the rest of the architecture, not smaller.
+
+**Recommendation: B now, A as a scoped follow-up if the product wants
+outcome notes to be able to update relationship knowledge.** B directly,
+minimally satisfies the governing rule today with zero current-data
+risk (finding 3); A is the natural richer capability to build later,
+reusing the CAS machinery that already exists in `[id]/route.ts` rather
+than inventing something new.
+
+**7. Regression requirements for an eventual fix (defined, not
+written).** No test currently asserts anything about `relationship_
+summary`/`institutional_memory`/`acceptRelationshipSnapshot` for this
+route -- confirmed by reading the existing `tests/activity-outcome.
+test.mjs` in full; this is genuinely untested behavior today. A fix
+would need:
+1. Completing a scheduled interaction (via either action `complete` or
+   `no-response`) without any acceptance step does not modify
+   `relationship_summary`/`institutional_memory` at all (fixture donor
+   with pre-set values; assert unchanged after the route runs).
+2. If an accept flow is built (Option A): accepting writes exactly the
+   previewed content, and only when explicitly accepted -- mirroring
+   `tests/capture.test.mjs`'s existing structural check of the main
+   route's `acceptRelationshipSnapshot === true` gate.
+3. An existing good `relationship_summary`/`institutional_memory` is
+   never silently replaced by completing an unrelated interaction --
+   direct regression coverage for reproduction (4)/(5) above.
+4. Ordinary completion/no-response/cancel/reschedule/reopen/undo
+   behavior, `activity_status_audits` inserts, and the old-reminder
+   deletion are unaffected by the fix (re-run of the existing
+   `tests/activity-outcome.test.mjs` suite, which the fix must not
+   break).
+5. Follow-up creation (`followUpEnabled`) still works unchanged.
+6. No regression to `POST /api/interactions` (main capture) --
+   `tests/capture.test.mjs` must keep passing unmodified.
+7. A shared/multi-donor-originated interaction that reaches `scheduled`
+   status and is later completed via this route must NOT write
+   `relationship_summary`/`institutional_memory` for that donor either --
+   new coverage closing finding 1a, extending the shared route's own
+   "never touches these fields" guarantee through this path too.
+
+**8. Scope discipline maintained.** Did not touch the "Zman"/"Yahrtzeit"
+people-extraction false positive (separate, already-recorded open
+task). Did not reopen or modify the completed malformed-snapshot
+cleanup (Zachter/Semmelman, already applied and verified). Did not
+modify recommendation logic. No code, D1, schema, or deployment change
+of any kind in this task -- every finding above came from reading source
+files and read-only `SELECT` queries via `wrangler d1 execute --remote`.
+
+**Confirmation.** `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Exact approval needed next.** A decision between Option B (recommended:
+stop the unconditional write now, smallest change, zero current-data
+risk) and Option A (build the full review/accept UI now, larger scope)
+-- or explicit confirmation to leave this open pending further product
+input. No implementation should begin until one option is chosen.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -4378,6 +4616,57 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-21T02:40:00Z (approximate)
+Claude (Sonnet 5) — Full investigation (no code/D1/deploy change) of the
+`app/api/interactions/[id]/outcome/route.ts` acceptance-gap finding.
+Traced every caller through the real UI: `OutcomeExperience.tsx` is the
+sole caller of the API, reached via "Edit outcome"
+(`ActivityActions.tsx`), "Log Outcome"/"Edit or reopen"
+(`UnifiedRelationshipTimeline.tsx`), and Today's `logOutcomeHref`
+(`live-data.ts`) -- none of them show any Relationship Snapshot preview
+or accept checkbox; the request body has no `acceptRelationshipSnapshot`
+field anywhere. Found the "Log Outcome" link renders regardless of
+`shared_activity_id`, and `isScheduledActivity`/`activityStatus` don't
+depend on it either -- proving a shared/broadcast-originated interaction
+CAN reach this route and bypass the shared route's own
+no-relationship-write guarantee for that one recipient (not observed in
+real data, but a real code-proven gap). Found the codebase already has a
+safe pattern for this exact problem, unused here: `app/api/interactions/
+[id]/route.ts`'s edit/archive handlers require `acceptRelationshipSnapshot
+=== true` AND use a real compare-and-swap (`contextStatement()`'s `CASE
+WHEN relationship_summary = <old> THEN <new> ELSE relationship_summary
+END`) that never blindly clobbers -- the outcome route has neither
+protection, just an unconditional `UPDATE`. Read-only staging audit:
+zero interactions have ever gone through this route's complete/
+no-response path, zero `activity_status_audits` rows exist at all, zero
+interactions are currently scheduled -- **no historical data was ever
+produced through this path**, so real-world exposure to date is zero,
+though the bug itself is real. Reproduced with the real
+`extractInteraction()` function (no D1, no real donor): completing a
+routine, topically-unrelated scheduled activity for a donor with an
+existing good, previously-accepted Relationship Snapshot **destroys**
+that content -- confirmed both for a note that extracts unrelated
+content and one that extracts nothing at all (silently nulls the
+field), and confirmed this repeats on every edit of an already-completed
+outcome, not just the first close. Recommended Option B (stop the
+unconditional write entirely -- smallest change, zero current-data
+cost, satisfies the governing acceptance rule immediately) over Option A
+(build a full preview/accept UI reusing the existing CAS pattern, a
+larger scoped follow-up) or Option C (asymmetric per-field treatment,
+rejected as architecturally inconsistent). Defined the regression tests
+an eventual fix would need (7 cases, including closing the shared-activity
+gap found in this investigation) -- confirmed via reading `tests/
+activity-outcome.test.mjs` that none of this behavior is currently
+tested. Kept scope narrow: did not touch the Zman/Yahrtzeit
+people-extraction issue, did not reopen the completed malformed-snapshot
+cleanup, did not touch recommendation logic. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`); no code, D1, or deploy
+change of any kind. Full report: "Outcome-Route Acceptance-Gap
+Investigation (2026-08-21)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-21T01:50:00Z (approximate)
 Claude (Sonnet 5) — Deployed the approved Zman/Yahrtzeit extraction fix
