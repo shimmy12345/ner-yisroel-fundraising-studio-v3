@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../lib/auth/profile";
-import { extractInteraction, type InteractionKind } from "../../../../../lib/capture/interaction";
+import { type InteractionKind } from "../../../../../lib/capture/interaction";
 import { activityStatus, completedPlannedAt, originalActivitySource, reopenActivitySource } from "../../../../../lib/workspace/scheduled-activity";
 import { logger } from "../../../../../lib/logger";
 
@@ -122,12 +122,23 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(auditId, id, profile.id, body.action, currentStatus, nextStatus, existing.source, nextSource, existing.occurred_at, nextOccurredAt, existing.summary, nextSummary, followUpId, now));
 
-  if (nextStatus === "completed" || nextStatus === "no-response") {
-    const kind = kinds.has(existing.type as InteractionKind) ? existing.type as InteractionKind : "note";
-    const extracted = extractInteraction(`${notes}\nOutcome: ${body.action === "no-response" ? (body.outcome?.trim() || "No response") : body.outcome?.trim()}`, kind, subject);
-    statements.push(env.DB.prepare("UPDATE donors SET relationship_summary = ?, institutional_memory = ?, relationship_health = 86, updated_at = ? WHERE id = ? AND owner_user_id = ? AND data_source = 'live'")
-      .bind(extracted.relationshipSummary, extracted.memory, now, existing.donor_id, profile.id));
-  }
+  // Deliberately no donors.relationship_summary/institutional_memory write
+  // here (Option B, 2026-08-21 -- see docs/AI-HANDOFF.md "Outcome-Route
+  // Acceptance-Gap Investigation"). This route used to write both fields
+  // unconditionally on every completion/no-response, with no equivalent
+  // to the main capture route's `acceptRelationshipSnapshot === true`
+  // gate, no preview shown to the user, and no compare-and-swap -- so
+  // completing (or re-editing) an activity whose outcome note was
+  // unrelated to a donor's existing, already-accepted Relationship
+  // Snapshot silently replaced or nulled it. Removed rather than gated,
+  // since this page has no review/accept UI at all today -- adding a
+  // bare acceptance flag with nothing for the user to actually review
+  // would not satisfy the governing rule that AI-extracted relationship
+  // content must not be persisted without explicit user review.
+  // Re-adding this capability requires real UI work (a client-side
+  // preview + accept step, mirroring CaptureExperience.tsx) plus reusing
+  // app/api/interactions/[id]/route.ts's contextStatement() compare-and-
+  // swap pattern, not just restoring this block.
 
   try {
     const results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
