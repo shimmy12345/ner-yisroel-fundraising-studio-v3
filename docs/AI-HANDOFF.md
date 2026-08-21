@@ -8,29 +8,42 @@ the repository/infrastructure disagree, trust the repository/infrastructure.
 
 ## Current Git State
 
+**This section was stale for some time (still showing `0f75ad0`, the
+2026-08-20 Monthly Payment Plan tip, through many subsequent completed
+tasks) -- corrected 2026-08-21. Per this file's own preamble, git/
+deployed state is always the authoritative source if this section ever
+drifts again; do not trust a commit SHA here over a fresh `git fetch`.**
+
 Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (this commit):
-`0f75ad0` -- the Monthly Payment Plan feature (`e69dc58`), its doc-update
-follow-up (`f474d1d`), and a small display-bug fix (`0f75ad0`) found
-during the controlled staging rollout (see "Pledge Payment Plan -- LIVE
-ROLLOUT VERIFICATION" below). **Deployed to Independent Staging (Worker
-version `1875be3f-392f-4b74-835a-8270a9d1f84a`); migration 0033 applied to
-Independent Staging only; a real payment plan now exists on the real
-KOLX2026 pledge, created through the actual product UI and verified.
-Production untouched.**
+`befa0fb` -- the people-extraction false-positive fix (see
+"People-Extraction False-Positive Investigation and Fix" below), on top
+of (most recent first): `3f1cd3e`/`e20e10d` (outcome-route Option B fix
++ docs), `c29590a`/`faea921` (Zman/Yahrtzeit extraction implementation +
+investigation docs), `b687511`/`4126663` (Zman/Yahrtzeit historical
+repair + comprehensive audit tooling), `d48e1f2`/`d6e43ee`/`a59c8d5`
+(grandchild-gap fix, deployment, and donor 987 historical repair), and
+the branch-documentation-authority fix (`dc245fc`) before that.
+**Deployed to Independent Staging (Worker version
+`70dd7081-0fb3-4e69-8329-e115685f09fc`, 2026-08-21T12:40:27Z) and
+live-verified**: Zachter/Semmelman/Weinschneider's Meeting Brief pages
+no longer show `Zman`/`Yahrtzeit`/`Discussed Kollel` under "People
+Mentioned"; a live temporary test note ("Spoke with Yaakov about the
+new Zman...") confirmed `Yaakov` still correctly appears while `Zman`
+does not (test interaction cleaned up afterward, no residue); both
+donors' Relationship Snapshot/Suggested Action text confirmed unchanged
+on the same live pages. No D1 schema change, no historical-data repair,
+no production access. `origin/main` untouched throughout every one of
+the above tasks.
 
 origin/feature/independent-cloudflare-sandbox:
-`0f75ad0` (pushed; matches local HEAD exactly, no divergence). Previously
-`93bdfb3` (the birthday-bucketing + open-pledge-payment-recency
-correctness fixes) was the tip; see "Deployment State" and the
-birthday/pledge-fix section below for that prior report.
+`befa0fb` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
-4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58 (untouched throughout this
-task -- reconfirmed via a fresh fetch immediately before and after the
-staging rollout).
+`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
+recorded in this file since it was first confirmed at this SHA).
 
 Working tree:
 clean.
@@ -4147,6 +4160,95 @@ Independent Staging. `origin/main` unchanged
 result above; approval to deploy this fix to Independent Staging (not
 done in this task).
 
+**UPDATE 2026-08-21 -- DEPLOYED AND LIVE-VERIFIED.** See "People-
+Extraction Fix -- Deployed + Live-Verified (2026-08-21)" below for the
+full deployment/verification report.
+
+## People-Extraction Fix -- Deployed + Live-Verified (2026-08-21)
+
+Deploys the fix committed above (`befa0fb`) and live-verifies it, per
+explicit instruction: no additional code changes, no D1 writes/
+migrations, no broadening of the extraction rules in this task.
+
+**Pre-deploy gates (re-run, all still passing on `befa0fb`).** `pnpm
+test`: exit 0, every suite `fail 0`. `pnpm exec tsc --noEmit`: clean.
+`pnpm run build:staging-independent`: completed, full route manifest,
+no errors.
+
+**Deployment.** `pnpm run deploy:staging-independent` (`wrangler deploy
+--config wrangler.staging.jsonc`), started 2026-08-21T12:40:27Z.
+**Worker version `70dd7081-0fb3-4e69-8329-e115685f09fc`**, deployed git
+SHA `befa0fb`. No D1 schema change, no production access.
+
+**Live verification -- Meeting Brief, all three real corpus cases.**
+- Zachter (`/donors/19af69d6-.../meeting-brief`): "PEOPLE MENTIONED /
+  Names to remember" now reads "No additional people are mentioned in
+  recent notes." -- `Zman` is gone. Suggested Action and Relationship
+  Snapshot still read exactly "Texted video from first day of Zman and
+  thanked him for his support that makes it happen." -- unchanged.
+- Semmelman (`/donors/5c35437c-.../meeting-brief`): same "No additional
+  people..." result -- `Yahrtzeit` is gone. Suggested Action/
+  Relationship Snapshot still exactly "Sent text on wife's Yahrtzeit to
+  acknowledge it." -- unchanged.
+- Weinschneider (`/donors/9a9e3a1f-.../meeting-brief`, the broader
+  structural-bug case): same "No additional people..." result --
+  `Discussed Kollel` (the fabricated multi-word "person" from the
+  leading-verb-stripping bug) is gone, confirming the structural fix is
+  live, not just the word-list additions.
+
+**Live verification -- legitimate names still recognized (temporary
+test, cleaned up afterward).** No safe disposable donor exists, so this
+reused donor 60830 (Zachter). Created a real, non-scheduled `call`
+interaction via the actual `/capture` UI with note "TEST
+(people-extraction fix live-verify, will be removed): Spoke with Yaakov
+about the new Zman and confirmed his pledge." -- deliberately combining
+a real name with the fixed term in one sentence, the exact shape of the
+Phase 4 false-negative risk. Did not check "Use this relationship
+snapshot", so no `relationship_summary`/`institutional_memory` write
+occurred (confirmed on-page: "Relationship snapshot unchanged -- The
+generated draft was not accepted, so it was not saved."). Zachter's
+Meeting Brief "PEOPLE MENTIONED" then correctly showed `Yaakov` (the
+real name, preserved) and did NOT show `Zman` -- `TEST` also appeared,
+which is expected and not a regression (it's the test label's own
+wording, not a real corpus term, and correctly demonstrates the
+extractor still treats any unexcluded capitalized word as a candidate
+name). Zero console errors throughout.
+
+**Cleanup.** Confirmed Zachter's `relationship_summary`/
+`institutional_memory`/`updated_at` were unaffected by the test
+(`updated_at` unchanged at `1787276491`) before deleting the test
+interaction directly via D1 (not a route call -- fabricated for the
+test, not real donor history). Re-verified after cleanup: Zachter's
+interaction list back to exactly the 1 real interaction, global
+interaction count back to the exact pre-test baseline (68).
+
+**Reconfirmed: Relationship Snapshot unchanged.** Directly observed
+live on both Zachter's and Semmelman's Meeting Brief pages above --
+identical text to every prior verification.
+
+**Reconfirmed: the outcome-route fix remains intact.** `app/api/
+interactions/[id]/outcome/route.ts` was not touched by this task or the
+people-extraction fix itself (confirmed: zero diff to that file since
+its own dedicated deployment/live-verification in the prior task); this
+deployment is strictly additive on top of that already-verified fix, and
+`tests/outcome-route-relationship-write-removed.test.mjs` still passed
+in this task's pre-deploy gate run.
+
+**Corrected the stale "Current Git State" section** at the top of this
+file (previously still showing `0f75ad0` through several subsequent
+completed tasks) to reflect the actual current HEAD (`befa0fb`) and
+deployed state.
+
+**Confirmation.** No D1 writes beyond the temporary test interaction
+(created and then deleted in this same task, net effect zero). No
+extraction-rule broadening -- only the deployment and live verification
+of the already-committed, already-reviewed fix. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+**Status: the people-extraction false-positive issue is now closed** --
+investigated, fixed, tested, deployed, and live-verified.
+
 ## Latest Completed Task
 
 A relationship-intelligence quality pass, deployed and live-verified on
@@ -4918,6 +5020,35 @@ work begins:
   donor" capture form, if fundraisers want it.
 
 ## Last Updated
+
+2026-08-21T13:15:00Z (approximate)
+Claude (Sonnet 5) — Deployed the people-extraction fix (`befa0fb`) to
+Independent Staging (Worker `70dd7081-0fb3-4e69-8329-e115685f09fc`) and
+live-verified it. Meeting Brief confirmed on the real deployed pages for
+all three real corpus cases: Zachter (`Zman` gone), Semmelman
+(`Yahrtzeit` gone), Weinschneider (`Discussed Kollel` gone, confirming
+the structural multi-word fix specifically, not just the word-list
+additions) -- all three donors' Relationship Snapshot/Suggested Action
+text unchanged. Live-verified the false-negative protection too: created
+a temporary test note for Zachter ("Spoke with Yaakov about the new
+Zman...") without accepting any relationship-snapshot write, confirmed
+`Yaakov` correctly still appears under People Mentioned while `Zman`
+does not, then deleted the test interaction and confirmed Zachter's
+donor row and the global interaction count were unaffected (back to the
+exact pre-test baseline). Reconfirmed the outcome-route fix remains
+intact (that file has zero diff since its own dedicated
+deployment/verification; still covered by its own passing test in this
+task's pre-deploy gate run). Corrected the stale "Current Git State"
+section at the top of this file, which had still shown `0f75ad0`
+through several completed tasks -- now reflects `befa0fb` and the
+current deployed state. No additional code changes, no D1 writes beyond
+the temporary test interaction (created and deleted within this task,
+net zero), no extraction-rule broadening. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Full report: "People-
+Extraction Fix -- Deployed + Live-Verified (2026-08-21)" above. Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-21T04:15:00Z (approximate)
 Claude (Sonnet 5) — Investigated and fixed the people-extraction
