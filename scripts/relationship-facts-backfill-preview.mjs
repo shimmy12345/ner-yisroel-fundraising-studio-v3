@@ -307,20 +307,20 @@ async function applyBackfill() {
   for (const item of plan) {
     const factId = crypto.randomUUID();
     const changeId = crypto.randomUUID();
-    const insertSql = `INSERT INTO donor_relationship_facts
-      (id, donor_id, user_id, category, lifecycle, fact_text, source_interaction_id, source_interaction_occurred_at, status, fingerprint, created_at, updated_at)
-      SELECT ${sqlString(factId)}, ${sqlString(item.donorId)}, d.owner_user_id, ${sqlString(item.category)}, ${sqlString(item.lifecycle)}, ${sqlLiteral(item.factText)}, NULL, ${item.sourceInteractionOccurredAt}, 'current', ${sqlString(item.fingerprint)}, ${item.sourceInteractionOccurredAt}, ${item.sourceInteractionOccurredAt}
-      FROM donors d WHERE d.id = ${sqlString(item.donorId)}
-      AND NOT EXISTS (SELECT 1 FROM donor_relationship_facts f WHERE f.user_id = d.owner_user_id AND f.fingerprint = ${sqlString(item.fingerprint)})`;
+    // Single-line SQL, deliberately -- a multi-line template literal here
+    // (embedded literal newlines in the statement's own formatting, not
+    // just in a bound value) breaks Windows `--command` argument passing
+    // the same way scripts/relationship-summary-cleanup-preview.mjs's own
+    // header comment warns about for VALUES; sqlLiteral() alone does not
+    // protect against newlines in the surrounding SQL structure itself.
+    const insertSql = `INSERT INTO donor_relationship_facts (id, donor_id, user_id, category, lifecycle, fact_text, source_interaction_id, source_interaction_occurred_at, status, fingerprint, created_at, updated_at) SELECT ${sqlString(factId)}, ${sqlString(item.donorId)}, d.owner_user_id, ${sqlString(item.category)}, ${sqlString(item.lifecycle)}, ${sqlLiteral(item.factText)}, NULL, ${item.sourceInteractionOccurredAt}, 'current', ${sqlString(item.fingerprint)}, ${item.sourceInteractionOccurredAt}, ${item.sourceInteractionOccurredAt} FROM donors d WHERE d.id = ${sqlString(item.donorId)} AND NOT EXISTS (SELECT 1 FROM donor_relationship_facts f WHERE f.user_id = d.owner_user_id AND f.fingerprint = ${sqlString(item.fingerprint)})`;
     const insertResult = wranglerJson(insertSql);
     const changes = insertResult?.[0]?.meta?.changes ?? 0;
     if (changes !== 1) {
       results.push({ donorId: item.donorId, status: "FAILED_CLOSED", reason: `Conditional INSERT matched ${changes} row(s), expected exactly 1 -- either the donor no longer exists/qualifies, or a fact with this fingerprint was created by a concurrent writer since this run's own fresh read. No write applied.` });
       continue;
     }
-    wranglerJson(`INSERT INTO donor_relationship_fact_changes (id, fact_id, user_id, donor_id, action, changed_fields, after_json, created_at)
-      SELECT ${sqlString(changeId)}, ${sqlString(factId)}, d.owner_user_id, ${sqlString(item.donorId)}, 'created', '[]', ${sqlLiteral(JSON.stringify({ factText: item.factText, category: item.category, lifecycle: item.lifecycle, source: "phase1-backfill" }))}, ${item.sourceInteractionOccurredAt}
-      FROM donors d WHERE d.id = ${sqlString(item.donorId)}`);
+    wranglerJson(`INSERT INTO donor_relationship_fact_changes (id, fact_id, user_id, donor_id, action, changed_fields, after_json, created_at) SELECT ${sqlString(changeId)}, ${sqlString(factId)}, d.owner_user_id, ${sqlString(item.donorId)}, 'created', '[]', ${sqlLiteral(JSON.stringify({ factText: item.factText, category: item.category, lifecycle: item.lifecycle, source: "phase1-backfill" }))}, ${item.sourceInteractionOccurredAt} FROM donors d WHERE d.id = ${sqlString(item.donorId)}`);
     results.push({ donorId: item.donorId, status: "APPLIED", factId });
   }
   return results;
