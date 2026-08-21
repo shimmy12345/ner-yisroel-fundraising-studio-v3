@@ -1297,10 +1297,14 @@ All 8 items from the design doc's "Unresolved decisions" section were
 implemented exactly as recommended (status model incl. `withdrawn`
 requiring a note; free-text purpose; multiple concurrent pending asks
 allowed; direct creation included; only-originating-interaction linking,
-Option A/D; the `ask_changes` audit table built). Items 7-8 (backfilling
-Klein/Pfeiffer/Rovinsky, and clearing their `relationship_summary`) were
-explicitly **not** done in this task, per instruction -- still open, see
-"Next Approval Required" below.
+Option A/D; the `ask_changes` audit table built). Items 7-8
+(backfilling Klein/Pfeiffer/Rovinsky, and clearing their
+`relationship_summary`) were explicitly **not** done in the earlier
+rollout task that first wrote this paragraph -- but **are** done as of
+this same "HISTORICAL BACKFILL AND CLOSURE" section above (this
+paragraph is carried over for continuity from that earlier report and
+was not itself updated when the backfill completed later in this same
+section; corrected 2026-08-21 during a documentation cleanup pass).
 
 ## Today's-Agenda Birthday Bucketing + Open-Pledge Payment Recency -- FIXED AND LIVE (2026-08-19)
 
@@ -4249,7 +4253,24 @@ of the already-committed, already-reviewed fix. `origin/main` unchanged
 **Status: the people-extraction false-positive issue is now closed** --
 investigated, fixed, tested, deployed, and live-verified.
 
-## Latest Completed Task
+## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
+
+**Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
+after many later tasks; kept as a heading only other sections still
+point to it by name). This describes the original quality pass
+(commit `1487a8b`) that first replaced the field-label-dump generator
+with the current quoted-sentence one. Substantial further work has
+happened since on this same code path -- every section ABOVE this one
+in the file is chronologically later (each new task's report was always
+inserted immediately before this anchor, so file order below "Current
+Git State" runs oldest-to-newest and this heading marks where a much
+older "latest" designation stopped being updated). In particular, see
+"Grandchild/Grandparent Extraction-Gap Fix", "Zman/Yahrtzeit Extraction
+Implementation + Historical Preview", "Outcome-Route Fix -- Option B",
+and "People-Extraction Fix -- Deployed + Live-Verified" above -- all now
+deployed and closed. The "Current Git State" section at the top of this
+file and the "Last Updated" log's newest entry are the actual current
+status; this section is history.
 
 A relationship-intelligence quality pass, deployed and live-verified on
 Independent Staging: stopped surfacing weak machine-generated content as
@@ -4303,7 +4324,7 @@ messages), plus `tests/shared-activity-ux.test.mjs`,
 `tests/text-message-type.test.mjs`, `tests/mobile-ux-fixes.test.mjs`, and
 `tests/relationship-quality.test.mjs`.
 
-## Relationship-Summary Cleanup Audit (Phase 1 applied; 3 of 5 NEEDS_REVIEW donors resolved via the Ask feature backfill, 2 still pending review)
+## Relationship-Summary Cleanup Audit (Phase 1 applied; all 5 original NEEDS_REVIEW donors now resolved -- see 2026-08-21 update below)
 
 Follows on from the "Existing (pre-fix) `relationship_summary`/
 `institutional_memory` rows" item in Outstanding Work below. Two-phase
@@ -4454,6 +4475,28 @@ paraphrase like `"Thanked for supporting the yeshiva's Zman."`, but this
 is lower-value/more borderline than the three solicitation-amount cases
 above.
 
+**SUPERSEDED 2026-08-21.** Both the "leave null" recommendation for
+Semmelman and the "manual paraphrase" suggestion for Zachter were
+overtaken by a real product decision and implementation, not a manual
+edit: after a domain clarification (Zman = Yeshiva semester/term,
+not generic calendar chatter), `FACT_SIGNAL_PATTERN` gained a
+`yahrtzeits?` entry and a new, narrow `ZMAN_APPRECIATION_PATTERN`
+(zman/semester + an appreciation-for-support phrase, in the same
+sentence -- corpus-evidence-backed, not a bare-word trigger) was added.
+The real extractor now produces, automatically: Semmelman -- `"Sent
+text on wife's Yahrtzeit to acknowledge it."`; Zachter -- `"Texted video
+from first day of Zman and thanked him for his support that makes it
+happen."` Both were applied to D1 via compare-and-swap (not hand-typed)
+and are now live and verified on Independent Staging. See "Zman/
+Yahrtzeit Extraction Implementation + Historical Preview" and "Zman/
+Yahrtzeit Deployment + Historical Repair -- APPLIED" above for the full
+implementation/deployment record. The dollar-amount category discussed
+in Part C below was, independently, effectively resolved a different
+way: the Ask/Solicitation feature (Option (b) from that section) became
+the dedicated home for solicitation amounts, and Klein/Pfeiffer/
+Rovinsky's dollar facts were backfilled into real `asks` rows instead of
+ever needing a `FACT_SIGNAL_PATTERN` dollar-amount keyword.
+
 ### Part C -- Extractor Expansion Recommendation (not implemented)
 
 Narrow assessment of whether `lib/capture/interaction.ts`'s
@@ -4507,6 +4550,20 @@ Zman is temporary/low-value; solicitation amounts are durable, giving-
 adjacent, and currently homeless. relationship_summary should stay a
 concise "what should I know" surface, not become a generic interaction-
 note dump for all three.
+
+**Where this landed, 2026-08-21 (see the SUPERSEDED note earlier in this
+section for the full record):** Yahrtzeit's "do not add" recommendation
+was overridden by an explicit product decision -- it's now a simple
+`FACT_SIGNAL_PATTERN` entry, same tier as birthday/anniversary. Zman's
+underlying caution actually held up: no bare "zman" keyword was ever
+added (a bare keyword would have hit real broadcast/generic false
+positives, confirmed by a later corpus audit) -- instead a narrow
+contextual rule (`ZMAN_APPRECIATION_PATTERN`) fires only when a
+zman/semester mention co-occurs with genuine appreciation-for-support
+language, matching this section's own instinct that generic Zman
+mentions shouldn't become relationship facts. Solicitation amounts
+found their home via the Ask feature, not a `FACT_SIGNAL_PATTERN`
+change, exactly matching option (b) considered above.
 
 ## Important Product Decisions
 
@@ -4619,38 +4676,61 @@ Migration `0032_asks.sql`:
 See "Ask / Solicitation Feature — LIVE ROLLOUT VERIFICATION" above for
 full verification detail.
 
-No migration beyond 0032 exists or has been applied.
+Migration `0033_pledge_payment_plans.sql`:
+**APPLIED** to `fundraising-os-staging-db` (Independent Staging) on
+2026-08-20, as part of the Pledge Payment Plan feature rollout. See
+"Pledge Payment Plan — LIVE ROLLOUT VERIFICATION" above for full
+verification detail. **(This corrects a prior stale statement below
+that had said "no migration beyond 0032" through several later
+completed tasks -- fixed 2026-08-21.)**
+
+No migration beyond 0033 exists or has been applied.
 
 ## Deployment State
 
-**Live -- current as of 2026-08-20T02:34:01Z.** Deployed commit `93bdfb3`
-("Fix Today's-Agenda birthday bucketing and open-pledge payment recency"
--- see "Today's-Agenda Birthday Bucketing + Open-Pledge Payment Recency"
-above), Worker version `5f738898-adee-4e43-8fc9-2f170e377c07`, confirmed
-via the deploy command's own printed Version ID and independently via
-`wrangler deployments list`. **This supersedes every earlier version ID
-in this file** (`db4dcc3e` -- the request-scoped-dedup fix this replaced
--- and, before that, `f29c075f`/`70f3c2c6`; none of those are live now).
-Branch HEAD may advance past `93bdfb3` by documentation-only commits
-(like this one) that touch no application code — the deployed Worker
-reflects the latest actual code change, `93bdfb3`.
+**Corrected 2026-08-21 -- this section had gone stale (still describing
+the 2026-08-20T02:34:01Z deploy through several later completed and
+deployed tasks: the Pledge Payment Plan rollout, the grandchild-gap fix,
+the Zman/Yahrtzeit fix, the outcome-route fix, and the people-extraction
+fix, each of which has its own full deployment record in its own dated
+section above). This section is now a pointer to the true current state,
+not a duplicate of it.**
+
+**Live -- current as of 2026-08-21T12:40:27Z.** Deployed commit
+`befa0fb` ("Fix people-extraction false positives" -- see "People-
+Extraction Fix -- Deployed + Live-Verified" above), Worker version
+`70dd7081-0fb3-4e69-8329-e115685f09fc`, confirmed via the deploy
+command's own printed Version ID and live-verified against real donor
+pages. This supersedes every earlier version ID recorded anywhere in
+this file. For the exact current git SHA (which may have advanced past
+`befa0fb` by documentation-only commits that touch no application
+code -- the deployed Worker always reflects the latest actual code
+change, not necessarily the latest commit), see "Current Git State" at
+the top of this file, which is the authoritative pointer kept in sync
+going forward.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
 D1: `fundraising-os-staging-db` (bound as `env.DB`)
 
-Multi-donor shared activities (Phase 1 + Phase 2), Text Message, the
-mobile UX fixes, the relationship-intelligence quality pass, the
-Ask/Solicitation Phase 1 feature, the request-scoped duplicate-loader fix,
-and now the Today's-Agenda birthday bucketing + open-pledge payment-
-recency fixes are all live and have been exercised end-to-end against
-real staging data (see Verification, and the sections above).
+Everything recorded in this file as deployed and live-verified remains
+so as of this correction: multi-donor shared activities (Phase 1 + 2),
+Text Message, the mobile UX fixes, the relationship-intelligence quality
+pass and its later extraction fixes (grandchild/grandparent, Yahrtzeit,
+Zman, people-extraction false positives), the Ask/Solicitation Phase 1
+feature and its historical backfill, the request-scoped duplicate-loader
+fix, the Today's-Agenda birthday-bucketing + open-pledge payment-recency
+fixes, the Pledge Payment Plan feature, and the outcome-route
+acceptance-gap fix (Option B). Each has its own dated section above with
+full live-verification detail -- this section intentionally does not
+repeat it.
 
-Note: this deploy required two retries — the environment's network/DNS
-had a transient outage (wrangler/curl/nslookup all failed to resolve
-`dash.cloudflare.com`/`api.cloudflare.com` for several minutes); the
-deploy succeeded once connectivity returned, verified independently via
-`wrangler deployments list` in the same session before live-testing.
+Historical note (kept for continuity, not current): the 2026-08-20
+deploy referenced above by the now-superseded version ID required two
+retries due to a transient network/DNS outage in the environment
+(`dash.cloudflare.com`/`api.cloudflare.com` briefly unresolvable);
+succeeded once connectivity returned, independently confirmed via
+`wrangler deployments list` before live-testing.
 
 ## Verification
 
@@ -4900,40 +4980,43 @@ relationship-intelligence quality work):
   activity it was opened from (e.g. the shared summary or date). Not
   requested by this task; worth considering if fundraisers want that
   context carried over.
-- Existing (pre-fix) `relationship_summary`/`institutional_memory` rows
-  written before this quality pass: 4 of 9 non-null rows were cleaned up
-  (regenerated with the current extractor, applied and verified -- see
-  "Relationship-Summary Cleanup Audit" above). Of the original 5
-  NEEDS_REVIEW rows, 3 ("Solicited" false-person cases --
-  Klein/Pfeiffer/Rovinsky) are now **resolved**: their solicitation-amount
-  fact was backfilled into real `asks` rows and their broken
-  relationship_summary cleared to `NULL` -- see "Ask / Solicitation
-  Feature -- HISTORICAL BACKFILL AND CLOSURE" above. 2 remain
-  (Semmelman/Zachter), hinging on a Yahrtzeit/Zman keyword gap the
-  extractor doesn't recognize -- unrelated to the Ask feature, still
-  pending a human decision. See Next Approval Required for what's needed
-  to close these out.
-- The current extractor's `FACT_SIGNAL_PATTERN` has no keyword coverage
-  for Yahrtzeit, Zman/yeshiva-timing language, or explicit dollar amounts
-  ("$5k", "$10,000"). Investigated in depth (see "Relationship-Summary
-  Cleanup Audit" -> "Part C"); recommendation is narrow and category-
-  specific, not implemented: Yahrtzeit facts are already durably tracked
-  in the dedicated `yahrtzeits` table (don't duplicate into
-  relationship_summary); Zman/timing mentions are temporary interaction
-  context better handled case-by-case than with a standing keyword;
-  solicitation dollar amounts are the one category that currently has
-  nowhere else to live in the schema and deserves an explicit product
-  decision (either narrow fact-signal support, or a small dedicated
-  ask/solicitation field/table).
+- **RESOLVED 2026-08-21 (was: "Existing pre-fix relationship_summary
+  rows... 2 remain (Semmelman/Zachter), pending a human decision").**
+  All 5 of the original NEEDS_REVIEW rows are now closed: Klein/
+  Pfeiffer/Rovinsky via the Ask feature's historical backfill (their
+  dollar-amount facts became real `asks` rows, `relationship_summary`
+  cleared to `NULL` -- see "Ask / Solicitation Feature -- HISTORICAL
+  BACKFILL AND CLOSURE" above); Semmelman/Zachter via the Zman/Yahrtzeit
+  extraction fix and its historical repair (both now have real,
+  extractor-generated `relationship_summary` values, applied via
+  compare-and-swap and live-verified -- see "Zman/Yahrtzeit Extraction
+  Implementation + Historical Preview" and "...Deployment + Historical
+  Repair -- APPLIED" above). Nothing remains open from this item.
+- **RESOLVED 2026-08-21 (was: "FACT_SIGNAL_PATTERN has no keyword
+  coverage for Yahrtzeit/Zman/dollar amounts").** Yahrtzeit is now a
+  simple `FACT_SIGNAL_PATTERN` entry; Zman has a narrow contextual rule
+  (`ZMAN_APPRECIATION_PATTERN`, requiring genuine appreciation-for-
+  support language alongside it, not a bare keyword -- see "Zman/
+  Yahrtzeit Extraction Implementation + Historical Preview" above for
+  the full corpus-evidence-backed design). Solicitation dollar amounts
+  were never added to `FACT_SIGNAL_PATTERN` -- the Ask/Solicitation
+  feature became their dedicated home instead (option (b) from the
+  original Part C analysis), which is the outcome this bullet was
+  originally waiting on a decision about.
 - Place/holiday names (e.g. "Israel", "Rosh Hashanah") can still appear
   in the `people` array — genuinely ambiguous with real given names in
   this donor community (e.g. "Israel" is also a real first name), so no
   attempt was made to filter them; a full named-entity/place gazetteer
-  was judged out of scope for a deterministic-rules-only fix. Confirmed
-  low-impact: Meeting Brief's "PEOPLE MENTIONED" card is the only reader
-  of this field, and this class of imprecision existed before this task
-  too (it doesn't affect the main Relationship Snapshot text, which is
-  driven by `specificFacts`, not `people`).
+  was judged out of scope for a deterministic-rules-only fix. **Still
+  accurate as of the 2026-08-21 people-extraction false-positive fix**
+  (see "People-Extraction Fix" sections above) -- that task fixed a
+  different, evidenced class of false positive (Zman/Yahrtzeit/Kollel/
+  disposition-verb/import-provenance words being misread as people), not
+  this broader place/holiday-name ambiguity, which remains a genuine,
+  unaddressed, low-impact known limitation. Meeting Brief's "PEOPLE
+  MENTIONED" card is still the only reader of this field, and this class
+  of imprecision still doesn't affect the main Relationship Snapshot
+  text, which is driven by `specificFacts`, not `people`.
 - The fact-signal sentence extraction (`specificFacts`) can occasionally
   promote a sentence that's technically "specific" (contains a signal
   keyword like "family") but still fairly generic in substance (e.g. "A
@@ -4986,40 +5069,116 @@ without a separate, explicit approval:
   verified zero ask-related code in `app/api/interactions/shared/route.ts`).
 - Meeting Brief dedicated `openAsks` line (item 1 above).
 
-**Separate, unrelated to Ask v1 closure — still open from the earlier
-relationship-summary cleanup audit:** 2 of the original 5 NEEDS_REVIEW
-donors are not solicitation cases and were correctly left untouched by
-the Ask backfill (Klein/Pfeiffer/Rovinsky, the 3 that *were* solicitation
-cases, are now resolved via the Ask feature instead — see above):
-1. **Semmelman**: recommend clearing relationship_summary to null (the
-   durable fact — wife's Yahrtzeit — is already tracked in the dedicated
-   `yahrtzeits` table; this row would just duplicate it). Needs explicit
-   confirmation before any write.
-2. **Zachter**: more borderline; recommend a human read and a short manual
-   value (e.g. "Thanked for supporting the yeshiva's Zman.") or leave
-   as-is.
-3. **Extractor expansion** (Part C above): a real product decision on
-   whether to add dollar-amount fact-signal support — not implemented,
-   needs its own explicit approval and design if wanted. (The Ask feature
-   itself now covers new solicitation notes going forward via "Did you
-   make an ask?" — this item is only about the extractor's free-text
-   `relationship_summary` generation, a separate concern.)
+**RESOLVED 2026-08-21, no longer open (this whole subsection is kept
+only as a historical record of what used to be pending here).** The
+former "Separate, unrelated to Ask v1 closure" block below this line
+used to recommend clearing Semmelman's `relationship_summary`, hand-
+writing a manual value for Zachter, and flagged the dollar-amount
+extractor question as needing its own decision. All three are now
+closed by real, deployed work, not by this documentation edit:
+Semmelman's and Zachter's `relationship_summary` were regenerated by the
+extractor itself (Yahrtzeit fact signal + the narrow
+`ZMAN_APPRECIATION_PATTERN`) and applied via compare-and-swap -- see
+"Zman/Yahrtzeit Extraction Implementation + Historical Preview" and
+"...Deployment + Historical Repair -- APPLIED" above; the dollar-amount
+question was answered by the Ask feature becoming the dedicated home for
+solicitation amounts rather than by extending `FACT_SIGNAL_PATTERN`.
+Nothing from this item needs approval any more. (The original wording of
+this now-resolved item is preserved in git history, per this file's own
+preamble that git history is the source of truth for exact past
+phrasing -- not worth duplicating verbatim here in a section whose whole
+purpose is to state what's currently pending.)
 
-Everything else is non-blocking — the shared-activity, Text Message,
-mobile UX fixes, and relationship-intelligence quality pass are all live
-and verified on Independent Staging.
+**Also resolved since this section was last accurate, each with its own
+full report above:** the outcome-route acceptance-gap issue (Option B --
+the unconditional write was removed entirely, deployed, live-verified);
+the people-extraction false-positive issue (Zman/Yahrtzeit/Kollel/
+Dropped/Imported-Source, deployed, live-verified). Neither needs
+approval or further action; both are closed.
 
-Optional follow-ups, each would need its own explicit approval before
-work begins:
-- A genuine device/alternate-tooling mobile visual QA pass to close the
-  viewport-emulation gap above.
-- A product decision on the `continue_conversation`/`reconnect_contact_gap`
-  ranking nuance and/or continue_conversation's eligibility on broadcast
-  recipient touches, if judged worth addressing.
-- Pre-filling shared-activity context into the new "Add note for this
-  donor" capture form, if fundraisers want it.
+**Genuinely still open, as of 2026-08-21:**
+- **Outcome-note review/accept UI (Option A)** — the outcome-route fix
+  (Option B) removed the unsafe unconditional write rather than building
+  a full preview/accept flow for outcome notes. If the product wants
+  outcome notes to be able to update `relationship_summary`/
+  `institutional_memory` going forward, that requires new UI work
+  (a client-side preview + accept step, reusing the existing
+  compare-and-swap pattern from `app/api/interactions/[id]/route.ts`) --
+  not started, needs its own explicit scoping and approval if wanted.
+- Everything below this line was already-known, non-blocking, optional
+  follow-up work (unchanged status) — see "Outstanding Work / Known
+  Limitations" above for the full current list: genuine mobile/
+  narrow-viewport visual QA (still not achievable in this automation
+  environment), the Meeting Brief `openAsks` rendering gap, "Add
+  follow-up" on an existing ask, the `continue_conversation`/
+  `reconnect_contact_gap` ranking nuance, pre-filling shared-activity
+  context into "Add note for this donor", and the place/holiday-name
+  ambiguity in the `people` array. None of these block anything; each
+  would need its own explicit approval before work begins.
+
+Everything else described in this file as deployed and live-verified
+remains so — the shared-activity feature, Text Message, mobile UX
+fixes, the relationship-intelligence quality pass and its later
+extraction fixes, the Ask/Solicitation feature and its historical
+backfill, the Pledge Payment Plan feature, and the outcome-route fix are
+all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-21T14:00:00Z (approximate)
+Claude (Sonnet 5) — Documentation-only cleanup pass over this whole
+file: no application code, tests, D1, migrations, Cloudflare config, or
+deployment touched. Fixed forward-looking/status sections that still
+described completed work as pending, without deleting any historical
+report:
+- Corrected a self-contradictory paragraph in "Ask / Solicitation
+  Feature -- HISTORICAL BACKFILL AND CLOSURE" that said items 7-8 were
+  "still open" immediately below the same section's own report of having
+  completed them.
+- Retitled "## Latest Completed Task" (misleading -- many later tasks
+  had superseded it without anyone renaming it) with a pointer to the
+  actual later sections and to "Current Git State" as the real current
+  status.
+- Fixed "Relationship-Summary Cleanup Audit"'s title and its Semmelman/
+  Zachter/"Part C" sub-sections, which still recommended leaving
+  relationship_summary null or hand-writing a manual value, and still
+  recommended "do not add" a Yahrtzeit/Zman fact signal -- all three were
+  later superseded by the real Zman/Yahrtzeit extraction fix and its
+  historical repair. Added SUPERSEDED notes pointing to the actual
+  resolution rather than deleting the original reasoning.
+- Rewrote "Deployment State" (was still describing a 2026-08-20T02:34:01Z
+  deploy through 5 later shipped deploys) to point at the real latest
+  deployment (`befa0fb`, Worker `70dd7081-...`) and at "Current Git
+  State" as the thing to trust going forward, rather than trying to stay
+  a duplicate of it.
+- Fixed "Database / Migration State", which stopped at migration 0032
+  and never recorded that 0033 (Pledge Payment Plan) was applied
+  2026-08-20.
+- Fixed two "Outstanding Work / Known Limitations" bullets (the
+  Semmelman/Zachter NEEDS_REVIEW item and the FACT_SIGNAL_PATTERN
+  keyword-gap item) to reflect that both are resolved; left the
+  genuinely-still-open items (mobile/viewport QA, Meeting Brief
+  `openAsks` rendering gap, place/holiday-name ambiguity in `people`,
+  etc.) unchanged since they're still accurate.
+- Rewrote "Next Approval Required": removed the stale "clear Semmelman's
+  relationship_summary / hand-write Zachter's" recommendation (resolved),
+  noted the outcome-route and people-extraction issues are also now
+  closed (neither needs approval), and added the one genuinely new open
+  item this file hadn't recorded yet -- Option A (a full outcome-note
+  review/accept UI), intentionally deferred when Option B shipped.
+- Verified "Current Git State" against a fresh `git fetch` before
+  starting this edit; it was already accurate (`befa0fb`) from the prior
+  task's own correction, and is updated again below to point at this
+  cleanup's own commit.
+No new tasks were invented; every correction above points to a
+follow-up decision only if the user wants one, not a task this session
+decided needed doing. Docs-only commit(s), pushed to
+`feature/independent-cloudflare-sandbox`; no staging deployment
+performed or needed. `origin/main` unchanged
+(`4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58`). Session
+`0d7eb3ea-61e9-462e-a65d-71eddd13f964`.
+
+---
 
 2026-08-21T13:15:00Z (approximate)
 Claude (Sonnet 5) — Deployed the people-extraction fix (`befa0fb`) to
