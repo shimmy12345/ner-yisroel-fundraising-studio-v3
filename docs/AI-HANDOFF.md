@@ -15,13 +15,14 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
+**`8263eff`** -- "Correct Current Git State to reference the new HEAD
+(1fa2c26)" -- docs-only, zero application code change. Sits on top of
 **`1fa2c26`** -- "Correct Capture/Outcome copy: no new relationship fact
 is not the same as a meaningless interaction" -- see "Meaningful
 Stewardship Activity vs. Durable Relationship Intelligence" below for
-full detail. NOT deployed (deployed Worker version below still predates
-it -- though this commit is UI-copy-only within the already-deployed
-Capture/Outcome components, so deploying it is low-risk whenever
-approved). On top of `cf40bee` ("Correct Current Git State to reference
+full detail, including its "Deployment + Live End-to-End Verification"
+subsection -- **DEPLOYED to Independent Staging and live-verified
+end-to-end** (see below). On top of `cf40bee` ("Correct Current Git State to reference
 the new HEAD (20e37dd)" -- docs-only, zero application code change),
 which sits on top of **`20e37dd`** -- "Ask/Solicitation v1: Meeting
 Brief open-ask visibility + add-follow-up on an existing ask" -- see
@@ -65,12 +66,14 @@ donor (see the dated subsection below) -- no test artifacts remain, and
 no Phase 2 D1 mutation beyond the already-applied Phase 1 Zachter row
 exists anywhere.
 
-**Deployed Worker version: `cfb39a25-5348-46e3-85a9-ef5a018b143b`**
-(deployed 2026-08-23T15:46:27Z, confirmed via `wrangler deployments
+**Deployed Worker version: `53229863-60fd-47a3-8711-ee9910e5566b`**
+(deployed 2026-08-23T19:18:38Z, confirmed via `wrangler deployments
 list` and live-verified end-to-end directly against real D1 writes) --
-supersedes `f57904ae-ec83-4d35-a38f-f28ef161a15e` (Relationship
-Intelligence Phase 2's own deploy, live from 2026-08-23T13:51 through
-this task) and `0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own
+supersedes `cfb39a25-5348-46e3-85a9-ef5a018b143b` (Ask/Solicitation v1's
+own deploy, live from 2026-08-23T15:46 through this task),
+`f57904ae-ec83-4d35-a38f-f28ef161a15e` (Relationship
+Intelligence Phase 2's own deploy, live from 2026-08-23T13:51) and
+`0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own
 deploy, live from 2026-08-21). **`4176860`'s solicited-classification
 correction remains live** (deployed as part of the Phase 2 Worker
 version above; unchanged since). **D1 data state, confirmed live
@@ -91,17 +94,19 @@ created merely by viewing a donor page, was not in the original cleanup
 plan and had to be found and deleted before the temporary donors could
 be removed -- fully resolved, D1 confirmed back to exact baseline).
 **`1fa2c26` (the meaningful-stewardship-activity Capture/Outcome copy
-fix) DOES modify live application code** (`app/capture/
+fix) modifies live application code** (`app/capture/
 CaptureExperience.tsx`, `app/interactions/[id]/outcome/
-OutcomeExperience.tsx` -- copy-only, no logic change) **and has NOT been
-deployed** -- the deployed Worker version above (`cfb39a25-...`)
-predates it; awaiting explicit approval before deploying. No production
-access. `origin/main` untouched throughout every task recorded in this
-file.
+OutcomeExperience.tsx` -- copy-only, no logic change) **and is now
+DEPLOYED and live-verified end-to-end** -- see "Meaningful Stewardship
+Activity vs. Durable Relationship Intelligence" below for full detail,
+including a real, disclosed cleanup complication (again a `donor_views`
+row, per the now-established lesson -- found and deleted, D1 confirmed
+back to exact baseline). No production access. `origin/main` untouched
+throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`1fa2c26` (pushed; matches local HEAD exactly, no divergence -- fetched
-and confirmed immediately before this commit).
+`8263eff` (pushed; matches local HEAD exactly, no divergence -- fetched
+and confirmed immediately before this deployment).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -7600,7 +7605,7 @@ Staging Worker (`cfb39a25-5348-46e3-85a9-ef5a018b143b`) now runs both
 Ask/Solicitation v1 enhancements end-to-end, live-verified against real
 D1 writes. No production/main access at any point in this task.
 
-## Meaningful Stewardship Activity vs. Durable Relationship Intelligence (2026-08-24) -- IMPLEMENTED, ALL GATES PASSING, NOT DEPLOYED
+## Meaningful Stewardship Activity vs. Durable Relationship Intelligence (2026-08-24) -- IMPLEMENTED, ALL GATES PASSING, DEPLOYED, LIVE-VERIFIED, CLEANED UP
 
 **Scope, per explicit instruction: correct the product semantics around
 a real-world case -- "Texted to welcome sons back to Yeshiva for the new
@@ -7723,14 +7728,112 @@ wording, no other tests affected). `pnpm exec tsc --noEmit`: clean, zero
 output. `pnpm run build:staging-independent`: completed, full route
 manifest, no errors.
 
-### Status -- NOT deployed, per instruction
+### Status -- committed, pushed, and deployed
 
-Implementation complete, gate-clean, and about to be committed and
-pushed to `feature/independent-cloudflare-sandbox` (see "Current Git
-State" at the top of this file for the exact commit SHA). Not deployed.
-No production/main access at any point. No Relationship Intelligence,
-Ask/Solicitation, or recommendation-ranking code was touched -- the
-investigation found none of those systems needed to change.
+Implementation complete, gate-clean, committed as `1fa2c26` and pushed to
+`feature/independent-cloudflare-sandbox`. See "Current Git State" at the
+top of this file for the exact commit SHA. No production/main access at
+any point. No Relationship Intelligence, Ask/Solicitation, or
+recommendation-ranking code was touched -- the investigation found none
+of those systems needed to change.
+
+### Deployment + Live End-to-End Verification (2026-08-23)
+
+**Approved and deployed to Independent Staging only** (explicit
+instruction: "Deploy commit 1fa2c26 to Independent Staging only. ...
+Do not touch production or main.").
+
+Pre-deploy fresh-verification: local HEAD confirmed at `8263eff` (a
+docs-only "Correct Current Git State" commit sitting on top of `1fa2c26`,
+zero application-code difference), matching `origin/feature/independent-
+cloudflare-sandbox` exactly with a clean working tree. Deployed Worker
+version confirmed via `wrangler deployments list` to still be
+`cfb39a25-5348-46e3-85a9-ef5a018b143b` (predates `1fa2c26`) immediately
+before deploying -- no discrepancy, proceeded.
+
+`pnpm run deploy:staging-independent` succeeded on the first attempt.
+**New deployed Worker version: `53229863-60fd-47a3-8711-ee9910e5566b`**
+(created 2026-08-23T19:18:38Z), confirmed current via a follow-up
+`wrangler deployments list` call. This supersedes `cfb39a25-...`.
+
+Pre-test D1 baseline recorded via direct remote queries: `donors=248`,
+`interactions=68`, `donor_relationship_facts=1`,
+`donor_relationship_fact_changes=1`, `recommendations=5`.
+
+Live-verified through the real deployed app (authenticated Cloudflare
+Access session), driving every mutating step through the real deployed
+API/UI and checking D1 directly at every step, never trusting API/HTML
+responses alone:
+
+- Created a temporary test donor (`ZZ TEST Stewardship LiveVerify
+  (delete me)`, id `8650f1bd-2813-47f1-b71a-93579a6f8bb5`) via
+  `POST /api/donors`.
+- Established a genuine, pre-existing piece of Relationship Intelligence
+  first, to prove it survives untouched: logged a real donor-specific
+  interaction ("His daughter is Danielle.") with
+  `acceptRelationshipSnapshot: true`, producing fact row
+  `3ecdcc76-4169-43b6-81db-225a0c6b0266` (`category: family_milestone`,
+  `lifecycle: durable`, `updated_at: 1787512794`) and donor row
+  `relationship_summary`/`institutional_memory: "His daughter is
+  Danielle.", relationship_health: 86, updated_at: 1787512794` -- the
+  exact baseline snapshot proven unchanged below.
+- In the real Capture UI (`/capture?donorId=...`), selected "Text
+  Message" and typed the exact real-world note verbatim: **"Texted to
+  welcome sons back to Yeshiva for the new zman."** The extraction
+  preview showed the new wording -- **"No new relationship details to
+  save. This interaction is still recorded as stewardship activity."** --
+  with **no acceptance checkbox** rendered (confirmed by screenshot: only
+  the "Ready to save" summary and the message text appear, no checkbox
+  element).
+- Clicked **Save interaction** -- succeeded normally ("Timeline updated.
+  The completed interaction and original note were added to the
+  relationship history.").
+- **Interaction history**: confirmed via the donor's timeline page --
+  the new interaction appears verbatim ("Texted to welcome sons back to
+  Yeshiva for the new zman", Completed · Text Message).
+- **D1 direct verification** of the new interaction row (id
+  `94885307-4e2c-49b4-91b9-1243045b7f35`): `role: null`,
+  `source: capture:text`, `occurred_at: 1787512800` -- later than the
+  first interaction's `1787512794`, i.e. the donor's latest interaction,
+  and `role !== "recipient"` so it also counts as the donor's latest
+  *substantive* contact per the existing `lastSubstantiveContactAt`
+  filter (see the investigation section above). The donor page's
+  "Last meaningful contact" also updated to reflect it.
+- **No new `donor_relationship_facts` row**: confirmed via D1 -- the
+  test donor still has exactly 1 fact row (the pre-existing "His
+  daughter is Danielle." one); global `donor_relationship_facts` count
+  stayed at the expected `2` (baseline 1 + this task's own positive-
+  control fact, zero from the stewardship note) and
+  `donor_relationship_fact_changes` likewise only advanced by the
+  positive control's own row.
+- **No existing Relationship Intelligence overwritten**: re-queried fact
+  row `3ecdcc76-...` and the donor row directly after saving the
+  stewardship interaction -- both **byte-for-byte identical** to the
+  pre-stewardship-note baseline, including `updated_at` unchanged at
+  `1787512794` for both. Global `recommendations` count also stayed at
+  `5` (unchanged).
+
+**Cleanup**: full per-table row inventory taken before deletion,
+including proactively checking `donor_views` (per the lesson learned
+during the Ask/Solicitation v1 deployment task -- viewing a donor/Capture
+page silently creates a `donor_views` row with a real FK to `donors`,
+which is not itself a feature write). Inventory: `donor_contact_
+audits=1`, `donor_views=1`, `interactions=2`, `donor_relationship_
+facts=1`, `donor_relationship_fact_changes=1`; all other donor-
+referencing tables (`gifts`, `giving_activities`, `recommendations`,
+`asks`, `yahrtzeits`, `important_dates`, donor-research tables, etc.)
+confirmed at `0`. Deleted in FK-safe order (fact_changes -> facts ->
+interactions -> contact_audits -> donor_views -> donors); every
+`DELETE`'s reported `changes` matched the inventory exactly. Re-verified
+D1 returns to the **exact pre-test baseline**: `donors=248`,
+`interactions=68`, `donor_relationship_facts=1`, `donor_relationship_
+fact_changes=1`, `recommendations=5`, zero remnants of the test donor id.
+Confirmed the sole remaining fact row is Zachter's original Phase 1 fact
+(`1550c6b7-ba7d-4bce-a819-a9cbfb320ee7`, `updated_at: 1787336520`,
+unchanged) -- no unrelated data was touched.
+
+**Result: all 7 requested checks passed.** No production/main access at
+any point.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -8176,26 +8279,25 @@ only.
 
 ## Deployment State
 
-**Corrected 2026-08-23 -- this section had gone stale again (still
-describing the Phase 2 deploy through the two Ask/Solicitation v1
-enhancements' own implementation and 2026-08-23 deployment, which has
-its own full record in its own dated section above). This section
-remains a pointer to the true current state, not a duplicate of it.**
+**Corrected 2026-08-23 (stewardship-activity deploy) -- this section had
+gone stale again (still describing the Ask/Solicitation v1 deploy
+through the meaningful-stewardship-activity fix's own 2026-08-23
+deployment, which has its own full record in its own dated section
+above). This section remains a pointer to the true current state, not a
+duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `20e37dd`
-("Ask/Solicitation v1: Meeting Brief open-ask visibility + add-follow-up
-on an existing ask" -- see "Ask/Solicitation v1 -- Two Approved
-Enhancements" above for full detail, including its "Deployment + Live
-End-to-End Verification" subsection), Worker version
-**`cfb39a25-5348-46e3-85a9-ef5a018b143b`**, confirmed via the deploy
-command's own printed Version ID, `wrangler deployments list`, and
-live-verified end-to-end directly against real D1 writes (two temporary,
-fully-cleaned-up test donors) plus a read-only smoke test against a real
-donor's genuine pending ask. This supersedes every earlier version ID
-recorded anywhere in this file, including
-`f57904ae-ec83-4d35-a38f-f28ef161a15e` (Relationship Intelligence Phase
-2's own deploy, live from 2026-08-23T13:51 through this task). For the
-exact current git SHA (which may have advanced past `20e37dd` by
+**Live -- current as of this deploy.** Deployed commit `1fa2c26`
+("Correct Capture/Outcome copy: no new relationship fact is not the same
+as a meaningless interaction" -- see "Meaningful Stewardship Activity vs.
+Durable Relationship Intelligence" above for full detail, including its
+"Deployment + Live End-to-End Verification" subsection), Worker version
+**`53229863-60fd-47a3-8711-ee9910e5566b`**, confirmed via
+`wrangler deployments list` and live-verified end-to-end directly
+against real D1 writes (one temporary, fully-cleaned-up test donor).
+This supersedes every earlier version ID recorded anywhere in this file,
+including `cfb39a25-5348-46e3-85a9-ef5a018b143b` (Ask/Solicitation v1's
+own deploy, live from 2026-08-23T15:46 through this task). For the exact
+current git SHA (which may have advanced past `1fa2c26` by
 documentation-only commits that touch no application code -- the
 deployed Worker always reflects the latest actual code change, not
 necessarily the latest commit), see "Current Git State" at the top of
@@ -8218,10 +8320,13 @@ fix (Option B), the outcome-note Relationship Snapshot review/accept
 flow (Option A, which restores a gated write on top of Option B's
 removal -- see that section above for why these are not in conflict),
 Relationship Intelligence Phase 2's deterministic fact-based synthesis,
-and now the two Ask/Solicitation v1 enhancements (Meeting Brief open-ask
+the two Ask/Solicitation v1 enhancements (Meeting Brief open-ask
 visibility, independent of Suggested Action; add-follow-up on an
 existing pending ask, reusing the existing reschedule path for an ask
-that already has one). Each has its own dated section above with full
+that already has one), and now the meaningful-stewardship-activity
+Capture/Outcome copy fix (an interaction that yields no new durable fact
+is still shown as saved stewardship activity, never as a worthless
+interaction). Each has its own dated section above with full
 live-verification detail -- this section intentionally does not repeat
 it.
 
@@ -8633,6 +8738,33 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-23T19:35:00Z (approximate)
+Claude (Sonnet 5) — Deployed the approved meaningful-stewardship-activity
+Capture/Outcome copy fix (commit 1fa2c26) to Independent Staging as
+Worker version 53229863-60fd-47a3-8711-ee9910e5566b, after fresh-verify
+confirmed local HEAD (8263eff, docs-only on top of 1fa2c26) matched
+origin exactly and the previously-deployed Worker was still
+Ask/Solicitation v1's own cfb39a25. Live-verified the Capture flow
+end-to-end using the exact real-world note "Texted to welcome sons back
+to Yeshiva for the new zman" against a temporary test donor, checking D1
+directly at every step: the new wording ("No new relationship details to
+save. This interaction is still recorded as stewardship activity.")
+appeared with no acceptance checkbox; the interaction saved normally and
+appeared in interaction history; it registered as the donor's latest and
+most substantive contact (role: null, latest occurred_at); no
+donor_relationship_facts row was created for it; and a pre-existing
+Relationship Intelligence fact plus its donor row (established first, as
+a baseline) remained byte-for-byte unchanged afterward, including
+updated_at. Cleanup included the now-established donor_views row (from
+merely viewing the donor/Capture pages) alongside the donor, its two
+interactions, its one fact row, and its one fact-change row; D1 confirmed
+back to the exact pre-test baseline (donors=248, interactions=68,
+facts=1, fact_changes=1, recommendations=5) with Zachter's original fact
+unchanged. All 7 requested checks passed. No production/main access at
+any point.
+
+---
 
 2026-08-24T12:30:00Z (approximate)
 Claude (Sonnet 5) — Corrected the product semantics around meaningful
