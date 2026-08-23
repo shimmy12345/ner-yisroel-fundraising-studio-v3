@@ -15,13 +15,16 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
+**`cf40bee`** -- "Correct Current Git State to reference the new HEAD
+(20e37dd)" (docs-only; zero application code change). On top of
 **`20e37dd`** -- "Ask/Solicitation v1: Meeting Brief open-ask visibility
 + add-follow-up on an existing ask" -- see "Ask/Solicitation v1 -- Two
-Approved Enhancements" below for full detail. NOT deployed (deployed
-Worker version below still predates it). On top of `ae84c01` ("Test-
-harness audit for Phase 2 pre-deploy checkpoint; correct stale HEAD in
-AI-HANDOFF" -- docs-only, zero application code change), which sits on
-top of **`3c4ff6c`** -- "Relationship Intelligence Phase 2:
+Approved Enhancements" below for full detail, including its "Deployment
++ Live End-to-End Verification" subsection -- **DEPLOYED to Independent
+Staging** (see below). Sits on top of `ae84c01` ("Test-harness audit for
+Phase 2 pre-deploy checkpoint; correct stale HEAD in AI-HANDOFF" --
+docs-only, zero application code change), which sits on top of
+**`3c4ff6c`** -- "Relationship Intelligence Phase 2:
 fact-based synthesis, replacing direct relationship_summary overwrites"
 (see "Relationship Intelligence Phase 2 -- Deterministic Fact-Based
 Synthesis" below for full detail -- this single commit carries both the
@@ -55,39 +58,37 @@ donor (see the dated subsection below) -- no test artifacts remain, and
 no Phase 2 D1 mutation beyond the already-applied Phase 1 Zachter row
 exists anywhere.
 
-**Deployed Worker version: `f57904ae-ec83-4d35-a38f-f28ef161a15e`**
-(deployed 2026-08-23T13:51:20Z, confirmed via `wrangler deployments
-list` and live-verified directly against D1) -- supersedes
-`0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own deploy, live from
-2026-08-21 through the entire Phase 2 implementation/checkpoint period).
-**`4176860`'s solicited-classification correction
-(`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) is now
-genuinely LIVE** -- it sat committed-but-undeployed since 2026-08-21 and
-was deployed as part of this same Worker version (it was already on the
-branch history `3c4ff6c`/`ae84c01`/`20e37dd` sit on top of); live-verified
-directly ("Solicited for a plaque ($5k)..." correctly classified
-`solicitation` in real D1, with a control sentence lacking "Solicited"
-confirmed to extract nothing). **D1 data state, confirmed live
+**Deployed Worker version: `cfb39a25-5348-46e3-85a9-ef5a018b143b`**
+(deployed 2026-08-23T15:46:27Z, confirmed via `wrangler deployments
+list` and live-verified end-to-end directly against real D1 writes) --
+supersedes `f57904ae-ec83-4d35-a38f-f28ef161a15e` (Relationship
+Intelligence Phase 2's own deploy, live from 2026-08-23T13:51 through
+this task) and `0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own
+deploy, live from 2026-08-21). **`4176860`'s solicited-classification
+correction remains live** (deployed as part of the Phase 2 Worker
+version above; unchanged since). **D1 data state, confirmed live
 immediately before AND after this deploy and after full test-data
 cleanup**: `donor_relationship_facts` holds exactly 1 row (Mr. & Mrs.
 Yaakov Zachter) and `donor_relationship_fact_changes` holds its matching
 1 audit row -- see "Relationship Intelligence Phase 1 -- Historical
-Backfill Applied" below for full original verification detail, and the
-Phase 2 deployment section below for the live re-verification. No other
-donor received a row; no `donors.relationship_summary`/
-`institutional_memory` value was altered by this backfill or by any
-Phase 2 activity. **`20e37dd` (the two approved Ask/Solicitation v1
-enhancements -- Meeting Brief open-ask visibility + add-follow-up on an
-existing ask) DOES modify live application code paths (`app/api/asks/
-[id]/reminder/route.ts` new, plus the Meeting Brief and donor-page
-files) and has NOT been deployed** -- the deployed Worker version above
-(`f57904ae-...`) predates it; awaiting explicit approval before
-deploying. No production access. `origin/main` untouched throughout
-every task recorded in this file.
+Backfill Applied" below for full original verification detail. No other
+donor received a row; no `donors.relationship_summary`/`institutional_
+memory` value was altered by this backfill or by any Phase 2 or
+Ask/Solicitation-v1-enhancement activity. **The two approved Ask/
+Solicitation v1 enhancements (Meeting Brief open-ask visibility +
+add-follow-up on an existing ask, `20e37dd`) are now DEPLOYED and
+live-verified end-to-end** -- see "Ask/Solicitation v1 -- Two Approved
+Enhancements" below for full detail, including a real, disclosed
+cleanup complication (a `donor_views` "recently viewed" tracking row,
+created merely by viewing a donor page, was not in the original cleanup
+plan and had to be found and deleted before the temporary donors could
+be removed -- fully resolved, D1 confirmed back to exact baseline). No
+production access. `origin/main` untouched throughout every task
+recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`20e37dd` (pushed; matches local HEAD exactly, no divergence -- fetched
-and confirmed immediately before this commit).
+`cf40bee` (pushed; matches local HEAD exactly, no divergence -- fetched
+and confirmed immediately before this deploy).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -7234,7 +7235,7 @@ real D1 writes for all ten originally-specified regression scenarios
 plus this checkpoint's three edge-case fixes. Zachter's Phase 1 fact is
 untouched. No production/main access at any point in this task.
 
-## Ask/Solicitation v1 -- Two Approved Enhancements (2026-08-23) -- IMPLEMENTED, ALL GATES PASSING, NOT DEPLOYED
+## Ask/Solicitation v1 -- Two Approved Enhancements (2026-08-23) -- DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED END-TO-END, ALL TEMPORARY TEST DATA CLEANED UP
 
 **Scope, per explicit approval: the two previously-deferred Ask/
 Solicitation v1 items ("Next Approval Required" #1 and #2 above, and
@@ -7396,6 +7397,195 @@ cloudflare-sandbox` (see "Current Git State" at the top of this file for
 the exact commit SHA). Not deployed to Independent Staging or anywhere
 else. No production/main access at any point. Awaiting explicit approval
 before deployment.
+
+### Deployment + Live End-to-End Verification (2026-08-23) -- APPROVED, DEPLOYED, VERIFIED, CLEANED UP
+
+**Scope, per explicit instruction: deploy commit `20e37dd` (the two Ask/
+Solicitation v1 enhancements) to Independent Staging only, then live-
+verify both through the real authenticated staging application/API,
+verifying resulting state directly in D1, with controlled temporary
+data cleaned up completely afterward.**
+
+#### Pre-deploy verification
+
+Fresh `git fetch`: local HEAD matched `origin/feature/independent-
+cloudflare-sandbox` exactly (`cf40bee`), working tree clean. **Noted
+discrepancy**: HEAD was one commit ahead of the `20e37dd` the approval
+named -- `cf40bee`, a docs-only "correct stale HEAD" follow-up (verified
+via its own diff: only `docs/AI-HANDOFF.md` touched). Judged not a
+material difference for deployment purposes (identical deployed Worker
+bundle either way) and proceeded, flagged explicitly. Confirmed the
+deployed Worker version was still `f57904ae-ec83-4d35-a38f-f28ef161a15e`
+(Phase 2's own deploy) via `wrangler deployments list`.
+
+#### Deploy
+
+`pnpm run deploy:staging-independent` -- succeeded. **New deployed
+Worker version: `cfb39a25-5348-46e3-85a9-ef5a018b143b`** (created
+2026-08-23T15:46:27Z), confirmed current via `wrangler deployments
+list`. Independent Staging only -- no production/main config touched.
+
+#### Live verification methodology
+
+Same as the Phase 2 deployment task: authenticated as the real staging
+owner via the actual deployed app (existing Cloudflare Access session),
+drove every mutating step through the REAL deployed API endpoints
+(`POST /api/donors`, `POST /api/interactions`, `POST /api/asks`, `PATCH
+/api/asks/:id`, `POST /api/asks/:id/reminder`, `POST /api/
+recommendations/:id/reschedule`, `POST /api/recommendations/:id/
+complete`) via authenticated `fetch()` from the app's own origin, and
+read the actual Meeting Brief/donor pages. Every claim below was
+verified by reading the resulting D1 rows directly via `wrangler d1
+execute --remote`, never by trusting an API/HTML response alone.
+
+Two disposable test donors were used: `ZZ TEST AskFollowUp LiveVerify
+(delete me)` (id `840b8e80-c055-4ac6-8f7b-8f5dd508dd4c`, for scenarios
+1-2 and 4-13) and `ZZ TEST EmptyAsk LiveVerify (delete me)` (id
+`52640d0d-c5d7-4d13-a0f7-4b2bca8f45e9`, a fresh donor with zero asks,
+for scenario 3 only).
+
+#### 1-2: Open Ask visible, independent of Suggested Action
+
+Created an interaction with a `tomorrow` reminder (so `honor_reminder`
+would win Suggested Action, not the ask), then a pending ask ($25,000,
+"Building Campaign", asked 13 days prior) via `POST /api/asks`. Meeting
+Brief rendered **Suggested Action: "Follow up on 'Check-in call'"**
+(the reminder, confirmed via D1 as the correct `recommendations` row)
+**and, simultaneously, an `OPEN ASK` card**: "Open ask: $25,000 for
+Building Campaign, pending since Aug 10, 2026." -- both present at once,
+neither gating the other. D1 confirmed the ask row directly
+(`amount_cents 2500000, purpose "Building Campaign", status "pending"`).
+
+#### 3: no open ask -> no section at all
+
+A fresh donor with zero asks: fetched its Meeting Brief HTML directly
+and confirmed **no `OPEN ASK` text anywhere, and no empty-state
+placeholder either** (`/OPEN ASKS?/` and `/open ask/i` both false
+against the raw HTML).
+
+#### 4-5: closed ask excluded; multiple open asks deterministic
+
+Added a second pending ask ($5,000, "Annual Fund", 5 days prior) and a
+third ($1,000, "Dinner sponsorship", 20 days prior) which was
+immediately declined via `PATCH /api/asks/:id`. Meeting Brief's `OPEN
+ASKS` card (correctly pluralized) showed **exactly the two still-
+pending asks, oldest first** ("Building Campaign" before "Annual
+Fund") -- the declined "Dinner sponsorship" ask did not appear anywhere
+in the open list. D1 confirmed all three asks' `status` directly
+(`declined`/`pending`/`pending`).
+
+#### 6-9: add a follow-up; correct association; Ask row untouched; retry-safe
+
+Recorded the first ask's full row (`amount_cents, purpose, status,
+asked_at, note, created_at, updated_at`) before acting. Called `POST
+/api/asks/:id/reminder` with a custom date (Sep 8, 2026) -- `201`,
+returned a `reminderId` carrying the `ask-<askId>-` prefix. D1 confirmed
+directly: the new `recommendations` row's `donor_id` matched the
+correct donor, its id carried the correct ask's prefix (**scenario
+7**), and -- re-reading the ask row -- **every single field, including
+`updated_at`, was byte-for-byte identical to the pre-follow-up snapshot**
+(**scenario 8**, the strongest possible proof: not just "the values
+happen to match" but the row was never touched at all). A second,
+immediate call to the same endpoint (simulating a double-submit) was
+correctly rejected with `409` and reported the SAME existing
+`reminderId` -- D1 confirmed exactly one open reminder existed for this
+ask, never two (**scenario 9**).
+
+#### 10: existing follow-up shown, Reschedule works
+
+The donor page's Ask card rendered the correct state for each ask:
+"Follow-up: Sep 8, 2026" + a `Reschedule` control for the first ask,
+"+ Add follow-up" for the second (screenshot-verified). Exercised the
+Reschedule control's own endpoint directly (`POST /api/recommendations/
+:id/reschedule`, the exact call the button's own `onClick` makes) with
+a new date (Sep 15) -- `200`, and D1 confirmed the reminder's `due_at`
+updated correctly while the ask row remained unchanged.
+
+#### 11: a completed historical follow-up never blocks (or is disturbed by) a new one
+
+Completed the first ask's now-existing reminder via `POST /api/
+recommendations/:id/complete` (simulating a prior cycle), then called
+`POST /api/asks/:id/reminder` again -- succeeded (`201`), a genuinely
+new open reminder. D1 confirmed directly: the old reminder remained
+`status: completed` with its own due date preserved exactly as it was
+when completed, and the new reminder was `status: open` with its own
+correct due date -- both rows coexisting, neither disturbed by the
+other.
+
+#### 12: Meeting Brief shows the follow-up date
+
+Re-fetched the Meeting Brief HTML directly: `<strong>Open ask: $25,000
+for Building Campaign, pending since Aug 10, 2026.</strong><span>
+Follow-up: Sep 8, 2026</span>` for the first ask, with no follow-up line
+for the second (which had none) -- exactly matching the live D1 state
+at that point in the sequence.
+
+#### 13: Relationship Intelligence and unrelated donor data untouched throughout
+
+Verified directly in D1, after every mutating step above: the test
+donor's `relationship_summary`/`institutional_memory`/`relationship_
+health` remained `NULL` throughout (never written by any ask/reminder
+operation), `donor_relationship_facts` held zero rows for this donor at
+any point, and Zachter's real Phase 1 fact (`id 1550c6b7-...`) remained
+`status: current`, completely unchanged.
+
+#### Read-only smoke test against real data
+
+Viewed (GET only, no writes) the Meeting Brief page for Rabbi Michoel A.
+Rovinsky, a real donor with a genuine pending ask ($5,000, "Plaque in
+memory of his wife," recorded 2025-09-29). Rendered correctly and
+sensibly: `OPEN ASK` (singular, correctly matching the one real ask),
+"Open ask: $5,000 for Plaque in memory of his wife, pending since Sep
+29, 2025." -- with no follow-up line (correct: this real ask has no
+active follow-up, and none was created for it). Confirmed via D1 both
+before and after that this donor's `asks` row was never modified.
+
+#### Cleanup -- full inventory, deletion, and re-verification
+
+Every row created across both test donors was counted directly before
+cleanup: 1 `interactions`, 3 `asks`, 4 `ask_changes`, 3 `recommendations`,
+2 `donor_contact_audits`, 0 `activity_status_audits`, 0
+`donor_relationship_facts`. **A real, disclosed complication**: the
+first cleanup attempt (deleting `ask_changes` → `asks` →
+`recommendations` → `donor_contact_audits` → `interactions` → `donors`,
+in that FK-safe order) failed on the final `DELETE FROM donors` with a
+foreign-key constraint error. Investigated by running each delete
+individually (D1 batches are transactional, so the failed attempt had
+rolled back completely -- confirmed via re-count before proceeding,
+nothing was left partially deleted) and by enumerating every table with
+a FK to `donors(id)` directly from `sqlite_schema`: the culprit was
+**`donor_views`** (a "recently viewed donor" tracking row, silently
+created by simply loading the donor/Meeting Brief pages during
+verification -- not part of this feature's own write surface at all,
+and not one of the tables this task's own code touches). Deleted the one
+`donor_views` row for both test donors, then the `donors` rows deleted
+cleanly. **Every deletion's reported `changes` count matched the
+pre-cleanup inventory exactly.** Final whole-table re-verification:
+`donors` = 248, `asks` = 6, `ask_changes` = 10, `recommendations` = 5,
+`interactions` = 68, `donor_relationship_facts` = 1, `donor_
+relationship_fact_changes` = 1 -- **every count identical to the
+pre-test baseline recorded before any write.** Re-confirmed directly:
+Zachter's fact byte-for-byte unchanged, and both real pending asks
+(Pfeiffer, Rovinsky) untouched.
+
+**Limitation/lesson disclosed for future test-donor cleanups in this
+app**: a `donor_views` row is created as a side effect of merely
+*viewing* a donor or Meeting Brief page (not a write this feature
+itself performs) and is easy to miss if a cleanup plan is built only
+from the tables a feature's own code touches. Future live-verification
+cleanups on a temporary donor should query `sqlite_schema` for every
+table with `REFERENCES \`donors\`` up front, or explicitly include
+`donor_views` in the delete order, rather than relying on that catalog
+being logically inferable from the feature under test.
+
+#### Conclusion
+
+Every live behavior matched the approved design exactly across all 13
+required scenarios plus the read-only real-data smoke test -- no
+divergence found, nothing patched forward. The deployed Independent
+Staging Worker (`cfb39a25-5348-46e3-85a9-ef5a018b143b`) now runs both
+Ask/Solicitation v1 enhancements end-to-end, live-verified against real
+D1 writes. No production/main access at any point in this task.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -7842,29 +8032,30 @@ only.
 ## Deployment State
 
 **Corrected 2026-08-23 -- this section had gone stale again (still
-describing the Option A deploy through the entire Relationship
-Intelligence Phase 2 implementation, its 2026-08-22 checkpoint, and its
-2026-08-23 deployment, each of which has its own full record in its own
-dated section above). This section remains a pointer to the true
-current state, not a duplicate of it.**
+describing the Phase 2 deploy through the two Ask/Solicitation v1
+enhancements' own implementation and 2026-08-23 deployment, which has
+its own full record in its own dated section above). This section
+remains a pointer to the true current state, not a duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `ae84c01`
-(top of the Relationship Intelligence Phase 2 work -- see "Relationship
-Intelligence Phase 2 -- Deterministic Fact-Based Synthesis" above for
-full detail, including its "Deployment + Live End-to-End Verification"
-subsection), Worker version **`f57904ae-ec83-4d35-a38f-f28ef161a15e`**,
-confirmed via the deploy command's own printed Version ID, `wrangler
-deployments list`, and live-verified end-to-end directly against real
-D1 writes (a temporary, fully-cleaned-up test donor) and Zachter's real
-Phase 1 donor record. This supersedes every earlier version ID recorded
-anywhere in this file, including `0673c91a-de71-4f29-950b-34f71fc3fbec`
-(Option A's own deploy, live from 2026-08-21 through the whole Phase 2
-implementation period). For the exact current git SHA (which may have
-advanced past `ae84c01` by documentation-only commits that touch no
-application code -- the deployed Worker always reflects the latest
-actual code change, not necessarily the latest commit), see "Current Git
-State" at the top of this file, which is the authoritative pointer kept
-in sync going forward.
+**Live -- current as of this deploy.** Deployed commit `20e37dd`
+("Ask/Solicitation v1: Meeting Brief open-ask visibility + add-follow-up
+on an existing ask" -- see "Ask/Solicitation v1 -- Two Approved
+Enhancements" above for full detail, including its "Deployment + Live
+End-to-End Verification" subsection), Worker version
+**`cfb39a25-5348-46e3-85a9-ef5a018b143b`**, confirmed via the deploy
+command's own printed Version ID, `wrangler deployments list`, and
+live-verified end-to-end directly against real D1 writes (two temporary,
+fully-cleaned-up test donors) plus a read-only smoke test against a real
+donor's genuine pending ask. This supersedes every earlier version ID
+recorded anywhere in this file, including
+`f57904ae-ec83-4d35-a38f-f28ef161a15e` (Relationship Intelligence Phase
+2's own deploy, live from 2026-08-23T13:51 through this task). For the
+exact current git SHA (which may have advanced past `20e37dd` by
+documentation-only commits that touch no application code -- the
+deployed Worker always reflects the latest actual code change, not
+necessarily the latest commit), see "Current Git State" at the top of
+this file, which is the authoritative pointer kept in sync going
+forward.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
@@ -7881,10 +8072,11 @@ fixes, the Pledge Payment Plan feature, the outcome-route acceptance-gap
 fix (Option B), the outcome-note Relationship Snapshot review/accept
 flow (Option A, which restores a gated write on top of Option B's
 removal -- see that section above for why these are not in conflict),
-and now Relationship Intelligence Phase 2's deterministic fact-based
-synthesis (replacing Option A's own direct-overwrite write path with
-the accumulate-don't-replace fact store, live-verified end-to-end as of
-this deploy). Each has its own dated section above with full
+Relationship Intelligence Phase 2's deterministic fact-based synthesis,
+and now the two Ask/Solicitation v1 enhancements (Meeting Brief open-ask
+visibility, independent of Suggested Action; add-follow-up on an
+existing pending ask, reusing the existing reschedule path for an ask
+that already has one). Each has its own dated section above with full
 live-verification detail -- this section intentionally does not repeat
 it.
 
@@ -8296,6 +8488,40 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-23T16:05:00Z (approximate)
+Claude (Sonnet 5) — Deployed the two approved Ask/Solicitation v1
+enhancements (commit 20e37dd) to Independent Staging as Worker version
+cfb39a25-5348-46e3-85a9-ef5a018b143b, after fresh-fetch verification
+(flagged and judged immaterial: HEAD was one docs-only commit ahead of
+the literal SHA named in the approval, same pattern as the prior Phase 2
+deploy) and confirming the previously-deployed version was still Phase
+2's own f57904ae. Live-verified all 13 required scenarios end-to-end
+through the real deployed API/UI against two temporary test donors,
+checking D1 directly at every step: an open ask appears explicitly in
+Meeting Brief and stays visible even when a different recommendation
+wins Suggested Action; a donor with no open ask gets no section at all;
+a declined ask never appears as open; two open asks render deterministic
+oldest-first; adding a follow-up succeeds, is attached to the correct
+donor/ask via the id-prefix convention, and leaves the ask row
+byte-for-byte unchanged (even updated_at); a retry while one is active
+is safely rejected with no duplicate; the existing Reschedule path
+updates the follow-up correctly; a completed historical follow-up
+neither blocks nor is disturbed by a new one; Meeting Brief shows the
+follow-up date alongside the open ask; and Relationship Intelligence/
+unrelated donor data stayed untouched throughout. Also read-only
+smoke-tested a real donor's genuine pending ask (Rovinsky) and confirmed
+sensible rendering with no writes. Cleanup hit one real, disclosed
+complication — a donor_views "recently viewed" row (created merely by
+viewing a donor page) blocked the final donor delete via FK constraint
+until found and removed — fully resolved; every deletion count matched
+the pre-cleanup inventory, and D1 was confirmed back to the exact
+pre-test baseline (248 donors, 6 asks, 10 ask_changes, 5 recommendations,
+68 interactions, 1 relationship fact + 1 audit). Updated docs/
+AI-HANDOFF.md with the deployed version, full live results, cleanup
+verification, and the donor_views lesson for future test cleanups.
+
+---
 
 2026-08-23T15:45:00Z (approximate)
 Claude (Sonnet 5) — Implemented the two approved Ask/Solicitation v1
