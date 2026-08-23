@@ -15,9 +15,11 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`8263eff`** -- "Correct Current Git State to reference the new HEAD
-(1fa2c26)" -- docs-only, zero application code change. Sits on top of
-**`1fa2c26`** -- "Correct Capture/Outcome copy: no new relationship fact
+**`ee496ae`** -- "Document stewardship-activity deploy + live
+end-to-end verification" -- docs-only, zero application code change.
+Sits on top of `8263eff` ("Correct Current Git State to reference the
+new HEAD (1fa2c26)" -- docs-only, zero application code change), which
+sits on top of **`1fa2c26`** -- "Correct Capture/Outcome copy: no new relationship fact
 is not the same as a meaningless interaction" -- see "Meaningful
 Stewardship Activity vs. Durable Relationship Intelligence" below for
 full detail, including its "Deployment + Live End-to-End Verification"
@@ -105,8 +107,7 @@ back to exact baseline). No production access. `origin/main` untouched
 throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`8263eff` (pushed; matches local HEAD exactly, no divergence -- fetched
-and confirmed immediately before this deployment).
+`ee496ae` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
