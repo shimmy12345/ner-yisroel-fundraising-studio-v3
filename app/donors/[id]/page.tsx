@@ -11,6 +11,7 @@ import { DONOR_GIVING_SQL } from "../../../lib/relationships/giving";
 import { isCancelledActivity, isScheduledActivity, sanitizeScheduledRelationshipContext } from "../../../lib/workspace/scheduled-activity";
 import { PendingGiftForm } from "./GivingManagement";
 import { OpenAskCard, AskHistory, LogAskForm } from "./AskManagement";
+import { matchAskFollowUps } from "../../../lib/relationships/meeting-brief-model";
 import { OpenPledgePlanCard, type PledgePlanState } from "./PledgePaymentPlanManagement";
 import { countsInGivingTotals } from "../../../lib/giving/management";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
@@ -312,6 +313,16 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // fact" pattern as openPledgeForEvidence above.
   const openAsks = asks.filter((item) => item.status === "pending").sort((a, b) => a.asked_at - b.asked_at);
   const historicalAsks = asks.filter((item) => item.status !== "pending");
+  // Same shared, pure matcher Meeting Brief uses (lib/relationships/
+  // meeting-brief-model.ts's matchAskFollowUps) -- reused from the
+  // reminders already fetched for the unified timeline above
+  // (recommendationResult.results), never a second query. Only 'open'
+  // reminders count as an active follow-up; a completed one from a prior
+  // cycle must not block adding a new one.
+  const openFollowUpByAskId = matchAskFollowUps(
+    openAsks.map((item) => item.id),
+    recommendationResult.results.filter((reminder) => reminder.status === "open" && reminder.id.startsWith("ask-")).map((reminder) => ({ id: reminder.id, dueAt: reminder.due_at })),
+  );
   const openAskForEvidence = openAsks[0] ? { id: openAsks[0].id, amountCents: openAsks[0].amount_cents, purpose: openAsks[0].purpose, askedAt: openAsks[0].asked_at } : null;
   const evidenceStart = Date.now();
   const recommendationEvidence = buildRecommendationEvidence({
@@ -356,7 +367,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
         fundraiser recorded, never giving_activities/gifts (JL Solutions
         financial-system-of-record data). Live mode only, matching every
         other write-capable donor-page feature (no demo/sample asks data). */}
-    {mode === "live" && <section className="asks-section"><div className="card-heading"><div><p className="eyebrow">ASKS</p><h2>{openAsks.length > 0 ? `${openAsks.length} open ask${openAsks.length === 1 ? "" : "s"}` : "No open ask"}</h2></div><LogAskForm donorId={id} minCustomDate={new Date().toISOString().slice(0, 10)} /></div>{openAsks.length > 0 && <div className="open-ask-list">{openAsks.map((ask) => <OpenAskCard key={ask.id} ask={{ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }} />)}</div>}<AskHistory asks={historicalAsks.map((ask) => ({ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }))} /></section>}
+    {mode === "live" && <section className="asks-section"><div className="card-heading"><div><p className="eyebrow">ASKS</p><h2>{openAsks.length > 0 ? `${openAsks.length} open ask${openAsks.length === 1 ? "" : "s"}` : "No open ask"}</h2></div><LogAskForm donorId={id} minCustomDate={new Date().toISOString().slice(0, 10)} /></div>{openAsks.length > 0 && <div className="open-ask-list">{openAsks.map((ask) => <OpenAskCard key={ask.id} ask={{ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }} followUp={openFollowUpByAskId.get(ask.id) ?? null} timezone={profile.timezone} minCustomDate={new Date().toISOString().slice(0, 10)} />)}</div>}<AskHistory asks={historicalAsks.map((ask) => ({ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }))} /></section>}
     {/* One card per open pledge, each with its own independent payment
         plan -- never a shared donor-wide plan, never a separate
         pledge-management screen. Live mode only, same as Asks above (no

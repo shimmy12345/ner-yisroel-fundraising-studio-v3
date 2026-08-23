@@ -7224,6 +7224,169 @@ real D1 writes for all ten originally-specified regression scenarios
 plus this checkpoint's three edge-case fixes. Zachter's Phase 1 fact is
 untouched. No production/main access at any point in this task.
 
+## Ask/Solicitation v1 -- Two Approved Enhancements (2026-08-23) -- IMPLEMENTED, ALL GATES PASSING, NOT DEPLOYED
+
+**Scope, per explicit approval: the two previously-deferred Ask/
+Solicitation v1 items ("Next Approval Required" #1 and #2 above, and
+"Intentionally Deferred Ask Enhancements" items 1 and 2) -- (A) Meeting
+Brief must explicitly surface open Asks, independent of Suggested
+Action; (B) a fundraiser must be able to add a follow-up reminder to an
+already-existing pending Ask. Explicitly scoped narrow: no Ask/
+Solicitation v1 redesign, no Relationship Intelligence change.**
+
+### Pre-work investigation (per explicit instruction, before changing anything)
+
+Fresh `git fetch`: local HEAD matched `origin/feature/independent-
+cloudflare-sandbox` exactly (`ffa28ac`), working tree clean. Confirmed
+Independent Staging's deployed Worker version unchanged
+(`f57904ae-ec83-4d35-a38f-f28ef161a15e`, Phase 2's own deploy). Read
+live D1 schema directly (`sqlite_schema` for `asks` and
+`recommendations`) -- confirmed it matches the repo's committed
+migrations exactly: `asks.status` is `pending|committed|declined|
+withdrawn` with a CHECK constraint (`pending` is the only non-terminal,
+i.e. "open," status -- `ASK_TERMINAL_STATUSES` in `lib/capture/ask.ts`
+already encodes this); `recommendations` has **no `ask_id` column at
+all** -- confirming the existing association is purely the
+`ask-<askId>-<uuid>` id-prefix convention already used by `app/api/
+asks/route.ts` (creation) and `app/api/asks/[id]/route.ts` (status-
+change reminder retirement), never a real FK. **No schema change was
+needed or made** -- this is exactly what made both enhancements
+buildable within the existing model, matching the "otherwise implement"
+branch of the instruction rather than the "stop and report" one.
+
+Also read `lib/relationships/meeting-brief-model.ts`/`meeting-brief.ts`
+in full: `MeetingBrief.openAsks`/`askLine()` already existed from Ask v1
+(oldest-pending-first, `status = 'pending'`-filtered query) but were
+never rendered on `app/donors/[id]/meeting-brief/page.tsx` -- exactly
+the documented "rendering gap, not a data or logic gap." Read `app/
+components/RescheduleButton.tsx`/`CompletePriorityButton.tsx`/
+`DismissPriorityButton.tsx` and `app/api/recommendations/[id]/
+reschedule/route.ts` -- confirmed a fully generic, already-built,
+already-used "edit an open reminder's due date" path exists and needed
+no changes to be reused for "an ask's existing follow-up can be
+rescheduled."
+
+### A: Meeting Brief now surfaces Open Ask(s) as first-class information
+
+- `lib/relationships/meeting-brief-model.ts`: `MeetingBriefAsk` gained
+  `followUpDueAt: number | null` (the ask's own open reminder's due
+  date, if any). New pure, exported `matchAskFollowUps(askIds,
+  openAskReminders)` -- matches each ask to its earliest-due OPEN
+  reminder by the existing id-prefix convention (deterministic: the
+  soonest due date wins if an ask somehow carries more than one open
+  reminder, never an arbitrary first match) -- shared by both this file
+  and the donor page (below), so the matching logic exists once, tested
+  once, not duplicated.
+- `lib/relationships/meeting-brief.ts`: one new query (`recommendations`
+  rows with `status = 'open' AND id LIKE 'ask-%'` for this donor -- one
+  query total, not one per ask), fed through `matchAskFollowUps()` and
+  merged into `openAsks`. The existing `status = 'pending'`-filtered ask
+  query itself is completely unchanged.
+- `app/donors/[id]/meeting-brief/page.tsx`: new `OPEN ASK`/`OPEN ASKS`
+  card, a sibling of (never nested inside) the `SUGGESTED ACTION` card --
+  both can and do appear simultaneously, and an ask's presence here
+  never depends on whether it also won Suggested Action. Uses the
+  existing, already-tested `askLine()` formatter for the factual "Open
+  ask: $X for Y, pending since Z" line (never invents a different
+  phrasing), plus a "Follow-up: {date}" line when `followUpDueAt` is
+  set. **Conditionally rendered** (`brief.openAsks.length > 0 &&`) --
+  deliberately mirrors `FAMILY CONTEXT`'s "no section at all when
+  empty" convention, not `OPEN COMMITMENTS`' "always render with an
+  empty-state message" one, per the explicit "no empty/noisy section"
+  requirement.
+
+### B: "Add follow-up" on an existing pending Ask
+
+- New route **`app/api/asks/[id]/reminder/route.ts`** (`POST`). Auth +
+  ownership + `status === 'pending'` check (a closed ask cannot receive
+  a new follow-up); validates `{reminder: "tomorrow"|"next-week"|
+  "custom", customDate?}` (the exact same `ReminderChoice` picker
+  convention/shape `LogAskForm` already uses, "None" simply omitted
+  since the entire point of this action is adding one) via the
+  **existing** `reminderDueAt()`; **fails closed** with `409` if an open
+  reminder already exists for this ask (checked via the same `id LIKE
+  'ask-<id>-%' ESCAPE` pattern `app/api/asks/[id]/route.ts`'s own
+  status-change completion query already uses) rather than creating a
+  duplicate -- this is both the "already has an active follow-up"
+  handling and the double-submit/retry safety net (matching the same
+  soft guarantee level -- pre-check plus client-side disable-while-
+  saving -- every other write path in this app already relies on; no
+  stronger transactional idempotency-key mechanism exists anywhere in
+  this codebase to match, so none was invented here either). On success,
+  inserts exactly one `recommendations` row (`ask-<askId>-<uuid>`,
+  `action` via the existing shared `askFollowUpAction()`, `status:
+  'open'`). **Contains no `UPDATE asks` statement of any kind** -- the
+  ask's own amount/purpose/asked date/status/note are structurally
+  guaranteed untouched, not just incidentally unchanged. No reference
+  anywhere in this route to `donor_relationship_facts`, `relationship_
+  summary`, `institutional_memory`, `giving_activities`, or `gifts`.
+- `app/donors/[id]/AskManagement.tsx`'s `OpenAskCard` gained a new
+  `AskFollowUpControl` (inline, per-card local state -- no new top-level
+  exported component needed): when the ask has **no** active follow-up,
+  a small "+ Add follow-up" disclosure reveals the same `reminder-picker`
+  fieldset markup pattern already duplicated a third time in
+  `LogAskForm` (now a fourth, matching convention rather than
+  extracting a shared component, since none was ever extracted for the
+  first three uses either) and posts to the new route. When the ask
+  **already has** one, its due date is shown alongside the **existing,
+  unmodified** `<RescheduleButton>` (`POST /api/recommendations/[id]/
+  reschedule`) -- never a second, ask-specific reschedule mechanism.
+- `app/donors/[id]/page.tsx`: computes each open ask's current follow-up
+  via the same shared `matchAskFollowUps()`, reusing the reminders
+  already fetched for the Unified Relationship Timeline
+  (`recommendationResult.results`) -- no new query added to this page.
+- `app/globals.css`: minimal new rules (`.open-ask-followup*`) matching
+  the existing `.open-ask-withdraw`/`.log-ask-*` visual conventions --
+  no new design system introduced.
+
+### Regression coverage -- `tests/ask-followup-and-meeting-brief.test.mjs`
+
+All 12 explicitly required scenarios, using this repo's established
+convention (route/page files import `cloudflare:workers` and can't run
+directly in Node, so pure logic --
+`buildMeetingBrief`/`askLine`/`matchAskFollowUps`/`askFollowUpAction` --
+is imported and run directly; D1-dependent route behavior is mirrored
+against a real in-memory SQLite database built from the actual
+committed migrations, matching `tests/relationship-facts-schema.
+test.mjs`'s own precedent; everything else is a structural assertion
+against the real, committed source): a pending ask appears explicitly in
+the Meeting Brief model and is unconditionally rendered by the page; it
+still appears when an unrelated recommendation wins Suggested Action,
+and the Open Ask section is structurally a sibling of, never nested
+inside, the Suggested Action section; a donor with no open ask produces
+an empty array and the page never renders an empty-state placeholder for
+it; the open-ask query's own `status = 'pending'` filter is asserted
+directly; two open asks preserve deterministic (oldest-first) order and
+`matchAskFollowUps()` picks the earliest-due reminder when an ask
+somehow has more than one; adding a follow-up to a pending ask succeeds
+and the created row's donor/ask association is verified via the actual
+id-prefix; the ask's own row is read back byte-for-byte unchanged after
+adding a follow-up, and the route is asserted to contain no `UPDATE
+asks` statement at all; a retry while an open reminder exists creates no
+duplicate and reports the same existing reminder; the UI is asserted to
+reuse the real `RescheduleButton` (never a second mechanism) when a
+follow-up already exists; a prior cycle's completed reminder is proven
+to neither block nor be disturbed by a new follow-up, and both rows
+coexist afterward; and both a structural sweep (no RI/financial-table
+reference anywhere in the new route) and a direct D1 check (an unrelated
+donor field byte-identical before/after) confirm no Relationship
+Intelligence or unrelated-donor side effect.
+
+### Quality gates (all passing)
+
+`pnpm test`: exit 0, all 116 test files pass (115 pre-existing + this
+task's one new file). `pnpm exec tsc --noEmit`: clean, zero output.
+`pnpm run build:staging-independent`: completed, full route manifest
+including the new `/api/asks/:id/reminder` route, no errors.
+
+### Status -- NOT deployed, per explicit instruction
+
+Implementation complete, committed and pushed to `feature/independent-
+cloudflare-sandbox` (see "Current Git State" at the top of this file for
+the exact commit SHA). Not deployed to Independent Staging or anywhere
+else. No production/main access at any point. Awaiting explicit approval
+before deployment.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -8035,16 +8198,19 @@ AND CLOSURE" above). No unresolved blocker remains for Ask v1. What
 remains is intentionally deferred, not blocking (see "Intentionally
 Deferred Ask Enhancements" below) — nothing here requires action before
 the feature can be considered done:
-1. **Meeting Brief completeness gap** (pre-existing, not a regression):
-   the Meeting Brief page never renders `brief.openAsks` as its own line;
-   a pending ask only becomes visible there if it happens to win the
-   single Suggested Action slot. Needs a decision on whether/how to add a
-   dedicated "Open ask" line to `app/donors/[id]/meeting-brief/page.tsx`
-   (the `askLine()` formatter and `brief.openAsks` data already exist and
-   are correct — this is a rendering gap, not a data or logic gap).
-2. **"Add follow-up" on an already-created pending ask** (§27 item 4) —
-   not built in Phase 1, reminders currently only attach at ask-creation
-   time.
+1. **RESOLVED 2026-08-23 (was: Meeting Brief completeness gap).** The
+   Meeting Brief page now explicitly renders an `OPEN ASK`/`OPEN ASKS`
+   card whenever `brief.openAsks` is non-empty, independent of Suggested
+   Action -- see "Ask/Solicitation v1 -- Two Approved Enhancements"
+   above for the full implementation and live-verification-pending
+   record. Implemented, tested, not yet deployed.
+2. **RESOLVED 2026-08-23 (was: "Add follow-up" on an already-created
+   pending ask).** A fundraiser can now add a follow-up reminder to any
+   existing pending ask directly from its own card (`POST /api/asks/
+   [id]/reminder`), reusing the existing reminder mechanism and the
+   existing `RescheduleButton` for an ask that already has one -- see
+   "Ask/Solicitation v1 -- Two Approved Enhancements" above. Implemented,
+   tested, not yet deployed.
 3. **Genuine mobile/narrow-viewport visual QA** — still not achievable in
    this browser-automation environment; recommend a real device or
    different tooling before treating any Ask UI mobile-layout claim as
@@ -8054,7 +8220,6 @@ the feature can be considered done:
 
 Explicitly out of scope for v1, not overlooked — do not build these
 without a separate, explicit approval:
-- Adding reminders later from an existing Ask card (item 2 above).
 - Cross-donor Assistant search / "what did I ask Klein for?" (needs
   donor-name-resolution infrastructure that doesn't exist for any fact
   type today — see design doc §16).
@@ -8065,7 +8230,6 @@ without a separate, explicit approval:
 - Automatic gift-to-ask matching or auto-close from payments.
 - Ask support on shared/multi-donor interactions (structurally excluded —
   verified zero ask-related code in `app/api/interactions/shared/route.ts`).
-- Meeting Brief dedicated `openAsks` line (item 1 above).
 
 **RESOLVED 2026-08-21, no longer open (this whole subsection is kept
 only as a historical record of what used to be pending here).** The
@@ -8122,6 +8286,29 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-23T15:45:00Z (approximate)
+Claude (Sonnet 5) — Implemented the two approved Ask/Solicitation v1
+enhancements (Meeting Brief now explicitly surfaces open Asks
+independent of Suggested Action; a fundraiser can add a follow-up
+reminder to an already-existing pending Ask). Investigated first, per
+instruction: fresh-verified branch/deployment/D1-schema state, confirmed
+`recommendations` has no ask_id column (association is the existing
+id-prefix convention only) and `askLine()`/`brief.openAsks` already
+existed but were never rendered -- no schema change was needed, so
+proceeded to implement rather than stopping to report a limitation.
+Added `matchAskFollowUps()`, a small pure helper shared by the Meeting
+Brief data loader and the donor page, and a new `POST /api/asks/[id]/
+reminder` route that only ever inserts a `recommendations` row (never
+touches the `asks` row itself) and fails closed against a duplicate by
+reusing the existing generic reschedule path for an ask that already has
+an active follow-up. Added tests/ask-followup-and-meeting-brief.test.mjs
+covering all 12 required scenarios. pnpm test (116 files), tsc --noEmit,
+and build:staging-independent all pass. Not deployed -- stopped for
+review per instruction. Updated docs/AI-HANDOFF.md, including marking
+"Next Approval Required" items 1 and 2 resolved.
+
+---
 
 2026-08-23T14:10:00Z (approximate)
 Claude (Sonnet 5) — Deployed Relationship Intelligence Phase 2 (commit

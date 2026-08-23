@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import {
   buildMeetingBrief,
+  matchAskFollowUps,
   type MeetingBrief,
   type MeetingBriefDonor,
   type MeetingBriefGift,
@@ -50,6 +51,7 @@ type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: Gif
 type YahrtzeitRow = { deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 type AskRow = { id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
+type AskReminderRow = { id: string; due_at: number | null };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
 
@@ -62,7 +64,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, openAskReminderRows, pledgePaymentRows, paymentPlanRows] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -104,6 +106,16 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
       WHERE a.donor_id = ? AND a.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
         AND a.status = 'pending'
       ORDER BY a.asked_at ASC`).bind(donorId, userId, userId).all<AskRow>(),
+    // Every OPEN reminder whose id carries the "ask-" prefix convention
+    // (app/api/asks/route.ts, app/api/asks/[id]/reminder/route.ts) --
+    // matched to its own ask below by id prefix, never a real FK
+    // (recommendations has no ask_id column, matching every other
+    // reminder-link convention in this app). One query for every ask's
+    // follow-up state, not N.
+    env.DB.prepare(`SELECT r.id, r.due_at
+      FROM recommendations r JOIN donors d ON d.id = r.donor_id
+      WHERE r.donor_id = ? AND r.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
+        AND r.status = 'open' AND r.id LIKE 'ask-%'`).bind(donorId, userId, userId).all<AskReminderRow>(),
     // Every payment actually applied to one of this donor's pledges --
     // feeds openPledge's "last activity" date via
     // resolveOpenPledgeActivityDate (see its doc comment). NOT the same
@@ -256,7 +268,11 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     importantDates: importantDateEvidenceInput,
   }, now, timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
-  const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at }));
+  const followUpByAsk = matchAskFollowUps(
+    openAskRows.results.map((row) => row.id),
+    openAskReminderRows.results.map((row) => ({ id: row.id, dueAt: row.due_at })),
+  );
+  const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at, followUpDueAt: followUpByAsk.get(row.id)?.dueAt ?? null }));
 
   // Same single open pledge already reflected in Suggested Action above --
   // never a second independent read of plan state, never a donor-wide

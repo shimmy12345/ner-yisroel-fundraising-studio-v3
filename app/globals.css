@@ -675,6 +675,14 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .open-ask-withdraw textarea { min-height: 60px; padding: 8px 10px; border: 1px solid #d5ded8; border-radius: 8px; resize: vertical; font: inherit; }
 .open-ask-withdraw-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .open-ask-withdraw-actions button { padding: 7px 10px; border: 1px solid #cbd8d0; border-radius: 7px; background: #fff; color: #365648; font-size: 12px; font-weight: 700; cursor: pointer; }
+.open-ask-followup { margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee8d5; }
+.open-ask-followup-date { margin: 0 0 8px; color: #52625a; font-size: 12px; font-weight: 700; }
+.open-ask-add-followup { padding: 7px 10px; border: 1px solid #cbd8d0; border-radius: 7px; background: #fff; color: #365648; font-size: 12px; font-weight: 700; cursor: pointer; }
+.open-ask-followup-form { margin-top: 10px; }
+.open-ask-followup-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.open-ask-followup-actions button { padding: 7px 10px; border: 1px solid #cbd8d0; border-radius: 7px; background: #fff; color: #365648; font-size: 12px; font-weight: 700; cursor: pointer; }
+.open-ask-followup-actions button:last-child { border-color: var(--green); background: var(--green); color: #fff; }
+.open-ask-followup-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .ask-history { margin-top: 14px; }
 .ask-history summary { color: #6b7168; font-size: 12px; font-weight: 750; cursor: pointer; }
 .ask-history ul { display: grid; gap: 9px; margin: 10px 0 0; padding: 0; list-style: none; }

@@ -72,12 +72,47 @@ export type MeetingBriefFamilyDate = {
 // giving_activities/gifts (JL Solutions financial-system-of-record data).
 // amountCents/purpose are both nullable: a legitimate ask can have no
 // specific figure ("asked him to support the dinner") or no stated purpose.
+// followUpDueAt is the due date of this ask's own open reminder (matched
+// by the existing "ask-<askId>-" recommendation id convention -- see
+// app/api/asks/route.ts/app/api/asks/[id]/reminder/route.ts), null when
+// no open follow-up exists for this ask. Never a second, independent
+// reminder system -- this is read-only awareness of the same
+// `recommendations` row every other reminder surface already uses.
 export type MeetingBriefAsk = {
   id: string;
   amountCents: number | null;
   purpose: string | null;
   askedAt: number;
+  followUpDueAt: number | null;
 };
+
+// Matches each ask to its own earliest-due OPEN follow-up reminder, by
+// the established "ask-<askId>-" recommendation id-prefix convention
+// (app/api/asks/route.ts, app/api/asks/[id]/reminder/route.ts) -- no real
+// FK, since `recommendations` has no ask_id column, matching every other
+// reminder-link convention in this app (interactions' own
+// "activity-<interactionId>"). Pure and D1-free so both callers (the
+// Meeting Brief data loader and the donor page) share one tested
+// implementation instead of two copies. Deterministic when an ask
+// somehow carries more than one open reminder: the earliest due date
+// wins, never an arbitrary first match; a null due date never wins over
+// a real one.
+export type AskReminderMatch = { id: string; dueAt: number | null };
+
+export function matchAskFollowUps(askIds: readonly string[], openAskReminders: readonly AskReminderMatch[]): Map<string, AskReminderMatch | null> {
+  const result = new Map<string, AskReminderMatch | null>();
+  for (const askId of askIds) {
+    const linked = openAskReminders.filter((reminder) => reminder.id.startsWith(`ask-${askId}-`));
+    const earliest = linked.reduce<AskReminderMatch | null>((soonest, reminder) => {
+      if (soonest === null) return reminder;
+      if (reminder.dueAt === null) return soonest;
+      if (soonest.dueAt === null || reminder.dueAt < soonest.dueAt) return reminder;
+      return soonest;
+    }, null);
+    result.set(askId, earliest);
+  }
+  return result;
+}
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 

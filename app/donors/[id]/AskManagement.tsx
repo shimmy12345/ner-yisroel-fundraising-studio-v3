@@ -2,13 +2,21 @@
 
 import { useState } from "react";
 import type { ReminderChoice } from "../../../lib/capture/interaction";
+import { localDayKey } from "../../../lib/workspace/local-time";
+import { RescheduleButton } from "../../components/RescheduleButton";
 
 export type AskStatus = "pending" | "committed" | "declined" | "withdrawn";
 export type AskItem = { id: string; amountCents: number | null; purpose: string | null; status: AskStatus; askedAt: number; note: string | null };
+// The ask's own open follow-up reminder, if any -- matched server-side by
+// the existing "ask-<askId>-" recommendation id convention (see
+// app/api/asks/[id]/reminder/route.ts), never a second reminder system.
+// null when this ask has no active follow-up yet.
+export type AskFollowUp = { id: string; dueAt: number | null };
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 const STATUS_LABEL: Record<AskStatus, string> = { pending: "Pending", committed: "Committed", declined: "Declined", withdrawn: "Stopped pursuing" };
+const followUpReminderOptions: Array<[ReminderChoice, string]> = [["tomorrow", "Tomorrow"], ["next-week", "Next week"], ["custom", "Custom"]];
 
 // A single open (pending) ask -- compact, factual, never a management
 // dashboard. Amount is shown only when present; a null amount never
@@ -17,7 +25,7 @@ const STATUS_LABEL: Record<AskStatus, string> = { pending: "Pending", committed:
 // at the application layer) is a secondary, less-prominent action, kept
 // out of the primary button row on purpose so this never reads as
 // pipeline-management software.
-export function OpenAskCard({ ask }: { ask: AskItem }) {
+export function OpenAskCard({ ask, followUp, timezone, minCustomDate }: { ask: AskItem; followUp: AskFollowUp | null; timezone: string; minCustomDate: string }) {
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [message, setMessage] = useState("");
   const [showWithdraw, setShowWithdraw] = useState(false);
@@ -58,8 +66,81 @@ export function OpenAskCard({ ask }: { ask: AskItem }) {
           </div>
         </div>
       )}
+      <AskFollowUpControl askId={ask.id} followUp={followUp} timezone={timezone} minCustomDate={minCustomDate} />
       {message && <p className="giving-action-error" role="alert">{message}</p>}
     </article>
+  );
+}
+
+// Whichever of the two applies -- never both, never a duplicate reminder.
+// No existing active follow-up: a small "+ Add follow-up" disclosure with
+// the same reminder-picker fieldset pattern LogAskForm already uses
+// (minus "None", since the entire point of this control is adding one).
+// An existing active follow-up: its own due date plus the existing,
+// already-built RescheduleButton (POST /api/recommendations/[id]/
+// reschedule) -- the smallest coherent way to let a fundraiser correct a
+// follow-up date without a second, ask-specific reschedule mechanism.
+function AskFollowUpControl({ askId, followUp, timezone, minCustomDate }: { askId: string; followUp: AskFollowUp | null; timezone: string; minCustomDate: string }) {
+  const [open, setOpen] = useState(false);
+  const [reminder, setReminder] = useState<ReminderChoice>("tomorrow");
+  const [customDate, setCustomDate] = useState("");
+  const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const [savedDueAt, setSavedDueAt] = useState<number | null>(followUp?.dueAt ?? null);
+  const [savedReminderId, setSavedReminderId] = useState<string | null>(followUp?.id ?? null);
+
+  async function save() {
+    if (status === "saving" || (reminder === "custom" && !customDate)) return;
+    setStatus("saving"); setMessage("");
+    try {
+      const response = await fetch(`/api/asks/${encodeURIComponent(askId)}/reminder`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reminder, customDate: reminder === "custom" ? customDate : undefined }),
+      });
+      const result = await response.json() as { error?: string; reminderId?: string; dueAt?: string };
+      if (!response.ok) throw new Error(result.error || "The follow-up could not be saved.");
+      setStatus("idle");
+      setOpen(false);
+      if (result.reminderId && result.dueAt) { setSavedReminderId(result.reminderId); setSavedDueAt(Math.floor(new Date(result.dueAt).getTime() / 1000)); }
+      else window.location.reload();
+    } catch (error) {
+      setStatus("error");
+      setMessage(error instanceof Error ? error.message : "The follow-up could not be saved.");
+    }
+  }
+
+  if (savedReminderId && savedDueAt !== null) {
+    return (
+      <div className="open-ask-followup">
+        <p className="open-ask-followup-date">Follow-up: {dateLabel(savedDueAt)}</p>
+        <RescheduleButton recommendationId={savedReminderId} currentDueDate={localDayKey(savedDueAt, timezone)} onOptimisticReschedule={(dueDate) => setSavedDueAt(Math.floor(new Date(`${dueDate}T12:00:00`).getTime() / 1000))} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="open-ask-followup">
+      <button type="button" className="open-ask-add-followup" onClick={() => setOpen((value) => !value)} aria-expanded={open}>+ Add follow-up</button>
+      {open && (
+        <div className="open-ask-followup-form">
+          <fieldset className="reminder-picker">
+            <legend>Follow-up date</legend>
+            <div>
+              {followUpReminderOptions.map(([value, label]) => (
+                <button type="button" key={value} className={reminder === value ? "active" : ""} aria-pressed={reminder === value} onClick={() => setReminder(value)}>{label}</button>
+              ))}
+            </div>
+            {reminder === "custom" && <input aria-label="Custom follow-up date" type="date" min={minCustomDate} value={customDate} onChange={(event) => setCustomDate(event.target.value)} />}
+          </fieldset>
+          <div className="open-ask-followup-actions">
+            <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+            <button type="button" disabled={status === "saving" || (reminder === "custom" && !customDate)} onClick={() => void save()}>{status === "saving" ? "Saving…" : "Save follow-up"}</button>
+          </div>
+          {message && <p className="giving-action-error" role="alert">{message}</p>}
+        </div>
+      )}
+    </div>
   );
 }
 
