@@ -15,32 +15,29 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`3c4ff6c`** -- "Relationship Intelligence Phase 2: fact-based
-synthesis, replacing direct relationship_summary overwrites" (see
-"Relationship Intelligence Phase 2 -- Deterministic Fact-Based
+**`ae84c01`** -- "Test-harness audit for Phase 2 pre-deploy checkpoint;
+correct stale HEAD in AI-HANDOFF" (docs-only; zero application code
+change). On top of **`3c4ff6c`** -- "Relationship Intelligence Phase 2:
+fact-based synthesis, replacing direct relationship_summary overwrites"
+(see "Relationship Intelligence Phase 2 -- Deterministic Fact-Based
 Synthesis" below for full detail -- this single commit carries both the
 initial Phase 2 implementation and its 2026-08-22 checkpoint's
-resolution of all three flagged edge cases, since neither had been
-committed separately before the checkpoint). **Corrected 2026-08-22 --
-this line previously still named `ddfc531` as current HEAD through the
-entire Phase 2 checkpoint task, which had already advanced HEAD to
-`3c4ff6c`; caught and fixed during that checkpoint's own explicit
-test-harness-audit instruction.** On top of `ddfc531` ("Fix
-applyBackfill()'s INSERT statements breaking on Windows shell argument
-passing" -- see "Relationship Intelligence Phase 1 -- Historical
-Backfill Applied" below), `c2a6837` (historical migration gate docs),
-`cf3d903` (the disposition-gate implementation), `f1d08af` (the semantic
-backfill review), `4176860` (the classification correction), `e66005c`
-(Phase 1 schema + backfill preview machinery), `a30316f` (Option A
-implementation), and the full history recorded further down this
-section from earlier tasks.
+resolution of all three flagged edge cases) -- on top of `ddfc531`
+("Fix applyBackfill()'s INSERT statements breaking on Windows shell
+argument passing" -- see "Relationship Intelligence Phase 1 --
+Historical Backfill Applied" below), `c2a6837` (historical migration
+gate docs), `cf3d903` (the disposition-gate implementation), `f1d08af`
+(the semantic backfill review), `4176860` (the classification
+correction), `e66005c` (Phase 1 schema + backfill preview machinery),
+`a30316f` (Option A implementation), and the full history recorded
+further down this section from earlier tasks.
 
-**Relationship Intelligence Phase 2, including its 2026-08-22 checkpoint
-(all three flagged edge cases resolved -- see "Relationship Intelligence
-Phase 2 -- Deterministic Fact-Based Synthesis" below for full detail),
-is commit `3c4ff6c`, committed and pushed to `feature/independent-
-cloudflare-sandbox`.** New files:
-`lib/relationships/fact-synthesis.ts`, `fact-supersession.ts`,
+**Relationship Intelligence Phase 2 -- including its 2026-08-22
+checkpoint (all three flagged edge cases resolved) and its 2026-08-23
+deployment + live end-to-end verification (see "Relationship
+Intelligence Phase 2 -- Deterministic Fact-Based Synthesis" below for
+full detail on all three) -- is DEPLOYED to Independent Staging.** New
+files: `lib/relationships/fact-synthesis.ts`, `fact-supersession.ts`,
 `fact-accept-plan.ts` (the pure planning core factored out during the
 checkpoint's Monday-race fix), and `fact-accept.ts` (restructured during
 the checkpoint into `loadFactAcceptanceDonorState()` +
@@ -48,40 +45,39 @@ the checkpoint into `loadFactAcceptanceDonorState()` +
 wrapper). Capture, Outcome Option A, the edit route, and Monday
 `confirm_contact` all rewired to the shared pipeline (Monday's own
 decision loop threads an in-memory per-donor working state, the
-checkpoint's race fix); `package.json`'s test script updated; existing
-test files' stale assertions fixed across both the initial
-implementation and the checkpoint; new regression test files added for
-all ten originally-specified scenarios plus the three checkpoint fixes.
-All three quality gates pass. Not deployed. No Phase 2 D1 mutation
-beyond the already-applied Phase 1 Zachter row at any point.
+checkpoint's race fix). All three quality gates pass, live-verified
+end-to-end against real D1 writes on a temporary, fully-cleaned-up test
+donor (see the dated subsection below) -- no test artifacts remain, and
+no Phase 2 D1 mutation beyond the already-applied Phase 1 Zachter row
+exists anywhere.
 
-**Deployed Worker version remains
-`0673c91a-de71-4f29-950b-34f71fc3fbec`** (Option A's own deploy, still
-unchanged -- reconfirmed live during Phase 2, see below). **`4176860`
-still modifies a live application code path**
-(`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) -- still
-deliberately not deployed, for the same reason recorded when that commit
-landed; it will be included automatically whenever this branch is next
-deployed, since it already sits in the committed history `3c4ff6c` now
-sits on top of. **`3c4ff6c` DOES modify live application code paths**
-(the four rewired routes plus the new `lib/relationships/fact-*.ts`
-modules) -- unlike `ddfc531`, which touched only a Node script
-(`scripts/relationship-facts-backfill-preview.mjs`'s `applyBackfill()`
-SQL, not part of the deployed Worker bundle). `3c4ff6c` has NOT been
-deployed -- the deployed Worker version below still predates it. **D1 data
-state, confirmed live, unchanged since Phase 1's backfill**:
-`donor_relationship_facts` holds exactly 1 row (Mr. & Mrs. Yaakov
-Zachter) and `donor_relationship_fact_changes` holds its matching 1
-audit row -- re-verified live during Phase 2 with no new mutation -- see
-"Relationship Intelligence Phase 1 -- Historical Backfill Applied" below
-for full original verification detail. No other donor received a row; no
-`donors.relationship_summary`/`institutional_memory`
-value was altered by this backfill. No production access. `origin/main`
-untouched throughout every task recorded in this file.
+**Deployed Worker version: `f57904ae-ec83-4d35-a38f-f28ef161a15e`**
+(deployed 2026-08-23T13:51:20Z, confirmed via `wrangler deployments
+list` and live-verified directly against D1) -- supersedes
+`0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own deploy, live from
+2026-08-21 through the entire Phase 2 implementation/checkpoint period).
+**`4176860`'s solicited-classification correction
+(`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) is now
+genuinely LIVE** -- it sat committed-but-undeployed since 2026-08-21 and
+was deployed as part of this same Worker version (it was already on the
+branch history `3c4ff6c`/`ae84c01` sit on top of); live-verified
+directly ("Solicited for a plaque ($5k)..." correctly classified
+`solicitation` in real D1, with a control sentence lacking "Solicited"
+confirmed to extract nothing). **D1 data state, confirmed live
+immediately before AND after this deploy and after full test-data
+cleanup**: `donor_relationship_facts` holds exactly 1 row (Mr. & Mrs.
+Yaakov Zachter) and `donor_relationship_fact_changes` holds its matching
+1 audit row -- see "Relationship Intelligence Phase 1 -- Historical
+Backfill Applied" below for full original verification detail, and the
+Phase 2 deployment section below for the live re-verification. No other
+donor received a row; no `donors.relationship_summary`/
+`institutional_memory` value was altered by this backfill or by any
+Phase 2 activity. No production access. `origin/main` untouched
+throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`3c4ff6c` (pushed; matches local HEAD exactly, no divergence -- fetched
-and confirmed during the 2026-08-22 checkpoint's test-harness audit).
+`ae84c01` (pushed; matches local HEAD exactly, no divergence -- fetched
+and confirmed immediately before the 2026-08-23 deploy).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -6564,7 +6560,7 @@ facts) has NOT been started. Not deployed. No production/main access at
 any point in this task. Awaiting explicit approval before beginning
 Phase 2.
 
-## Relationship Intelligence Phase 2 -- Deterministic Fact-Based Synthesis (2026-08-21/22) -- ALL THREE FLAGGED EDGE CASES RESOLVED, ALL GATES PASSING, NOT DEPLOYED, NO NEW D1 MUTATION -- SEE COMMIT BELOW
+## Relationship Intelligence Phase 2 -- Deterministic Fact-Based Synthesis (2026-08-21/22/23) -- DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED END-TO-END, ALL TEMPORARY TEST DATA CLEANED UP, ZACHTER'S PHASE 1 FACT UNTOUCHED
 
 **Scope, per explicit instruction: transition the existing accepted
 Relationship Snapshot write paths (Capture, Outcome Option A, the edit
@@ -6997,6 +6993,236 @@ row, `donor_relationship_fact_changes` = 1 row -- still exactly
 Zachter's Phase 1 fact, byte-for-byte unchanged. Deployed Worker version
 re-confirmed unchanged (still predates `3c4ff6c`). **Not deployed** --
 awaiting explicit approval, per instruction.
+
+### Deployment + Live End-to-End Verification (2026-08-23) -- APPROVED, DEPLOYED, VERIFIED, CLEANED UP
+
+**Scope, per explicit instruction: deploy the approved commit to
+Independent Staging only, then perform a controlled live end-to-end
+verification of the whole Relationship Intelligence architecture using
+temporary staging data, cleaning everything up afterward. No production/
+main access.**
+
+#### Pre-deploy verification
+
+Fresh `git fetch`: local HEAD matched `origin/feature/independent-
+cloudflare-sandbox` exactly, working tree clean. **Noted discrepancy**:
+actual HEAD was `ae84c01` (the test-harness-audit/docs-only commit),
+one commit ahead of the `3c4ff6c` the approval named -- confirmed via
+`git diff --stat` (from the prior task) that `ae84c01` touches only
+`docs/AI-HANDOFF.md`, zero application code, so `ae84c01`'s deployed
+Worker bundle is byte-identical to what `3c4ff6c` alone would have
+produced. Judged not a material difference for deployment purposes and
+proceeded, flagging it explicitly rather than silently ignoring it.
+D1 read: `donor_relationship_facts` = 1 row, `donor_relationship_fact_
+changes` = 1 row -- Zachter's Phase 1 fact, byte-for-byte the values on
+record. `wrangler deployments list`: most recent deployed version still
+`0673c91a-de71-4f29-950b-34f71fc3fbec` (Option A's own deploy, predating
+Phase 2 entirely). All conditions matched -- proceeded.
+
+#### Deploy
+
+`pnpm run deploy:staging-independent` -- succeeded. **New deployed
+Worker version: `f57904ae-ec83-4d35-a38f-f28ef161a15e`** (created
+2026-08-23T13:51:20Z), confirmed current via `wrangler deployments
+list`. Independent Staging only (`wrangler.staging.jsonc`) -- no
+production/main config touched or referenced at any point.
+
+#### Live end-to-end verification methodology
+
+Authenticated in the actual deployed app as the real staging owner
+(Cloudflare Access SSO, existing browser session) and drove every
+mutating step through the REAL deployed API endpoints (`POST /api/
+donors`, `POST /api/interactions`, `PATCH /api/interactions/:id`,
+`POST /api/interactions/:id/outcome`, `DELETE /api/interactions/:id`)
+via authenticated `fetch()` calls from the app's own origin -- the same
+code paths, same auth, same D1 writes a real fundraiser's browser
+session would produce. Every claim below was verified by reading the
+actual resulting D1 rows directly via `wrangler d1 execute --remote`,
+never by trusting an API response alone (API responses are quoted only
+for context).
+
+A single, disposable test donor was created for this purpose:
+`ZZ TEST Phase2 LiveVerify (delete me)`, id
+`ed30d5f5-068d-4cfc-bc70-83ec0fdbd258`. Baseline recorded and confirmed
+before any test action: `relationship_summary`/`institutional_memory`/
+`relationship_health` all `NULL`, zero relationship facts, zero
+interactions.
+
+#### 1-3: Fact A -- create, accept, verify
+
+`POST /api/interactions` with `acceptRelationshipSnapshot: true`, note
+"Texted him a video from the dinner and thanked him for his ongoing
+support that makes it happen." -- API returned `relationshipUpdated:
+true`. D1 confirmed: one new `donor_relationship_facts` row, `category
+engagement`, `lifecycle durable`, `status current`,
+`source_interaction_id` = the interaction's own id (correct
+provenance), one matching `donor_relationship_fact_changes` row
+(`action created`). `donors.relationship_summary` =
+`institutional_memory` = the fact's exact text, `relationship_health`
+bumped to `86`.
+
+#### 4-5: Fact B (unrelated) -- the central accumulation proof
+
+A SEPARATE interaction, `POST /api/interactions` with
+`acceptRelationshipSnapshot: true`, note "His daughter is Danielle." --
+classified `family_milestone`/`durable` (a different category from
+Fact A's `engagement`/`durable`, so the additive-category rule applies,
+not singular-state auto-supersession). D1 confirmed directly: **BOTH**
+facts read back with `status current` -- Fact A's row completely
+untouched, Fact B a genuinely new row. Both `donor_relationship_fact_
+changes` rows present (`created` for each). `donors.relationship_
+summary` read back as **"His daughter is Danielle. Texted him a video
+from the dinner and thanked him for his ongoing support that makes it
+happen."** -- both facts' text present together, most-recent first, per
+the approved synthesis model -- proving accumulation, not replacement,
+live against real D1.
+
+#### Rejection creates nothing; Outcome Option A still requires explicit acceptance (combined test)
+
+Created a SCHEDULED interaction, then completed it via `POST /api/
+interactions/:id/outcome` with `action: "complete"` and a note ("Spoke
+with him about his grandson bar mitzvah next spring.") that genuinely
+extracts real content -- deliberately WITHOUT `acceptRelationshipSnapshot`.
+API returned `relationshipUpdated: false`. D1 confirmed directly:
+still exactly 2 facts (A and B only, no third), and `donors.
+relationship_summary`/`institutional_memory` byte-for-byte unchanged
+from before this call. Proves both properties at once: a real,
+extractable proposal that is never explicitly accepted writes nothing,
+and Outcome's own acceptance gate is genuinely enforced live, not just
+in tests.
+
+#### Follow-up fact preserved historically, absent from Snapshot prose
+
+`POST /api/interactions`, accepted, note "Promised to follow up after
+the holidays with more details." -- classified `commitment_followup`/
+`follow_up`. D1 confirmed: the fact row exists, `status current`,
+`lifecycle follow_up` (a real, queryable, historically-preserved row) --
+but `donors.relationship_summary`/`institutional_memory` remained
+**exactly** "His daughter is Danielle. Texted him a video from the
+dinner..." -- byte-identical to before this fact existed. The follow-up
+fact never entered Snapshot prose while still being fully present in
+the fact store.
+
+#### Edit and re-accept the same source interaction -- supersedes without deleting history
+
+`PATCH /api/interactions/:id` on Fact A's own interaction, new note
+text ("...and he replied with real enthusiasm."),
+`acceptRelationshipSnapshot: true`. D1 confirmed directly: the
+ORIGINAL Fact A row now `status superseded` (never deleted, still
+fully readable, same id, same original text) with a NEW fact row
+`status current`, `supersedes_fact_id` pointing at the original,
+same `source_interaction_id` (the edited interaction's own id). Audit
+trail: 5 total `donor_relationship_fact_changes` rows at this point (4
+`created` + 1 `superseded`), matching every fact ever created plus
+exactly the one supersession -- full history intact.
+
+#### Cancelling an interaction with an accepted fact archives it immediately
+
+Created a SCHEDULED interaction, completed it via Outcome with
+`acceptRelationshipSnapshot: true` and note "Attended the gala with his
+whole family and seemed to really enjoy the evening." (`family_
+milestone`/`durable`) -- D1 confirmed the fact `current`. Then called
+Outcome again with `action: "cancel"`. D1 confirmed directly: the SAME
+fact row now `status archived_with_source` (never deleted, fully
+readable, same id and text), and `donors.relationship_summary`/
+`institutional_memory` no longer contained its text at all --
+immediately excluded from current synthesis while the historical row
+and its full audit trail remain. (One test-methodology artifact
+surfaced and was corrected mid-verification, disclosed for full
+transparency: an earlier, separate plain-Capture interaction had
+accidentally used the identical note text and was still contributing
+that same sentence to the Snapshot after the cancel-tested fact was
+archived, briefly making the result look like the cancellation hadn't
+worked. Direct D1 inspection immediately distinguished the two rows by
+`source_interaction_id` and confirmed the cancel-tested fact was
+correctly archived; the stray duplicate interaction was archived via
+the app's own edit-route archive action, and the Snapshot was
+re-verified clean afterward, correctly containing neither gala fact's
+text. This was a test-setup duplicate, not an application defect.)
+
+#### Zachter's Phase 1 intelligence survives deployment
+
+Read-only, direct D1 query joining `donor_relationship_facts` to
+`donors` for Zachter's real donor id (`19af69d6-
+f147-474b-88ad-f6358ff65b9a`) -- the fact row is unchanged (`id
+1550c6b7-...`, `category engagement`, `lifecycle durable`, `status
+current`, same `fact_text`), and `donors.relationship_summary` still
+reads exactly that fact's own text, byte-for-byte matching what Phase
+1's backfill wrote and what the pure `synthesizeRelationshipSnapshot()`
+unit test (`tests/relationship-fact-synthesis.test.mjs`, using this
+exact real row's data) proves synthesis would independently produce.
+Zachter's own `donors.institutional_memory` still holds its
+pre-Phase-1 legacy value (a differently-formatted string, never
+overwritten by either the Phase 1 backfill or by any Phase 2 write,
+since no accept/archive event has ever run for Zachter -- Phase 2 only
+resynthesizes on an actual write, and none has ever been made against
+this donor) -- correct and expected, not a regression, since neither
+Phase 1 nor Phase 2 promises to retroactively resynthesize a donor
+nothing has been accepted or archived for.
+
+#### The `4176860` solicited-classification correction is live
+
+`POST /api/interactions`, accepted, note "Solicited for a plaque ($5k)
+in memory of his father." -- deliberately containing NO other
+fact-signal term (verified locally beforehand: the control sentence
+"Asked about a plaque ($5k)..." extracts nothing at all) -- isolating
+the correction specifically. D1 confirmed directly: the created fact's
+`category` = `solicitation` (via the bare word "Solicited", which
+`4176860` added to `SOLICITATION_FACT_TERMS`) -- proving the correction
+is genuinely live in the deployed Worker, not merely present in git
+history.
+
+#### Cleanup -- full inventory, deletion, and re-verification
+
+Before cleanup, every row this session's testing created was counted
+directly: 7 `interactions`, 7 `donor_relationship_facts`, 10 `donor_
+relationship_fact_changes`, 3 `activity_status_audits`, 1 `donor_
+contact_audits`, 0 `recommendations`, 0 `asks` -- all scoped to the
+one temporary test donor. Deleted in FK-safe order (fact_changes ->
+facts -> activity_status_audits -> donor_contact_audits -> interactions
+-> the donor row itself), all in one `wrangler d1 execute --remote`
+call; every `changes` count in the response matched the pre-deletion
+inventory exactly (10, 7, 3, 1, 7, 1). Re-verified immediately after:
+zero rows remain anywhere referencing the test donor id, the donor row
+itself is gone, and the whole-table counts for `donor_relationship_
+facts`/`donor_relationship_fact_changes` are back to exactly **1/1** --
+Zachter's Phase 1 row and its audit, nothing else, byte-for-byte
+identical to the pre-test read. The live donor list UI was reloaded and
+confirmed back to **248 relationships** -- the same count as before the
+test donor was created.
+
+**One minor, disclosed, unavoidable side effect**: creating the test
+donor via the real `POST /api/donors` route also performs its own
+established `ON CONFLICT ... DO UPDATE` upsert on `onboarding_
+preferences` (a user-level, not donor-level, row: `data_mode='live',
+sample_data_acknowledged=1`). This row's values were already exactly
+`live`/`1` (the real, correct state for this actively-used live
+workspace) both before and after, so the upsert was a substance no-op
+-- only its own `updated_at` timestamp advanced. Not reverted (there is
+no "previous timestamp" to restore to, and doing so would require
+directly rewriting shared user state, which is out of scope and
+harmless to leave). No other cross-donor or user-level side effect was
+found.
+
+#### Final focused smoke test
+
+Direct D1 read, no test data involved: `donor_relationship_facts` = 1
+row, `donor_relationship_fact_changes` = 1 row, both exactly Zachter's
+Phase 1 values (same `id`, `donor_id`, `category`, `lifecycle`,
+`status`, `fingerprint`, `source_interaction_id`,
+`source_interaction_occurred_at`, and the same single audit row's `id`/
+`fact_id`/`action`) -- confirming D1 returned to exactly the expected
+persistent state.
+
+#### Conclusion
+
+Every live behavior matched the approved architecture exactly -- no
+divergence found, nothing patched forward. The deployed Independent
+Staging Worker (`f57904ae-ec83-4d35-a38f-f28ef161a15e`) now runs
+Relationship Intelligence Phase 2 end-to-end, live-verified against
+real D1 writes for all ten originally-specified regression scenarios
+plus this checkpoint's three edge-case fixes. Zachter's Phase 1 fact is
+untouched. No production/main access at any point in this task.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -7442,23 +7668,26 @@ only.
 
 ## Deployment State
 
-**Corrected 2026-08-21 -- this section had gone stale (still describing
-the 2026-08-20T02:34:01Z deploy through several later completed and
-deployed tasks: the Pledge Payment Plan rollout, the grandchild-gap fix,
-the Zman/Yahrtzeit fix, the outcome-route fix, and the people-extraction
-fix, each of which has its own full deployment record in its own dated
-section above). This section is now a pointer to the true current state,
-not a duplicate of it.**
+**Corrected 2026-08-23 -- this section had gone stale again (still
+describing the Option A deploy through the entire Relationship
+Intelligence Phase 2 implementation, its 2026-08-22 checkpoint, and its
+2026-08-23 deployment, each of which has its own full record in its own
+dated section above). This section remains a pointer to the true
+current state, not a duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `a30316f` ("Add
-Option A: explicit review/accept flow for outcome-note Relationship
-Snapshots" -- see "Outcome-Note Relationship Snapshot Review/Accept Flow
--- Option A" above), Worker version
-`0673c91a-de71-4f29-950b-34f71fc3fbec`, confirmed via the deploy
-command's own printed Version ID and live-verified directly against D1
-on real donor records. This supersedes every earlier version ID recorded
-anywhere in this file. For the exact current git SHA (which may have
-advanced past `a30316f` by documentation-only commits that touch no
+**Live -- current as of this deploy.** Deployed commit `ae84c01`
+(top of the Relationship Intelligence Phase 2 work -- see "Relationship
+Intelligence Phase 2 -- Deterministic Fact-Based Synthesis" above for
+full detail, including its "Deployment + Live End-to-End Verification"
+subsection), Worker version **`f57904ae-ec83-4d35-a38f-f28ef161a15e`**,
+confirmed via the deploy command's own printed Version ID, `wrangler
+deployments list`, and live-verified end-to-end directly against real
+D1 writes (a temporary, fully-cleaned-up test donor) and Zachter's real
+Phase 1 donor record. This supersedes every earlier version ID recorded
+anywhere in this file, including `0673c91a-de71-4f29-950b-34f71fc3fbec`
+(Option A's own deploy, live from 2026-08-21 through the whole Phase 2
+implementation period). For the exact current git SHA (which may have
+advanced past `ae84c01` by documentation-only commits that touch no
 application code -- the deployed Worker always reflects the latest
 actual code change, not necessarily the latest commit), see "Current Git
 State" at the top of this file, which is the authoritative pointer kept
@@ -7476,11 +7705,15 @@ Zman, people-extraction false positives), the Ask/Solicitation Phase 1
 feature and its historical backfill, the request-scoped duplicate-loader
 fix, the Today's-Agenda birthday-bucketing + open-pledge payment-recency
 fixes, the Pledge Payment Plan feature, the outcome-route acceptance-gap
-fix (Option B), and the outcome-note Relationship Snapshot review/accept
+fix (Option B), the outcome-note Relationship Snapshot review/accept
 flow (Option A, which restores a gated write on top of Option B's
-removal -- see that section above for why these are not in conflict).
-Each has its own dated section above with full live-verification detail
--- this section intentionally does not repeat it.
+removal -- see that section above for why these are not in conflict),
+and now Relationship Intelligence Phase 2's deterministic fact-based
+synthesis (replacing Option A's own direct-overwrite write path with
+the accumulate-don't-replace fact store, live-verified end-to-end as of
+this deploy). Each has its own dated section above with full
+live-verification detail -- this section intentionally does not repeat
+it.
 
 Historical note (kept for continuity, not current): the 2026-08-20
 deploy referenced above by the now-superseded version ID required two
@@ -7889,6 +8122,39 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-23T14:10:00Z (approximate)
+Claude (Sonnet 5) — Deployed Relationship Intelligence Phase 2 (commit
+ae84c01, on top of the approved 3c4ff6c) to Independent Staging as
+Worker version f57904ae-ec83-4d35-a38f-f28ef161a15e, after fresh-fetch
+verification (flagged and judged immaterial: HEAD was one docs-only
+commit ahead of the literal SHA named in the approval) and D1/deployed-
+version pre-checks. Performed a full live end-to-end verification using
+a temporary, disposable test donor and the real deployed API
+(authenticated fetch from the actual staging app): accepted fact A,
+accepted unrelated fact B via a separate interaction and confirmed both
+remained current with the synthesized Snapshot containing both texts
+(the central accumulation proof) — verified directly in D1 throughout,
+never from API responses alone. Also live-verified: rejection creates
+no fact and leaves the Snapshot unchanged; Outcome Option A's acceptance
+gate is genuinely enforced; a follow_up fact is preserved but excluded
+from Snapshot prose; editing and re-accepting the same interaction
+supersedes without deleting history; cancelling an accepted interaction
+archives its fact and immediately excludes it from synthesis (caught and
+correctly diagnosed one of my own test-setup duplicates mid-verification
+— a stray earlier interaction with identical note text, not an
+application defect — cleaned it up and re-confirmed clean); Zachter's
+Phase 1 fact and its own synthesis remain correct and untouched; and the
+4176860 solicited-classification correction is genuinely live. Fully
+cleaned up all 7 interactions, 7 facts, 10 fact-change audits, 3
+activity-status audits, and the test donor itself — every deletion count
+matched the pre-cleanup inventory exactly, and a final smoke test
+confirmed D1 returned to exactly the Phase 1 baseline (1 fact, 1 audit,
+both byte-identical to Zachter's original row) and the live donor list
+back to 248 relationships. Updated docs/AI-HANDOFF.md with the deployed
+version, full live-verification results, and cleanup confirmation.
+
+---
 
 2026-08-22T00:30:00Z (approximate)
 Claude (Sonnet 5) — Implemented Relationship Intelligence Phase 2:
