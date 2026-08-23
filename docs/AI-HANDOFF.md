@@ -15,16 +15,23 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`cf40bee`** -- "Correct Current Git State to reference the new HEAD
-(20e37dd)" (docs-only; zero application code change). On top of
-**`20e37dd`** -- "Ask/Solicitation v1: Meeting Brief open-ask visibility
-+ add-follow-up on an existing ask" -- see "Ask/Solicitation v1 -- Two
-Approved Enhancements" below for full detail, including its "Deployment
-+ Live End-to-End Verification" subsection -- **DEPLOYED to Independent
-Staging** (see below). Sits on top of `ae84c01` ("Test-harness audit for
-Phase 2 pre-deploy checkpoint; correct stale HEAD in AI-HANDOFF" --
-docs-only, zero application code change), which sits on top of
-**`3c4ff6c`** -- "Relationship Intelligence Phase 2:
+**`1fa2c26`** -- "Correct Capture/Outcome copy: no new relationship fact
+is not the same as a meaningless interaction" -- see "Meaningful
+Stewardship Activity vs. Durable Relationship Intelligence" below for
+full detail. NOT deployed (deployed Worker version below still predates
+it -- though this commit is UI-copy-only within the already-deployed
+Capture/Outcome components, so deploying it is low-risk whenever
+approved). On top of `cf40bee` ("Correct Current Git State to reference
+the new HEAD (20e37dd)" -- docs-only, zero application code change),
+which sits on top of **`20e37dd`** -- "Ask/Solicitation v1: Meeting
+Brief open-ask visibility + add-follow-up on an existing ask" -- see
+"Ask/Solicitation v1 -- Two Approved Enhancements" below for full
+detail, including its "Deployment + Live End-to-End Verification"
+subsection -- **DEPLOYED to Independent Staging** (see below). Sits on
+top of `ae84c01` ("Test-harness audit for Phase 2 pre-deploy checkpoint;
+correct stale HEAD in AI-HANDOFF" -- docs-only, zero application code
+change), which sits on top of **`3c4ff6c`** -- "Relationship
+Intelligence Phase 2:
 fact-based synthesis, replacing direct relationship_summary overwrites"
 (see "Relationship Intelligence Phase 2 -- Deterministic Fact-Based
 Synthesis" below for full detail -- this single commit carries both the
@@ -82,13 +89,19 @@ Enhancements" below for full detail, including a real, disclosed
 cleanup complication (a `donor_views` "recently viewed" tracking row,
 created merely by viewing a donor page, was not in the original cleanup
 plan and had to be found and deleted before the temporary donors could
-be removed -- fully resolved, D1 confirmed back to exact baseline). No
-production access. `origin/main` untouched throughout every task
-recorded in this file.
+be removed -- fully resolved, D1 confirmed back to exact baseline).
+**`1fa2c26` (the meaningful-stewardship-activity Capture/Outcome copy
+fix) DOES modify live application code** (`app/capture/
+CaptureExperience.tsx`, `app/interactions/[id]/outcome/
+OutcomeExperience.tsx` -- copy-only, no logic change) **and has NOT been
+deployed** -- the deployed Worker version above (`cfb39a25-...`)
+predates it; awaiting explicit approval before deploying. No production
+access. `origin/main` untouched throughout every task recorded in this
+file.
 
 origin/feature/independent-cloudflare-sandbox:
-`cf40bee` (pushed; matches local HEAD exactly, no divergence -- fetched
-and confirmed immediately before this deploy).
+`1fa2c26` (pushed; matches local HEAD exactly, no divergence -- fetched
+and confirmed immediately before this commit).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
