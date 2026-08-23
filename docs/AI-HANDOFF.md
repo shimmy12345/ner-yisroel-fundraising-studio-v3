@@ -15,9 +15,13 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`ae84c01`** -- "Test-harness audit for Phase 2 pre-deploy checkpoint;
-correct stale HEAD in AI-HANDOFF" (docs-only; zero application code
-change). On top of **`3c4ff6c`** -- "Relationship Intelligence Phase 2:
+**`20e37dd`** -- "Ask/Solicitation v1: Meeting Brief open-ask visibility
++ add-follow-up on an existing ask" -- see "Ask/Solicitation v1 -- Two
+Approved Enhancements" below for full detail. NOT deployed (deployed
+Worker version below still predates it). On top of `ae84c01` ("Test-
+harness audit for Phase 2 pre-deploy checkpoint; correct stale HEAD in
+AI-HANDOFF" -- docs-only, zero application code change), which sits on
+top of **`3c4ff6c`** -- "Relationship Intelligence Phase 2:
 fact-based synthesis, replacing direct relationship_summary overwrites"
 (see "Relationship Intelligence Phase 2 -- Deterministic Fact-Based
 Synthesis" below for full detail -- this single commit carries both the
@@ -60,7 +64,7 @@ list` and live-verified directly against D1) -- supersedes
 (`lib/capture/interaction.ts`'s `SOLICITATION_FACT_TERMS`) is now
 genuinely LIVE** -- it sat committed-but-undeployed since 2026-08-21 and
 was deployed as part of this same Worker version (it was already on the
-branch history `3c4ff6c`/`ae84c01` sit on top of); live-verified
+branch history `3c4ff6c`/`ae84c01`/`20e37dd` sit on top of); live-verified
 directly ("Solicited for a plaque ($5k)..." correctly classified
 `solicitation` in real D1, with a control sentence lacking "Solicited"
 confirmed to extract nothing). **D1 data state, confirmed live
@@ -72,12 +76,18 @@ Backfill Applied" below for full original verification detail, and the
 Phase 2 deployment section below for the live re-verification. No other
 donor received a row; no `donors.relationship_summary`/
 `institutional_memory` value was altered by this backfill or by any
-Phase 2 activity. No production access. `origin/main` untouched
-throughout every task recorded in this file.
+Phase 2 activity. **`20e37dd` (the two approved Ask/Solicitation v1
+enhancements -- Meeting Brief open-ask visibility + add-follow-up on an
+existing ask) DOES modify live application code paths (`app/api/asks/
+[id]/reminder/route.ts` new, plus the Meeting Brief and donor-page
+files) and has NOT been deployed** -- the deployed Worker version above
+(`f57904ae-...`) predates it; awaiting explicit approval before
+deploying. No production access. `origin/main` untouched throughout
+every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`ae84c01` (pushed; matches local HEAD exactly, no divergence -- fetched
-and confirmed immediately before the 2026-08-23 deploy).
+`20e37dd` (pushed; matches local HEAD exactly, no divergence -- fetched
+and confirmed immediately before this commit).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
