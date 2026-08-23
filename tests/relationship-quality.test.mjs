@@ -129,7 +129,7 @@ async function run() {
   const captureExperience = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
   assert.match(captureExperience, /preview\.relationshipSummary\s*\?\s*<div className="relationship-snapshot-preview">/, "a meaningful preview must still offer the existing opt-in checkbox");
   assert.match(captureExperience, /Nothing generated is saved unless you check this box\./, "the opt-in guarantee copy must be unchanged");
-  assert.match(captureExperience, /No meaningful relationship details detected\./, "an empty extraction must show an honest message, not silently offer nothing or force a checkbox on garbage");
+  assert.match(captureExperience, /No new relationship details to save\. This interaction is still recorded as stewardship activity\./, "an empty extraction must show an honest message, not silently offer nothing or force a checkbox on garbage -- and must never imply the interaction itself was meaningless");
   assert.match(captureExperience, /acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview\.relationshipSummary !== null,/, "the submitted flag must be gated on the CURRENT preview actually being meaningful, not just the checkbox's own stale state");
 
   console.log("Relationship-intelligence quality checks passed.");

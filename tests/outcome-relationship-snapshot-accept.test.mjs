@@ -134,8 +134,8 @@ async function run() {
 
   assert.match(
     outcomeExperience,
-    /No meaningful relationship details detected\./,
-    "when nothing extracts, the UI must say so plainly and offer no acceptance affordance",
+    /No new relationship details to save\. This interaction is still recorded as stewardship activity\./,
+    "when nothing extracts, the UI must say so plainly and offer no acceptance affordance -- and must never imply the interaction itself was meaningless",
   );
   // The ternary structure itself: the checkbox/current-value block only
   // renders in the `preview.relationshipSummary !== null` branch: the

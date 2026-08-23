@@ -414,10 +414,16 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
                   category label or boilerplate the user would have to
                   manually reject. See actionableRelationshipSnapshot's doc
                   comment: null here means nothing specific and
-                  donor-relevant was actually found in this note. */}
+                  donor-relevant was actually found in this note -- it does
+                  NOT mean the interaction itself is meaningless. The note
+                  is still saved and still counts as real contact (Last
+                  Contact/engagement recency are driven by the interaction
+                  row itself, never by whether a durable fact was found --
+                  see lib/relationships/meeting-brief.ts); this message must
+                  never imply otherwise. */}
               {!future && (preview.relationshipSummary
                 ? <div className="relationship-snapshot-preview"><label><input type="checkbox" checked={acceptRelationshipSnapshot} onChange={(event) => setAcceptRelationshipSnapshot(event.target.checked)} /><span><strong>Use this relationship snapshot</strong><small>Nothing generated is saved unless you check this box.</small></span></label><p>{preview.relationshipSummary}</p></div>
-                : <p className="relationship-snapshot-preview relationship-snapshot-empty">No meaningful relationship details detected.</p>)}
+                : <p className="relationship-snapshot-preview relationship-snapshot-empty">No new relationship details to save. This interaction is still recorded as stewardship activity.</p>)}
             </div>
           )}
 

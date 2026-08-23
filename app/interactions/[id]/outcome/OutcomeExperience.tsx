@@ -148,7 +148,11 @@ export function OutcomeExperience({ activity, initialCompletedValue, initialResc
             <p><strong>Proposed Relationship Snapshot:</strong> {preview.relationshipSummary}</p>
           </div>
         ) : (
-          <p className="relationship-snapshot-preview relationship-snapshot-empty">No meaningful relationship details detected.</p>
+          // null here means no NEW durable fact was found -- never that this
+          // outcome itself was meaningless. The activity still closes out
+          // and still counts as real contact regardless (see
+          // lib/relationships/meeting-brief.ts).
+          <p className="relationship-snapshot-preview relationship-snapshot-empty">No new relationship details to save. This interaction is still recorded as stewardship activity.</p>
         )}
       </div>
 

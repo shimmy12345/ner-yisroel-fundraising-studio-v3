@@ -7587,6 +7587,138 @@ Staging Worker (`cfb39a25-5348-46e3-85a9-ef5a018b143b`) now runs both
 Ask/Solicitation v1 enhancements end-to-end, live-verified against real
 D1 writes. No production/main access at any point in this task.
 
+## Meaningful Stewardship Activity vs. Durable Relationship Intelligence (2026-08-24) -- IMPLEMENTED, ALL GATES PASSING, NOT DEPLOYED
+
+**Scope, per explicit instruction: correct the product semantics around
+a real-world case -- "Texted to welcome sons back to Yeshiva for the new
+zman" is legitimate, personalized donor/parent stewardship, but the
+Capture UI said "No meaningful relationship details detected," implying
+the whole interaction was worthless merely because it taught no NEW
+durable donor fact. Investigate whether an existing model already
+represents "meaningful stewardship activity" before adding anything new;
+keep this narrowly scoped; do not weaken durable Relationship
+Intelligence by auto-promoting every stewardship touch into a fact.**
+
+### Investigation finding: no new architecture was needed
+
+Read `lib/capture/interaction.ts` (extraction/classification),
+`lib/relationships/meeting-brief.ts`/`meeting-brief-model.ts` (Meeting
+Brief), `lib/relationships/recommendation-evidence.ts`/
+`recommendation-candidates.ts`/`recommendation-rank.ts` (engagement/
+recency scoring), `app/api/interactions/route.ts` (Capture), and
+`app/capture/CaptureExperience.tsx`/`app/interactions/[id]/outcome/
+OutcomeExperience.tsx` (the UI) before changing anything, per
+instruction. Findings:
+
+- **What already makes an interaction count toward Last Contact?**
+  `lib/relationships/meeting-brief.ts`'s own `interactions` query (the
+  actual source of `lastCompletedInteraction`/`lastContactAt`/
+  `recentInteractions`/`lastMeaningfulContact`) has **no dependency
+  whatsoever** on `relationship_summary`, `donor_relationship_facts`, or
+  acceptance state -- it filters only on the interaction's own
+  `source`/`occurred_at` (not cancelled/archived, genuinely completed).
+  Confirmed directly: the query text contains none of those terms.
+  **Any saved, completed interaction already counts as real contact,
+  regardless of whether it produced a durable fact.** No code change
+  was needed here.
+- **What already distinguishes a personalized touch from a mass
+  broadcast?** `recommendation-evidence.ts`'s `lastSubstantiveContactAt`
+  already excludes `role === "recipient"` rows (broadcast/shared-
+  activity recipients) from counting as *substantive* contact --
+  `interactions.results.find((item) => item.role !== "recipient")`, an
+  existing mechanism built for the shared-activity feature, unrelated to
+  Relationship Intelligence. A plain, single-donor Capture interaction
+  (like the real-world example) has `role = null`, so it was **already**
+  treated as substantive/personalized contact. This is the existing
+  "meaningful stewardship" distinction the task asked to look for -- it
+  already exists and needed no changes.
+- **Does a personalized stewardship interaction already influence any
+  recommendation/scoring path?** Yes, via the mechanisms above --
+  `lastContactAt`/`lastSubstantiveContactAt` feed directly into
+  `reconnect_contact_gap`'s own evidence in the shared recommendation
+  engine, unconditionally on fact-worthiness. No new scoring signal was
+  invented or needed.
+- **`donors.relationship_health`**: found to be a real column
+  (`db/schema.ts`, present since `drizzle/0000_foundation.sql`) but
+  **written only** by `lib/relationships/fact-accept.ts` (bumped to `86`
+  on fact acceptance) and **never read anywhere else in the codebase** --
+  confirmed via a full-repo search. Not a viable "existing engagement
+  model" to wire into (nothing consumes it today; writing to it would
+  have zero observable effect and would not satisfy "reuse an existing
+  concept"). Left untouched -- not part of this fix.
+- **Was "No meaningful relationship details detected" only about the
+  Relationship Snapshot, or did the app treat the interaction as low-
+  value elsewhere too?** Confirmed the former: the interaction row is
+  **always** inserted unconditionally in `app/api/interactions/route.ts`
+  (the `INSERT INTO interactions` statement is the first, unconditional
+  entry in the route's own `statements` array -- the fact-acceptance
+  block is a structurally separate, later, optional concern). The
+  message was purely a UI-copy problem in Capture and Outcome, with no
+  corresponding under-valuation anywhere else in the app.
+
+**Conclusion: the existing architecture already correctly represents
+"meaningful stewardship activity" -- via the interaction row itself
+(always saved) plus the existing `role`-based personalized-vs-broadcast
+distinction already feeding Last Contact/substantive-contact evidence.
+No new table, column, or scoring subsystem was created or needed.**
+
+### What was implemented
+
+Purely a UI-copy fix, in the two places the misleading message existed:
+`app/capture/CaptureExperience.tsx` and `app/interactions/[id]/outcome/
+OutcomeExperience.tsx`. Replaced **"No meaningful relationship details
+detected."** with **"No new relationship details to save. This
+interaction is still recorded as stewardship activity."** -- reusing the
+existing `relationship-snapshot-empty` styling and the existing
+null-preview gating exactly as before (the opt-in checkbox still only
+ever appears for a real, non-null proposal; nothing about *when* the
+message appears changed, only its wording). No extraction,
+classification, fact-acceptance, or recommendation-scoring code was
+touched.
+
+### Regression coverage -- `tests/stewardship-activity.test.mjs`
+
+Uses the exact real-world case throughout. Proves, against the real,
+unmodified `extractInteraction()`/`classifyRelationshipFact()`/
+`planFactAcceptanceStep()` plus a real in-memory SQLite mirror of Meeting
+Brief's own interactions query (matching this repo's established
+convention for D1-dependent data-loader logic): the note extracts no
+durable-fact proposal (unchanged, correct, evidence-gated behavior); the
+old misleading message is fully gone from both Capture and Outcome, and
+the new wording is present in both; the opt-in checkbox still only
+appears for a real proposal; the interactions INSERT is unconditional in
+the Capture route; a real SQLite-backed interaction with this exact note
+and zero relationship facts is still found by the actual Last-Contact
+query and would be the donor's most recent contact; a broadcast-role
+version of a similar note is still visible in the raw query but is
+exactly what the existing `role !== "recipient"` filter would exclude
+from substantive contact (proving the existing distinction, not a new
+one); a positive control shows genuine donor-specific text (e.g. "His
+daughter is Danielle.") still proposes and creates a fact normally when
+explicitly accepted; the same real-world note produces no fact even if
+acceptance were requested, since nothing was ever extracted; a generic
+broadcast-style message containing "zman" still does not propose a fact
+merely for the word's presence; and genuine zman-appreciation text
+(Zachter's own real Phase 1 fact wording) still classifies exactly as
+before (`engagement`/`durable`).
+
+### Quality gates (all passing)
+
+`pnpm test`: exit 0, all 117 test files pass (116 pre-existing + this
+task's one new file; two pre-existing tests updated in place for the new
+wording, no other tests affected). `pnpm exec tsc --noEmit`: clean, zero
+output. `pnpm run build:staging-independent`: completed, full route
+manifest, no errors.
+
+### Status -- NOT deployed, per instruction
+
+Implementation complete, gate-clean, and about to be committed and
+pushed to `feature/independent-cloudflare-sandbox` (see "Current Git
+State" at the top of this file for the exact commit SHA). Not deployed.
+No production/main access at any point. No Relationship Intelligence,
+Ask/Solicitation, or recommendation-ranking code was touched -- the
+investigation found none of those systems needed to change.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -8488,6 +8620,40 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-24T12:30:00Z (approximate)
+Claude (Sonnet 5) — Corrected the product semantics around meaningful
+stewardship activity vs. durable Relationship Intelligence, using the
+real-world case "Texted to welcome sons back to Yeshiva for the new
+zman" (legitimate personalized stewardship, correctly proposes no new
+durable fact, but the Capture UI said "No meaningful relationship
+details detected," implying the whole interaction was worthless).
+Investigated first, per instruction, before changing anything: found
+that Meeting Brief's own Last-Contact query already has zero dependency
+on relationship_summary/donor_relationship_facts/acceptance state (any
+saved interaction already counts as real contact), and that the
+existing role !== "recipient" filter (built for shared/broadcast
+activities) already distinguishes a personalized touch from a mass
+broadcast for substantive-contact purposes -- so the "meaningful
+stewardship" distinction the task asked to look for already existed
+architecturally, with no new table, column, or scoring subsystem
+needed. Also found donors.relationship_health is written only on fact
+acceptance and read nowhere in the codebase -- not a viable existing
+signal to wire into, left untouched. The actual fix was purely UI copy
+in Capture and Outcome: replaced the misleading message with wording
+that distinguishes "no new relationship fact" from "still recorded as
+stewardship activity," reusing the existing null-preview gating
+unchanged. Added tests/stewardship-activity.test.mjs proving the real-
+world note saves normally, is found by the actual Last-Contact query,
+creates no fact even if acceptance were requested, that a genuine-intel
+positive control still creates a fact when accepted, that broadcast-role
+zman text still doesn't become a fact, and that genuine zman-
+appreciation classification is unchanged. pnpm test (117 files), tsc
+--noEmit, and build:staging-independent all pass. Not deployed. No
+Relationship Intelligence, Ask/Solicitation, or recommendation-ranking
+code was touched.
+
+---
 
 2026-08-23T16:05:00Z (approximate)
 Claude (Sonnet 5) — Deployed the two approved Ask/Solicitation v1
