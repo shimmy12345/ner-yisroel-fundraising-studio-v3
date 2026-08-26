@@ -15,10 +15,23 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`da31215`** -- "Expand Gmail API send-mechanism investigation in
-Daily Fundraising Agenda email section (no code/config/send/deploy
-change)" -- docs-only, zero application code change; see "Daily
-Fundraising Agenda Email" below for full detail. Sits on top of `42d336b`
+**(pending -- see the follow-up correction commit right after this one
+for the exact SHA)** -- "Document Daily Fundraising Agenda implementation
++ preview deploy + live-verification" -- docs-only, zero application code
+change; see "Daily Fundraising Agenda Email" below for full detail. Sits
+on top of **`a97f212`** ("Daily Fundraising Agenda: agenda generator,
+Gmail sender, preview route, scheduled handler (cron not yet activated)"
+-- real application code: `lib/agenda/*.ts`, `app/api/agenda/preview/
+route.ts`, `worker/index.ts`'s new `scheduled()` export,
+`wrangler.staging.jsonc`'s new `APP_BASE_URL` var, `cloudflare-env.d.ts`,
+5 new test files -- see "Daily Fundraising Agenda Email" below for full
+detail, including its implementation/deployment/live-verification
+subsection) -- **DEPLOYED to Independent Staging as the preview route
+only; the scheduled handler ships inert with no active Cron Trigger, and
+no email has ever been sent** (see below). On top of `da31215` --
+"Expand Gmail API send-mechanism investigation in Daily Fundraising
+Agenda email section (no code/config/send/deploy change)" -- docs-only,
+zero application code change; sits on top of `42d336b`
 ("Correct Current Git State to reference the new HEAD (37bcf35)" --
 docs-only, zero application code change), which sits on top of `37bcf35`
 -- "Document Daily Fundraising Agenda email investigation (no code/
@@ -116,8 +129,22 @@ row, per the now-established lesson -- found and deleted, D1 confirmed
 back to exact baseline). No production access. `origin/main` untouched
 throughout every task recorded in this file.
 
+**Deployed Worker version: `02056678-29b8-4366-becf-54c40f08f8c7`**
+(deployed 2026-08-26T16:07:34Z, confirmed via `wrangler deployments
+list`) -- supersedes `53229863-...` above. This is the Daily Fundraising
+Agenda's own deploy (`a97f212`): adds the new `GET /api/agenda/preview`
+route and `wrangler.staging.jsonc`'s `APP_BASE_URL` var, and ships (but
+does not activate) the `scheduled()` handler -- there is no `triggers`
+entry in `wrangler.staging.jsonc`, so Cloudflare never invokes it. Live-
+verified via the deployed preview route directly against real staging D1
+data -- see "Daily Fundraising Agenda Email" below for the full content
+returned. No email was sent by this deploy or by any action in this
+task. `STAGING_OWNER_EMAIL`/D1 data untouched by this deploy (the preview
+route only reads).
+
 origin/feature/independent-cloudflare-sandbox:
-`da31215` (pushed; matches local HEAD exactly, no divergence).
+`a97f212` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -7846,7 +7873,7 @@ unchanged) -- no unrelated data was touched.
 **Result: all 7 requested checks passed.** No production/main access at
 any point.
 
-## Daily Fundraising Agenda Email (2026-08-26) -- INVESTIGATION ONLY, NO CODE/CONFIG/SECRET/DEPLOY/SEND CHANGE, AWAITING PRODUCT DECISION
+## Daily Fundraising Agenda Email (2026-08-26) -- IMPLEMENTED, DEPLOYED (PREVIEW ONLY), LIVE-VERIFIED AGAINST REAL STAGING DATA, CRON NOT YET ACTIVATED, NO EMAIL EVER SENT
 
 **Request.** A daily 9:00 AM America/New_York email (every day including
 weekends, DST-correct, never a fixed UTC time) summarizing what actually
@@ -8082,6 +8109,170 @@ no OAuth flow started, no secret created, no credential of any kind
 exposed or committed. No production/main access at any point; no code,
 dependency, migration, secret, or deployment changed by this
 investigation.
+
+### Implementation -- Gmail approved, pre-deployment checkpoint complete (2026-08-26)
+
+**Approval.** The user completed the Gmail OAuth setup themselves: an
+Internal Google Auth app (so no external verification was ever needed --
+see the Workspace question above, now resolved by this choice), scoped to
+`gmail.send` only, authorized against their own `nirc.edu` account, and
+stored the resulting three values directly as encrypted Cloudflare Worker
+secrets on Independent Staging: `GMAIL_OAUTH_CLIENT_ID`,
+`GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`. Confirmed
+present via `wrangler secret list --config wrangler.staging.jsonc`
+(returns names/types only, never values, before and after this task's
+deploy) -- their values were never pasted into this conversation, never
+read by this session, and are read only from `env` at runtime.
+
+**Fresh-verify, per instruction.** Branch
+`feature/independent-cloudflare-sandbox`, local HEAD `c4e0a78`, matched
+`origin/feature/independent-cloudflare-sandbox` exactly, working tree
+clean. Deployed Worker confirmed still `53229863-...` via
+`wrangler deployments list`. `STAGING_OWNER_EMAIL` reconfirmed as
+`sgoldstein@nirc.edu` in `wrangler.staging.jsonc`. `loadWorkspaceBrief()`
+(`lib/workspace/live-data.ts`) reconfirmed as the reusable data source
+computing `relationshipQueue.{overdue,today,upcoming}`, `todaySchedule`,
+and `todayRelationshipDates` exactly as recorded in the investigation
+above.
+
+**What was built** (commit `a97f212`, see its own message for full
+per-file detail -- summarized here):
+- `lib/agenda/agenda-model.ts` -- pure `buildAgenda(brief, {now,
+  baseUrl})`: TODAY'S PRIORITIES from `relationshipQueue.today` only;
+  OVERDUE from `relationshipQueue.overdue`; IMPORTANT DATES / STEWARDSHIP
+  from `todayRelationshipDates` (yahrtzeit/birthday/anniversary) plus
+  `todaySchedule` (today's calendar-driven meetings/calls/visits) --
+  grouped together as calendar-driven stewardship moments, distinct from
+  reminder-queue items; SUGGESTED from `relationshipQueue.upcoming`
+  filtered to `dueAt === null` (genuine undated recommendations only,
+  never a future-dated reminder), capped to 3. A `dedupeAcrossSections()`
+  pass keys on (donorId, headline text) in that fixed section order, so a
+  collision always keeps the higher-priority placement -- a second,
+  explicit safety net on top of `loadWorkspaceBrief()`'s own donor-level
+  dedup (`dedupeRelationshipQueue`), which already makes a reminder and a
+  same-donor suggestion structurally mutually exclusive.
+- `lib/agenda/agenda-render.ts` -- pure HTML/plain-text rendering, with
+  HTML-escaping on every field (donor name, headline, context, href) and
+  a friendly empty-agenda message when all four sections are empty.
+- `lib/agenda/mime-message.ts` -- pure RFC 2822 multipart/alternative
+  message construction (base64url `raw` field for Gmail's
+  `users.messages.send`), deliberately free of any `cloudflare:workers`
+  import so it stays unit-testable -- matching this repo's own
+  established `fact-supersession.ts`/`fact-accept.ts` split for exactly
+  this constraint.
+- `lib/agenda/gmail-client.ts` -- `refreshAccessToken()` (one token per
+  send, no caching needed at one email/day) and `sendGmail()`. Every
+  failure path throws with HTTP status/statusText only -- the response
+  body is never read on failure, so a Gmail error payload can never reach
+  a thrown message or a log line; enforced by `tests/agenda-safety.test.mjs`.
+- `lib/agenda/send-agenda.ts` -- `generateAgenda()` (shared by preview and
+  real send), `sendDailyAgenda()`, and `runScheduledAgendaSend(now)`: the
+  DST-safe guard (`isDailyAgendaSendHour`, `lib/agenda/timezone.ts` --
+  checks the real America/New_York wall-clock hour at execution time,
+  never a fixed UTC offset) meant for an hourly Cron Trigger. A caught
+  send failure is logged via `lib/logger.ts` (status-only, per above) AND
+  rethrown -- Cloudflare records the scheduled invocation itself as
+  failed in Observability; nothing here can turn a real failure into a
+  silent success.
+- `worker/index.ts` -- new `scheduled(controller, env, ctx)` export,
+  wrapping `runScheduledAgendaSend()` in `ctx.waitUntil()` so Cloudflare
+  doesn't terminate the Worker before the send (or its failure)
+  completes.
+- `app/api/agenda/preview/route.ts` -- protected `GET
+  /api/agenda/preview` (same `getChatGPTUser()` auth every other route
+  uses), supporting `?format=html|text|json` and an optional `?now=`
+  override to preview a specific day against real data. **Zero import of
+  `gmail-client.ts`** -- there is no code path from this route to an
+  actual send, verified both by inspection and by
+  `tests/agenda-safety.test.mjs`'s explicit import-list check.
+- `wrangler.staging.jsonc` -- one new plaintext var, `APP_BASE_URL`
+  (`https://fundraising-os-staging.sgoldstein.workers.dev`), needed
+  because the scheduled handler has no incoming `Request` to derive an
+  origin from for absolute donor links. **Deliberately no
+  `triggers.crons` entry** -- the scheduled handler is implemented and
+  deployed but Cloudflare will never invoke it until that one line is
+  added, which is the only remaining step to go live once approved.
+- `cloudflare-env.d.ts` -- the three `GMAIL_OAUTH_*` secrets and
+  `APP_BASE_URL` added to the ambient `cloudflare:workers` env type, all
+  optional (absent on legacy ChatGPT Sites staging/production/local dev).
+
+**Tests added** (5 new files, all passing as part of `pnpm test`'s full
+run): `agenda-timezone.test.mjs` (DST correctness proven across both 2026
+transitions -- spring-forward March 8 and fall-back November 1 -- via the
+sharpest case: the identical UTC hour is 9 AM local the day before a
+transition and only 8 AM local the day of/after it); `agenda-mime-message
+.test.mjs` (pure MIME construction, decodes back to a well-formed
+message); `agenda-model.test.mjs` (prioritization/ordering preserved from
+the existing rank, due-vs-overdue classification, Ask-follow-up-as-
+ordinary-reminder handling, important dates with yahrtzeit
+provenance/Hebrew-date context and meeting-links-to-Meeting-Brief,
+suggestions capped and undated-only with a future-dated reminder proven
+absent, two separate deduplication cases -- today-beats-suggestion and
+overdue-beats-suggestion -- plus a "different actions aren't over-eagerly
+collapsed" negative case, empty-agenda behavior); `agenda-render.test.mjs`
+(empty-agenda message, section presence/absence and fixed ordering, HTML-
+escaping of a deliberately hostile donor name/headline/context/href,
+every item linking back to the app); `agenda-safety.test.mjs`
+(source-inspection guardrails: no response-body reads or direct
+console logging in `gmail-client.ts`, no secret given a literal fallback
+value, every thrown Error is status-only, `send-agenda.ts`'s catch block
+logs-then-rethrows, the preview route has zero import of the sending
+module and requires authentication, and -- the regression guard for "do
+not activate the cron yet" -- `wrangler.staging.jsonc` has no `triggers`
+key and `worker/index.ts` does export `scheduled()`).
+
+**Pre-deployment checkpoint, all three gates passing:**
+```
+pnpm test                          PASS (all suites, including the 5 new agenda-* files)
+pnpm exec tsc --noEmit             PASS (exit 0, no errors)
+pnpm run build:staging-independent PASS -- /api/agenda/preview appears in the route list
+```
+
+**Deployed to Independent Staging (preview only).** `wrangler deploy
+--config wrangler.staging.jsonc` produced Worker version
+**`02056678-29b8-4366-becf-54c40f08f8c7`** (supersedes `53229863-...`).
+The only remote-vs-local config diff wrangler reported was the new
+`APP_BASE_URL` var being added -- no `triggers` field, confirming the
+cron did not activate as a side effect of this deploy. Secrets
+reconfirmed present immediately after deploy (`wrangler secret list`
+still returns exactly the same three names).
+
+**Live-verification against real staging data (2026-08-26, via the
+already-authenticated Cloudflare Access browser session -- no test data
+created, nothing to clean up, since this route only reads):**
+`GET /api/agenda/preview` and `?format=json` both returned, live, from
+real D1:
+- Subject: **`Fundraising Agenda — Wednesday, August 26`** -- exactly the
+  requested format, using the real America/New_York calendar date.
+- TODAY'S PRIORITIES: empty (no reminder currently has a due date of
+  today on this staging roster).
+- OVERDUE: empty (no reminder currently overdue).
+- IMPORTANT DATES / STEWARDSHIP: 2 real items -- Mr. & Mrs. Zev
+  Nussbaum's birthday today ("Turning 33") and Mr. & Mrs. Eli Treitel's
+  birthday today ("Turning 56"), each with a working absolute
+  `/donors/{id}` link.
+- SUGGESTED: 3 real items (capped correctly), all `follow_up_pledge`
+  recommendations -- Mr. & Mrs. Yaakov Pollack ($1,300 open pledge, "No
+  payment activity in 258 days"), Rabbi & Mrs. Ahron Schabes ($2,950,
+  "254 days"), Mr. Elie Grinblatt ($500, "253 days and no completed
+  interaction on file") -- each with a working donor link.
+- HTML rendering: escaped correctly (`Zev's` -> `Zev&#39;s`, `&` ->
+  `&amp;`), clean semantic structure, no broken markup.
+- Plain-text rendering: correct section headers, indentation, and full
+  URLs.
+- `isEmpty: false` (correct, since two sections have content).
+- Nothing due/overdue today on the real roster is consistent with (not
+  contradicted by) the live Today page, which independently reads the
+  same `loadWorkspaceBrief()` output.
+
+**Not done, per explicit instruction:** no real Gmail message was ever
+sent (the preview route has no code path to `sendGmail()`, confirmed
+above); the Cron Trigger was not activated (`wrangler.staging.jsonc` has
+no `triggers` key); `origin/main` and production were never touched.
+
+**The only remaining step to go fully live**, once the user reviews this
+preview and approves: add `"triggers": { "crons": ["0 * * * *"] }` to
+`wrangler.staging.jsonc` and redeploy -- no other code change is needed.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -8527,27 +8718,27 @@ only.
 
 ## Deployment State
 
-**Corrected 2026-08-23 (stewardship-activity deploy) -- this section had
-gone stale again (still describing the Ask/Solicitation v1 deploy
-through the meaningful-stewardship-activity fix's own 2026-08-23
-deployment, which has its own full record in its own dated section
-above). This section remains a pointer to the true current state, not a
-duplicate of it.**
+**Corrected 2026-08-26 (Daily Fundraising Agenda preview deploy) -- this
+section had gone stale again. This section remains a pointer to the true
+current state, not a duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `1fa2c26`
-("Correct Capture/Outcome copy: no new relationship fact is not the same
-as a meaningless interaction" -- see "Meaningful Stewardship Activity vs.
-Durable Relationship Intelligence" above for full detail, including its
-"Deployment + Live End-to-End Verification" subsection), Worker version
-**`53229863-60fd-47a3-8711-ee9910e5566b`**, confirmed via
-`wrangler deployments list` and live-verified end-to-end directly
-against real D1 writes (one temporary, fully-cleaned-up test donor).
-This supersedes every earlier version ID recorded anywhere in this file,
-including `cfb39a25-5348-46e3-85a9-ef5a018b143b` (Ask/Solicitation v1's
-own deploy, live from 2026-08-23T15:46 through this task). For the exact
-current git SHA (which may have advanced past `1fa2c26` by
-documentation-only commits that touch no application code -- the
-deployed Worker always reflects the latest actual code change, not
+**Live -- current as of this deploy.** Deployed commit `a97f212` ("Daily
+Fundraising Agenda: agenda generator, Gmail sender, preview route,
+scheduled handler (cron not yet activated)" -- see "Daily Fundraising
+Agenda Email" above for full detail, including its implementation/
+deployment/live-verification subsection), Worker version
+**`02056678-29b8-4366-becf-54c40f08f8c7`**, confirmed via `wrangler
+deployments list` and live-verified against real staging D1 data via the
+new `GET /api/agenda/preview` route. **This deploy adds a `scheduled()`
+handler that Cloudflare cannot yet invoke (no `triggers.crons` entry in
+`wrangler.staging.jsonc`) and a Gmail send code path that no route in
+this deploy calls -- no email has ever been sent by this app.** This
+supersedes every earlier version ID recorded anywhere in this file,
+including `53229863-60fd-47a3-8711-ee9910e5566b` (the meaningful-
+stewardship-activity fix's own deploy, live from 2026-08-23T19:18 through
+this task). For the exact current git SHA (which may have advanced past
+`a97f212` by documentation-only commits that touch no application code --
+the deployed Worker always reflects the latest actual code change, not
 necessarily the latest commit), see "Current Git State" at the top of
 this file, which is the authoritative pointer kept in sync going
 forward.
@@ -8571,12 +8762,15 @@ Relationship Intelligence Phase 2's deterministic fact-based synthesis,
 the two Ask/Solicitation v1 enhancements (Meeting Brief open-ask
 visibility, independent of Suggested Action; add-follow-up on an
 existing pending ask, reusing the existing reschedule path for an ask
-that already has one), and now the meaningful-stewardship-activity
-Capture/Outcome copy fix (an interaction that yields no new durable fact
-is still shown as saved stewardship activity, never as a worthless
-interaction). Each has its own dated section above with full
-live-verification detail -- this section intentionally does not repeat
-it.
+that already has one), the meaningful-stewardship-activity Capture/
+Outcome copy fix (an interaction that yields no new durable fact is
+still shown as saved stewardship activity, never as a worthless
+interaction), and now the Daily Fundraising Agenda email's preview route
+(`GET /api/agenda/preview`, generating real content from live D1 data --
+the scheduled send itself remains inert, not part of "deployed and
+live-verified" in the sending sense). Each has its own dated section
+above with full live-verification detail -- this section intentionally
+does not repeat it.
 
 Historical note (kept for continuity, not current): the 2026-08-20
 deploy referenced above by the now-superseded version ID required two
@@ -8891,17 +9085,19 @@ relationship-intelligence quality work):
 ## Next Approval Required
 
 **Genuinely open, newest first: Daily Fundraising Agenda email (2026-08-26)
--- awaiting the user's send-mechanism decision.** See "Daily Fundraising
-Agenda Email" above for the full investigation. Nothing is blocking except
-this one choice: Gmail API (contingent on the user confirming whether
-`nirc.edu` is a Google Workspace domain, which decides Internal-vs-
-External OAuth consent) vs. Resend vs. holding. No infrastructure exists
-for either scheduling (no `triggers.crons`/`scheduled()` handler) or
-sending (no email dependency/binding of any kind) today. Once decided,
-implementation is scoped through the pre-deploy checkpoint per the
-original instruction: tests, `tsc --noEmit`, `build:staging-independent`,
-docs update, commit/push -- no deploy or real send without a separate
-explicit approval.
+-- awaiting the user's review of the live preview and approval to activate
+the cron.** See "Daily Fundraising Agenda Email" above for the full
+investigation, implementation, deployment, and live-verification record
+(subject/section content actually returned against real staging data on
+2026-08-26 is quoted there in full). Gmail is the approved and configured
+send mechanism (Internal OAuth app, `gmail.send`-only, secrets already on
+the Worker) -- that decision is closed. **What remains, and only this:**
+add `"triggers": { "crons": ["0 * * * *"] }` to `wrangler.staging.jsonc`
+and redeploy. No other code change is needed; the scheduled handler,
+DST-safe guard, and Gmail sender are already implemented, tested, and
+deployed inert. Do not add that line or send a real email without a
+separate, explicit approval from the user after they've reviewed the
+preview.
 
 **The Ask/Solicitation feature is now COMPLETE / CLOSED FOR V1** —
 implemented, migration applied, deployed, end-to-end live-tested, and the
@@ -8999,6 +9195,42 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T16:15:00Z (approximate)
+Claude (Sonnet 5) — Implemented the Daily Fundraising Agenda email now
+that the user completed Gmail OAuth setup themselves (Internal app,
+`gmail.send`-only, three secrets already stored on the Worker). Fresh-
+verified branch/HEAD, deployed Worker, STAGING_OWNER_EMAIL, and
+loadWorkspaceBrief() first. Built: a pure agenda generator
+(lib/agenda/agenda-model.ts) reusing loadWorkspaceBrief()'s existing
+due/overdue/today's-dates/suggestion buckets across the four approved
+sections with cross-section deduplication; HTML/text rendering with full
+escaping; a dependency-free MIME-message builder kept unit-testable per
+this repo's own fact-accept.ts convention; a Gmail token-refresh/send
+client whose every failure path is status-code-only (never logs a
+secret, token, header, or response body); a DST-safe
+isDailyAgendaSendHour() guard and a new scheduled() handler in
+worker/index.ts wired to it (failures logged then rethrown, never
+swallowed); and a protected GET /api/agenda/preview route with zero
+import of the Gmail-sending module. Added 5 new test files covering
+prioritization, due-vs-overdue classification, deduplication, Ask
+follow-ups, important dates, suggestions, empty-agenda behavior, and DST
+correctness across both 2026 transitions -- all passing as part of
+`pnpm test`'s full run, alongside a clean `tsc --noEmit` and a successful
+`build:staging-independent`. Deployed to Independent Staging as Worker
+version 02056678-29b8-4366-becf-54c40f08f8c7 -- preview route only; added
+no `triggers.crons` entry, so the scheduled handler remains inert and no
+email has ever been sent. Live-verified GET /api/agenda/preview against
+real staging D1 data (quoted in full in "Daily Fundraising Agenda Email"
+above): today's date's correct subject line, two real birthdays under
+Important Dates/Stewardship, three real pledge-follow-up suggestions
+capped correctly, nothing currently due/overdue on this roster. Committed
+and pushed the implementation (a97f212) and this documentation update.
+Stopped for the user's review and approval before adding the Cron
+Trigger or sending any real email, per instruction. No production/main
+access at any point.
+
+---
 
 2026-08-26T00:20:00Z (approximate)
 Claude (Sonnet 5) — At the user's request, expanded the same-day Gmail
