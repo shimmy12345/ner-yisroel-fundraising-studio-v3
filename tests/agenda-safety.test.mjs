@@ -8,7 +8,9 @@ import { readFile } from "node:fs/promises";
 // comment on the same limitation). This file instead guards, by source
 // inspection, the specific safety properties that matter most for this
 // feature: no secret/response-body logging, no silent failure swallowing,
-// and the cron staying deliberately unactivated until explicit approval.
+// and (now that the cron is approved and active, 2026-08-26) that the
+// exact approved hourly Cron Trigger is registered and still gated by
+// the DST-safe 9 AM America/New_York guard, never a bare/unguarded send.
 
 const gmailClient = await readFile(new URL("../lib/agenda/gmail-client.ts", import.meta.url), "utf8");
 const sendAgenda = await readFile(new URL("../lib/agenda/send-agenda.ts", import.meta.url), "utf8");
@@ -63,14 +65,24 @@ async function run() {
   assert.match(previewRouteCode, /getChatGPTUser/);
   assert.match(previewRouteCode, /status: 401/);
 
-  // --- The scheduled handler is implemented, but the Cron Trigger itself
-  // is deliberately NOT activated yet -- this must keep failing (in the
-  // sense of catching a regression) once real activation is explicitly
-  // approved and this line is intentionally updated. ---
-  assert.doesNotMatch(wranglerStagingCode, /"triggers"\s*:/, "the cron must not be activated until explicit approval -- see the file's own comment on why");
-  assert.match(workerIndex, /async scheduled\(/, "the scheduled() handler itself must exist and be exported, ready for when the trigger is added");
-  assert.match(workerIndex, /runScheduledAgendaSend/);
+  // --- The Cron Trigger is APPROVED and ACTIVE (2026-08-26): exactly the
+  // approved hourly schedule, nothing broader (e.g. a fixed once-daily
+  // UTC cron, which would be the DST bug this whole design avoids) and
+  // nothing else registered alongside it. ---
+  assert.match(wranglerStagingCode, /"triggers"\s*:\s*\{\s*"crons"\s*:\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/, "the cron must be exactly the approved hourly schedule (\"0 * * * *\")");
+  const cronMatches = wranglerStagingCode.match(/"crons"\s*:/g) ?? [];
+  assert.equal(cronMatches.length, 1, "exactly one crons entry -- no duplicate or additional schedule");
+
+  // --- The scheduled handler exists, is wired to the DST-safe guard, and
+  // extends the Worker's lifetime -- the cron firing hourly must never by
+  // itself cause a send; only runScheduledAgendaSend()'s own
+  // isDailyAgendaSendHour() check (verified independently in
+  // agenda-timezone.test.mjs) decides that. ---
+  assert.match(workerIndex, /async scheduled\(/, "the scheduled() handler itself must exist and be exported");
+  assert.match(workerIndex, /runScheduledAgendaSend/, "the handler must delegate to the guarded sender, never call sendDailyAgenda/sendGmail directly");
+  assert.doesNotMatch(workerIndex, /sendDailyAgenda\(|sendGmail\(/, "the Worker entry point must never bypass the DST guard by calling the sender directly");
   assert.match(workerIndex, /ctx\.waitUntil\(/, "the scheduled handler must extend the Worker's lifetime with waitUntil, not return before the send completes");
+  assert.match(sendAgenda, /isDailyAgendaSendHour\(now\)/, "runScheduledAgendaSend must still gate on the real DST-safe local-hour guard, not an unconditional send");
 
   console.log("agenda-safety: all assertions passed");
 }

@@ -67,15 +67,17 @@ const worker = {
     return runWithWorkspaceBriefRequestScope(() => handler.fetch(request, env, ctx));
   },
 
-  // Daily Fundraising Agenda email. Intended to run on an hourly Cron
-  // Trigger ("0 * * * *") -- see wrangler.staging.jsonc's comment on why
-  // no `triggers.crons` entry exists yet (not activated pending explicit
-  // approval of the reviewed preview). runScheduledAgendaSend() itself is
-  // the DST-safe 9 AM America/New_York guard (lib/agenda/send-agenda.ts)
-  // -- this handler does no time-zone logic of its own, just passes
-  // through the trigger's own scheduled time and extends the Worker's
-  // lifetime with waitUntil() so Cloudflare doesn't terminate it before
-  // the send (or its failure) completes.
+  // Daily Fundraising Agenda email -- APPROVED and ACTIVE. Runs on the
+  // hourly Cron Trigger ("0 * * * *") registered in wrangler.staging.jsonc
+  // (see that file's own comment for the full approval record).
+  // runScheduledAgendaSend() itself is the DST-safe 9 AM America/New_York
+  // guard (lib/agenda/send-agenda.ts's isDailyAgendaSendHour()) -- this
+  // handler does no time-zone logic of its own, just passes through the
+  // trigger's own scheduled time and extends the Worker's lifetime with
+  // waitUntil() so Cloudflare doesn't terminate it before the send (or
+  // its failure) completes. 23 of every 24 hourly invocations are an
+  // intentional, silent no-op; only the one where the real local hour
+  // reads 9 actually sends.
   async scheduled(controller: ScheduledController, _env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runScheduledAgendaSend(Math.floor(controller.scheduledTime / 1000)));
   },
