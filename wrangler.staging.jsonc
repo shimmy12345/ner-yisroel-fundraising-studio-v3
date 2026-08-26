@@ -42,7 +42,22 @@
     // The sole email allowed to authenticate. Enforced both by the Access
     // policy itself and, independently, by this app's own JWT verification
     // (defense in depth).
-    "STAGING_OWNER_EMAIL": "sgoldstein@nirc.edu"
+    "STAGING_OWNER_EMAIL": "sgoldstein@nirc.edu",
+    // This Worker's own public URL -- not a secret, just the same
+    // *.workers.dev address anyone could look up from the Worker's name.
+    // Used to build absolute donor links in the Daily Fundraising Agenda
+    // email, whose scheduled handler has no incoming Request to derive an
+    // origin from. See cloudflare-env.d.ts for why this lives here rather
+    // than as a hardcoded string in application source.
+    "APP_BASE_URL": "https://fundraising-os-staging.sgoldstein.workers.dev"
   },
+  // Daily Fundraising Agenda email: the scheduled() handler in
+  // worker/index.ts is implemented and ready, but this Worker has no
+  // `triggers.crons` entry yet -- Cloudflare will never invoke it until
+  // one is added. Deliberate: the explicit instruction for this task was
+  // "implement the scheduled handler" AND "do not activate the cron yet".
+  // Adding `"triggers": { "crons": ["0 * * * *"] }` here (see the
+  // handler's own DST-safety comment for why hourly) is the only change
+  // needed to go live, once approved.
   "observability": { "enabled": true }
 }

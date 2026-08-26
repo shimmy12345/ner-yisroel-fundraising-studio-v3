@@ -2,6 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { runWithWorkspaceBriefRequestScope } from "../lib/workspace/live-data";
+import { runScheduledAgendaSend } from "../lib/agenda/send-agenda";
 
 interface Env {
   ASSETS: Fetcher;
@@ -21,6 +22,14 @@ interface Env {
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
+}
+
+// Minimal shape of Cloudflare's real ScheduledController -- only the one
+// field this Worker actually reads, matching this file's existing
+// hand-rolled-interface convention (see ExecutionContext/Env above)
+// rather than pulling in @cloudflare/workers-types.
+interface ScheduledController {
+  scheduledTime: number;
 }
 
 // Image security config. SVG sources with .svg extension auto-skip the
@@ -56,6 +65,19 @@ const worker = {
     // only run()/getStore() -- Cloudflare Workers' AsyncLocalStorage does
     // not implement enterWith()/disable().
     return runWithWorkspaceBriefRequestScope(() => handler.fetch(request, env, ctx));
+  },
+
+  // Daily Fundraising Agenda email. Intended to run on an hourly Cron
+  // Trigger ("0 * * * *") -- see wrangler.staging.jsonc's comment on why
+  // no `triggers.crons` entry exists yet (not activated pending explicit
+  // approval of the reviewed preview). runScheduledAgendaSend() itself is
+  // the DST-safe 9 AM America/New_York guard (lib/agenda/send-agenda.ts)
+  // -- this handler does no time-zone logic of its own, just passes
+  // through the trigger's own scheduled time and extends the Worker's
+  // lifetime with waitUntil() so Cloudflare doesn't terminate it before
+  // the send (or its failure) completes.
+  async scheduled(controller: ScheduledController, _env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runScheduledAgendaSend(Math.floor(controller.scheduledTime / 1000)));
   },
 };
 
