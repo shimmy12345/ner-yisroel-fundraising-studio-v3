@@ -15,7 +15,14 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`45c31ac`** -- "Document Google Workspace identity provider
+**(pending -- see the follow-up correction commit right after this one
+for the exact SHA)** -- "Document Daily Fundraising Agenda quality
+investigation (advance-notice window + Suggested Actions root cause)" --
+docs-only, zero application code change; see "Daily Fundraising Agenda
+Quality Investigation" below for full detail. Sits on top of `2a7b57b`
+("Correct Current Git State to reference the new HEAD (45c31ac)" --
+docs-only, zero application code change), which sits on top of
+`45c31ac` -- "Document Google Workspace identity provider
 implementation and live verification" -- docs-only, zero application
 code change (the implementation itself is Cloudflare Zero Trust +
 Google Cloud configuration, outside this repo -- see "Authentication
@@ -185,7 +192,8 @@ job itself at the next 9:00 AM America/New_York firing. See "Daily
 Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`45c31ac` (pushed; matches local HEAD exactly, no divergence).
+`45c31ac` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -9017,6 +9025,321 @@ completely unchanged. No production/main access at any point. Stopped
 for the user's review before any further decision about narrowing to a
 single login method.
 
+## Daily Fundraising Agenda Quality Investigation -- Advance-Notice Window + Suggested Actions Root Cause (2026-08-26) -- INVESTIGATION ONLY, NO D1 MUTATION/DEPLOY/SCORING CHANGE, AWAITING DECISIONS BEFORE IMPLEMENTATION
+
+**Request.** Two focused quality issues with the Daily Fundraising
+Agenda email, investigation only: (1) `todayRelationshipDates` only ever
+shows a birthday/anniversary/yahrtzeit on the exact day, giving no
+advance notice for stewardship prep -- investigate real-data volume at a
+3-day vs. 7-day window and recommend, without silently picking one; (2)
+the Suggested section is dominated by `follow_up_pledge` despite the
+recommendation engine already supporting `continue_conversation`/
+`reconnect_contact_gap`/`relationship_opportunity`/`solicit` -- trace the
+full pipeline against real Independent Staging data and determine
+whether pledges genuinely score highest or whether something is
+suppressing the others. No D1 mutation, no deployment, no production/
+main change, no scoring/ranking code change -- this is a pure reading +
+real-data analysis task.
+
+**Fresh-verified first.** Branch `feature/independent-cloudflare-
+sandbox`, local HEAD `2a7b57b`, matched `origin/feature/independent-
+cloudflare-sandbox` exactly, working tree clean (confirmed unchanged
+again at the end of this task).
+
+**Method.** Read `lib/agenda/agenda-model.ts`, `lib/workspace/live-
+data.ts`, `lib/workspace/relationship-date-events.ts`,
+`lib/relationships/recommendation-candidates.ts`, `recommendation-
+rank.ts`, `recommendation-evidence.ts`, and `lib/workspace/suggestion-
+candidates.ts` in full. Then, since none of `recommendation-evidence.ts`
+/ `recommendation-candidates.ts` / `recommendation-rank.ts` /
+`suggestion-candidates.ts` / `relationship-queue.ts` / `capture/
+interaction.ts` / the calendar modules import `cloudflare:workers` (all
+pure), this session pulled real Independent Staging data via `wrangler
+d1 execute --remote --json` (donors, giving_activities, interactions,
+asks, yahrtzeits, important_dates, recommendations, gift_acknowledgments
+-- all read-only `SELECT`s, zero writes) into local JSON files, and ran
+that real data through the **actual, unmodified, real production
+functions** (`buildRecommendationEvidence`, `generateCandidates`,
+`buildDonorRecommendation`, `score`, `selectSuggestionDonorIds`,
+`dedupeRelationshipQueue`, `relationshipQueueBucket`,
+`nextYahrtzeitOccurrence`, `nextGregorianRecurrence`), imported directly
+from the repo into a throwaway Node analysis script in the scratchpad
+directory -- not a reimplementation or approximation of the scoring
+logic, the real code itself, against real data. One acknowledged
+simplification: pledge-payment-plan linkage (`activePaymentPlan`) was
+left `null` for all pledges in this analysis, since the raw pledge pull
+didn't select `giving_activities.id`; this only matters for the small
+number of pledges with an active payment plan, and doesn't affect the
+core findings below (none of the top-scoring pledges in this data have
+an active plan -- confirmed by their wording in the live preview
+already captured in this file, "no payment activity in N days," not
+plan-based wording).
+
+### Issue 1 -- Advance notice for stewardship dates
+
+**How the three date types are modeled today, confirmed in code:**
+`RELATIONSHIP_DATE_LEAD_WINDOW_DAYS = 14` (`lib/relationships/
+recommendation-candidates.ts`) is **one shared constant**, used
+identically by `yahrtzeitOutreachCandidate`, `birthdayOutreachCandidate`,
+and `anniversaryOutreachCandidate`, and re-imported by `lib/workspace/
+relationship-date-events.ts` for the homepage's "Coming Up" list and by
+`lib/workspace/suggestion-candidates.ts` for pool inclusion. The code's
+own comment states this is deliberate: "Coming Up is meant to feel like
+one relationship calendar with one consistent horizon, not a different
+lead time per type." **There is no structural reason in the data or code
+that forces different windows per type** -- the only type-specific
+difference is volume (see below), not mechanism. The Daily Agenda email
+currently uses none of this -- it only reads `todayRelationshipDates`
+(the exact-`daysUntil===0` partition), never `upcomingRelationshipDates`
+(the already-computed 14-day-windowed set), which is why advance notice
+is entirely absent from the email today despite the underlying data and
+lead-window logic already existing and already being live on the
+homepage's "Coming Up" section.
+
+**Real-data volume, computed via the actual `nextYahrtzeitOccurrence`/
+`nextGregorianRecurrence` functions against real staging data (208 total
+date facts: 36 yahrtzeits, 171 birthdays, 1 anniversary; snapshot taken
+2026-08-26T21:16 UTC):**
+
+| Window | Total items | Yahrtzeits | Birthdays | Anniversaries |
+|---|---|---|---|---|
+| Today only (current behavior) | 2 | 0 | 2 | 0 |
+| 3 days | 2 | 0 | 2 | 0 |
+| 7 days | 6 | 0 | 6 | 0 |
+| 14 days (existing "Coming Up" window) | 12 | 0 | 12 | 0 |
+
+No yahrtzeit happens to fall within 14 days of this exact snapshot date
+-- a real, honest artifact of today's specific date, not a general
+absence (36 yahrtzeits exist on file; the annual density estimate below
+shows they occur at a real, non-zero rate). The 1 anniversary on file
+also doesn't fall in any near window today. **Annual density estimate**
+(total facts / 365, then scaled by window size -- a uniform-arrival
+approximation, since Hebrew-calendar yahrtzeits don't fall perfectly
+uniformly but are close enough for this purpose): ~0.57 dates/day
+overall, so a typical (not today-specific) 3-day window would contain
+**~1.7 items**, a 7-day window **~4.0 items**, and the existing 14-day
+window **~8.0 items**. At this donor-roster scale (248 donors, 208 date
+facts), **none of these windows produce anything close to a noisy
+volume** -- even 14 days averages under 2 items/day of "new" entries and
+under 8 simultaneously in-window at any time.
+
+**Repeated-appearance math** (mechanical, not data-dependent): showing
+an item **every day it's inside the window** produces `window+1` total
+appearances per date (e.g. 8 appearances for a 7-day window: day -7
+through day 0) -- this is a ramp, not noise, and mirrors the existing
+recommendation engine's own already-shipped design philosophy (yahrtzeit/
+birthday/anniversary *candidate* urgency already ramps continuously via
+`recencyScore(daysUntil, RELATIONSHIP_DATE_LEAD_WINDOW_DAYS)`, never a
+binary flip) -- reusing that same "ramps, doesn't nag" precedent for the
+email's presentation would be consistent with how this codebase already
+treats these dates elsewhere. Showing it only **twice** (once on entry,
+once on the day itself) is simpler and closer to the rest of the
+agenda's "either due or suggested, never a standing daily repeat" feel,
+at the cost of a fundraiser potentially not seeing the reminder again
+between entry and the day itself (a real risk only for longer windows;
+negligible for 3 days, modest for 7).
+
+**Whether the three types need different windows.** Practically:
+`anniversary` has essentially no real data (1 row) to reason about at
+all right now. `yahrtzeit`/`birthday` are both plausible candidates for
+slightly different real-world lead times (a yahrtzeit is often about a
+timely acknowledgment/call; a birthday/anniversary card or gift
+typically needs mail lead time, arguably favoring a slightly longer
+window) -- but this is a soft product judgment about donor-relations
+practice, not something the data or architecture forces either way, and
+the existing code's own documented rationale for a single shared window
+is a reasonable, already-chosen design this session would not want to
+silently reverse.
+
+**Options for the user to choose between, not decided here:**
+1. **Reuse the existing 14-day `upcomingRelationshipDates` set as-is**
+   (zero new lead-window logic anywhere -- just wire the already-computed
+   array into `lib/agenda/agenda-model.ts`, optionally further filtered
+   to a smaller window post-hoc since `WorkspaceRelationshipDateEvent`
+   already exposes `dateEpoch`). Smallest possible change, but inherits a
+   window tuned for a UI list ("Coming Up"), not necessarily right for a
+   once-daily email.
+2. **A dedicated, smaller email-only window** (3 or 7 days, per the real
+   counts above), implemented as a post-filter on the already-computed
+   `upcomingRelationshipDates` array (`dateEpoch - now <= windowDays *
+   86400`) -- no change to `relationship-date-events.ts`,
+   `recommendation-candidates.ts`, or the shared 14-day constant at all,
+   since both 3 and 7 are within the existing computed ceiling. This is
+   the smallest change that lets the email have its own, deliberately
+   chosen horizon independent of the homepage's.
+3. **Same window, different presentation cadence** (show once on entry +
+   once on the day, vs. every day) -- an independent choice from the
+   window size itself, decidable separately.
+Recommendation, offered not decided: **Option 2, a 7-day window, shown
+every day within the window** -- 7 days gives real mail/prep lead time
+for birthdays/anniversaries without meaningfully more volume than 3 days
+at this roster's real scale (~4 vs. ~1.7 typical items), and "every day"
+matches the existing ramp philosophy already used elsewhere in this
+codebase. This is a recommendation for the user's decision, not
+something implemented in this task.
+
+### Issue 2 -- Suggested Actions are pledge-follow-up-heavy: full pipeline trace
+
+**The honest, evidenced answer: both things are true at once.** Pledges
+genuinely are numerous and genuinely score at or near the top of the
+real formula for a meaningful share of the roster -- **and** two
+separate, real pipeline defects independently suppress every one of the
+other four named categories (plus a fifth, `open_ask`, discovered along
+the way) from ever reaching the email, regardless of their real score.
+Fixing the defects would not manufacture artificial diversity in today's
+specific data, but it would correct a real, demonstrated bug and would
+change today's email in one concrete way: it would surface two
+`open_ask` opportunities (a $10,000 and a $5,000 pending ask) that
+currently score **higher than every pledge in the dataset** and yet
+never appear anywhere in the email.
+
+**Step 1 -- candidate generation & eligibility, all 248 donors (not just
+the ones actually evaluated today -- see Step 3):**
+
+| Category | Eligible donors (of 248) | Real score range | Notes |
+|---|---|---|---|
+| `continue_conversation` | **1** | 0.5600 (fixed, one value) | Only one donor roster-wide currently has a completed interaction within 30 days whose note contains actionable follow-up language. |
+| `reconnect_contact_gap` | 237 | 0.2375 -- 0.3875 | Nearly universal (most donors have no recent substantive contact), as expected. |
+| `follow_up_pledge` | 58 | 0.3500 -- 0.6500 | Matches the known "58 donors with an open pledge" baseline in this file. |
+| `relationship_opportunity` | 14 | 0.4186 (fixed, one value) | Matches "14 donors with relationship_summary/institutional_memory set." |
+| `solicit` | 23 | 0.1293 (all 23, identical) | See the regex finding below -- the higher-scoring narrative branch (0.459) never actually fires in current data. |
+| `open_ask` *(not one of the 5 named, found along the way)* | 2 | 0.8075 (both) | The two highest real scores of **any** candidate in the entire dataset, in either the 5 named categories or this one. |
+
+**A secondary, real finding inside `solicit`:** `SOLICITATION_PATTERN`'s
+regex (`\bsolicit\b`, exact word) does not match the past tense
+"Solicited" -- e.g. Mr. & Mrs. Mayer Simcha Klein's own narrative,
+literally "Note context: Solicited for a plaque ($5k)," fails to match
+and falls through to `relationship_opportunity` (0.4186) instead of the
+higher-scoring narrative `solicit` branch (0.459) it evidently should
+hit. This is a real, narrow regex gap worth fixing separately, but it is
+not the primary cause of `solicit`'s weak showing (see Step 3 -- none of
+`solicit`'s candidates reach the email at all regardless of which branch
+scores them).
+
+**Step 2 -- the pool bottleneck (`selectSuggestionDonorIds`).** Of 248
+donors, the pool selects **145** -- every donor with a gift/pledge/ask/
+near relationship-date (all "kept in full, unbounded" by design) plus
+the top-100-stalest-contact donors (the module's own, intentional bound,
+justified by its own comment: "at real scale, 'no recent contact' is
+most of the donor roster... the only one that needs bounding"). **This
+module has no inclusion category at all for "has a narrative
+relationship_summary/institutional_memory fact" or "was contacted
+recently with actionable follow-up language"** -- `relationship_
+opportunity` and `continue_conversation` eligibility are not represented
+in pool selection as their own criteria. Consequences, confirmed
+directly: the one real `continue_conversation`-eligible donor (Mr. &
+Mrs. Dovie Weinschneider, real note: "Follow up after succos," score
+0.5600) is **excluded from the pool** -- structurally guaranteed, since
+`continue_conversation` requires contact within 30 days, and the
+contact-gap pool keeps the top-100 *stalest* (least-recently-contacted)
+donors, the opposite end of the spectrum. 9 of the 14
+`relationship_opportunity`-eligible donors are likewise excluded. Their
+candidates are never even computed as part of the ranked queue -- not
+scored low, **never evaluated at all**.
+
+**Step 3 -- the real, decisive bottleneck: the cross-donor "rank" tier
+system in `lib/workspace/live-data.ts` ignores `score()` entirely.**
+Even for the 145 pool donors whose evidence *is* built, each donor's
+single winning recommendation (`buildDonorRecommendation`, which does
+use the real 0-1 `score()` formula to pick the best candidate *within
+that one donor*) is then placed into the shared cross-donor "Suggested"
+queue using a **separate, coarse, hardcoded priority table**
+(`suggestionRankByKind = { acknowledge_gift: 2, follow_up_pledge: 3 }`,
+every other kind falls through to `?? 4`) -- **not** the real score.
+Reproduced exactly (real code, real data): among the 145 pool donors,
+winners break down as `follow_up_pledge: 53`, `reconnect_contact_gap:
+74`, `acknowledge_gift: 6`, `open_ask: 2` -- **zero** `continue_
+conversation`/`relationship_opportunity`/`solicit` winners even within
+the pool (when a pool donor has both, e.g., a pledge and a
+`relationship_opportunity` fact, the pledge's higher real score wins
+that donor's one slot -- a separate, smaller effect from the main
+bottleneck below). Building the exact real `ranked` array (138 items:
+6 rank-2, 53 rank-3, 76 rank-4, 3 rank-5) and running it through the
+real `dedupeRelationshipQueue()` + `slice(0, 50)` (the Daily Agenda's own
+`AGENDA_PRIORITY_LIMIT`) produces **50 surviving items: 6
+`acknowledge_gift` + 44 `follow_up_pledge`, and *zero* rank-4 items of
+any kind** -- because 6 + 53 = 59 already exceeds the 50-item budget by
+itself. **Every single rank-4 item -- all 76 of them, including the two
+`open_ask` candidates scoring 0.8075, the single highest real score in
+the entire dataset -- is discarded before the agenda's own `dueAt===
+null`/`MAX_SUGGESTED=3` logic ever runs.** This is not a scoring
+outcome; it is a hard cutoff that never consults `score()` for the
+cross-donor comparison at all. Reproducing the actual live email's
+current output from this exact pipeline matches what was live-verified
+earlier in this file almost exactly (three tied-at-0.6500
+`follow_up_pledge` items; the specific three names differ slightly from
+the earlier live capture due to this analysis's payment-plan-linkage
+simplification noted above, which doesn't change which *kind* wins).
+
+**Direct answer to "are pledges winning on merit, or is something
+suppressing the others":** structurally suppressing, demonstrated with
+real numbers -- but only down to a point. Simulating the fix (re-sorting
+the same "upcoming, `dueAt===null`" candidate set by real `score()`
+instead of by rank/sortAt) changes the top 3 from three tied
+`follow_up_pledge` items to **the two `open_ask` items (0.8075 each) +
+one `follow_up_pledge` (0.6500)** -- a real, meaningful, evidence-backed
+improvement (the two largest, most urgent pending asks in the portfolio
+would finally appear, ahead of much-smaller stale pledges). It does
+**not**, however, promote any `continue_conversation`/`relationship_
+opportunity`/`solicit` item into the top 3 today, because their real
+scores (0.5600 / 0.4186 / up to 0.4590-if-the-regex-were-fixed) are
+genuinely lower than the strongest pledges (0.6500) in the *current*
+data -- not because they're still being suppressed, but because there
+genuinely isn't a stronger cultivation opportunity on file right now
+than the strongest stale pledges. **This is exactly the "say so and show
+the evidence" case the instruction anticipated**: the pipeline is
+demonstrably broken (Steps 2-3), fixing it is worthwhile on its own
+correctness merits and does promote real, more-urgent items (the two
+asks), but it would not, by itself, manufacture cultivation-category
+diversity that the current portfolio's real facts don't yet support --
+that will only show up in a future day's email once a stronger
+`continue_conversation`/`relationship_opportunity` fact exists (which,
+per Step 2, it now would be able to, once eligible).
+
+**Smallest principled corrections identified, none implemented:**
+1. **Pool inclusion (`lib/workspace/suggestion-candidates.ts`,
+   `selectSuggestionDonorIds`):** add two new unbounded inclusion
+   categories -- donors with `relationship_summary`/`institutional_
+   memory` set (feeds `relationship_opportunity`/`solicit` eligibility;
+   14 donors in real data, small and bounded, matching the module's own
+   "driven by real, rare events" principle for every other unbounded
+   category) and donors with a completed interaction within the
+   `continue_conversation` eligibility window (~30 days; ~52 donors have
+   *any* latest-interaction row in real data, a small fraction of 248).
+   No change to `recommendation-candidates.ts`/`recommendation-rank.ts`
+   -- this only widens which donors get their evidence built at all.
+2. **Agenda-scoped re-ranking, not homepage-wide (`lib/agenda/agenda-
+   model.ts` + a small plumbing addition in `lib/workspace/live-
+   data.ts`):** expose each `WorkspacePriority`'s already-computed real
+   `score()` value (currently computed inside `buildDonorRecommendation`
+   and then discarded) as an additional field, and have the agenda's own
+   Suggested-selection step sort the `upcoming`/`dueAt===null` candidate
+   set by that real score before applying `MAX_SUGGESTED`, instead of
+   inheriting the homepage's coarse rank/sortAt order. **Deliberately
+   scoped to the email only** -- the homepage's "Coming Up"/queue
+   ordering is a separate, already-shipped product surface with its own
+   design history (the rank-2/3 privileging of acknowledge_gift/
+   follow_up_pledge may well be intentional there) and this
+   investigation was not asked to and does not recommend changing it.
+3. **(Optional, narrow, separate from the above two)** Fix
+   `SOLICITATION_PATTERN` to also match past-tense "solicited" --
+   `\bsolicit(ed|ing)?\b` or similar -- so a narrative fact like Klein's
+   scores as the intended `solicit` candidate (0.459) rather than
+   silently falling through to `relationship_opportunity` (0.4186).
+   Narrow, low-risk, and independent of corrections 1-2.
+
+No scoring formula, certainty multiplier, or ranking weight in
+`recommendation-rank.ts`/`recommendation-candidates.ts` is recommended
+for change -- every correction above is about *which donors get
+evaluated* and *how the agenda orders already-computed results*, never
+about re-weighing what makes one candidate better than another.
+
+**Status: investigation complete, no changes made.** No D1 write, no
+deployment, no scoring/ranking/candidate-generation code change, no
+production/main access. Stopped for the user's decisions (the advance-
+notice window/cadence choice, and approval of the two-part Suggested
+Actions correction) before any implementation.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -9833,6 +10156,36 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**Genuinely open, newest first: Daily Fundraising Agenda quality
+corrections (2026-08-26) -- awaiting the user's decisions before any
+implementation.** See "Daily Fundraising Agenda Quality Investigation"
+above for the full real-data analysis. Two independent decisions needed:
+1. **Advance-notice window/cadence for birthdays/anniversaries/
+   yahrtzeits in the email** -- pick a window (3 days? 7 days? reuse the
+   existing 14-day "Coming Up" set as-is?) and a cadence (show every day
+   in the window, ramping like the existing outreach-candidate urgency
+   scoring already does, vs. show only on entry + on the day). This
+   session's recommendation (7 days, shown every day) is offered, not
+   decided.
+2. **Suggested Actions pipeline correction** -- approve, adjust, or
+   reject the two smallest identified corrections: (a) add
+   `relationship_summary`/`institutional_memory` and recent-completed-
+   interaction donors as new unbounded inclusion categories in
+   `selectSuggestionDonorIds()`, and (b) have the agenda's own Suggested
+   selection re-sort by each candidate's already-computed real `score()`
+   instead of inheriting the homepage's coarse rank/sortAt tiering
+   (scoped to the email only, not the homepage's own "Coming Up"/queue
+   ordering). Real-data evidence shows this would correctly surface two
+   currently-invisible, higher-scoring `open_ask` opportunities ($10,000
+   and $5,000, both scoring above every pledge in the dataset) but would
+   not, on today's data, promote `continue_conversation`/`relationship_
+   opportunity`/`solicit` into the top 3 -- their real scores are
+   genuinely lower than the strongest pledges/asks right now. A
+   separate, optional, narrow `SOLICITATION_PATTERN` regex fix
+   (matching "solicited," not just "solicit") was also identified.
+Nothing has been implemented -- no D1 write, no code change, no
+deployment.
+
 **RESOLVED 2026-08-26 -- Google Workspace identity provider implemented
 and live-verified; genuinely open item is now just a future product
 decision, not a blocker.** See "Authentication Architecture
@@ -9964,6 +10317,54 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T21:30:00Z (approximate)
+Claude (Sonnet 5) — Investigated two Daily Fundraising Agenda quality
+issues per explicit instruction, with no D1 mutation, deployment, or
+scoring/ranking code change. Fresh-verified branch/HEAD and clean tree
+first. Read the full agenda/relationship-date/recommendation pipeline
+(lib/agenda/agenda-model.ts, lib/workspace/live-data.ts, lib/workspace/
+relationship-date-events.ts, lib/relationships/recommendation-
+candidates.ts/recommendation-rank.ts/recommendation-evidence.ts,
+lib/workspace/suggestion-candidates.ts). Since none of that chain
+imports cloudflare:workers, pulled real Independent Staging data via
+read-only wrangler d1 execute --remote --json queries and ran it through
+the actual, unmodified production functions in a throwaway analysis
+script to get real, code-verified numbers rather than estimates.
+Issue 1 (advance notice): confirmed all three date types share one
+14-day lead-window constant by deliberate design; computed real counts
+at 3/7/14-day windows (2/6/12 items respectively against today's real
+data; ~1.7/4.0/8.0 typical via an annual-density estimate from 208 real
+date facts) and the repeated-appearance math for "every day in window"
+vs. "entry + day-of," and recommended (not decided) a 7-day window shown
+every day. Issue 2 (Suggested Actions): traced the full pipeline with
+real data and found two independent, demonstrated defects -- (1)
+selectSuggestionDonorIds() has no inclusion category for relationship_
+opportunity/continue_conversation eligibility, so the one real
+continue_conversation-eligible donor in the whole roster and 9 of 14
+relationship_opportunity-eligible donors are structurally excluded from
+ever being evaluated; (2) live-data.ts's cross-donor "rank" tier system
+privileges acknowledge_gift/follow_up_pledge with hardcoded ranks 2/3
+while every other kind (including the two highest-real-scoring
+candidates in the entire dataset, both open_ask) shares a generic rank
+4 that gets entirely squeezed out of the top-50 slice whenever rank-2/3
+volume alone exceeds 50, which it currently does (59 vs. 50) --
+reproduced exactly with the real dedupeRelationshipQueue()/slice
+pipeline, confirming zero rank-4 items survive today regardless of real
+score. Also found a narrow SOLICITATION_PATTERN regex gap (misses
+"solicited," a real past-tense example in the data). Proposed the
+smallest corrections for each (widen pool inclusion; re-rank the
+agenda's own Suggested selection by real score, scoped to the email
+only, not the homepage) and showed, honestly, that fixing both would
+promote two real $10k/$5k open_ask opportunities but would not manufacture
+continue_conversation/relationship_opportunity/solicit diversity beyond
+what today's real data actually supports. Documented the full analysis,
+tables, and recommendations in "Daily Fundraising Agenda Quality
+Investigation" above. Committed and pushed the documentation update.
+Stopped for the user's decisions before any implementation. No
+production/main access at any point.
+
+---
 
 2026-08-26T18:00:00Z (approximate)
 Claude (Sonnet 5) — Implemented the approved Round 2 migration plan:
