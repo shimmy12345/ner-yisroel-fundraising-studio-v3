@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Implement Daily Fundraising
+**`167c7b7`** -- "Implement Daily Fundraising
 Agenda quality corrections: 7-day advance-notice window, Suggested
 Actions pool inclusion, score-based Suggested ranking, solicitation
 regex fix, plus an agenda-scoped upstream candidate-pool cap fix found
