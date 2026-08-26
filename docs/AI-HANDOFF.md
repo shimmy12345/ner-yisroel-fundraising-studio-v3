@@ -15,8 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending -- see the follow-up correction commit right after this one
-for the exact SHA)** -- "Document Google Workspace identity provider
+**`45c31ac`** -- "Document Google Workspace identity provider
 implementation and live verification" -- docs-only, zero application
 code change (the implementation itself is Cloudflare Zero Trust +
 Google Cloud configuration, outside this repo -- see "Authentication
@@ -186,8 +185,7 @@ job itself at the next 9:00 AM America/New_York firing. See "Daily
 Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`18c18ac` prior to this commit (pushed; will be updated to the new HEAD
-by the follow-up correction commit once pushed).
+`45c31ac` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
