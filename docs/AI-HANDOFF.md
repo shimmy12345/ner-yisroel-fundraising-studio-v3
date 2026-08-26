@@ -15,8 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending -- see the follow-up correction commit right after this one for
-the exact SHA)** -- "Expand Gmail API send-mechanism investigation in
+**`da31215`** -- "Expand Gmail API send-mechanism investigation in
 Daily Fundraising Agenda email section (no code/config/send/deploy
 change)" -- docs-only, zero application code change; see "Daily
 Fundraising Agenda Email" below for full detail. Sits on top of `42d336b`
@@ -118,8 +117,7 @@ back to exact baseline). No production access. `origin/main` untouched
 throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`42d336b` prior to this commit (pushed; will be updated to the new HEAD
-by the follow-up correction commit once pushed).
+`da31215` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
