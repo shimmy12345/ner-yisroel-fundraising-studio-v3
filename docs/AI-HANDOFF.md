@@ -15,8 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending -- see the follow-up correction commit right after this one
-for the exact SHA)** -- "Document authentication architecture
+**`14916fe`** -- "Document authentication architecture
 investigation" -- docs-only, zero application code change; see
 "Authentication Architecture Investigation" below for full detail. Sits
 on top of `13cb0d7` ("Correct Current Git State to reference the new
@@ -175,8 +174,7 @@ job itself at the next 9:00 AM America/New_York firing. See "Daily
 Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`13cb0d7` prior to this commit (pushed; will be updated to the new HEAD
-by the follow-up correction commit once pushed).
+`14916fe` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
