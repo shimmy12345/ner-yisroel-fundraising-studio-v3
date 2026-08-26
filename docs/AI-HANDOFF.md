@@ -15,12 +15,17 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`14916fe`** -- "Document authentication architecture
-investigation" -- docs-only, zero application code change; see
-"Authentication Architecture Investigation" below for full detail. Sits
-on top of `13cb0d7` ("Correct Current Git State to reference the new
-HEAD (2c5167d)" -- docs-only, zero application code change), which sits
-on top of `2c5167d` -- "Document Daily Fundraising Agenda cron
+**(pending -- see the follow-up correction commit right after this one
+for the exact SHA)** -- "Document Cloudflare Zero Trust configuration
+inspection + Google Workspace migration plan" -- docs-only, zero
+application code change; see "Authentication Architecture Investigation"
+-> "Round 2" below for full detail. Sits on top of `14916fe` -- "Document
+authentication architecture investigation" -- docs-only, zero
+application code change; see "Authentication Architecture Investigation"
+below for full detail. Sits on top of `13cb0d7` ("Correct Current Git
+State to reference the new HEAD (2c5167d)" -- docs-only, zero
+application code change), which sits on top of `2c5167d` -- "Document
+Daily Fundraising Agenda cron
 activation + deployment verification" -- docs-only, zero application
 code change; see "Daily Fundraising Agenda Email" below for full detail.
 Sits on top of **`bd1cf99`** ("Activate the Daily Fundraising Agenda
@@ -174,7 +179,8 @@ job itself at the next 9:00 AM America/New_York firing. See "Daily
 Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`14916fe` (pushed; matches local HEAD exactly, no divergence).
+`14916fe` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -8398,7 +8404,7 @@ this deploy, check Cloudflare Observability for a logged
 failures are logged and rethrown, never swallowed) before assuming
 anything else is wrong.
 
-## Authentication Architecture Investigation -- Cloudflare Access vs. Google Workspace vs. Native Google OAuth (2026-08-26) -- INVESTIGATION ONLY, NO CODE/CONFIG/ACCESS-POLICY/OAUTH/SECRET/DEPLOY CHANGE
+## Authentication Architecture Investigation -- Cloudflare Access vs. Google Workspace vs. Native Google OAuth (2026-08-26) -- INVESTIGATION ONLY (round 2: real Zero Trust config inspected), NO CODE/CONFIG/ACCESS-POLICY/OAUTH/SECRET/DEPLOY CHANGE, OPTION B APPROVED IN PRINCIPLE, AWAITING MIGRATION-PLAN APPROVAL
 
 **Request.** Investigate the current authentication architecture and
 whether Fundraising OS should use Google Workspace login, without
@@ -8636,6 +8642,208 @@ that's actually needed.
 **Status: investigation complete, no changes made.** No code, config,
 Access policy, Google OAuth client, secret, or deployment was touched.
 Stopped for the user's review per instruction.
+
+### Round 2 -- real Cloudflare Zero Trust configuration, read-only (2026-08-26)
+
+**Approval and scope.** The user approved Option B in principle (keep
+Cloudflare Access; add Google Workspace as its identity provider) and
+asked for a read-only inspection of the *actual* Independent Staging
+Zero Trust configuration -- not just the code-level inference from round
+1 -- before proposing exact steps. Explicitly out of scope for this
+round, and none of it was done: removing/bypassing Access, native OAuth
+in the app, application auth code changes, reusing the Gmail `gmail.send`
+OAuth client/credentials for login, changing the Access policy or
+allowed users, creating Google OAuth credentials, or any deploy.
+
+**Fresh-verified first.** Branch `feature/independent-cloudflare-
+sandbox`, local HEAD `c6db2db`, matched `origin/feature/independent-
+cloudflare-sandbox` exactly, working tree clean.
+
+**Method.** Wrangler's own OAuth token (used for `wrangler whoami`/
+deploys) has no Access/Zero-Trust-scoped API permission, so the
+Cloudflare Access Apps/Policies/Identity-Providers API was not reachable
+that way -- this inspection was done by browsing the real Cloudflare
+Zero Trust dashboard (`one.dash.cloudflare.com`, already authenticated
+as `sgoldstein@nirc.edu` in the browser session used throughout this
+project) as pure read-only navigation: no toggle was flipped, no form
+was submitted, and every screen that was opened for viewing was left via
+"Cancel," never "Save."
+
+**Findings, directly from the live dashboard (account
+`2f34086b78ac8643498a1a600b846757`, team domain `fundraising-
+os.cloudflareaccess.com`, Zero Trust Free plan, 1 of 50 seats used):**
+
+1. **Access Application:** exactly one -- "Fundraising OS Independent
+   Staging" (self-hosted type), destination = the `fundraising-os-
+   staging` Worker (matches `wrangler.staging.jsonc`'s `name` exactly).
+   Created 2026-08-06 (matches the Worker's own `compatibility_date` and
+   this project's initial setup).
+2. **Access Policy:** exactly one, named "Allow" (policy ID
+   `23e16599-8be4-47e5-866b-b286c84f5efc`), action **Allow**, a single
+   Include rule: **Emails -- `sgoldstein@nirc.edu`** -- confirming the
+   policy is restricted to exactly `STAGING_OWNER_EMAIL` and nothing
+   broader, exactly as `docs/DEPLOYMENT.md` describes. MFA is Off at the
+   policy level; no purpose justification, temporary auth, or
+   application isolation is configured. Policy session duration:
+   "Same as application session timeout."
+3. **Current login method -- confirmed directly, not inferred:**
+   **Cloudflare's dashboard, `Team & Resources -> Integrations ->
+   Identity providers`, lists exactly one identity provider: "Cloudflare"
+   (type `Cloudflare`)** -- Cloudflare's own built-in login method. The
+   page's own text is explicit: *"If you do not add an identity
+   provider, a one-time pin will be the default login method."* Since no
+   other identity provider exists, **today's actual login method is
+   Cloudflare's built-in email One-Time PIN** -- not Google, not Google
+   Workspace, not any third party. This resolves round 1's one open
+   factual question.
+4. **The Application's own "Login methods" tab is set to "Accept all
+   available identity providers"** (not narrowed to a hand-picked
+   subset) -- a detail that turns out to matter a great deal for the
+   migration plan below: whatever identity providers exist at the
+   account level are automatically offered at this app's login screen,
+   with no per-application setting to touch.
+5. **Session duration:** Application-level session timeout is
+   **24 hours**. The account's global session duration setting is
+   "Same as application session timeout" (i.e. it defers to the
+   24-hour app setting, not a separate/shorter value). MFA is disabled
+   account-wide too (Biometrics/Security key/Authenticator app/PIV/
+   FIDO2 all Off in `Access controls -> Access settings`) -- Access's
+   own login step is the only factor today, whichever IdP backs it.
+6. **Google/Google Workspace is confirmed NOT currently configured** as
+   an identity provider anywhere in this Zero Trust account -- the
+   Identity Providers list has exactly the one "Cloudflare" entry.
+
+**Whether Google Workspace can be enabled directly through the existing
+Cloudflare Access setup -- yes, with one prerequisite outside
+Cloudflare.** Cloudflare Access natively supports a **"Google
+Workspace"** identity provider type (distinct from a generic "Google"
+type that would accept any personal Gmail account) -- this is the
+correct type to add, since it can be scoped to the `nirc.edu` Workspace
+domain specifically. Cloudflare's own setup for this IdP type asks for
+an OAuth 2.0 **Client ID and Client Secret** from a Google Cloud project
+(this is documented Cloudflare/Google product behavior, not something
+this session opened the "Add identity provider" form to confirm live --
+that form was deliberately not opened, since even viewing it risks an
+accidental draft/save and the account-level facts above already fully
+answer "is Google Workspace configured" without needing to). Adding this
+new IdP is a pure Cloudflare Zero Trust configuration action -- it does
+not touch the Access Application, the Access Policy, or any application
+code.
+
+**Whether any Google Workspace Admin action or Google Cloud OAuth
+configuration is required -- yes, and it is a genuinely new, separate
+credential, never the Gmail one.** A brand-new OAuth 2.0 Client ID/
+Secret must be created in Google Cloud Console specifically for this
+purpose -- **never the existing `GMAIL_OAUTH_CLIENT_ID`/
+`GMAIL_OAUTH_CLIENT_SECRET`/`GMAIL_OAUTH_REFRESH_TOKEN`** already
+stored on the Worker for the Daily Fundraising Agenda's `gmail.send`
+access, which must remain a completely separate credential and security
+concern (per explicit instruction -- and structurally, an
+authentication-login OAuth client and a `gmail.send` API OAuth client
+serve unrelated purposes and should never share a client ID regardless).
+This new client only ever needs the standard OpenID Connect login scopes
+(`openid`, `email`, `profile`) -- Google classifies these as
+**non-sensitive**, meaning (unlike the Gmail `gmail.send` setup) there is
+no Testing-mode 7-day refresh-token-expiry concern here at all: Access's
+login flow performs a fresh OAuth authorization each time a session
+needs to re-authenticate, it never stores or refreshes a long-lived
+token the way the Gmail sender does, so that entire class of complexity
+from the Gmail investigation simply doesn't apply to this one. The same
+open question from the Gmail investigation still applies here, though,
+and is genuinely unresolved: **whether `nirc.edu` Workspace's own
+security policy requires admin approval to register a new OAuth client
+against its users at all** (Admin Console -> Security -> API Controls)
+-- an `.edu` Workspace-for-Education tenant is exactly the kind of
+tenant that sometimes restricts this by default, per the same caveat
+raised in the Gmail investigation. This is only discoverable by
+attempting the Google Cloud Console step itself (or asking whoever
+administers the domain), and this session did not attempt it, per
+instruction not to create Google OAuth credentials.
+
+**Exact proposed configuration changes (none performed; for approval):**
+1. (User, in Google Cloud Console, outside this repo/session) Create a
+   new, separate Google Cloud OAuth 2.0 Client ID for login use --
+   Application type "Web application," Authorized redirect URI set to
+   Cloudflare's Access callback for this team domain
+   (`https://fundraising-os.cloudflareaccess.com/cdn-cgi/access/
+   callback`), OAuth consent screen scoped to the `openid`/`email`/
+   `profile` scopes only.
+2. (User or this session, in the Zero Trust dashboard, Team & Resources
+   -> Integrations -> Identity providers) Add a new identity provider of
+   type **"Google Workspace,"** supplying the new client ID/secret from
+   step 1 and the `nirc.edu` Google Apps domain.
+3. **No change to the Access Application** ("Fundraising OS Independent
+   Staging" stays on "Accept all available identity providers" -- this
+   is precisely what keeps the existing One-Time PIN method available
+   automatically, satisfying the "don't lock me out" requirement with
+   zero extra configuration).
+4. **No change to the Access Policy** -- the existing "Allow" policy's
+   `Emails: sgoldstein@nirc.edu` rule is IdP-agnostic; a successful
+   Google Workspace login asserting that same email satisfies it exactly
+   as a One-Time-PIN login does today.
+5. **No application code change** -- `verifyAccessToken()` only ever
+   reads the JWT's `email` claim, indifferent to which login method
+   produced it (reconfirmed from round 1).
+
+**Risk of lockout during the transition -- effectively none, specifically
+because of finding 4 above.** Because the Application is already set to
+"Accept all available identity providers" rather than a hand-picked
+list, simply *adding* the Google Workspace IdP at the account level does
+not remove or disable the existing Cloudflare One-Time-PIN method --
+both become selectable at the login screen immediately, automatically,
+with no separate step. **The only way to create real lockout risk is to
+later narrow the Application to "Choose available identity providers"
+and select only Google Workspace before Google login has been personally
+confirmed working** -- which this plan explicitly defers until after
+successful end-to-end testing (see below), and even recommends never
+doing at all unless the user specifically wants to force everyone
+through Google going forward (there is no cost to leaving both methods
+enabled indefinitely for a single-owner environment).
+
+**Rollback plan.** At the "add the IdP, leave Accept-all in place" stage
+(the only stage this plan proposes performing without a live successful
+test in between): deleting the "Google Workspace" identity provider
+entry from `Integrations -> Identity providers` fully reverts to the
+current state (Cloudflare One-Time-PIN only) -- no other setting was
+touched, so nothing else needs reverting. If the Application were ever
+later narrowed to Google-only and that broke, re-enabling "Accept all
+available identity providers" (or re-adding "Cloudflare" to a chosen
+list) restores the fallback instantly from the same screen -- no deploy,
+no app code change, no downtime beyond the edit itself. The Access
+Policy and all application code are untouched at every stage and need no
+rollback of their own.
+
+**How to test Google Workspace login before removing/disabling the
+existing method, without ever creating a cutover that could lock the
+user out:**
+1. Add the Google Workspace identity provider (steps 1-2 above) while
+   leaving the Application on "Accept all available identity providers."
+2. In a fresh/incognito browser session (or after clearing the existing
+   Access cookie), visit the protected Worker URL or the team's App
+   Launcher (`https://fundraising-os.cloudflareaccess.com`) and confirm
+   **both** login options now appear -- proving the existing method is
+   untouched, not just theoretically still configured.
+3. Choose Google Workspace, sign in with the `nirc.edu` account, and
+   confirm the full round trip: Google's consent screen appears
+   correctly, Cloudflare issues a session afterward (lands in the app,
+   not an error page), and the app itself loads and correctly identifies
+   the user (e.g. `/settings` shows the same account/profile as always)
+   -- this last check specifically exercises `verifyAccessToken()`'s
+   independent JWT re-check and the `STAGING_OWNER_EMAIL` match, without
+   touching any app code, proving nothing in the existing security
+   architecture broke.
+4. Only after that full round trip succeeds at least once should
+   removing the old method even be considered -- and this plan's
+   recommendation is to **leave both enabled indefinitely** rather than
+   ever narrow to Google-only, since there is no meaningful downside to
+   keeping the One-Time-PIN fallback available for a single-owner
+   environment.
+
+**Status: investigation complete (round 2), no changes made.** No
+Google OAuth client was created, no identity provider was added, no
+Access Application/Policy setting was changed, and nothing was deployed.
+Stopped for the user's approval of the exact steps above before
+performing any of them.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -9453,6 +9661,25 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**Genuinely open, newest first: Google Workspace as the Cloudflare Access
+identity provider (2026-08-26) -- awaiting the user's approval of the
+exact migration steps.** See "Authentication Architecture Investigation"
+-> "Round 2" above for the full record: the real Zero Trust config was
+inspected read-only (one Access Application, one Access Policy scoped to
+`sgoldstein@nirc.edu`, and exactly one identity provider today --
+Cloudflare's own built-in One-Time PIN; Google/Google Workspace is
+confirmed not yet configured). The proposed plan -- create a new,
+separate Google Cloud OAuth client (never reusing the Gmail `gmail.send`
+credentials), add it to Cloudflare as a "Google Workspace" identity
+provider, and change nothing else (the Application already accepts all
+available identity providers, so the existing One-Time-PIN login stays
+available automatically with zero extra configuration) -- carries
+effectively no lockout risk as designed, precisely because nothing about
+the fallback method needs to change to add the new one. Nothing has been
+created or changed yet; awaiting explicit approval before the user (for
+the Google Cloud OAuth client) or this session (for the Cloudflare
+identity-provider entry) does anything.
+
 **RESOLVED 2026-08-26 -- Daily Fundraising Agenda email is fully live and
 armed, nothing further required.** The user reviewed the live preview and
 explicitly approved cron activation. `wrangler.staging.jsonc` now has
@@ -9563,6 +9790,37 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T17:30:00Z (approximate)
+Claude (Sonnet 5) — At the user's approval of Option B in principle,
+performed a read-only inspection of the real Independent Staging
+Cloudflare Zero Trust configuration (via the dashboard, since wrangler's
+own OAuth token has no Access-scoped API permission) -- no toggle
+flipped, no form saved. Fresh-verified branch/HEAD and clean tree first.
+Confirmed directly: exactly one Access Application ("Fundraising OS
+Independent Staging") and one Access Policy ("Allow," Include rule
+Emails: sgoldstein@nirc.edu, matching STAGING_OWNER_EMAIL exactly);
+exactly one identity provider configured account-wide ("Cloudflare,"
+i.e. the built-in One-Time PIN -- Google/Google Workspace confirmed not
+yet present); the Application is set to "Accept all available identity
+providers" (not a hand-picked subset) -- the key fact that makes adding
+a new IdP automatically preserve the existing login method with zero
+extra configuration; 24-hour application session duration; no MFA
+enabled anywhere. Proposed exact migration steps (none performed): a
+brand-new, separate Google Cloud OAuth client for login only (explicitly
+never reusing the Gmail gmail.send credentials), added to Cloudflare as
+a "Google Workspace" identity provider, with no change to the Access
+Application, Access Policy, or any application code. Assessed lockout
+risk as effectively none as designed (the fallback method never needs
+to be touched to add the new one) and wrote a rollback plan and an
+end-to-end test procedure that keeps both login methods available
+throughout. Documented the full inspection and plan in "Authentication
+Architecture Investigation" -> "Round 2" above. Committed and pushed the
+documentation update. Stopped for the user's approval of the exact steps
+-- no Google OAuth client created, no identity provider added, no Access
+setting changed, nothing deployed.
+
+---
 
 2026-08-26T17:00:00Z (approximate)
 Claude (Sonnet 5) — Investigated the current authentication architecture
