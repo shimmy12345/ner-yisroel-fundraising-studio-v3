@@ -15,19 +15,35 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`be8bd20`** -- "Document Daily Fundraising Agenda implementation
-+ preview deploy + live-verification" -- docs-only, zero application code
-change; see "Daily Fundraising Agenda Email" below for full detail. Sits
-on top of **`a97f212`** ("Daily Fundraising Agenda: agenda generator,
-Gmail sender, preview route, scheduled handler (cron not yet activated)"
--- real application code: `lib/agenda/*.ts`, `app/api/agenda/preview/
-route.ts`, `worker/index.ts`'s new `scheduled()` export,
-`wrangler.staging.jsonc`'s new `APP_BASE_URL` var, `cloudflare-env.d.ts`,
-5 new test files -- see "Daily Fundraising Agenda Email" below for full
-detail, including its implementation/deployment/live-verification
-subsection) -- **DEPLOYED to Independent Staging as the preview route
-only; the scheduled handler ships inert with no active Cron Trigger, and
-no email has ever been sent** (see below). On top of `da31215` --
+**(pending -- see the follow-up correction commit right after this one
+for the exact SHA)** -- "Document Daily Fundraising Agenda cron
+activation + deployment verification" -- docs-only, zero application
+code change; see "Daily Fundraising Agenda Email" below for full detail.
+Sits on top of **`bd1cf99`** ("Activate the Daily Fundraising Agenda
+Cron Trigger on Independent Staging (approved)" -- real application
+code: `wrangler.staging.jsonc` gains `"triggers": { "crons": ["0 * * *
+*"] }`, comment updates in `worker/index.ts`, and
+`tests/agenda-safety.test.mjs`'s cron assertions flipped from
+"must be absent" to "must be exactly this approved schedule, still
+DST-guarded" -- see "Daily Fundraising Agenda Email" below for full
+detail, including its cron-activation subsection) -- **DEPLOYED to
+Independent Staging with the Cron Trigger now ACTIVE; no email has been
+sent yet -- the first real send awaits the next 9 AM America/New_York
+firing** (see below). On top of `7513c68` ("Correct Current Git State
+to reference the new HEAD (be8bd20)" -- docs-only, zero application code
+change), which sits on top of `be8bd20` -- "Document Daily Fundraising
+Agenda implementation + preview deploy + live-verification" -- docs-only,
+zero application code change; see "Daily Fundraising Agenda Email" below
+for full detail. Sits on top of **`a97f212`** ("Daily Fundraising
+Agenda: agenda generator, Gmail sender, preview route, scheduled handler
+(cron not yet activated)" -- real application code: `lib/agenda/*.ts`,
+`app/api/agenda/preview/route.ts`, `worker/index.ts`'s new `scheduled()`
+export, `wrangler.staging.jsonc`'s new `APP_BASE_URL` var,
+`cloudflare-env.d.ts`, 5 new test files -- see "Daily Fundraising Agenda
+Email" below for full detail, including its implementation/deployment/
+live-verification subsection) -- **DEPLOYED to Independent Staging as
+the preview route only at the time; since superseded by the cron
+activation above.** On top of `da31215` --
 "Expand Gmail API send-mechanism investigation in Daily Fundraising
 Agenda email section (no code/config/send/deploy change)" -- docs-only,
 zero application code change; sits on top of `42d336b`
@@ -132,17 +148,30 @@ throughout every task recorded in this file.
 (deployed 2026-08-26T16:07:34Z, confirmed via `wrangler deployments
 list`) -- supersedes `53229863-...` above. This is the Daily Fundraising
 Agenda's own deploy (`a97f212`): adds the new `GET /api/agenda/preview`
-route and `wrangler.staging.jsonc`'s `APP_BASE_URL` var, and ships (but
-does not activate) the `scheduled()` handler -- there is no `triggers`
-entry in `wrangler.staging.jsonc`, so Cloudflare never invokes it. Live-
-verified via the deployed preview route directly against real staging D1
-data -- see "Daily Fundraising Agenda Email" below for the full content
-returned. No email was sent by this deploy or by any action in this
-task. `STAGING_OWNER_EMAIL`/D1 data untouched by this deploy (the preview
-route only reads).
+route and `wrangler.staging.jsonc`'s `APP_BASE_URL` var, and shipped (at
+the time) without activating the `scheduled()` handler. Live-verified via
+the deployed preview route directly against real staging D1 data -- see
+"Daily Fundraising Agenda Email" below for the full content returned.
+Superseded by the cron-activation deploy immediately below.
+
+**Deployed Worker version: `526c8710-6120-497e-998a-5dc6754c72a6`**
+(deployed 2026-08-26T16:21:30Z, confirmed via `wrangler versions view`)
+-- supersedes `02056678-...` above. This is the cron-activation deploy
+(`bd1cf99`): `wrangler.staging.jsonc` now has `"triggers": { "crons":
+["0 * * * *"] }` -- the deploy's own output included a "Deployed
+fundraising-os-staging triggers" step and echoed back `schedule: 0 * *
+* *`, and a separate `wrangler versions view` call independently
+confirmed `Handlers: fetch, scheduled` for this version. The deployed
+`dist/server/index.js` was grepped directly and still contains the
+`isDailyAgendaSendHour`/`America/New_York` DST guard. **No email has
+been sent by this app as of this deploy** -- the Gmail sender was never
+invoked manually; the first real send will be generated by the scheduled
+job itself at the next 9:00 AM America/New_York firing. See "Daily
+Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`be8bd20` (pushed; matches local HEAD exactly, no divergence).
+`bd1cf99` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -7871,7 +7900,7 @@ unchanged) -- no unrelated data was touched.
 **Result: all 7 requested checks passed.** No production/main access at
 any point.
 
-## Daily Fundraising Agenda Email (2026-08-26) -- IMPLEMENTED, DEPLOYED (PREVIEW ONLY), LIVE-VERIFIED AGAINST REAL STAGING DATA, CRON NOT YET ACTIVATED, NO EMAIL EVER SENT
+## Daily Fundraising Agenda Email (2026-08-26) -- IMPLEMENTED, DEPLOYED, LIVE-VERIFIED, CRON APPROVED AND ACTIVE, NO EMAIL SENT YET (first real send awaits the next 9 AM America/New_York firing)
 
 **Request.** A daily 9:00 AM America/New_York email (every day including
 weekends, DST-correct, never a fixed UTC time) summarizing what actually
@@ -8271,6 +8300,100 @@ no `triggers` key); `origin/main` and production were never touched.
 **The only remaining step to go fully live**, once the user reviews this
 preview and approves: add `"triggers": { "crons": ["0 * * * *"] }` to
 `wrangler.staging.jsonc` and redeploy -- no other code change is needed.
+
+### Cron activation -- approved and deployed (2026-08-26)
+
+**Approval.** The user reviewed the live preview above and explicitly
+approved activating the schedule: the approved hourly Cloudflare Cron
+Trigger (`0 * * * *`), with the existing DST-safe America/New_York-9-AM
+runtime guard kept exactly as implemented (no code change to the guard
+itself) -- Independent Staging only.
+
+**Fresh-verify, per instruction.** Branch
+`feature/independent-cloudflare-sandbox`, local HEAD `7513c68`, matched
+`origin/feature/independent-cloudflare-sandbox` exactly, working tree
+clean. Gmail secrets reconfirmed present under their exact expected
+names (`wrangler secret list`: `GMAIL_OAUTH_CLIENT_ID`,
+`GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`).
+`STAGING_OWNER_EMAIL` reconfirmed as `sgoldstein@nirc.edu`. Deployed
+Worker reconfirmed unchanged at `02056678-29b8-4366-becf-54c40f08f8c7`.
+**No email had yet been sent**, confirmed structurally rather than by
+reading the mailbox (this app only ever holds `gmail.send`, never inbox
+access, so verification has to be structural): `grep`-ing the whole repo
+for call sites of `sendGmail(`/`sendDailyAgenda(` shows exactly one
+caller each -- `sendDailyAgenda()` is `sendGmail()`'s only caller, and
+`runScheduledAgendaSend()` (inside the DST guard) is `sendDailyAgenda()`'s
+only caller -- and `runScheduledAgendaSend()` is itself only ever invoked
+by `worker/index.ts`'s `scheduled()` handler, which Cloudflare could not
+have called before this task since no `triggers.crons` entry existed in
+any prior deploy; this session never called any of these functions
+manually either.
+
+**What changed** (commit `bd1cf99`): `wrangler.staging.jsonc` gains
+`"triggers": { "crons": ["0 * * * *"] }` -- the only functional change.
+The explanatory comments in `wrangler.staging.jsonc` and
+`worker/index.ts`'s `scheduled()` handler were updated from "not yet
+activated" to "approved and active"; no logic changed in either file.
+`tests/agenda-safety.test.mjs`'s cron-related assertions were flipped
+from asserting the cron's *absence* to asserting it is *exactly* the one
+approved schedule (`"0 * * * *"`, and only one `crons` entry -- guarding
+against a duplicate or a broader/incorrect schedule creeping in later),
+that the Worker entry point still delegates only through the guarded
+`runScheduledAgendaSend()` (never calling `sendDailyAgenda()`/
+`sendGmail()` directly, which would bypass the DST guard), and that
+`runScheduledAgendaSend()` still calls `isDailyAgendaSendHour(now)` --
+i.e. the safety property being guarded flipped from "cron absent" to
+"cron active AND still correctly gated," never "cron active,
+unconditionally."
+
+**Pre-deployment checkpoint, all three gates passing:**
+```
+pnpm test                          PASS (all suites, including the updated agenda-safety.test.mjs)
+pnpm exec tsc --noEmit             PASS (exit 0, no errors)
+pnpm run build:staging-independent PASS
+```
+
+**Deployed to Independent Staging.** `wrangler deploy --config
+wrangler.staging.jsonc` produced Worker version
+**`526c8710-6120-497e-998a-5dc6754c72a6`** (supersedes
+`02056678-...`). The deploy's own output included a distinct "Deployed
+fundraising-os-staging triggers" step (a separate API call, not just a
+local echo) followed by **`schedule: 0 * * * *`** -- Cloudflare's own
+confirmation of the registered schedule.
+
+**Direct post-deployment verification (two independent Cloudflare API
+reads, not just the deploy step's own output):**
+- `wrangler versions view 526c8710-...` (a separate, fresh API call)
+  returned **`Handlers: fetch, scheduled`** for this exact version --
+  Cloudflare's own record that the deployed script exports a `scheduled`
+  handler, and confirmed the same three Gmail secrets are still attached
+  (names only, never values).
+- The deployed build artifact itself (`dist/server/index.js`, the exact
+  file uploaded) was grepped directly and still contains
+  `isDailyAgendaSendHour`/`America/New_York` -- the DST guard is real
+  code in the artifact that shipped, not just source that happened to
+  exist in the repo.
+- `wrangler.staging.jsonc`'s `vars`/`d1_databases`/`services` were
+  otherwise unchanged from the prior deploy -- this deploy's only
+  functional delta was the trigger.
+
+**Not done, per explicit instruction:** the Gmail sender was never
+manually invoked to test it -- no `sendGmail()`/`sendDailyAgenda()` call
+was made by this session, live or otherwise. **The first real email this
+app ever sends will be generated by the scheduled job itself**, at the
+next invocation where the real America/New_York wall-clock hour reads 9
+(the cron fires hourly starting immediately; the deploy landed at
+2026-08-26T16:21:30Z / 12:21 PM EDT, after that day's 9 AM window had
+already passed, so the first real send is expected at the **next**
+occurrence of 9:00 AM America/New_York). `origin/main` and production
+were never touched.
+
+**Status: fully live and armed.** Nothing further is required for the
+email to start arriving daily. If it doesn't appear the morning after
+this deploy, check Cloudflare Observability for a logged
+`daily_agenda_send_failed` entry (see `lib/agenda/send-agenda.ts` --
+failures are logged and rethrown, never swallowed) before assuming
+anything else is wrong.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -8716,27 +8839,30 @@ only.
 
 ## Deployment State
 
-**Corrected 2026-08-26 (Daily Fundraising Agenda preview deploy) -- this
+**Corrected 2026-08-26 (Daily Fundraising Agenda cron activation) -- this
 section had gone stale again. This section remains a pointer to the true
 current state, not a duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `a97f212` ("Daily
-Fundraising Agenda: agenda generator, Gmail sender, preview route,
-scheduled handler (cron not yet activated)" -- see "Daily Fundraising
-Agenda Email" above for full detail, including its implementation/
-deployment/live-verification subsection), Worker version
-**`02056678-29b8-4366-becf-54c40f08f8c7`**, confirmed via `wrangler
-deployments list` and live-verified against real staging D1 data via the
-new `GET /api/agenda/preview` route. **This deploy adds a `scheduled()`
-handler that Cloudflare cannot yet invoke (no `triggers.crons` entry in
-`wrangler.staging.jsonc`) and a Gmail send code path that no route in
-this deploy calls -- no email has ever been sent by this app.** This
-supersedes every earlier version ID recorded anywhere in this file,
-including `53229863-60fd-47a3-8711-ee9910e5566b` (the meaningful-
-stewardship-activity fix's own deploy, live from 2026-08-23T19:18 through
-this task). For the exact current git SHA (which may have advanced past
-`a97f212` by documentation-only commits that touch no application code --
-the deployed Worker always reflects the latest actual code change, not
+**Live -- current as of this deploy.** Deployed commit `bd1cf99`
+("Activate the Daily Fundraising Agenda Cron Trigger on Independent
+Staging (approved)" -- see "Daily Fundraising Agenda Email" above for
+full detail, including its cron-activation subsection), Worker version
+**`526c8710-6120-497e-998a-5dc6754c72a6`**, confirmed via `wrangler
+versions view` (`Handlers: fetch, scheduled`) and via the deploy's own
+"Deployed ... triggers" / `schedule: 0 * * * *` output. **The hourly Cron
+Trigger is now active; the scheduled handler still only actually sends
+on the one invocation per day where the real America/New_York
+wall-clock hour reads 9 (`isDailyAgendaSendHour()`, confirmed present in
+the deployed `dist/server/index.js` itself). No email has been sent by
+this app yet** -- the Gmail sender has never been manually invoked; the
+first real send will be generated by the scheduled job itself at the
+next 9 AM America/New_York firing. This supersedes every earlier version
+ID recorded anywhere in this file, including
+`02056678-29b8-4366-becf-54c40f08f8c7` (the Agenda feature's own preview-
+only deploy, live from 2026-08-26T16:07 through this task). For the
+exact current git SHA (which may have advanced past `bd1cf99` by
+documentation-only commits that touch no application code -- the
+deployed Worker always reflects the latest actual code change, not
 necessarily the latest commit), see "Current Git State" at the top of
 this file, which is the authoritative pointer kept in sync going
 forward.
@@ -8763,10 +8889,13 @@ existing pending ask, reusing the existing reschedule path for an ask
 that already has one), the meaningful-stewardship-activity Capture/
 Outcome copy fix (an interaction that yields no new durable fact is
 still shown as saved stewardship activity, never as a worthless
-interaction), and now the Daily Fundraising Agenda email's preview route
-(`GET /api/agenda/preview`, generating real content from live D1 data --
-the scheduled send itself remains inert, not part of "deployed and
-live-verified" in the sending sense). Each has its own dated section
+interaction), and now the Daily Fundraising Agenda email -- both its
+preview route (`GET /api/agenda/preview`, generating real content from
+live D1 data) and its scheduled send, whose Cron Trigger is now active
+(the send itself is "deployed and armed," not yet "live-verified by an
+actual sent email" -- that verification arrives naturally at the next
+9 AM America/New_York firing, per instruction not to invoke it
+manually). Each has its own dated section
 above with full live-verification detail -- this section intentionally
 does not repeat it.
 
@@ -9082,20 +9211,19 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Daily Fundraising Agenda email (2026-08-26)
--- awaiting the user's review of the live preview and approval to activate
-the cron.** See "Daily Fundraising Agenda Email" above for the full
-investigation, implementation, deployment, and live-verification record
-(subject/section content actually returned against real staging data on
-2026-08-26 is quoted there in full). Gmail is the approved and configured
-send mechanism (Internal OAuth app, `gmail.send`-only, secrets already on
-the Worker) -- that decision is closed. **What remains, and only this:**
-add `"triggers": { "crons": ["0 * * * *"] }` to `wrangler.staging.jsonc`
-and redeploy. No other code change is needed; the scheduled handler,
-DST-safe guard, and Gmail sender are already implemented, tested, and
-deployed inert. Do not add that line or send a real email without a
-separate, explicit approval from the user after they've reviewed the
-preview.
+**RESOLVED 2026-08-26 -- Daily Fundraising Agenda email is fully live and
+armed, nothing further required.** The user reviewed the live preview and
+explicitly approved cron activation. `wrangler.staging.jsonc` now has
+`"triggers": { "crons": ["0 * * * *"] }`, deployed as Worker version
+`526c8710-...` and independently confirmed via `wrangler versions view`
+(`Handlers: fetch, scheduled`). See "Daily Fundraising Agenda Email" ->
+"Cron activation -- approved and deployed" above for the full record.
+**No email has been sent yet** -- by explicit instruction the sender was
+never manually invoked; the first real send will be generated by the
+scheduled job itself at the next 9 AM America/New_York firing. Nothing
+here needs a decision or action -- only worth checking Cloudflare
+Observability for a `daily_agenda_send_failed` log line if the email
+doesn't arrive as expected the morning after this deploy.
 
 **The Ask/Solicitation feature is now COMPLETE / CLOSED FOR V1** —
 implemented, migration applied, deployed, end-to-end live-tested, and the
@@ -9193,6 +9321,34 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T16:30:00Z (approximate)
+Claude (Sonnet 5) — Activated the Daily Fundraising Agenda's Cron Trigger
+on Independent Staging per the user's explicit approval of the live
+preview. Fresh-verified branch/HEAD, working tree, the three Gmail
+secret names, STAGING_OWNER_EMAIL, and the deployed Worker first, and
+confirmed structurally (via call-site tracing, since this app only ever
+holds send-only Gmail access) that no email had yet been sent. Added
+`"triggers": { "crons": ["0 * * * *"] }` to wrangler.staging.jsonc --
+the only functional change; the existing DST-safe
+isDailyAgendaSendHour() guard was left untouched. Updated
+tests/agenda-safety.test.mjs's cron assertions from "must be absent" to
+"must be exactly this approved schedule, still gated by the real guard,
+never called unconditionally." Ran the full pnpm test suite, `tsc
+--noEmit`, and the staging build -- all passed -- then deployed to
+Independent Staging as Worker version
+526c8710-6120-497e-998a-5dc6754c72a6. Verified directly, via two
+independent Cloudflare API reads (not just the deploy step's own
+output): `wrangler versions view` returned `Handlers: fetch, scheduled`
+for this version, and the deployed dist/server/index.js bundle itself
+was grepped and still contains the DST guard. Did not manually invoke
+the Gmail sender at any point, per instruction -- the first real email
+this app sends will be generated by the scheduled job itself at the next
+9 AM America/New_York firing. Committed and pushed the implementation
+(bd1cf99) and this documentation update. No production/main access at
+any point.
+
+---
 
 2026-08-26T16:15:00Z (approximate)
 Claude (Sonnet 5) — Implemented the Daily Fundraising Agenda email now
