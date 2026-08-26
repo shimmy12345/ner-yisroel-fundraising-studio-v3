@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
 import { buildAgenda } from "../lib/agenda/agenda-model.ts";
+import { localDateOnlyEpoch } from "../lib/workspace/local-time.ts";
+import { AGENDA_TIMEZONE } from "../lib/agenda/timezone.ts";
+import { dedupeRelationshipQueue, groupRelationshipQueue, resolvePriorityCap } from "../lib/workspace/relationship-queue.ts";
+import { HOMEPAGE_MAX_RESULTS } from "../lib/workspace/suggestion-candidates.ts";
 
 const NOW = Math.floor(Date.parse("2026-08-26T14:00:00Z") / 1000); // 9 AM EDT, Wednesday Aug 26 2026
 const BASE_URL = "https://fundraising-os-staging.sgoldstein.workers.dev";
+// The date-only, UTC-midnight-of-local-date value "today" resolves to --
+// the same space WorkspaceRelationshipDateEvent.dateEpoch values live in
+// (see relationship-date-events.ts's own doc comment on this convention).
+// Fixtures below build dateEpoch as TODAY_EPOCH + N*86400 for "N days from
+// today," matching exactly how the real occurrence functions compute it.
+const TODAY_EPOCH = localDateOnlyEpoch(NOW, AGENDA_TIMEZONE);
 
 function priority(overrides) {
   return {
@@ -340,6 +350,284 @@ async function run() {
     );
     assert.equal(agenda.overdue.length, 1);
     assert.equal(agenda.importantDates.length, 1, "a scheduled activity is never suppressed just because a reminder mentions similar words");
+  }
+
+  // --- Advance notice: birthdays/anniversaries/yahrtzeits inside the
+  // email's 7-day window (upcomingRelationshipDates), distinct wording
+  // from the exact-today case, boundary at day 7 (included) vs. day 8
+  // (excluded), and preserved context (Hebrew date/age/donor link). ---
+  {
+    const tomorrow = relationshipDateEvent({
+      id: "date-tomorrow",
+      donorId: "donor-11",
+      donorName: "Mr. & Mrs. Katz",
+      type: "birthday",
+      relationshipPhrase: "Shimmy's birthday",
+      secondaryDateLabel: "Turning 12",
+      provenanceName: null,
+      dateLabel: "Aug 27, 2026",
+      dateEpoch: TODAY_EPOCH + 1 * 86400,
+    });
+    const in5Days = relationshipDateEvent({
+      id: "date-in-5",
+      donorId: "donor-12",
+      donorName: "Mr. & Mrs. Rosen",
+      type: "yahrtzeit",
+      relationshipPhrase: "Father's yahrtzeit",
+      secondaryDateLabel: "5 Elul",
+      provenanceName: "Yosef Rosen",
+      provenanceNameHebrew: "יוסף",
+      dateLabel: "Aug 31, 2026",
+      dateEpoch: TODAY_EPOCH + 5 * 86400,
+    });
+    const atBoundary = relationshipDateEvent({
+      id: "date-boundary-7",
+      donorId: "donor-13",
+      donorName: "Mr. & Mrs. Adler",
+      type: "anniversary",
+      relationshipPhrase: "Wedding anniversary",
+      secondaryDateLabel: "18 years married",
+      provenanceName: null,
+      dateLabel: "Sep 2, 2026",
+      dateEpoch: TODAY_EPOCH + 7 * 86400,
+    });
+    const justOutsideWindow = relationshipDateEvent({
+      id: "date-outside-8",
+      donorId: "donor-14",
+      donorName: "Mr. & Mrs. Outside",
+      type: "birthday",
+      relationshipPhrase: "Dovi's birthday",
+      dateLabel: "Sep 3, 2026",
+      dateEpoch: TODAY_EPOCH + 8 * 86400,
+    });
+    const todayEvent = relationshipDateEvent({
+      id: "date-today",
+      donorId: "donor-15",
+      donorName: "Mr. & Mrs. Today",
+      relationshipPhrase: "Mother's yahrtzeit",
+      dateEpoch: TODAY_EPOCH,
+    });
+    const brief = emptyBrief({
+      todayRelationshipDates: [todayEvent],
+      upcomingRelationshipDates: [tomorrow, in5Days, atBoundary, justOutsideWindow],
+    });
+    const agenda = buildAgenda(brief, { now: NOW, baseUrl: BASE_URL });
+
+    // Today's event, the 3 in-window upcoming events -- never the
+    // 8-days-out one.
+    assert.equal(agenda.importantDates.length, 4, "exactly today + the 3 events inside the 7-day window; the 8-day-out one must be excluded");
+    assert.ok(!agenda.importantDates.some((item) => item.donorName === "Mr. & Mrs. Outside"), "an event 8 days out must never appear -- only through 7 days, per the approved window");
+
+    const byDonor = Object.fromEntries(agenda.importantDates.map((item) => [item.donorName, item]));
+    assert.equal(byDonor["Mr. & Mrs. Today"].headline, "Mother's yahrtzeit today", "the exact-today wording is unchanged by this change");
+    assert.equal(byDonor["Mr. & Mrs. Katz"].headline, "Shimmy's birthday — Tomorrow, Aug 27, 2026", "1 day out reads as \"Tomorrow\", concise and distinct from today's wording");
+    assert.equal(byDonor["Mr. & Mrs. Katz"].context, "Turning 12", "age context is preserved for an upcoming birthday, not just a today one");
+    assert.equal(byDonor["Mr. & Mrs. Rosen"].headline, "Father's yahrtzeit — In 5 days, Aug 31, 2026", "multi-day-out reads as \"In N days\" plus the actual date");
+    assert.equal(byDonor["Mr. & Mrs. Rosen"].context, "Yosef Rosen (יוסף) · 5 Elul", "deceased name/Hebrew-date context is preserved for an upcoming yahrtzeit");
+    assert.equal(byDonor["Mr. & Mrs. Rosen"].href, `${BASE_URL}/donors/donor-12`, "donor link is preserved for an upcoming date, same as today's");
+    assert.equal(byDonor["Mr. & Mrs. Adler"].headline, "Wedding anniversary — In 7 days, Sep 2, 2026", "day 7 itself is included -- the window is inclusive of the boundary");
+
+    console.log("agenda-model: advance-notice window checks passed");
+  }
+
+  // --- Score-based Suggested re-rank: reproduces the concrete real-data
+  // failure from the investigation (docs/AI-HANDOFF.md's Daily
+  // Fundraising Agenda Quality Investigation) -- an open_ask candidate
+  // scoring 0.8075 was silently discarded before Suggested ever saw it,
+  // purely because follow_up_pledge had a better coarse homepage rank
+  // tier, never because of real score. Input order deliberately puts the
+  // lower-scoring item FIRST, simulating the old coarse-rank ordering
+  // that used to privilege it -- proving the output order comes from
+  // score, not from whatever order the items arrived in. ---
+  {
+    const pledgeItem = priority({
+      queueId: "priority:pledge-donor:follow_up_pledge",
+      donorId: "pledge-donor",
+      name: "Mr. & Mrs. Pledge",
+      reason: "Follow up on the open $500 pledge.",
+      why: "No payment activity in 253 days.",
+      href: "/donors/pledge-donor",
+      dueAt: null,
+      dueLabel: "No due date recorded",
+      score: 0.65,
+    });
+    const askItem = priority({
+      queueId: "priority:ask-donor:open_ask",
+      donorId: "ask-donor",
+      name: "Mr. & Mrs. Ask",
+      reason: "Follow up on the $10,000 ask.",
+      why: "An ask was made 200 days ago and is still pending.",
+      href: "/donors/ask-donor",
+      dueAt: null,
+      dueLabel: "No due date recorded",
+      score: 0.8075,
+    });
+    // Lower-scoring cultivation opportunity -- real from the investigation
+    // (Weinschneider, continue_conversation, 0.5600) -- included to prove
+    // it does NOT displace the higher-scoring pledge merely for category
+    // diversity (see the dedicated diversity test further below too).
+    const cultivationItem = priority({
+      queueId: "priority:cultivation-donor:continue_conversation",
+      donorId: "cultivation-donor",
+      name: "Mr. & Mrs. Cultivation",
+      reason: "Follow up after succos.",
+      why: "A specific follow-up was noted in the most recent text.",
+      href: "/donors/cultivation-donor",
+      dueAt: null,
+      dueLabel: "No due date recorded",
+      score: 0.56,
+    });
+    const brief = emptyBrief({ relationshipQueue: { overdue: [], today: [], thisWeek: [], upcoming: [pledgeItem, cultivationItem, askItem] } });
+    const agenda = buildAgenda(brief, { now: NOW, baseUrl: BASE_URL });
+    assert.equal(agenda.suggested.length, 3);
+    assert.deepEqual(
+      agenda.suggested.map((item) => item.donorName),
+      ["Mr. & Mrs. Ask", "Mr. & Mrs. Pledge", "Mr. & Mrs. Cultivation"],
+      "Suggested must be ordered by real score (0.8075 > 0.65 > 0.56), not by the input order that used to reflect the old coarse rank tier",
+    );
+
+    console.log("agenda-model: score-based Suggested re-rank checks passed");
+  }
+
+  // --- The re-rank must never displace a higher-scoring pledge for a
+  // lower-scoring cultivation item merely for category diversity -- when
+  // MAX_SUGGESTED trims the list, the genuinely higher-scoring items win,
+  // full stop. Four pledges (0.65 each) + one weaker cultivation item
+  // (0.56): the cultivation item must NOT bump a pledge out of the top 3
+  // just to appear. ---
+  {
+    const pledges = ["A", "B", "C", "D"].map((letter) =>
+      priority({
+        queueId: `priority:pledge-${letter}`,
+        donorId: `pledge-donor-${letter}`,
+        name: `Pledge Donor ${letter}`,
+        reason: "Follow up on the open pledge.",
+        why: "No payment activity in 253 days.",
+        href: `/donors/pledge-donor-${letter}`,
+        dueAt: null,
+        score: 0.65,
+      }),
+    );
+    const weakerCultivation = priority({
+      queueId: "priority:cultivation-weak",
+      donorId: "cultivation-weak-donor",
+      name: "Weaker Cultivation Donor",
+      reason: "Reach out and reference: a minor note.",
+      why: "A specific, donor-relevant fact is on file.",
+      href: "/donors/cultivation-weak-donor",
+      dueAt: null,
+      score: 0.42,
+    });
+    const brief = emptyBrief({ relationshipQueue: { overdue: [], today: [], thisWeek: [], upcoming: [...pledges, weakerCultivation] } });
+    const agenda = buildAgenda(brief, { now: NOW, baseUrl: BASE_URL });
+    assert.equal(agenda.suggested.length, 3, "still capped at MAX_SUGGESTED");
+    assert.ok(!agenda.suggested.some((item) => item.donorName === "Weaker Cultivation Donor"), "a genuinely lower-scoring cultivation item must not displace higher-scoring pledges merely to appear -- no artificial diversity quota");
+    assert.ok(agenda.suggested.every((item) => item.donorName.startsWith("Pledge Donor")), "the three genuinely highest-scoring items (all pledges here) win on merit");
+
+    console.log("agenda-model: no-artificial-diversity checks passed");
+  }
+
+  // --- End-to-end regression: the real dedupeRelationshipQueue ->
+  // resolvePriorityCap -> groupRelationshipQueue -> buildAgenda() pipeline,
+  // exactly as live-data.ts's loadWorkspaceBriefUncached assembles it --
+  // minus only the D1 fetch and per-donor recommendation-scoring loop
+  // itself, which require env.DB from cloudflare:workers and have no
+  // meaningful mock outside a real Workers/Miniflare runtime (this repo's
+  // established limitation for every D1-coupled loader -- see
+  // tests/workspace-brief-instrumentation.test.mjs). Reproduces the residual
+  // bug found after the Suggested-rerank fix first landed: buildAgenda()'s
+  // real-score rerank can only reorder whatever survived an EARLIER
+  // coarse-rank slice in live-data.ts, so a genuinely higher-scoring rank-4
+  // open_ask could still be discarded there before ever reaching
+  // buildAgenda -- the real Allen Pfeiffer/0.8075 case found in the live
+  // Independent Staging preview reproduced exactly this. ---
+  {
+    const OLD_AGENDA_PRIORITY_LIMIT = 50; // send-agenda.ts's value before this fix
+    const NEW_AGENDA_PRIORITY_LIMIT = 500; // send-agenda.ts's current value
+
+    // 50 follow_up_pledge candidates (old coarse rank 3) -- on their own
+    // enough to fill the old 50-slot cap. Real fixture shape: the exact
+    // QueueCandidate fields dedupeRelationshipQueue/groupRelationshipQueue
+    // consume (queueId, donorId, dueAt, rank, sortAt) plus the full
+    // WorkspacePriority fields buildAgenda's priorityToItem reads --
+    // mirroring exactly what live-data.ts's ranked.push(...) produces for a
+    // recommendation-kind candidate.
+    const pledgeCandidates = Array.from({ length: 50 }, (_, i) => ({
+      queueId: `recommendation:pledge-donor-${i}:follow_up_pledge`,
+      donorId: `pledge-donor-${i}`,
+      name: `Pledge Donor ${i}`,
+      initials: "PD",
+      donorCode: String(i),
+      label: "Pledge follow-up",
+      signal: "warm",
+      reason: "Follow up on the open pledge.",
+      why: "No payment activity in 200+ days.",
+      action: "Follow up",
+      href: `/donors/pledge-donor-${i}`,
+      dueAt: null,
+      dueLabel: "No due date recorded",
+      score: 0.65,
+      rank: 3,
+      sortAt: 1000 + i,
+    }));
+    // The real evidenced case: an open_ask candidate at 0.8075, old coarse
+    // rank 4 (worse than follow_up_pledge's rank 3) despite the higher real
+    // score.
+    const openAskCandidate = {
+      queueId: "recommendation:open-ask-donor:open_ask",
+      donorId: "open-ask-donor",
+      name: "Mr. & Mrs. Open Ask",
+      initials: "OA",
+      donorCode: "999",
+      label: "Open Ask",
+      signal: "warm",
+      reason: "Follow up on the open ask.",
+      why: "A specific ask amount and purpose were discussed.",
+      action: "Follow up",
+      href: "/donors/open-ask-donor",
+      dueAt: null,
+      dueLabel: "No due date recorded",
+      score: 0.8075,
+      rank: 4,
+      sortAt: 2000,
+    };
+    const allCandidates = [...pledgeCandidates, openAskCandidate];
+    assert.equal(allCandidates.length, 51, "sanity: more than 50 upstream candidates exist in this fixture");
+    assert.equal(pledgeCandidates.length, 50, "sanity: 50 rank<=3 items alone are enough to fill the old 50-slot cap");
+
+    function buildRelationshipQueue(priorityCap) {
+      const deduped = dedupeRelationshipQueue(allCandidates, new Set()).slice(0, priorityCap);
+      const withBucket = deduped.map(({ rank: _rank, sortAt: _sortAt, ...item }) => ({ ...item, bucket: "upcoming" }));
+      return groupRelationshipQueue(withBucket.map((item, index) => ({ ...item, rank: index, sortAt: item.dueAt ?? Number.MAX_SAFE_INTEGER })), NOW, AGENDA_TIMEZONE);
+    }
+
+    // OLD behavior: the exact prior cap formula and value, before this fix.
+    const oldCap = Math.max(5, Math.min(OLD_AGENDA_PRIORITY_LIMIT, HOMEPAGE_MAX_RESULTS));
+    const oldQueue = buildRelationshipQueue(oldCap);
+    assert.ok(!oldQueue.upcoming.some((item) => item.donorId === "open-ask-donor"), "OLD behavior: the higher-scoring open_ask must have been cut by the coarse-rank cap before ever reaching buildAgenda()");
+    const oldAgenda = buildAgenda(emptyBrief({ relationshipQueue: oldQueue }), { now: NOW, baseUrl: BASE_URL });
+    assert.ok(!oldAgenda.suggested.some((item) => item.donorName === "Mr. & Mrs. Open Ask"), "OLD end-to-end agenda must not include the open_ask");
+
+    // NEW behavior: the real resolvePriorityCap, for the real "daily-agenda"
+    // context and the real current AGENDA_PRIORITY_LIMIT.
+    const newCap = resolvePriorityCap("daily-agenda", NEW_AGENDA_PRIORITY_LIMIT, HOMEPAGE_MAX_RESULTS);
+    const newQueue = buildRelationshipQueue(newCap);
+    assert.ok(newQueue.upcoming.some((item) => item.donorId === "open-ask-donor"), "NEW behavior: the daily-agenda context's own priorityLimit must let the higher-scoring open_ask survive into relationshipQueue.upcoming");
+    const newAgenda = buildAgenda(emptyBrief({ relationshipQueue: newQueue }), { now: NOW, baseUrl: BASE_URL });
+    assert.equal(newAgenda.suggested[0]?.donorName, "Mr. & Mrs. Open Ask", "buildAgenda() must rank the surviving higher-scoring open_ask above the lower-scoring pledge follow-ups");
+    assert.equal(newAgenda.suggested.length, 3, "still capped at MAX_SUGGESTED");
+
+    // The homepage/Today-page path must be provably untouched: same
+    // fixture, the homepage's own real context ("today") and real
+    // priorityLimit (8) -- resolvePriorityCap must still clamp exactly as
+    // before, since 8 < HOMEPAGE_MAX_RESULTS regardless of context.
+    const homepageCap = resolvePriorityCap("today", 8, HOMEPAGE_MAX_RESULTS);
+    assert.equal(homepageCap, 8, "homepage/Today-page priorityLimit=8 must be completely unaffected by this fix");
+    const homepageQueue = buildRelationshipQueue(homepageCap);
+    assert.equal(homepageQueue.upcoming.length, 8, "homepage queue must still be capped at its own priorityLimit, exactly as before");
+    assert.ok(homepageQueue.upcoming.every((item) => item.donorId.startsWith("pledge-donor")), "homepage's own coarse-rank ordering (rank 3 before rank 4) is completely unchanged -- the open_ask still would not appear in the homepage's own small slice");
+
+    console.log("agenda-model: end-to-end resolvePriorityCap -> relationshipQueue -> buildAgenda() checks passed");
   }
 
   console.log("agenda-model: all assertions passed");

@@ -150,6 +150,24 @@ async function run() {
   const allowedResult = buildDonorRecommendation(solicitAllowedAfterPledge);
   assert.equal(allowedResult.kind, "solicit", "solicitation evidence postdating the pledge must survive the veto and be free to compete");
 
+  // --- SOLICITATION_PATTERN regression: real staging evidence found
+  // "Solicited" (past tense) falling through to relationship_opportunity
+  // instead of the intended solicit candidate, because the old pattern
+  // only matched the bare word "solicit" (docs/AI-HANDOFF.md's Daily
+  // Fundraising Agenda Quality Investigation, donor Mr. & Mrs. Mayer
+  // Simcha Klein, real narrative "Note context: Solicited for a plaque
+  // ($5k)"). Narrow fix: "solicited" now matches too, nothing broader
+  // (e.g. "soliciting", not evidenced, deliberately not added). ---
+  const pastTenseSolicited = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: "Note context: Solicited for a plaque ($5k)" }, NOW, TIMEZONE);
+  const pastTenseCandidates = generateCandidates(pastTenseSolicited);
+  assert.ok(pastTenseCandidates.find((c) => c.kind === "solicit"), "past-tense \"Solicited\" must now generate a real solicit candidate, not silently fail to match");
+  assert.equal(buildDonorRecommendation(pastTenseSolicited).kind, "solicit", "past-tense \"Solicited\" narrative must win as solicit, not fall through to relationship_opportunity");
+  // Deliberately narrow: "soliciting" (present participle, not evidenced
+  // anywhere in real data) must NOT be swept in by this fix -- proves the
+  // fix is the one evidenced word form, not a speculative stem match.
+  const presentParticiple = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: "Soliciting feedback on the new building design" }, NOW, TIMEZONE);
+  assert.ok(!generateCandidates(presentParticiple).find((c) => c.kind === "solicit"), "\"soliciting\" must not match -- this fix is deliberately narrow to the one evidenced past-tense gap, not a speculative stem match");
+
   // --- hard constraint 3: unconfirmed-historical evidence is capped, never "high" ---
   const historicalOnly = buildRecommendationEvidence({ ...emptyInput, historicalContext: [{ text: "Solicit for $10k", source: "import-monday", sourceDate: daysAgo(30) }] }, NOW, TIMEZONE);
   const historicalWinner = buildDonorRecommendation(historicalOnly);
@@ -360,7 +378,11 @@ async function run() {
   // -- the exact internal-provenance leak fixed in this same change), even
   // though it doesn't re-validate/re-clean whatever text it's handed --
   // quality is enforced at the extraction layer, not here.
-  const verboseNarrative = "Latest discussion topics: Relationship update.\nPeople mentioned: Solicited.\nRecommended next action: Review this note before the next interaction.";
+  // "People mentioned: Cousin." deliberately avoids any solicitation
+  // vocabulary -- this fixture is about legacy field-dump handling, not
+  // solicitation detection (see the dedicated SOLICITATION_PATTERN
+  // regression below for that).
+  const verboseNarrative = "Latest discussion topics: Relationship update.\nPeople mentioned: Cousin.\nRecommended next action: Review this note before the next interaction.";
   const verboseEvidence = buildRecommendationEvidence({ ...emptyInput, relationshipSummary: verboseNarrative }, NOW, TIMEZONE);
   const verboseRecommendation = buildDonorRecommendation(verboseEvidence);
   assert.ok(verboseRecommendation, "sanity: the narrative-only fixture must actually produce a recommendation");
@@ -368,7 +390,7 @@ async function run() {
   // The full action/evidence fields are UNCHANGED -- the detail view still
   // gets the complete text; nothing was deleted from the recommendation engine.
   assert.match(verboseRecommendation.action, /Latest discussion topics:/);
-  assert.match(verboseRecommendation.action, /People mentioned: Solicited/);
+  assert.match(verboseRecommendation.action, /People mentioned: Cousin/);
   assert.match(verboseRecommendation.evidence.join(" "), /Recorded relationship note:/);
   assert.doesNotMatch(verboseRecommendation.evidence.join(" "), /relationship_summary\/institutional_memory:/, "the recommendation engine must never expose the raw DB field name in donor-facing evidence text");
 

@@ -40,6 +40,26 @@ export function dedupeRelationshipQueue<T extends QueueCandidate>(items: T[], di
   });
 }
 
+// The homepage/Today-page path clamps to homepageMaxResults because that
+// slice is taken before the Daily Agenda's real-score Suggested rerank ever
+// runs (see buildAgenda() in lib/agenda/agenda-model.ts), and this queue is
+// sorted strictly by the coarse per-kind rank tier (suggestionRankByKind in
+// live-data.ts) -- so a genuinely higher-scoring rank-4 suggestion (e.g.
+// open_ask) can be cut here purely for having a worse coarse category than
+// whatever pledge/gift items fill the cap first. That was the exact residual
+// bug found after the Suggested-rerank fix landed: the rerank can only
+// reorder what already survived this earlier slice. The "daily-agenda"
+// context therefore skips the homepageMaxResults clamp and uses its own
+// (larger, but still bounded) priorityLimit -- see AGENDA_PRIORITY_LIMIT in
+// lib/agenda/send-agenda.ts. Every other context keeps the exact prior
+// clamp/ordering unchanged; the homepage always requests priorityLimit=8,
+// well under homepageMaxResults, so this never changes homepage/Today-page
+// behavior.
+export function resolvePriorityCap(context: string, priorityLimit: number, homepageMaxResults: number): number {
+  const cap = context === "daily-agenda" ? priorityLimit : Math.min(priorityLimit, homepageMaxResults);
+  return Math.max(5, cap);
+}
+
 export function groupRelationshipQueue<T extends QueueCandidate>(items: T[], now: number, timezone: string) {
   const groups: Record<RelationshipQueueBucket, T[]> = { overdue: [], today: [], thisWeek: [], upcoming: [] };
   for (const item of items) groups[relationshipQueueBucket(item.dueAt, now, timezone)].push(item);

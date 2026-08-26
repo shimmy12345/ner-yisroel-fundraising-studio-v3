@@ -31,13 +31,16 @@ function requireOwnerEmail(): string {
   return ownerEmail;
 }
 
-// A high priorityLimit (loadWorkspaceBrief's own cap is 50, see
-// lib/workspace/suggestion-candidates.ts's HOMEPAGE_MAX_RESULTS) so the
-// email never silently truncates real due/overdue items the way the
-// homepage's own default limit of 8 would -- overdue and due-today items
-// still sort first within that cap either way, so a suggestion is always
-// what gets squeezed out first if 50 is ever exceeded.
-const AGENDA_PRIORITY_LIMIT = 50;
+// loadWorkspaceBrief's "daily-agenda" context (passed below) skips the
+// homepage's HOMEPAGE_MAX_RESULTS=50 clamp entirely, so this limit is the
+// email's own real cap. 500 is comfortably above the current donor roster
+// (248, one recommendation-kind candidate per donor at most) plus reminders/
+// scheduled activities, so it is not expected to truncate real candidates in
+// practice -- a concrete bounded number rather than an unbounded/Infinity
+// sentinel, per the smallest-safe-fix scoping for this correction. Overdue
+// and due-today items still sort first regardless, so a suggestion is always
+// what would get squeezed out first if this limit were ever exceeded.
+const AGENDA_PRIORITY_LIMIT = 500;
 
 export async function generateAgenda(now = Math.floor(Date.now() / 1000)): Promise<Agenda> {
   const ownerEmail = requireOwnerEmail();

@@ -1,12 +1,12 @@
 import { env } from "cloudflare:workers";
 import type { DataMode } from "./mode";
 import { scheduleBucket } from "./scheduled-activity";
-import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, type RelationshipQueueBucket } from "./relationship-queue";
+import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, resolvePriorityCap, type RelationshipQueueBucket } from "./relationship-queue";
 import { financialDateLabel } from "../financial-date.ts";
 import { donorInitials, numericDonorCode } from "../relationships/donor-identity.ts";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../relationships/recommendation-evidence.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
-import type { RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
+import { CONTINUE_CONVERSATION_WINDOW_DAYS, type RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
@@ -33,7 +33,20 @@ type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpo
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
 
-export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; giftSource?: GiftSource; giftId?: string };
+// score: the recommendation engine's own real 0-1 score() value for this
+// item's underlying candidate -- only present for recommendation-kind
+// items (acknowledge_gift/follow_up_pledge/open_ask/relationship_
+// opportunity/continue_conversation/solicit/reconnect_contact_gap), never
+// for a reminder- or scheduled-activity-derived priority (those aren't
+// recommendation-engine candidates and have no such score to report).
+// This homepage/Today queue itself still orders by the existing rank/
+// sortAt system below, unchanged -- score exists here only so a
+// different consumer (the Daily Fundraising Agenda's own Suggested
+// section) can re-rank its own candidate set by real merit without
+// duplicating the scoring formula. See docs/AI-HANDOFF.md's Daily
+// Fundraising Agenda Quality Investigation for why the homepage's own
+// coarse rank tiers are not a substitute for this.
+export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; score?: number; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
 export type WorkspaceScheduledActivity = { id: string; donorId: string; type: string; typeLabel: string; time: string; period: string; date: string; donorName: string; donorCode: string | null; initials: string; subject: string; note: string; prepareHref: string | null; openHref: string; editHref: string; logOutcomeHref: string | null; canCancel: boolean };
 export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; donorCode: string | null; amount: string; detail: string };
@@ -376,13 +389,26 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // At real scale, "no recent contact" is most of the donor roster (247 of
   // 248 in the incident that prompted this bound), so it's the only
   // category below that's bounded -- every donor with a real gift, pledge,
-  // or a yahrtzeit/birthday/anniversary actually inside its own lead window
-  // is kept in full, unbounded. See lib/workspace/suggestion-candidates.ts
+  // a yahrtzeit/birthday/anniversary actually inside its own lead window,
+  // a narrative relationship fact, or a recent completed interaction is
+  // kept in full, unbounded. See lib/workspace/suggestion-candidates.ts
   // for the monotonicity argument this bound relies on.
   const suggestionDonorIds = selectSuggestionDonorIds({
     giftDonorIds: recentGiftByDonor.keys(),
     pledgeDonorIds: openPledgeByDonor.keys(),
     askDonorIds: openAskByDonor.keys(),
+    // Feeds relationship_opportunity/solicit eligibility, which otherwise
+    // has no representation in this pool at all -- see
+    // docs/AI-HANDOFF.md's Daily Fundraising Agenda Quality Investigation.
+    narrativeDonorIds: donors.results.filter((item) => item.relationship_summary || item.institutional_memory).map((item) => item.id),
+    // Feeds continue_conversation eligibility, using the SAME window
+    // (CONTINUE_CONVERSATION_WINDOW_DAYS) and the SAME "any completed
+    // interaction, not substantive-only" contact measure
+    // continueConversationCandidate itself reads (contactByDonor/
+    // lastContactAt) -- deliberately not substantiveContactByDonor, which
+    // feeds a different candidate (reconnect_contact_gap) with a
+    // different, stricter contact definition.
+    recentContactDonorIds: contacts.filter((item) => item.last_contact != null && Math.floor((now - item.last_contact) / 86400) <= CONTINUE_CONVERSATION_WINDOW_DAYS).map((item) => item.id),
     yahrtzeitRows: yahrtzeitRows.results.map((row) => ({ donorId: row.donor_id, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
     importantDateRows: importantDateRows.results.map((row) => ({ donorId: row.donor_id, month: row.month, day: row.day })),
     // Substantive (non-recipient) contact, not the display Last Contact
@@ -526,6 +552,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       href: suggestionHrefByKind[recommendation.kind] === "capture" ? `/capture?donorId=${encodeURIComponent(donorId)}&returnTo=%2F` : `/donors/${encodeURIComponent(donorId)}`,
       dueAt: recommendation.kind === "acknowledge_gift" ? now : null,
       dueLabel: recommendation.timing ?? (recommendation.kind === "acknowledge_gift" ? "Suggested today" : "No due date recorded"),
+      score: recommendation.score,
       rank: suggestionRankByKind[recommendation.kind] ?? 4,
       sortAt,
       giftSource: recommendation.giftSource,
@@ -537,7 +564,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
 
   const activeQueue = dedupeRelationshipQueue(ranked, new Set(dismissals.results.map((item) => item.item_key)));
   const allPriorities: WorkspacePriority[] = activeQueue.map(({ rank: _rank, sortAt: _sortAt, ...item }) => ({ ...item, bucket: relationshipQueueBucket(item.dueAt, now, timezone) }));
-  const deduped = allPriorities.slice(0, Math.max(5, Math.min(priorityLimit, HOMEPAGE_MAX_RESULTS)));
+  const deduped = allPriorities.slice(0, resolvePriorityCap(context, priorityLimit, HOMEPAGE_MAX_RESULTS));
   const relationshipQueue = groupRelationshipQueue(deduped.map((item, index) => ({ ...item, rank: index, sortAt: item.dueAt ?? Number.MAX_SAFE_INTEGER })), now, timezone);
 
   const scheduled = scheduledActivities.results.map((item) => ({ row: item, activity: scheduledActivity(item, timezone, now) }));

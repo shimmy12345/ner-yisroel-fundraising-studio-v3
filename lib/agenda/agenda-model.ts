@@ -16,15 +16,31 @@
 //   mechanism, just past its due date.
 // - IMPORTANT DATES / STEWARDSHIP: todayRelationshipDates (yahrtzeit/
 //   birthday/anniversary occurring today) plus todaySchedule (a meeting/
-//   call/visit already on the calendar for today) -- both are
-//   calendar-driven stewardship moments, not reminder-queue items, which
-//   is why they're grouped together under this header rather than folded
-//   into Today's Priorities.
+//   call/visit already on the calendar for today) plus, since 2026-08-26,
+//   upcomingRelationshipDates post-filtered to this email's own
+//   AGENDA_RELATIONSHIP_DATE_WINDOW_DAYS (7 days) -- both "today" and
+//   "upcoming" are calendar-driven stewardship moments, not reminder-queue
+//   items, which is why they're grouped together under this header rather
+//   than folded into Today's Priorities. The 7-day window is a pure
+//   post-filter of the SAME already-computed upcomingRelationshipDates
+//   array the homepage's "Coming Up" section reads (itself bounded by the
+//   shared, unchanged 14-day RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) -- no
+//   change to that shared constant, to relationship-date-events.ts, or to
+//   the homepage's own behavior. An item appears every day it remains
+//   inside the 7-day window (re-derived fresh from real dates each time
+//   this function runs, so nothing needs to be recorded anywhere to
+//   "remember" it was already shown).
 // - SUGGESTED: relationshipQueue.upcoming, filtered to items with no real
 //   due date at all (dueAt === null -- genuine recommendation-engine
 //   suggestions like reconnect_contact_gap/continue_conversation/
 //   relationship_opportunity/follow_up_pledge/solicit, never a
-//   future-dated reminder), capped to a small number.
+//   future-dated reminder), re-sorted by each item's own real
+//   WorkspacePriority.score (since 2026-08-26 -- see that field's own doc
+//   comment in lib/workspace/live-data.ts for why the homepage's rank/
+//   sortAt ordering isn't a substitute for this), then capped to a small
+//   number. This re-rank is scoped to this module only -- it never
+//   touches relationshipQueue.upcoming's own order, so the homepage's
+//   "Coming Up"/queue surfaces are completely unaffected.
 //
 // Why this can't double-count a reminder as a suggestion: loadWorkspaceBrief
 // already runs every reminder/suggestion candidate through
@@ -41,7 +57,8 @@
 
 import type { WorkspaceBrief, WorkspacePriority, WorkspaceScheduledActivity } from "../workspace/live-data.ts";
 import type { WorkspaceRelationshipDateEvent } from "../workspace/relationship-date-events.ts";
-import { easternDateLabel } from "./timezone.ts";
+import { localDateOnlyEpoch } from "../workspace/local-time.ts";
+import { easternDateLabel, AGENDA_TIMEZONE } from "./timezone.ts";
 
 export type AgendaItem = {
   key: string;
@@ -84,6 +101,16 @@ export type BuildAgendaOptions = {
 
 const MAX_SUGGESTED = 3;
 
+// Email-specific advance-notice window for birthdays/anniversaries/
+// yahrtzeits -- deliberately separate from and smaller than the shared
+// RELATIONSHIP_DATE_LEAD_WINDOW_DAYS (14) the homepage's "Coming Up" and
+// the recommendation engine's own outreach candidates use. A pure
+// post-filter of the already-computed upcomingRelationshipDates array
+// (itself already bounded by the 14-day constant), chosen per the real-
+// data analysis in docs/AI-HANDOFF.md's Daily Fundraising Agenda Quality
+// Investigation -- never a change to the shared constant itself.
+const AGENDA_RELATIONSHIP_DATE_WINDOW_DAYS = 7;
+
 function absoluteHref(baseUrl: string, path: string): string {
   if (/^https?:\/\//i.test(path)) return path;
   const base = baseUrl.replace(/\/+$/, "");
@@ -121,19 +148,48 @@ function scheduledActivityToItem(activity: WorkspaceScheduledActivity, baseUrl: 
   };
 }
 
-function dateEventToItem(event: WorkspaceRelationshipDateEvent, baseUrl: string): AgendaItem {
+// Shared context (deceased/provenance name + Hebrew date, or age/years-
+// married) for both the exact-today and the advance-notice renderings
+// below -- advance notice changes only the headline's own timing phrase,
+// never what supporting context is shown alongside it.
+function relationshipDateContext(event: WorkspaceRelationshipDateEvent): string | null {
   const contextParts: string[] = [];
   if (event.provenanceName) {
     contextParts.push(event.provenanceNameHebrew ? `${event.provenanceName} (${event.provenanceNameHebrew})` : event.provenanceName);
   }
   if (event.secondaryDateLabel) contextParts.push(event.secondaryDateLabel);
+  return contextParts.length ? contextParts.join(" · ") : null;
+}
+
+function dateEventToItem(event: WorkspaceRelationshipDateEvent, baseUrl: string): AgendaItem {
   return {
     key: `date:${event.id}`,
     donorId: event.donorId,
     donorName: event.donorName,
     donorCode: event.donorCode,
     headline: `${event.relationshipPhrase} today`,
-    context: contextParts.length ? contextParts.join(" · ") : null,
+    context: relationshipDateContext(event),
+    href: absoluteHref(baseUrl, `/donors/${encodeURIComponent(event.donorId)}`),
+  };
+}
+
+// Advance-notice rendering for a relationship date still inside the
+// email's 7-day window but not yet today -- a distinct timing phrase
+// ("Tomorrow" / "In N days") plus the actual calendar date, so a
+// fundraiser can tell at a glance whether something needs action now or
+// is worth preparing for (a card, a gift, a call) ahead of time. Never
+// used for daysUntil === 0 -- that stays dateEventToItem's "today"
+// wording, unchanged, so existing behavior/tests for the exact-today case
+// are untouched.
+function upcomingDateEventToItem(event: WorkspaceRelationshipDateEvent, baseUrl: string, daysUntil: number): AgendaItem {
+  const timing = daysUntil === 1 ? "Tomorrow" : `In ${daysUntil} days`;
+  return {
+    key: `date:${event.id}`,
+    donorId: event.donorId,
+    donorName: event.donorName,
+    donorCode: event.donorCode,
+    headline: `${event.relationshipPhrase} — ${timing}, ${event.dateLabel}`,
+    context: relationshipDateContext(event),
     href: absoluteHref(baseUrl, `/donors/${encodeURIComponent(event.donorId)}`),
   };
 }
@@ -158,17 +214,58 @@ function dedupeAcrossSections(sections: AgendaItem[][]): AgendaItem[][] {
   );
 }
 
+// Real score first (descending), an unscored item (a real, undated
+// fundraiser-created reminder that reached this bucket with no
+// recommendation-engine candidate behind it -- rare in practice) treated
+// as maximal priority rather than silently buried beneath every scored
+// suggestion. Explicit relational comparison, not subtraction -- two
+// unscored items would both be Number.POSITIVE_INFINITY, and
+// Infinity - Infinity is NaN, not a valid comparator result (same
+// footgun lib/workspace/suggestion-candidates.ts's own staleness sort
+// already documents and avoids).
+function suggestedScoreKey(priority: WorkspacePriority): number {
+  return priority.score ?? Number.POSITIVE_INFINITY;
+}
+function bySuggestedScoreDescending(a: WorkspacePriority, b: WorkspacePriority): number {
+  const sa = suggestedScoreKey(a);
+  const sb = suggestedScoreKey(b);
+  return sa === sb ? 0 : sb > sa ? 1 : -1;
+}
+
 export function buildAgenda(brief: WorkspaceBrief, options: BuildAgendaOptions): Agenda {
   const { now, baseUrl } = options;
 
   const overdueRaw = brief.relationshipQueue.overdue.map((priority) => priorityToItem(priority, baseUrl));
   const todayPriorityRaw = brief.relationshipQueue.today.map((priority) => priorityToItem(priority, baseUrl));
+
+  // Advance notice: post-filter the already-computed upcomingRelationshipDates
+  // (itself bounded by the shared 14-day RELATIONSHIP_DATE_LEAD_WINDOW_DAYS,
+  // unchanged) down to this email's own 7-day window. daysUntil is derived
+  // fresh from each event's own date-only dateEpoch against "today" in the
+  // same date-only space (localDateOnlyEpoch) partitionRelationshipDateEventsByToday
+  // itself uses -- never a naive (dateEpoch - now)/86400, which could be
+  // off by a day depending on what time of day "now" is.
+  const todayEpoch = localDateOnlyEpoch(now, AGENDA_TIMEZONE);
+  const upcomingDatesInWindow = brief.upcomingRelationshipDates
+    .map((event) => ({ event, daysUntil: Math.round((event.dateEpoch - todayEpoch) / 86400) }))
+    .filter(({ daysUntil }) => daysUntil >= 1 && daysUntil <= AGENDA_RELATIONSHIP_DATE_WINDOW_DAYS);
+
   const importantDateRaw = [
     ...brief.todayRelationshipDates.map((event) => dateEventToItem(event, baseUrl)),
     ...brief.todaySchedule.map((activity) => scheduledActivityToItem(activity, baseUrl)),
+    ...upcomingDatesInWindow.map(({ event, daysUntil }) => upcomingDateEventToItem(event, baseUrl, daysUntil)),
   ];
-  const suggestedRaw = brief.relationshipQueue.upcoming
+
+  // Suggested: re-rank by each candidate's own real recommendation-engine
+  // score (WorkspacePriority.score) rather than trusting the order
+  // relationshipQueue.upcoming already arrived in -- that order reflects
+  // the homepage's own coarse rank/sortAt tiering (unchanged, still used
+  // for the homepage itself), not real merit. This re-rank exists only
+  // here; relationshipQueue.upcoming's own array is never mutated or
+  // reordered in place.
+  const suggestedRaw = [...brief.relationshipQueue.upcoming]
     .filter((priority) => priority.dueAt === null)
+    .sort(bySuggestedScoreDescending)
     .slice(0, MAX_SUGGESTED)
     .map((priority) => priorityToItem(priority, baseUrl));
 

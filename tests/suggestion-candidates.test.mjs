@@ -94,6 +94,61 @@ async function run() {
   assert.equal(CONTACT_GAP_POOL_SIZE, HOMEPAGE_MAX_RESULTS * CONTACT_GAP_POOL_HEADROOM_MULTIPLIER);
   assert.ok(CONTACT_GAP_POOL_HEADROOM_MULTIPLIER >= 1, "headroom must never shrink the pool below the display ceiling itself");
 
+  // --- Regression: relationship_opportunity/continue_conversation
+  // eligibility previously had NO representation in this pool at all --
+  // diagnosed against real Independent Staging data (docs/AI-HANDOFF.md's
+  // Daily Fundraising Agenda Quality Investigation), where the one real
+  // continue_conversation-eligible donor in the entire 248-donor roster,
+  // and 9 of 14 real relationship_opportunity-eligible donors, were
+  // structurally excluded from ever being evaluated. Both fixtures below
+  // model a donor with NO gift/pledge/ask/near-date and RECENT contact
+  // (10 days -- comfortably under reconnectContactGapCandidate's own
+  // 90-day threshold, so this donor is also NOT eligible for the bounded
+  // contact-gap category) -- the only two ways such a donor could
+  // previously have entered the pool. ---
+  {
+    // CONTACT_GAP_POOL_SIZE (100) OTHER donors, all genuinely staler (200+
+    // days) than the two 10-day-recent donors under test -- without this,
+    // the bounded pool's slice(0, poolSize) would trivially include
+    // everyone in a too-small fixture regardless of staleness, which
+    // would silently pass even without this task's fix (a real bug in an
+    // earlier draft of this exact test, caught by running it).
+    const fillerContactGapCandidates = Array.from({ length: CONTACT_GAP_POOL_SIZE }, (_, i) => ({ donorId: `filler-stale-donor-${i}`, daysSinceLastContact: 200 + i }));
+    const baseFixture = {
+      giftDonorIds: [],
+      pledgeDonorIds: [],
+      yahrtzeitRows: [],
+      importantDateRows: [],
+      contactGapCandidates: [
+        { donorId: "narrative-only-donor", daysSinceLastContact: 10 },
+        { donorId: "recent-contact-donor", daysSinceLastContact: 10 },
+        ...fillerContactGapCandidates,
+      ],
+      timezone: TIMEZONE,
+      now: NOW,
+    };
+
+    // Without either new inclusion path (the OLD, buggy behavior): both
+    // donors are excluded, despite having real, legitimate evidence.
+    const withoutNewPaths = selectSuggestionDonorIds(baseFixture);
+    assert.equal(withoutNewPaths.has("narrative-only-donor"), false, "sanity: without narrativeDonorIds, a narrative-only donor must reproduce the old excluded behavior");
+    assert.equal(withoutNewPaths.has("recent-contact-donor"), false, "sanity: without recentContactDonorIds, a recently-contacted donor must reproduce the old excluded behavior");
+
+    // With narrativeDonorIds: the relationship_opportunity/solicit-eligible
+    // donor is now evaluated.
+    const withNarrative = selectSuggestionDonorIds({ ...baseFixture, narrativeDonorIds: ["narrative-only-donor"] });
+    assert.ok(withNarrative.has("narrative-only-donor"), "a donor with a relationship_summary/institutional_memory fact must now be evaluated, even with no gift/pledge/ask/date and recent contact");
+    assert.equal(withNarrative.has("recent-contact-donor"), false, "narrativeDonorIds must not accidentally include an unrelated donor");
+
+    // With recentContactDonorIds: the continue_conversation-eligible donor
+    // is now evaluated.
+    const withRecentContact = selectSuggestionDonorIds({ ...baseFixture, recentContactDonorIds: ["recent-contact-donor"] });
+    assert.ok(withRecentContact.has("recent-contact-donor"), "a donor contacted inside the continue_conversation window must now be evaluated, even with no gift/pledge/ask/date");
+    assert.equal(withRecentContact.has("narrative-only-donor"), false, "recentContactDonorIds must not accidentally include an unrelated donor");
+
+    console.log("Relationship-opportunity/continue-conversation pool-inclusion regression checks passed.");
+  }
+
   // --- scale fixtures: 248 (current real scale) and 2000 (larger than
   // real). Urgent-evidence donors are deliberately placed at the END of
   // every input array/list -- the least favorable position for any

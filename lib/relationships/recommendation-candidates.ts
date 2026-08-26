@@ -226,9 +226,15 @@ function openAskCandidate(evidence: RecommendationEvidence): RecommendationCandi
   };
 }
 
+// Exported so lib/workspace/suggestion-candidates.ts can pre-filter donor
+// pool inclusion on the exact same window this candidate itself uses,
+// never a duplicated magic number that could silently drift out of sync
+// -- same rationale as RELATIONSHIP_DATE_LEAD_WINDOW_DAYS above.
+export const CONTINUE_CONVERSATION_WINDOW_DAYS = 30;
+
 function continueConversationCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const interaction = evidence.contact.lastCompletedInteraction;
-  if (!interaction || interaction.daysAgo > 30) return null;
+  if (!interaction || interaction.daysAgo > CONTINUE_CONVERSATION_WINDOW_DAYS) return null;
   const kind = interaction.type as InteractionKind;
   const friendlyType = interactionKindLabel(kind) || interaction.type;
   const { subject, note } = splitInteractionSummary(interaction.summary);
@@ -285,7 +291,13 @@ function relationshipOpportunityCandidate(evidence: RecommendationEvidence): Rec
   };
 }
 
-const SOLICITATION_PATTERN = /\b(solicit|ask (him|her|them) for|pledge (request|ask)|corporate sponsorship|capital campaign ask)\b/i;
+// "solicit(ed)?" -- not a broader stem match (e.g. "soliciting") -- the
+// past-tense form is the one evidenced gap (a real staging narrative,
+// "Note context: Solicited for a plaque ($5k)," fell through to
+// relationship_opportunity instead of this candidate because \bsolicit\b
+// alone doesn't match "Solicited"). Kept deliberately narrow to that one
+// evidenced case rather than widening to every inflection speculatively.
+const SOLICITATION_PATTERN = /\b(solicit(ed)?|ask (him|her|them) for|pledge (request|ask)|corporate sponsorship|capital campaign ask)\b/i;
 
 function solicitCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const narrativeText = evidence.narrative.relationshipSummary || evidence.narrative.institutionalMemory;

@@ -6,12 +6,14 @@
 // scale (see tests/suggestion-candidates.test.mjs).
 //
 // Every category except "no recent contact" is kept in full, unbounded:
-// a real paid gift, a real open pledge, and a yahrtzeit/birthday/
-// anniversary actually inside its own lead window are all driven by real,
-// rare events -- their count scales with donor *activity*, not with total
-// donor count. Only the contact-gap bucket scales with the size of the
-// donor base itself (at real scale, most of the roster has no recent
-// contact), so it's the only one that needs bounding.
+// a real paid gift, a real open pledge, a yahrtzeit/birthday/anniversary
+// actually inside its own lead window, a donor with a relationship_
+// summary/institutional_memory narrative fact, and a donor contacted
+// inside continueConversationCandidate's own window are all driven by
+// real, rare events -- their count scales with donor *activity*, not
+// with total donor count. Only the contact-gap bucket scales with the
+// size of the donor base itself (at real scale, most of the roster has
+// no recent contact), so it's the only one that needs bounding.
 //
 // Open reminders are deliberately NOT part of this selection at all --
 // lib/workspace/live-data.ts's separate, unconditional reminder loop
@@ -83,6 +85,29 @@ export function selectSuggestionDonorIds(input: {
   // as giftDonorIds/pledgeDonorIds above: exactly as "always worth
   // surfacing" a signal as an open pledge, per design.
   askDonorIds?: Iterable<string>;
+  // A donor with a relationship_summary/institutional_memory narrative
+  // fact on file -- included in full/unbounded, same rationale as every
+  // category above: driven by a real, rare, human-accepted event (a
+  // fundraiser accepting a generated relationship snapshot), not by
+  // total donor count. Without this, relationship_opportunity/solicit
+  // eligibility has no representation in this pool at all -- a donor
+  // could have a genuine, on-file cultivation fact and never have their
+  // evidence built merely because they also lack a gift/pledge/ask/near
+  // date and aren't among the top-N stalest-contact donors. See
+  // docs/AI-HANDOFF.md's Daily Fundraising Agenda Quality Investigation
+  // for the real-data evidence this was missing (9 of 14 real
+  // relationship_opportunity-eligible donors were excluded).
+  narrativeDonorIds?: Iterable<string>;
+  // A donor with a completed interaction inside continueConversationCandidate's
+  // own eligibility window (CONTINUE_CONVERSATION_WINDOW_DAYS) -- also
+  // included in full/unbounded. Deliberately the OPPOSITE end of the
+  // staleness spectrum from contactGapCandidates below: a donor eligible
+  // here was contacted RECENTLY, so widening the stale-contact bound below
+  // could never satisfy this category -- it needs its own inclusion path.
+  // Without this, the investigation found the one real continue_
+  // conversation-eligible donor in the entire roster was structurally
+  // excluded, by construction, every single day.
+  recentContactDonorIds?: Iterable<string>;
   yahrtzeitRows: YahrtzeitCandidateRow[];
   importantDateRows?: ImportantDateCandidateRow[];
   contactGapCandidates: ContactGapCandidate[];
@@ -95,6 +120,8 @@ export function selectSuggestionDonorIds(input: {
   for (const id of input.giftDonorIds) selected.add(id);
   for (const id of input.pledgeDonorIds) selected.add(id);
   for (const id of input.askDonorIds ?? []) selected.add(id);
+  for (const id of input.narrativeDonorIds ?? []) selected.add(id);
+  for (const id of input.recentContactDonorIds ?? []) selected.add(id);
 
   const yahrtzeitsByDonor = new Map<string, YahrtzeitCandidateRow[]>();
   for (const row of input.yahrtzeitRows) {

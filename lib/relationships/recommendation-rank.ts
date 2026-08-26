@@ -12,6 +12,16 @@ export type DonorRecommendation = {
   // per surface (e.g. the homepage queue), without re-deriving what kind
   // of action this is from the text itself.
   kind: RecommendationCandidateKind;
+  // The winning candidate's own real score() value (see score() below) --
+  // exposed so a caller needing to compare recommendations ACROSS donors
+  // (e.g. the Daily Fundraising Agenda's Suggested section, which must
+  // rank its own candidate set by actual merit rather than inherit a
+  // coarse per-kind display tier meant for a different surface) has the
+  // real number available, rather than only kind/confidence labels.
+  // Never used by this file's own within-donor ranking, which already has
+  // it in the `ranked` array below -- this is purely for downstream
+  // cross-donor comparison.
+  score: number;
   // Only set when kind === "acknowledge_gift" -- lets a surface wire a
   // direct one-click "Mark thank-you sent" action to the exact gift this
   // recommendation is about.
@@ -114,7 +124,7 @@ export function buildDonorRecommendation(evidence: RecommendationEvidence): Dono
   });
 
   const winner = ranked[0];
-  return { action: winner.action, why: winner.why, evidence: winner.evidence, confidence: winner.confidence, timing: winner.timing, kind: winner.kind, giftSource: winner.giftSource, giftId: winner.giftId };
+  return { action: winner.action, why: winner.why, evidence: winner.evidence, confidence: winner.confidence, timing: winner.timing, kind: winner.kind, score: score(winner), giftSource: winner.giftSource, giftId: winner.giftId };
 }
 
 // --- Snapshot-card presentation ---

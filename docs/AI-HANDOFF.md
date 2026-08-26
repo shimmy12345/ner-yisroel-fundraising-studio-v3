@@ -15,10 +15,28 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`2642f45`** -- "Document Daily Fundraising Agenda quality
-investigation (advance-notice window + Suggested Actions root cause)" --
-docs-only, zero application code change; see "Daily Fundraising Agenda
-Quality Investigation" below for full detail. Sits on top of `2a7b57b`
+**`(pending — see follow-up commit)`** -- "Implement Daily Fundraising
+Agenda quality corrections: 7-day advance-notice window, Suggested
+Actions pool inclusion, score-based Suggested ranking, solicitation
+regex fix, plus an agenda-scoped upstream candidate-pool cap fix found
+during live verification" -- real application code:
+`lib/agenda/agenda-model.ts`, `lib/agenda/send-agenda.ts`, `lib/
+relationships/recommendation-candidates.ts`, `lib/relationships/
+recommendation-rank.ts`, `lib/workspace/live-data.ts`, `lib/workspace/
+suggestion-candidates.ts`, `lib/workspace/relationship-queue.ts`, plus
+regression coverage in `tests/agenda-model.test.mjs`, `tests/
+recommendation-engine.test.mjs`, `tests/suggestion-candidates.test.mjs`
+-- see "Daily Fundraising Agenda Quality Corrections -- Implementation +
+Extended Fix + Live Verification" below for full detail, including its
+live-verification subsection. **Implemented, tested, tsc-clean,
+build-clean, live-verified read-only; NOT deployed, no email sent, no
+D1 write.** Sits on top of `23353d8` ("Correct Current Git State to
+reference the new HEAD (2642f45)" -- docs-only, zero application code
+change), which sits on top of **`2642f45`** -- "Document Daily
+Fundraising Agenda quality investigation (advance-notice window +
+Suggested Actions root cause)" -- docs-only, zero application code
+change; see "Daily Fundraising Agenda Quality Investigation" below for
+full detail. Sits on top of `2a7b57b`
 ("Correct Current Git State to reference the new HEAD (45c31ac)" --
 docs-only, zero application code change), which sits on top of
 `45c31ac` -- "Document Google Workspace identity provider
@@ -9338,6 +9356,201 @@ production/main access. Stopped for the user's decisions (the advance-
 notice window/cadence choice, and approval of the two-part Suggested
 Actions correction) before any implementation.
 
+## Daily Fundraising Agenda Quality Corrections -- Implementation + Extended Fix + Live Verification (2026-08-26)
+
+**Status: implemented, tested, tsc-clean, build-clean, live-verified
+read-only against current Independent Staging D1 data. Committed and
+pushed to `feature/independent-cloudflare-sandbox`. NOT deployed. No
+email sent. No D1 write. No production/main access.** Approved and
+scoped by the user on top of "Daily Fundraising Agenda Quality
+Investigation" above; implements all 4 requested corrections plus one
+additional, user-approved extension found during live verification
+(see "Extended fix" below).
+
+**1. Upcoming stewardship dates -- 7-day email-only advance-notice
+window (`lib/agenda/agenda-model.ts`).** New `AGENDA_RELATIONSHIP_DATE_
+WINDOW_DAYS = 7` constant, a pure post-filter of the already-computed
+`brief.upcomingRelationshipDates` array (itself unchanged, still bounded
+by the shared `RELATIONSHIP_DATE_LEAD_WINDOW_DAYS = 14` in
+`relationship-date-events.ts`, still feeding the homepage's own "Coming
+Up" exactly as before). `daysUntil` is computed via `localDateOnlyEpoch`
+against each event's own date-only `dateEpoch`, matching the same
+date-only space `partitionRelationshipDateEventsByToday` already uses
+(never a naive `(dateEpoch-now)/86400`). A new `upcomingDateEventToItem`
+renders "Tomorrow"/"In N days" plus the actual calendar date (e.g.
+"Paltiel's birthday — In 5 days, Aug 31, 2026"), reusing the existing
+`relationshipDateContext` helper for age/Hebrew-date/provenance context
+and the same donor href -- no new database state, no reminder, nothing
+recorded to "remember" an item was already shown; it's simply re-derived
+fresh, every day, for as long as it's inside the window.
+
+**2. Suggested Actions pool inclusion (`lib/workspace/suggestion-
+candidates.ts` + one small plumbing addition in `lib/workspace/live-
+data.ts`).** Two new optional, unbounded inclusion categories added to
+`selectSuggestionDonorIds()`: `narrativeDonorIds` (any donor with
+`relationship_summary`/`institutional_memory` set, feeding `relationship_
+opportunity`/`solicit` eligibility) and `recentContactDonorIds` (any
+donor with a completed interaction inside the `continue_conversation`
+eligibility window). `CONTINUE_CONVERSATION_WINDOW_DAYS = 30` was
+extracted as a new exported constant from `recommendation-candidates.ts`
+so the pool-inclusion window can never silently drift from the
+candidate's own real eligibility window. Both new categories are derived
+from data `live-data.ts` had already fetched (`donors.results`,
+`contacts`) -- zero new D1 queries. The existing bounded stale-contact
+category (`CONTACT_GAP_POOL_SIZE = 100`) is untouched.
+
+**3. Suggested-section ranking by real score (`lib/relationships/
+recommendation-rank.ts` + `lib/workspace/live-data.ts` + `lib/agenda/
+agenda-model.ts`).** `DonorRecommendation` now carries the winning
+candidate's own real `score()` value (previously computed, then
+discarded). `WorkspacePriority` exposes it as an optional `score` field
+-- purely additive, read by nothing except the Daily Agenda; the
+homepage's own `rank`/`sortAt` tiering (`suggestionRankByKind`) is
+completely unchanged and still governs the homepage/Today-page/queue
+surfaces. `buildAgenda()`'s Suggested section now sorts a *copy* of
+`relationshipQueue.upcoming` (`dueAt === null` only) by real score
+(`bySuggestedScoreDescending`, an explicit relational comparator, not
+subtraction, to avoid the `Infinity - Infinity = NaN` footgun) before
+applying `MAX_SUGGESTED = 3` -- `relationshipQueue.upcoming` itself is
+never mutated or reordered in place. No category quotas, no artificial
+diversity: the three genuinely highest-scoring undated candidates win,
+full stop.
+
+**4. Narrow solicitation wording fix (`lib/relationships/recommendation-
+candidates.ts`).** `SOLICITATION_PATTERN` gained `(ed)?` --
+`/\b(solicit(ed)?|ask (him|her|them) for|...)\b/i` -- so real staging
+text like "Note context: Solicited for a plaque ($5k)," now correctly
+resolves to the `solicit` recommendation candidate instead of falling
+through to the weaker `relationship_opportunity` fallback. Deliberately
+narrow to the one evidenced past-tense gap; "soliciting" (unevidenced)
+is not matched.
+
+**Extended fix -- agenda-scoped upstream candidate-pool cap (found
+during live verification, approved by the user before proceeding).**
+The first live-data preview (below) surfaced a residual bug: `live-
+data.ts`'s own candidate-pool assembly (`dedupeRelationshipQueue` ->
+`allPriorities.slice(0, cap)`) ran *before* `relationshipQueue.upcoming`
+is built and before `buildAgenda()`'s new score-rerank ever sees
+anything -- and that slice sorted strictly by the OLD coarse `rank` tier
+(`suggestionRankByKind`), capped at `HOMEPAGE_MAX_RESULTS = 50` for
+every context, including the Daily Agenda. With 145 real candidates
+competing for that shared 50-slot cap today, 5 genuinely higher-scoring
+items -- including both real evidenced `open_ask` candidates at
+**0.8075** (Allen Pfeiffer, Michoel A. Rovinsky) -- were being discarded
+before correction #3's rerank ever had a chance to promote them. Fix
+#3, while individually correct, could not fix the concrete originally-
+reported case end-to-end without this.
+
+Fix: a new pure, exported `resolvePriorityCap(context, priorityLimit,
+homepageMaxResults)` in `lib/workspace/relationship-queue.ts` -- for
+`context === "daily-agenda"`, returns `Math.max(5, priorityLimit)` (no
+`homepageMaxResults` clamp at all); for every other context, returns the
+exact prior `Math.max(5, Math.min(priorityLimit, homepageMaxResults))`,
+byte-for-byte unchanged. `live-data.ts` now calls this instead of its
+old inline formula. `lib/agenda/send-agenda.ts`'s `AGENDA_PRIORITY_
+LIMIT` was raised from 50 to 500 -- a concrete, bounded ceiling (not an
+unbounded/Infinity sentinel), comfortably above the current 248-donor
+roster plus reminders/scheduled activities, chosen as the smallest safe
+fix rather than an architectural change to the shared cap. The homepage
+(`context: "today"`), Assistant (`"assistant_page"`/`"assistant_api"`),
+and every other caller are provably unaffected: none of them pass
+`"daily-agenda"`, so `resolvePriorityCap` clamps them exactly as before,
+and they all request small `priorityLimit`s (8, etc.) well under
+`HOMEPAGE_MAX_RESULTS` regardless.
+
+**Regression coverage added:**
+- `tests/recommendation-engine.test.mjs`: "Solicited" now resolves to
+  `solicit`; "Soliciting" (present participle, unevidenced) deliberately
+  does not. Fixed one pre-existing, unrelated fixture
+  (`"People mentioned: Solicited."`, testing legacy verbose field-dump
+  handling) that incidentally started matching the corrected regex --
+  changed to `"People mentioned: Cousin."`, preserving that test's real
+  intent.
+- `tests/suggestion-candidates.test.mjs`: `narrativeDonorIds`/
+  `recentContactDonorIds` each admit a donor the old pool excluded,
+  with a real bounded-pool fixture (100 filler stale-contact donors)
+  so the exclusion this fix corrects is genuinely exercised, not
+  trivially already-included.
+- `tests/agenda-model.test.mjs`: (a) the 7-day advance-notice window's
+  boundary/wording/context preservation; (b) the concrete evidenced
+  failure -- an `open_ask` at 0.8075 must not be discarded merely
+  because `follow_up_pledge` has a better coarse category rank, and
+  after re-ranking it beats every pledge; (c) no-artificial-diversity --
+  four pledges at 0.65 plus one weaker cultivation candidate at 0.42
+  never has the weaker item displace a pledge; (d) a genuine end-to-end
+  regression exercising the real `dedupeRelationshipQueue` ->
+  `resolvePriorityCap` -> `groupRelationshipQueue` -> `buildAgenda()`
+  pipeline (not a hand-constructed `relationshipQueue.upcoming`) with
+  51 upstream candidates (50 rank-3 pledges + 1 rank-4 open_ask at
+  0.8075), proving: the OLD cap formula/value discards the open_ask
+  before `buildAgenda()` ever sees it; the NEW `"daily-agenda"` path
+  lets it survive and ranks it #1; and the homepage's own `"today"`/
+  `priorityLimit=8` path produces the identical 8-item, all-pledge
+  slice either way. (`loadWorkspaceBrief()` itself remains untestable
+  in plain Node -- it imports `cloudflare:workers` -- matching this
+  repo's established limitation for every D1-coupled loader; see
+  `tests/workspace-brief-instrumentation.test.mjs`'s own note on this.)
+
+**Automated verification:**
+pnpm test: PASS (all suites, including the new regression coverage above)
+pnpm exec tsc --noEmit: PASS
+pnpm run build:staging-independent: PASS (full route table unchanged,
+including `/api/agenda/preview`)
+
+**Live, read-only verification against current Independent Staging D1
+data (no deploy -- the real, modified production functions run directly
+in a throwaway Node script against fresh `wrangler d1 execute --remote
+--json` pulls, the same technique used for the original investigation):**
+
+*7-day relationship-date window:* Today -- Zev Nussbaum's birthday,
+Eli Treitel's birthday. Upcoming, in-window -- Paltiel Myers (In 5 days,
+Aug 31), Ezra Wisotsky (In 5 days, Aug 31), Shaul Jaspan (In 7 days,
+Sep 2). Confirmed no duplication between the today/upcoming lists.
+
+*Suggested top 3 -- before any of today's corrections:* Yaakov Pollack
+(`follow_up_pledge`, 0.6500), Elie Grinblatt (`follow_up_pledge`,
+0.6500), Dovi Kreismann (`follow_up_pledge`, 0.4450) -- all pledge
+follow-ups; both real 0.8075 `open_ask` candidates structurally
+unreachable.
+
+*Suggested top 3 -- after fixes #2/#3 alone (before the extended
+fix):* Pollack, Ahron Schabes (newly reachable via the widened pool),
+Grinblatt -- an improvement (a previously-excluded donor now
+evaluated), but the concrete 0.8075 `open_ask` case was still cut by
+the upstream cap described above.
+
+*Suggested top 3 -- final, with the extended fix applied:* **#1 Mr. &
+Mrs. Allen Pfeiffer -- `open_ask`, 0.8075. #2 Rabbi Michoel A. Rovinsky
+-- `open_ask`, 0.8075. #3 Mr. & Mrs. Yaakov Pollack -- `follow_up_
+pledge`, 0.6500.** Both real evidenced $10k/$5k open-ask opportunities
+now surface, ahead of every pledge follow-up, exactly as corrections
+#2/#3 were meant to produce.
+
+*Pool-inclusion effect:* 51 donors newly reachable in today's real data
+(narrative + recent-contact categories combined), spanning winning kinds
+`reconnect_contact_gap`, `open_ask`, `follow_up_pledge`, `relationship_
+opportunity`, and `solicit` -- confirming previously-structurally-
+excluded categories are now genuinely evaluated, not just theoretically
+eligible.
+
+*Upstream cap sizing:* 145 total deduped candidates exist today, well
+under the new 500 cap -- nothing is truncated pre-rerank in current
+real data.
+
+*Homepage/Today-page ordering -- explicitly confirmed unchanged:*
+`resolvePriorityCap("today", 8, 50)` still returns exactly `8`, matching
+the prior inline formula bit-for-bit. The real top-8
+`relationshipQueue.upcoming` slice is byte-identical before and after
+every change in this task: Pollack, Schabes, Grinblatt, Musman,
+Silverman, Broide, Schwartz, Kreismann, in that order, both times.
+`relationshipQueue.upcoming` itself is never mutated by `buildAgenda()`
+-- its score-based re-rank operates on a spread copy, scoped to
+`lib/agenda/agenda-model.ts` only.
+
+**Not done, by explicit instruction:** no deployment, no manual email
+send, no D1 write, no production/main access. See "Current Git State"
+and "Next Approval Required" for what's outstanding.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -10155,34 +10368,22 @@ relationship-intelligence quality work):
 ## Next Approval Required
 
 **Genuinely open, newest first: Daily Fundraising Agenda quality
-corrections (2026-08-26) -- awaiting the user's decisions before any
-implementation.** See "Daily Fundraising Agenda Quality Investigation"
-above for the full real-data analysis. Two independent decisions needed:
-1. **Advance-notice window/cadence for birthdays/anniversaries/
-   yahrtzeits in the email** -- pick a window (3 days? 7 days? reuse the
-   existing 14-day "Coming Up" set as-is?) and a cadence (show every day
-   in the window, ramping like the existing outreach-candidate urgency
-   scoring already does, vs. show only on entry + on the day). This
-   session's recommendation (7 days, shown every day) is offered, not
-   decided.
-2. **Suggested Actions pipeline correction** -- approve, adjust, or
-   reject the two smallest identified corrections: (a) add
-   `relationship_summary`/`institutional_memory` and recent-completed-
-   interaction donors as new unbounded inclusion categories in
-   `selectSuggestionDonorIds()`, and (b) have the agenda's own Suggested
-   selection re-sort by each candidate's already-computed real `score()`
-   instead of inheriting the homepage's coarse rank/sortAt tiering
-   (scoped to the email only, not the homepage's own "Coming Up"/queue
-   ordering). Real-data evidence shows this would correctly surface two
-   currently-invisible, higher-scoring `open_ask` opportunities ($10,000
-   and $5,000, both scoring above every pledge in the dataset) but would
-   not, on today's data, promote `continue_conversation`/`relationship_
-   opportunity`/`solicit` into the top 3 -- their real scores are
-   genuinely lower than the strongest pledges/asks right now. A
-   separate, optional, narrow `SOLICITATION_PATTERN` regex fix
-   (matching "solicited," not just "solicit") was also identified.
-Nothing has been implemented -- no D1 write, no code change, no
-deployment.
+corrections -- implemented, tested, live-verified read-only; awaiting
+the user's review before deployment (2026-08-26).** See "Daily
+Fundraising Agenda Quality Corrections -- Implementation + Extended Fix
++ Live Verification" above for the full implementation and live-
+verification record. All 4 originally-requested corrections plus one
+user-approved extension (an agenda-scoped upstream candidate-pool cap
+fix, needed to make the concrete evidenced 0.8075 `open_ask` case
+actually reach the email) are complete: `pnpm test`/`tsc --noEmit`/
+`build:staging-independent` all pass, and a read-only live preview
+against current Independent Staging data confirms the 7-day
+relationship-date window, the corrected Suggested top 3 (both real
+$10k/$5k `open_ask` opportunities now surface ahead of every pledge),
+and that homepage/Today-page ordering is byte-identical to before.
+Committed and pushed to `feature/independent-cloudflare-sandbox`. **Not
+deployed, no email sent, no D1 write** -- awaiting the user's go-ahead
+to deploy.
 
 **RESOLVED 2026-08-26 -- Google Workspace identity provider implemented
 and live-verified; genuinely open item is now just a future product
@@ -10315,6 +10516,58 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T23:45:00Z (approximate)
+Claude (Sonnet 5) — Implemented all 4 approved Daily Fundraising Agenda
+quality corrections from the investigation above, plus one additional
+extension found and approved mid-task. Fix 1: 7-day email-only advance-
+notice window for relationship dates, a pure post-filter of the
+already-computed upcomingRelationshipDates array (lib/agenda/agenda-
+model.ts) -- shared 14-day constant and homepage "Coming Up" untouched.
+Fix 2: selectSuggestionDonorIds() gained two new unbounded inclusion
+categories (relationship_summary/institutional_memory narrative donors;
+recent-completed-interaction donors within the continue_conversation
+window), derived from already-fetched D1 results, zero new queries.
+Fix 3: exposed each recommendation's real score() as WorkspacePriority.
+score and had the agenda's own Suggested selection re-rank by it
+(scoped to the email only; relationshipQueue.upcoming itself never
+mutated; homepage/Today-page rank/sortAt ordering untouched). Fix 4:
+narrowed SOLICITATION_PATTERN to also match "solicited." While live-
+verifying fixes 2/3 against fresh Independent Staging data, found that
+live-data.ts's own upstream candidate-pool slice (dedupeRelationshipQueue
+-> allPriorities.slice) ran before buildAgenda()'s rerank and still
+capped at the homepage's HOMEPAGE_MAX_RESULTS=50 using the OLD coarse
+rank -- so the concrete evidenced 0.8075 open_ask case could still be
+silently discarded pre-rerank (145 real candidates compete for that
+50-slot cap today). Flagged this to the user as a scope decision rather
+than silently expanding scope or silently shipping an incomplete fix;
+user approved extending the fix. Added a new pure resolvePriorityCap()
+in lib/workspace/relationship-queue.ts (skips the homepage clamp only
+for context==="daily-agenda") and raised send-agenda.ts's
+AGENDA_PRIORITY_LIMIT from 50 to 500 (a concrete bounded ceiling, not
+Infinity, comfortably above the 248-donor roster) -- homepage/Assistant
+callers pass other context values and small priorityLimits, so they're
+provably unaffected. Added regression coverage for all of the above,
+including a genuine end-to-end test chaining the real
+dedupeRelationshipQueue -> resolvePriorityCap -> groupRelationshipQueue
+-> buildAgenda() pipeline (loadWorkspaceBrief() itself remains
+untestable in plain Node per this repo's established cloudflare:workers
+limitation). pnpm test/tsc --noEmit/build:staging-independent all pass.
+Live-verified read-only against fresh Independent Staging D1 data
+(read-only wrangler d1 execute --remote --json pulls, run through the
+real, modified production functions in a throwaway Node script, same
+technique as the original investigation): confirmed the 7-day window's
+exact contents, and confirmed the final Suggested top 3 is Allen
+Pfeiffer (open_ask, 0.8075), Michoel Rovinsky (open_ask, 0.8075),
+Yaakov Pollack (follow_up_pledge, 0.6500) -- both real evidenced
+open-ask opportunities now surface, versus the original all-pledge top
+3 (Pollack/Grinblatt/Kreismann). Confirmed homepage/Today-page's own
+top-8 slice is byte-identical before and after every change in this
+task. Committed and pushed to feature/independent-cloudflare-sandbox.
+Not deployed; no email sent; no D1 write; no production/main access,
+per explicit instruction -- stopped for the user's review.
+
+---
 
 2026-08-26T21:30:00Z (approximate)
 Claude (Sonnet 5) — Investigated two Daily Fundraising Agenda quality
