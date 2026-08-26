@@ -15,8 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending -- see the follow-up correction commit right after this one
-for the exact SHA)** -- "Document Cloudflare Zero Trust configuration
+**`18c18ac`** -- "Document Cloudflare Zero Trust configuration
 inspection + Google Workspace migration plan" -- docs-only, zero
 application code change; see "Authentication Architecture Investigation"
 -> "Round 2" below for full detail. Sits on top of `14916fe` -- "Document
@@ -179,8 +178,7 @@ job itself at the next 9:00 AM America/New_York firing. See "Daily
 Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`14916fe` prior to this commit (pushed; will be updated to the new HEAD
-by the follow-up correction commit once pushed).
+`18c18ac` (pushed; matches local HEAD exactly, no divergence).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
