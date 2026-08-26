@@ -15,12 +15,18 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`37bcf35`** -- "Document Daily Fundraising Agenda email investigation
-(no code/config/send/deploy change)" -- docs-only, zero application code
-change; see "Daily Fundraising Agenda Email" below for full detail. Sits
-on top of `16986e4` ("Correct Current Git State to reference the new HEAD
-(ee496ae)" -- docs-only, zero application code change), which sits on top
-of `ee496ae` -- "Document stewardship-activity deploy + live
+**(pending -- see the follow-up correction commit right after this one for
+the exact SHA)** -- "Expand Gmail API send-mechanism investigation in
+Daily Fundraising Agenda email section (no code/config/send/deploy
+change)" -- docs-only, zero application code change; see "Daily
+Fundraising Agenda Email" below for full detail. Sits on top of `42d336b`
+("Correct Current Git State to reference the new HEAD (37bcf35)" --
+docs-only, zero application code change), which sits on top of `37bcf35`
+-- "Document Daily Fundraising Agenda email investigation (no code/
+config/send/deploy change)" -- docs-only, zero application code change,
+which sits on top of `16986e4` ("Correct Current Git State to reference
+the new HEAD (ee496ae)" -- docs-only, zero application code change),
+which sits on top of `ee496ae` -- "Document stewardship-activity deploy + live
 end-to-end verification" -- docs-only, zero application code change.
 Sits on top of `8263eff` ("Correct Current Git State to reference the
 new HEAD (1fa2c26)" -- docs-only, zero application code change), which
@@ -112,7 +118,8 @@ back to exact baseline). No production access. `origin/main` untouched
 throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`37bcf35` (pushed; matches local HEAD exactly, no divergence).
+`42d336b` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -7925,65 +7932,158 @@ STAGING_OWNER_EMAIL` (`sgoldstein@nirc.edu`) is the existing, appropriate
 place for the recipient address and should be read from there rather than
 adding a new literal to application source.
 
-**User asked to choose the send mechanism; chose to investigate Gmail API
-further before deciding against Resend.** Findings (research only, matched
-against this repo -- confirmed no existing Google Cloud project, OAuth
-client, token, or Workspace configuration anywhere in the repo; the only
-"google" hit repo-wide is the unrelated `next/font/google` import in
-`app/layout.tsx`):
-- Correct minimal scope for send-only access: `https://www.googleapis.com
-  /auth/gmail.send` (no inbox read/modify/settings access).
-- A refresh token stored as a Cloudflare Worker **secret** (`wrangler
-  secret put`, never a `vars` entry or source literal), paired with the
-  OAuth client's `client_id`/`client_secret` (also secrets), can be used
-  non-interactively: each scheduled run exchanges it at `https://oauth2.
-  googleapis.com/token` (`grant_type=refresh_token`) for a short-lived
-  access token, then calls `users.messages.send`. At one send/day, no
-  token caching/KV is needed -- refresh fresh every run.
-- **Real caveat:** if the Google Cloud OAuth consent screen is left in
-  "Testing" publishing status, issued refresh tokens expire after 7 days,
-  which would silently break this within a week. Avoiding that needs
-  either user type "Internal" (only available if `nirc.edu` is a Google
-  Workspace domain -- restricts the app to that org and requires no
-  Google verification at all, regardless of scope sensitivity) or
-  "External" + "In production" (requires Google's standard verification
-  for a Sensitive-classified scope like `gmail.send` -- not the heavier
-  CASA audit that Restricted scopes need, but still a review that can
-  take days to weeks and typically wants a privacy-policy URL/verified
-  domain). **Whether `nirc.edu` is a Google Workspace domain is not
-  determinable from this repo and is the open question the user needs to
-  answer** -- it decides which of these two paths applies. Separately, if
-  a Workspace admin exists, Admin Console -> Security -> API controls ->
-  App access control could independently block or require allow-listing
-  the OAuth client regardless of Internal/External status.
-- Sender = recipient = `STAGING_OWNER_EMAIL` is fully normal (emailing
-  yourself); it lands in that account's Sent folder like any other
-  Gmail-sent message and in Inbox as a normal received message.
-- Other ways a refresh token can die: 6 months unused, password-reset risk
-  scenarios, manual revocation at `myaccount.google.com/permissions`, or
-  exceeding 50 refresh tokens per OAuth client per user (evicts the
-  oldest -- unlikely at one token, but possible if the consent flow is
-  re-run during setup/debugging). Any of these surfaces as `invalid_grant`
-  on token refresh; the scheduled handler would need to fail loudly
-  (Cloudflare Observability, already enabled) since no secondary alert
-  channel exists today if the daily email silently stops.
-- Sending limits are not a real constraint at this volume (consumer Gmail
-  ~500 recipients/day, Workspace higher; Gmail API's own per-day quota
-  units are effectively unlimited for one send/day).
-- Trade-off versus Resend for this specific use case: Gmail avoids a new
-  vendor and the email genuinely lives in the user's own mailbox, at the
-  cost of a materially higher one-time setup (Cloud project, consent
-  screen, Internal/External decision contingent on the still-open
-  Workspace question, one-time manual authorization) and an ongoing small
-  risk of silent breakage from the refresh-token-lifecycle caveats above,
-  none of which apply to a static Resend API key. Both are equally narrow
-  in blast radius (`gmail.send`-only vs. a send-scoped Resend key) --
-  neither grants read access to anything.
+**User asked to investigate Gmail API as the send mechanism (round 1,
+same day).** Findings below (research only, matched against this repo --
+confirmed no existing Google Cloud project, OAuth client, token, or
+Workspace configuration anywhere in the repo; the only "google" hit
+repo-wide is the unrelated `next/font/google` import in `app/layout.tsx`).
+**Round 2 (same day, this update)** re-asked the identical question set
+more precisely; findings below are the merged, final answer to both
+rounds -- nothing changed between rounds except added precision, and
+still nothing implemented, no credential created/exposed/committed, no
+email sent:
 
-**Status: awaiting the user's decision** (Gmail -- pending the Workspace
-question above -- vs. Resend vs. holding). Nothing implemented pending
-that choice. No production/main access at any point; no code, dependency,
-migration, secret, or deployment changed by this investigation.
+1. **Narrowest send-only scope:** `https://www.googleapis.com/auth/
+   gmail.send`. This grants `users.messages.send`/`users.drafts.send`
+   only -- no read, no modify, no settings, no label/thread access.
+   Fundraising OS would never receive inbox-reading permission under this
+   scope, which is the explicit requirement.
+2. **Refresh token as a Cloudflare Worker secret, used non-interactively
+   -- yes, and this is the intended, secure pattern for exactly this
+   scenario.** `wrangler secret put` stores the value encrypted at rest
+   in Cloudflare's control plane; it is never written to any file in this
+   repo, never appears in `wrangler.staging.jsonc`'s `vars` (which are
+   plaintext and visible via `wrangler deployments`/the dashboard), and
+   `wrangler secret list` only ever returns secret *names*, never values
+   -- there is no command that reads a secret's value back out once set.
+   The scheduled Worker reads it from its own `env` binding at runtime,
+   server-side only; it is never sent to the browser/client bundle.
+3. **Google Cloud project / OAuth client setup required (not yet
+   performed by me -- this is what the user would need to do):**
+   a. Create (or reuse) a Google Cloud project in console.cloud.google.com.
+   b. Enable the Gmail API for that project (APIs & Services -> Library).
+   c. Configure the OAuth consent screen (APIs & Services -> OAuth
+      consent screen): choose user type **Internal** (only selectable if
+      `nirc.edu` is itself a Google Workspace domain -- see point 4) or
+      **External**; add the `gmail.send` scope to the screen's scope list.
+   d. Create an OAuth 2.0 Client ID (APIs & Services -> Credentials);
+      application type **Desktop app** is the simplest, since it supports
+      the one-time manual/installed-app authorization flow below without
+      needing a hosted redirect URI. This yields a `client_id` and
+      `client_secret`.
+   e. Perform the one-time interactive authorization **once, in a
+      browser, by the user** -- never inside the Worker: authorize the
+      target Gmail/Workspace account against the `gmail.send` scope
+      (e.g. via Google's own OAuth Playground with "use your own OAuth
+      credentials" pointed at the client from step (d)), which yields one
+      `refresh_token`.
+   f. Store the three resulting values as Cloudflare Worker secrets (see
+      point 8) -- nothing from this flow is written to the repository at
+      any point.
+   g. If user type ended up **External** rather than **Internal**, the
+      consent screen's publishing status must be moved to **"In
+      production"** (not left in "Testing") before or shortly after this
+      setup -- see point 9's expiration note for why.
+4. **Whether Google Workspace administrator approval is likely/required
+   -- cannot be fully resolved from this repo, but here is the concrete
+   assessment:** `nirc.edu` is an institutional (`.edu`) domain, which
+   makes it plausible it runs Google Workspace for Education rather than
+   consumer Gmail -- but this repo contains no evidence either way, and
+   I have not and will not probe `nirc.edu`'s mail configuration to find
+   out. Two independent approval questions follow from that, both worth
+   checking with whoever administers the domain (which may or may not be
+   the user):
+   - **Creating the "Internal" OAuth app itself** does not require admin
+     action by default -- any member of the Workspace org can register
+     an Internal app for that org from their own Google Cloud account.
+   - **However**, Workspace admins (Admin Console -> Security -> API
+     Controls -> App Access Control) can configure a policy that blocks
+     or requires explicit allow-listing of third-party/internal apps
+     requesting Sensitive-or-higher scopes like `gmail.send`, even for
+     Internal apps. Google Workspace for Education tenants in particular
+     often ship with stricter default trust settings than a standard
+     Workspace Business tenant. **Net assessment: admin approval is
+     plausible-to-likely for an `.edu` tenant, not certain, and only
+     something the user (or the domain's actual admin) can confirm** by
+     checking that Admin Console page, or by simply attempting step 3(e)
+     above and seeing whether Google blocks the consent screen with an
+     "app not verified by your organization" style error.
+5. **Sender = recipient = `STAGING_OWNER_EMAIL` -- confirmed fully
+   normal.** The Gmail API sends as the authenticated "me" account;
+   addressing `To:` to that same address is simply emailing yourself.
+6. **Appears normally in Sent -- confirmed yes.** `users.messages.send`
+   goes through Gmail's standard send pipeline, so the message lands in
+   that account's Sent folder exactly like any other Gmail-sent message,
+   and (since sender = recipient here) in Inbox as a normal received
+   message too.
+7. **How access-token refresh works from the Worker:** on each scheduled
+   invocation that decides to send (i.e. only the one run/day where local
+   NY time reads 9:00, per the DST-safe design above), the Worker issues
+   one `POST https://oauth2.googleapis.com/token` with body
+   `client_id`, `client_secret`, `refresh_token`, `grant_type=refresh_
+   token`; the response's `access_token` (short-lived, ~3600s) is used as
+   a `Bearer` token on the immediately-following `POST https://gmail.
+   googleapis.com/gmail/v1/users/me/messages/send` call (body: a
+   base64url-encoded RFC 2822 MIME message). At one send/day there is no
+   reason to cache the access token across invocations -- mint fresh
+   every time, which needs no KV/state.
+8. **Exactly which Cloudflare secrets/config would be required (none
+   created by this investigation):**
+   - `GMAIL_OAUTH_CLIENT_ID` (Worker secret) -- from step 3(d).
+   - `GMAIL_OAUTH_CLIENT_SECRET` (Worker secret) -- from step 3(d).
+   - `GMAIL_OAUTH_REFRESH_TOKEN` (Worker secret) -- from step 3(e).
+   - No new `vars` entry is needed for the recipient/sender address --
+     `wrangler.staging.jsonc`'s existing `vars.STAGING_OWNER_EMAIL` is
+     reused for both, per the existing-config-location finding above.
+   - All three secrets would be set via `wrangler secret put <NAME>
+     --config wrangler.staging.jsonc` (interactive prompt, value never
+     echoed or written to any file in this repo).
+9. **Token expiration/revocation considerations:** issued refresh tokens
+   expire after **7 days** if the OAuth consent screen is left in
+   **"Testing"** publishing status (the default for a brand-new app) --
+   this would silently break the daily email within a week if not moved
+   to "In production" (External) or built as "Internal" from the start
+   (Internal apps have no publishing-status-driven expiry). Beyond that,
+   a refresh token can also stop working from: 6 months of no use
+   (irrelevant at daily use), certain password-reset/security-event
+   scenarios on the Google account, manual revocation at `myaccount.
+   google.com/permissions`, or exceeding 50 live refresh tokens for the
+   same OAuth client + user (issuing a 51st silently revokes the oldest
+   -- unlikely at one token in steady state, but possible if the
+   one-time authorization step is re-run multiple times while debugging
+   setup). Any of these surfaces as an `invalid_grant` error on the
+   token-refresh call; since no secondary notification channel exists
+   today, a failure here would need to fail loudly into Cloudflare
+   Observability (already enabled) rather than fail silently, or the
+   user simply stops receiving the daily email with no other signal.
+10. **Gmail sending limits for one message/day -- not a real
+    constraint either way:** consumer Gmail accounts cap around 500
+    recipients/day; Google Workspace accounts are higher (historically
+    ~2,000/day depending on SKU); the Gmail API's own per-project quota
+    system is unit-based (a send costs on the order of 100 units against
+    a default budget in the billions/day) and is nowhere close to being
+    exercised by one email per day.
+11. **Security/maintenance trade-offs versus Resend, for this specific
+    use case:** Gmail's advantages are avoiding a new vendor entirely and
+    the email genuinely living in the user's own mailbox at no
+    incremental cost. Its costs are a materially higher one-time setup
+    (Cloud project, consent screen, the still-open Internal-vs-External/
+    Workspace-admin question above, a manual one-time browser
+    authorization) and an ongoing, if small, risk of silent breakage from
+    the refresh-token-lifecycle caveats in point 9 -- none of which a
+    static Resend API key is subject to (it doesn't expire on a
+    publishing-status timer and isn't capped at 50 live tokens). Both
+    are equally narrow in blast radius if ever leaked (`gmail.send`-only
+    vs. a send-scoped Resend key) -- neither can read mail or any other
+    data.
+
+**Status: awaiting the user's decision** (Gmail -- pending the Workspace/
+admin-approval question in point 4 above -- vs. Resend vs. holding).
+Nothing implemented pending that choice; no Google Cloud project created,
+no OAuth flow started, no secret created, no credential of any kind
+exposed or committed. No production/main access at any point; no code,
+dependency, migration, secret, or deployment changed by this
+investigation.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
@@ -8901,6 +9001,29 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T00:20:00Z (approximate)
+Claude (Sonnet 5) — At the user's request, expanded the same-day Gmail
+API send-mechanism investigation (see "Daily Fundraising Agenda Email"
+above) into a precise, numbered answer to each specific question asked:
+narrowest scope (`gmail.send`), why storing a refresh token as a
+Cloudflare Worker secret is secure and how non-interactive refresh works
+from the Worker, the exact Google Cloud project/OAuth-consent-screen/
+client setup steps (not performed), an explicit assessment of Workspace
+admin approval likelihood for the `.edu` domain (genuinely undetermined,
+flagged as plausible-to-likely, not confirmable from this repo), that
+sender/recipient can both be `STAGING_OWNER_EMAIL` and the message
+appears normally in Sent, the exact three Cloudflare secret names that
+would be required (`GMAIL_OAUTH_CLIENT_ID`/`_CLIENT_SECRET`/
+`_REFRESH_TOKEN`), token expiration/revocation causes (the 7-day
+Testing-mode expiry being the one most likely to bite), sending limits
+(not a real constraint at one/day), and the security/maintenance
+trade-off versus Resend. Re-confirmed no reusable Google/Workspace
+configuration exists anywhere in the repo. No Google Cloud project
+created, no OAuth flow started, no secret created or exposed, nothing
+implemented, no email sent, no production/main access.
+
+---
 
 2026-08-26T00:00:00Z (approximate)
 Claude (Sonnet 5) — Investigated a requested Daily Fundraising Agenda
