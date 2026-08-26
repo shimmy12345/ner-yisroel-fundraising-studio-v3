@@ -15,7 +15,13 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`ee496ae`** -- "Document stewardship-activity deploy + live
+**(pending -- see the follow-up correction commit right after this one for
+the exact SHA)** -- "Document Daily Fundraising Agenda email investigation
+(no code/config/send/deploy change)" -- docs-only, zero application code
+change; see "Daily Fundraising Agenda Email" below for full detail. Sits
+on top of `16986e4` ("Correct Current Git State to reference the new HEAD
+(ee496ae)" -- docs-only, zero application code change), which sits on top
+of `ee496ae` -- "Document stewardship-activity deploy + live
 end-to-end verification" -- docs-only, zero application code change.
 Sits on top of `8263eff` ("Correct Current Git State to reference the
 new HEAD (1fa2c26)" -- docs-only, zero application code change), which
@@ -107,7 +113,8 @@ back to exact baseline). No production access. `origin/main` untouched
 throughout every task recorded in this file.
 
 origin/feature/independent-cloudflare-sandbox:
-`ee496ae` (pushed; matches local HEAD exactly, no divergence).
+`16986e4` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -7836,6 +7843,150 @@ unchanged) -- no unrelated data was touched.
 **Result: all 7 requested checks passed.** No production/main access at
 any point.
 
+## Daily Fundraising Agenda Email (2026-08-26) -- INVESTIGATION ONLY, NO CODE/CONFIG/SECRET/DEPLOY/SEND CHANGE, AWAITING PRODUCT DECISION
+
+**Request.** A daily 9:00 AM America/New_York email (every day including
+weekends, DST-correct, never a fixed UTC time) summarizing what actually
+needs attention that day: reminders/follow-ups due or overdue, pending Ask
+follow-ups, today's donor dates/yahrtzeits, scheduled stewardship actions
+due today, and a small separate "Suggested" list of non-due recommendations
+-- deduplicated so one underlying action never appears in two sections.
+Explicit instruction: investigate existing infrastructure before designing
+anything; do not introduce a new email provider, paid service, database
+table, or major dependency merely for convenience; if the necessary
+infrastructure already exists, implement through the pre-deploy checkpoint
+and stop for review; if new external email infrastructure or credentials
+are required, stop after investigation instead of choosing for the user.
+No code was written, no dependency added, no migration created, no secret
+created, no OAuth flow started, nothing deployed, no email sent.
+
+**Fresh-verified first, per instruction.** Branch
+`feature/independent-cloudflare-sandbox`, local HEAD `16986e4`, matched
+`origin/feature/independent-cloudflare-sandbox` exactly, working tree
+clean. Deployed Worker unchanged at `53229863-60fd-47a3-8711-ee9910e5566b`
+(see "Meaningful Stewardship Activity" above). D1 schema reconfirmed via
+`db/schema.ts`: `recommendations` (used for both due reminders and
+undated suggestions -- Ask follow-ups reuse this same table/mechanism, per
+"Ask/Solicitation v1" above), `yahrtzeits`, `important_dates`
+(birthday/anniversary), `asks`.
+
+**Content-generation reuse found -- no new query logic needed.**
+`lib/workspace/live-data.ts`'s `loadWorkspaceBrief()` (the existing Today-
+page/homepage data loader) already computes exactly the due-vs-suggested
+split this feature needs, tested and already live: `relationshipQueue.
+overdue` / `.today` (reminders and Ask follow-ups with a real `dueAt`,
+bucketed via `relationshipQueueBucket()`), `todaySchedule` (scheduled
+donor actions/stewardship due today), `todayRelationshipDates`
+(yahrtzeit/birthday/anniversary occurring today, Hebrew-date-aware,
+structurally guaranteed never to duplicate the reminder queue -- see the
+loader's own comment on why relationship-date candidates are excluded from
+the ranked queue), and suggestion-kind priorities (`continue_conversation`,
+`reconnect_contact_gap`, `follow_up_pledge`, `relationship_opportunity`,
+`solicit`) that carry no `dueAt` and bucket into `upcoming`. Donor links
+are `/donors/{id}` (Meeting Brief: `/donors/{id}/meeting-brief`); there is
+no separate `/asks/{id}` page, so "the relevant donor/Ask" link is the
+donor page. The smallest reliable implementation, once a send mechanism is
+approved, is a thin new module that calls this existing loader and
+reshapes/dedupes its output into the four requested email sections plus
+HTML/text rendering -- not a new data/query layer.
+
+**Scheduling infrastructure -- missing, but addable without new
+services.** Neither `wrangler.staging.jsonc` nor `wrangler.production.
+example.jsonc` has a `triggers.crons` entry, and `worker/index.ts` exports
+only `fetch`, no `scheduled()` handler. The only existing cron anywhere in
+this repo is GitHub Actions' nightly D1 backup (`.github/workflows/
+d1-backup-nightly.yml`, `0 8 * * *` UTC) -- unrelated infrastructure, and
+itself not DST-aware (irrelevant for a backup, would be wrong for "9 AM
+Eastern"). Design for DST correctness (not yet implemented): a Cloudflare
+Cron Trigger firing hourly (`0 * * * *`), with the `scheduled()` handler
+computing the current wall-clock hour in `America/New_York` via
+`Intl.DateTimeFormat(..., { timeZone: "America/New_York" })` at execution
+time and only proceeding when local hour `=== 9`. Firing hourly means
+exactly one of the 24 daily invocations ever matches, so no idempotency
+marker, no new KV namespace, and no new D1 table are needed for dedup --
+directly satisfying the "no new database table merely for convenience"
+constraint. Cron Triggers require no plan upgrade beyond what's already in
+place (Workers Paid, already active per the 2026-08-20 CPU-limit
+sections above).
+
+**Email-sending infrastructure -- does not exist; this is the actual
+blocker.** No Resend/SendGrid/Postmark/Mailgun/nodemailer/SMTP dependency
+anywhere in `package.json`, no Cloudflare `send_email` binding in either
+wrangler config, no MailChannels reference. No custom domain/zone exists
+on this Cloudflare account either (the Worker is `*.workers.dev` only;
+Cloudflare Access uses Cloudflare's own `cloudflareaccess.com` team
+domain, not an owned domain) -- material because Cloudflare's own
+outbound-email mechanism (Email Routing's `send_email` Worker binding)
+requires a zone the account controls with Email Routing enabled, which is
+not present here. Per instruction, stopped after investigation rather
+than choosing a provider or signing up for anything.
+
+**Existing config location for the notification address -- confirmed,
+do not hardcode a new one.** `wrangler.staging.jsonc`'s `vars.
+STAGING_OWNER_EMAIL` (`sgoldstein@nirc.edu`) is the existing, appropriate
+place for the recipient address and should be read from there rather than
+adding a new literal to application source.
+
+**User asked to choose the send mechanism; chose to investigate Gmail API
+further before deciding against Resend.** Findings (research only, matched
+against this repo -- confirmed no existing Google Cloud project, OAuth
+client, token, or Workspace configuration anywhere in the repo; the only
+"google" hit repo-wide is the unrelated `next/font/google` import in
+`app/layout.tsx`):
+- Correct minimal scope for send-only access: `https://www.googleapis.com
+  /auth/gmail.send` (no inbox read/modify/settings access).
+- A refresh token stored as a Cloudflare Worker **secret** (`wrangler
+  secret put`, never a `vars` entry or source literal), paired with the
+  OAuth client's `client_id`/`client_secret` (also secrets), can be used
+  non-interactively: each scheduled run exchanges it at `https://oauth2.
+  googleapis.com/token` (`grant_type=refresh_token`) for a short-lived
+  access token, then calls `users.messages.send`. At one send/day, no
+  token caching/KV is needed -- refresh fresh every run.
+- **Real caveat:** if the Google Cloud OAuth consent screen is left in
+  "Testing" publishing status, issued refresh tokens expire after 7 days,
+  which would silently break this within a week. Avoiding that needs
+  either user type "Internal" (only available if `nirc.edu` is a Google
+  Workspace domain -- restricts the app to that org and requires no
+  Google verification at all, regardless of scope sensitivity) or
+  "External" + "In production" (requires Google's standard verification
+  for a Sensitive-classified scope like `gmail.send` -- not the heavier
+  CASA audit that Restricted scopes need, but still a review that can
+  take days to weeks and typically wants a privacy-policy URL/verified
+  domain). **Whether `nirc.edu` is a Google Workspace domain is not
+  determinable from this repo and is the open question the user needs to
+  answer** -- it decides which of these two paths applies. Separately, if
+  a Workspace admin exists, Admin Console -> Security -> API controls ->
+  App access control could independently block or require allow-listing
+  the OAuth client regardless of Internal/External status.
+- Sender = recipient = `STAGING_OWNER_EMAIL` is fully normal (emailing
+  yourself); it lands in that account's Sent folder like any other
+  Gmail-sent message and in Inbox as a normal received message.
+- Other ways a refresh token can die: 6 months unused, password-reset risk
+  scenarios, manual revocation at `myaccount.google.com/permissions`, or
+  exceeding 50 refresh tokens per OAuth client per user (evicts the
+  oldest -- unlikely at one token, but possible if the consent flow is
+  re-run during setup/debugging). Any of these surfaces as `invalid_grant`
+  on token refresh; the scheduled handler would need to fail loudly
+  (Cloudflare Observability, already enabled) since no secondary alert
+  channel exists today if the daily email silently stops.
+- Sending limits are not a real constraint at this volume (consumer Gmail
+  ~500 recipients/day, Workspace higher; Gmail API's own per-day quota
+  units are effectively unlimited for one send/day).
+- Trade-off versus Resend for this specific use case: Gmail avoids a new
+  vendor and the email genuinely lives in the user's own mailbox, at the
+  cost of a materially higher one-time setup (Cloud project, consent
+  screen, Internal/External decision contingent on the still-open
+  Workspace question, one-time manual authorization) and an ongoing small
+  risk of silent breakage from the refresh-token-lifecycle caveats above,
+  none of which apply to a static Resend API key. Both are equally narrow
+  in blast radius (`gmail.send`-only vs. a send-scoped Resend key) --
+  neither grants read access to anything.
+
+**Status: awaiting the user's decision** (Gmail -- pending the Workspace
+question above -- vs. Resend vs. holding). Nothing implemented pending
+that choice. No production/main access at any point; no code, dependency,
+migration, secret, or deployment changed by this investigation.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -8643,6 +8794,19 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**Genuinely open, newest first: Daily Fundraising Agenda email (2026-08-26)
+-- awaiting the user's send-mechanism decision.** See "Daily Fundraising
+Agenda Email" above for the full investigation. Nothing is blocking except
+this one choice: Gmail API (contingent on the user confirming whether
+`nirc.edu` is a Google Workspace domain, which decides Internal-vs-
+External OAuth consent) vs. Resend vs. holding. No infrastructure exists
+for either scheduling (no `triggers.crons`/`scheduled()` handler) or
+sending (no email dependency/binding of any kind) today. Once decided,
+implementation is scoped through the pre-deploy checkpoint per the
+original instruction: tests, `tsc --noEmit`, `build:staging-independent`,
+docs update, commit/push -- no deploy or real send without a separate
+explicit approval.
+
 **The Ask/Solicitation feature is now COMPLETE / CLOSED FOR V1** —
 implemented, migration applied, deployed, end-to-end live-tested, and the
 3 known historical cases backfilled with their broken relationship_summary
@@ -8739,6 +8903,34 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T00:00:00Z (approximate)
+Claude (Sonnet 5) — Investigated a requested Daily Fundraising Agenda
+email (9:00 AM America/New_York, every day, DST-correct) per explicit
+instruction to investigate before designing/changing anything. Fresh-
+verified branch/HEAD (16986e4, matching origin, clean tree) and the
+deployed Worker (unchanged, 53229863-...) first. Found `loadWorkspaceBrief()`
+in `lib/workspace/live-data.ts` already computes the exact due/overdue/
+today's-dates/suggested split this feature needs (reminders, Ask follow-
+ups, yahrtzeit/birthday/anniversary, undated suggestions), so content
+generation needs no new query layer. Found no scheduling trigger
+(`triggers.crons`/`scheduled()` handler) and no email-sending
+infrastructure whatsoever (no provider dependency, no Cloudflare
+`send_email` binding, no custom domain/zone to enable one) anywhere in
+the repo or Cloudflare config — confirmed `STAGING_OWNER_EMAIL` in
+`wrangler.staging.jsonc` as the existing, reusable config location for
+the recipient address. Per instruction, stopped after investigation
+rather than choosing a provider. At the user's request, additionally
+researched the Gmail API as a send mechanism (scope, refresh-token/
+Testing-mode-7-day-expiry caveat, Internal-vs-External OAuth consent
+turning on whether `nirc.edu` is a Google Workspace domain, sender-equals-
+recipient behavior, and trade-offs versus Resend) — research only, no
+Google Cloud project created, no OAuth flow started, no secret created.
+See "Daily Fundraising Agenda Email" above for the full record. Nothing
+implemented, nothing deployed, no email sent, no production/main access.
+Status: awaiting the user's send-mechanism decision.
+
+---
 
 2026-08-23T19:35:00Z (approximate)
 Claude (Sonnet 5) — Deployed the approved meaningful-stewardship-activity
