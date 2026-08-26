@@ -15,7 +15,18 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`167c7b7`** -- "Implement Daily Fundraising
+**`(pending — see follow-up commit)`** -- "Document Daily Fundraising
+Agenda quality corrections deploy + live verification" -- docs-only,
+zero application code change; see "Daily Fundraising Agenda Quality
+Corrections -- Deployed to Independent Staging + Live Verification"
+below for full detail. **Deployed commit `167c7b7` to Independent
+Staging as Worker version `08ecf769-9ebe-42be-b807-daf3a2896d20`,
+live-verified end-to-end via the real authenticated `/api/agenda/
+preview?format=json` route against real D1 data; Cron Trigger confirmed
+active on its unchanged schedule; no email sent, no D1 write.** Sits on
+top of `209ed92` ("Correct Current Git State to reference the new HEAD
+(167c7b7)" -- docs-only, zero application code change), which sits on
+top of **`167c7b7`** -- "Implement Daily Fundraising
 Agenda quality corrections: 7-day advance-notice window, Suggested
 Actions pool inclusion, score-based Suggested ranking, solicitation
 regex fix, plus an agenda-scoped upstream candidate-pool cap fix found
@@ -28,11 +39,9 @@ regression coverage in `tests/agenda-model.test.mjs`, `tests/
 recommendation-engine.test.mjs`, `tests/suggestion-candidates.test.mjs`
 -- see "Daily Fundraising Agenda Quality Corrections -- Implementation +
 Extended Fix + Live Verification" below for full detail, including its
-live-verification subsection. **Implemented, tested, tsc-clean,
-build-clean, live-verified read-only; NOT deployed, no email sent, no
-D1 write.** Sits on top of `23353d8` ("Correct Current Git State to
-reference the new HEAD (2642f45)" -- docs-only, zero application code
-change), which sits on top of **`2642f45`** -- "Document Daily
+live-verification subsection. Sits on top of `23353d8` ("Correct
+Current Git State to reference the new HEAD (2642f45)" -- docs-only,
+zero application code change), which sits on top of **`2642f45`** -- "Document Daily
 Fundraising Agenda quality investigation (advance-notice window +
 Suggested Actions root cause)" -- docs-only, zero application code
 change; see "Daily Fundraising Agenda Quality Investigation" below for
@@ -9551,6 +9560,142 @@ Silverman, Broide, Schwartz, Kreismann, in that order, both times.
 send, no D1 write, no production/main access. See "Current Git State"
 and "Next Approval Required" for what's outstanding.
 
+## Daily Fundraising Agenda Quality Corrections -- Deployed to Independent Staging + Live Verification (2026-08-26)
+
+**Status: DEPLOYED to Independent Staging and live-verified end-to-end
+against real D1 data through the actual authenticated route. Cron
+Trigger remains active on its unchanged hourly schedule with the
+existing 9 AM America/New_York send-hour guard. No email sent, no D1
+write, no production/main access.** Approved by the user to deploy
+commit `167c7b7` (the implementation commit above; `209ed92`, its
+docs-only SHA-correction follow-up, rode along automatically since
+deploy always ships the current committed tree, not a pinned commit).
+
+**Pre-deploy verification:** branch `feature/independent-cloudflare-
+sandbox`, clean working tree, HEAD at `209ed92`, confirmed via `git
+status`/`git log`. `git diff` against the pre-task commit (`23353d8`)
+confirmed `wrangler.staging.jsonc` (cron schedule, Gmail/Access/env
+bindings) was untouched by this task -- the only changed files are the
+11 already listed in "Current Git State." The then-live Worker version
+(`526c8710-...`) was independently confirmed via `wrangler versions
+view` to already have `Handlers: fetch, scheduled` and the same Gmail
+OAuth secrets/`TEAM_DOMAIN`/`POLICY_AUD` bindings before this deploy
+touched anything.
+
+**Deploy:** `pnpm run deploy:staging-independent` (`wrangler deploy
+--config wrangler.staging.jsonc`) -- the same command and config used
+for every prior deploy in this file, no new deploy mechanism. New
+**Worker Version ID: `08ecf769-9ebe-42be-b807-daf3a2896d20`**, deployed
+2026-08-26T22:24:26Z. `wrangler versions view` on the new version
+confirms `Handlers: fetch, scheduled` (unchanged), the same three Gmail
+OAuth secrets present (unchanged -- this deploy does not touch
+secrets), and the same `env.DB`/`TEAM_DOMAIN`/`POLICY_AUD`/
+`STAGING_OWNER_EMAIL`/`APP_BASE_URL` bindings (unchanged). The deploy's
+own output explicitly confirmed the Cron Trigger: `schedule: 0 * * * *`
+-- byte-identical to the pre-deploy schedule; this task never touched
+`sendDailyAgenda()`'s `isDailyAgendaSendHour()` runtime guard (confirmed
+via `git diff` on `lib/agenda/send-agenda.ts`: the only change in that
+file across this whole task is the `AGENDA_PRIORITY_LIMIT` constant
+value and its comment -- the send-hour gating function is untouched
+text). This supersedes `526c8710-...` as the current live version.
+
+**Live verification, via the real authenticated `/api/agenda/preview?
+format=json` route on the deployed Worker itself (Cloudflare Access
+session in-browser; not a local script, not a simulation) against real
+current Independent Staging D1 data:**
+
+*7-day relationship-date window -- correct timing, confirmed live:*
+Today -- Zev Nussbaum's birthday ("Turning 33"), Eli Treitel's birthday
+("Turning 56"). Upcoming, in-window, each with the correct advance-
+notice phrase and date -- Paltiel Myers ("In 5 days, Aug 31, 2026"),
+Ezra Wisotsky ("In 5 days, Aug 31, 2026"), Shaul Jaspan ("In 7 days,
+Sep 2, 2026"). Matches the pre-deploy read-only preview exactly.
+
+*Suggested top 3 -- real, live, from the deployed Worker:*
+**#1 Mr. & Mrs. Allen Pfeiffer -- `open_ask`, score 0.8075** ("Follow up
+on the $10,000 ask" -- pending 345 days). **#2 Rabbi Michoel A. Rovinsky
+-- `open_ask`, score 0.8075** ("Follow up on the $5,000 Plaque in memory
+of his wife ask" -- pending 331 days). **#3 Mr. & Mrs. Yaakov Pollack --
+`follow_up_pledge`, score 0.6500** ("Follow up on the open $1,300
+pledge" -- 258 days no payment activity). Kinds read directly from each
+item's own `key` field (`recommendation:<donorId>:<kind>`) in the live
+JSON response; scores match the same real `score()` values already
+independently verified against this exact data (the public JSON
+response intentionally does not expose the raw score field -- only
+`AgendaItem`'s existing display fields -- so the score values
+themselves are corroborated via the code-level verification already
+performed, not re-derived from the API response).
+
+*Allen Pfeiffer's `open_ask` specifically -- confirmed reaching the
+agenda, at #1, exactly as evidenced in the original investigation.*
+
+*Upstream 50-item coarse-rank truncation -- confirmed no longer
+applies to the Daily Agenda:* both real 0.8075 `open_ask` candidates
+now appear (they did not before either fix), and 145 total real
+candidates exist today against the new 500 cap, comfortably
+untruncated.
+
+*No artificial diversity / no lower-scoring displacement:* today's real
+top 3 contains only `open_ask` and `follow_up_pledge` items in strict
+descending-score order (0.8075, 0.8075, 0.6500) -- no `reconnect_
+contact_gap`/`continue_conversation`/`relationship_opportunity`
+candidate appears ahead of a genuinely higher-scoring pledge, consistent
+with (and not contradicted by) the dedicated regression test proving
+this invariant structurally. Today's real data simply has no cultivation-
+type candidate scoring between 0.65 and 0.8075 to specifically exercise
+the boundary live; the invariant itself is proven by `tests/agenda-
+model.test.mjs`'s "no-artificial-diversity" test (four pledges at 0.65
+vs. one weaker cultivation candidate at 0.42).
+
+*Homepage/Today-page behavior -- confirmed unchanged, live, in the same
+authenticated browser session:* the homepage's own "Later" queue still
+opens with Yaakov Pollack, Ahron Schabes, and Elie Grinblatt -- all
+`follow_up_pledge` ("OPEN COMMITMENT"), still privileged over both
+0.8075 `open_ask` items exactly as the homepage's own coarse `rank`
+tiering has always done. Neither Pfeiffer nor Rovinsky displaced them
+on the homepage, confirming the Suggested re-rank and the agenda-scoped
+`resolvePriorityCap` widening are genuinely scoped to `context ===
+"daily-agenda"` and do not alter homepage ordering. (Note: the
+homepage's real default `priorityLimit` is `10` -- `showAll ? 50 : 10`
+in `app/page.tsx` -- not the illustrative `8` used in this task's own
+unit-test fixture and in the pre-deploy fork's report; the two are
+functionally equivalent for this proof, since `resolvePriorityCap`
+clamps identically for any non-`"daily-agenda"` context regardless of
+the specific number, but `8` was never the real homepage value and is
+corrected here for accuracy.) The two new pool-inclusion categories
+(fix #2) are intentionally NOT scoped away from the homepage -- they
+were a general eligibility bug fix, not an agenda-only change -- so
+Ahron Schabes (previously excluded from the whole pool) now correctly
+appears on the homepage too; this was never a "homepage must be frozen"
+requirement, only that homepage *ordering* stay on its own coarse
+rank/sortAt system, which it demonstrably still is.
+
+*No D1 mutation from previewing -- confirmed:* the preview route (`app/
+api/agenda/preview/route.ts`) contains no write statement and has no
+import of the Gmail-sending module by construction; `generateAgenda()`
+-> `loadWorkspaceBrief()` -> `buildAgenda()` is the same long-standing
+read-only chain the homepage itself already relies on. Verified
+directly too: a live read-only `wrangler d1 execute` query immediately
+after all browser verification showed `relationship_queue_dismissals`
+(15 rows) and `donor_views` (111 rows) at their normal pre-existing
+counts for this user -- no Dismiss/Review button was ever clicked, no
+donor detail page was ever opened during verification, only the
+preview route and the homepage's own read-only view were loaded.
+
+*Cron Trigger -- confirmed active after deployment:* the deploy output
+itself reported `schedule: 0 * * * *`; `wrangler versions view` on the
+new version confirms `Handlers: fetch, scheduled`. No change to the
+schedule or the runtime send-hour guard (see above). **No manual Gmail
+send occurred at any point in this verification** -- only `GET`
+requests were made (the JSON preview route, the homepage), and the
+preview route has no code path to `lib/agenda/gmail-client.ts` by
+construction. The next real email remains gated entirely behind the
+normal scheduled `scheduled()` handler's own 9 AM America/New_York
+firing.
+
+**Nothing differed from the approved behavior; no patch-forward was
+needed.**
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -9995,33 +10140,36 @@ only.
 
 ## Deployment State
 
-**Corrected 2026-08-26 (Daily Fundraising Agenda cron activation) -- this
-section had gone stale again. This section remains a pointer to the true
-current state, not a duplicate of it.**
+**Corrected 2026-08-26 (Daily Fundraising Agenda quality corrections
+deploy) -- this section had gone stale again. This section remains a
+pointer to the true current state, not a duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `bd1cf99`
-("Activate the Daily Fundraising Agenda Cron Trigger on Independent
-Staging (approved)" -- see "Daily Fundraising Agenda Email" above for
-full detail, including its cron-activation subsection), Worker version
-**`526c8710-6120-497e-998a-5dc6754c72a6`**, confirmed via `wrangler
+**Live -- current as of this deploy.** Deployed commit `167c7b7`
+("Implement Daily Fundraising Agenda quality corrections" -- see "Daily
+Fundraising Agenda Quality Corrections -- Deployed to Independent
+Staging + Live Verification" above for full detail), Worker version
+**`08ecf769-9ebe-42be-b807-daf3a2896d20`**, confirmed via `wrangler
 versions view` (`Handlers: fetch, scheduled`) and via the deploy's own
-"Deployed ... triggers" / `schedule: 0 * * * *` output. **The hourly Cron
-Trigger is now active; the scheduled handler still only actually sends
-on the one invocation per day where the real America/New_York
-wall-clock hour reads 9 (`isDailyAgendaSendHour()`, confirmed present in
-the deployed `dist/server/index.js` itself). No email has been sent by
-this app yet** -- the Gmail sender has never been manually invoked; the
-first real send will be generated by the scheduled job itself at the
-next 9 AM America/New_York firing. This supersedes every earlier version
-ID recorded anywhere in this file, including
-`02056678-29b8-4366-becf-54c40f08f8c7` (the Agenda feature's own preview-
-only deploy, live from 2026-08-26T16:07 through this task). For the
-exact current git SHA (which may have advanced past `bd1cf99` by
-documentation-only commits that touch no application code -- the
-deployed Worker always reflects the latest actual code change, not
-necessarily the latest commit), see "Current Git State" at the top of
-this file, which is the authoritative pointer kept in sync going
-forward.
+"Deployed ... triggers" / `schedule: 0 * * * *` output -- byte-identical
+cron schedule to the prior deploy; not touched by this task. **The
+hourly Cron Trigger remains active; the scheduled handler still only
+actually sends on the one invocation per day where the real
+America/New_York wall-clock hour reads 9 (`isDailyAgendaSendHour()`,
+untouched by this task). No email has been sent by this app yet** --
+the Gmail sender has never been manually invoked; the first real send
+will be generated by the scheduled job itself at the next 9 AM
+America/New_York firing. This deploy's own live-verification (via the
+real authenticated `/api/agenda/preview?format=json` route against real
+D1 data) is recorded in full above. This supersedes every earlier
+version ID recorded anywhere in this file, including `526c8710-6120-
+497e-998a-5dc6754c72a6` (live from 2026-08-26T16:21 through this task)
+and `02056678-29b8-4366-becf-54c40f08f8c7` (the Agenda feature's own
+preview-only deploy, live from 2026-08-26T16:07). For the exact current
+git SHA (which may have advanced past `167c7b7` by documentation-only
+commits that touch no application code -- the deployed Worker always
+reflects the latest actual code change, not necessarily the latest
+commit), see "Current Git State" at the top of this file, which is the
+authoritative pointer kept in sync going forward.
 
 Worker: `fundraising-os-staging`
 URL: `https://fundraising-os-staging.sgoldstein.workers.dev`
@@ -10045,15 +10193,19 @@ existing pending ask, reusing the existing reschedule path for an ask
 that already has one), the meaningful-stewardship-activity Capture/
 Outcome copy fix (an interaction that yields no new durable fact is
 still shown as saved stewardship activity, never as a worthless
-interaction), and now the Daily Fundraising Agenda email -- both its
-preview route (`GET /api/agenda/preview`, generating real content from
-live D1 data) and its scheduled send, whose Cron Trigger is now active
-(the send itself is "deployed and armed," not yet "live-verified by an
-actual sent email" -- that verification arrives naturally at the next
-9 AM America/New_York firing, per instruction not to invoke it
-manually). Each has its own dated section
-above with full live-verification detail -- this section intentionally
-does not repeat it.
+interaction), the Daily Fundraising Agenda email -- both its preview
+route (`GET /api/agenda/preview`, generating real content from live D1
+data) and its scheduled send, whose Cron Trigger is active (the send
+itself is "deployed and armed," not yet "live-verified by an actual
+sent email" -- that verification arrives naturally at the next 9 AM
+America/New_York firing, per instruction not to invoke it manually) --
+and now its quality corrections (7-day relationship-date advance
+notice, corrected Suggested Actions pool/ranking, the solicitation
+regex fix, and the agenda-scoped upstream candidate-pool cap fix),
+live-verified end-to-end via the real authenticated preview route
+against real D1 data. Each has its own dated section above with full
+live-verification detail -- this section intentionally does not repeat
+it.
 
 Historical note (kept for continuity, not current): the 2026-08-20
 deploy referenced above by the now-superseded version ID required two
@@ -10367,23 +10519,22 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Daily Fundraising Agenda quality
-corrections -- implemented, tested, live-verified read-only; awaiting
-the user's review before deployment (2026-08-26).** See "Daily
-Fundraising Agenda Quality Corrections -- Implementation + Extended Fix
-+ Live Verification" above for the full implementation and live-
-verification record. All 4 originally-requested corrections plus one
-user-approved extension (an agenda-scoped upstream candidate-pool cap
-fix, needed to make the concrete evidenced 0.8075 `open_ask` case
-actually reach the email) are complete: `pnpm test`/`tsc --noEmit`/
-`build:staging-independent` all pass, and a read-only live preview
-against current Independent Staging data confirms the 7-day
-relationship-date window, the corrected Suggested top 3 (both real
-$10k/$5k `open_ask` opportunities now surface ahead of every pledge),
-and that homepage/Today-page ordering is byte-identical to before.
-Committed and pushed to `feature/independent-cloudflare-sandbox`. **Not
-deployed, no email sent, no D1 write** -- awaiting the user's go-ahead
-to deploy.
+**RESOLVED 2026-08-26 -- Daily Fundraising Agenda quality corrections
+are deployed to Independent Staging and live-verified end-to-end;
+nothing further required.** See "Daily Fundraising Agenda Quality
+Corrections -- Deployed to Independent Staging + Live Verification"
+above for the full deployment and live-verification record (Worker
+version `08ecf769-9ebe-42be-b807-daf3a2896d20`). All 4 originally-
+requested corrections plus the user-approved extended fix are live:
+the 7-day relationship-date window, the corrected Suggested top 3 (both
+real $10k/$5k `open_ask` opportunities now surface ahead of every
+pledge -- confirmed via the real authenticated `/api/agenda/preview?
+format=json` route against live D1 data), and homepage/Today-page
+ordering confirmed unchanged in the same live session. Cron Trigger
+remains active on its unchanged hourly schedule with the unchanged 9 AM
+America/New_York send-hour guard; no email has been manually sent --
+the next real send remains gated entirely behind that scheduled
+firing. Nothing here needs a decision or action.
 
 **RESOLVED 2026-08-26 -- Google Workspace identity provider implemented
 and live-verified; genuinely open item is now just a future product
@@ -10516,6 +10667,48 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-27T02:30:00Z (approximate)
+Claude (Sonnet 5) — Deployed the approved Daily Fundraising Agenda
+quality corrections (commit 167c7b7) to Independent Staging per
+explicit user approval. Pre-deploy: fresh-verified clean tree/branch/
+HEAD (209ed92), confirmed wrangler.staging.jsonc (cron schedule, Gmail/
+Access bindings) untouched by the task's diff, and confirmed the
+then-live Worker version's handlers/secrets/bindings via `wrangler
+versions view`. Deployed via the existing `pnpm run deploy:staging-
+independent` command (no new deploy mechanism) -- new Worker version
+08ecf769-9ebe-42be-b807-daf3a2896d20, cron schedule confirmed
+byte-identical (0 * * * *) both in the deploy's own output and via
+`wrangler versions view` (Handlers: fetch, scheduled, unchanged). Live-
+verified end-to-end using the real authenticated /api/agenda/preview?
+format=json route on the deployed Worker itself (an existing Cloudflare
+Access browser session, not a local script) against real current D1
+data: confirmed the 7-day relationship-date window's exact contents/
+timing; confirmed the Suggested top 3 is Allen Pfeiffer (open_ask,
+0.8075), Michoel Rovinsky (open_ask, 0.8075), Yaakov Pollack
+(follow_up_pledge, 0.6500) -- both real evidenced open-ask
+opportunities reaching the live agenda; confirmed via the same
+authenticated session that the homepage's own "Later" queue still
+opens with the same three pledge-kind donors (Pollack/Schabes/
+Grinblatt), proving homepage ordering is unaffected (also corrected an
+inaccuracy from the prior session's own report: the homepage's real
+default priorityLimit is 10, not the illustrative 8 used in earlier
+fixtures/reports -- functionally irrelevant to resolvePriorityCap's
+correctness, but corrected for accuracy). Confirmed no D1 mutation via
+a direct read-only wrangler d1 execute query showing dismissal/donor-
+view counts at their normal pre-existing levels, and confirmed no
+Dismiss/Review button or donor-detail page was touched during
+verification. Confirmed the Cron Trigger remains active and no manual
+Gmail send occurred at any point -- the next real send remains gated
+behind the normal scheduled 9 AM America/New_York firing. Updated
+"Daily Fundraising Agenda Quality Corrections" (new dated deployment
+subsection), "Deployment State", "Current Git State", and "Next
+Approval Required" (now RESOLVED) accordingly. Nothing differed from
+the approved behavior; no patch-forward was needed. Committed and
+pushed the docs-only update to feature/independent-cloudflare-sandbox.
+No production/main access.
+
+---
 
 2026-08-26T23:45:00Z (approximate)
 Claude (Sonnet 5) — Implemented all 4 approved Daily Fundraising Agenda
