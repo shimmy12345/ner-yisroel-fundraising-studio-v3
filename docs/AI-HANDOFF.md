@@ -15,7 +15,13 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`2c5167d`** -- "Document Daily Fundraising Agenda cron
+**(pending -- see the follow-up correction commit right after this one
+for the exact SHA)** -- "Document authentication architecture
+investigation" -- docs-only, zero application code change; see
+"Authentication Architecture Investigation" below for full detail. Sits
+on top of `13cb0d7` ("Correct Current Git State to reference the new
+HEAD (2c5167d)" -- docs-only, zero application code change), which sits
+on top of `2c5167d` -- "Document Daily Fundraising Agenda cron
 activation + deployment verification" -- docs-only, zero application
 code change; see "Daily Fundraising Agenda Email" below for full detail.
 Sits on top of **`bd1cf99`** ("Activate the Daily Fundraising Agenda
@@ -169,7 +175,8 @@ job itself at the next 9:00 AM America/New_York firing. See "Daily
 Fundraising Agenda Email" below for the full cron-activation record.
 
 origin/feature/independent-cloudflare-sandbox:
-`2c5167d` (pushed; matches local HEAD exactly, no divergence).
+`13cb0d7` prior to this commit (pushed; will be updated to the new HEAD
+by the follow-up correction commit once pushed).
 
 origin/main:
 `4ea1d5ec98ee2a2ef010154ba02a9ad278aa6a58` (untouched across every task
@@ -8393,6 +8400,245 @@ this deploy, check Cloudflare Observability for a logged
 failures are logged and rethrown, never swallowed) before assuming
 anything else is wrong.
 
+## Authentication Architecture Investigation -- Cloudflare Access vs. Google Workspace vs. Native Google OAuth (2026-08-26) -- INVESTIGATION ONLY, NO CODE/CONFIG/ACCESS-POLICY/OAUTH/SECRET/DEPLOY CHANGE
+
+**Request.** Investigate the current authentication architecture and
+whether Fundraising OS should use Google Workspace login, without
+changing anything. Read fresh, then inspect the current Cloudflare
+Access setup, auth/profile code, user/session model, `TEAM_DOMAIN`,
+`STAGING_OWNER_EMAIL`, and any identity-provider assumptions; compare
+three options; recommend one. No code, config, Access policy, Google
+OAuth, secret, or deployment change was made -- this is a pure reading
+task.
+
+**Fresh-verified first, per instruction.** Branch
+`feature/independent-cloudflare-sandbox`, local HEAD `13cb0d7`, matched
+`origin/feature/independent-cloudflare-sandbox` exactly, working tree
+clean.
+
+**How users currently authenticate to Independent Staging (read directly
+from `lib/auth/cloudflare-access.ts`, `app/auth/cloudflare-access-
+provider.ts`, `lib/auth/provider.ts`, `docs/DEPLOYMENT.md`'s "Cloudflare
+Access and JWT verification" section):**
+1. Cloudflare Access sits in front of the Worker's route at the edge,
+   restricted by an Access policy to `STAGING_OWNER_EMAIL`. An
+   unauthenticated request is redirected (`302`) to Cloudflare's own
+   hosted login page for this Access Application **before it ever
+   reaches the Worker** -- the app's own code does not even execute for
+   a request Access rejects.
+2. After completing whatever login method that Access Application is
+   configured with, Cloudflare issues a signed JWT
+   (`cf-access-jwt-assertion` header) and forwards the request to the
+   Worker.
+3. `app/auth/cloudflare-access-provider.ts` reads that header and calls
+   `lib/auth/cloudflare-access.ts`'s `verifyAccessToken()`, which
+   independently re-verifies the JWT's signature (against the team's own
+   published JWKS, fetched from `https://<TEAM_DOMAIN>/cdn-cgi/access/
+   certs`), issuer, audience, and expiry via `jose` -- a second,
+   defense-in-depth check the app performs itself, not merely trusting
+   that Access already let the request through.
+4. The verified email is checked *again* against `STAGING_OWNER_EMAIL`
+   (case-insensitively) -- so even a technically-valid Access session for
+   a different email is still rejected by the app's own logic, not just
+   by the Access policy (proven at the unit level by `tests/cloudflare-
+   access-auth.test.mjs`'s "owner restriction" cases, per `docs/
+   DEPLOYMENT.md`).
+5. There is no password, no app-issued session cookie/token, and no
+   login/logout endpoint of the app's own for this path -- login/logout
+   UI is entirely Cloudflare's (`/cdn-cgi/access/login`,
+   `/cdn-cgi/access/logout`). The legacy ChatGPT Sites deployment target
+   works the same way in spirit but through a different upstream gateway
+   (`oai-authenticated-user-email` header from the ChatGPT Sites gateway,
+   handled by the separate `chatGPTHeaderProvider` in `app/chatgpt-
+   auth.ts`) -- also externally trusted, also no app-level session of its
+   own. `lib/auth/provider.ts`'s `resolveIdentity()` tries the ChatGPT
+   header provider first, falling back to the Cloudflare Access provider
+   only when that header is absent (i.e. on independent staging) --
+   confirmed in code, not inferred.
+
+**Whether Cloudflare Access is already using Google/Google Workspace as
+the identity provider -- genuinely not determinable from this
+repository, and this session did not probe Cloudflare's Zero Trust
+dashboard to find out (out of scope for "investigation only" against
+code/docs, and changing nothing means not even opening a settings page
+that could accidentally be saved).** `TEAM_DOMAIN`
+(`fundraising-os.cloudflareaccess.com`) is Cloudflare's own
+auto-assigned Zero Trust team name -- it says nothing about which login
+method the Access Application actually presents. `POLICY_AUD` identifies
+which Access Application protects this Worker, not its login method
+either. Neither this repository's code nor `docs/DEPLOYMENT.md` records
+which "Login method" (Cloudflare's term: One-Time PIN via email, Google,
+Google Workspace/SAML, GitHub, Azure AD, etc.) is enabled for this
+specific Access Application -- that is Zero Trust dashboard
+configuration (Settings -> Authentication -> Login methods), entirely
+external to this repo. **This is the one open factual question the user
+(or whoever set up the Access Application) would need to check directly
+in the Cloudflare Zero Trust dashboard** -- it does not change any of
+the analysis below, since the app's own code is already indifferent to
+which login method produced the JWT it verifies.
+
+**What identity information Fundraising OS receives from Cloudflare
+Access today -- exactly one field, `email`.** `AccessIdentity = { email:
+string }` (`lib/auth/cloudflare-access.ts`) is the entire shape returned
+by JWT verification -- no name, no picture, no groups, no employee ID,
+no custom claims of any kind are read from the token, even if Access's
+IdP supplied more. `cloudflareAccessAuthProvider` then constructs
+`{ displayName: identity.email, email: identity.email, fullName: null }`
+-- so a brand-new user's display name is literally their email address
+until they visit `/settings` and fill in a name themselves (persisted in
+`users.name`/`preferred_first_name` via `ensureUserProfile()`'s
+insert-or-update). Nothing about this would change by itself if Access's
+upstream IdP became Google Workspace -- Google's richer profile (real
+name, photo) is available to Access at login time, but this app would
+still only ever see whatever Access chooses to put in the JWT, and today
+that's just `email` regardless of IdP.
+
+**Whether the app has its own session/user model beyond Cloudflare
+Access -- no.** There is no session store, no cookie/token the app
+itself issues, and no password anywhere in this codebase for either
+deployment target. Every request is authenticated fresh by re-verifying
+the incoming JWT/header -- `jwksCache` (`lib/auth/cloudflare-access.ts`)
+caches only the JWKS *keys* for performance, never an identity or
+session. The `users` table (`db/schema.ts`) is a **profile store, not an
+auth/session store**: `id, email, name, preferred_first_name,
+organization_name, job_title, timezone, avatar_url,
+household_import_review_mode` -- no `role`, `permissions`,
+`password_hash`, or `session_token` column exists anywhere in the
+schema. `userIdForEmail()` deterministically derives a row id
+(`user_<email>`) from the already-verified email; `ensureUserProfile()`
+upserts that row on every request purely to personalize the UI (name,
+timezone, avatar) -- it grants nothing and is called only after Access
+(and this app's own JWT check) has already let the request through.
+Consistent with `docs/architecture/001-foundation.md`'s "Deferred
+decisions" list, which explicitly names **"Organization roles and
+fine-grained authorization"** as never-yet-built, not merely
+unconfigured -- there is no multi-role concept to preserve or migrate
+here, in any of the three options below.
+
+**Whether switching to native Google OAuth inside the app would provide
+meaningful benefit for the current single-user/small-team architecture
+-- no, and it would add real cost.** The two things native OAuth is
+usually reached for -- richer profile data (name/photo) and a familiar
+"Sign in with Google" screen -- are either already solved (profile
+editing exists at `/settings`) or achievable with zero app code by
+changing Access's login method instead (see the comparison below). What
+native OAuth would *add*, that doesn't exist today, is a meaningful new
+category of code and risk this app has never had to carry: token
+exchange, session issuance and storage (a new cookie/JWT format, signed
+with a new secret this Worker would have to hold and rotate), CSRF
+protection around the OAuth redirect/callback, and token-refresh/
+expiry handling -- all of it net-new, security-sensitive, and currently
+handled entirely by Cloudflare (audited, maintained, and outside this
+app's own attack surface) rather than by this codebase.
+
+**What security/operational protections would be lost by moving
+authentication from Cloudflare Access into the application:**
+- **Edge-layer blocking.** Today, an unauthenticated request never
+  reaches the Worker at all -- Access rejects it at Cloudflare's edge.
+  Native in-app OAuth means the Worker's own `fetch` handler executes
+  for *every* request, authenticated or not, until the app's own check
+  rejects it -- a strictly larger blast radius for any future bug in
+  routing/auth-check placement (a forgotten check on a new route, a
+  logic bug), since there is no independent second gate catching it
+  the way Access does today.
+- **No new secrets today.** `TEAM_DOMAIN`/`POLICY_AUD`/
+  `STAGING_OWNER_EMAIL` are plain `vars`, not secrets -- there is no
+  OAuth client secret or session-signing key for this Worker to protect.
+  Native OAuth requires at least two new secrets (OAuth client secret,
+  session-signing key) that this app would then own the rotation/
+  compromise-blast-radius of.
+- **Centralized, code-independent policy management.** Revoking access
+  (an employee leaves, a credential is suspected compromised) is a
+  single Zero Trust policy edit today, instantly effective, with zero
+  app deployment. A native in-app scheme needs its own revocation logic
+  built and maintained specifically for this one app.
+- **Access's own maintained login/session UX** (re-auth frequency,
+  session duration, and any future Zero Trust signal like device
+  posture or IP allowlisting) is configured centrally without touching
+  this app's code at all. All of that would need to be reimplemented
+  in-app under the native-OAuth option.
+- Note what is **not** at risk either way: `verifyAccessToken()`'s
+  defense-in-depth pattern (independently re-checking the JWT rather
+  than blindly trusting a header) is this app's own good practice and
+  isn't unique to using Access -- but it exists today specifically
+  because Access is the primary gate; removing Access removes the thing
+  being double-checked, not just the double-check itself.
+
+**Whether the cleaner architecture is instead to keep Cloudflare Access
+and use Google Workspace as the Access identity provider -- yes, this is
+the recommended option (see below).** Changing an Access Application's
+"Login method" to Google/Google Workspace is Zero Trust dashboard
+configuration only -- **zero application code change**, because this
+codebase already only cares about the one `email` claim in the resulting
+JWT, regardless of which upstream login method produced it. Every
+existing protection is preserved exactly as-is: edge-layer blocking, the
+existing JWT verification code and its tests, the `STAGING_OWNER_EMAIL`
+defense-in-depth check, and the `AuthProvider`/`resolveIdentity`
+abstraction. Nothing in `lib/auth/`, `app/auth/`, or `db/schema.ts` would
+need to change.
+
+**How future multiple-user roles/permissions would work under each
+option** (a currently-deferred concern either way, per `docs/
+architecture/001-foundation.md` -- none of this is being built now):
+- **Keep Access unchanged:** app-level roles would still need a new
+  `role`/`permissions` concept added to `users` (or a separate table) and
+  checked in the app regardless of login method -- Access itself has no
+  concept of app-specific roles, only "is this email allowed through at
+  all." The Access policy's own allowlist would need to widen from one
+  email to several (or an Access Group), which is normal Access
+  administration, not an architecture change.
+- **Access + Google Workspace as IdP:** identical to the above for
+  in-app roles (still needed, still an app concern), but gains a real,
+  free coarse-grained tier at the edge: Access can gate on **Google
+  Workspace group membership** (e.g. everyone in a
+  `fundraising-team@nirc.edu` Google Group) instead of a hand-maintained
+  per-email allowlist -- staff added to or removed from that Workspace
+  group automatically gain or lose access, managed wherever staff
+  directory changes already happen (Google Workspace admin), with zero
+  Cloudflare or app changes per person. Fine-grained in-app roles (e.g.
+  view vs. edit vs. admin) still require the same `users.role` work as
+  every other option.
+- **Native Google OAuth in-app:** to get anything resembling the
+  group-based access Option B gets for free, the app itself would need
+  to call Google's Admin SDK Directory API to check group membership --
+  requiring domain-wide delegation, a service account, and materially
+  broader Google Workspace API scopes than a simple login needs. Its
+  only structural "advantage" over Option B is that fine-grained roles
+  still need the exact same in-app work either way -- so Option C adds
+  real setup/maintenance/security-surface cost for the login+access-
+  control layer without adding anything Option B doesn't already cover
+  for roles.
+
+**Comparison, summarized:**
+
+| | A: Keep Access unchanged | B: Access + Google Workspace IdP | C: Native Google OAuth in-app |
+|---|---|---|---|
+| App code change | None | None | Substantial (token exchange, session issuance, CSRF, refresh) |
+| New secrets | None | None | OAuth client secret + session-signing key |
+| Edge-layer blocking preserved | Yes | Yes | No -- Worker executes for every request |
+| Login experience | Whatever Access is configured with today (unknown from this repo) | "Sign in with Google" via `nirc.edu` | "Sign in with Google" via `nirc.edu` |
+| Group-based access for future staff | No (per-email allowlist only) | Yes (Google Workspace group) | Only via extra Admin SDK integration |
+| Fine-grained in-app roles | Still needs new work | Still needs new work (same amount as A) | Still needs new work (same amount as A/B) |
+| Revocation | Single Zero Trust policy edit | Single Zero Trust policy edit or Workspace group removal | Custom in-app logic to build and maintain |
+
+**Recommendation: Option B -- keep Cloudflare Access as the front gate,
+and add Google Workspace as the Access Application's login method.**
+This solves the actual stated goal (log in with your `nirc.edu` Google
+account) with a pure Zero Trust dashboard configuration change, zero
+application code, zero new secrets, and zero loss of the edge-layer
+protection this app currently has -- while also setting up a real,
+low-maintenance path to multi-user access later via Google Workspace
+group membership, without needing Google's Admin SDK or any of Option
+C's added integration surface. Fine-grained in-app roles remain future,
+deferred work under every option alike (per `docs/architecture/001-
+foundation.md`) and are not addressed by any authentication choice --
+only by adding a `role` concept to the app's own `users` model whenever
+that's actually needed.
+
+**Status: investigation complete, no changes made.** No code, config,
+Access policy, Google OAuth client, secret, or deployment was touched.
+Stopped for the user's review per instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -9319,6 +9565,39 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-26T17:00:00Z (approximate)
+Claude (Sonnet 5) — Investigated the current authentication architecture
+per explicit instruction, with no code/config/policy/OAuth/secret/deploy
+change. Fresh-verified branch/HEAD and clean tree first. Read
+lib/auth/cloudflare-access.ts, app/auth/cloudflare-access-provider.ts,
+lib/auth/provider.ts, lib/auth/profile.ts, db/schema.ts's users table,
+app/chatgpt-auth.ts, docs/DEPLOYMENT.md's Cloudflare Access section, and
+docs/architecture/001-foundation.md's deferred-decisions list. Findings:
+Cloudflare Access blocks unauthenticated requests at the edge before the
+Worker ever executes; the app receives only an `email` claim from the
+verified Access JWT and independently re-verifies it plus checks it
+against STAGING_OWNER_EMAIL; there is no app-level session/password/role
+model anywhere in this codebase for either deployment target, only a
+`users` profile-personalization row upserted after Access has already
+authenticated the request; and which login method Access's Application
+currently uses (possibly already Google, possibly Cloudflare's own
+One-Time-PIN, possibly something else) is genuinely not determinable
+from this repository -- it's Zero Trust dashboard configuration this
+session did not probe. Compared three options (keep Access unchanged;
+keep Access but switch its login method to Google Workspace; replace/
+augment with native Google OAuth inside the app) and recommended keeping
+Access with Google Workspace as its login method -- a pure Zero Trust
+dashboard change requiring zero application code, zero new secrets, and
+zero loss of the existing edge-layer protection, versus native OAuth's
+meaningfully larger new attack surface (token exchange, session
+issuance, CSRF, refresh) for no benefit this single-user/small-team app
+currently needs. Documented the full investigation, comparison table,
+and recommendation in "Authentication Architecture Investigation" above.
+Committed and pushed the documentation update. Stopped for the user's
+review, per instruction -- no changes made to authentication.
+
+---
 
 2026-08-26T16:30:00Z (approximate)
 Claude (Sonnet 5) — Activated the Daily Fundraising Agenda's Cron Trigger
