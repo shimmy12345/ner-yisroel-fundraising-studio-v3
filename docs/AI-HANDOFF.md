@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending — see follow-up commit)** -- "Document Stage 2 deployment
+**`a5f57d3`** -- "Document Stage 2 deployment
 and live verification (2026-08-28)" -- docs-only, zero application
 code change; the application code was already reviewed and is
 unchanged from `f2eadd1`, now DEPLOYED to Independent Staging (Worker
