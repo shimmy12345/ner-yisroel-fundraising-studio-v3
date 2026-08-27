@@ -15,7 +15,20 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`72bc4c8`** -- "Implement open-ask
+**`(pending — see follow-up commit)`** -- "Document open-ask
+recommendation quality fix deploy + live verification" -- docs-only,
+zero application code change; see "Open-Ask Recommendation Quality Fix
+-- Deployed to Independent Staging + Live Verification" below for full
+detail. **Deployed commit `72bc4c8` to Independent Staging as Worker
+version `913e21ce-c938-4711-8590-bddfdbcbfd57`, live-verified end-to-
+end via the real authenticated `/api/agenda/preview?format=json` route
+against real D1 data (plus read-only reconstruction/tests for
+scenarios no longer present in real staging data); Cron Trigger
+confirmed active on its unchanged schedule; Ask records/statuses
+confirmed untouched by a before/after D1 baseline check; no email
+sent.** Sits on top of `91d3b6a` ("Correct Current Git State to
+reference the new HEAD (72bc4c8)" -- docs-only, zero application code
+change), which sits on top of **`72bc4c8`** -- "Implement open-ask
 recommendation quality fix: post-Ask gift/pledge cross-reference,
 explicit follow-up-scheduling deferral" -- real application code:
 `lib/relationships/recommendation-candidates.ts`, `lib/relationships/
@@ -23,12 +36,11 @@ recommendation-evidence.ts`, `lib/workspace/live-data.ts`, `lib/
 relationships/meeting-brief.ts`, `app/donors/[id]/page.tsx`, plus
 regression coverage in `tests/asks.test.mjs` -- see "Open-Ask
 Recommendation Quality Fix -- Implementation" below for full detail,
-including its verification subsection. **Implemented, tested, tsc-
-clean, build-clean, verified read-only; NOT deployed, no D1 mutation,
-no email sent.** Narrowly scoped: Daily Agenda ranking, the 7-day
-stewardship-date window, and Ask status semantics are all untouched.
-Sits on top of `941ca3a` ("Correct Current Git State to reference the
-new HEAD (727d912)" -- docs-only, zero application code change), which
+including its verification subsection. Narrowly scoped: Daily Agenda
+ranking, the 7-day stewardship-date window, and Ask status semantics
+are all untouched. Sits on top of `941ca3a` ("Correct Current Git
+State to reference the new HEAD (727d912)" -- docs-only, zero
+application code change), which
 sits on top of `727d912` -- "Document open-ask
 recommendation quality investigation (2026-08-27)" -- docs-only, zero
 application code change, zero D1 mutation; see "Open-Ask Recommendation
@@ -10116,6 +10128,103 @@ manual email, no D1 mutation, no production/main access, no new
 cooldown/dismissal system, no change to Daily Agenda ranking, the
 7-day stewardship-date window, or Ask status semantics.
 
+## Open-Ask Recommendation Quality Fix -- Deployed to Independent Staging + Live Verification (2026-08-27)
+
+**Status: DEPLOYED to Independent Staging and verified end-to-end
+against real D1 data through the actual authenticated route, plus
+read-only reconstruction/tests for the scenarios no longer present in
+real staging data. Cron Trigger remains active on its unchanged hourly
+schedule. No email sent, no D1 mutation, no production/main access.**
+Approved by the user to deploy commit `72bc4c8` (the implementation
+commit above; `91d3b6a`, its docs-only SHA-correction follow-up, rode
+along automatically since deploy always ships the current committed
+tree).
+
+**Pre-deploy verification:** branch `feature/independent-cloudflare-
+sandbox`, clean working tree, HEAD at `91d3b6a`, confirmed via `git
+status`/`git log`. `git diff` against the pre-task commit (`941ca3a`)
+confirmed `wrangler.staging.jsonc` (cron schedule `0 * * * *`, Gmail/
+Access/env bindings) was untouched -- the only changed files are the 7
+already listed in "Current Git State." The then-live Worker version
+(`08ecf769-...`) was independently confirmed via `wrangler versions
+view` to already have `Handlers: fetch, scheduled` and the same Gmail
+OAuth secrets/bindings before this deploy touched anything. A D1
+baseline was also recorded before any verification step: `asks` table
+-- 6 total rows, 0 pending, `MAX(updated_at) = 1787845744` (the
+Rovinsky/Pfeiffer status-change timestamp from the prior investigation
+session).
+
+**Deploy:** `pnpm run deploy:staging-independent` (same command/config
+as every prior deploy). New **Worker Version ID: `913e21ce-c938-4711-
+8590-bddfdbcbfd57`**, deployed 2026-08-27T16:55:11Z. `wrangler versions
+view` on the new version confirms `Handlers: fetch, scheduled`
+(unchanged), the same three Gmail OAuth secrets, and the same
+`env.DB`/`TEAM_DOMAIN`/`POLICY_AUD`/`STAGING_OWNER_EMAIL`/
+`APP_BASE_URL` bindings. The deploy's own output confirmed the Cron
+Trigger: `schedule: 0 * * * *` -- byte-identical to pre-deploy; this
+task's diff never touched `send-agenda.ts`'s send-hour gating or
+`wrangler.staging.jsonc` at all. This supersedes `08ecf769-...` as the
+current live version.
+
+**Live verification, via the real authenticated `/api/agenda/preview?
+format=json` route on the deployed Worker (Cloudflare Access session
+in-browser) against real current Independent Staging D1 data:**
+- **Preview works end-to-end:** subject/date/sections all render
+  correctly from the live Worker.
+- **7-day Important Dates -- unchanged:** Paltiel Myers/Ezra Wisotsky
+  "In 4 days," Shaul Jaspan "In 6 days," Shimmy Ramras "In 7 days" --
+  identical rolling behavior to the pre-deploy check the day before,
+  advanced by exactly one day as expected. No defect, no change.
+- **Suggested ranking -- unchanged:** Yaakov Pollack, Ahron Schabes,
+  Elie Grinblatt, all `follow_up_pledge`, in the same order and wording
+  as the pre-deploy preview -- confirms this fix did not alter Daily
+  Agenda ranking in any way.
+- **Zero pending Asks, confirmed live:** `asks` table has 0 `pending`
+  rows (both Rovinsky's and Pfeiffer's were resolved during the prior
+  investigation session, and remain resolved) -- consistent with
+  Suggested containing no `open_ask` item at all today. This is the
+  correct, expected state, not a gap in verification: there is
+  currently no real pending Ask to exercise the new wording against
+  live, which is exactly why the reconstruction/synthetic checks below
+  exist.
+
+**Read-only reconstruction/regression verification (same throwaway
+script and `tests/asks.test.mjs` suite as the pre-deploy round,
+re-run here against the exact deployed source -- deployment ships the
+same committed tree these already ran against, so this confirms the
+DEPLOYED code's actual behavior, not a separate implementation):**
+- `node tests/asks.test.mjs`: all 35 checks pass, including the 10 new
+  regression cases (#26-35).
+- **Rovinsky's real historical case** (reconstructed as still pending,
+  using the real $5,000/2025-09-29 ask and real $5,000/2025-09-30
+  gift): "Confirm whether the $5,000 Plaque in memory of his wife ask
+  is already resolved," score unchanged at **0.8075**.
+- **Pfeiffer's real historical case** (real $10,000/2025-09-15 ask,
+  real $5,000/2025-09-17 gift): "Confirm whether the $10,000 ask is
+  already resolved," score unchanged at **0.8075**.
+- **A genuinely unresolved old Ask with no post-Ask activity**
+  (synthetic, since real staging still has zero pending asks):
+  unchanged "Follow up on the $3,000 annual campaign ask" wording,
+  score 0.8075.
+- **An Ask with an active FUTURE follow-up reminder** (synthetic):
+  `open_ask` candidate is suppressed entirely.
+- **Same ask, follow-up now OVERDUE:** `open_ask` fires normally,
+  score 0.8075 -- confirms the deferral is scoped to the not-yet-due
+  case only. (The due-today case is covered by regression test #33,
+  which also passed.)
+
+**Ask records/statuses -- confirmed untouched by this recommendation
+logic:** a read-only re-check of the exact same baseline query after
+every verification step above (including the live preview call and
+the deploy itself) returned byte-identical results -- 6 total rows, 0
+pending, `MAX(updated_at)` still `1787845744`. No write path in this
+fix's diff touches the `asks` table at all (confirmed by construction:
+`openAskCandidate`/`buildRecommendationEvidence` are pure functions
+with no D1 access of any kind).
+
+**Nothing differed from the approved behavior; no patch-forward was
+needed.**
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -10560,32 +10669,33 @@ only.
 
 ## Deployment State
 
-**Corrected 2026-08-26 (Daily Fundraising Agenda quality corrections
-deploy) -- this section had gone stale again. This section remains a
-pointer to the true current state, not a duplicate of it.**
+**Corrected 2026-08-27 (Open-Ask recommendation quality fix deploy) --
+this section had gone stale again. This section remains a pointer to
+the true current state, not a duplicate of it.**
 
-**Live -- current as of this deploy.** Deployed commit `167c7b7`
-("Implement Daily Fundraising Agenda quality corrections" -- see "Daily
-Fundraising Agenda Quality Corrections -- Deployed to Independent
-Staging + Live Verification" above for full detail), Worker version
-**`08ecf769-9ebe-42be-b807-daf3a2896d20`**, confirmed via `wrangler
-versions view` (`Handlers: fetch, scheduled`) and via the deploy's own
-"Deployed ... triggers" / `schedule: 0 * * * *` output -- byte-identical
-cron schedule to the prior deploy; not touched by this task. **The
-hourly Cron Trigger remains active; the scheduled handler still only
-actually sends on the one invocation per day where the real
-America/New_York wall-clock hour reads 9 (`isDailyAgendaSendHour()`,
-untouched by this task). No email has been sent by this app yet** --
-the Gmail sender has never been manually invoked; the first real send
-will be generated by the scheduled job itself at the next 9 AM
-America/New_York firing. This deploy's own live-verification (via the
-real authenticated `/api/agenda/preview?format=json` route against real
-D1 data) is recorded in full above. This supersedes every earlier
-version ID recorded anywhere in this file, including `526c8710-6120-
-497e-998a-5dc6754c72a6` (live from 2026-08-26T16:21 through this task)
-and `02056678-29b8-4366-becf-54c40f08f8c7` (the Agenda feature's own
-preview-only deploy, live from 2026-08-26T16:07). For the exact current
-git SHA (which may have advanced past `167c7b7` by documentation-only
+**Live -- current as of this deploy.** Deployed commit `72bc4c8`
+("Implement open-ask recommendation quality fix" -- see "Open-Ask
+Recommendation Quality Fix -- Deployed to Independent Staging + Live
+Verification" above for full detail), Worker version **`913e21ce-
+c938-4711-8590-bddfdbcbfd57`**, confirmed via `wrangler versions view`
+(`Handlers: fetch, scheduled`) and via the deploy's own "Deployed ...
+triggers" / `schedule: 0 * * * *` output -- byte-identical cron
+schedule to the prior deploy; not touched by this task. **The hourly
+Cron Trigger remains active; the scheduled handler still only actually
+sends on the one invocation per day where the real America/New_York
+wall-clock hour reads 9 (`isDailyAgendaSendHour()`, untouched by this
+task). No email has been sent by this app yet** -- the Gmail sender
+has never been manually invoked; the first real send will be generated
+by the scheduled job itself at the next 9 AM America/New_York firing.
+This deploy's own live-verification (via the real authenticated
+`/api/agenda/preview?format=json` route against real D1 data, plus
+read-only reconstruction/tests for scenarios no longer present in real
+staging data) is recorded in full above. This supersedes every earlier
+version ID recorded anywhere in this file, including `08ecf769-9ebe-
+42be-b807-daf3a2896d20` (live from 2026-08-26T22:24 through this task)
+and `526c8710-6120-497e-998a-5dc6754c72a6` (live from 2026-08-26T16:21).
+For the exact current git SHA (which may have advanced past `72bc4c8`
+by documentation-only
 commits that touch no application code -- the deployed Worker always
 reflects the latest actual code change, not necessarily the latest
 commit), see "Current Git State" at the top of this file, which is the
@@ -10619,13 +10729,16 @@ data) and its scheduled send, whose Cron Trigger is active (the send
 itself is "deployed and armed," not yet "live-verified by an actual
 sent email" -- that verification arrives naturally at the next 9 AM
 America/New_York firing, per instruction not to invoke it manually) --
-and now its quality corrections (7-day relationship-date advance
-notice, corrected Suggested Actions pool/ranking, the solicitation
-regex fix, and the agenda-scoped upstream candidate-pool cap fix),
-live-verified end-to-end via the real authenticated preview route
-against real D1 data. Each has its own dated section above with full
-live-verification detail -- this section intentionally does not repeat
-it.
+its quality corrections (7-day relationship-date advance notice,
+corrected Suggested Actions pool/ranking, the solicitation regex fix,
+and the agenda-scoped upstream candidate-pool cap fix), and now the
+open-ask recommendation quality fix (post-Ask gift/pledge cross-
+reference; deferral to an explicit, not-yet-due Ask follow-up
+reminder) -- all live-verified end-to-end via the real authenticated
+preview route against real D1 data (plus read-only reconstruction/
+tests where real staging data no longer has a pending Ask to exercise
+live). Each has its own dated section above with full live-
+verification detail -- this section intentionally does not repeat it.
 
 Historical note (kept for continuity, not current): the 2026-08-20
 deploy referenced above by the now-superseded version ID required two
@@ -10939,21 +11052,26 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Open-Ask recommendation quality fix --
-implemented, tested, verified read-only; awaiting the user's review
-before deployment (2026-08-27).** See "Open-Ask Recommendation Quality
-Fix -- Implementation" above for the full record. `openAskCandidate()`
-now cross-references `mostRecentPaidGift`/`openPledge.activityDate`
-against `askedAt` (verified against Rovinsky's and Pfeiffer's real
-historical facts -- both now produce "Confirm whether ... is already
-resolved" wording at the unchanged 0.8075 score) and defers to an
-active, not-yet-due Ask follow-up reminder via the existing
-`ask-<askId>-` convention (verified with synthetic data, since no real
-ask-linked reminder currently exists in staging). `pnpm test`/`tsc
---noEmit`/`build:staging-independent` all pass, including 10 new
-regression cases. Committed and pushed to `feature/independent-
-cloudflare-sandbox`. **Not deployed, no D1 mutation, no email sent** --
-awaiting the user's go-ahead to deploy.
+**RESOLVED 2026-08-27 -- Open-Ask recommendation quality fix is
+deployed to Independent Staging and verified end-to-end; nothing
+further required.** See "Open-Ask Recommendation Quality Fix --
+Deployed to Independent Staging + Live Verification" above for the
+full deployment and verification record (Worker version `913e21ce-
+c938-4711-8590-bddfdbcbfd57`). `openAskCandidate()` now cross-
+references `mostRecentPaidGift`/`openPledge.activityDate` against
+`askedAt` and defers to an active, not-yet-due Ask follow-up reminder
+-- confirmed live (real preview route, real D1 data: Important Dates
+and Suggested ranking both unchanged, zero pending Asks correctly
+produce zero `open_ask` items) and via read-only reconstruction/tests
+for the scenarios no longer present in real staging data (Rovinsky's
+and Pfeiffer's real historical facts now produce "Confirm whether ...
+is already resolved" at the unchanged 0.8075 score; a genuinely stale
+ask with no post-Ask activity still produces the default wording; a
+future follow-up suppresses `open_ask` while overdue/due-today ones do
+not). Ask records/statuses confirmed untouched by a before/after D1
+baseline check. Cron Trigger remains active on its unchanged hourly
+schedule; no email has been manually sent. Nothing here needs a
+decision or action.
 
 **RESOLVED 2026-08-26 -- Daily Fundraising Agenda quality corrections
 are deployed to Independent Staging and live-verified end-to-end;
@@ -11103,6 +11221,47 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-27T20:00:00Z (approximate)
+Claude (Sonnet 5) — Deployed the approved open-ask recommendation
+quality fix (commit 72bc4c8) to Independent Staging per explicit user
+approval. Pre-deploy: fresh-verified clean tree/branch/HEAD (91d3b6a),
+confirmed wrangler.staging.jsonc (cron schedule, Gmail/Access bindings)
+untouched by the task's diff, confirmed the then-live Worker version's
+handlers/secrets/bindings via wrangler versions view, and recorded a
+D1 baseline on the asks table (6 total rows, 0 pending, MAX(updated_at)
+= 1787845744) before any verification step. Deployed via the existing
+pnpm run deploy:staging-independent command -- new Worker version
+913e21ce-c938-4711-8590-bddfdbcbfd57, cron schedule confirmed byte-
+identical (0 * * * *) both in the deploy's own output and via wrangler
+versions view (Handlers: fetch, scheduled, unchanged). Live-verified
+via the real authenticated /api/agenda/preview?format=json route on
+the deployed Worker against real D1 data: confirmed the preview works
+end-to-end, confirmed the 7-day Important Dates window is unchanged
+(4/4/6/7 days, one day advanced from the prior check as expected),
+confirmed Suggested ranking is unchanged (same three follow_up_pledge
+donors, same order/wording), and confirmed zero pending Asks in real
+staging correctly produces zero open_ask items in Suggested. Re-ran
+tests/asks.test.mjs (all 35 checks, including the 10 open-ask
+regression cases) and the historical-reconstruction script against the
+exact deployed source to confirm: Rovinsky's and Pfeiffer's real
+historical facts now produce "Confirm whether ... is already resolved"
+wording at the unchanged 0.8075 score; a genuinely stale synthetic ask
+with no post-Ask activity still produces the default "Follow up on
+..." wording; a synthetic future follow-up suppresses open_ask
+entirely while an overdue one does not (due-today covered by the
+existing regression test). Re-checked the exact same asks-table
+baseline query after every verification step (including the live
+preview call and the deploy itself): byte-identical to the pre-deploy
+baseline, confirming no D1 mutation occurred anywhere in this task.
+Nothing differed from the approved behavior; no patch-forward was
+needed. Updated "Open-Ask Recommendation Quality Fix" (new dated
+deployment subsection), "Deployment State", "Current Git State", and
+"Next Approval Required" (now RESOLVED) accordingly. Committed and
+pushed the docs-only update to feature/independent-cloudflare-sandbox.
+No production/main access.
+
+---
 
 2026-08-27T18:30:00Z (approximate)
 Claude (Sonnet 5) — Implemented the approved open-ask recommendation
