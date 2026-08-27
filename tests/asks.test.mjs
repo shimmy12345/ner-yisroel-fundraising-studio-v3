@@ -14,7 +14,7 @@ import {
 import { generateCandidates } from "../lib/relationships/recommendation-candidates.ts";
 import { buildRecommendationEvidence } from "../lib/relationships/recommendation-evidence.ts";
 import { buildDonorRecommendation } from "../lib/relationships/recommendation-rank.ts";
-import { buildMeetingBrief, askLine } from "../lib/relationships/meeting-brief-model.ts";
+import { buildMeetingBrief, askLine, matchAskFollowUps } from "../lib/relationships/meeting-brief-model.ts";
 import { STAGING_RESET_TABLE_ORDER } from "../lib/operations/staging-reset.ts";
 import { PRODUCTION_BASELINE_TABLES, PRODUCTION_BASELINE_VERIFIED } from "../lib/data-health/production-baseline.ts";
 
@@ -329,6 +329,150 @@ async function run() {
     assert.ok(PRODUCTION_BASELINE_TABLES.includes("asks"));
     assert.ok(PRODUCTION_BASELINE_TABLES.includes("ask_changes"));
     assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  }
+
+  // --- 26: post-Ask gift/pledge activity -- the real Rovinsky pattern
+  // (a $5,000 ask followed the very next day by a $5,000 completed
+  // gift) must switch the recommendation from an unconditional "follow
+  // up" to a verification-oriented one. Scoring inputs are unchanged
+  // from the default case -- this is a wording change only, never a
+  // ranking change. The Ask's own status is untouched anywhere in this
+  // fix -- resolving it remains a human decision. ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-rovinsky", amountCents: 500000, purpose: "plaque in memory of his wife", askedAt: NOW - 331 * DAY },
+      mostRecentPaidGift: { giftSource: "giving_activity", giftId: "gift-rovinsky", amountCents: 500000, occurredAt: NOW - 330 * DAY, campaign: null, description: null, acknowledged: false },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.ok(candidate, "an old ask with a later gift must still produce an open_ask candidate");
+    assert.match(candidate.action, /Confirm whether the \$5,000 plaque in memory of his wife ask is already resolved/);
+    assert.match(candidate.why, /\$5,000 gift was recorded/);
+    assert.doesNotMatch(candidate.action, /Follow up on/, "must not use the unconditional follow-up wording once a later gift exists");
+    assert.equal(candidate.specificity, 0.75);
+    assert.equal(candidate.recency, 0.7);
+    assert.ok(candidate.urgency > 0.9, `urgency should still ramp the same way as the default case, got ${candidate.urgency}`);
+  }
+
+  // --- 27: post-Ask gift/pledge activity -- the real Pfeiffer pattern
+  // (a $10,000 ask followed 1.5 days later by a $5,000 completed gift,
+  // half the amount). "Already resolved?" verification wording does not
+  // require an exact amount match -- only that something happened since
+  // the ask that the ask's own "still pending" framing doesn't reflect. ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-pfeiffer", amountCents: 1000000, purpose: null, askedAt: NOW - 345 * DAY },
+      mostRecentPaidGift: { giftSource: "giving_activity", giftId: "gift-pfeiffer", amountCents: 500000, occurredAt: NOW - 343 * DAY, campaign: null, description: null, acknowledged: false },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.ok(candidate);
+    assert.match(candidate.action, /Confirm whether the \$10,000 ask is already resolved/);
+    assert.match(candidate.why, /\$5,000 gift was recorded/);
+  }
+
+  // --- 28: a genuinely unresolved old Ask with NO post-Ask gift/pledge
+  // activity still produces the existing, unconditional follow-up
+  // wording -- this fix must not become a blanket "always verify" for
+  // every old ask, only the ones with real evidence in tension. ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-genuinely-stale", amountCents: 750000, purpose: "annual campaign", askedAt: NOW - 300 * DAY },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.ok(candidate);
+    assert.match(candidate.action, /Follow up on the \$7,500 annual campaign ask/);
+    assert.doesNotMatch(candidate.action, /Confirm whether/);
+  }
+
+  // --- 29: a gift recorded BEFORE the Ask (ordinary prior giving
+  // history) must not trigger verification wording -- only activity
+  // strictly AFTER the Ask's own askedAt is relevant tension. ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-with-prior-gift", amountCents: 200000, purpose: null, askedAt: NOW - 100 * DAY },
+      mostRecentPaidGift: { giftSource: "giving_activity", giftId: "gift-prior", amountCents: 100000, occurredAt: NOW - 200 * DAY, campaign: null, description: null, acknowledged: true },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.match(candidate.action, /Follow up on the \$2,000 ask/);
+  }
+
+  // --- 30: pledge activity (not just a paid gift) recorded after the
+  // Ask also triggers verification wording. ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-with-later-pledge", amountCents: 1000000, purpose: null, askedAt: NOW - 200 * DAY },
+      openPledge: { balanceCents: 500000, campaign: null, description: null, activityDate: NOW - 150 * DAY, activePaymentPlan: null },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.match(candidate.action, /Confirm whether the \$10,000 ask is already resolved/);
+    assert.match(candidate.why, /pledge activity was recorded/i);
+  }
+
+  // --- 31: an Ask with an ACTIVE FUTURE follow-up reminder (the
+  // fundraiser's own explicit, dated decision, matched via the existing
+  // "ask-<askId>-" convention) must not generate the generic open_ask
+  // suggestion at all -- it defers entirely to the scheduled reminder,
+  // never silently overriding it with "follow up now." ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-scheduled", amountCents: 500000, purpose: null, askedAt: NOW - 200 * DAY, activeFollowUpDueAt: NOW + 14 * DAY },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.equal(candidate, undefined, "a future-scheduled follow-up must suppress the generic open_ask candidate entirely");
+  }
+
+  // --- 32: an OVERDUE Ask follow-up reminder must NOT suppress open_ask
+  // generation -- overdue work already wins the homepage/agenda's own
+  // due-date ranking (rank 0) ahead of any recommendation-kind
+  // candidate regardless; only a not-yet-due follow-up needed deferral. ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-overdue-followup", amountCents: 500000, purpose: null, askedAt: NOW - 200 * DAY, activeFollowUpDueAt: NOW - 3 * DAY },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.ok(candidate, "an overdue follow-up must not suppress the open_ask candidate");
+  }
+
+  // --- 33: a follow-up due TODAY must also not suppress open_ask (rank
+  // 2 already beats a generic Suggested Action on its own). ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-due-today", amountCents: 500000, purpose: null, askedAt: NOW - 200 * DAY, activeFollowUpDueAt: NOW },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.ok(candidate, "a follow-up due today must not suppress the open_ask candidate");
+  }
+
+  // --- 34: a COMPLETED historical reminder must not permanently
+  // suppress the Ask -- matchAskFollowUps only ever sees status='open'
+  // rows (see live-data.ts/meeting-brief.ts's own queries), so a
+  // completed reminder simply never populates activeFollowUpDueAt in
+  // the first place; modeled here as null, same as "never had one." ---
+  {
+    const evidence = buildRecommendationEvidence({
+      ...emptyEvidenceInput,
+      openAsk: { id: "ask-completed-followup", amountCents: 500000, purpose: null, askedAt: NOW - 200 * DAY, activeFollowUpDueAt: null },
+    }, NOW, "America/New_York");
+    const candidate = generateCandidates(evidence).find((item) => item.kind === "open_ask");
+    assert.ok(candidate, "a completed (no longer open) reminder must not suppress the open_ask candidate");
+  }
+
+  // --- 35: matchAskFollowUps itself -- an unrelated reminder (a
+  // different ask's id prefix, or a non-ask activity reminder) must
+  // never match a different ask. ---
+  {
+    const matches = matchAskFollowUps(
+      ["ask-x"],
+      [{ id: "ask-y-some-uuid-here", dueAt: NOW + 5 * DAY }, { id: "activity-unrelated-uuid", dueAt: NOW + 1 * DAY }],
+    );
+    assert.equal(matches.get("ask-x"), null, "an unrelated reminder id must never match a different ask's id prefix");
   }
 
   console.log("Ask/Solicitation feature (Phase 1) checks passed.");

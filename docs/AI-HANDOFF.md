@@ -15,7 +15,21 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`727d912`** -- "Document open-ask
+**`(pending — see follow-up commit)`** -- "Implement open-ask
+recommendation quality fix: post-Ask gift/pledge cross-reference,
+explicit follow-up-scheduling deferral" -- real application code:
+`lib/relationships/recommendation-candidates.ts`, `lib/relationships/
+recommendation-evidence.ts`, `lib/workspace/live-data.ts`, `lib/
+relationships/meeting-brief.ts`, `app/donors/[id]/page.tsx`, plus
+regression coverage in `tests/asks.test.mjs` -- see "Open-Ask
+Recommendation Quality Fix -- Implementation" below for full detail,
+including its verification subsection. **Implemented, tested, tsc-
+clean, build-clean, verified read-only; NOT deployed, no D1 mutation,
+no email sent.** Narrowly scoped: Daily Agenda ranking, the 7-day
+stewardship-date window, and Ask status semantics are all untouched.
+Sits on top of `941ca3a` ("Correct Current Git State to reference the
+new HEAD (727d912)" -- docs-only, zero application code change), which
+sits on top of `727d912` -- "Document open-ask
 recommendation quality investigation (2026-08-27)" -- docs-only, zero
 application code change, zero D1 mutation; see "Open-Ask Recommendation
 Quality Investigation" below for the full findings and the proposed
@@ -9945,6 +9959,163 @@ D1 mutation, no manual email, no deployment, no production/main
 access. This section is investigation and recommendation only, for the
 user's review.
 
+## Open-Ask Recommendation Quality Fix -- Implementation (2026-08-27)
+
+**Status: implemented, tested, tsc-clean, build-clean, verified read-
+only against real historical staging facts. Committed and pushed to
+`feature/independent-cloudflare-sandbox`. NOT deployed. No D1
+mutation. No manual email. No production/main access.** Approved by
+the user on top of the investigation above; implements exactly the
+"smallest principled improvement" that investigation proposed, plus
+its explicitly-requested follow-up-reminder deferral. Narrowly scoped
+to `open_ask` recommendation quality only -- the Daily Agenda ranking
+formula (`recommendation-rank.ts`'s `score()`), the 7-day stewardship-
+date window (`agenda-model.ts`), and Ask status semantics (`lib/
+capture/ask.ts`) are all untouched (confirmed via `git diff`: none of
+those files appear in this change).
+
+**1. Post-Ask gift/pledge activity (`lib/relationships/recommendation-
+candidates.ts`'s `openAskCandidate()`).** Before building the default
+"still pending" wording, compares `ask.askedAt` against `evidence.
+giving.mostRecentPaidGift?.occurredAt` and `evidence.giving.openPledge?.
+activityDate` -- both already computed elsewhere in the same evidence
+object (they drive `acknowledge_gift`/`follow_up_pledge`), zero new D1
+queries, zero schema change. When either postdates the ask, the
+candidate's `action`/`why`/`evidence` switch to a verification framing
+-- e.g. "Confirm whether the $5,000 Plaque in memory of his wife ask is
+already resolved" with a `why` naming which activity (gift and/or
+pledge) was recorded and when. **Scoring inputs (`specificity`,
+`recency`, `urgency`, `certainty`) are byte-identical to the default
+case** -- this is a wording change only; the candidate's score, and
+therefore its place in every ranking (Daily Agenda Suggested, homepage
+queue, Meeting Brief), is completely unaffected. The Ask's own
+`status` is never touched -- it stays `pending`; resolving it remains
+the fundraiser's own decision via the existing Ask Management UI. When
+neither signal exists, behavior is byte-identical to before (same
+"Follow up on the {ask} ask" wording).
+
+**2. Respect explicit Ask follow-up scheduling.** New field
+`RecommendationEvidenceInput.openAsk.activeFollowUpDueAt` (`lib/
+relationships/recommendation-evidence.ts`), populated via the exact
+same `matchAskFollowUps()`/"ask-<askId>-" id-prefix convention `lib/
+relationships/meeting-brief-model.ts` already uses for Meeting Brief
+and the donor page -- no new schema, no second reminder system.
+`buildRecommendationEvidence` derives `openAsk.hasFutureFollowUp`
+(true only when that due date falls on a strictly later calendar day
+than `now`, via the same `localDayKey` convention `reminder.isOverdue`
+already uses -- an overdue or due-today follow-up is deliberately NOT
+"future"). `openAskCandidate` returns `null` entirely when
+`hasFutureFollowUp` is true, mirroring `followUpPledgeCandidate`'s own
+existing precedent just above it in the same file (an on-track payment
+plan suppresses that candidate rather than nagging about a balance the
+fundraiser already has a plan for). This closes the real gap the
+investigation found: a >=180-day-old `open_ask` (score 0.8075) could
+previously outscore -- and, in the final per-donor cross-donor dedup,
+completely hide -- a fundraiser's own explicitly-scheduled, not-yet-due
+follow-up reminder (score ~0.7575). An overdue or due-today follow-up
+needs no such deferral: its own due-date-based rank (0 or 2) already
+beats a generic recommendation-kind entry's rank (4) regardless, so
+`openAskCandidate` fires normally in both cases -- verified explicitly.
+Wired into all three evidence-building call sites that already compute
+or can compute this match: `lib/workspace/live-data.ts` (new, via the
+already-fetched `reminders` rows -- zero new queries), `lib/
+relationships/meeting-brief.ts` (reordered its existing `
+matchAskFollowUps` call to run before evidence construction instead of
+after, reusing the same map for both purposes rather than computing it
+twice), and `app/donors/[id]/page.tsx` (already computed the match
+before evidence construction; just added the one field). The Ask
+itself remains fully visible in Meeting Brief/the donor page's Open Ask
+list regardless -- only the *generic* Suggested Action recommendation
+defers.
+
+**Defensive detail:** `activeFollowUpDueAt` is read via `?? null`
+inside `buildRecommendationEvidence`, not a bare property read --
+guards every caller/fixture written before this field existed (where
+it would otherwise be `undefined`, and `undefined !== null` is `true`
+in JS, which would have fed `undefined` into a date-formatting call and
+thrown). Confirmed this matters: `tests/asks.test.mjs`'s own pre-
+existing ask-evidence fixture (test #15, unmodified) omits the field
+entirely and continues to pass.
+
+**3. Repetition/dismissal -- explicitly NOT built this round.** Per
+instruction, no cooldown, snooze, or "shown N times" state was added.
+The investigation's finding stands as a documented, intentional
+remaining limitation: once `open_ask` becomes evidence-aware (this
+fix) and both existing mechanisms are available -- resolving the Ask's
+own status, or the homepage's donor+kind-scoped "Dismiss suggestion"
+(shared with the email via the same `relationship_queue_dismissals`
+table) -- no further automatic suppression was judged necessary for
+this pass. The email itself still has no in-line dismiss/resolve
+action; a fundraiser who only reads the email still has no way to stop
+a *correctly-still-actionable* repeat short of visiting the app. This
+remains true after this fix and is unchanged by it.
+
+**Regression coverage added (`tests/asks.test.mjs`, tests #26-#35):**
+- #26 -- the real Rovinsky pattern (exact-amount $5,000 gift the day
+  after a $5,000 ask): verification wording, unchanged score inputs.
+- #27 -- the real Pfeiffer pattern (partial $5,000 gift 1.5 days after
+  a $10,000 ask): verification wording without requiring an exact
+  amount match.
+- #28 -- a genuinely stale ask with NO post-Ask activity: unchanged
+  default "Follow up on the ask" wording (proves this isn't a blanket
+  "always verify" for every old ask).
+- #29 -- a gift recorded *before* the ask (ordinary prior giving
+  history) does not trigger verification wording -- only activity
+  strictly after `askedAt` is relevant.
+- #30 -- pledge activity alone (no paid gift) after the ask also
+  triggers verification wording.
+- #31 -- an active FUTURE follow-up reminder suppresses `open_ask`
+  entirely.
+- #32 -- an OVERDUE follow-up reminder does NOT suppress `open_ask`.
+- #33 -- a follow-up due TODAY does NOT suppress `open_ask`.
+- #34 -- a COMPLETED (no longer open) historical reminder does not
+  permanently suppress the ask (modeled as `activeFollowUpDueAt: null`,
+  matching how `matchAskFollowUps` only ever sees `status='open'` rows
+  in the first place).
+- #35 -- `matchAskFollowUps` itself: an unrelated reminder id (a
+  different ask's prefix, or a non-ask activity reminder) never matches
+  a different ask.
+
+**Automated verification:**
+pnpm test: PASS (all suites, including the 10 new regression cases)
+pnpm exec tsc --noEmit: PASS
+pnpm run build:staging-independent: PASS
+
+**Read-only verification against real historical staging facts** (a
+throwaway Node script, same technique as every prior live-verification
+in this file, importing the real, now-modified production functions
+directly -- no D1 write, and in this case no live D1 read was even
+needed since both real asks are no longer pending and the exact
+historical dates were already retrieved read-only during the
+investigation):
+- **Rovinsky's real historical case** (reconstructed as still pending,
+  using the real $5,000/2025-09-29 ask and the real $5,000/2025-09-30
+  gift): the real `openAskCandidate` now returns action "Confirm
+  whether the $5,000 Plaque in memory of his wife ask is already
+  resolved," why citing the exact gift date, **score unchanged at
+  0.8075**.
+- **Pfeiffer's real historical case** (real $10,000/2025-09-15 ask,
+  real $5,000/2025-09-17 gift): "Confirm whether the $10,000 ask is
+  already resolved," **score unchanged at 0.8075**.
+- **A genuinely unresolved old ask with no post-Ask activity**
+  (synthetic, since real staging currently has zero pending asks --
+  both real ones were resolved by the user during the prior
+  investigation): unchanged "Follow up on the $3,000 annual campaign
+  ask" wording, score 0.8075 -- default behavior preserved exactly.
+- **An ask with an active future follow-up reminder** (synthetic, per
+  explicit permission -- no ask-linked reminder currently exists in
+  real staging data): `open_ask` candidate is `NONE (suppressed)`; the
+  donor's winning recommendation correctly falls through to whatever
+  else applies.
+- **Same synthetic ask, follow-up now overdue:** `open_ask` fires
+  normally, score 0.8075 -- confirms suppression is scoped to the
+  future case only, exactly as designed.
+
+**Not done this round, by explicit instruction:** no deployment, no
+manual email, no D1 mutation, no production/main access, no new
+cooldown/dismissal system, no change to Daily Agenda ranking, the
+7-day stewardship-date window, or Ask status semantics.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -10769,23 +10940,20 @@ relationship-intelligence quality work):
 ## Next Approval Required
 
 **Genuinely open, newest first: Open-Ask recommendation quality fix --
-awaiting the user's decision (2026-08-27).** See "Open-Ask
-Recommendation Quality Investigation" above for the full record. This
-was investigation only, per explicit instruction -- no code was
-changed, no D1 write, no deploy. Finding: `openAskCandidate()` never
-cross-references `evidence.giving.mostRecentPaidGift`/`openPledge`
-against the ask's own `askedAt`, so a gift that already (fully or
-partially) answers a pending ask never changes the recommendation --
-demonstrated live for both donors in the trigger email (Rovinsky
-received a matching $5,000 gift the day after his $5,000 ask; Pfeiffer
-received a $5,000 gift 1.5 days after his $10,000 ask). Proposed
-smallest fix: compare those already-computed dates inside
-`openAskCandidate` and switch to a "verify whether this is already
-resolved" wording when a later gift/pledge activity exists, using zero
-new queries, zero schema change, and no arbitrary age cutoff. Decision
-needed: approve this candidate-wording fix (and, optionally, the
-smaller secondary ask-specific-reminder cross-reference) for
-implementation, adjust the approach, or decline.
+implemented, tested, verified read-only; awaiting the user's review
+before deployment (2026-08-27).** See "Open-Ask Recommendation Quality
+Fix -- Implementation" above for the full record. `openAskCandidate()`
+now cross-references `mostRecentPaidGift`/`openPledge.activityDate`
+against `askedAt` (verified against Rovinsky's and Pfeiffer's real
+historical facts -- both now produce "Confirm whether ... is already
+resolved" wording at the unchanged 0.8075 score) and defers to an
+active, not-yet-due Ask follow-up reminder via the existing
+`ask-<askId>-` convention (verified with synthetic data, since no real
+ask-linked reminder currently exists in staging). `pnpm test`/`tsc
+--noEmit`/`build:staging-independent` all pass, including 10 new
+regression cases. Committed and pushed to `feature/independent-
+cloudflare-sandbox`. **Not deployed, no D1 mutation, no email sent** --
+awaiting the user's go-ahead to deploy.
 
 **RESOLVED 2026-08-26 -- Daily Fundraising Agenda quality corrections
 are deployed to Independent Staging and live-verified end-to-end;
@@ -10935,6 +11103,61 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-27T18:30:00Z (approximate)
+Claude (Sonnet 5) — Implemented the approved open-ask recommendation
+quality fix from the investigation above, narrowly scoped to open_ask
+content only (Daily Agenda ranking, the 7-day stewardship-date window,
+and Ask status semantics all untouched -- confirmed via git diff).
+Fix 1: openAskCandidate() (lib/relationships/recommendation-
+candidates.ts) now compares askedAt against the already-computed
+mostRecentPaidGift.occurredAt/openPledge.activityDate (both already in
+the same evidence object -- zero new queries, zero schema change) and
+switches to "Confirm whether the {ask} is already resolved" wording
+when either postdates the ask, leaving scoring inputs (specificity/
+recency/urgency/certainty) byte-identical to the default case so
+ranking is completely unaffected; the Ask's own status stays pending,
+never auto-resolved. Fix 2: added RecommendationEvidenceInput.openAsk.
+activeFollowUpDueAt, populated via the existing matchAskFollowUps()/
+"ask-<askId>-" convention already used by Meeting Brief (wired into
+live-data.ts via the already-fetched reminders rows, and into
+meeting-brief.ts/app/donors/[id]/page.tsx by reordering their existing
+matchAskFollowUps call to run before evidence construction); derived
+openAsk.hasFutureFollowUp (via the same localDayKey convention
+reminder.isOverdue already uses) makes openAskCandidate return null
+entirely for a not-yet-due explicit follow-up, mirroring
+followUpPledgeCandidate's own on-track-plan-suppression precedent --
+an overdue or due-today follow-up is deliberately left unsuppressed
+since its own due-date rank already wins regardless. Made the new
+field's read defensive (?? null) so pre-existing evidence fixtures/
+callers written before this field existed keep working unchanged --
+confirmed via tests/asks.test.mjs's own untouched pre-existing ask
+fixture still passing. Fix 3: no cooldown/dismissal system built, per
+instruction -- documented the current repeat behavior as an
+intentional remaining limitation. Added 10 new regression tests
+(tests/asks.test.mjs #26-35) covering the real Rovinsky/Pfeiffer
+patterns, a genuinely-stale-ask-with-no-post-Ask-activity control case,
+a before-the-ask gift (must not trigger), pledge-only activity (must
+trigger), future/overdue/due-today/completed follow-up reminder cases,
+and matchAskFollowUps' own cross-ask isolation. pnpm test/tsc --noEmit/
+build:staging-independent all pass. Verified read-only using a
+throwaway script importing the real production functions against
+Rovinsky's/Pfeiffer's actual historical dates (both real asks are no
+longer pending in live staging -- resolved by the user during the
+prior investigation -- so this reconstructs their evidence as it stood
+while pending, using the same real dates already retrieved read-only)
+plus synthetic data for the no-post-Ask-activity and future-follow-up
+scenarios (real staging currently has zero pending asks and no ask-
+linked reminders, per explicit permission to use synthetic data if
+needed): confirmed both real cases now show verification wording at
+the unchanged 0.8075 score, confirmed the synthetic stale-ask control
+case is unchanged, confirmed a future follow-up suppresses open_ask
+while an overdue one does not. Committed and pushed to
+feature/independent-cloudflare-sandbox. Not deployed; no D1 mutation;
+no email sent; no production/main access -- stopped for the user's
+review.
+
+---
 
 2026-08-27T16:15:00Z (approximate)
 Claude (Sonnet 5) — Investigated open_ask recommendation quality per

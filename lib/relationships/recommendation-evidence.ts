@@ -84,7 +84,15 @@ export type RecommendationEvidenceInput = {
   // an ask is relationship-layer data the fundraiser recorded, never
   // giving_activities/gifts (JL Solutions financial-system-of-record
   // data) -- see docs/ASK-SOLICITATION-DESIGN.md.
-  openAsk: { id: string; amountCents: number | null; purpose: string | null; askedAt: number } | null;
+  // activeFollowUpDueAt: this ask's own OPEN follow-up reminder's due
+  // date, matched via the exact same "ask-<askId>-" recommendation
+  // id-prefix convention lib/relationships/meeting-brief-model.ts's
+  // matchAskFollowUps already uses for Meeting Brief/the donor page --
+  // never a second, independent reminder system. Null when this ask has
+  // no active follow-up (never created one, or it was completed/
+  // dismissed -- matchAskFollowUps only ever sees status='open' rows, so
+  // a completed historical reminder naturally can't populate this).
+  openAsk: { id: string; amountCents: number | null; purpose: string | null; askedAt: number; activeFollowUpDueAt: number | null } | null;
   // donors.relationship_summary / institutional_memory -- human-reviewed,
   // AI-suggested-then-accepted text. More trustworthy than an imported
   // note, less than a confirmed database row.
@@ -167,7 +175,13 @@ export type RecommendationEvidence = {
     daysSinceSubstantiveContact: number | null;
   };
   reminder: { action: string; reason: string; dueAt: number | null; isOverdue: boolean } | null;
-  openAsk: { id: string; amountCents: number | null; purpose: string | null; askedAt: number; ageDays: number } | null;
+  // hasFutureFollowUp: true only when activeFollowUpDueAt falls on a
+  // later calendar day than `now` (same localDayKey convention as
+  // reminder.isOverdue above) -- an overdue or due-today follow-up is
+  // deliberately NOT "future": those already win the homepage/agenda's
+  // own due-date-based ranking on their own merit, so openAskCandidate
+  // only needs to defer for the genuinely-not-yet-due case.
+  openAsk: { id: string; amountCents: number | null; purpose: string | null; askedAt: number; ageDays: number; activeFollowUpDueAt: number | null; hasFutureFollowUp: boolean } | null;
   narrative: { relationshipSummary: string | null; institutionalMemory: string | null };
   historicalContext: Array<{ text: string; source: string; sourceDate: number | null }>;
   yahrtzeits: YahrtzeitEvidence[];
@@ -257,7 +271,16 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
     reminder: input.openReminder
       ? { ...input.openReminder, isOverdue: input.openReminder.dueAt !== null && localDayKey(input.openReminder.dueAt, timezone) < localDayKey(now, timezone) }
       : null,
-    openAsk: input.openAsk ? { ...input.openAsk, ageDays: daysBetween(now, input.openAsk.askedAt) } : null,
+    // `?? null`, not a bare `input.openAsk.activeFollowUpDueAt` read --
+    // defensive against an older caller/fixture that predates this field
+    // (undefined, not null); without it, `undefined !== null` is true and
+    // localDayKey(undefined, ...) throws.
+    openAsk: input.openAsk
+      ? (() => {
+          const activeFollowUpDueAt = input.openAsk.activeFollowUpDueAt ?? null;
+          return { ...input.openAsk, ageDays: daysBetween(now, input.openAsk.askedAt), hasFutureFollowUp: activeFollowUpDueAt !== null && localDayKey(activeFollowUpDueAt, timezone) > localDayKey(now, timezone) };
+        })()
+      : null,
     narrative: { relationshipSummary: input.relationshipSummary, institutionalMemory: input.institutionalMemory },
     historicalContext: input.historicalContext,
     yahrtzeits,

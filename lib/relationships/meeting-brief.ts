@@ -251,7 +251,15 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   // window) falls back to null here, matching how "never contacted" is
   // already handled everywhere else in this evidence shape.
   const latestSubstantiveInteraction = interactions.results.find((item) => item.role !== "recipient");
-  const openAskForEvidence = openAskRows.results[0] ? { id: openAskRows.results[0].id, amountCents: openAskRows.results[0].amount_cents, purpose: openAskRows.results[0].purpose, askedAt: openAskRows.results[0].asked_at } : null;
+  // Computed before evidence so openAskForEvidence can carry each ask's
+  // own active-follow-up due date (see recommendation-evidence.ts's
+  // activeFollowUpDueAt) -- the same map is reused below for the full
+  // openAsks display list, never computed twice.
+  const followUpByAsk = matchAskFollowUps(
+    openAskRows.results.map((row) => row.id),
+    openAskReminderRows.results.map((row) => ({ id: row.id, dueAt: row.due_at })),
+  );
+  const openAskForEvidence = openAskRows.results[0] ? { id: openAskRows.results[0].id, amountCents: openAskRows.results[0].amount_cents, purpose: openAskRows.results[0].purpose, askedAt: openAskRows.results[0].asked_at, activeFollowUpDueAt: followUpByAsk.get(openAskRows.results[0].id)?.dueAt ?? null } : null;
   const recommendationEvidence = buildRecommendationEvidence({
     donorId,
     mostRecentPaidGift: mostRecentPaidGiftForEvidence,
@@ -268,10 +276,6 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     importantDates: importantDateEvidenceInput,
   }, now, timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
-  const followUpByAsk = matchAskFollowUps(
-    openAskRows.results.map((row) => row.id),
-    openAskReminderRows.results.map((row) => ({ id: row.id, dueAt: row.due_at })),
-  );
   const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at, followUpDueAt: followUpByAsk.get(row.id)?.dueAt ?? null }));
 
   // Same single open pledge already reflected in Suggested Action above --

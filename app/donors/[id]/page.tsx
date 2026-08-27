@@ -323,7 +323,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     openAsks.map((item) => item.id),
     recommendationResult.results.filter((reminder) => reminder.status === "open" && reminder.id.startsWith("ask-")).map((reminder) => ({ id: reminder.id, dueAt: reminder.due_at })),
   );
-  const openAskForEvidence = openAsks[0] ? { id: openAsks[0].id, amountCents: openAsks[0].amount_cents, purpose: openAsks[0].purpose, askedAt: openAsks[0].asked_at } : null;
+  const openAskForEvidence = openAsks[0] ? { id: openAsks[0].id, amountCents: openAsks[0].amount_cents, purpose: openAsks[0].purpose, askedAt: openAsks[0].asked_at, activeFollowUpDueAt: openFollowUpByAskId.get(openAsks[0].id)?.dueAt ?? null } : null;
   const evidenceStart = Date.now();
   const recommendationEvidence = buildRecommendationEvidence({
     donorId: id,

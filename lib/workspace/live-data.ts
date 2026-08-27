@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import type { DataMode } from "./mode";
 import { scheduleBucket } from "./scheduled-activity";
 import { dedupeRelationshipQueue, groupRelationshipQueue, isRecentPastEvent, relationshipQueueBucket, resolvePriorityCap, type RelationshipQueueBucket } from "./relationship-queue";
+import { matchAskFollowUps } from "../relationships/meeting-brief-model.ts";
 import { financialDateLabel } from "../financial-date.ts";
 import { donorInitials, numericDonorCode } from "../relationships/donor-identity.ts";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../relationships/recommendation-evidence.ts";
@@ -424,6 +425,20 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   });
 
   const reminderByDonor = new Map(reminders.results.map((item) => [item.donor_id, item]));
+  // Matches each in-scope donor's oldest-pending ask to its own OPEN
+  // follow-up reminder, if any, by the existing "ask-<askId>-"
+  // recommendation id-prefix convention (app/api/asks/[id]/reminder/
+  // route.ts, already used identically by lib/relationships/meeting-
+  // brief-model.ts's matchAskFollowUps for Meeting Brief/the donor
+  // page) -- reusing the SAME `reminders` rows already fetched above,
+  // never a new query. Feeds openAskCandidate's future-follow-up
+  // deferral (recommendation-candidates.ts) so a fundraiser's own
+  // explicit, dated decision on this exact ask is never silently
+  // overridden by the generic "follow up on the ask" suggestion.
+  const askFollowUpByAskId = matchAskFollowUps(
+    Array.from(openAskByDonor.values()).map((item) => item.id),
+    reminders.results.map((item) => ({ id: item.recommendation_id, dueAt: item.due_at })),
+  );
   const donorById = new Map(donors.results.map((item) => [item.id, item]));
   const latestInteractionByDonor = new Map(latestInteractions.results.map((item) => [item.donor_id, item]));
   const historicalContextByDonor = new Map<string, HistoricalContextRow[]>();
@@ -501,7 +516,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       lastContactAt: contactByDonor.get(donorId) ?? null,
       lastSubstantiveContactAt: substantiveContactByDonor.get(donorId) ?? null,
       openReminder: reminder ? { action: reminder.action, reason: reminder.reason, dueAt: reminder.due_at } : null,
-      openAsk: ask ? { id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, askedAt: ask.asked_at } : null,
+      openAsk: ask ? { id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, askedAt: ask.asked_at, activeFollowUpDueAt: askFollowUpByAskId.get(ask.id)?.dueAt ?? null } : null,
       relationshipSummary: donorRow.relationship_summary,
       institutionalMemory: donorRow.institutional_memory,
       historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),

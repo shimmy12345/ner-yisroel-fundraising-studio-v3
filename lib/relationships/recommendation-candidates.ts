@@ -1,7 +1,7 @@
 import type { RecommendationEvidence } from "./recommendation-evidence.ts";
 import type { GiftSource } from "../giving/acknowledgment.ts";
 import { interactionKindLabel, relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";
-import { askFollowUpAction } from "../capture/ask.ts";
+import { askDescriptor, askFollowUpAction } from "../capture/ask.ts";
 
 // Plausible next-action candidates generated from one donor's evidence.
 // Each generator only fires on its own precondition, so a candidate simply
@@ -209,8 +209,56 @@ function followUpPledgeCandidate(evidence: RecommendationEvidence): Recommendati
 function openAskCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
   const ask = evidence.openAsk;
   if (!ask) return null;
+  // The fundraiser already made an explicit, dated decision (via the
+  // existing "Add follow-up" feature -- app/api/asks/[id]/reminder/
+  // route.ts, matched here by the same "ask-<askId>-" id-prefix
+  // convention Meeting Brief already uses) to revisit this ask on a
+  // specific later day. Deferring to it entirely (no candidate at all)
+  // mirrors followUpPledgeCandidate's own precedent just above (an
+  // on-track payment plan suppresses that candidate rather than nagging
+  // about an open balance the fundraiser already has a plan for). An
+  // overdue or due-today follow-up is NOT "future" (hasFutureFollowUp is
+  // false for both -- see its own doc comment in recommendation-
+  // evidence.ts) and falls through to the normal candidate below: those
+  // already win the homepage/agenda's own due-date ranking over a
+  // generic Suggested Action on their own merit, so no suppression is
+  // needed for them.
+  if (ask.hasFutureFollowUp) return null;
   const amountLabel = ask.amountCents !== null ? money(ask.amountCents) : null;
   const askedLabel = ask.ageDays === 0 ? "today" : `${ask.ageDays} day${ask.ageDays === 1 ? "" : "s"} ago`;
+  // A gift or pledge payment recorded on or after the day the ask was
+  // made is real, confirmed evidence in tension with "still pending" --
+  // both dates already live in this same evidence object (mostRecentPaidGift
+  // drives acknowledge_gift; openPledge.activityDate drives
+  // follow_up_pledge), simply never compared against askedAt before now.
+  // This never asserts the ask WAS answered (that remains a human
+  // judgment, gated behind the existing pending/committed/declined/
+  // withdrawn status machine in lib/capture/ask.ts) -- it only stops
+  // asserting the opposite (that nothing has happened since) once the
+  // evidence itself says otherwise. Scoring inputs are deliberately
+  // unchanged from the default case below -- this only changes the
+  // wording, never where this candidate ranks.
+  const giftAfterAsk = evidence.giving.mostRecentPaidGift !== null && evidence.giving.mostRecentPaidGift.occurredAt > ask.askedAt ? evidence.giving.mostRecentPaidGift : null;
+  const pledgeActivityAfterAsk = evidence.giving.openPledge?.activityDate !== null && evidence.giving.openPledge?.activityDate !== undefined && evidence.giving.openPledge.activityDate > ask.askedAt ? evidence.giving.openPledge.activityDate : null;
+  if (giftAfterAsk || pledgeActivityAfterAsk) {
+    const signals: string[] = [];
+    if (giftAfterAsk) signals.push(`a ${money(giftAfterAsk.amountCents)} gift was recorded ${dateLabel(giftAfterAsk.occurredAt)}`);
+    if (pledgeActivityAfterAsk) signals.push(`pledge activity was recorded ${dateLabel(pledgeActivityAfterAsk)}`);
+    const signalText = signals.join(" and ");
+    return {
+      kind: "open_ask",
+      action: `Confirm whether the ${askDescriptor(ask.amountCents, ask.purpose)} ask is already resolved.`,
+      why: `${signalText.charAt(0).toUpperCase()}${signalText.slice(1)}, after this ask was made ${askedLabel} -- verify before following up again.`,
+      evidence: [`${amountLabel ? `${amountLabel} ` : ""}${ask.purpose ? `${ask.purpose}, ` : ""}asked ${dateLabel(ask.askedAt)}, still marked pending; ${signalText} since then.`],
+      confidence: ask.ageDays >= 60 ? "medium" : "low",
+      timing: null,
+      certainty: "confirmed",
+      specificity: 0.75,
+      recency: 0.7,
+      urgency: clamp01(ask.ageDays / 180),
+      supportingDate: ask.askedAt,
+    };
+  }
   return {
     kind: "open_ask",
     action: askFollowUpAction(ask.amountCents, ask.purpose),
