@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending — see follow-up commit)** -- "Apply Stage 1: ask-linked
+**`3bb77df`** -- "Apply Stage 1: ask-linked
 legacy Relationship Facts backfill (Klein/Rovinsky/Pfeiffer)
 (2026-08-28)" -- APPLIED to Independent Staging D1 (`donor_
 relationship_facts`/`donor_relationship_fact_changes` only), zero
