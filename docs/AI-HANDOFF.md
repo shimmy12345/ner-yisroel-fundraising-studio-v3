@@ -15,7 +15,24 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`1381cce`** -- "Document financial-data-
+**`(pending — see follow-up commit)`** -- "Document corrected redo of
+the portfolio-level 30-day focus investigation (2026-08-28)" --
+docs-only, zero application code change, zero D1 mutation; see
+"Portfolio-Level 30-Day Focus Investigation -- CORRECTED REDO
+(2026-08-28)" below -- the authoritative version, superseding the
+original "Portfolio-Level 30-Day Focus Investigation" section wherever
+they disagree (that section is preserved unedited as historical
+context, per instruction). New top-10 focus list recomputed from zero
+(Stein, Schwartz, Miller, Schnaidman, Ray, Ramras, Rosenberg,
+Weinschneider, Zachter, Klein); a second real data-model wrinkle found
+and fixed mid-round (a pledge row's `activity_date` can itself be a
+future, non-creation date -- found via live cross-check on Avi Stein,
+whose real $75,000/11-day-old pledge the original broken analysis
+missed entirely). Spetner re-evaluated as the required regression case
+and does NOT belong in the new list (his correction reveals low
+urgency, not high). Sits on top of `0d4d001` ("Correct Current Git
+State to reference the new HEAD (1381cce)" -- docs-only, zero
+application code change), which sits on top of **`1381cce`** -- "Document financial-data-
 model audit correcting the portfolio-level investigation (2026-08-27)"
 -- docs-only, zero application code change, zero D1 mutation; see
 "Financial-Data-Model Audit -- Correcting the Portfolio-Level
@@ -10971,6 +10988,482 @@ this document without that trace.
 
 **Stopping for review before implementation**, per instruction.
 
+## Portfolio-Level 30-Day Focus Investigation -- CORRECTED REDO (2026-08-28) -- INVESTIGATION ONLY, NO CODE CHANGE, NO D1 MUTATION, NO NEW SCORE, NO DEPLOY
+
+**This section supersedes "Portfolio-Level 30-Day Focus Investigation"
+above wherever the two disagree.** That section is preserved unedited
+as historical context per instruction; treat this one as authoritative
+for any financial claim. The prior section's non-financial findings
+(the Klein/Rovinsky/Pfeiffer stale-narrative pattern, Abdelhak's
+broadcast-vs-substantive gap, the missing-intelligence catalogue) were
+never touched by the financial-data-model bugs and are reused here,
+re-verified, not re-derived from scratch.
+
+**Method:** fresh read-only pulls of every table involved (donors,
+full `giving_activities`, `asks`, `interactions`, open `recommendations`,
+yahrtzeits/important dates, `gift_acknowledgments`,
+`relationship_queue_dismissals`, `donor_historical_context`,
+`jl_payment_assignment_audits` with `applied_cents`,
+`pledge_payment_plans`) run through a rewritten analysis script that
+now (a) fails loudly instead of silently on an unexpected `giving_
+activities.category`, a missing join key, or a payment-audit row that
+doesn't join to a real pledge; (b) carries an explicit Spetner
+regression assertion; (c) independently reconciles its own output
+against the live donor page for every donor named below, not just
+Spetner.
+
+### 1. Financial correctness -- verification gates run before any ranking
+
+The script aborts (non-zero exit, no output trusted) unless all of the
+following hold, checked fresh on every run:
+- Every `giving_activities.category` value actually present is one of
+  the three audited categories (`completed_gift`, `open_pledge`,
+  `partially_paid_pledge`); an unrecognized category halts everything
+  rather than being silently ignored.
+- At least 40 `partially_paid_pledge` rows load (the last audited count
+  was 53) -- a direct regression guard against that exact category
+  silently disappearing again.
+- Every `giving_activities` row has a real `id`, and every `jl_payment_
+  assignment_audits` row's `pledge_activity_id` joins to a real row --
+  an orphaned join aborts the script rather than silently producing an
+  empty/zero result (this is exactly the class of failure -- a missing
+  `id` column -- that broke the immediately-prior round).
+- A canary confirms at least one donor's category-agnostic paid total
+  genuinely exceeds their `completed_gift`-only total (proves the fix
+  is live code, not dead code).
+- A named Spetner regression check: his pledge category must be
+  `partially_paid_pledge`, his most recent cash activity must be within
+  ~45 days, his trailing-365-day cash must be at least $9,000, and his
+  open balance must be exactly $2,000 -- all four passed on this run.
+
+**A second, real discrepancy was found and fixed during this redo,
+independently of anything the user asked about directly:** a live
+cross-check of Dr. & Mrs. Avi Stein (a large new finding below) showed
+the script's own "most recent paid gift" figure ($6,249) did not match
+the live donor page's ($2,083, Aug 16 2026). Investigated rather than
+discarded: Stein's pledge row's own `activity_date` is **2029-04-21 --
+three years in the future**, not a creation date at all. The prior
+round's methodology (this round's starting point) attributed any
+`paid_cents` not covered by an audited `jl_payment_assignment_audits`
+row to the pledge's own `activity_date` as a safe lower bound -- correct
+when that date is genuinely in the past (as verified for Spetner), but
+silently wrong when it is not. **Fixed:** an unaudited remainder is now
+only date-attributed to the pledge's own `activity_date` when that date
+is `<= now`; when it is in the future, the amount is still counted in
+lifetime totals (the dollar figure is not in question) but excluded
+from trailing/prior-365-day figures and flagged explicitly
+(`undatedPledgeCashCents`) rather than silently mis-dated. Re-checked
+against the live page after the fix: Stein's most-recent-paid-gift
+figure now matches exactly ($2,083, 11 days ago). **16 donors
+portfolio-wide carry some undated pledge cash** (from $144 to $9,000
+each) -- their lifetime totals are unaffected; their trailing-365/
+prior-365 figures are conservative (dated cash only) rather than
+inflated by a guessed date.
+
+**Terminology used throughout, kept deliberately separate (never
+collapsed into "giving"):**
+- **Lifetime received**: category-agnostic sum of all real cash
+  (`completed_gift.paid_cents` + all pledge `paid_cents`, dated or not).
+- **Cash received, trailing/preceding 12 months**: dated cash events
+  only -- `completed_gift.paid_cents` by its own `activity_date`, plus
+  `jl_payment_assignment_audits.applied_cents` by `payment_date`, plus
+  any unaudited pledge remainder whose pledge `activity_date` is
+  genuinely in the past. Excludes undated pledge cash.
+- **New commitments**: a pledge's full `paid_cents + balance_cents`
+  total, dated by the pledge row's own `activity_date` when that date
+  is a real past date (kept separate from cash received -- a new
+  pledge and the cash later paid against it are different facts).
+- **Outstanding pledge balance**: `balance_cents`, stored directly,
+  category-agnostic.
+- **Pledge fulfillment progress**: `paid_cents / (paid_cents +
+  balance_cents)` -- how far along a pledge is, independent of its
+  dollar size.
+- **Most recent financial activity**: the latest *dated* cash event
+  (gift or audited/bounded pledge payment) -- never an undated
+  remainder.
+
+### 2-3. Recomputed portfolio and new 30-day focus list
+
+Portfolio-wide, corrected: **248 donors, $3,470,745.30 lifetime
+received** (unchanged from the prior correction -- the undated-cash fix
+only affects date bucketing, never totals). Recommendation-kind
+distribution is essentially unchanged from the prior correction:
+`reconnect_contact_gap` still the modal outcome for the large majority
+of the portfolio, `follow_up_pledge` for donors with a real open
+pledge, `honor_reminder`/`relationship_opportunity`/`solicit` for the
+small set with an explicit reminder or narrative fact. 169 of 248
+donors are in the Suggested pool.
+
+**Per instruction, "no interaction in FOS" is reported below strictly
+as "no documented interaction evidence," never as "no real
+relationship" -- and no capacity, dissatisfaction, or intent is
+inferred from any financial number alone.**
+
+**1. Dr. & Mrs. Avi Stein.** *Fact:* a new **$75,000 pledge, created
+within the last ~11 days**, already 11% paid ($8,332: one audited
+payment of $2,083 on 2026-08-16, plus $6,249 whose exact date cannot be
+reconstructed from available data), $66,668 balance, payment plan
+active and on-track. Lifetime received $71,332 (of which $27,083 is
+confirmed within the trailing 365 days vs. $20,000 the year before --
+real growth on the dated evidence alone, before even counting the new
+pledge). *Relationship evidence:* one broadcast text 8 days ago (a
+shared "first day of Zman" message sent to many donors); zero
+documented one-on-one contact ever. *Why now:* this is the single
+largest live financial event found anywhere in the portfolio this
+round, days old, with zero relationship documentation on file for it.
+*Attention type:* cultivation/stewardship -- acknowledge and build on
+a major new commitment, not payment follow-up (the plan is on-track;
+nagging would be wrong). *FOS recommends:* `reconnect_contact_gap`,
+0.2375 ("no contact has ever been recorded") -- `follow_up_pledge` is
+correctly suppressed by the on-track-plan rule, but nothing else steps
+in to say "this is a major new commitment, not routine contact
+maintenance." *Appropriate?* Directionally yes (reach out), but the
+framing is generic where the fact is not. *Strategic next step:*
+personal acknowledgment of the new commitment, and log the
+relationship once real contact happens. *Confidence:* high on every
+financial fact (independently verified against the live donor page,
+including the corrected $2,083/11-day figure); low on relationship
+context, which simply does not exist in FOS yet.
+
+**2. Mr. & Mrs. Mordechai Schwartz.** *Fact:* $101,885 lifetime, a real
+open pledge of $36,000 created ~59 days ago (`open_pledge`, $0 paid
+yet), cash received $36,000 trailing 365 days vs. $13,080 the year
+before. *Relationship evidence:* zero documented interactions ever.
+*Attention type:* cultivation + ordinary pledge follow-up. *FOS
+recommends:* `follow_up_pledge`, "No payment activity in 59 days and no
+completed interaction on file," 0.4483, low confidence. *Appropriate?*
+Partially -- collecting is right, but the framing under-serves a
+$36,000 relationship with zero documented history. *Strategic next
+step:* a personal call/visit, not a payment nudge. *Confidence:*
+high on the numbers; none on relationship context.
+
+**3. Mr. & Mrs. Yale Miller.** *Fact:* $199,150 lifetime received --
+the largest in the portfolio -- $3,600 trailing 365 days, $1,800 prior.
+No pledge of any kind. *Relationship evidence:* zero documented
+interactions ever; not in the Suggested pool at all. *Attention type:*
+relationship research. *FOS recommends:* `reconnect_contact_gap`,
+0.2375 -- but does not even surface in Suggested today (his most recent
+gift is outside the 30-day window the pool's gift-inclusion category
+uses, and nothing else about him qualifies him for any other pool
+category). *Appropriate?* The recommendation itself is reasonable;
+its complete absence from view is not. *Strategic next step:*
+establish what relationship context exists outside FOS before any
+outreach framing. *Confidence:* high on the number; FOS simply has no
+relationship data point to offer here at all.
+
+**4. Mr. & Mrs. Manuel Schnaidman.** *Fact:* $158,202 lifetime received
+-- #2 in the portfolio -- $1,000 trailing 365 days, $1,000 prior (flat).
+No pledge. *Relationship evidence:* zero documented interactions ever;
+not in the Suggested pool. *Attention type:* relationship research.
+*FOS recommends:* `reconnect_contact_gap`, 0.2375, not surfaced.
+*Appropriate?* Same as Miller. *Strategic next step:* same as Miller.
+*Confidence:* same as Miller.
+
+**5. Mr. & Mrs. Tzvi Ray.** *Fact:* $114,026 lifetime received (#3),
+$5,760 trailing 365 days vs. **$25,360 the year before -- a confirmed,
+real 77% decline in dated cash receipts**, still accurate after every
+correction this round. A trivial $10 legacy pledge balance (of an
+original $360, 1,913 days/5.2 years old) is the only reason he
+technically appears in the Suggested pool at all. *Relationship
+evidence:* zero documented interactions ever. *Attention type:*
+re-engagement. *FOS recommends:* `follow_up_pledge`, "Follow up on the
+open $10 pledge," 0.6500 -- a real recommendation that is almost
+comically disconnected from why this donor actually matters.
+*Appropriate?* No -- the tactical recommendation is correct about a
+fact that is strategically irrelevant, and silent about the fact that
+is. *Strategic next step:* understand the real decline before assuming
+it will self-correct. *Confidence:* high on the decline itself; zero
+insight into cause (capacity, satisfaction, competing priority --
+none of which FOS records support inferring).
+
+**6. Rabbi & Mrs. Shimmy Ramras.** *Fact:* $110,155 lifetime received
+(materially revised upward from the original investigation's $99,055 --
+a real `partially_paid_pledge` contribution was previously missed),
+**$22,050 confirmed trailing-365-day cash vs. $11,350 the year before
+-- real growth**, plus $9,000 more whose exact date cannot be pinned
+down (still real cash, just not date-attributable). A small $1,500-of-
+$3,600 pledge remains, 10 days old. **Birthday in 6 days.**
+*Relationship evidence:* zero documented interactions ever. *Attention
+type:* stewardship (the birthday) plus cultivation (the growth).
+*FOS recommends:* `follow_up_pledge`, "No payment activity in 10 days
+and no completed interaction on file," 0.3667, low confidence.
+*Appropriate?* Reasonable but thin relative to the real trajectory and
+the imminent birthday, which FOS's Suggested Actions engine has no way
+to connect to a donor's financial importance. *Strategic next step:* a
+birthday touchpoint that also acknowledges the year's growth.
+*Confidence:* high on the numbers (independently re-verified this
+round); none on relationship context.
+
+**7. Mr. & Mrs. Nachum Rosenberg.** *Fact:* $107,616 lifetime received,
+$8,000 trailing 365 days vs. $7,800 prior (stable). No pledge.
+*Relationship evidence:* one broadcast text 8 days ago; zero
+documented one-on-one contact. *Attention type:* relationship
+research. *FOS recommends:* `reconnect_contact_gap`, 0.2375.
+*Appropriate?* Reasonable as far as it goes. *Strategic next step:*
+same as Miller/Schnaidman -- establish real relationship context.
+*Confidence:* high on the number; none on relationship depth.
+
+**8. Mr. & Mrs. Dovie Weinschneider.** *Fact:* $89,931 lifetime
+received, $23,500 trailing 365 days vs. $610 prior -- dramatic, real,
+dated growth. *Relationship evidence:* a real, recent (10 days ago)
+conversation ("Discussed Kollel donation and said to follow up after
+succos"), with an explicit fundraiser-created follow-up reminder
+already scheduled. *Attention type:* solicitation follow-through.
+*FOS recommends:* `honor_reminder`, 0.7575 -- the system's own,
+correctly-computed top-tier score. *Appropriate?* **Yes, fully** -- this
+is the system working exactly as designed: a live, dated, explicit
+commitment, correctly prioritized over every routine item. *Strategic
+next step:* honor the "after Succos" commitment on schedule; no
+correction needed. *Confidence:* high across the board -- the one
+donor on this list where FOS's own tactical output is already the
+right strategic answer.
+
+**9. Mr. & Mrs. Yaakov Zachter.** *Fact:* $45,400 lifetime received, a
+new $18,000 pledge 9 days old, already 25% paid ($4,500), on-track
+plan. *Relationship evidence:* real, recent (8 days ago), substantive
+contact with a specific, warm note ("thanked him for his support that
+makes it happen"). *Attention type:* cultivation, continuing genuine
+momentum. *FOS recommends:* `relationship_opportunity`, "Reach out and
+reference: [the real, current note]," 0.4186. *Appropriate?* Yes -- the
+evidence is fresh, specific, and not stale (contrast with Klein below).
+*Strategic next step:* continue the relationship on the strength
+already documented; no correction needed to what FOS is saying, only
+to how it ranks relative to the rest of the portfolio. *Confidence:*
+high across the board -- alongside Weinschneider, the clearest example
+in this list of the recommendation engine already doing its tactical
+job well. **Deliberately paired with Stein above**: same underlying
+pattern (a large new pledge within days), opposite documentation
+completeness -- Stein has zero relationship evidence, Zachter has
+real, current, specific evidence. FOS's own recommendation correctly
+reflects that difference (`reconnect_contact_gap` vs. `relationship_
+opportunity`); what it does not reflect, for either, is that a
+brand-new five-figure pledge just happened.
+
+**10. Mr. & Mrs. Mayer Simcha Klein.** *Fact:* $21,189 lifetime
+received, flat ($3,600 both periods). A $5,000 Plaque ask was made and
+**declined 227 days ago**. *Relationship evidence:* Klein's own
+Relationship Intelligence narrative is still the *original
+solicitation text* ("Note context: Solicited for a plaque ($5k)"),
+never updated to reflect that it was declined. *Attention type:*
+relationship research (correct the record) before any further
+solicitation. *FOS recommends:* `solicit`, "Make a solicitation ask,
+following up on: Note context: Solicited for a plaque ($5k)," 0.4590.
+**Disagree** -- this actively risks re-soliciting using the text of an
+ask that was already turned down, with no acknowledgment that it was.
+*Strategic next step:* find out why it was declined before any further
+ask; refresh the narrative fact. *Confidence:* high on what happened
+(a clean, confirmed status fact); zero on why, which is outside FOS.
+Untouched by this round's financial correction -- carried forward
+because it remains fully valid and is the clearest example of a
+different, non-financial gap (Relationship-Intelligence/Ask lifecycle
+desynchronization) that the corrected financial numbers do not change.
+
+### 4. Jonathan Spetner -- required regression case, answered directly
+
+**Corrected facts** (independently re-verified against the live donor
+page this round and the prior round): a real **$12,000 pledge created
+2025-09-26**, an active $1,000/month payment plan, **$10,000 paid
+(83%)**, **$2,000 remaining**, most recent payment **10 days ago**
+($1,000, 2026-08-17). Zero documented interactions ever; no
+Relationship Intelligence narrative; no Ask. **FOS's actual current
+recommendation, now that the payment-plan match is correctly wired
+(a further refinement found this round -- see below), is `reconnect_
+contact_gap`, 0.2375** -- `follow_up_pledge` is correctly suppressed
+because the plan is on-track, exactly the same rule that applies to
+Stein above.
+
+**Does Spetner belong in the new strategic top 10? No.** Not because he
+exposed the bug, and not preserved or excluded for that reason -- on
+the corrected evidence itself, he is the opposite of urgent: an
+on-schedule pledge, 83% complete, with only $2,000 and roughly two
+monthly payments left, needing no fundraiser action in the next 30
+days to keep progressing. The one honest, still-real finding that
+survives correction is documentation, not urgency: **zero interactions
+have ever been logged for a donor who has quietly paid $10,000 on
+schedule** -- worth a relationship-research note, not a 30-day
+priority slot. This is the correct, non-arbitrary answer the
+regression check was designed to produce either way.
+
+**Refinement found this round, beyond the immediately-prior
+correction:** the prior round reported Spetner's recommendation as
+`follow_up_pledge`/0.3667 ("No payment activity in 10 days"). That was
+itself still slightly wrong -- an artifact of the same `id`-join gap
+not yet being fully exercised for his own payment-plan lookup in that
+round's intermediate state. With the join fully correct, his active,
+on-track plan correctly suppresses `follow_up_pledge` entirely, and
+his real current recommendation is `reconnect_contact_gap`. This is
+disclosed for full transparency, not smoothed over.
+
+### 5. Disposition of every donor from the original top 10
+
+| Donor | Disposition | Why |
+|---|---|---|
+| Yale Miller | **STAYS** | Unchanged, correct every round: zero pledge activity, zero interactions, largest lifetime relationship, structurally invisible to Suggested. |
+| Manuel Schnaidman | **STAYS** | Unchanged, correct every round: same pattern as Miller. |
+| Mordechai Schwartz | **STAYS** | Unchanged, correct every round: real $36,000 open pledge, zero interactions. |
+| Tzvi Ray | **STAYS, CHANGES RATIONALE** | The -77% cash decline is confirmed still real. The original "invisible to the queue" claim was wrong -- he is technically in-pool via a trivial, 5.2-year-old $10 legacy pledge, itself a second real example of the stale-pledge gap (alongside Yaakov Pollack's 27.7-year-old $60 pledge). |
+| Jonathan Spetner | **DROPS** | Required regression case (see #4) -- the correction reveals low urgency, not high; he no longer belongs on a 30-day list. |
+| Dovie Weinschneider | **STAYS** | Unchanged, correct every round: the one case where FOS's own tactical output is already the right strategic answer. |
+| Tzvi Shlionsky | **DROPS from the top-10 slot list** | Figures remain accurate ($70,500 lifetime, +33% YoY, stale 437-day narrative) -- outranked this round by Stein/Schwartz/Ramras/Rosenberg's larger, more time-sensitive facts, not by any error. Remains a valid secondary example of the same "stale narrative wording" gap Abdelhak illustrates. |
+| Yaakov Abdelhak | **DROPS from the top-10 slot list** | Same reasoning as Shlionsky -- $40,714 lifetime, real broadcast-vs-substantive gap, genuinely outranked by larger new findings this round, not wrong. |
+| Eitan Zeffren | **DROPS from the top-10 slot list** | Still a legitimate, correctly-handled case (`honor_reminder`, an explicit scheduled ask) -- functionally the same finding-type as Weinschneider, which is kept as the stronger example (dramatically larger trajectory swing). |
+| Mayer Simcha Klein | **STAYS** | Unchanged and unaffected by the financial correction -- the stale-Ask-narrative risk is a real, distinct, non-financial finding, carried forward. |
+
+**Newly added because the corrected financial model revealed activity
+the broken analysis missed entirely:**
+- **Dr. & Mrs. Avi Stein** -- a $75,000 pledge, 11 days old, was
+  invisible to the original investigation because its `partially_paid_
+  pledge` category and its `paid_cents` were both excluded by the
+  original bug. Now the single highest-priority item on the list.
+- **Rabbi & Mrs. Shimmy Ramras** -- was already on the original list,
+  but materially under-stated ($99,055 vs. the corrected $110,155
+  lifetime, and a real pledge/trajectory picture the original analysis
+  could not see).
+- **Mr. & Mrs. Yaakov Zachter** -- a $18,000 pledge, 9 days old, tied
+  to real, current, substantive contact -- also invisible to the
+  original analysis for the same category-exclusion reason.
+
+### 6. Strategic focus vs. the tactical Recommendation Engine
+
+**A. Current top tactical recommendations (by real engine score, in
+the Suggested pool):** `honor_reminder` at 0.7575 for Weinschneider,
+Donny Wiesel, and Zeffren (three donors with an explicit, dated
+fundraiser commitment); then a large, tightly-clustered band of
+`follow_up_pledge` at exactly 0.6500 spanning pledge balances from $10
+(Ray, Schabes) to $2,500 (Broide) -- dollar value plays no role in this
+tier at all.
+
+**B. Corrected 30-day strategic focus list:** Stein, Schwartz, Miller,
+Schnaidman, Ray, Ramras, Rosenberg, Weinschneider, Zachter, Klein (per
+above).
+
+**Where they agree:** Weinschneider (both lists' top-tier item, for
+the same reason) and, more weakly, Zachter (a real `relationship_
+opportunity` candidate, correctly generated, just not ranked anywhere
+near the top of the engine's own score). **Where they diverge:**
+everything driven by lifetime value, a *new* pledge's size (Stein and
+Schwartz's large pledges score *lower* than a $10-$60 legacy balance,
+because urgency is purely a function of elapsed days), or the mere
+passage of time on an Ask/narrative fact (Klein). Miller, Schnaidman,
+and Rosenberg do not appear in the engine's own top tier at all --
+Miller and Schnaidman do not appear in the pool at all.
+
+**Testing the hypothesis directly, trying to disprove it rather than
+confirm it:** *"The Recommendation Engine is good at selecting a next
+action once a donor is being considered, but FOS lacks a separate
+mechanism for deciding which donor relationships deserve the
+fundraiser's limited attention relative to the rest of the portfolio."*
+The strongest evidence *against* this hypothesis is Weinschneider and
+Zachter: for both, the engine's tactical output happens to also be the
+right strategic answer, because a real, dated, specific fact (an
+explicit reminder; a fresh, substantive interaction) already exists
+and the engine correctly rewards specificity/recency. If most donors
+had a fact this good on file, the hypothesis would be false -- the
+engine's own ranking would already approximate strategic
+prioritization. **But most donors do not.** 196 of 248 donors have no
+interaction evidence at all, and the engine's score has no term at all
+for lifetime value, pledge size, or trajectory -- Stein's $75,000
+brand-new pledge and Schwartz's $36,000 fresh pledge both score *below*
+a decades-old $10-$60 legacy balance for the same structural reason
+(urgency only measures elapsed time, never measures what's at stake).
+**The hypothesis survives the attempt to disprove it, and survives more
+strongly than the original (uncorrected) investigation suggested**:
+the correction did not manufacture the gap -- it relocated it (from a
+misdated Spetner to a correctly-dated, much larger Stein) and, if
+anything, sharpened it, since the two highest-stakes live financial
+events found this round (Stein's $75,000, Schwartz's $36,000) score
+*worse* than routine legacy pledge balances once the numbers are
+actually right.
+
+### 7. Reassessing the proposed Portfolio Focus architecture
+
+**A separate layer is warranted -- the corrected evidence supports this
+independently of the original, flawed investigation.** Evaluating each
+proposed signal strictly against what this round's real donor cases
+demonstrate, rejecting any the evidence doesn't support:
+
+- **Financial significance (lifetime value / pledge size): justified.**
+  Directly demonstrated by Stein and Schwartz's large, brand-new
+  pledges scoring below trivial legacy balances, and by Miller/
+  Schnaidman's six-figure lifetime relationships being completely
+  invisible to Suggested.
+- **Cash/commitment trajectory: justified, but only using the
+  corrected, audit-trail-aware computation.** Ramras and Stein's real
+  growth (confirmed even after excluding undated pledge cash) is
+  invisible to the current engine; the original investigation's own
+  Spetner error is the direct proof of what happens when trajectory is
+  computed carelessly -- this signal is real, but this round proves it
+  is also easy to get wrong, which argues for extreme care (or reuse
+  of a single, tested utility) if ever implemented.
+- **Pledge fulfillment behavior (progress, on-track vs. late):
+  justified.** Already computed correctly by `evaluatePaymentPlan` for
+  tactical suppression (correctly quieting Stein/Spetner's on-track
+  plans) -- the gap is that nothing surfaces the *positive* fact
+  ("83% through a $12,000 pledge, on schedule") anywhere at all once
+  the tactical nag is suppressed.
+- **Relationship/contact trajectory: not demonstrated this round
+  beyond what the original investigation already showed** (Abdelhak's
+  broadcast-vs-substantive gap). No new evidence for or against a
+  *trajectory* (rather than a point-in-time distinction) specifically.
+- **Unusual lapse relative to the donor's own history: justified,
+  narrowly.** Ray's real, dated 77% decline is a clean example; but
+  Spetner's own history proves this signal is dangerous to compute
+  without the corrected methodology -- a naive "compare periods" check
+  would have flagged him as the same kind of "lapse" this signal is
+  meant to catch, incorrectly.
+- **Open opportunities/commitments (pledges, in particular new ones):
+  justified, strongly.** The single most concrete finding of this
+  entire redo -- Stein and Zachter's brand-new pledges were completely
+  invisible to the original, broken analysis and are barely visible to
+  the current tactical engine's score.
+- **Relationship Intelligence quality (freshness, not just presence):
+  justified.** Untouched by this round's correction -- Klein/Rovinsky/
+  Pfeiffer stand as-is.
+- **Current tactical recommendation as an input signal (not the
+  answer): justified.** Weinschneider and Zachter show it is a strong
+  positive signal when a real fact backs it; Ray and Stein show it is a
+  weak-to-misleading signal on its own for a large majority of the
+  portfolio.
+- **Upcoming stewardship opportunities (birthdays etc.) cross-referenced
+  with financial significance: justified, narrowly.** Ramras's 6-day
+  birthday combined with his corrected, real growth is the one clean
+  example; this round did not find a case strong enough to generalize
+  beyond "cross-reference, don't treat as independent."
+
+**Rejected or not supported by this round's evidence:** a donor-
+capacity/intent signal of any kind -- explicitly out of scope per
+instruction, and no case this round provides evidence for or against
+inferring it. No score, formula, or weighting scheme is proposed here
+-- only which raw signals a future layer would need to consider.
+
+**Does the corrected investigation change the priority of the stale-
+Relationship-Intelligence/Ask-supersession fix relative to Portfolio
+Focus? No -- if anything it strengthens the case for fixing it first.**
+That problem (Klein/Rovinsky/Pfeiffer) is completely orthogonal to the
+financial-data bugs this round fixed, remains fully valid, is cheap
+relative to a new architectural layer (reuses the existing but
+unwired `lib/relationships/fact-supersession.ts`), and -- unlike a new
+Portfolio Focus layer -- prevents an active, currently-live risk (a
+fundraiser being told to re-solicit a declined ask) rather than adding
+a new capability. It should not wait on Portfolio Focus.
+
+### Verification performed
+
+- All fail-loud gates in section 1 passed on a fresh run.
+- Spetner's and Stein's figures independently cross-checked against
+  their live donor pages, word-for-word (Spetner: $1,000/Aug 17/2026,
+  $2,000/$12,000 open commitment; Stein: $71,332 lifetime, $66,668
+  open, $2,083/Aug 16/2026 most recent paid gift -- all matched exactly
+  after the undated-pledge-cash fix).
+- Manually inspected the reconstructed histories of all 10 final-list
+  donors for internal contradictions (e.g., paid_cents + balance_cents
+  reconciling to a stable pledge total; dated-cash totals never
+  exceeding lifetime totals) -- none found.
+- No D1 write, no code change, no new scoring formula, no deployment,
+  no production/main access at any point.
+
+**Stopping for review before implementation**, per instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -11799,37 +12292,41 @@ relationship-intelligence quality work):
 ## Next Approval Required
 
 **Genuinely open, newest first: Portfolio-level 30-day focus
-investigation, now financial-data-corrected -- awaiting the user's
-decision on what, if anything, to build (2026-08-27).** See
-"Financial-Data-Model Audit -- Correcting the Portfolio-Level
-Investigation" above for the corrected figures, then "Portfolio-Level
-30-Day Focus Investigation" for the rest of the original record (its
-specific financial claims about Spetner and the portfolio-wide
-`acknowledge_gift`/0.3150 figure are superseded -- see the audit
-section for exactly what changed and why). Corrected headline finding:
-the recommendation engine is good at tactical next actions
-(Weinschneider/Zeffren are correctly handled) but has no portfolio-
-level strategic prioritization capability at all -- **corrected**: 80%
-of the portfolio (198/248 donors) scores an identical 0.2375
-(`reconnect_contact_gap`, not the originally-reported `acknowledge_
-gift`/0.3150), and 2 of the portfolio's 10 largest lifetime donors
-(Miller, Schnaidman -- not 5, per the correction) are structurally
-invisible to the Suggested queue; Ray, Spetner, and Saidian are
-technically in the pool but via trivial or misleading pledge fragments
-that don't reflect their real value. Six missing-intelligence gaps
-identified and proven from real
-donor examples, ranked smallest-first: giving trajectory (logic-only),
-portfolio-value/capacity awareness in scoring (would need a new
-scoring dimension -- out of scope for a "smallest fix"), Ask/
-Relationship-Intelligence lifecycle synchronization (logic-only, can
-reuse the existing but currently-unwired `lib/relationships/fact-
-supersession.ts`), substantive-vs-broadcast contact reasoning in
-`why` text (logic-only), a lifetime-value pool-inclusion category
-(logic-only, same fix shape already applied twice in this codebase),
-and stale-pledge staleness-awareness (logic-only, same shape as the
-already-shipped open-ask fix). Nothing implemented -- no code change,
-no D1 write, no new scoring formula, no deployment. Decision needed:
-which gap (if any) to address next, and in what order.
+investigation, fully financial-data-corrected in a second redo --
+awaiting the user's decision on what, if anything, to build
+(2026-08-28).** See "Portfolio-Level 30-Day Focus Investigation --
+CORRECTED REDO (2026-08-28)" above for the authoritative record --
+recomputed from zero, not patched. New top-10 list: Avi Stein, Mordechai
+Schwartz, Yale Miller, Manuel Schnaidman, Tzvi Ray, Shimmy Ramras,
+Nachum Rosenberg, Dovie Weinschneider, Yaakov Zachter, Mayer Simcha
+Klein. Jonathan Spetner (the required regression case) does NOT belong
+on the corrected list -- his correction reveals an on-schedule,
+low-urgency pledge, not a lapsed donor. A second real data-model
+wrinkle was found and fixed mid-round (a pledge row's own
+`activity_date` can itself be a future, non-creation date; found via
+live cross-check on Avi Stein, whose real $75,000/11-day-old pledge --
+the single largest live financial event in the portfolio -- the
+original broken analysis missed entirely because of the first bug).
+The strategic-vs-tactical hypothesis was tested by actively trying to
+disprove it and survived: it is confirmed, and more sharply than the
+original investigation suggested, since the two largest live financial
+events found this round (Stein's $75,000, Schwartz's $36,000 pledge)
+both score *below* trivial decades-old legacy pledge balances under
+the current formula. A separate Portfolio Focus layer is judged
+warranted on this corrected evidence, with 8 of 9 candidate signals
+supported by real cases (financial significance, corrected trajectory,
+pledge fulfillment/on-track status, unusual lapse relative to a
+donor's own history, new open commitments, Relationship Intelligence
+freshness, current tactical recommendation as one input, and
+stewardship-date cross-referencing) and donor capacity/intent
+explicitly rejected as unsupported. The stale-Relationship-
+Intelligence/Ask-supersession fix (Klein/Rovinsky/Pfeiffer) is judged
+higher priority than Portfolio Focus -- cheaper, already has a reusable
+mechanism (`lib/relationships/fact-supersession.ts`), and prevents an
+active risk rather than adding a capability. Nothing implemented -- no
+code change, no D1 write, no new scoring formula, no deployment.
+Decision needed: whether to fix the stale-RI/Ask-supersession problem
+next, and separately whether/when to scope a Portfolio Focus layer.
 
 **RESOLVED 2026-08-27 -- Open-Ask recommendation quality fix is
 deployed to Independent Staging and verified end-to-end; nothing
@@ -12000,6 +12497,66 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T02:45:00Z (approximate)
+Claude (Sonnet 5) — Redid the portfolio-level 30-day focus
+investigation completely from zero using the corrected financial-data
+model, per explicit instruction not to patch the prior list. Rewrote
+the read-only analysis script to fail loudly (per instruction) rather
+than silently: aborts on any unrecognized giving_activities category,
+on a missing/orphaned join key, on the partially_paid_pledge category
+disappearing below a regression floor, or on a canary showing its cash
+computation isn't actually wired up; added a named Spetner regression
+assertion. Fresh-pulled every table involved. Found and fixed a SECOND
+real data-model wrinkle beyond the one the immediately-prior audit
+found: while independently cross-checking the newly-discovered Dr. &
+Mrs. Avi Stein (a real $75,000 pledge, 11 days old) against her live
+donor page, the script's own "most recent paid gift" figure ($6,249)
+did not match the live page's ($2,083) -- investigated per instruction
+rather than picking whichever number fit, and traced to Stein's pledge
+row's own activity_date being 2029-04-21, three years in the future,
+not a creation date at all. Fixed by only attributing an unaudited
+pledge-payment remainder to a pledge's own activity_date when that
+date is genuinely in the past; when it isn't, the amount stays in
+lifetime totals but is excluded from trailing/prior-365-day figures
+and flagged (16 donors portfolio-wide affected). Re-verified against
+the live page after the fix: exact match. Recomputed the full
+248-donor portfolio and produced a new top-10 list from scratch:
+Avi Stein, Mordechai Schwartz, Yale Miller, Manuel Schnaidman, Tzvi
+Ray, Shimmy Ramras (materially corrected upward, $110,155 vs. the
+original $99,055), Nachum Rosenberg, Dovie Weinschneider, Yaakov
+Zachter, and Mayer Simcha Klein -- each with fact/derived-signal/
+judgment kept explicit and financial figures independently
+cross-checked against the live donor page. Re-evaluated Jonathan
+Spetner as the required regression case: does not belong on the
+corrected list (an on-schedule, 83%-paid pledge needing no 30-day
+action, the opposite of his original "lapsed" characterization) --
+also found and disclosed a further refinement, that his true current
+recommendation is reconnect_contact_gap (0.2375), not the
+follow_up_pledge/0.3667 the immediately-prior round reported, since
+his payment-plan on-track suppression is now fully wired. Produced a
+disposition (STAYS/DROPS/CHANGES RATIONALE) for every original top-10
+donor and identified Stein and Zachter as donors the broken analysis
+missed entirely. Compared tactical engine output against the corrected
+strategic list and explicitly tried to disprove the "engine is
+tactically good but strategically blind" hypothesis using
+Weinschneider/Zachter as the strongest counter-evidence -- the
+hypothesis survived, more sharply than before, since Stein's and
+Schwartz's large new pledges score below trivial legacy balances.
+Reassessed the Portfolio Focus architecture against only the corrected
+evidence: judged warranted, with 8 of 9 candidate signals supported by
+real cases and donor capacity/intent explicitly rejected; judged the
+stale-Relationship-Intelligence/Ask-supersession fix higher priority
+than Portfolio Focus. No new score proposed. Updated "Next Approval
+Required" and "Current Git State"; preserved the original investigation
+and its immediately-prior correction unedited as historical context,
+per instruction, and added this fully corrected section rather than
+rewriting them in place. Committed and pushed the docs-only update to
+feature/independent-cloudflare-sandbox. No production/main access,
+no D1 mutation, no code change, no new scoring formula, no deployment.
+Stopping for review before implementation, per instruction.
+
+---
 
 2026-08-28T00:30:00Z (approximate)
 Claude (Sonnet 5) — Audited the financial-data-model interpretation
