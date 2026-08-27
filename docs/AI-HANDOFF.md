@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Document open-ask
+**`727d912`** -- "Document open-ask
 recommendation quality investigation (2026-08-27)" -- docs-only, zero
 application code change, zero D1 mutation; see "Open-Ask Recommendation
 Quality Investigation" below for the full findings and the proposed
