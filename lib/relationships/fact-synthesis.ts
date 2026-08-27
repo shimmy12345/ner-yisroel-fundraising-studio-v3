@@ -95,3 +95,38 @@ export function synthesizeRelationshipSnapshot(facts: SynthesisFact[], now: numb
 
   return { relationshipSummary: joinFacts(summarySet), institutionalMemory: joinFacts(memorySet) };
 }
+
+export type ActionableFact = { factText: string; category: FactCategory; sourceInteractionId: string | null; score: number };
+
+// Relationship Snapshot Architecture Stage 2 (see docs/AI-HANDOFF.md) --
+// a STRICT, non-fallback relevance check answering "is there a currently
+// ACTIONABLE fact," never "what should the Snapshot display." Reuses the
+// exact same scoreFact() formula synthesizeRelationshipSnapshot() itself
+// uses above (same function in this module, not a copy or a second
+// formula) -- the only difference is this NEVER falls back to the single
+// most-recent fact when nothing clears RELEVANCE_FLOOR. That "never
+// blank" fallback exists so the DISPLAYED Relationship Snapshot never
+// reads empty; it must never leak into a recommendation-actionability
+// decision, where "nothing currently actionable" is the correct, honest
+// answer, not a display gap to paper over. Concretely: a donor whose
+// only fact is a fully-decayed, ask-resolved solicitation would still
+// show that fact's text via synthesizeRelationshipSnapshot()'s fallback
+// (correct for display -- something beats nothing when there's genuinely
+// nothing more current to say), but this function correctly returns null
+// for that same fact set (correct for actionability -- there is nothing
+// CURRENT to recommend acting on).
+//
+// `category`, when passed, restricts eligibility to that one category
+// (e.g. "solicitation" for solicit-candidate gating); omitted, it
+// considers every current, non-follow_up fact regardless of category
+// (for a generic "is there anything currently relevant at all" check).
+export function findMostActionableFact(facts: SynthesisFact[], now: number, pinnedFresh: PinnedFreshSourceInteractionIds = new Set(), category?: FactCategory): ActionableFact | null {
+  const eligible = facts.filter((fact) => fact.status === "current" && fact.lifecycle !== "follow_up" && (category === undefined || fact.category === category));
+  const scored = eligible
+    .map((fact) => ({ fact, score: scoreFact(fact, now, pinnedFresh) }))
+    .filter((item) => item.score > RELEVANCE_FLOOR)
+    .sort((a, b) => b.score - a.score || b.fact.sourceInteractionOccurredAt - a.fact.sourceInteractionOccurredAt);
+  if (scored.length === 0) return null;
+  const top = scored[0];
+  return { factText: top.fact.factText, category: top.fact.category, sourceInteractionId: top.fact.sourceInteractionId, score: top.score };
+}

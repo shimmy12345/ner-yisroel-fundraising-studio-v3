@@ -6,6 +6,7 @@ import { matchAskFollowUps } from "../relationships/meeting-brief-model.ts";
 import { financialDateLabel } from "../financial-date.ts";
 import { donorInitials, numericDonorCode } from "../relationships/donor-identity.ts";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../relationships/recommendation-evidence.ts";
+import type { SynthesisFact } from "../relationships/fact-synthesis.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import { CONTINUE_CONVERSATION_WINDOW_DAYS, type RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
@@ -30,9 +31,10 @@ type HistoricalContextRow = { donor_id: string; text: string; source: string; so
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
-type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
+type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number; source_interaction_id: string | null };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
+type RelationshipFactRow = { donor_id: string; category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
 
 // score: the recommendation engine's own real 0-1 score() value for this
 // item's underlying candidate -- only present for recommendation-kind
@@ -212,7 +214,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const __loaderStart = performance.now();
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows, relationshipFactRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -287,7 +289,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // way openPledgeByDonor feeds follow_up_pledge below. No demo/sample
     // data exists for this new feature, matching historicalContextRows/
     // acknowledgments/yahrtzeitRows/importantDateRows above.
-    demo ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, asked_at FROM asks WHERE user_id = ? AND status = 'pending' ORDER BY donor_id, asked_at ASC`).bind(userId).all<AskRow>(),
+    demo ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, asked_at, source_interaction_id FROM asks WHERE user_id = ? AND status = 'pending' ORDER BY donor_id, asked_at ASC`).bind(userId).all<AskRow>(),
     // Every payment actually applied to any of this user's pledges --
     // feeds openPledge's "last activity" date via
     // resolveOpenPledgeActivityDate (see its doc comment in
@@ -305,6 +307,16 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // demo/sample data exists for this new feature, matching the other
     // demo-skipped queries above.
     demo ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at FROM pledge_payment_plans WHERE user_id = ? AND ended_at IS NULL`).bind(userId).all<PaymentPlanRow>(),
+    // Relationship Snapshot Architecture Stage 2 -- every in-scope
+    // donor's CURRENT structured Relationship Facts, batched in one query
+    // exactly like every other per-donor child table above (never a
+    // per-donor query in the scoring loop below -- see docs/AI-HANDOFF.md's
+    // Stage 2 entry on N+1 risk). Feeds fact-level solicit/relationship_
+    // opportunity actionability; a donor with zero rows here falls back to
+    // the existing legacy narrative-text behavior unchanged. No demo/
+    // sample data exists for this table, matching the other demo-skipped
+    // queries above.
+    demo ? Promise.resolve({ results: [] as RelationshipFactRow[] }) : env.DB.prepare(`SELECT donor_id, category, lifecycle, status, fact_text, source_interaction_id, source_interaction_occurred_at FROM donor_relationship_facts WHERE user_id = ? AND status = 'current'`).bind(userId).all<RelationshipFactRow>(),
   ]);
   const queryFanoutDurationMs = Math.round(performance.now() - __loaderStart);
   logger.info("workspace_brief_phase", {
@@ -377,6 +389,26 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // pattern as openPledgeByDonor above.
   const openAskByDonor = new Map<string, AskRow>();
   for (const item of openAskRows.results) if (!openAskByDonor.has(item.donor_id)) openAskByDonor.set(item.donor_id, item);
+  // Every source_interaction_id across ALL of a donor's pending asks (not
+  // just the single oldest one openAskByDonor keeps) -- a donor can have
+  // multiple simultaneous pending asks by design (see openAsk's own doc
+  // comment in recommendation-evidence.ts), and each one's linked fact
+  // deserves pinning, not only the oldest ask's. Reuses openAskRows.results
+  // already fetched above, never a second query.
+  const pendingAskSourceInteractionIdsByDonor = new Map<string, string[]>();
+  for (const item of openAskRows.results) {
+    if (!item.source_interaction_id) continue;
+    if (!pendingAskSourceInteractionIdsByDonor.has(item.donor_id)) pendingAskSourceInteractionIdsByDonor.set(item.donor_id, []);
+    pendingAskSourceInteractionIdsByDonor.get(item.donor_id)!.push(item.source_interaction_id);
+  }
+  // Relationship Snapshot Architecture Stage 2 -- every in-scope donor's
+  // CURRENT structured Relationship Facts, grouped the same way as every
+  // other per-donor child collection here.
+  const relationshipFactsByDonor = new Map<string, RelationshipFactRow[]>();
+  for (const row of relationshipFactRows.results) {
+    if (!relationshipFactsByDonor.has(row.donor_id)) relationshipFactsByDonor.set(row.donor_id, []);
+    relationshipFactsByDonor.get(row.donor_id)!.push(row);
+  }
   const yahrtzeitsByDonor = new Map<string, YahrtzeitRow[]>();
   for (const row of yahrtzeitRows.results) {
     if (!yahrtzeitsByDonor.has(row.donor_id)) yahrtzeitsByDonor.set(row.donor_id, []);
@@ -522,6 +554,8 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
       yahrtzeits: (yahrtzeitsByDonor.get(donorId) ?? []).map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
       importantDates: (importantDatesByDonor.get(donorId) ?? []).map((row) => ({ type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
+      relationshipFacts: (relationshipFactsByDonor.get(donorId) ?? []).map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
+      pendingAskSourceInteractionIds: pendingAskSourceInteractionIdsByDonor.get(donorId) ?? [],
     }, now, timezone);
     const recommendation = buildDonorRecommendation(evidence);
     if (!recommendation) continue;

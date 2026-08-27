@@ -15,7 +15,32 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`3bb77df`** -- "Apply Stage 1: ask-linked
+**(pending — see follow-up commit)** -- "Implement Stage 2: fact-level
+recommendation actionability (2026-08-28)" -- application code change
+(no D1 mutation, no schema, no deploy); see "Relationship Snapshot
+Architecture -- Stage 2 Implemented: Fact-Level Recommendation
+Actionability (2026-08-28)" below. `solicitCandidate()`/
+`relationshipOpportunityCandidate()` (`lib/relationships/recommendation-
+candidates.ts`) now consult a donor's real `donor_relationship_facts`
+(via a new `findMostActionableFact()` in `fact-synthesis.ts`, reusing
+the exact same `scoreFact()` formula, never a second formula) instead of
+regex-matching cached narrative text, for any donor with ≥1 fact row;
+donors with zero fact rows keep the exact, unmodified legacy behavior.
+Wired into all three real evidence-building call sites (`lib/workspace/
+live-data.ts`, `lib/relationships/meeting-brief.ts`, `app/donors/[id]/
+page.tsx`), each with one new batched `donor_relationship_facts` query
+matching the existing per-donor-child-table convention. Live-verified
+read-only against real staging data: Klein/Pfeiffer's stale `solicit`
+recommendation stops winning; Rovinsky's stale `relationship_
+opportunity` stops winning (his `solicit` was already vetoed
+pre-Stage-2 by an unrelated open-pledge constraint, correctly not
+counted as this stage's fix); two real control donors (a fact-having
+donor with genuinely current evidence, and a still-unmigrated legacy
+donor) are provably unaffected, byte-for-byte. Stage 1's facts/asks/
+interactions/cached narrative confirmed byte-for-byte unchanged. New
+regression suite: `tests/relationship-fact-recommendation-
+actionability.test.mjs` (10 cases). All 3 gates pass; not deployed.
+Sits on top of `3bb77df` -- "Apply Stage 1: ask-linked
 legacy Relationship Facts backfill (Klein/Rovinsky/Pfeiffer)
 (2026-08-28)" -- APPLIED to Independent Staging D1 (`donor_
 relationship_facts`/`donor_relationship_fact_changes` only), zero
@@ -12713,6 +12738,353 @@ ones. Did not run the general legacy Relationship Facts backfill.
 **Stopping for review before starting Stage 2**, per explicit
 instruction.
 
+## Relationship Snapshot Architecture -- Stage 2 Implemented: Fact-Level Recommendation Actionability (2026-08-28) -- IMPLEMENTED, TESTED, LIVE-VERIFIED READ-ONLY, NOT DEPLOYED, STAGE 3 NOT STARTED
+
+**Scope, per explicit instruction:** fix recommendation actionability
+only. A fact may remain historically true (and stay visible in the
+Relationship Snapshot, once Stage 3 ships) while no longer being
+current enough to justify a fundraising recommendation. No Stage 3
+(display/Snapshot) change. No D1 mutation, no schema, no arbitrary age
+threshold, no deletion of history, no deploy.
+
+### 1. Exact pre-change recommendation evidence path (traced before any code was touched)
+
+Four evidence-building call sites exist (see the architecture-decision
+round above): `lib/workspace/live-data.ts` (Workspace/Homepage +
+Daily Agenda, one shared pipeline), `lib/relationships/meeting-brief.ts`
+(Meeting Brief; Assistant reuses its computed `.recommendation`, never
+builds evidence independently -- confirmed by reading `app/api/
+assistant/route.ts` in full: it calls `loadMeetingBrief()` and reads
+`primaryMeetingBrief?.recommendation`), and `app/donors/[id]/page.tsx`
+(donor page). All three call `buildRecommendationEvidence()` →
+`generateCandidates()` → `buildDonorRecommendation()`
+(`lib/relationships/recommendation-{evidence,candidates,rank}.ts`).
+
+**Confirmed by direct read, not assumed: `relationshipOpportunityCandidate()`
+and `solicitCandidate()` (`recommendation-candidates.ts`) both read
+`evidence.narrative.relationshipSummary || evidence.narrative.
+institutionalMemory` -- a plain string sourced from the CACHED `donors`
+columns -- and `solicitCandidate()` regex-matches it against
+`SOLICITATION_PATTERN` (`/\b(solicit(ed)?|ask (him|her|them) for|pledge
+(request|ask)|corporate sponsorship|capital campaign ask)\b/i`).
+Neither function reads `donor_relationship_facts` at all before this
+round.** For Klein/Rovinsky/Pfeiffer, `institutionalMemory` is "Note
+context: Solicited for..." (Stage 1 left this untouched by design), so
+the regex matches unconditionally, every time, regardless of the ask's
+real status or the interaction's real age -- this is the exact,
+directly-confirmed mechanism producing the stale `solicit` (and,
+Rovinsky's case additionally revealed, `relationship_opportunity`)
+recommendation. `historicalContext` (unconfirmed `donor_historical_
+context` rows) is a second, independent regex-matched fallback inside
+`solicitCandidate()` -- structurally separate from the narrative
+columns, never migrated by Stage 1, and deliberately left untouched by
+this round (see Section 5).
+
+**Yes, confirmed: actionability was inferred purely by regex/text
+matching against human-readable narrative, with zero connection to
+`donor_relationship_facts`, its `status`, its decay, or the linked
+Ask's real state.** This is not new information (the architecture-
+decision round already established it), but this round re-verified it
+directly against the current file contents before writing a single
+line, per instruction.
+
+### 2. Implementation -- why fact-level actionability, reusing the existing scoring architecture
+
+**New pure function, `lib/relationships/fact-synthesis.ts`'s
+`findMostActionableFact(facts, now, pinnedFresh?, category?)`.** Calls
+the SAME private `scoreFact()` this file's own `synthesizeRelationship
+Snapshot()` already uses -- not a copy, not a second formula, the exact
+same function in the exact same module, satisfying "do not create a
+second arbitrary relevance formula" literally, not just in spirit. The
+only difference from `synthesizeRelationshipSnapshot()`: it never
+applies the "never blank" display fallback. That fallback exists so the
+DISPLAYED Snapshot never reads empty (a legitimate display concern);
+leaking it into an actionability decision is exactly the bug this round
+found and fixed (see Section 8's Klein/Pfeiffer reconstruction). Already
+accounts for every existing semantic the task asked to preserve, because
+it delegates to the same `scoreFact()`: `lifecycle` (durable = fixed
+0.3 baseline, time_bound = real decay, follow_up = excluded entirely by
+the same status/lifecycle filter `synthesizeRelationshipSnapshot()`
+uses), `sourceInteractionOccurredAt` (real decay-clock start, unclamped
+per Stage 1), `status` (only `current` facts are ever eligible --
+`superseded`/`archived_with_source` are excluded structurally, not by a
+new check), current Ask state via `pinnedFreshSourceInteractionIds`
+(unchanged, same mechanism), and `RELEVANCE_FLOOR` (the same constant,
+imported, never redefined).
+
+**`RecommendationEvidenceInput` gained two new, OPTIONAL fields**
+(`relationshipFacts?: SynthesisFact[]`, `pendingAskSourceInteractionIds?:
+string[]`), defaulting to `[]` when omitted -- chosen specifically so
+every one of the 8 existing test files that construct evidence directly
+(`tests/asks.test.mjs`, `mobile-ux-fixes`, `personalization`, `pledge-
+payment-recency`, `recommendation-engine`, `relationship-quality`,
+`suggestion-candidates`, `workspace-brief-instrumentation`) keeps
+passing unmodified -- an omitted field is behaviorally identical to a
+donor with zero facts, which is exactly the correct legacy behavior for
+a fixture that predates this field, not a workaround. `buildRecommendation
+Evidence()` computes a new `factActionability: { hasStructuredFacts,
+actionableSolicitationFact, actionableAnyFact }` output field by calling
+`findMostActionableFact()` once for `category: "solicitation"` and once
+with no category filter (for the generic "any current fact" check).
+
+**`solicitCandidate()` and `relationshipOpportunityCandidate()`
+(`recommendation-candidates.ts`) branch on `evidence.factActionability.
+hasStructuredFacts`:** true (the donor has ≥1 `donor_relationship_facts`
+row, of any status) routes to the strict fact-level check -- no
+actionable fact means no candidate from that channel, full stop, never
+falling through to regex-match the cached narrative text. `false` (zero
+rows) is the UNCHANGED legacy path, byte-identical to the pre-Stage-2
+code. `solicitCandidate()`'s `historicalContext` fallback is unaffected
+either way (see Section 5).
+
+### 3. Wiring -- the three real call sites
+
+Each of the three evidence-building call sites was updated with ONE new
+batched query for the donor's/donors' CURRENT `donor_relationship_
+facts` rows, following this codebase's own established per-donor-child-
+table pattern exactly (never a per-donor query in a scoring loop -- see
+Section "Performance" of the prior architecture round for why this
+matters and was verified not to regress):
+- **`lib/workspace/live-data.ts`**: one new `WHERE user_id = ? AND
+  status = 'current'` batched query (matching the existing convention
+  used by `yahrtzeitRows`/`historicalContextRows`/etc.), grouped into a
+  `relationshipFactsByDonor` map; `source_interaction_id` added to the
+  existing pending-asks query; a new `pendingAskSourceInteractionIdsByDonor`
+  map built from ALL of a donor's pending asks (not just the single
+  oldest one `openAskByDonor` tracks -- a donor can have multiple
+  simultaneous pending asks by design, and every one's linked fact
+  deserves pinning).
+- **`lib/relationships/meeting-brief.ts`**: one new single-donor-scoped
+  query for the same table; `source_interaction_id` added to its
+  existing pending-asks query.
+- **`app/donors/[id]/page.tsx`**: one new single-donor-scoped query;
+  `source_interaction_id` added to its existing (already-broader,
+  all-statuses) asks query, reusing the page's own already-derived
+  `openAsks` filter rather than a second query.
+
+**Assistant needed no changes** -- confirmed it never builds its own
+evidence, only reuses Meeting Brief's already-computed recommendation.
+
+**A real, intentional D1 query-count increase, expected and
+re-verified:** `tests/today.test.mjs`'s and `tests/workspace-brief-
+instrumentation.test.mjs`'s own structural `env.DB.prepare(...)`
+call-site-count assertions (pinned exact numbers to catch instrumentation
+leaks) were updated (23→24 for the donor page, 18→19 for `loadWorkspaceBrief`)
+with an explanatory comment, exactly matching those files' own
+established convention for a prior real, intentional query addition (the
+Ask and Payment Plan features) -- not a leak, a real new batched query,
+one per call site.
+
+### 4. Legacy fallback behavior
+
+For any donor with zero `donor_relationship_facts` rows (234 of 248 live
+donors, plus the 8 narrative-only/no-fact legacy donors identified in
+the prior architecture round -- Horn, Joel Danziger, Mark Danziger,
+Abdelhak, Semmelman, Weinschneider, Shlionsky, Sonnenblick), `hasStructured
+Facts` is `false` and `solicitCandidate()`/`relationshipOpportunityCandidate()`
+run their exact, byte-identical pre-Stage-2 logic. This is not a
+best-effort preservation -- it is structurally guaranteed by the same
+`if (hasStructuredFacts) { ... } else { /* unchanged legacy code,
+untouched */ }` branch, and directly proven for a REAL such donor
+(Weinschneider) in Section 8 below: before/after recommendation output
+is byte-identical.
+
+### 5. Solicitation history vs. the Ask system -- do not conflate recommendation kinds
+
+**Investigated, not assumed: does a pending Ask's `open_ask` candidate
+ever coexist with a fact-driven `solicit` candidate for the same donor,
+and if so, which wins?** Yes, both can be generated simultaneously
+(regression scenario 3, `tests/relationship-fact-recommendation-
+actionability.test.mjs`) -- a solicitation fact pinned fresh by a
+pending ask (score 1.0) is a valid `solicit` candidate, and the same
+pending ask independently produces `open_ask`. **This is pre-existing
+behavior, not introduced by Stage 2** (the narrative-text-based
+`solicitCandidate()` could already coexist with `openAskCandidate()`
+before this round, for any donor whose narrative happened to mention
+"solicited" while also having a pending ask). `recommendation-rank.ts`'s
+existing scoring already resolves this without any Stage 2 change:
+`open_ask`'s certainty is `"confirmed"` (1.0 multiplier) and its
+`recency` is a constant 0.7 (per its own doc comment, "an ask's own fact
+... stays exactly as true and current regardless of age"), while
+`solicit`'s certainty is `"narrative"` (0.85 multiplier); the resulting
+scores (`open_ask` ≈0.51+ vs. `solicit` ≈0.46, at day-0 urgency) mean
+`open_ask` reliably outranks `solicit` whenever both exist -- verified
+directly in the new regression test, not merely reasoned about.
+**`lib/relationships/recommendation-candidates.ts`'s `openAskCandidate()`
+was not touched.** No interaction with this Stage-2 change required
+altering it, so per instruction, it was left exactly as-is.
+
+### 6. Recommendation explanations remain truthful
+
+Every fact-derived candidate's `action`/`why`/`evidence` text is built
+from the winning fact's own real `factText` (e.g. "Make a solicitation
+ask, following up on: Asked about renewing gala support at $5,000."),
+never a synthesized or invented sentence, and never mentions internal
+implementation terms (`score`, `RELEVANCE_FLOOR`, `pinnedFresh`,
+`scoreFact`, `actionable`) -- verified directly by a dedicated
+regression assertion (`tests/relationship-fact-recommendation-
+actionability.test.mjs`'s "Explanations remain truthful" case), not
+merely by inspection.
+
+### 7. Regression test coverage
+
+New file: **`tests/relationship-fact-recommendation-actionability.test.mjs`**
+(pure, no D1, run via `node tests/relationship-fact-recommendation-
+actionability.test.mjs`, wired into `package.json`'s `test` script).
+Covers, against the REAL `buildRecommendationEvidence`/`generateCandidates`/
+`buildDonorRecommendation`/`synthesizeRelationshipSnapshot` (never
+reimplemented):
+1. Old solicitation + declined Ask (Klein's exact real shape, 294 days) --
+   no `solicit` candidate, fact object itself provably unmutated.
+2. Old solicitation + committed Ask (Rovinsky's exact real shape, 332
+   days) -- no duplicate `solicit`.
+3. Pending Ask linked to the solicitation interaction -- existing
+   pinning keeps the fact a valid `solicit` candidate; a real pending
+   Ask independently produces `open_ask`; the existing, unmodified
+   ranking still picks `open_ask` as the sole winner (Section 5).
+4. A new, later solicitation after an old declined Ask -- the old fact
+   is `status: superseded` (by the existing, unmodified `fact-
+   supersession.ts`, not re-implemented here); the new fact still fires
+   `solicit`, grounded in the new text only, never the old.
+5. Multiple facts, only one actionable -- a stale solicitation fact does
+   not suppress or contaminate a separate, fresh `engagement` fact's
+   `relationship_opportunity` candidate.
+6. An archived fact (even with a FRESH date, and even when legacy
+   narrative text is still separately present) never becomes evidence --
+   `hasStructuredFacts` stays true (no silent fallback to the legacy
+   text) and no candidate fires from it.
+7. A fully time-decayed sole fact: `synthesizeRelationshipSnapshot()`
+   correctly still DISPLAYS it (never-blank fallback, proven in the same
+   test) while `findMostActionableFact()` correctly returns null for the
+   identical fact set -- the direct, executable proof that display and
+   actionability are governed by different rules.
+8. Zero structured facts -- the exact legacy `solicit` behavior fires
+   unchanged, both when `relationshipFacts` is an empty array and when
+   the field is omitted entirely (an older fixture shape).
+9. **Explicit Klein/Rovinsky/Pfeiffer regression**, per instruction:
+   confirms `hasStructuredFacts` is `true` for a donor with Stage 1's
+   real fact shape even while the real, unchanged cached narrative
+   column still says "Solicited," and that `solicit` does not fire via
+   the legacy path in that state.
+10. Truthful-explanations check (Section 6).
+
+### 8. Real staging before/after reconstruction (read-only, no D1 mutation)
+
+Reconstructed via the REAL production functions against real Independent
+Staging field values, read fresh this round (`wrangler d1 execute
+--remote`, read-only) -- gifts, pledges, interactions, reminders,
+historical context, yahrtzeits, important dates, asks, and facts, for
+5 real donors: Klein, Rovinsky, Pfeiffer, plus two controls (Nussbaum --
+a donor with a genuine, currently-relevant fact; Weinschneider -- a real,
+still-unmigrated legacy donor with zero fact rows). "BEFORE" = the
+current (post-Stage-2) code called with `relationshipFacts: []` --
+proven byte-identical to the actual pre-Stage-2 code by this round's own
+regression test 8, so this is a faithful reconstruction, not an
+approximation. "AFTER" = the same code called with each donor's real
+facts/pending-ask linkage.
+
+| Donor | BEFORE winner | AFTER winner | `solicit` candidate present? |
+|---|---|---|---|
+| **Klein** | `solicit`, score 0.4590 -- "Make a solicitation ask, following up on: Note context: Solicited for a plaque ($5k)" | `reconnect_contact_gap`, score 0.3291 | before: yes (narrative, score 0.540 raw). **after: yes, but only via the SEPARATE, unconfirmed `donor_historical_context` row** ("Follow up // Solicit for a plaque dedication," never migrated by Stage 1, deliberately untouched -- Section 5) **at a much lower score (0.235 raw × 0.55 unconfirmed-certainty), which no longer wins.** |
+| **Rovinsky** | `relationship_opportunity`, score 0.4186 -- "Reach out and reference: Note context: Solicited for a plaque in memory of his wife ($5k)" | `reconnect_contact_gap`, score 0.3604 | **before: yes, but already NOT winning** -- vetoed by the pre-existing, unrelated "open pledge vetoes solicit" hard constraint (Rovinsky has a real open pledge, balance $1,250, with a future-dated next-expected-payment). **This means Stage 2 is NOT what fixed `solicit` for Rovinsky -- that was already true before this round, for an unrelated reason, and is correctly NOT counted as a Stage 2 result.** What Stage 2 DID fix for Rovinsky: `relationship_opportunity` was incorrectly winning using the identical stale solicitation text as a generic "relevant fact" -- after Stage 2, it correctly stops firing (his sole fact isn't actionable under the category-agnostic check either), and the winner changes to `reconnect_contact_gap`. after: `solicit` absent from the candidate list entirely (no historicalContext match exists for Rovinsky). |
+| **Pfeiffer** | `solicit`, score 0.4590 -- "Make a solicitation ask, following up on: Note context: Solicited for $10k" | `reconnect_contact_gap`, score 0.3719 | before: yes. **after: no** -- absent from the candidate list entirely (no historicalContext match for Pfeiffer either). The cleanest, most unambiguous fix of the three. |
+| **Nussbaum (control)** | `relationship_opportunity`, score 0.4186 -- "Reach out and reference: sent text to wish happy birthday." | **identical** | n/a -- never present; proves a donor with a genuinely current fact is completely unaffected. |
+| **Weinschneider (control)** | `honor_reminder`, score 0.7575 | **identical** | n/a -- proves a real, still-unmigrated legacy donor (zero fact rows) is completely unaffected, byte-for-byte. |
+
+**Explicit proof requested by instruction, for all three regression
+donors, confirmed by direct fresh D1 read immediately after this
+round's code changes (Section 3 above touched zero D1 rows -- this is a
+code-only stage):**
+- Fact rows still exist: `donor_relationship_facts` still has exactly
+  the 3 Stage-1 rows for these donors, `id`/`fingerprint`/`created_at`/
+  `updated_at` byte-identical to Stage 1's own verified values.
+- Historical fact text unchanged: `fact_text`/`category`/`lifecycle`/
+  `status`/`source_interaction_id`/`source_interaction_occurred_at` all
+  byte-identical.
+- Ask records unchanged: `status`/`asked_at`/`source_interaction_id`/
+  `updated_at` all byte-identical to both Stage 1's and this round's own
+  pre-change reads.
+- Cached `relationship_summary`/`institutional_memory` unchanged:
+  `null` / the original "Note context: ..." text, exactly as Stage 1
+  left them.
+
+**Honest accounting of "did it disappear for the right reason," per
+explicit instruction not to count an unrelated-cause disappearance as a
+successful regression:** Pfeiffer -- unambiguously the intended fix,
+zero caveats. Klein -- the intended fix for the STRONG, narrative-driven
+`solicit` signal; a separate, honest, appropriately low-confidence
+`solicit` candidate survives via the independent, unconfirmed
+`historicalContext` channel (untouched by design, Section 5), and does
+not win. Rovinsky -- `solicit` was already not winning pre-Stage-2 for
+an unrelated reason (the pledge veto); the actual Stage 2 fix for him is
+`relationship_opportunity` no longer firing from the same stale text,
+correctly attributed as such above, not conflated with `solicit`.
+
+### 9. What this discovers for the planned Stage 3 architecture
+
+- **`relationship_opportunity` needed the identical fact-level gate
+  `solicit` needed**, discovered by this round's own live reconstruction
+  (Rovinsky) -- the architecture-decision round's Section 9 plan already
+  anticipated this in its refined recommendation, but this is the first
+  concrete, real-data confirmation that skipping it would have left a
+  real donor's stale evidence winning under a different recommendation
+  label. Stage 3 (moving DISPLAY surfaces to live synthesis) should
+  expect the same category of "more than one consumer reads the same
+  stale signal" surprise and budget for checking each one against real
+  data before assuming a narrow fix is complete.
+- **`donor_historical_context` is a real, still-open gap, deliberately
+  out of Stage 2's scope.** Klein's case shows a real, unconfirmed
+  Monday-imported note ("Follow up // Solicit for a plaque dedication")
+  can independently keep a low-confidence `solicit` candidate alive
+  after the primary narrative-based signal is correctly suppressed. This
+  is arguably correct today (an honestly low-confidence, clearly-labeled
+  "unconfirmed, never verified" candidate, not a false claim of current
+  relevance) but is a real, un-investigated question for whenever this
+  channel's own lifecycle is considered -- it is NOT itself linked to
+  Ask state the way `donor_relationship_facts` now is, and was
+  explicitly out of scope for this round to touch or judge further.
+- **The open-pledge-vetoes-solicit hard constraint can mask whether a
+  narrower fix actually works**, discovered via Rovinsky -- a future
+  round changing that constraint's shape should re-verify solicitation
+  actionability against real data again rather than assuming Stage 2's
+  fix is independently sufficient in every case; today the two
+  mechanisms are complementary, not redundant (this round's fix stops
+  the CANDIDATE from being generated at all for a decayed fact, which is
+  strictly stronger and does not depend on a pledge happening to exist).
+- **No change to the previously-identified donor-merge fact-reparenting
+  gap** (facts are not re-parented on donor merge) -- unaffected by and
+  unrelated to this round, still flagged, still not fixed.
+
+### Quality gates (all passing)
+
+`pnpm test`: exit code 0, all test files pass, including the 10 new
+Stage 2 regression assertions and the two updated structural query-count
+assertions (`today.test.mjs`, `workspace-brief-instrumentation.test.mjs`).
+`pnpm exec tsc --noEmit`: clean, zero output. `pnpm run build:staging-
+independent`: completed, full route manifest, no errors. No deploy
+performed or needed for this stage's own verification (the live
+reconstruction above is read-only, run via `pathToFileURL` dynamic
+import against real field values, never against a running deployed
+Worker) -- deployment remains a separate, later, explicitly-approved
+step.
+
+### What this stage explicitly did NOT do
+
+Did not touch Stage 3 (no display/Snapshot surface changed --
+`app/donors/[id]/page.tsx`'s Snapshot text, Meeting Brief's Snapshot
+text, and Assistant's raw `summary`/`memory` context lines all still
+read the unchanged cached columns exactly as before). Did not migrate
+any additional legacy donor. Did not modify Klein/Rovinsky/Pfeiffer's
+facts, narrative columns, or Ask records (D1-verified above). Did not
+add schema. Did not introduce an arbitrary age threshold (the 90-day
+solicitation decay window is pre-existing and unmodified). Did not
+delete any historical intelligence. Did not touch Portfolio Focus work.
+Did not touch production or main. Did not alter `openAskCandidate()`
+(Section 5). Did not deploy.
+
+**Stopping for review before starting Stage 3**, per explicit
+instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -13540,21 +13912,28 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Stage 2 (recommendation-engine
-fact-level relevance gate) -- awaiting the user's decision on whether
-to proceed (2026-08-28).** See "Relationship Snapshot Architecture --
-Stage 1 Applied: Ask-Linked Legacy Backfill (2026-08-28)" above. Stage
-1 is done: Klein, Rovinsky, and Pfeiffer each now have exactly one real
-`donor_relationship_facts` row with real, un-clamped provenance
-(verified byte-for-byte, idempotent on rerun). **The stale `solicit`/
-`relationship_opportunity` recommendation is unchanged and still fires
-for all three** -- Stage 1 deliberately did not touch recommendation
-logic or the cached `donors` columns any consumer still reads. Next
-decision: approve Stage 2 (add a strict, non-fallback fact-relevance
-check to `solicitCandidate()`/`relationshipOpportunityCandidate()` as
-an additional gate, per the architecture decision's Section 9 plan) and
-Stage 3 (move display surfaces to live synthesis), or adjust the plan
-first.
+**Genuinely open, newest first: Stage 3 (move display surfaces to live
+Snapshot synthesis) -- awaiting the user's decision on whether to
+proceed (2026-08-28).** See "Relationship Snapshot Architecture --
+Stage 2 Implemented: Fact-Level Recommendation Actionability
+(2026-08-28)" above. Stage 2 is done and live-verified read-only:
+Klein/Pfeiffer's stale `solicit` and Rovinsky's stale `relationship_
+opportunity` no longer win, real control donors are provably
+unaffected, Stage 1 data is unchanged, all gates pass, nothing
+deployed. **The donor page/Meeting Brief/Assistant Snapshot TEXT for
+Klein/Rovinsky/Pfeiffer still reads the unchanged cached columns
+("Note context: Solicited for...") -- this is expected and intentional
+(Stage 3's job), not a gap in Stage 2.** Also newly discovered this
+round, worth weighing before Stage 3: `relationship_opportunity` needed
+the identical fact-level gate `solicit` did (confirmed via Rovinsky's
+real data, not merely anticipated); a real, unconfirmed `donor_
+historical_context` row can independently keep a low-confidence
+`solicit` candidate alive for Klein (deliberately untouched, a genuinely
+separate provenance channel); the open-pledge-vetoes-solicit hard
+constraint already suppressed Rovinsky's `solicit` for an unrelated
+reason, so future changes to that constraint should be re-verified
+against real data rather than assumed independent of this fix. Decision
+needed: approve Stage 3 (or an adjustment) before it begins.
 
 **Genuinely open, newest-but-one: Relationship Snapshot architecture
 decision -- awaiting the user's decision on whether to implement
@@ -13806,6 +14185,74 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T18:00:00Z (approximate)
+Claude (Sonnet 5) — Implemented Stage 2 only of the approved
+Relationship Snapshot architecture plan: fact-level recommendation
+actionability. Traced the exact pre-change evidence path first (direct
+read, not assumed): solicitCandidate()/relationshipOpportunityCandidate()
+in lib/relationships/recommendation-candidates.ts both regex-matched
+evidence.narrative.relationshipSummary||institutionalMemory (cached
+donors columns) against SOLICITATION_PATTERN or a bare non-null check,
+with zero connection to donor_relationship_facts, confirming this is
+exactly the mechanism producing Klein/Rovinsky/Pfeiffer's stale
+recommendation. Added findMostActionableFact() to lib/relationships/
+fact-synthesis.ts -- reuses the module's own private scoreFact()
+(the exact same formula synthesizeRelationshipSnapshot() uses, never a
+second formula), but with no "never blank" display fallback, since that
+fallback exists for the DISPLAYED Snapshot and must never leak into an
+actionability decision (proven as a real, load-bearing distinction by
+a dedicated regression test: the same fully-decayed fact is correctly
+still shown by synthesis but correctly not actionable). Added two new
+OPTIONAL fields (relationshipFacts, pendingAskSourceInteractionIds) to
+RecommendationEvidenceInput, defaulting to empty so all 8 existing
+tests that construct evidence directly keep passing unmodified; added
+a computed factActionability output field. Rewired solicitCandidate()/
+relationshipOpportunityCandidate() to branch on hasStructuredFacts:
+true routes to the strict fact check (no fallback to narrative-text
+regex); false is the byte-identical legacy path. Wired all three real
+evidence-building call sites (lib/workspace/live-data.ts, lib/
+relationships/meeting-brief.ts, app/donors/[id]/page.tsx) with one new
+batched donor_relationship_facts query each, matching the codebase's
+own established per-donor-child-table convention -- confirmed
+Assistant needs no change since it only reuses Meeting Brief's already-
+computed recommendation. Updated two pre-existing structural D1-query-
+count regression tests (today.test.mjs, workspace-brief-instrumentation.
+test.mjs) to reflect the one legitimate new query each. Wrote a new
+10-case regression suite (tests/relationship-fact-recommendation-
+actionability.test.mjs) covering every required scenario, including an
+explicit Klein/Rovinsky/Pfeiffer-specific check that they do not fall
+through to the legacy narrative path now that Stage 1 gave them facts.
+Investigated whether open_ask and a fact-driven solicit ever coexist
+(yes, pre-existing behavior, unmodified by this round) and confirmed
+via a new regression test that existing ranking (unchanged) already
+prevents a duplicate/conflicting winning recommendation -- did not
+touch openAskCandidate(), since no interaction with this stage's change
+required it. Ran a comprehensive read-only live verification against
+real Independent Staging data (gifts, pledges, interactions, reminders,
+historical context, yahrtzeits, important dates, asks, facts, pulled
+fresh via wrangler d1 execute --remote) for Klein, Rovinsky, Pfeiffer,
+plus two real controls (Nussbaum -- a donor with a genuinely current
+fact; Weinschneider -- a real, still-unmigrated legacy donor). Found
+and honestly reported two real nuances rather than overclaiming: Klein
+still has a low-confidence solicit candidate surviving via a separate,
+deliberately-untouched donor_historical_context row, correctly no
+longer winning; Rovinsky's solicit was already not winning before this
+round for an unrelated reason (an existing open-pledge veto), so the
+real Stage 2 fix for him is relationship_opportunity no longer firing
+from the same stale text, not solicit. Both control donors' output is
+byte-identical before/after. Re-verified via fresh D1 reads that Stage
+1's facts/asks/interactions/cached narrative columns are completely
+unchanged by this round (a pure code change, zero D1 mutation). All 3
+quality gates pass (pnpm test exit 0, tsc --noEmit clean, build:
+staging-independent completed). Updated docs/AI-HANDOFF.md with the
+full trace, implementation rationale, legacy-fallback proof, regression
+coverage, real before/after reconstruction, Stage 1 unchanged-data
+confirmation, and Stage-3-relevant discoveries. Committed and pushed to
+feature/independent-cloudflare-sandbox. Nothing deployed; stopping for
+review before starting Stage 3, per explicit instruction.
+
+---
 
 2026-08-28T13:00:00Z (approximate)
 Claude (Sonnet 5) — Implemented Stage 1 only of the approved

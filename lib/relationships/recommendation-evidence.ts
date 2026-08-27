@@ -13,6 +13,8 @@ import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gr
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { localDayKey } from "../workspace/local-time.ts";
 import { evaluatePaymentPlan, type PaymentPlanFields } from "./pledge-payment-plan.ts";
+import { findMostActionableFact, type SynthesisFact } from "./fact-synthesis.ts";
+import type { FactCategory } from "./fact-classification.ts";
 
 export type RecommendationEvidenceInput = {
   donorId: string;
@@ -113,6 +115,23 @@ export type RecommendationEvidenceInput = {
   // Gregorian month/day/year only, the current occurrence recalculated
   // here (see lib/calendar/gregorian-recurring-date.ts), never stored.
   importantDates: Array<{ type: ImportantDateType; personName: string | null; relationship: string | null; month: number; day: number; year: number | null }>;
+  // Relationship Snapshot Architecture Stage 2 (see docs/AI-HANDOFF.md) --
+  // every CURRENT donor_relationship_facts row for this donor, in the
+  // exact shape lib/relationships/fact-synthesis.ts already defines (no
+  // new shape). Optional and defaulting to an empty array so every
+  // existing caller/fixture that predates this field keeps behaving
+  // exactly as before (an empty array means "no structured facts," which
+  // is precisely the signal that preserves today's legacy narrative-text
+  // behavior unchanged -- see recommendation-candidates.ts). Never
+  // invented from narrative text; populated ONLY from real rows.
+  relationshipFacts?: SynthesisFact[];
+  // Every source_interaction_id belonging to one of this donor's
+  // currently-PENDING asks -- the same, only sanctioned channel a
+  // solicitation-category fact's relevance may be influenced by
+  // structured Ask state (fact-synthesis.ts's pinnedFreshSourceInteractionIds).
+  // Never the ask's own amount/purpose/status text. Optional, defaults to
+  // none pinned.
+  pendingAskSourceInteractionIds?: string[];
 };
 
 export type YahrtzeitEvidence = {
@@ -186,6 +205,24 @@ export type RecommendationEvidence = {
   historicalContext: Array<{ text: string; source: string; sourceDate: number | null }>;
   yahrtzeits: YahrtzeitEvidence[];
   importantDates: ImportantDateEvidence[];
+  // Relationship Snapshot Architecture Stage 2 -- derived fact-level
+  // actionability, computed via findMostActionableFact() (the SAME
+  // scoreFact()/RELEVANCE_FLOOR architecture Relationship Snapshot
+  // synthesis uses, never a second formula). `hasStructuredFacts: false`
+  // means this donor has zero donor_relationship_facts rows -- solicit/
+  // relationship_opportunity candidate generation falls back to the
+  // existing legacy narrative-text behavior UNCHANGED for such a donor
+  // (see recommendation-candidates.ts). When true, actionability is
+  // decided strictly (no display-oriented "never blank" fallback): a
+  // historically-true, currently-decayed-or-resolved fact can remain
+  // fully intact in donor_relationship_facts and even in the displayed
+  // Snapshot while `actionableSolicitationFact`/`actionableAnyFact` here
+  // are null, because it no longer justifies a live recommendation.
+  factActionability: {
+    hasStructuredFacts: boolean;
+    actionableSolicitationFact: { factText: string } | null;
+    actionableAnyFact: { factText: string; category: FactCategory } | null;
+  };
   now: number;
 };
 
@@ -285,6 +322,19 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
     historicalContext: input.historicalContext,
     yahrtzeits,
     importantDates,
+    factActionability: (() => {
+      const facts = input.relationshipFacts ?? [];
+      const hasStructuredFacts = facts.length > 0;
+      if (!hasStructuredFacts) return { hasStructuredFacts: false, actionableSolicitationFact: null, actionableAnyFact: null };
+      const pinnedFresh = new Set(input.pendingAskSourceInteractionIds ?? []);
+      const solicitation = findMostActionableFact(facts, now, pinnedFresh, "solicitation");
+      const any = findMostActionableFact(facts, now, pinnedFresh);
+      return {
+        hasStructuredFacts: true,
+        actionableSolicitationFact: solicitation ? { factText: solicitation.factText } : null,
+        actionableAnyFact: any ? { factText: any.factText, category: any.category } : null,
+      };
+    })(),
     now,
   };
 }

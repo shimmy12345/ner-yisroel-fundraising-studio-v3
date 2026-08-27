@@ -22,6 +22,7 @@ import { financialDateLabel } from "../../../lib/financial-date";
 import { donorInitials, numericDonorCode } from "../../../lib/relationships/donor-identity";
 import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
+import type { SynthesisFact } from "../../../lib/relationships/fact-synthesis";
 import { evaluatePaymentPlan } from "../../../lib/relationships/pledge-payment-plan";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
@@ -44,7 +45,8 @@ type FindingRow = { id: string; category: string; claim: string; status: "curren
 type HistoricalContextRow = { id: string; text: string; source_date: number | null; classification: string; source: string; created_at: number };
 type SourceRow = { finding_id: string; url: string; title: string; publisher: string | null; published_at: number | null; source_tier: string };
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus; created_at: number };
-type AskRow = { id: string; amount_cents: number | null; purpose: string | null; status: "pending" | "committed" | "declined" | "withdrawn"; asked_at: number; note: string | null; created_at: number };
+type AskRow = { id: string; amount_cents: number | null; purpose: string | null; status: "pending" | "committed" | "declined" | "withdrawn"; asked_at: number; note: string | null; created_at: number; source_interaction_id: string | null };
+type RelationshipFactRow = { category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
 type YahrtzeitRow = { id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number; hebrew_year: number | null };
 type ImportantDateRow = { id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null; notes: string | null };
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
@@ -97,7 +99,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     marks.donorViewsMs = Date.now() - donorViewsStart;
     d1Calls += 1;
   }
-  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult, paymentPlanResult] = await Promise.all([
+  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult, paymentPlanResult, relationshipFactResult] = await Promise.all([
     timedAll(marks, "giving", (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>()),
     timedAll(marks, "gifts", env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>()),
     timedAll(marks, "interactions", env.DB.prepare(`SELECT interactions.id, interactions.type, interactions.occurred_at, interactions.occurred_at_date_only, interactions.summary, interactions.source, interactions.created_at, interactions.shared_activity_id, interactions.role, shared_activities.recipient_count AS shared_activity_recipient_count, shared_activities.summary AS shared_activity_summary, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at
@@ -123,13 +125,18 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     timedAll(marks, "acknowledgments", mode === "demo" ? Promise.resolve({ results: [] as AcknowledgmentRow[] }) : env.DB.prepare("SELECT gift_source, gift_id, status, created_at FROM gift_acknowledgments WHERE donor_id=? AND user_id=? ORDER BY created_at DESC LIMIT 2000").bind(id, profile.id).all<AcknowledgmentRow>()),
     // No demo/sample data exists for this new feature, matching
     // contactAuditResult/acknowledgmentResult's demo handling above.
-    timedAll(marks, "asks", mode === "demo" ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare("SELECT id, amount_cents, purpose, status, asked_at, note, created_at FROM asks WHERE donor_id=? AND user_id=? ORDER BY asked_at DESC LIMIT 200").bind(id, profile.id).all<AskRow>()),
+    timedAll(marks, "asks", mode === "demo" ? Promise.resolve({ results: [] as AskRow[] }) : env.DB.prepare("SELECT id, amount_cents, purpose, status, asked_at, note, created_at, source_interaction_id FROM asks WHERE donor_id=? AND user_id=? ORDER BY asked_at DESC LIMIT 200").bind(id, profile.id).all<AskRow>()),
     // This donor's ACTIVE (ended_at IS NULL) payment plans, if any --
     // local fundraiser-declared stewardship metadata for a specific open
     // pledge, never a JL fact. Feeds openPledge.activePaymentPlan.
     timedAll(marks, "paymentPlans", mode === "demo" ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare("SELECT id, pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note FROM pledge_payment_plans WHERE donor_id=? AND user_id=? AND ended_at IS NULL").bind(id, profile.id).all<PaymentPlanRow>()),
+    // Relationship Snapshot Architecture Stage 2 -- every CURRENT
+    // structured Relationship Fact for this donor, feeding fact-level
+    // recommendation actionability below. No demo/sample data for this
+    // table, matching acknowledgmentResult/askResult's demo handling.
+    timedAll(marks, "relationshipFacts", mode === "demo" ? Promise.resolve({ results: [] as RelationshipFactRow[] }) : env.DB.prepare("SELECT category, lifecycle, status, fact_text, source_interaction_id, source_interaction_occurred_at FROM donor_relationship_facts WHERE donor_id=? AND user_id=? AND status='current'").bind(id, profile.id).all<RelationshipFactRow>()),
   ]);
-  d1Calls += 4 + (mode === "live" ? 6 : 0);
+  d1Calls += 4 + (mode === "live" ? 7 : 0);
   const activities = activityResult.results;
   const asks = askResult.results;
   const countedActivities = activities.filter(countsInGivingTotals);
@@ -339,6 +346,8 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     historicalContext: historicalContextRows.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
     yahrtzeits: yahrtzeitRows.map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
     importantDates: importantDateRows.map((row) => ({ type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
+    relationshipFacts: relationshipFactResult.results.map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
+    pendingAskSourceInteractionIds: openAsks.map((item) => item.source_interaction_id).filter((sourceId): sourceId is string => sourceId !== null),
   }, Math.floor(Date.now() / 1000), profile.timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
   const recommendationSummary = recommendation ? summarizeRecommendationForSnapshot(recommendation) : null;

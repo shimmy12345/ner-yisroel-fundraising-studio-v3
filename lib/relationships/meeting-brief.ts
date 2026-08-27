@@ -15,6 +15,7 @@ import { importedContextLine } from "./historical-context";
 import { financialDateLabel } from "../financial-date";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "./recommendation-evidence";
 import { buildDonorRecommendation } from "./recommendation-rank";
+import type { SynthesisFact } from "./fact-synthesis.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment";
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
@@ -50,10 +51,11 @@ type HistoricalContextRow = { text: string; source: string; source_date: number 
 type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: GiftAcknowledgmentStatus };
 type YahrtzeitRow = { deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
-type AskRow = { id: string; amount_cents: number | null; purpose: string | null; asked_at: number };
+type AskRow = { id: string; amount_cents: number | null; purpose: string | null; asked_at: number; source_interaction_id: string | null };
 type AskReminderRow = { id: string; due_at: number | null };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
+type RelationshipFactRow = { category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
 
 function titled(title: string | null, name: string | null) {
   return name ? [title, name].filter(Boolean).join(" ") : null;
@@ -64,7 +66,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' LIMIT 1`).bind(donorId, userId).first<DonorRow>();
   if (!donor) return null;
 
-  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, openAskReminderRows, pledgePaymentRows, paymentPlanRows] = await Promise.all([
+  const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, openAskReminderRows, pledgePaymentRows, paymentPlanRows, relationshipFactRows] = await Promise.all([
     env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
       FROM giving_activities
       WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
@@ -100,8 +102,11 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     // Oldest first -- [0] (if any) is the one most-in-need-of-follow-up ask,
     // fed into recommendation evidence below. Only 'pending' asks are
     // "open" -- committed/declined/withdrawn are history, not this brief's
-    // concern.
-    env.DB.prepare(`SELECT a.id, a.amount_cents, a.purpose, a.asked_at
+    // concern. source_interaction_id feeds the Stage 2 pinnedFresh set
+    // below (fact-synthesis.ts's pinnedFreshSourceInteractionIds) -- the
+    // only sanctioned channel a pending ask may influence a fact's
+    // relevance.
+    env.DB.prepare(`SELECT a.id, a.amount_cents, a.purpose, a.asked_at, a.source_interaction_id
       FROM asks a JOIN donors d ON d.id = a.donor_id
       WHERE a.donor_id = ? AND a.user_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'
         AND a.status = 'pending'
@@ -131,6 +136,15 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     env.DB.prepare(`SELECT pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at
       FROM pledge_payment_plans
       WHERE donor_id = ? AND user_id = ? AND ended_at IS NULL`).bind(donorId, userId).all<PaymentPlanRow>(),
+    // Relationship Snapshot Architecture Stage 2 -- every CURRENT
+    // structured Relationship Fact for this donor, feeding fact-level
+    // recommendation actionability below. superseded/archived_with_source
+    // rows are deliberately excluded here (never eligible evidence, per
+    // fact-synthesis.ts's own status filter, enforced again defensively
+    // here at the query level).
+    env.DB.prepare(`SELECT category, lifecycle, status, fact_text, source_interaction_id, source_interaction_occurred_at
+      FROM donor_relationship_facts
+      WHERE donor_id = ? AND user_id = ? AND status = 'current'`).bind(donorId, userId).all<RelationshipFactRow>(),
   ]);
 
   const address = [
@@ -274,6 +288,8 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     historicalContext: historicalContextRows.results.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
     yahrtzeits: yahrtzeitEvidenceInput,
     importantDates: importantDateEvidenceInput,
+    relationshipFacts: relationshipFactRows.results.map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
+    pendingAskSourceInteractionIds: openAskRows.results.map((row) => row.source_interaction_id).filter((id): id is string => id !== null),
   }, now, timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
   const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at, followUpDueAt: followUpByAsk.get(row.id)?.dueAt ?? null }));

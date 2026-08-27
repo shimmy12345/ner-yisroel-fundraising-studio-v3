@@ -316,6 +316,32 @@ function continueConversationCandidate(evidence: RecommendationEvidence): Recomm
 }
 
 function relationshipOpportunityCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
+  // Stage 2 (see docs/AI-HANDOFF.md's "Relationship Snapshot Architecture
+  // -- Stage 2"): for a donor with structured Relationship Facts,
+  // actionability is decided by fact-level relevance (scoreFact(), via
+  // findMostActionableFact()), never by "does any text still sit in the
+  // cached narrative columns." A historically-true fact can remain fully
+  // intact -- and even keep being shown in the Relationship Snapshot --
+  // while no longer being current enough to justify this recommendation.
+  if (evidence.factActionability.hasStructuredFacts) {
+    const actionable = evidence.factActionability.actionableAnyFact;
+    if (!actionable) return null;
+    return {
+      kind: "relationship_opportunity",
+      action: `Reach out and reference: ${actionable.factText}`,
+      why: "A specific, currently-relevant fact is on file and no open reminder currently covers this.",
+      evidence: [`Recorded relationship fact: "${actionable.factText}"`],
+      confidence: "medium",
+      timing: null,
+      certainty: "narrative",
+      specificity: 0.65,
+      recency: 0.5,
+      urgency: 0.3,
+      supportingDate: evidence.now,
+    };
+  }
+  // Legacy path -- UNCHANGED for a donor with zero structured facts yet
+  // (Stage 2's fallback: this population is migrated in a later stage).
   const text = evidence.narrative.relationshipSummary || evidence.narrative.institutionalMemory;
   if (!text) return null;
   return {
@@ -348,21 +374,57 @@ function relationshipOpportunityCandidate(evidence: RecommendationEvidence): Rec
 const SOLICITATION_PATTERN = /\b(solicit(ed)?|ask (him|her|them) for|pledge (request|ask)|corporate sponsorship|capital campaign ask)\b/i;
 
 function solicitCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
-  const narrativeText = evidence.narrative.relationshipSummary || evidence.narrative.institutionalMemory;
-  if (narrativeText && SOLICITATION_PATTERN.test(narrativeText)) {
-    return {
-      kind: "solicit",
-      action: `Make a solicitation ask, following up on: ${narrativeText}`,
-      why: "A specific, still-relevant solicitation opportunity is on file.",
-      evidence: [`Recorded relationship note: "${narrativeText}"`],
-      confidence: "medium",
-      timing: null,
-      certainty: "narrative",
-      specificity: 0.7,
-      recency: 0.5,
-      urgency: 0.4,
-      supportingDate: evidence.now,
-    };
+  // Stage 2: for a donor with structured Relationship Facts, whether a
+  // solicitation is still worth suggesting is decided by fact-level
+  // relevance (scoreFact(), via findMostActionableFact()'s solicitation-
+  // category check), never by regex-matching whatever text happens to
+  // still sit in the cached narrative columns. This is the direct fix
+  // for the evidenced Klein/Rovinsky/Pfeiffer failure: their historical
+  // "Solicited for..." fact remains stored (and may still be displayed
+  // as history) but no longer clears the relevance floor once its Ask
+  // resolved and enough time passed, so it correctly stops generating
+  // this recommendation -- without deleting or archiving anything.
+  if (evidence.factActionability.hasStructuredFacts) {
+    const actionable = evidence.factActionability.actionableSolicitationFact;
+    if (actionable) {
+      return {
+        kind: "solicit",
+        action: `Make a solicitation ask, following up on: ${actionable.factText}`,
+        why: "A specific, currently-relevant solicitation opportunity is on file.",
+        evidence: [`Recorded relationship fact: "${actionable.factText}"`],
+        confidence: "medium",
+        timing: null,
+        certainty: "narrative",
+        specificity: 0.7,
+        recency: 0.5,
+        urgency: 0.4,
+        supportingDate: evidence.now,
+      };
+    }
+    // No currently-actionable solicitation fact for this donor -- do NOT
+    // fall through to regex-matching the cached narrative text below;
+    // that text is exactly the stale evidence Stage 2 exists to stop
+    // treating as current. The unconfirmed-historical-context channel
+    // just below is a structurally separate, always-independent signal
+    // (never migrated into facts) and remains unaffected either way.
+  } else {
+    // Legacy path -- UNCHANGED for a donor with zero structured facts yet.
+    const narrativeText = evidence.narrative.relationshipSummary || evidence.narrative.institutionalMemory;
+    if (narrativeText && SOLICITATION_PATTERN.test(narrativeText)) {
+      return {
+        kind: "solicit",
+        action: `Make a solicitation ask, following up on: ${narrativeText}`,
+        why: "A specific, still-relevant solicitation opportunity is on file.",
+        evidence: [`Recorded relationship note: "${narrativeText}"`],
+        confidence: "medium",
+        timing: null,
+        certainty: "narrative",
+        specificity: 0.7,
+        recency: 0.5,
+        urgency: 0.4,
+        supportingDate: evidence.now,
+      };
+    }
   }
   const historicalHit = evidence.historicalContext.find((row) => SOLICITATION_PATTERN.test(row.text));
   if (historicalHit) {

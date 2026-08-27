@@ -151,16 +151,20 @@ for (const phase of ["giving", "gifts", "interactions", "reminders", "paymentEve
 // invented mechanism.
 assert.match(donorPage, /headers\(\)\)\.get\("cf-ray"\)/, "the donor page must read cf-ray via next/headers, matching the app's existing header-access pattern");
 // Instrumentation must only wrap already-issued promises, never add a new
-// D1 statement of its own -- 23 env.DB.prepare(...) call sites: the
+// D1 statement of its own -- 24 env.DB.prepare(...) call sites: the
 // original 21 (verified directly via the same regex on origin/feature/
 // independent-cloudflare-sandbox before this task, not assumed) plus one
 // legitimate new query added by the Ask feature (asks by donor, timed via
 // timedAll(marks, "asks", ...) like every other phase above) plus one
 // more legitimate new query added by the Monthly Payment Plan feature
 // (active payment plans by donor, timed via timedAll(marks,
-// "paymentPlans", ...)) -- both real, intentional additions, not an
-// instrumentation leak.
-assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 23, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query and the one new payment-plans query");
+// "paymentPlans", ...)) plus one more legitimate new query added by
+// Relationship Snapshot Architecture Stage 2 (this donor's current
+// donor_relationship_facts rows, timed via timedAll(marks,
+// "relationshipFacts", ...), feeding fact-level recommendation
+// actionability -- see docs/AI-HANDOFF.md) -- all real, intentional
+// additions, not an instrumentation leak.
+assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 24, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query, the one new payment-plans query, and the one new relationship-facts query");
 
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);
