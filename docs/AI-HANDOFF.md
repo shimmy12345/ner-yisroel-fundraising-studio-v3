@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Implement open-ask
+**`72bc4c8`** -- "Implement open-ask
 recommendation quality fix: post-Ask gift/pledge cross-reference,
 explicit follow-up-scheduling deferral" -- real application code:
 `lib/relationships/recommendation-candidates.ts`, `lib/relationships/
