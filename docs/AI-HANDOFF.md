@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Document portfolio-level
+**`1de5dd8`** -- "Document portfolio-level
 30-day focus investigation (2026-08-27)" -- docs-only, zero
 application code change, zero D1 mutation; see "Portfolio-Level 30-Day
 Focus Investigation" below for the full 30-day focus list, stress-test
