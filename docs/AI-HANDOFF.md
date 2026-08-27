@@ -15,7 +15,12 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`280525d`** -- "Document Daily Fundraising
+**`(pending — see follow-up commit)`** -- "Document open-ask
+recommendation quality investigation (2026-08-27)" -- docs-only, zero
+application code change, zero D1 mutation; see "Open-Ask Recommendation
+Quality Investigation" below for the full findings and the proposed
+(not implemented) smallest-fix recommendation. Sits on top of
+`280525d` -- "Document Daily Fundraising
 Agenda quality corrections deploy + live verification" -- docs-only,
 zero application code change; see "Daily Fundraising Agenda Quality
 Corrections -- Deployed to Independent Staging + Live Verification"
@@ -9696,6 +9701,250 @@ firing.
 **Nothing differed from the approved behavior; no patch-forward was
 needed.**
 
+## Open-Ask Recommendation Quality Investigation (2026-08-27) -- INVESTIGATION ONLY, NO CODE CHANGE, NO D1 MUTATION, NO DEPLOY
+
+**Trigger:** the first real scheduled Daily Fundraising Agenda (2026-08-26
+9 AM America/New_York) correctly surfaced two `open_ask` Suggested
+Actions -- Allen Pfeiffer ($10,000, 346 days pending) and Michael/
+Michoel Rovinsky ($5,000, 332 days pending) -- both at the same score,
+0.8075, ahead of Yaakov Pollack's $1,300 pledge. The Daily Agenda
+ranking fix itself is confirmed working (not touched or questioned in
+this task); this investigation is scoped entirely to whether the
+underlying `open_ask` recommendation *content* is good enough once it
+reliably reaches the email.
+
+### 1. Exact score trace -- why both are 0.8075
+
+`score()` (`lib/relationships/recommendation-rank.ts`):
+`certaintyMultiplier(certainty) * (0.35*specificity + 0.35*recency +
+0.30*urgency)`. `openAskCandidate()` (`lib/relationships/recommendation-
+candidates.ts`) sets, for every ask regardless of donor: `certainty:
+"confirmed"` (multiplier 1), `specificity: 0.75` (constant),
+`recency: 0.7` (constant -- deliberately does not decay with age; see
+that function's own comment), `urgency: clamp01(ask.ageDays / 180)`.
+
+For Pfeiffer (ageDays 345) and Rovinsky (ageDays 331/332), both values
+are far past 180, so `urgency` clamps to exactly `1.0` for both:
+`1 * (0.35*0.75 + 0.35*0.7 + 0.30*1.0) = 0.2625 + 0.245 + 0.3 =
+0.8075`. **The two scores are identical not by coincidence but because
+`urgency` saturates at 180 days and never distinguishes further** -- a
+185-day-old ask and a 1,000-day-old ask score exactly the same. This
+saturation is a legitimate simplicity choice (`clamp01`, matching
+`follow_up_pledge`'s identical 180-day horizon by explicit design, per
+`openAskCandidate`'s own comment), not itself a defect -- but it does
+mean **age alone cannot be the mechanism that ever prompts a different
+kind of recommendation** for a very old ask; once staleness is worth
+flagging, it has to come from a different signal, not a bigger age
+number.
+
+### 2. What the engine currently considers for `open_ask`
+
+Exactly three fields, all read directly off the single oldest-pending
+`asks` row: `amountCents`, `purpose` (both display-only, via
+`askDescriptor`/`askFollowUpAction` in `lib/capture/ask.ts`), and
+`askedAt` -> `ageDays` (drives `confidence` low/medium at the 60-day
+mark, and `urgency` as above). Nothing else.
+
+### 3. What it ignores -- confirmed in code, several confirmed live in real data
+
+`RecommendationEvidence` (the same object `openAskCandidate` receives)
+already contains every one of the signals below -- this is not a "the
+data doesn't exist" gap, it's a "the function never reads its own
+input" gap:
+
+- **Interactions occurring after the Ask:** `evidence.contact.
+  lastCompletedInteraction` is populated and used by `continue_
+  conversation`, but `openAskCandidate` never reads it at all.
+- **Whether subsequent interactions mention the Ask:** there is no
+  cross-referencing of any kind anywhere in the codebase between an
+  interaction's text and a specific ask -- not a partially-built
+  feature, simply absent.
+- **Existing reminders/follow-ups tied to *this* Ask:** two separate
+  gaps. (a) `openAskCandidate` never reads `evidence.reminder` at all.
+  (b) Even at the rank step, `open_ask` is deliberately NOT in
+  `REMINDER_SUPPRESSES` (it's grouped with `acknowledge_gift`/
+  `follow_up_pledge` as a "money concern that wins on its own merit" --
+  see that set's comment), so it only loses to a reminder by outscoring
+  it. The math shows this fails for a non-overdue, explicitly-scheduled
+  follow-up: `honor_reminder`'s non-overdue score is `1*(0.35*0.9 +
+  0.35*0.75 + 0.30*0.6) = 0.7575` -- **lower than a >=180-day
+  `open_ask`'s 0.8075.** So if a fundraiser used the existing "Add
+  follow-up" feature (`app/api/asks/[id]/reminder/route.ts`, which
+  creates a `recommendations` row via the established `ask-<askId>-`
+  id-prefix convention -- the same convention `lib/relationships/
+  meeting-brief-model.ts`'s `matchAskFollowUps` already uses to link a
+  reminder back to its ask) to deliberately defer an old ask to next
+  week, the raw duplicate `open_ask` candidate would still win and
+  still show up in Suggested *today*, silently overriding the
+  fundraiser's own explicit scheduling decision. (Neither Pfeiffer nor
+  Rovinsky had ever had a reminder created via this path -- confirmed
+  via a live, empty `SELECT ... FROM recommendations WHERE donor_id IN
+  (...)` -- so this specific failure mode isn't demonstrated by today's
+  real data, but the scoring math demonstrates it's live and waiting to
+  happen for the next donor who uses that feature.)
+- **Completed follow-ups:** there is no field or table anywhere that
+  records "a follow-up on this specific ask was completed" as distinct
+  from "no follow-up was ever created" -- confirmed empirically (zero
+  `recommendations` rows, ever, for either donor).
+- **Relationship Intelligence:** `evidence.narrative.
+  relationshipSummary`/`institutionalMemory` are read by `relationship_
+  opportunity`/`solicit`, but never by `openAskCandidate`. In this
+  specific real data the gap turned out to be moot -- both donors'
+  `institutional_memory` is literally `"Note context: Solicited for
+  [the exact ask]"`, a mechanical echo produced by the historical Ask
+  backfill (see "Ask/Solicitation Feature -- HISTORICAL BACKFILL AND
+  CLOSURE" above), not independent intelligence -- but the structural
+  gap (the function never even looks) stands regardless of whether
+  today's two examples happen to have anything new to say.
+- **Gifts or commitments occurring after the Ask -- the concrete,
+  live-data-confirmed finding:** `evidence.giving.mostRecentPaidGift`
+  is already computed for every donor (it drives `acknowledge_gift`)
+  but `openAskCandidate` never compares it against `ask.askedAt`. Real
+  staging `giving_activities` rows:
+  - **Rovinsky** asked for a **$5,000** plaque on 2025-09-29
+    (`askedAt=1759147200`). A **$5,000** `completed_gift` was recorded
+    **the very next day**, 2025-09-30 (`activity_date=1759190400`, 12
+    hours later) -- the exact amount, immediately after. This ask sat
+    "pending," generating an identical "follow up" recommendation
+    every single day, for **331 days** after the money had, in all
+    likelihood, already arrived.
+  - **Pfeiffer** asked for **$10,000** on 2025-09-15
+    (`askedAt=1757937600`). A **$5,000** `completed_gift` (half the ask
+    amount) was recorded **1.5 days later**, 2025-09-17
+    (`activity_date=1758067200`) -- a plausible partial response the
+    engine never surfaced or reasoned about at all.
+  Neither gift is linked to its ask by any foreign key -- `asks` and
+  `giving_activities` are deliberately separate systems of record (an
+  ask is fundraiser-recorded relationship data; `giving_activities` is
+  JL Solutions financial data -- see `docs/ASK-SOLICITATION-DESIGN.md`)
+  -- but the recommendation engine already holds both dates in the same
+  evidence object and simply never compares them.
+- **Whether the Ask may be stale rather than genuinely actionable:**
+  there is no such signal anywhere. `urgency` only ever ramps up with
+  age (saturating at 180 days, per #1 above); nothing ever ramps back
+  down or flags "this might already be resolved -- verify before
+  re-asking."
+
+### 4. Real post-Ask histories (staging data, read-only) -- and an observed status change during this investigation
+
+The full histories above were pulled directly from `asks`,
+`giving_activities`, `interactions`, `donor_historical_context`, and
+`donors.relationship_summary`/`institutional_memory` for both donor
+ids via read-only `wrangler d1 execute`. Neither donor has ANY
+completed interaction after the original ask-creation note (itself
+just the Monday.com import of the ask); "pending" here did not mean
+"actively engaged and just needs a nudge" -- it meant "no documented
+contact in nearly a year," which is itself a separate observation from
+whether the specific $-amount ask was already answered.
+
+**Observed, not performed by this investigation:** both `asks` rows'
+`status` changed away from `pending` (Pfeiffer -> `declined`, Rovinsky
+-> `committed`) at 2026-08-27T15:48:55Z / T15:49:04Z, per `ask_changes`
+audit rows -- roughly nine seconds apart, and only minutes before this
+investigation's own read queries ran. This investigation performed
+zero writes; this is a pre-existing state discovered while querying,
+almost certainly the user's own action (via the existing Ask Management
+UI's `PATCH /api/asks/[id]`) after reading this morning's email. A
+live re-check of `/api/agenda/preview?format=json` after this change
+confirms the mechanism works exactly as designed: `evidence.openAsk`
+is sourced from `SELECT ... FROM asks WHERE ... status = 'pending'`
+(`lib/workspace/live-data.ts`), so once status changed, both
+candidates disappeared from Suggested with no further code involved --
+today's real Suggested list is back to Pollack/Schabes/Grinblatt
+(`follow_up_pledge`). This is, in effect, a live demonstration of
+finding #5 below: closing the loop requires an explicit human action;
+nothing in the pipeline does it automatically.
+
+### 5. Should a very old unresolved Ask sometimes produce a different recommendation?
+
+**Yes -- and the evidence above shows why, without needing an age
+cutoff.** The problem this investigation found is not "asks over N
+days old should be treated differently" (that would just be a new
+arbitrary threshold layered on top of the existing 180-day one). The
+problem is that **the engine already has, in the same evidence object,
+a date (`mostRecentPaidGift.occurredAt`) that can directly answer "did
+something happen after this ask that the ask itself doesn't reflect,"
+and never asks that question.** Rovinsky's case makes this concrete: a
+gift for the *exact* asked amount landed within a day, and the
+recommendation stayed "follow up on the ask" for 331 days regardless.
+The right response to a very old ask is not automatically "review/
+close" either -- for a donor with a real interaction after the ask
+that doesn't mention it, "follow up" may still be exactly correct. The
+missing piece is narrower and more principled: **compare `askedAt`
+against `mostRecentPaidGift.occurredAt` (and `openPledge.activityDate`,
+already in the same evidence) before deciding what to recommend.**
+
+### 6. What prevents the same Suggested Action from repeating indefinitely
+
+Nothing automatic. There is no decay, cooldown, snooze, or "shown N
+times" counter anywhere in `recommendation-candidates.ts`/
+`recommendation-rank.ts`/`live-data.ts`/`agenda-model.ts` for
+Suggested-kind recommendations. Two manual escape valves exist today,
+neither reachable from the email itself:
+1. **Resolve the underlying fact** -- mark the ask `committed`/
+   `declined`/`withdrawn` (Ask Management UI, `PATCH /api/asks/[id]`)
+   or pay down the pledge. Demonstrated live in #4 above.
+2. **"Dismiss suggestion"** on the homepage writes the exact `queueId`
+   (`recommendation:<donorId>:<kind>`) into `relationship_queue_
+   dismissals`, and `dedupeRelationshipQueue` -- shared by both the
+   homepage and `generateAgenda()`'s `context: "daily-agenda"` call --
+   filters on that same table, so a homepage dismissal genuinely also
+   suppresses the next day's email. But the email itself only renders
+   an "Open in Fundraising OS" link -- there is no dismiss/resolve
+   action reachable directly from the email, so a fundraiser who only
+   reads the email (never opens the app) has no way to stop a
+   recommendation from repeating short of acting on the underlying ask/
+   pledge. (A dismissal is also donor+kind-scoped, not ask-instance-
+   scoped -- a future new ask of the same kind on the same donor would
+   not be dismissed by a stale old dismissal, which is correct, but
+   also means dismissal is not a substitute for real ask-resolution
+   tracking.)
+
+### 7. Seven-day Important Dates window -- re-verified, no defect found
+
+Per instruction, treated as working unless a defect was found; none
+was. A same-day re-check of `/api/agenda/preview?format=json` (now
+Thursday, Aug 27) shows the window rolling forward exactly as
+designed: Myers/Wisotsky moved from "In 5 days" (Aug 26 email) to "In
+4 days" today, Jaspan moved from "In 7 days" to "In 6 days," and a new
+item (Shimmy Ramras, "In 7 days, Sep 3") entered the window at the
+7-day boundary as time advanced -- exactly the intended "shown every
+day while inside the window, re-derived fresh" behavior from the
+original implementation. **No change made or recommended to this
+part of the system.**
+
+### Smallest principled recommendation-engine improvement (proposed, NOT implemented this round)
+
+In `openAskCandidate()` (`lib/relationships/recommendation-
+candidates.ts`), before building the default "still pending" wording,
+compare `ask.askedAt` against `evidence.giving.mostRecentPaidGift?.
+occurredAt` (and, if present, `evidence.giving.openPledge?.
+activityDate`) -- both already computed, already in the same evidence
+object, zero new D1 queries, zero schema change, zero arbitrary day
+threshold. When a paid gift (or pledge activity) postdates the ask,
+change the candidate's `action`/`why` to an honest "verify" framing --
+e.g. "Confirm whether the {amount} ask to {purpose} is already
+resolved -- a gift was recorded on {date}, after the ask was made" --
+rather than the current unconditional "Follow up on the ask." This
+does not require deciding *whether* the ask is resolved (that
+remains a human judgment, correctly gated behind the existing
+`pending`/`committed`/`declined`/`withdrawn` status machine in `lib/
+capture/ask.ts`) -- it only requires the recommendation to stop
+asserting the ask is still simply "pending, follow up" once the
+engine's own evidence already contains a fact in tension with that.
+As a smaller, secondary follow-on (not required for the above): feed
+whether an ask already has an active follow-up reminder (via the
+existing `ask-<askId>-` id-prefix convention `matchAskFollowUps`
+already uses) into `RecommendationEvidenceInput.openAsk`, so
+`openAskCandidate` -- or a future rank-level rule -- can defer to an
+explicit fundraiser-scheduled follow-up instead of risking silently
+outscoring it, per #3 above.
+
+**Not done this round, by explicit instruction:** no code change, no
+D1 mutation, no manual email, no deployment, no production/main
+access. This section is investigation and recommendation only, for the
+user's review.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -10519,6 +10768,25 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**Genuinely open, newest first: Open-Ask recommendation quality fix --
+awaiting the user's decision (2026-08-27).** See "Open-Ask
+Recommendation Quality Investigation" above for the full record. This
+was investigation only, per explicit instruction -- no code was
+changed, no D1 write, no deploy. Finding: `openAskCandidate()` never
+cross-references `evidence.giving.mostRecentPaidGift`/`openPledge`
+against the ask's own `askedAt`, so a gift that already (fully or
+partially) answers a pending ask never changes the recommendation --
+demonstrated live for both donors in the trigger email (Rovinsky
+received a matching $5,000 gift the day after his $5,000 ask; Pfeiffer
+received a $5,000 gift 1.5 days after his $10,000 ask). Proposed
+smallest fix: compare those already-computed dates inside
+`openAskCandidate` and switch to a "verify whether this is already
+resolved" wording when a later gift/pledge activity exists, using zero
+new queries, zero schema change, and no arbitrary age cutoff. Decision
+needed: approve this candidate-wording fix (and, optionally, the
+smaller secondary ask-specific-reminder cross-reference) for
+implementation, adjust the approach, or decline.
+
 **RESOLVED 2026-08-26 -- Daily Fundraising Agenda quality corrections
 are deployed to Independent Staging and live-verified end-to-end;
 nothing further required.** See "Daily Fundraising Agenda Quality
@@ -10667,6 +10935,52 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-27T16:15:00Z (approximate)
+Claude (Sonnet 5) — Investigated open_ask recommendation quality per
+explicit instruction, investigation only (no code change, no D1
+mutation, no deploy). Traced the exact 0.8075 score for both Pfeiffer
+and Rovinsky to openAskCandidate's formula: specificity 0.75 and
+recency 0.7 are constants, urgency = clamp01(ageDays/180) saturates to
+1.0 for both since their ages (345/331 days) are both far past the
+180-day horizon -- explaining why two asks of different ages score
+identically. Confirmed via code (recommendation-candidates.ts/
+recommendation-rank.ts/recommendation-evidence.ts) that openAskCandidate
+reads only amountCents/purpose/askedAt, and structurally never
+consults lastCompletedInteraction, reminders (including the existing
+ask-<askId>- reminder-link convention meeting-brief-model.ts already
+uses), completed follow-ups (none exist for either donor -- confirmed
+empirically), relationship narrative text, or mostRecentPaidGift/
+openPledge activity -- all already present in the same evidence
+object. Pulled real staging data (read-only) for both donors and found
+the concrete case: Rovinsky's $5,000 ask was followed the very next
+day by a $5,000 completed gift for the exact amount, and Pfeiffer's
+$10,000 ask was followed 1.5 days later by a $5,000 completed gift --
+neither cross-referenced, so the recommendation repeated unchanged for
+331/345 days. Also found, live and unprompted by this investigation,
+that both asks' status had just been manually changed away from
+pending (Pfeiffer declined, Rovinsky committed) via ask_changes audit
+rows timestamped minutes before this investigation's own queries --
+confirmed this correctly removed both from Suggested on a live
+re-check, demonstrating the only existing mechanisms against
+indefinite repetition are manual (resolving the ask's status, or the
+homepage's donor+kind-scoped "Dismiss suggestion," neither reachable
+from the email itself) -- no automatic decay/cooldown exists anywhere
+in the pipeline. Re-verified the 7-day Important Dates window on a
+same-day re-check (Aug 26 -> Aug 27): confirmed correct rolling
+behavior (5/5/7 days -> 4/4/6 days, plus a new item entering at the
+7-day boundary), no defect, no change made. Proposed (not implemented)
+the smallest principled fix: cross-reference the ask's askedAt against
+the already-computed mostRecentPaidGift/openPledge dates inside
+openAskCandidate, switching to a "verify whether already resolved"
+wording when a later gift/pledge activity exists -- zero new queries,
+zero schema change, no arbitrary age cutoff. Documented full findings
+in "Open-Ask Recommendation Quality Investigation," updated "Next
+Approval Required" and "Current Git State" accordingly. Committed and
+pushed the docs-only update to feature/independent-cloudflare-sandbox.
+No production/main access.
+
+---
 
 2026-08-27T02:30:00Z (approximate)
 Claude (Sonnet 5) — Deployed the approved Daily Fundraising Agenda
