@@ -15,7 +15,26 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`1de5dd8`** -- "Document portfolio-level
+**`(pending — see follow-up commit)`** -- "Document financial-data-
+model audit correcting the portfolio-level investigation (2026-08-27)"
+-- docs-only, zero application code change, zero D1 mutation; see
+"Financial-Data-Model Audit -- Correcting the Portfolio-Level
+Investigation" below. **Important: this corrects material errors in
+the "Portfolio-Level 30-Day Focus Investigation" section immediately
+below it** -- two bugs in that investigation's own read-only analysis
+script (a category filter that excluded `partially_paid_pledge` rows,
+and a missing `id` column that broke the pledge-payment-audit join)
+caused Jonathan Spetner specifically, and the portfolio-wide
+`acknowledge_gift`/"82% score 0.3150" headline claim, to be wrong.
+Both bugs were confirmed to be in the investigation script only, not
+in the deployed application (independently verified against the real,
+live donor page). See the newer section for the full corrected
+figures; the original section's specific retracted claims are called
+out there rather than silently edited. Investigation only -- no
+recommendation is approved for implementation. Sits on top of
+`d235622` ("Correct Current Git State to reference the new HEAD
+(1de5dd8)" -- docs-only, zero application code change), which sits on
+top of **`1de5dd8`** -- "Document portfolio-level
 30-day focus investigation (2026-08-27)" -- docs-only, zero
 application code change, zero D1 mutation; see "Portfolio-Level 30-Day
 Focus Investigation" below for the full 30-day focus list, stress-test
@@ -10637,6 +10656,321 @@ the list with near-duplicates.
 No recommendation above should be read as approved for
 implementation -- this section is analysis and options, not a plan.
 
+## Financial-Data-Model Audit -- Correcting the Portfolio-Level Investigation (2026-08-27) -- INVESTIGATION ONLY, NO CODE CHANGE, NO D1 MUTATION, NO DEPLOY
+
+**The user identified a concrete contradiction:** Jonathan Spetner was
+characterized above as "giving stopped entirely," "$0 last 365 days,"
+"most recent gift ~700 days ago" -- but real fundraising context is
+that he made a pledge in September 2025 and has almost paid it off.
+**The correction is confirmed, and it is worse than one donor: this
+investigation's own analysis script had two real bugs that materially
+distorted the 30-day focus investigation above.** Both bugs were in
+the read-only analysis script written for that investigation, not (as
+traced and independently verified below) in the actual Fundraising OS
+application.
+
+### 1. Spetner's real financial history, reconstructed end-to-end
+
+Read-only queries against `giving_activities`, `jl_payment_assignment_
+audits`, `pledge_payment_plans`, `asks`, `interactions`, and
+`donors.relationship_summary`/`institutional_memory` for donor id
+`3abc9f0b-30a2-43f6-9f07-63938f9dc043`, then independently confirmed
+against the real, live donor page in the app (`/donors/3abc9f0b-...`,
+read-only, no write):
+
+- **2025-09-26:** a pledge is created -- one `giving_activities` row
+  (`f511ba5a-...`), category `partially_paid_pledge`, campaign
+  "CT2025." This single row is the pledge's entire record; there is no
+  separate row per payment.
+- An active `pledge_payment_plans` row exists for this pledge: **$1,000/
+  month, due the 17th of each month**, `ended_at IS NULL` (still
+  active), `final_expected_payment_at` = 2026-10-17.
+- As of today, the pledge row shows **`paid_cents` = $10,000,
+  `balance_cents` = $2,000`** -- a $12,000 total commitment, 83% paid.
+  The live donor page confirms this exactly: "LIFETIME PAID $100,361...
+  OPEN COMMITMENTS $2,000... 1 open pledge, $2,000, CT2025."
+- Only **one** individual payment has a matching `jl_payment_
+  assignment_audits` row: **$1,000, applied 2026-08-17 (10 days before
+  this audit)**. The live donor page's own "MOST RECENT PAID GIFT"
+  card independently confirms this exact figure and date: "$1,000 ·
+  Aug 17, 2026." The other $9,000 of the pledge's `paid_cents` has no
+  matching per-payment audit row at all -- it was evidently already
+  reflected in the pledge's `paid_cents` before the audit-trail
+  mechanism logged this most recent installment (nine prior monthly
+  payments, most plausibly, given the plan is Sept 2025 -> present).
+  That $9,000 cannot be dated more precisely than "on or after the
+  pledge's own creation date, 2025-09-26" -- which is itself only 335
+  days ago, safely inside the trailing 365-day window regardless of
+  exactly when within that window each of the nine payments landed.
+- **Zero interactions were ever recorded for this donor** (confirmed,
+  unchanged from the original investigation -- this part of the
+  original characterization was correct). No pending Ask (correct --
+  this was a pledge, never a tracked Ask). No Relationship Intelligence
+  narrative (correct, unchanged).
+
+**Correct chronological summary:** Spetner made a real, current,
+**$12,000 pledge in September 2025 and has been paying it down on an
+active, on-schedule $1,000/month plan ever since**, most recently 10
+days before this audit, with two payments left before the pledge is
+fully retired in October 2026. This is the opposite of "lapsed" --
+"giving stopped entirely" and "700 days" were flatly wrong.
+
+### Why the prior investigation got this wrong -- two distinct, now-fixed bugs in the analysis script (not in the application)
+
+**Bug 1 -- a category filter that silently excluded the exact rows
+this investigation most needed.** `giving_activities.category` has
+three cash-relevant values: `completed_gift`, `open_pledge`, and
+**`partially_paid_pledge`** (plus three non-financial categories
+already correctly excluded everywhere: `needs_review`,
+`nonfinancial_entry`, `pending_gift`). The original analysis script
+filtered for "gifts" using `category === "completed_gift"` and for
+"open pledges" using `category === "open_pledge"` -- **both filters
+silently excluded every `partially_paid_pledge` row**, portfolio-wide.
+Real production code (`lib/workspace/live-data.ts`) never filters this
+way: its own `giving_activities` query only excludes the three
+non-financial categories, and it derives "is this a gift" / "is this a
+pledge" from `paid_cents > 0` / `balance_cents > 0` respectively --
+category-agnostic, exactly the check this audit's corrected script now
+uses. Portfolio-wide, **53 `giving_activities` rows carry the
+`partially_paid_pledge` category, representing $76,169.50 of real cash
+already received** that the original investigation's "total lifetime
+giving" figure ($3,394,576) silently omitted -- the corrected total is
+**$3,470,745.30**. **58 donors** (not the 21 originally reported) have
+a real open-pledge-category row once `partially_paid_pledge` is
+counted.
+
+**Bug 2 -- a missing `id` column broke the payment-audit join for
+every pledge.** The script's own `giving_activities` read-only pull
+never selected the `id` column, so `resolveOpenPledgeActivityDate()`
+(the exact, real, unmodified production function used to resolve "when
+was this pledge's last payment") could never match a pledge to its
+`jl_payment_assignment_audits` rows, and silently fell back to the
+pledge's raw, frozen creation date for every single pledge in the
+portfolio -- for Spetner this alone would have shown 335 days instead
+of the correct 10. Fixed by re-pulling `giving_activities` with `id`
+included; independently confirmed correct against the live donor page
+above (both showed "10 days," "$1,000," "Aug 17, 2026" identically).
+
+**A third, related but distinct issue, found while fixing the above:**
+the original script also fed `evidence.giving.mostRecentPaidGift` from
+the single most-recent-dated paid row for *every* donor with any
+paid_cents ever recorded, with no recency window. Real production code
+(`live-data.ts`'s `recentGiftByDonor`) only ever populates this field
+when the row's `activity_date` is within the **trailing 30 days**
+(`isRecentPastEvent`) -- feeding it unconditionally, as the original
+script did, does not reproduce what the real Suggested/Daily-Agenda
+pipeline actually computes. This is not a "gift vs. pledge" confusion
+like bugs 1-2; it is a separate fidelity gap in how the script built
+evidence at all. Concretely, it caused the original investigation to
+report Rabbi & Mrs. Yehuda Fried, Mr. & Mrs. David B. Rosenbaum, and
+Mr. & Mrs. Nachum Rosenberg as the engine's top-scoring items
+(`acknowledge_gift`, 0.9650, "gift recorded today") -- **their gifts
+are actually dated in the future** relative to "now" (a separate,
+real data-timestamp curiosity in this fictional dataset, not
+investigated further here), which fails `isRecentPastEvent`'s own
+`eventAt <= now` check. Corrected, all three donors' real recommendation
+is `reconnect_contact_gap` at 0.2375, identical to most of the
+portfolio -- **the original "0.9650 top scorers" claim is retracted.**
+
+**One further, real (not this script's bug) finding surfaced while
+verifying against the live app:** the donor page's own Suggested
+Action widget (`app/donors/[id]/page.tsx`'s `mostRecentPaidGiftForEvidence`,
+line 258) has **no recency gate at all** -- it always uses the single
+most-recent-dated paid row, unlike `live-data.ts`'s 30-day-gated
+`recentGiftByDonor`. This is why the live donor page actually shows
+Spetner's Suggested Action as "Send a personal thank-you for the
+recent $10,000 gift to CT2025 -- No dated urgency" (treating the whole
+pledge's cumulative `paid_cents` as if newly gifted) rather than the
+`follow_up_pledge`/"No payment activity in 10 days" this audit's
+corrected, `live-data.ts`-faithful reconstruction computes. **The
+donor page and the homepage/Daily-Agenda pipeline can genuinely
+disagree about the same donor's recommendation today** -- a real,
+evidenced cross-surface inconsistency, flagged here for awareness, not
+investigated further (out of this round's scope) or fixed (no code
+changes this round).
+
+### 2. The authoritative financial data model
+
+- **A gift** (`giving_activities.category = 'completed_gift'`): a
+  single, fully-realized cash event. `paid_cents` = the full amount,
+  `balance_cents` is always 0, `activity_date` is the real date the
+  cash was received and is never touched again.
+- **A pledge**: a donor's commitment to give a total amount over time,
+  represented by exactly **one** `giving_activities` row per pledge,
+  in one of two states: `open_pledge` (`paid_cents = 0`, nothing paid
+  yet) or `partially_paid_pledge` (`paid_cents > 0 AND balance_cents >
+  0`, partway paid). `paid_cents + balance_cents` is the fixed original
+  commitment total and does not change as payments are applied.
+- **What represents a payment against a pledge:** two things, and
+  conflating them is exactly what caused this error. (a) The pledge's
+  own `paid_cents`/`balance_cents` are mutated **in place** every time
+  a payment is applied -- this is the current *aggregate* state, not a
+  dated event. (b) `jl_payment_assignment_audits` (`pledge_activity_id`,
+  `applied_cents`, `payment_date`) is the *per-payment ledger* -- the
+  only place an individual payment's real date lives. **A pledge
+  payment never creates a new `completed_gift` row** -- confirmed
+  directly by Spetner's data (one pledge row, ten monthly payments,
+  zero additional `giving_activities` rows).
+- **`giving_activities.activity_date` on a pledge row is frozen at the
+  pledge's creation/commitment date and is *never* updated when a
+  payment is applied** -- this is the single fact the original
+  investigation's category filters obscured entirely (by excluding the
+  row) and that bug 2 then computed wrong even once the row was found
+  (by not joining to the one place the real payment date lives). Not
+  every payment necessarily has an audit row (Spetner: 1 of 10
+  did) -- an unaudited remainder should be attributed to the pledge's
+  own `activity_date` as the earliest defensible bound, never a later,
+  invented date.
+- **Remaining pledge balance** is stored directly on the pledge's own
+  row (`balance_cents`) -- not derived or computed elsewhere.
+- **Cash received in a period** = `completed_gift.paid_cents` dated by
+  its own `activity_date`, **plus** `jl_payment_assignment_audits.
+  applied_cents` dated by `payment_date` for the donor's pledges, plus
+  any unaudited pledge-`paid_cents` remainder attributed to that
+  pledge's own `activity_date`.
+- **New commitments made in a period** = the full `paid_cents +
+  balance_cents` total of any pledge (`open_pledge`/`partially_paid_
+  pledge`) whose own `activity_date` (a reliable creation-date signal,
+  since it's never mutated) falls in that period. A `completed_gift`'s
+  `paid_cents` is a same-moment commitment-and-cash event and must not
+  be counted again separately.
+- **Total fundraising activity** (broadest, least useful for
+  prioritization on its own) = the union of all of the above.
+- **Lifetime giving/received** = the sum of all real cash across all
+  three categories, category-agnostic (never `completed_gift`-only).
+
+### 3. Corrected financial profiles for all 10 focus-list donors
+
+Recomputed with the corrected, category-agnostic, audit-trail-joined
+methodology above, then spot-checked against the real recommendation
+engine.
+
+| Donor | Lifetime received | Cash, last 365d | Cash, prior 365d | Open pledge (corrected) | Real recommendation (corrected) | In pool? |
+|---|---|---|---|---|---|---|
+| Yale Miller | $199,150 | $3,600 | $1,800 | none | `reconnect_contact_gap`, 0.2375 | No |
+| Manuel Schnaidman | $158,202 | $1,000 | $1,000 | none | `reconnect_contact_gap`, 0.2375 | No |
+| Tzvi Ray | $114,026 (was $113,676) | $5,760 | $25,360 | **$10 balance, `partially_paid_pledge`, 1,913 days old (~5.2 yrs) -- newly found** | `follow_up_pledge`, 0.6500 (was reported as `acknowledge_gift` 0.315/invisible) | **Yes (was reported No)** |
+| Mordechai Schwartz | $101,885 | $36,000 | $13,080 | $36,000 balance, `open_pledge`, 59 days -- unchanged | `follow_up_pledge`, 0.4483 -- unchanged | Yes |
+| Jonathan Spetner | **$100,361 (was $90,361)** | **$10,000 (was $0)** | $10,000 (a separate, unrelated 2024 gift) | $2,000 balance, `partially_paid_pledge`, **10 days old (was reported 700)** | `follow_up_pledge`, "No payment activity in 10 days," 0.3667 (was reported `acknowledge_gift`, 0.315, invisible) | **Yes (was reported No)** |
+| Dovie Weinschneider | $89,931 | $23,500 | $610 | none | `honor_reminder`, 0.7575 -- unchanged | Yes |
+| Tzvi Shlionsky | $70,500 | $20,000 | $15,000 | none | `relationship_opportunity`, 0.4186 -- unchanged | Yes |
+| Yaakov Abdelhak | $40,714 | $5,000 | $0 | none | `relationship_opportunity`, 0.4186 -- unchanged | Yes |
+| Eitan Zeffren | $56,920 | $18,000 | $36,000 | none | `honor_reminder`, 0.7575 -- unchanged | Yes |
+| Mayer Simcha Klein | $21,189 | $3,600 | $3,600 | none | `solicit`, 0.4590 -- unchanged | Yes |
+
+**Six of ten (Schwartz, Weinschneider, Shlionsky, Abdelhak, Zeffren,
+Klein) are unchanged and were already correct** -- none of these six
+have any pledge-category row at all, so the category-filter bug never
+touched them; independently re-verified with the corrected script.
+**Two (Spetner, Ray) were materially wrong** in exactly the way the
+user identified. **Two (Miller, Schnaidman) are unchanged and remain
+genuinely correct as originally described** -- both have zero pledge
+activity of any kind; their "invisible, zero contact, largest
+donors" characterization holds.
+
+### 4. Stress-testing the strategic conclusions after correction
+
+- **Does Spetner still qualify as lapsed/re-engagement priority? No.**
+  He should be removed from that framing entirely and reclassified as
+  a **currently-active, on-schedule pledge nearing completion** --
+  stewardship-level attention (make sure the plan finishes cleanly,
+  perhaps a acknowledgment once it does) rather than any re-engagement
+  outreach. The one thing that remains genuinely true and still
+  worth surfacing: **zero interactions have ever been logged** for a
+  donor who has quietly paid $10,000 on schedule -- that is a real
+  relationship-documentation gap, just not a "lapsed donor" one.
+- **Which other donors were incorrectly characterized as declining,
+  inactive, or growing?** Tzvi Ray's *decline* claim (giving down from
+  $25,360 to $5,760) is confirmed still correct on the corrected cash
+  figures -- but the claim that he was "zero interactions, invisible to
+  the queue" was wrong: he is actually in the pool today via a nearly-
+  irrelevant $10 legacy pledge balance (5.2 years old), which is itself
+  a strong illustration of a different real gap (see below). No
+  donor's *growth* claims (Schwartz +175%, Weinschneider +38x,
+  Shlionsky +33%) changed -- none of the three has any pledge-category
+  row, so they were never exposed to either bug.
+- **Does the central conclusion that Portfolio Focus needs a separate
+  strategic layer still hold? Yes -- more strongly, on corrected
+  numbers.** The corrected portfolio-wide recommendation-kind
+  distribution is **`reconnect_contact_gap`: 198 of 248 (80%), all at
+  an identical flat score of 0.2375** (not the originally-reported
+  `acknowledge_gift`/0.3150 for 203 donors -- that specific claim is
+  retracted, but the underlying finding -- the vast majority of the
+  portfolio collapses to one indistinguishable, generic recommendation
+  -- is confirmed, and by an even larger margin than originally
+  reported). 79 of 248 donors still fall outside the Suggested pool
+  entirely (was 93 -- fewer once pledges are correctly detected, but
+  still meaningful, including Miller and Schnaidman, the portfolio's
+  #1 and #2 lifetime donors).
+- **Which proposed signals remain valid once cash receipts and pledge
+  commitments are correctly separated?** All six gaps identified in
+  the original investigation remain valid and are untouched by this
+  correction (none of Klein/Rovinsky/Pfeiffer's stale-narrative
+  problem, Abdelhak's broadcast-vs-substantive gap, or Schwartz's
+  open-pledge-with-no-relationship-context case involved a
+  pledge-payment date at all). **One is now corroborated by a second,
+  independent real example:** the "stale, effectively-dead pledge"
+  gap (previously evidenced only by Pollack's 27.7-year-old $60
+  pledge) now has a second real case -- **Tzvi Ray's own $10 balance,
+  1,913 days (5.2 years) old**, discovered only because this audit
+  finally looked at `partially_paid_pledge` rows correctly.
+
+### 5. Safe metrics for a future Portfolio Focus layer -- no new scoring formula
+
+The smallest, schema-existing set that would prevent this exact class
+of error from recurring, kept as **separate, named metrics** rather
+than one collapsed "giving" number:
+
+1. **Cash received, trailing 12 months** -- `completed_gift.paid_cents`
+   by `activity_date`, plus `jl_payment_assignment_audits.applied_cents`
+   by `payment_date` for the donor's pledges, plus any unaudited pledge
+   remainder attributed to that pledge's own `activity_date`. Requires
+   only a logic change (join an already-existing table this codebase
+   already queries for a different purpose -- `resolveOpenPledgeActivityDate`
+   already uses it for a single date, not yet for a full period sum).
+2. **Cash received, prior 12 months** -- same computation, prior
+   window, for trend comparison.
+3. **New commitments, trailing 12 months** -- pledge `paid_cents +
+   balance_cents` totals by the pledge's own `activity_date`, kept
+   **separate** from cash received (a new $12,000 pledge and $12,000
+   of cash received are not the same fact, as Spetner's case shows
+   directly: he made a new commitment 335 days ago and has been
+   converting it to cash gradually ever since).
+4. **Outstanding pledge balance** -- already correctly stored
+   (`balance_cents`); this audit's only fix was to stop excluding
+   `partially_paid_pledge` rows from ever being looked at.
+5. **Payment recency** -- already correctly implemented in production
+   (`resolveOpenPledgeActivityDate`, verified working correctly against
+   the live app for Spetner in this very audit); no change needed
+   there, only in how this investigation's own script reproduced it.
+6. **Lifetime received** -- category-agnostic sum across all three
+   cash-bearing categories (this audit's corrected total: $3,470,745.30).
+7. **Pledge fulfillment progress** (`paid_cents / (paid_cents +
+   balance_cents)`) -- not previously proposed; worth naming
+   explicitly because it is what actually distinguishes Spetner (83%
+   paid, on schedule) from a donor who pledged and never paid a cent
+   (`open_pledge`, 0% paid) -- two donors a single "has an open
+   pledge" flag would otherwise treat identically.
+
+Explicitly **not** proposed: any single blended "giving" score. The
+whole root cause of this error was collapsing distinct, schema-real
+concepts (a one-time gift, a pledge's original commitment, and an
+individual payment against that pledge) into one number:
+`recentGiveByDonor`. Any future Portfolio Focus layer should keep them
+visibly separate metrics, per the user's own framing, not fold them
+back together the moment someone builds a UI on top of them.
+
+**Constraints honored throughout:** read-only staging investigation;
+every figure traced to a real `wrangler d1 execute` query or the real,
+unmodified production functions, independently cross-checked against
+the live donor page (read-only page view, no write action taken); zero
+D1 writes; zero code changes; zero new scoring formula; no deployment;
+no production/main access; the numbers above were derived by tracing
+and fixing the underlying data model and script, never hand-edited in
+this document without that trace.
+
+**Stopping for review before implementation**, per instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -11465,16 +11799,25 @@ relationship-intelligence quality work):
 ## Next Approval Required
 
 **Genuinely open, newest first: Portfolio-level 30-day focus
-investigation -- awaiting the user's decision on what, if anything, to
-build (2026-08-27).** See "Portfolio-Level 30-Day Focus Investigation"
-above for the full record. Headline finding: the recommendation engine
-is good at tactical next actions (Weinschneider/Zeffren, its own top
-scores, are correctly handled) but has no portfolio-level strategic
-prioritization capability at all -- 82% of the portfolio (203/248
-donors) scores an identical 0.3150 regardless of dollar value, and 5
-of the portfolio's 10 largest lifetime donors (Miller, Schnaidman,
-Ray, Spetner, Saidian) are structurally invisible to the Suggested
-queue. Six missing-intelligence gaps identified and proven from real
+investigation, now financial-data-corrected -- awaiting the user's
+decision on what, if anything, to build (2026-08-27).** See
+"Financial-Data-Model Audit -- Correcting the Portfolio-Level
+Investigation" above for the corrected figures, then "Portfolio-Level
+30-Day Focus Investigation" for the rest of the original record (its
+specific financial claims about Spetner and the portfolio-wide
+`acknowledge_gift`/0.3150 figure are superseded -- see the audit
+section for exactly what changed and why). Corrected headline finding:
+the recommendation engine is good at tactical next actions
+(Weinschneider/Zeffren are correctly handled) but has no portfolio-
+level strategic prioritization capability at all -- **corrected**: 80%
+of the portfolio (198/248 donors) scores an identical 0.2375
+(`reconnect_contact_gap`, not the originally-reported `acknowledge_
+gift`/0.3150), and 2 of the portfolio's 10 largest lifetime donors
+(Miller, Schnaidman -- not 5, per the correction) are structurally
+invisible to the Suggested queue; Ray, Spetner, and Saidian are
+technically in the pool but via trivial or misleading pledge fragments
+that don't reflect their real value. Six missing-intelligence gaps
+identified and proven from real
 donor examples, ranked smallest-first: giving trajectory (logic-only),
 portfolio-value/capacity awareness in scoring (would need a new
 scoring dimension -- out of scope for a "smallest fix"), Ask/
@@ -11657,6 +12000,57 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T00:30:00Z (approximate)
+Claude (Sonnet 5) — Audited the financial-data-model interpretation
+behind the portfolio-level 30-day focus investigation per explicit
+instruction, after the user identified that Jonathan Spetner was
+wrongly characterized as lapsed ($0 last 365 days, gift ~700 days ago)
+when he actually made a $12,000 pledge in September 2025 and has paid
+83% of it via an active $1,000/month plan, most recently 10 days ago.
+Investigation only: no code change, no D1 mutation, no new scoring
+formula, no deploy. Traced the root cause to two bugs in the prior
+investigation's own read-only analysis script, neither in the deployed
+application: (1) a category filter (`category === "completed_gift"`/
+`"open_pledge"`) that silently excluded every `partially_paid_pledge`
+row -- a real, distinct giving_activities category (53 rows
+portfolio-wide, $76,169.50 of real cash) production's own live-data.ts
+never filters out (it derives gift/pledge status from paid_cents>0/
+balance_cents>0, category-agnostically); (2) the script's own
+giving_activities SQL SELECT never included the `id` column, silently
+breaking the join to jl_payment_assignment_audits that
+resolveOpenPledgeActivityDate (the real, unmodified production
+function) needs to find a pledge's actual last-payment date, causing
+every pledge's age to fall back to its frozen creation date. Verified
+both fixes directly against the live donor page (read-only page view):
+production showed Spetner's $1,000/Aug 17, 2026 most recent payment
+and $2,000/$12,000 open commitment identically to the corrected
+script's output, confirming the bugs were in the investigation only.
+Also found and corrected a third, related script gap (mostRecentPaidGift
+fed without production's real 30-day recency gate, causing three
+unrelated donors -- Fried, Rosenbaum, Rosenberg -- whose gifts are
+actually future-dated to be wrongly reported as the engine's top
+scorers), and, as a byproduct of the live verification, a real
+(unfixed, out of scope) cross-surface inconsistency: the donor page's
+own Suggested Action widget has no recency gate at all, unlike
+live-data.ts, so the same donor can show a different recommendation on
+the donor page vs. the homepage/Daily Agenda today. Documented the
+complete Spetner reconciliation, the authoritative financial-data
+model (gift vs. pledge vs. payment-against-a-pledge, cash-received vs.
+new-commitments vs. lifetime-received as separate, non-collapsible
+metrics), re-audited all 10 focus-list donors (6 unchanged and
+already correct; 2 -- Spetner and Ray -- materially corrected; 2 --
+Miller and Schnaidman -- unchanged and confirmed still correct),
+re-ran the stress-test questions post-correction (central conclusion
+holds and is corroborated by a second stale-pledge example, Ray's
+5.2-year-old $10 balance), and recommended 7 separate, named financial
+metrics (never one blended "giving" score) for any future Portfolio
+Focus layer. Updated "Next Approval Required" and "Current Git State"
+to point to the correction. Committed and pushed the docs-only update
+to feature/independent-cloudflare-sandbox. No production/main access.
+Stopping for review before implementation, per instruction.
+
+---
 
 2026-08-27T22:15:00Z (approximate)
 Claude (Sonnet 5) — Investigated portfolio-level 30-day fundraising
