@@ -15,7 +15,22 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`f2eadd1`** -- "Implement Stage 2: fact-level
+**(pending — see follow-up commit)** -- "Document Stage 2 deployment
+and live verification (2026-08-28)" -- docs-only, zero application
+code change; the application code was already reviewed and is
+unchanged from `f2eadd1`, now DEPLOYED to Independent Staging (Worker
+version `2029cd3c-c2e4-4fde-83bb-f628d126bf4b`) and live-verified
+through the real deployed app; see "Relationship Snapshot Architecture
+-- Stage 2 Deployed and Live-Verified (2026-08-28)" below. Klein/
+Pfeiffer's stale `solicit` and Rovinsky's stale `relationship_
+opportunity` confirmed live to no longer win, using real donor-page/
+Meeting Brief/Daily-Agenda screenshots and API responses -- not just
+unit tests. Two real controls (Nussbaum, a fact-having donor with
+genuinely current evidence; Weinschneider, a still-unmigrated legacy
+donor) confirmed unaffected, live. Zero D1 mutation from deploy or
+verification (before/after row counts and hashes identical). Cron,
+auth, and secrets all confirmed unchanged. All 3 gates re-pass. Sits
+on top of `f2eadd1` -- "Implement Stage 2: fact-level
 recommendation actionability (2026-08-28)" -- application code change
 (no D1 mutation, no schema, no deploy); see "Relationship Snapshot
 Architecture -- Stage 2 Implemented: Fact-Level Recommendation
@@ -13085,6 +13100,279 @@ Did not touch production or main. Did not alter `openAskCandidate()`
 **Stopping for review before starting Stage 3**, per explicit
 instruction.
 
+## Relationship Snapshot Architecture -- Stage 2 Deployed and Live-Verified (2026-08-28) -- DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED THROUGH REAL APPLICATION SURFACES, ZERO DATA MUTATION, STAGE 3 NOT STARTED
+
+**Scope, per explicit instruction:** deploy the already-implemented,
+already-reviewed Stage 2 commit (`f2eadd1`) to Independent Staging only,
+and verify through the real deployed application (not just unit tests
+or direct function calls) that it correctly distinguishes historically
+useful Relationship Intelligence from currently actionable
+recommendation evidence. No Stage 3 change. No production/main. No
+donor-data mutation for testing.
+
+### Pre-deploy verification
+
+Fresh `git fetch origin`: local HEAD (`467f96a`) matched
+`origin/feature/independent-cloudflare-sandbox` exactly, working tree
+clean. `git diff --stat f2eadd1 HEAD`: exactly one file, `docs/AI-
+HANDOFF.md`, one line -- confirmed application code at HEAD is
+byte-identical to the reviewed `f2eadd1`, not merely "similar." No
+unrelated commits had appeared. Stage 1's three facts re-verified fresh
+from D1, byte-identical to every prior check (same ids, fingerprints,
+`created_at`/`updated_at`). Ask statuses re-verified unchanged
+(Klein `declined`, Rovinsky `committed`, Pfeiffer `declined`, same
+`asked_at`/`source_interaction_id`/`updated_at` as every prior read).
+Deployed Worker version before this round: `913e21ce-
+c938-4711-8590-bddfdbcbfd57` (2026-08-27T16:55:11Z -- predates Stage 2).
+`wrangler.staging.jsonc`'s cron (`"0 * * * *"`) confirmed unchanged
+since its own 2026-08-26 approval commit (`bd1cf99`) -- `git diff` across
+every intervening commit shows zero touches to this file. All 3 gates
+re-run fresh immediately before deploying: `pnpm test` exit 0, `tsc
+--noEmit` clean, `build:staging-independent` completed.
+
+### Deploy
+
+`pnpm run deploy:staging-independent` (`wrangler deploy --config
+wrangler.staging.jsonc`) -- succeeded on the first attempt. **New
+deployed Worker version: `2029cd3c-c2e4-4fde-83bb-f628d126bf4b`**
+(2026-08-27T20:20:04Z), confirmed current via `wrangler deployments
+list`. Deploy output's own binding/trigger summary showed no change
+to any binding, and explicitly reprinted `schedule: 0 * * * *` --
+the identical, already-approved cron, not a new or modified trigger.
+`wrangler secret list` immediately after: the same 3 Gmail OAuth
+secrets, same names, unchanged. Independent Staging only -- `main` and
+production were never touched, confirmed by this session never running
+any command against them.
+
+### Live verification -- through the real deployed application (Claude-in-Chrome, already-authenticated Cloudflare Access session, read-only navigation only)
+
+**1. Klein** (`/donors/b5e8cc18-49f5-42c9-8511-26371ca3cef6`, live
+screenshot). Past Asks: **DECLINED $5,000 — Plaque, Asked Nov 6, 2025**
+-- unchanged. Institutional Memory card: **"Note context: Solicited
+for a plaque ($5k)"** -- the historical fact, fully intact, still
+displayed exactly as before (Stage 2 does not touch display, confirmed
+live, not just by design intent). Suggested Action card, directly
+below that same historical text on the same page: **"Reach out to
+re-establish contact." / "No contact has been recorded in 294 days." /
+"Last confirmed contact: 294 days ago."** -- `reconnect_contact_gap`,
+not `solicit`, not a generic `relationship_opportunity` quoting the
+"Solicited" text. This is the real, deployed, live proof of the exact
+distinction Stage 2 was built for: the historically-true fact remains
+visible one card above a Suggested Action that correctly no longer
+treats it as current. "Imported context (4)" expanded independently --
+purely historical display, unrelated to and not feeding the Suggested
+Action card.
+**2. Pfeiffer** (`/donors/d1b9cf78-2cdb-4546-9527-6210b95d16d4`). Past
+Asks: **DECLINED $10,000, Asked Sep 15, 2025** -- unchanged.
+Institutional Memory: **"Note context: Solicited for $10k"** -- intact.
+Suggested Action: **"Reach out to re-establish contact." / "No contact
+has been recorded in 346 days."** -- the cleanest of the three: no
+solicitation-flavored candidate of any kind survives for Pfeiffer,
+confirmed live.
+**3. Rovinsky** (`/donors/952a1cc7-c05a-42ed-a472-463fdb1d633b`). Past
+Asks: **COMMITTED $5,000 — Plaque in memory of his wife, Asked Sep 29,
+2025** -- unchanged. Open pledge $1,250 (`DYSP5786`) also confirmed
+live and unchanged. Institutional Memory: **"Note context: Solicited
+for a plaque in memory of his wife ($5k)"** -- intact. Suggested
+Action: **"Reach out to re-establish contact." / "No contact has been
+recorded in 332 days."** -- `reconnect_contact_gap`. **Explicitly
+distinguished, per instruction: his `solicit` candidate was already
+suppressed before Stage 2 existed, by the unrelated, pre-existing
+"open pledge vetoes solicit" hard constraint (`recommendation-
+rank.ts`) -- confirmed unchanged by this round (that file was not
+touched by Stage 2). The real Stage 2 effect for Rovinsky, confirmed
+live, is that `relationship_opportunity` (which was quoting the exact
+same stale "Solicited..." text pre-Stage-2, and is NOT covered by the
+pledge veto) no longer fires, so the winner correctly changes to
+`reconnect_contact_gap`.** Not claiming Stage 2 fixed something the
+pledge veto already handled -- claiming precisely what it did fix.
+
+### 4. Positive structured-fact control
+
+**Nussbaum** (`/donors/41e14d6a-74d4-4f8d-9307-9b38bfeb8402`, live).
+Fact: `"sent text to wish happy birthday."`, category
+`family_milestone`, lifecycle `durable` (fixed 0.3 baseline score,
+never decays), real `source_interaction_id`, accepted ~1 day before
+this fact's own creation. Relevance/actionability result: `durable`
+facts always clear `RELEVANCE_FLOOR` by construction (0.3 > 0.1), so
+`actionableAnyFact` is non-null. Resulting recommendation, confirmed
+live: **"Review before next outreach" / "Reach out and reference: sent
+text to wish happy birthday."** -- `relationship_opportunity`, firing
+correctly from the real fact. Why this remains appropriate: this is
+exactly the accumulate-and-stay-visible case Stage 2 must never
+suppress -- a durable, human-accepted fact with no resolved-Ask
+question hanging over it. Confirms Stage 2 does not overcorrect.
+
+### 5. Legacy control
+
+**Weinschneider** (`/donors/9a9e3a1f-50d6-42b6-b986-c7608f0b8e8e`, live,
+real donor, zero `donor_relationship_facts` rows, confirmed both in
+the prior round's real count and freshly here). Suggested Action,
+live: **"Follow up on 'Giving follow-up', Due 2026-10-06"** --
+`honor_reminder`, driven by a real open reminder that predates Stage 2
+entirely and is completely independent of the narrative-text/fact-gate
+question. This is exactly the pre-Stage-2 winner (matches this round's
+own code-level BEFORE/AFTER reconstruction from the implementation
+round, which is proven identical to actual pre-Stage-2 code by the
+regression suite's own "omitted vs. legacy" assertion) -- byte-for-byte
+equivalent, live-confirmed, not merely asserted from the code.
+
+### 6. Pending-Ask pinning control
+
+**No real donor in Independent Staging currently has a structured
+solicitation fact linked via `source_interaction_id` to a currently-
+PENDING ask** -- re-confirmed fresh this round: all 6 real `asks` rows
+system-wide are resolved (`committed`/`declined`), zero `pending`.
+Per explicit instruction, D1 was NOT mutated to manufacture this case.
+This behavior is instead verified through the existing deterministic
+regression test (`tests/relationship-fact-recommendation-
+actionability.test.mjs`, scenario 3): a solicitation fact whose
+`sourceInteractionId` matches a `pendingAskSourceInteractionIds` entry
+is pinned to score 1.0 regardless of age (200 days in the test fixture,
+which would otherwise be fully decayed) and remains a valid `solicit`
+candidate, while the existing, unmodified ranking still correctly
+prefers the real structured `open_ask` candidate as the sole winner --
+proving Stage 2 does not suppress a genuinely pending, ask-linked fact
+merely because it is old. **Stating explicitly, per instruction: no
+real staging case of this shape currently exists to verify live.**
+
+### 7. Recommendation surfaces -- all-surface consistency
+
+- **Donor page**: verified live for all 5 donors above.
+- **Meeting Brief** (`/donors/.../meeting-brief`): verified live for
+  Klein -- Suggested Action **"Reach out to re-establish contact."**,
+  byte-identical wording to the donor page, same donor, same moment.
+  Last Interaction card independently shows the historical "Solicited
+  for a plaque ($5k)" note (a display of the raw interaction record,
+  unrelated to and not contradicting the Suggested Action logic).
+- **Workspace/Homepage** (`/`, `/?priorities=all#coming-up-queue`):
+  the full "Later" priority queue (32 real, live items across both the
+  "Open commitment" and "Contact gap" buckets) was read via the
+  accessibility tree end to end. **Klein, Rovinsky, and Pfeiffer do not
+  appear in this aggregate view at all** -- investigated rather than
+  assumed benign: `lib/workspace/live-data.ts`'s `sortAt` for
+  `reconnect_contact_gap` is `-(daysSinceSubstantiveContact ??
+  MAX_SAFE_INTEGER)`, and the **identical formula shape already applied
+  to `solicit`/`relationship_opportunity`** before this round
+  (`-(daysSinceLastContact ?? MAX_SAFE_INTEGER)`, unchanged, untouched
+  by Stage 2). A donor with a real, specific, moderate day-count
+  (294/332/346 days) always sorts behind the large real population of
+  donors with `null` (never-contacted, sorted as maximally stale) days
+  -- a donor's presence or absence in this specific capped aggregate
+  view is governed entirely by `lib/workspace/suggestion-candidates.ts`
+  and this pre-existing `sortAt`/cap logic, neither of which Stage 2
+  touched. **This is not a new disagreement introduced by Stage 2** --
+  the same crowding-out would have applied to Klein's `solicit`
+  recommendation before this round too, for the identical reason.
+  Confirmed via code, not assumed: no incorrect recommendation leaks
+  into this view for any of the three (they simply don't appear, which
+  is a pre-existing display-cap characteristic of a large, mostly-
+  never-contacted real donor roster, not a Stage 2 side effect).
+- **Assistant** (`/assistant`): confirmed via source code (unchanged,
+  not touched by Stage 2) that it has no independent evidence-building
+  path -- it reuses `loadMeetingBrief()`'s already-computed
+  `.recommendation` field exclusively (`app/api/assistant/route.ts`).
+  The page loaded live with no errors. Per instruction, this is
+  confirmed through the Meeting Brief dependency rather than inventing
+  a separate Assistant-specific evidence check.
+- **No disagreement found** between any two surfaces for the same
+  donor at the same moment.
+
+### Daily Agenda preview
+
+`GET /api/agenda/preview?format=json` (authenticated, no email sent --
+confirmed the preview route has zero import of the sending module,
+unchanged from the prior deployment round's own structural
+verification). Returned live, real, valid JSON:
+- `isEmpty: false`, subject **"Fundraising Agenda — Thursday, August
+  27"**.
+- `todayPriorities: []`, `overdue: []` -- both empty, consistent with
+  the live Today page showing "No activities or follow-ups need
+  attention today."
+- **Important Dates (4 items, all within the existing 7-day-ish lead
+  window, unchanged behavior):** Paltiel Myers (in 4 days), Ezra
+  Wisotsky (in 4 days), Shaul Jaspan (in 6 days), Shimmy Ramras (in 7
+  days).
+- **Top three Suggested Actions, exactly as requested:**
+  1. Mr. & Mrs. Yaakov Pollack -- "Follow up on the open $1,300
+     pledge." (No payment activity in 259 days.)
+  2. Rabbi & Mrs. Ahron Schabes -- "Follow up on the open $2,950
+     pledge." (No payment activity in 255 days.)
+  3. Mr. Elie Grinblatt -- "Follow up on the open $500 pledge." (No
+     payment activity in 254 days and no completed interaction on
+     file.)
+  All three `follow_up_pledge`, matching (modulo one additional day
+  elapsed) the exact same top three from the 2026-08-26 pre-Stage-2
+  live verification of this same route -- **direct, live proof Stage 2
+  did not disturb the approved score-based Suggested ranking.**
+- No stale Klein/Pfeiffer/Rovinsky solicitation recommendation appears
+  anywhere in the payload (`todayPriorities`/`overdue`/`suggested` all
+  checked directly against the raw JSON).
+- No D1 mutation: this is a `GET` to a read-only preview route; verified
+  directly below (Data-integrity verification) that D1 was untouched
+  by this request.
+
+### Data-integrity verification (before/after, direct D1 reads)
+
+| | Before this round | After deploy + full live verification |
+|---|---|---|
+| `donor_relationship_facts` total rows | 6 | 6 (unchanged) |
+| Klein/Rovinsky/Pfeiffer facts (id/fingerprint/`created_at`/`updated_at`) | Stage 1 values | byte-identical |
+| `donor_relationship_fact_changes` total rows | 6 | 6 (unchanged) |
+| Klein/Rovinsky/Pfeiffer `asks` (`status`/`asked_at`/`source_interaction_id`/`updated_at`) | Stage 1 values | byte-identical |
+| Klein/Rovinsky/Pfeiffer `donors.relationship_summary`/`institutional_memory` | `null` / "Note context: ..." | byte-identical |
+| Total `donors`/`asks`/`interactions` counts | 248 / 6 / 71 | 248 / 6 / 71 (unchanged) |
+
+**Zero donor-data mutations occurred from deployment or from any of
+the live-verification browsing** -- confirmed directly, not inferred
+from "this route is read-only" alone.
+
+### Operational verification
+
+- **Deployed Worker version:** `2029cd3c-c2e4-4fde-83bb-f628d126bf4b`,
+  confirmed current via `wrangler deployments list`.
+- **Routes healthy:** donor page, Meeting Brief, Workspace/Homepage
+  (both default and `?priorities=all`), Assistant, and `/api/agenda/
+  preview?format=json` all returned real, correct, authenticated
+  content with no error pages during this round's verification.
+- **Authentication still works:** every page loaded as the real
+  authenticated user (Shimmy Goldstein) via the existing Cloudflare
+  Access session -- no sign-in redirect encountered, no change to any
+  auth code path (Stage 2 touched none).
+- **Cron still exists with the same schedule:** `0 * * * *`,
+  re-confirmed in this deploy's own output, unchanged from the
+  2026-08-26 approval.
+- **No manual Gmail send occurred:** the preview route was the only
+  agenda-related call made this round, and it has no code path to
+  `sendGmail()` (structurally unchanged from the prior deployment
+  round's own verification).
+- **No unexpected Worker errors:** every request made during this
+  round's verification (donor pages, Meeting Brief, Assistant,
+  Workspace/Homepage in both modes, Daily Agenda preview) returned
+  real, correct content -- none produced an error response.
+
+### Quality gates (re-run, all passing)
+
+`pnpm test`: exit code 0. `pnpm exec tsc --noEmit`: clean, zero output.
+`pnpm run build:staging-independent`: completed, full route manifest,
+no errors. Working tree clean, no application code changed this
+round -- this was a deployment and live-verification round only.
+
+### What this round explicitly did NOT do
+
+Did not implement Stage 3. Did not touch production or `main`. Did not
+change authentication. Did not change cron configuration (re-deployed
+the identical, already-approved schedule). Did not manually send the
+Daily Agenda (no code path exists from the preview route to do so).
+Did not mutate any donor/Ask/fact/interaction data for testing (all
+verification was read-only navigation against real, unaltered data).
+Did not fabricate a pending-Ask-pinning case in D1; stated plainly that
+no real such case exists today and relied on the existing deterministic
+test for that scenario instead.
+
+**Stopping for review before starting Stage 3**, per explicit
+instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -13915,12 +14203,23 @@ relationship-intelligence quality work):
 **Genuinely open, newest first: Stage 3 (move display surfaces to live
 Snapshot synthesis) -- awaiting the user's decision on whether to
 proceed (2026-08-28).** See "Relationship Snapshot Architecture --
-Stage 2 Implemented: Fact-Level Recommendation Actionability
-(2026-08-28)" above. Stage 2 is done and live-verified read-only:
-Klein/Pfeiffer's stale `solicit` and Rovinsky's stale `relationship_
-opportunity` no longer win, real control donors are provably
-unaffected, Stage 1 data is unchanged, all gates pass, nothing
-deployed. **The donor page/Meeting Brief/Assistant Snapshot TEXT for
+Stage 2 Deployed and Live-Verified (2026-08-28)" above. Stage 2 is
+DEPLOYED to Independent Staging (Worker `2029cd3c-
+c2e4-4fde-83bb-f628d126bf4b`) and live-verified through the real
+application: Klein/Pfeiffer's stale `solicit` and Rovinsky's stale
+`relationship_opportunity` confirmed live (donor page, Meeting Brief,
+Daily Agenda preview) to no longer win, real control donors are
+provably unaffected live, Stage 1 data confirmed unchanged by direct
+before/after D1 reads, all gates pass, cron/auth/secrets unchanged. **A
+newly-investigated, pre-existing (not Stage-2-caused) nuance: Klein/
+Rovinsky/Pfeiffer no longer appear in the Workspace/Homepage's
+aggregate "Later" priority queue at all, because that view's staleness-
+based sort/cap crowds out any donor with a real, specific day-count
+behind the much larger population of never-contacted donors -- the same
+crowding-out already applied to their prior `solicit` recommendation
+before Stage 2, confirmed via the unchanged `sortAt` formula in
+`live-data.ts`, so this is not a new disagreement.** **The donor page/
+Meeting Brief/Assistant Snapshot TEXT for
 Klein/Rovinsky/Pfeiffer still reads the unchanged cached columns
 ("Note context: Solicited for...") -- this is expected and intentional
 (Stage 3's job), not a gap in Stage 2.** Also newly discovered this
@@ -14185,6 +14484,74 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T21:00:00Z (approximate)
+Claude (Sonnet 5) — Deployed the already-implemented, already-reviewed
+Stage 2 commit (f2eadd1) to Independent Staging and live-verified it
+through the real deployed application, per explicit instruction (not
+just unit tests or direct function calls). Pre-deploy: fresh git fetch
+confirmed local HEAD matched origin exactly and differed from f2eadd1
+by a single docs-only line; Stage 1's three facts and the three real
+Ask statuses re-verified byte-identical fresh from D1; deployed Worker
+version and cron config (0 * * * *, unchanged since its 2026-08-26
+approval) confirmed before touching anything; all 3 gates re-run
+clean. Deployed via wrangler deploy --config wrangler.staging.jsonc --
+new Worker version 2029cd3c-c2e4-4fde-83bb-f628d126bf4b, cron/secrets
+confirmed unchanged in the deploy's own output. Live-verified via
+Claude-in-Chrome against the real, already-authenticated Cloudflare
+Access session (read-only navigation only): Klein's donor page showed,
+side by side, the intact historical "Note context: Solicited for a
+plaque ($5k)" fact AND a Suggested Action of "Reach out to
+re-establish contact" (294 days) instead of a stale solicit -- the
+exact live proof of the historically-true-vs-currently-actionable
+distinction Stage 2 was built for. Pfeiffer showed the same pattern
+cleanly (346 days, no solicitation-flavored candidate survives at
+all). Rovinsky showed his historical fact and committed ask/open
+pledge intact, with the winner now reconnect_contact_gap (332 days) --
+explicitly verified and reported that his solicit candidate was
+already suppressed pre-Stage-2 by an unrelated open-pledge hard
+constraint, so the real Stage 2 effect for him is relationship_
+opportunity no longer firing from the same stale text, not solicit.
+Verified a real positive control (Nussbaum, a fresh family_milestone/
+durable fact correctly still driving relationship_opportunity) and a
+real legacy control (Weinschneider, zero fact rows, Suggested Action
+unchanged from a pre-existing open reminder) live. Confirmed no real
+pending-Ask-linked solicitation fact currently exists in staging (all
+6 real asks are resolved) and explicitly did not mutate D1 to
+manufacture one, relying on the existing deterministic regression test
+for that scenario instead, exactly as instructed. Checked Meeting
+Brief (byte-identical wording to the donor page for Klein) and
+confirmed Assistant has no independent evidence path (reuses Meeting
+Brief's computed recommendation, per source code). Investigated the
+Workspace/Homepage's aggregate "Later" priority queue not showing
+Klein/Rovinsky/Pfeiffer at all, and traced it to a pre-existing,
+Stage-2-unrelated sortAt/display-cap characteristic (the same crowding-
+out already applied to their prior solicit recommendation, confirmed
+via the unchanged sortAt formula) rather than assuming it was benign or
+attributing it to this round's change. Ran the real, authenticated
+Daily Agenda preview (GET /api/agenda/preview?format=json, no email
+sent) and confirmed the top three Suggested Actions (Yaakov Pollack,
+Ahron Schabes, Elie Grinblatt, all follow_up_pledge) match the prior
+pre-Stage-2 live verification of the same route almost exactly (one
+additional day elapsed), proving Stage 2 did not disturb the approved
+ranking, and that no stale Klein/Pfeiffer/Rovinsky recommendation
+leaked into the agenda. Captured before/after D1 counts and exact
+values for donor_relationship_facts, its audit table, the three real
+Asks, and the three donors' cached narrative columns, proving zero
+donor-data mutation from deployment or from any of the live-
+verification browsing. Confirmed operationally: deployed Worker
+version, all exercised routes healthy, authentication still works,
+cron unchanged, no manual Gmail send, no unexpected Worker errors. All
+3 quality gates re-run clean post-deploy. Updated docs/AI-HANDOFF.md
+with the full pre-deploy record, live-verification results for all
+three regression donors plus two controls, the pending-Ask-pinning
+non-case, all-surface consistency findings, the Daily Agenda top
+three, the data-integrity before/after table, and operational
+verification. Committed and pushed to
+feature/independent-cloudflare-sandbox. Stopping for review before
+starting Stage 3, per explicit instruction.
+
+---
 
 2026-08-28T18:00:00Z (approximate)
 Claude (Sonnet 5) — Implemented Stage 2 only of the approved
