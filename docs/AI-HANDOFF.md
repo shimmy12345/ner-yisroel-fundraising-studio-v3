@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Document open-ask
+**`86b7d07`** -- "Document open-ask
 recommendation quality fix deploy + live verification" -- docs-only,
 zero application code change; see "Open-Ask Recommendation Quality Fix
 -- Deployed to Independent Staging + Live Verification" below for full
