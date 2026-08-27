@@ -15,7 +15,20 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`a5f57d3`** -- "Document Stage 2 deployment
+**(pending — see follow-up commit)** -- "Today workspace desktop layout
+cleanup (2026-08-28)" -- presentation/layout-only application code
+change (widened `.content`'s max-width 1540px→1800px, rebalanced
+`.today-command-grid`'s columns so Today's Agenda gets the larger
+flexible share and Coming Up is capped at 480px, gave Coming Up's body
+a desktop-only bounded/scrollable wrapper so ~20+ real entries no
+longer stretch the whole page, removed a redundant "Open donor" line
+from each Coming Up/Today's Agenda relationship-date row) -- DEPLOYED
+to Independent Staging (Worker `cd7a6529-63c8-4e67-9f4c-f47fcceb907e`)
+and live-verified; see "Today Workspace Desktop Layout Cleanup
+(2026-08-28)" below. Measured live: real page `scrollHeight` went from
+12,520px to 1,255px on the same real `?priorities=all` dataset. No
+data/recommendation/Stage-2/schema/cron/auth change of any kind. Sits
+on top of `a5f57d3` -- "Document Stage 2 deployment
 and live verification (2026-08-28)" -- docs-only, zero application
 code change; the application code was already reviewed and is
 unchanged from `f2eadd1`, now DEPLOYED to Independent Staging (Worker
@@ -13373,6 +13386,234 @@ test for that scenario instead.
 **Stopping for review before starting Stage 3**, per explicit
 instruction.
 
+## Today Workspace Desktop Layout Cleanup (2026-08-28) -- IMPLEMENTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, PRESENTATION-ONLY
+
+**Scope, per explicit instruction:** a focused desktop layout cleanup of
+the Today page, requested ahead of Stage 3, based on a screen recording
+of the wide-desktop viewport (not separately visible in this transcript
+-- the detailed written problem/goal description was treated as
+authoritative). Presentation/layout only: no data, recommendation,
+Stage 2, Agenda, or birthday-logic change of any kind. No D1, schema,
+cron, Gmail, auth, production, or `main` touched.
+
+### Investigation (before any code change)
+
+- **Outer max-width/container:** `.content { max-width: 1540px; ...
+  margin: 0 auto; }` (`app/globals.css`) -- the single outer constraint
+  applied globally via `AppShell.tsx`'s `<div className="content">`, to
+  every page in the app. Confirmed every page that needs a narrower
+  reading width already sets its OWN inner max-width nested inside this
+  (`.donor-directory`/`.meeting-brief-page`/`.capture-page` at 1100px,
+  etc.), so this outer value is the one actually responsible for how
+  much width Today's workspace (which has no such inner constraint of
+  its own) gets to use.
+- **Today's Agenda vs. Coming Up grid:** `.today-command-grid { display:
+  grid; grid-template-columns:minmax(0,1.35fr) minmax(330px,.9fr);
+  gap:16px; align-items:start; }` (`app/globals.css`) -- a simple
+  2-column CSS grid, `align-items:start` (each column already sized to
+  its own content, not stretched -- confirmed this was NOT the cause of
+  Today's Agenda looking short; it already behaved correctly).
+- **Cause of page-wide vertical scrolling:** confirmed directly, not
+  assumed -- `.today-command-grid` is one CSS grid ROW containing both
+  sections; a grid row's height is the taller of its items, and nothing
+  capped that height, so the whole `.content` block (and therefore the
+  whole page, via normal document flow) grew to match Coming Up's full
+  rendered height whenever it had many entries. Measured live on real
+  staging data before any change: `document.documentElement.scrollHeight`
+  = **12,520px** at a 1280×551 viewport with `?priorities=all` (the
+  real ~20-50-entry Coming Up dataset) -- over 22x the viewport height.
+- **Breakpoints (unchanged by this round, confirmed by direct read):**
+  `@media (max-width:1100px) { .today-command-grid { grid-template-
+  columns:1fr; } }` (stacks to one column -- tablet and below) and
+  `@media (max-width:760px) { ... }` (further mobile-specific tweaks).
+  Desktop = >1100px, exactly where the 2-column grid (and therefore the
+  page-height problem) applies.
+- **Reusability:** `RelationshipQueueExperience` (`app/components/
+  RelationshipQueueExperience.tsx`) is used only twice, both from
+  `app/page.tsx` -- once per column, via a `scope="agenda"|"coming"`
+  prop. It is not used on any other page, so layout changes could be
+  scoped entirely to Today's own CSS/JSX without any risk to other
+  pages that don't use it.
+
+### Desktop layout change
+
+- **`.content`'s max-width raised from 1540px to 1800px.** Chosen
+  because it is the identified single outer constraint, and because
+  every other page's own inner max-width (confirmed above) means this
+  change is invisible everywhere except Today's two-column workspace,
+  which has no inner constraint of its own to absorb it. Outer gutters
+  are unchanged -- the existing responsive `clamp(28px, 4.6vw, 74px)`
+  side padding was left exactly as-is, so content still never touches
+  the browser edge.
+- **`.today-command-grid`'s columns rebalanced:** `minmax(0,1.35fr)
+  minmax(330px,.9fr)` → `minmax(0,1fr) minmax(340px,480px)`. Coming Up
+  is now explicitly CAPPED at 480px (a "useful secondary panel" width)
+  instead of an uncapped proportional share, so it does not grow
+  awkwardly wide just because `.content` did; Today's Agenda
+  (`minmax(0,1fr)`) absorbs essentially all of the freed width,
+  directly satisfying "Today's Agenda gets the larger work area."
+  `align-items:start` (Today's Agenda staying naturally sized, never
+  artificially stretched to match Coming Up) was left unchanged.
+- Neither the `@media (max-width:1100px)` nor `@media (max-width:760px)`
+  stacking rules were touched -- confirmed by direct diff review, they
+  are byte-identical to before this round except for one unrelated
+  `.relationship-date-row` padding value (below), so the existing
+  tablet/mobile stacked behavior is fully preserved.
+
+### Coming Up bounded height / internal scroll
+
+`app/page.tsx`'s Coming Up section was restructured (no behavior
+change, purely a wrapper) so everything after its header
+(`.command-section-heading`) is now inside one new `<div
+className="command-panel-body">`. A new, desktop-only rule bounds and
+scrolls exactly that wrapper:
+```css
+@media (min-width:1101px) {
+  .today-coming-up .command-panel-body { max-height:clamp(360px, calc(100vh - 420px), 680px); overflow-y:auto; padding-right:4px; }
+}
+```
+`clamp()` keeps this reasonable on both a modest laptop screen and a
+very tall monitor, computed from the real viewport rather than a fixed
+pixel guess. Because the header lives OUTSIDE this wrapper, "NEXT /
+Coming Up" (and its count badge) stays visible and pinned while the
+list scrolls internally underneath it -- confirmed live (see
+Verification below): the internal scrollbar sits inside the Coming Up
+card, separate from the page's own (now much shorter) scrollbar. Gated
+to `min-width:1101px` -- the exact same breakpoint where the 2-column
+grid itself applies -- so tablet and mobile (where the grid is already
+a single stacked column) get NO height cap and NO internal scroll,
+preserving the existing single, natural page-scroll behavior exactly
+as instructed ("avoid nested scrolling on mobile").
+
+### Coming Up row density
+
+Investigated `RelationshipDateEventRow` (`app/page.tsx`, used for both
+Today's Agenda's and Coming Up's birthday/yahrtzeit/anniversary rows --
+the exact row shape described: date, donor name, event type, age,
+"Open donor"). Found the donor name in the row's heading is already a
+real `<a href={openHref}>` link to the identical destination as the
+separate "Open donor →" line rendered below it -- **two links to the
+same href in one row.** Concluded "Open donor" does NOT need its own
+line: removed the redundant footer link entirely (and its now-unused
+`.relationship-date-row-action` CSS), relying on the already-real,
+already-accessible name link. This is a net density win with **zero
+information removed** (every date/donor/event-type/age field is fully
+intact) and, if anything, an accessibility improvement (no duplicate
+same-destination links competing in one row's tab order/screen-reader
+announcement). Row padding also tightened modestly (9px 11px → 8px
+11px; inner line margins 2px → 1px) for a slightly denser, still
+readable list.
+
+### Today's Agenda
+
+Untouched structurally -- still renders its natural-height card,
+`align-items:start` unchanged, no artificial stretching. Nothing was
+added below the grid (confirmed there is nothing below it in the
+current page), so the "let existing sections below flow naturally"
+concern does not currently apply; nothing in this round's CSS would
+prevent it if a future section were added.
+
+### Responsive verification
+
+**Confirmed live, with real dramatic before/after evidence, at the
+one desktop-scale viewport genuinely achievable in this session's
+sandboxed browser environment (~1280px CSS width -- see the
+environment-limitation note below for why wider was not achievable as
+a real screenshot):**
+- `document.documentElement.scrollHeight` on the real `?priorities=all`
+  Today page: **12,520px before → 1,255px after** -- a ~10x reduction,
+  measured, not estimated.
+- Live screenshot confirmed: Today's Agenda (short, natural height) and
+  Coming Up (now visibly wider, capped, with noticeably denser rows --
+  no more separate "Open donor →" line) sit side by side; Coming Up's
+  own internal scrollbar is visible inside its card, distinct from the
+  page's own scrollbar.
+- Scrolled the Coming Up panel's internal scrollbar through its full
+  real dataset (birthdays through every `reconnect_contact_gap`/
+  `follow_up_pledge` "Later" entry, ending at the real last entry,
+  "Rabbi & Dr. Samuel Goldenhersh," followed by the pre-existing "Show
+  top actions" link) -- confirmed every entry remains reachable via
+  internal scroll, the "NEXT / Coming Up" header stayed pinned and
+  visible throughout, and the outer page did not move.
+- No data/recommendation/Agenda/birthday content changed -- every
+  donor name, date, ask/pledge amount, and "days" figure visible in
+  these screenshots matches the real, unmodified data from the Stage 2
+  round's own live verification.
+
+**Tablet and mobile: verified by direct code inspection, not by a
+live screenshot, and this is disclosed rather than assumed.** This
+session's browser-automation environment has a fixed, small physical
+display (~1281×721, confirmed via `window.screen.width/height`);
+`resize_window` reports success for a smaller target but the tab's own
+`window.innerWidth` never actually changes (stayed 1280 throughout, in
+every attempt, including after a reported-successful resize to
+820×700), and CSS-zoom workarounds could not reliably force a
+different effective layout width either. This is the same class of
+tooling limitation already documented earlier in this project's
+history ("the browser-automation tooling's window resize did not
+change the rendered viewport in this environment"). Given that hard
+constraint, tablet/mobile correctness was verified the reliable way
+still available: **direct diff review confirms every tablet/mobile
+rule (`@media (max-width:1100px)`, `@media (max-width:760px)`) is
+byte-identical to before this round**, except the one already-noted
+`.relationship-date-row` padding value (9px→8px, applies at every
+width, including mobile, and is strictly a tightening, never a
+regression); the new bounded-scroll rule is gated to `min-width:1101px`
+specifically so it cannot apply below the existing stacking
+breakpoint; and the widened `.content`/`.today-command-grid` column
+values are both overridden back to a single, full-width column at
+≤1100px by the pre-existing, untouched media query. No horizontal
+overflow, clipped cards, tiny columns, nested-scroll, or sidebar-overlap
+risk was introduced by any rule that only takes effect at ≤1100px,
+because no rule at that width was touched.
+
+### Data-integrity and behavior verification
+
+This round touched zero backend code, zero D1 access, zero recommendation
+logic. Confirmed unchanged, live, during the same browsing session:
+Suggested Actions render the exact same kinds/wording as Stage 2's own
+live verification (`follow_up_pledge`, `reconnect_contact_gap`, etc.);
+Important Dates/birthdays render the same real donors/dates; donor
+links (`/donors/{id}`) work identically. No D1 mutation is possible from
+this change in principle (no code path in this diff reads or writes
+D1), and no such path was exercised regardless.
+
+### Quality gates (all passing)
+
+`pnpm test`: exit code 0 -- including one updated structural assertion
+(`tests/today.test.mjs`, which pinned the old exact `grid-template-
+columns` value and now pins the new one, plus new assertions for the
+widened `.content` max-width and the new `.command-panel-body`
+wrapper/bounded-height rule). `pnpm exec tsc --noEmit`: clean, zero
+output. `pnpm run build:staging-independent`: completed, full route
+manifest, no errors.
+
+### Deploy and live verification
+
+`pnpm run deploy:staging-independent` -- succeeded. **New deployed
+Worker version: `cd7a6529-63c8-4e67-9f4c-f47fcceb907e`** (supersedes
+`2029cd3c-...`, Stage 2's own deployed version). Deploy output
+reprinted the identical, unchanged cron (`schedule: 0 * * * *`) and an
+unchanged binding list -- confirmed nothing else moved. Live-verified
+against the real, already-authenticated Cloudflare Access session
+immediately after deploy (screenshots captured before and after, per
+instruction) -- see Responsive verification above for the exact
+before/after evidence.
+
+### What this round explicitly did NOT do
+
+Did not change Stage 2 behavior or begin Stage 3. Did not touch D1,
+schema, cron configuration, Gmail, or authentication. Did not touch
+`main` or production. Did not remove any date/donor/event/age
+information from Coming Up (only a redundant duplicate link). Did not
+redesign typography, colors, borders, card treatment, or navigation --
+every visual-language token (`--green`, `--line`, border-radius,
+box-shadow, font stacks) is untouched; this round only changed sizing/
+layout numbers on a handful of existing rules plus one structural
+wrapper `<div>`.
+
+**Stopping for review**, per explicit instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -14200,6 +14441,13 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**Note, not itself awaiting a decision:** the Today workspace desktop
+layout cleanup (2026-08-28, see "Today Workspace Desktop Layout Cleanup"
+above) was requested and executed in full this round -- deployed to
+Independent Staging (Worker `cd7a6529-63c8-4e67-9f4c-f47fcceb907e`) and
+live-verified, nothing further pending on it. It does not change or
+depend on the Stage 3 decision below.
+
 **Genuinely open, newest first: Stage 3 (move display surfaces to live
 Snapshot synthesis) -- awaiting the user's decision on whether to
 proceed (2026-08-28).** See "Relationship Snapshot Architecture --
@@ -14484,6 +14732,73 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-29T01:00:00Z (approximate)
+Claude (Sonnet 5) — Did a focused desktop layout cleanup of the Today
+workspace, ahead of Stage 3, based on a described screen recording of
+the wide-desktop viewport. Investigated first, per instruction: found
+the single outer container constraint (.content, max-width:1540px,
+applied globally via AppShell), confirmed every other page already
+sets its own narrower inner max-width so widening this one is scoped
+in effect to Today's workspace; found the two-column grid
+(.today-command-grid, minmax(0,1.35fr) minmax(330px,.9fr)) with
+align-items:start already correctly not stretching Today's Agenda;
+confirmed the real cause of page-wide vertical scrolling directly
+(nothing capped the grid row's height, so the whole page grew to match
+Coming Up), measuring document.documentElement.scrollHeight = 12,520px
+on the real ?priorities=all dataset before any change; confirmed the
+existing @media (max-width:1100px)/(max-width:760px) breakpoints and
+that RelationshipQueueExperience is only used twice, both from
+app/page.tsx, so the fix could stay fully scoped to Today's own
+CSS/JSX. Widened .content to max-width:1800px (outer gutters
+unchanged, existing clamp() padding kept). Rebalanced
+.today-command-grid to minmax(0,1fr) minmax(340px,480px) so Today's
+Agenda absorbs the freed width and Coming Up stays capped as a
+secondary panel. Wrapped Coming Up's body (everything after its
+header) in a new command-panel-body div and added a desktop-only
+(min-width:1101px) rule giving it a clamp()-based max-height and
+internal overflow-y:auto scroll, so the header stays pinned while ~20+
+real entries scroll internally instead of stretching the whole page --
+gated to the exact same breakpoint as the 2-column grid so
+tablet/mobile keep their existing single, natural page scroll with no
+nested scrolling. Investigated Coming Up's row density
+(RelationshipDateEventRow) and found the donor name heading was
+already a real link to the identical destination as a separate,
+redundant "Open donor →" footer line -- removed the redundant line
+entirely (zero information lost, arguably better accessibility from
+one less duplicate-destination link) and tightened row padding
+modestly. Updated one structural test assertion
+(tests/today.test.mjs) that had pinned the old exact grid-template-
+columns value, and added new assertions for the widened .content
+max-width and the new command-panel-body wrapper/bounded-height rule.
+All 3 gates passed. Deployed to Independent Staging (Worker
+cd7a6529-63c8-4e67-9f4c-f47fcceb907e, cron/bindings confirmed
+unchanged in the deploy's own output) and live-verified via
+Claude-in-Chrome against the real ?priorities=all dataset: measured
+scrollHeight dropped from 12,520px to 1,255px on the same real data;
+screenshots confirmed Today's Agenda and a visibly wider, denser
+Coming Up sitting side by side, Coming Up's own internal scrollbar
+distinct from the page's; scrolled the internal panel through its
+entire real dataset (birthdays through every real Suggested-Action
+entry, ending at the real last item) confirming every entry stays
+reachable with the header pinned throughout. Found and disclosed a
+genuine environment limitation rather than working around it silently:
+this session's browser sandbox has a fixed ~1281x721 physical display,
+so resize_window and CSS-zoom attempts to test tablet/mobile at a
+truly narrower rendered viewport did not actually change
+window.innerWidth (confirmed directly, consistent with an already-
+documented tooling limitation from earlier in this project) -- verified
+tablet/mobile correctness instead by direct diff review, confirming
+every rule at those breakpoints is byte-identical to before this round
+except one strictly-tightening padding value. Updated
+docs/AI-HANDOFF.md with the full investigation, the exact CSS/JSX
+changes and reasoning, the measured before/after scrollHeight proof,
+the live verification, the disclosed viewport-testing limitation, and
+confirmation that no data/recommendation/Stage-2/schema/cron/auth
+behavior changed. Committed and pushed to
+feature/independent-cloudflare-sandbox. Stopping for review.
+
+---
 
 2026-08-28T21:00:00Z (approximate)
 Claude (Sonnet 5) — Deployed the already-implemented, already-reviewed

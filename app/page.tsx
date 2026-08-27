@@ -68,7 +68,6 @@ function RelationshipDateEventRow({ event, today = false }: { event: WorkspaceRe
         {event.provenanceNameHebrew && <> · <bdi dir="rtl">{event.provenanceNameHebrew}</bdi></>}
       </p>}
       {event.ambiguous && <small className="capture-error">A future occurrence falls in a leap year -- the date shown is valid as recorded, but the specific recurrence needs review.</small>}
-      <a className="relationship-date-row-action" href={openHref}>Open donor →</a>
     </div>
   </article>;
 }
@@ -115,11 +114,18 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
 
       <section className="today-command-section today-coming-up" aria-labelledby="coming-up-title">
         <div className="command-section-heading"><div><p className="eyebrow">NEXT</p><h2 id="coming-up-title">Coming Up</h2></div><span className="count">{comingQueueCount + data.upcomingActivities.length + data.upcomingRelationshipDates.length}</span></div>
-        {data.upcomingRelationshipDates.length ? <div className="relationship-date-list">{data.upcomingRelationshipDates.map((event) => <RelationshipDateEventRow event={event} key={event.id} />)}</div> : null}
-        {visibleUpcomingActivities.length ? <div className="today-meeting-list command-activity-list">{visibleUpcomingActivities.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} upcoming key={item.id} />)}</div> : null}
-        {comingQueueCount ? <RelationshipQueueExperience scope="coming" initialQueue={data.relationshipQueue} priorityCount={data.priorityCount} showAll={showAll} expanded={showAll || agendaIsEmpty} /> : null}
-        {!showAll && data.upcomingActivities.length > visibleUpcomingActivities.length && <a className="view-all-link command-view-all" href="/?priorities=all#coming-up-title">View all upcoming activities</a>}
-        {comingIsEmpty && <p className="command-empty">No meetings, reminders, commitments, or relationship dates are coming up.</p>}
+        {/* Desktop-only bounded/scrollable body (see .today-coming-up .command-panel-body
+            in globals.css) -- keeps the header pinned above the fold and lets a long
+            Coming Up list (up to ~20 entries) scroll internally instead of stretching
+            the whole page. Below the desktop breakpoint this wrapper has no height
+            constraint, so tablet/mobile keep the existing natural, single-scroll stack. */}
+        <div className="command-panel-body">
+          {data.upcomingRelationshipDates.length ? <div className="relationship-date-list">{data.upcomingRelationshipDates.map((event) => <RelationshipDateEventRow event={event} key={event.id} />)}</div> : null}
+          {visibleUpcomingActivities.length ? <div className="today-meeting-list command-activity-list">{visibleUpcomingActivities.map((item) => <ScheduledActivityCard activity={item} live={mode === "live"} upcoming key={item.id} />)}</div> : null}
+          {comingQueueCount ? <RelationshipQueueExperience scope="coming" initialQueue={data.relationshipQueue} priorityCount={data.priorityCount} showAll={showAll} expanded={showAll || agendaIsEmpty} /> : null}
+          {!showAll && data.upcomingActivities.length > visibleUpcomingActivities.length && <a className="view-all-link command-view-all" href="/?priorities=all#coming-up-title">View all upcoming activities</a>}
+          {comingIsEmpty && <p className="command-empty">No meetings, reminders, commitments, or relationship dates are coming up.</p>}
+        </div>
       </section>
     </div>
   </AppShell>;

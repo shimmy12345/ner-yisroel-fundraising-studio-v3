@@ -49,7 +49,17 @@ assert.doesNotMatch(today, /ACT NOW|PLAN AHEAD|REFERENCE|LIVE WORKSPACE/);
 for (const behavior of ["completedToday", "markComplete", "Read Again", "Dismiss for today", "localStorage"]) assert.match(briefExperience, new RegExp(behavior));
 assert.match(briefExperience, /speech\.message === "Full brief finished\."/);
 assert.match(styles, /today-command-grid/);
-assert.match(styles, /grid-template-columns:minmax\(0,1\.35fr\)/);
+// Today Workspace Layout Cleanup (see docs/AI-HANDOFF.md): Today's Agenda
+// now takes the flexible 1fr share and Coming Up is capped at 480px so it
+// stays a useful secondary panel rather than growing with .content's
+// wider max-width -- see that same entry for why .content itself widened.
+assert.match(styles, /grid-template-columns:minmax\(0,1fr\) minmax\(340px,480px\)/, "Today's Agenda must take the larger, flexible work area; Coming Up stays a capped secondary panel");
+assert.match(styles, /max-width: 1800px/, "the outer .content container must use substantially more of a wide desktop's width than the old 1540px cap");
+// Coming Up's body (everything after its header) must be desktop-bounded
+// and internally scrollable so ~20 real entries can't stretch the whole
+// page -- header stays outside/above this wrapper so it remains visible.
+assert.match(today, /<div className="command-panel-body">/, "Coming Up's body must be wrapped so it can be bounded/scrolled independently of its header");
+assert.match(styles, /\.today-coming-up \.command-panel-body \{ max-height:clamp\(/, "Coming Up's bounded height must only apply within .today-coming-up, never to Today's Agenda");
 assert.match(styles, /@media \(max-width:760px\)[\s\S]*today-actions-section \.today-quick-actions \{ grid-template-columns:1fr 1fr/);
 
 assert.match(liveData, /Overdue follow-up/);

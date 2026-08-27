@@ -66,7 +66,16 @@ button:focus-visible, a:focus-visible {
 .profile span { color: #89918d; font-size: 10px; margin-top: 2px; }
 .profile button { border: 0; background: transparent; cursor: pointer; color: #8b938f; }
 
-.content { min-width: 0; padding: 50px clamp(28px, 4.6vw, 74px) 70px; max-width: 1540px; width: 100%; margin: 0 auto; }
+/* 1800px (was 1540px) -- widened so wide-desktop viewports (the Today
+   workspace in particular) use substantially more of the space to the
+   right of the 232px sidebar instead of leaving large unused gutters on
+   both sides of a narrow centered column. Every page that needs a
+   narrower reading width already sets its own inner max-width (e.g.
+   .donor-directory/.meeting-brief-page/.capture-page at 1100px), so
+   this only visibly widens pages -- chiefly Today's two-column
+   workspace -- that don't already self-constrain. Outer gutters are
+   preserved via the existing clamp() side padding, unchanged. */
+.content { min-width: 0; padding: 50px clamp(28px, 4.6vw, 74px) 70px; max-width: 1800px; width: 100%; margin: 0 auto; }
 .page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 27px; }
 .eyebrow { margin: 0 0 9px; color: #87918b; font-size: 10px; font-weight: 680; letter-spacing: .14em; }
 h1, h2, h3, p { margin-top: 0; }
@@ -818,11 +827,26 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 /* Homepage command center */
 .today-header { margin-bottom:20px; }
 .today-header .subhead { max-width:650px; margin-bottom:0; font-size:15px; line-height:1.55; }
-.today-command-grid { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(330px,.9fr); gap:16px; align-items:start; margin-bottom:22px; }
+/* Coming Up is capped at 480px (was an uncapped .9fr share) so it stays a
+   useful secondary panel rather than growing proportionally huge on wide
+   desktops -- Today's Agenda (minmax(0,1fr)) absorbs essentially all of
+   the width freed up by .content's wider max-width above. */
+.today-command-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(340px,480px); gap:20px; align-items:start; margin-bottom:22px; }
 .today-command-grid.agenda-empty .today-coming-up { grid-column:auto; }
 .today-command-section,.today-actions-section,.today-brief-section { min-width:0; padding:19px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:0 5px 18px rgba(31,54,45,.045); }
 .today-agenda { border-top:3px solid #316c54; }
 .today-coming-up { border-top:3px solid #a7b8ae; background:#fbfcfa; }
+/* Desktop only (matches the 2-column .today-command-grid breakpoint just
+   below): Coming Up's header stays visible while everything after it
+   scrolls internally within a viewport-relative bounded height, so ~20
+   real entries no longer stretch the whole page. clamp() keeps this
+   reasonable on both a modest laptop screen and a very tall monitor.
+   Below this breakpoint the grid stacks to one column and this rule does
+   not apply, so tablet/mobile keep the existing single, natural page
+   scroll -- no nested scrolling on touch. */
+@media (min-width:1101px) {
+  .today-coming-up .command-panel-body { max-height:clamp(360px, calc(100vh - 420px), 680px); overflow-y:auto; padding-right:4px; }
+}
 .command-section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:13px; }
 .command-section-heading .eyebrow { margin-bottom:4px; }
 .command-section-heading h2 { margin:0; font-family:Georgia,serif; font-size:23px; line-height:1.25; font-weight:500; }
@@ -838,10 +862,13 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
    birthdays/anniversaries) -- a calendar-style list, not stacked priority
    cards. Two columns only (date, body) at every width so nothing has to
    squeeze a third column at the narrow Coming Up panel width seen with the
-   sidebar layout (~330-450px); "Open donor" lives as the last line inside
-   the body instead of a side column. */
+   sidebar layout (~330-480px). No separate "Open donor" line: the donor
+   name in the heading is already a real link to the identical
+   destination, so a second, redundant link to the same href was removed
+   for density (fewer/lower-friction targets, not less information) --
+   see docs/AI-HANDOFF.md's Today Workspace Layout entry. */
 .relationship-date-list { margin-bottom:11px; border:1px solid #e6ece8; border-radius:10px; background:#fff; overflow:hidden; }
-.relationship-date-row { display:grid; grid-template-columns:44px minmax(0,1fr); gap:10px; padding:9px 11px; border-bottom:1px solid #eef1ee; }
+.relationship-date-row { display:grid; grid-template-columns:44px minmax(0,1fr); gap:10px; padding:8px 11px; border-bottom:1px solid #eef1ee; }
 .relationship-date-row:last-child { border-bottom:0; }
 .relationship-date-row-date { padding-top:1px; color:#4d6659; font-size:11px; font-weight:700; line-height:1.3; }
 .relationship-date-row-body { min-width:0; }
@@ -849,11 +876,9 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .relationship-date-row-heading a { min-width:0; color:var(--ink); font-size:13px; font-weight:650; text-decoration:none; line-height:1.3; }
 .relationship-date-row-heading a:hover { text-decoration:underline; }
 .relationship-date-row-heading .donor-code { margin:0; font-size:9px; }
-.relationship-date-row-meaning { display:flex; align-items:center; gap:6px; overflow:hidden; margin:2px 0 0; color:#57675f; font-size:11px; line-height:1.4; white-space:nowrap; text-overflow:ellipsis; }
+.relationship-date-row-meaning { display:flex; align-items:center; gap:6px; overflow:hidden; margin:1px 0 0; color:#57675f; font-size:11px; line-height:1.4; white-space:nowrap; text-overflow:ellipsis; }
 .relationship-date-row-meaning .event-type { flex:0 0 auto; }
-.relationship-date-row-provenance { overflow:hidden; margin:2px 0 0; color:#96a09a; font-size:10px; line-height:1.4; white-space:nowrap; text-overflow:ellipsis; }
-.relationship-date-row-action { display:inline-block; margin-top:4px; color:#37705a; font-size:10px; font-weight:650; text-decoration:none; }
-.relationship-date-row-action:hover { text-decoration:underline; }
+.relationship-date-row-provenance { overflow:hidden; margin:1px 0 0; color:#96a09a; font-size:10px; line-height:1.4; white-space:nowrap; text-overflow:ellipsis; }
 .command-queue .relationship-queue-groups { gap:9px; }
 .command-queue .relationship-queue-group { margin:0; }
 .command-queue .relationship-queue-group > header { margin:0 0 6px; padding:0; }
