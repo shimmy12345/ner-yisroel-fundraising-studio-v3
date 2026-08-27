@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending — see follow-up commit)** -- "Document Relationship
+**`48973b3`** -- "Document Relationship
 Snapshot architecture decision (live/derived vs. cached)
 (2026-08-28)" -- docs-only, zero application code change, zero D1
 mutation, zero migration, zero backfill, zero schema, zero deploy; see
