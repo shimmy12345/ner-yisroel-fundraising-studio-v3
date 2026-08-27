@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Document Relationship-
+**`e6ed06d`** -- "Document Relationship-
 Intelligence/Ask-supersession investigation (2026-08-28)" -- docs-only,
 zero application code change, zero D1 mutation, zero migration; see
 "Relationship-Intelligence / Ask-Supersession Investigation
