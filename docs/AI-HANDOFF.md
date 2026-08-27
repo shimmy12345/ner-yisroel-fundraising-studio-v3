@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Document financial-data-
+**`1381cce`** -- "Document financial-data-
 model audit correcting the portfolio-level investigation (2026-08-27)"
 -- docs-only, zero application code change, zero D1 mutation; see
 "Financial-Data-Model Audit -- Correcting the Portfolio-Level
