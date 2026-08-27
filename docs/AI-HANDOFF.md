@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending — see follow-up commit)** -- "Today workspace desktop layout
+**`ed2ea20`** -- "Today workspace desktop layout
 cleanup (2026-08-28)" -- presentation/layout-only application code
 change (widened `.content`'s max-width 1540px→1800px, rebalanced
 `.today-command-grid`'s columns so Today's Agenda gets the larger
