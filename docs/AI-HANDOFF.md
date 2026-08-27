@@ -15,7 +15,15 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`86b7d07`** -- "Document open-ask
+**`(pending — see follow-up commit)`** -- "Document portfolio-level
+30-day focus investigation (2026-08-27)" -- docs-only, zero
+application code change, zero D1 mutation; see "Portfolio-Level 30-Day
+Focus Investigation" below for the full 30-day focus list, stress-test
+results, engine comparison, and missing-intelligence findings.
+Investigation only -- no recommendation in it is approved for
+implementation. Sits on top of `5f92ae0` ("Correct Current Git State
+to reference the new HEAD (86b7d07)" -- docs-only, zero application
+code change), which sits on top of **`86b7d07`** -- "Document open-ask
 recommendation quality fix deploy + live verification" -- docs-only,
 zero application code change; see "Open-Ask Recommendation Quality Fix
 -- Deployed to Independent Staging + Live Verification" below for full
@@ -10225,6 +10233,410 @@ with no D1 access of any kind).
 **Nothing differed from the approved behavior; no patch-forward was
 needed.**
 
+## Portfolio-Level 30-Day Focus Investigation (2026-08-27) -- INVESTIGATION ONLY, NO CODE CHANGE, NO D1 MUTATION, NO NEW SCORING FORMULA, NO DEPLOY
+
+**Question investigated:** "Given everything Fundraising OS currently
+knows, where should I spend my fundraising time over the next 30
+days?" Method: pulled the full real Independent Staging portfolio
+read-only (donors, full giving history, asks, interactions, open
+reminders, yahrtzeits/important dates, gift acknowledgments,
+dismissals, historical context, pledge payment plans/audits -- 248
+in-scope donors), then ran the REAL, unmodified production functions
+(`buildRecommendationEvidence`, `generateCandidates`,
+`buildDonorRecommendation`, `score`, `selectSuggestionDonorIds`,
+`matchAskFollowUps`, `resolveOpenPledgeActivityDate`,
+`evaluatePaymentPlan`) against it for every donor, plus derived,
+non-scoring signals not currently synthesized anywhere in the app:
+12-month giving trajectory (last 365 days vs. prior 365 days),
+lifetime total, days since last gift, substantive-contact recency,
+and upcoming (30-day) important dates. No D1 write at any point; no
+new score/schema/category was created -- every number below is either
+a real database fact or the real engine's own output.
+
+**Portfolio-wide facts, unweighted by any judgment call:** 248 in-scope
+donors; total lifetime giving across the whole portfolio $3,394,576.
+**Zero** pending Asks (both real ones from the prior investigation
+remain resolved). 14 donors have any Relationship Intelligence
+narrative (`relationship_summary`/`institutional_memory`). 21 have an
+open pledge. 196 of 248 (79%) have **no interaction ever recorded**.
+155 of 248 (63%) currently qualify for the Suggested pool at all; 93
+do not. Recommendation-kind distribution: `acknowledge_gift` 210,
+`follow_up_pledge` 20, `relationship_opportunity` 11, `honor_reminder`
+3, `solicit` 2, `reconnect_contact_gap` 2, `open_ask`/`continue_
+conversation` **0** (no live example of either exists in the portfolio
+right now). **203 of 248 donors (82% of the entire portfolio) score
+exactly 0.3150** -- the `acknowledge_gift` recency/urgency floor once
+a gift is >30 days old and unacknowledged -- **regardless of whether
+the unacknowledged gift is $50 or $18,000.**
+
+### The real 30-day focus list
+
+Ranked by a human synthesis of lifetime value, giving trajectory,
+relationship-context strength, and real near-term risk -- not by the
+engine's own score, which is shown for comparison on each entry. No
+artificial tier or threshold was used to reach 10; these are the 10
+real donors the fuller evidence most clearly supports. (A dollar
+figure below is always a real recorded total from `giving_activities`,
+never an estimate of future capacity or intent.)
+
+**1. Mr. & Mrs. Yale Miller -- $199,150 lifetime (#1 in the entire
+portfolio).** Evidence: single largest lifetime relationship in the
+portfolio; **zero interactions ever recorded**; most recent gift
+$1,800, 93 days ago. Attention type: relationship research /
+re-engagement. FOS recommendation: `acknowledge_gift`, score 0.3150 --
+**and this donor does not currently appear in the Suggested pool at
+all** (his gift is >30 days old, and nothing else -- no pledge, ask,
+narrative, or recent contact -- qualifies him for any other pool
+category). Agree? No -- a generic, invisible thank-you nudge is not a
+credible answer for the portfolio's single largest relationship. Next
+step: a relationship-research pass (who is this household, is there
+any staff/board context outside FOS) before any solicitation framing.
+Main uncertainty: FOS has no relationship context on this donor at
+all, so there is no informed way to propose more than "find out who
+they are."
+
+**2. Mr. & Mrs. Manuel Schnaidman -- $158,202 lifetime (#2 in the
+portfolio).** Evidence: identical pattern to Miller -- zero
+interactions ever, most recent gift $1,000, 243 days ago, invisible to
+the Suggested pool. Attention type: relationship research /
+re-engagement. FOS recommendation: `acknowledge_gift`, score 0.3150,
+not surfaced anywhere. Agree? No, for the same reason as Miller.
+Next step: same as Miller. Main uncertainty: same as Miller -- no
+relationship context exists to refine the ask further.
+
+**3. Mr. & Mrs. Mordechai Schwartz -- $101,885 lifetime (#5), a real
+$36,000 open pledge only 59 days old, giving up ~175% year over year
+($36,000 last 365 days vs. $13,080 the year before).** Evidence: large,
+accelerating giver with a large fresh commitment and **zero
+interactions ever recorded**. Attention type: cultivation (build the
+relationship the pledge is riding on) plus ordinary pledge follow-up.
+FOS recommendation: `follow_up_pledge`, "No payment activity in 59
+days and no completed interaction on file," score 0.4483, low
+confidence. Agree partially -- collecting the pledge is right, but the
+real priority is relationship-building, not a payment nudge; FOS has
+no way to say that. Next step: a personal call/visit to build the
+relationship behind a $36,000 commitment that currently has no
+documented human contact at all. Main uncertainty: whether the
+$36,000 pledge reflects an existing personal relationship the
+fundraiser has off-system, or a purely transactional/campaign-driven
+gift -- FOS cannot tell.
+
+**4. Mr. & Mrs. Tzvi Ray -- $113,676 lifetime (#3), giving down ~77%
+year over year ($5,760 vs. $25,360).** Evidence: one of the portfolio's
+largest donors, real and recent ($5,400, 106 days ago) giving, but a
+sharp drop from the prior year and **zero interactions ever recorded**;
+not in the Suggested pool. Attention type: re-engagement /
+relationship research. FOS recommendation: `acknowledge_gift`, score
+0.3150, invisible. Agree? No -- a top-3 donor's giving falling by
+three-quarters in a year, with zero documented relationship, deserves
+active attention FOS currently gives none. Next step: find out why the
+drop happened (capacity change? dissatisfaction? a competing
+priority?) before assuming it will self-correct. Main uncertainty: no
+data exists on the cause -- this is a real blind spot, not an
+inference.
+
+**5. Mr. & Mrs. Jonathan Spetner -- $90,361 lifetime, giving stopped
+entirely (last 365 days $0 vs. $10,000 the year before), most recent
+gift 700 days ago.** Evidence: a major past donor whose giving simply
+stopped, with zero interactions ever recorded; not in the Suggested
+pool. Attention type: re-engagement. FOS recommendation:
+`acknowledge_gift` for the 700-day-old gift, score 0.3150, invisible.
+Agree? No -- this is the starkest "went quiet" signal in the
+portfolio and FOS treats it identically to a $50 donor's routine
+unacknowledged gift. Next step: a direct, personal re-engagement
+outreach, not a generic thank-you. Main uncertainty: whether the lapse
+is relationship-driven or simply reflects a multi-year giving cadence
+FOS has no way to model (see "expected contact/giving cadence" below).
+
+**6. Mr. & Mrs. Dovie Weinschneider -- $89,931 lifetime, giving up
+~38x year over year ($23,500 vs. $610), a real conversation 10 days
+ago ("Discussed Kollel donation and said to follow up after succos"),
+with an explicit follow-up reminder already scheduled.** Attention
+type: solicitation follow-through. FOS recommendation: `honor_reminder`
+("Follow up on 'Giving follow-up'"), score 0.7575 -- correctly the
+system's #4 overall. Agree? **Yes, fully** -- this is the system
+working as intended: a live, warm, rapidly-escalating relationship
+with an explicit fundraiser commitment, correctly surfaced ahead of
+routine items. Next step: honor the "after Succos" commitment on
+schedule; no correction needed. Main uncertainty: none of substance --
+this is the clearest, most confidently correct item in the whole
+portfolio.
+
+**7. Mr. & Mrs. Tzvi Shlionsky -- $70,500 lifetime, giving up ~33%
+year over year ($20,000 vs. $15,000), narrative on file ("Sent him an
+email with photo of his son") but that note and the interaction behind
+it are 437 days old.** Attention type: cultivation (the relationship
+signal is real but has gone cold). FOS recommendation:
+`relationship_opportunity`, "Reach out and reference: Sent him an
+email with photo of his son," score 0.4186. Agree partially -- the
+underlying instinct (there is a personal note worth building on) is
+right, but FOS's own `why` text never mentions that the note is 437
+days old, so the recommendation reads exactly the same whether the
+fact is a week old or over a year old. Next step: a personal
+touchpoint that acknowledges the gap, not a mechanical reference to a
+stale note as if it were current. Main uncertainty: whether anything
+relationship-relevant happened in the intervening 437 days that
+simply was never logged.
+
+**8. Dr. & Mrs. Yaakov Abdelhak -- $40,714 lifetime, a personal note on
+file ("Personal invite to Teaneck event"), a broadcast text 8 days ago
+-- but 724 days since any real one-on-one substantive contact.**
+Attention type: cultivation / relationship research. FOS
+recommendation: `relationship_opportunity`, score 0.4186 (same
+formula/score class as Shlionsky above). Agree partially, with a
+specific correction: FOS's own `lastContactAt` vs.
+`lastSubstantiveContactAt` distinction (built specifically so a
+broadcast touch never masks real neglect) correctly computes 724 days
+of real silence here, but the recommendation's `action`/`why` text
+never surfaces that number -- a fundraiser skimming the queue would
+see a recent-looking "text" contact and could easily believe this
+relationship is warm. Next step: real one-on-one outreach, not another
+broadcast. Main uncertainty: none about the facts -- FOS already has
+the right underlying numbers; it just doesn't say them out loud.
+
+**9. Mr. & Mrs. Eitan Zeffren -- $56,920 lifetime, giving down ~50%
+year over year ($18,000 vs. $36,000), but with an explicit "Solicit
+corporate sponsorship for dinner" reminder already scheduled for a
+future date, and 2 real interactions in the last 90 days.** Attention
+type: solicitation follow-through (already tracked). FOS
+recommendation: `honor_reminder`, score 0.7575. Agree -- the decline
+is real and worth noting, but the fundraiser has already made an
+explicit plan for this donor, and FOS is correctly holding that plan
+rather than generating a competing generic suggestion. Next step:
+execute the scheduled solicitation on schedule; separately, worth a
+private note that this is a donor whose giving nearly halved, so the
+ask itself may need to be sized differently than last time -- FOS has
+no capacity signal to inform that sizing. Main uncertainty: whether
+the decline reflects reduced capacity/interest (which should inform
+the ask amount) or simply timing.
+
+**10. Mr. & Mrs. Mayer Simcha Klein -- $21,189 lifetime, and the
+clearest live example of a stale recommendation actively pointing the
+wrong way.** Evidence: a $5,000 Plaque ask was made and was
+**declined** 227 days ago; Klein's own Relationship Intelligence note
+is still the *original solicitation text* ("Note context: Solicited
+for a plaque ($5k)"). Attention type: relationship research (correct
+the record) before any further solicitation. FOS recommendation:
+`solicit`, "Make a solicitation ask, following up on: Note context:
+Solicited for a plaque ($5k)," score 0.4590. **Disagree** -- FOS is
+currently recommending the fundraiser re-solicit using the exact text
+of an ask that was already declined, with no acknowledgment that it
+was declined at all. Next step: find out *why* it was declined (price?
+purpose? timing?) before any further ask, and correct/refresh the
+narrative fact so it reflects the real current state. Main
+uncertainty: none about what happened (the ask's own status is a
+clean, confirmed fact) -- the uncertainty is entirely about *why*,
+which lives outside FOS. **The identical pattern recurs, independently,
+for Rabbi Michoel A. Rovinsky (`relationship_opportunity`, quoting his
+now-committed ask's original note) and Mr. & Mrs. Allen Pfeiffer
+(`solicit`, quoting his now-declined $10,000 ask's original note) --
+three separate real donors, not a one-off.**
+
+### Stress-testing the current intelligence
+
+- **Giving more over time vs. merely consistent:** the engine cannot
+  tell these apart at all. Schwartz (+175% YoY) and Weinschneider
+  (+38x YoY) get no scoring benefit from their trajectory; Weinschneider
+  only ranks highly because a *reminder* happens to exist, not because
+  of the trend itself. Concretely: Schwartz's fresh, accelerating
+  $36,000 pledge (`follow_up_pledge`, 0.4483) scores **lower** than
+  Yaakov Pollack's flat, essentially dead $60 pledge that is **10,100
+  days old (~27.7 years)** (`follow_up_pledge`, 0.6500) -- purely
+  because urgency is a function of age, and dollar value/trajectory
+  play no role at all.
+- **High-value donor gone unusually quiet:** proven directly -- Miller,
+  Schnaidman, Ray, Spetner, and (a fifth, not in the top-10 list above
+  but the same pattern) Mr. Daniel Saidian ($72,022 lifetime, $0 last
+  365 days vs. $9,500 the year before, zero interactions, invisible to
+  the pool) are simultaneously among the portfolio's 10 largest
+  lifetime donors and completely absent from anything the fundraiser
+  would ever see.
+- **Strong relationship momentum, no current Ask:** Weinschneider is
+  the clean positive case -- real momentum, no formal Ask yet, and FOS
+  already holds the correct next step via a manually-created reminder.
+  This only works because a human already flagged it explicitly; there
+  is no automatic "this conversation implies a future ask" detection.
+- **Old pending Ask that may be stale:** the just-shipped fix (see
+  "Open-Ask Recommendation Quality Fix" above) already addresses this
+  for a *still-pending* Ask. Klein/Rovinsky/Pfeiffer show the adjacent,
+  unaddressed case: once an Ask is resolved, the *Relationship
+  Intelligence narrative describing it* is never refreshed or flagged
+  stale, so a different candidate (`solicit`/`relationship_
+  opportunity`) confidently re-surfaces the same superseded fact.
+- **Open pledge, weak relationship context:** Schwartz, exactly --
+  $36,000 pledge, zero interactions ever.
+- **Meaningful recent stewardship that should NOT read as neglected:**
+  Weinschneider and Zeffren both prove FOS gets this right today --
+  real reminders, correctly held above generic suggestions, correctly
+  not flagged as urgent apart from their own schedule.
+- **Strong Relationship Intelligence, no actionable next step:**
+  no donor in the portfolio currently has a narrative fact that
+  produces a null or `reconnect_contact_gap` recommendation -- every
+  one of the 14 narrative-bearing donors gets a real `relationship_
+  opportunity`/`solicit` candidate. The adjacent, real problem is
+  worse than "no next step": a *confidently wrong* one, when the fact
+  itself has gone stale (Klein/Rovinsky/Pfeiffer above).
+- **Appears in the queue but probably should not be a top-30-day
+  priority:** the Suggested pool's top tier is currently dominated by
+  `follow_up_pledge` items for **$10, $15, $25, $36, and $60** balances
+  (Bronfeld, Sobol, Spatz, Pollack), each scoring the identical 0.6500
+  as Joshua Broide's real $2,500 pledge -- a fundraiser working the
+  queue top-down would exhaust real time on decade-old trivial balances
+  before ever reaching Schwartz's $36,000 pledge (0.4483) or any of the
+  invisible top-10 lifetime donors above.
+- **Does not appear in the queue but probably should:** proven
+  directly and repeatedly above -- 5 of the portfolio's top 10 lifetime
+  donors (Miller, Schnaidman, Ray, Spetner, Saidian) are structurally
+  invisible to Suggested today.
+
+### Comparison with the existing recommendation engine
+
+**Top of the real engine's own score today (in-pool):** `acknowledge_
+gift` at 0.9650 for three donors whose most recent gift was recorded
+*today* (Yehuda Fried $360, David B. Rosenbaum $3,600, Nachum
+Rosenberg $2,000), then `honor_reminder` at 0.7575 (Weinschneider,
+Zeffren, and Donny Wiesel), then a long, tightly-clustered band of
+`follow_up_pledge` items at exactly 0.6500 regardless of whether the
+balance is $10 or $2,500.
+
+**The two lists agree on:** Weinschneider and Zeffren -- both make the
+strategic top 10 *and* the engine's own top 10, for the same reason
+(a real, live, explicit next step). This is the engine's genuine
+strength: once a concrete, dated fact exists (a fresh gift, an open
+reminder), it ranks and describes it well.
+
+**The two lists disagree on:** everything driven by lifetime value,
+trajectory, or the passage of time since an Ask/narrative fact was
+last true. None of Miller, Schnaidman, Ray, Spetner, Schwartz,
+Shlionsky, or Abdelhak appear anywhere near the engine's own top
+scores -- most don't appear in the pool at all, and the ones that do
+are indistinguishable (0.3150/0.4186) from the rest of the portfolio's
+routine, low-stakes items. Conversely, several of the engine's own
+highest-scoring items (the $10-$60 legacy pledge balances) would not
+make a responsible 30-day list at all.
+
+**Why:** `score()`'s three inputs (`specificity`, `recency`, `urgency`)
+are all about *how fresh and well-formed the evidence for one specific
+fact is* -- never about *how much this relationship is worth* or
+*which direction it's moving*. That design is a genuine strength for
+"what's the single next tactical action for this one donor" (which is
+what `buildDonorRecommendation` was built to answer, and does answer
+well for Weinschneider/Zeffren/the three same-day gifts). It has no
+mechanism at all for "which of my 248 relationships is worth my time
+this month" -- a fundamentally different, portfolio-relative question
+the current architecture was never asked to answer. **The engine is
+good at tactical next actions and has no portfolio-level strategic
+prioritization capability at all** -- not a weak version of one, an
+absent one.
+
+### Missing intelligence -- proven from real donor examples, smallest-first
+
+1. **Giving trajectory (increasing/decreasing/lapsed).** *Real case:*
+   Schwartz +175% YoY vs. Ray -77% YoY vs. Spetner -100% YoY -- none
+   reflected anywhere. *Data already exists:* yes, in full --
+   `giving_activities` is already fetched in its entirety for the
+   `follow_up_pledge`/`acknowledge_gift` evidence; a trailing-365-vs-
+   prior-365 comparison (exactly what this investigation computed) is
+   pure arithmetic over already-fetched rows. *Logic-only or schema?*
+   Logic-only -- zero new tables/columns. *Smallest principled
+   implementation:* a new derived field on `RecommendationEvidence`
+   (e.g. `giving.trajectory: "increasing" | "decreasing" | "flat" |
+   "lapsed" | "new"`, computed the same way this investigation did),
+   surfaced first in `why` text for existing candidates (not a new
+   score term) so a fundraiser reading Suggested can at least see the
+   direction, without touching `score()` at all.
+
+2. **Portfolio-value/capacity awareness in scoring.** *Real case:* 203
+   of 248 donors (82%) score exactly 0.3150 on `acknowledge_gift`
+   regardless of whether the unacknowledged gift is $50 or $18,000
+   (Lehrman). *Data already exists:* yes -- `mostRecentPaidGift.
+   amountCents` (and lifetime total, computable the same way as #1) are
+   already in evidence. *Logic-only or schema?* Logic-only, but this
+   is the one gap that would require an actual **new scoring
+   dimension** (explicitly out of scope for a "smallest fix" -- named
+   here for honesty, not proposed for this round). *Smallest
+   principled implementation, if ever pursued:* not a new formula
+   grafted onto every candidate -- start narrower, e.g. a lifetime-
+   value-aware *pool-inclusion* threshold (see #5) before touching
+   `score()` itself.
+
+3. **Ask/Relationship-Intelligence lifecycle synchronization.** *Real
+   case:* Klein (declined), Rovinsky (committed), and Pfeiffer
+   (declined) all still show their *original* solicitation narrative
+   as current, producing a `solicit`/`relationship_opportunity`
+   recommendation that contradicts the Ask's own resolved status.
+   *Data already exists:* the Ask's `status` transition is a real,
+   already-written fact (`ask_changes` audit trail); the narrative text
+   is a separate, never-invalidated field. *Logic-only or schema?*
+   Logic mostly, with one small existing hook to reuse: `lib/
+   relationships/fact-supersession.ts` already exists in this codebase
+   for marking a fact superseded -- it is not currently wired to fire
+   on an Ask status change. *Smallest principled implementation:* when
+   `PATCH /api/asks/[id]` changes status away from `pending`, flag the
+   narrative fact that produced this Ask (already linked via `source_
+   interaction_id`/the historical-context provenance) as superseded,
+   reusing that existing mechanism -- no new schema, a few lines in an
+   existing route.
+
+4. **Substantive-vs-broadcast contact isn't reasoned about outside
+   `reconnect_contact_gap`.** *Real case:* Abdelhak -- a broadcast text
+   8 days ago, 724 days since real substantive contact -- but his
+   `relationship_opportunity` `why` text never mentions the 724-day
+   gap. *Data already exists:* fully -- `daysSinceSubstantiveContact`
+   is already computed in the same evidence object every candidate
+   receives. *Logic-only or schema?* Logic-only. *Smallest principled
+   implementation:* have `relationshipOpportunityCandidate` (and
+   `solicitCandidate`) append a clause to their existing `why` text
+   when `daysSinceSubstantiveContact` is large, using data they already
+   have but currently ignore -- no scoring change.
+
+5. **Suggested pool-inclusion has no "meaningfully large lifetime
+   relationship" category.** *Real case:* Miller, Schnaidman, Ray,
+   Spetner, Saidian -- 5 of the portfolio's 10 largest lifetime donors,
+   invisible to Suggested because their most recent gift is >30 days
+   old and nothing else qualifies them. *Data already exists:* yes --
+   this is the exact same already-fetched `giving_activities` data the
+   `recentGiftDonorIds`/`acknowledge_gift` path already uses, just
+   summed differently (lifetime total instead of "paid in the last 30
+   days"). *Logic-only or schema?* Logic-only -- this is the same class
+   of fix already twice applied in this codebase (the narrative/
+   recent-contact pool-inclusion fix, and the agenda-cap fix), not a
+   new architecture. *Smallest principled implementation:* a new
+   unbounded pool-inclusion category in `selectSuggestionDonorIds`
+   (e.g. lifetime giving above some real, evidenced threshold derived
+   from the portfolio's own distribution, not an arbitrary round
+   number) so these donors are at least evaluated -- what they'd then
+   be *recommended* is a separate question from whether they're
+   considered at all.
+
+6. **Stale, effectively-dead pledges are never distinguished from
+   genuinely aging-but-live ones.** *Real case:* Pollack's $60 pledge,
+   10,100 days old (~27.7 years) -- almost certainly a legacy/data-
+   migration remnant that will never be collected -- scores identically
+   (urgency clamps at 180 days, same as every other pledge past that
+   point) to a pledge six months old. This is the exact class of gap
+   the open-ask fix just addressed for Asks, unaddressed for pledges.
+   *Data already exists:* yes -- `openPledge.ageDays` is already
+   computed. *Logic-only or schema?* Logic-only, and likely the exact
+   same shape of fix (a "review whether this is still real" framing
+   past some evidenced staleness point, or a payment-plan-style
+   suppression) -- not proposed for implementation this round.
+
+**Constraints honored throughout:** investigation only; every number
+above came from a read-only `wrangler d1 execute` query or the real,
+unmodified production functions run against that data in a throwaway
+script; zero D1 writes; zero code changes; zero new scoring formulas;
+no deployment; no manual email; no production/main access; no
+artificial tier or threshold was invented to force exactly 10 donors
+-- these 10 are the ones the real evidence actually supports, and
+several close, similar cases (Saidian, Klein's twins Rovinsky/Pfeiffer)
+were deliberately folded into the write-up above rather than padding
+the list with near-duplicates.
+
+**Stopping for review before implementing anything**, per instruction.
+No recommendation above should be read as approved for
+implementation -- this section is analysis and options, not a plan.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -11052,6 +11464,30 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
+**Genuinely open, newest first: Portfolio-level 30-day focus
+investigation -- awaiting the user's decision on what, if anything, to
+build (2026-08-27).** See "Portfolio-Level 30-Day Focus Investigation"
+above for the full record. Headline finding: the recommendation engine
+is good at tactical next actions (Weinschneider/Zeffren, its own top
+scores, are correctly handled) but has no portfolio-level strategic
+prioritization capability at all -- 82% of the portfolio (203/248
+donors) scores an identical 0.3150 regardless of dollar value, and 5
+of the portfolio's 10 largest lifetime donors (Miller, Schnaidman,
+Ray, Spetner, Saidian) are structurally invisible to the Suggested
+queue. Six missing-intelligence gaps identified and proven from real
+donor examples, ranked smallest-first: giving trajectory (logic-only),
+portfolio-value/capacity awareness in scoring (would need a new
+scoring dimension -- out of scope for a "smallest fix"), Ask/
+Relationship-Intelligence lifecycle synchronization (logic-only, can
+reuse the existing but currently-unwired `lib/relationships/fact-
+supersession.ts`), substantive-vs-broadcast contact reasoning in
+`why` text (logic-only), a lifetime-value pool-inclusion category
+(logic-only, same fix shape already applied twice in this codebase),
+and stale-pledge staleness-awareness (logic-only, same shape as the
+already-shipped open-ask fix). Nothing implemented -- no code change,
+no D1 write, no new scoring formula, no deployment. Decision needed:
+which gap (if any) to address next, and in what order.
+
 **RESOLVED 2026-08-27 -- Open-Ask recommendation quality fix is
 deployed to Independent Staging and verified end-to-end; nothing
 further required.** See "Open-Ask Recommendation Quality Fix --
@@ -11221,6 +11657,55 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-27T22:15:00Z (approximate)
+Claude (Sonnet 5) — Investigated portfolio-level 30-day fundraising
+prioritization per explicit instruction: investigation only, no code
+change, no D1 mutation, no new scoring formula, no deploy. Pulled the
+full real Independent Staging portfolio read-only (donors, full giving
+history, asks, interactions, reminders, yahrtzeits/important dates,
+acknowledgments, dismissals, historical context, pledge payment plans/
+audits -- 248 in-scope donors) and ran the real, unmodified production
+functions (buildRecommendationEvidence/generateCandidates/
+buildDonorRecommendation/score/selectSuggestionDonorIds/
+matchAskFollowUps/resolveOpenPledgeActivityDate/evaluatePaymentPlan)
+against it for every donor in a throwaway script, plus computed
+derived-but-not-currently-synthesized signals (12-month giving
+trajectory, lifetime total, substantive-contact recency, 30-day
+upcoming dates) as pure arithmetic over already-fetched data. Found:
+82% of the portfolio (203/248) scores an identical 0.3150 on
+acknowledge_gift regardless of dollar value; 5 of the portfolio's 10
+largest lifetime donors (Yale Miller $199,150, Manuel Schnaidman
+$158,202, Tzvi Ray $113,676, Jonathan Spetner $90,361, Daniel Saidian
+$72,022) are structurally invisible to the Suggested queue; the engine
+cannot distinguish a fresh, accelerating $36,000 pledge (Mordechai
+Schwartz, +175% YoY) from a flat, 27.7-year-old $60 legacy pledge
+(Yaakov Pollack) -- the older one scores higher; and three real
+donors (Klein, Rovinsky, Pfeiffer) currently get a confidently-wrong
+solicit/relationship_opportunity recommendation that quotes the
+original text of an Ask that has since been declined or committed,
+because the Relationship Intelligence narrative is never invalidated
+when the Ask it describes changes status. Produced a real 10-donor
+30-day focus list (human synthesis of value/trajectory/risk, not the
+engine's own score) with per-donor evidence, agreement/disagreement
+with the current recommendation, and next steps; stress-tested 9
+specific intelligence-distinction scenarios the user named, all
+answered from real data; compared the focus list against the engine's
+own top-scored items (they agree only where a real, dated fact exists
+-- Weinschneider/Zeffren -- and diverge everywhere driven by lifetime
+value, trajectory, or elapsed time); identified 6 missing-intelligence
+gaps ranked smallest-first, each proven from a real donor case with an
+explicit answer on whether the data already exists, whether it's
+logic-only or needs schema, and the smallest principled fix (including
+noting that lib/relationships/fact-supersession.ts already exists but
+is not wired to Ask status changes). Documented the full investigation
+in "Portfolio-Level 30-Day Focus Investigation," added a "Next
+Approval Required" entry awaiting the user's decision on what to build
+next, if anything. Committed and pushed the docs-only update to
+feature/independent-cloudflare-sandbox. No production/main access.
+Stopping for review before implementing anything, per instruction.
+
+---
 
 2026-08-27T20:00:00Z (approximate)
 Claude (Sonnet 5) — Deployed the approved open-ask recommendation
