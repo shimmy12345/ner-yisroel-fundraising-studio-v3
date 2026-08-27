@@ -15,7 +15,30 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`48973b3`** -- "Document Relationship
+**(pending — see follow-up commit)** -- "Apply Stage 1: ask-linked
+legacy Relationship Facts backfill (Klein/Rovinsky/Pfeiffer)
+(2026-08-28)" -- APPLIED to Independent Staging D1 (`donor_
+relationship_facts`/`donor_relationship_fact_changes` only), zero
+application code path changed, zero deploy; see "Relationship Snapshot
+Architecture -- Stage 1 Applied: Ask-Linked Legacy Backfill
+(2026-08-28)" below. Added `scripts/relationship-facts-ask-linked-
+backfill.mjs` (deterministic preview/apply/verify tool, hardcoded to
+exactly the 3 evidenced donors) and used it to insert exactly 3 real
+`donor_relationship_facts` rows (Klein, Rovinsky, Pfeiffer) with real,
+not-clamped `source_interaction_id`/`source_interaction_occurred_at`
+and real `donor_relationship_fact_changes` audit rows, verified
+byte-for-byte against fresh D1 both before and after, confirmed
+idempotent on rerun (0 writes, all 3 report `ALREADY_MIGRATED`). Asks,
+interactions, and `donors.relationship_summary`/`institutional_memory`
+are all confirmed byte-for-byte unchanged -- this stage deliberately
+left the cache alone since no consumer reads facts yet. Stage 2
+(recommendation-engine fact-level gate) and Stage 3 (live display
+synthesis) are explicitly NOT done -- the stale `solicit` recommendation
+for these three donors is unchanged and still fires exactly as before;
+this stage only gives later stages real, correctly-provenanced facts to
+operate on. All 3 quality gates pass (`pnpm test`, `tsc --noEmit`,
+`build:staging-independent`); no deploy performed or needed. Sits on
+top of `48973b3` -- "Document Relationship
 Snapshot architecture decision (live/derived vs. cached)
 (2026-08-28)" -- docs-only, zero application code change, zero D1
 mutation, zero migration, zero backfill, zero schema, zero deploy; see
@@ -12483,6 +12506,213 @@ schema change, no deployment.
 
 **Stopping for review before implementing anything**, per instruction.
 
+## Relationship Snapshot Architecture -- Stage 1 Applied: Ask-Linked Legacy Backfill (2026-08-28) -- APPLIED TO INDEPENDENT STAGING, NOT DEPLOYED (no application code path changed), STAGE 2/3 NOT STARTED
+
+**Scope, per explicit instruction:** Stage 1 only, of the Option-B-
+refined plan approved in "Relationship Snapshot Architecture Decision"
+above -- migrate exactly the three evidenced legacy-solicitation cases
+(Klein, Rovinsky, Pfeiffer) from cached narrative text into real
+`donor_relationship_facts` rows with exact historical provenance.
+Explicitly NOT in scope and NOT done: Stage 2 (wiring a fact-level
+relevance gate into the recommendation candidate functions) or Stage 3
+(moving display surfaces to live synthesis). Cached `donors.
+relationship_summary`/`institutional_memory` deliberately left
+byte-for-byte unchanged -- see "Cached narrative fields" below for why.
+
+### Tooling built
+
+**`scripts/relationship-facts-ask-linked-backfill.mjs`** (new) -- a
+deterministic preview/apply/verify script, following the exact same
+`wrangler d1 execute --remote --json` + conditional-`INSERT ... WHERE
+NOT EXISTS` + affected-row-count check pattern already established and
+tested by `scripts/relationship-facts-backfill-preview.mjs` and
+`scripts/ask-historical-backfill.mjs`. Deliberately hardcoded to
+exactly the 3 evidenced donor ids (`ALLOWLIST`) -- this is a one-time,
+named migration, never a general classifier, and does not read or
+depend on the general Phase 1 historical-corpus allowlist. Three
+modes: default (preview, read-only), `--apply` (re-previews fresh,
+aborts entirely on any `FAIL_CLOSED`, otherwise inserts), `--verify`
+(read-only: re-derives state and runs the REAL, unmodified
+`synthesizeRelationshipSnapshot()` against whatever facts currently
+exist).
+
+**Per-donor fail-closed checks, run fresh on every invocation** (not
+cached, not trusted from a prior run): donor exists, is `live`, is not
+archived, and its `display_name` matches the reviewed name exactly;
+the donor has exactly one `asks` row; that ask has a non-null
+`source_interaction_id`; the referenced interaction exists and belongs
+to the same donor; the interaction's `occurred_at` is a valid past
+timestamp and exactly matches the ask's own `asked_at`; the derived
+note text (the interaction summary's first line, before its `\n` --
+the exact text `app/api/import/monday/commit/route.ts`'s
+`confirm_contact` path would feed to `extractInteraction()`/the fact
+pipeline today, reproduced by inspecting that route's real code, not
+guessed) classifies via the real, unmodified `classifyRelationshipFact()`
+as category `solicitation`; the donor's cached `relationship_summary`
+is exactly `null` and `institutional_memory` exactly equals the
+reconstructed legacy template (`` `Note context: ${noteText}` ``,
+reproducing `lib/capture/interaction.ts`'s own `extractInteraction()`
+memory template verbatim -- confirmed by reading `interactionKindLabel
+("note") === "Note"` directly, not assumed); and either zero existing
+`donor_relationship_facts` rows for the donor (→ `READY`) or exactly
+one existing row that matches this migration's own expected shape by
+fingerprint/category/source_interaction_id/fact_text (→
+`ALREADY_MIGRATED`, a safe no-op). Any other shape (ambiguous ask
+count, a mismatched cached value, an unrelated existing fact row,
+etc.) is `FAIL_CLOSED` for that donor, which aborts the ENTIRE
+migration -- per instruction, a violated assumption is never silently
+narrowed around or broadened past.
+
+### Preview (fresh staging data, immediately before applying)
+
+| | Klein | Rovinsky | Pfeiffer |
+|---|---|---|---|
+| Ask status | declined | committed | declined |
+| Ask amount / purpose | $5,000 / "Plaque" | $5,000 / "Plaque in memory of his wife" | $10,000 / (none) |
+| Source interaction | `monday-interaction-5a79919d`, 2025-11-06 | `monday-interaction-6d655cb9`, 2025-09-29 | `monday-interaction-7161c502`, 2025-09-15 |
+| Cached `relationship_summary` | `null` | `null` | `null` |
+| Cached `institutional_memory` | "Note context: Solicited for a plaque ($5k)" | "Note context: Solicited for a plaque in memory of his wife ($5k)" | "Note context: Solicited for $10k" |
+| Existing fact-row count | 0 | 0 | 0 |
+| Proposed `fact_text` | "Solicited for a plaque ($5k)" | "Solicited for a plaque in memory of his wife ($5k)" | "Solicited for $10k" |
+| category / lifecycle | solicitation / time_bound | solicitation / time_bound | solicitation / time_bound |
+| `source_interaction_id` | real, not clamped | real, not clamped | real, not clamped |
+| `source_interaction_occurred_at` | 1762430400 (real) | 1759147200 (real) | 1757937600 (real) |
+| Ask pending → pinned fresh? | NO (declined) | NO (committed) | NO (declined) |
+| Expected relevance | time_bound, ~294 days since the source interaction, not pinned -- decays per the 90-day solicitation window | time_bound, ~332 days, not pinned | time_bound, ~346 days, not pinned |
+
+All 3 donors: `READY`. Zero `FAIL_CLOSED`. (Days-since figures are
+measured from the ORIGINAL solicitation/interaction date, i.e. the
+decay-clock start -- a larger number than the "227/331/346 days since
+the ask was marked resolved" figures quoted in the prior investigation
+round, which measured a different event; both are correct, they
+measure different things.)
+
+### Apply -- exact three-row migration
+
+Re-ran the preview fresh immediately before applying (per instruction)
+-- identical result, all 3 still `READY` against fresh D1 state.
+Applied atomically-in-spirit: each of the 3 conditional INSERTs is
+independently fail-closed (checked for exactly 1 affected row before
+its matching audit row is written), and the script aborts immediately
+on the first non-1-row result rather than proceeding to the next
+donor -- all 3 succeeded on the first attempt, in `ALLOWLIST` order:
+
+| Donor | fact id |
+|---|---|
+| Klein | `c1167225-737c-4df8-aedc-2755fe7d8612` |
+| Rovinsky | `e98cd7fc-7e95-4410-8aca-01578ff7c0c4` |
+| Pfeiffer | `466368e9-798c-43cc-97fb-de38454cf878` |
+
+### D1 verification (direct, independent of the script's own self-report)
+
+- `SELECT COUNT(*) FROM donor_relationship_facts`: **6** (the 3
+  pre-existing Zachter/Nussbaum/Treitel rows, byte-for-byte unchanged
+  by id/fingerprint/`updated_at`, + the 3 new rows) -- confirms exactly
+  three rows were added and nothing pre-existing was touched.
+- All 3 new rows' `donor_id`/`category`/`lifecycle`/`status`/`fact_text`/
+  `source_interaction_id`/`source_interaction_occurred_at`/`fingerprint`
+  read back exactly matching the re-run preview, field for field.
+- All 3 `donor_relationship_fact_changes` audit rows exist, `action:
+  'created'`, `after_json` recording the real fact text/category/
+  lifecycle/source-interaction linkage, `changed_fields: '[]'` (matching
+  the existing backfill script's own convention for a brand-new row).
+- `asks` rows for all 3 donors: byte-for-byte unchanged (`amount_cents`/
+  `purpose`/`status`/`asked_at`/`source_interaction_id`/`updated_at` all
+  identical to the pre-migration read) -- Ask status was never touched.
+- `interactions` rows for all 3 source interactions: byte-for-byte
+  unchanged (`summary`/`source`/`occurred_at`/`updated_at` identical) --
+  the source interaction was never archived, edited, or deleted.
+- `donors.relationship_summary`/`institutional_memory` for all 3:
+  byte-for-byte unchanged (`null` / the original "Note context: ..."
+  text, exactly as before this stage) -- confirmed both by the script's
+  own `--verify` read and by an independent direct query.
+- Re-running `--apply` against fresh post-migration D1 state reports
+  **0 READY, 3 ALREADY_MIGRATED, 0 FAIL_CLOSED**, performs zero writes,
+  and explicitly states "Nothing to apply -- all 3 donors are already
+  migrated (idempotent no-op)" -- confirmed a rerun cannot create
+  duplicates, satisfying the required idempotency property directly,
+  not by inspection of the code alone.
+
+### Current fact relevance/pinning today (real, via the actual `synthesizeRelationshipSnapshot()`, read-only)
+
+Running the real function against each donor's real current fact
+(exactly 1 each), with `pinnedFresh` built from each donor's real,
+live ask status:
+
+- **Klein:** ask `declined` → not pinned. `synthesizeRelationshipSnapshot()`
+  output: `relationship_summary`/`institutional_memory` = "Solicited
+  for a plaque ($5k)." (this is the sole current fact, so the "never
+  blank" fallback still surfaces it verbatim regardless of its real,
+  decayed score -- see the architecture decision's own Section 4.1/4.5
+  finding; the fact NOW EXISTS and IS correctly time_bound/not-pinned,
+  but the text-level fallback means this alone does not yet change what
+  any consumer displays or recommends).
+- **Rovinsky:** ask `committed` → not pinned (committed is resolved,
+  same as declined for pinning purposes, unchanged design). Same
+  synthesis output shape: "Solicited for a plaque in memory of his wife
+  ($5k)."
+- **Pfeiffer:** ask `declined` → not pinned. Same shape: "Solicited for
+  $10k."
+
+**Explicitly: the bad `solicit`/`relationship_opportunity` recommendation
+is NOT fixed by this stage, and this is not claimed.** Every
+recommendation-evidence-building call site (`lib/workspace/live-data.ts`,
+`lib/relationships/meeting-brief.ts`, `app/donors/[id]/page.tsx`,
+`app/api/assistant/route.ts`) still reads the unchanged, untouched
+`donors.relationship_summary`/`institutional_memory` cache columns, not
+`donor_relationship_facts` -- confirmed unchanged by this stage's own
+D1 verification above. Stage 2 (the fact-level relevance gate) has not
+been built or wired in anywhere; Stage 3 (moving display surfaces to
+live synthesis) has not been built either. All three donors' donor
+page/Meeting Brief/Workspace/Daily-Agenda/Assistant behavior is
+unchanged from before this stage, byte-for-byte, and will remain so
+until Stage 2/3 are separately approved and implemented.
+
+### Cached narrative fields -- left unchanged, as instructed
+
+Confirmed by direct verification above: `relationship_summary`/
+`institutional_memory` were not touched for any of the 3 donors, and
+this script contains no `UPDATE donors` statement of any kind.
+Reasoning (per the task's own instruction to determine this before
+acting): since Stage 3 has not moved any display or recommendation
+surface to live synthesis, every consumer still reads the cache
+exclusively; clearing or rewriting it now, before anything reads facts
+instead, would only ever make currently-displayed donor-facing context
+disappear or change with no corresponding behavioral fix in place yet
+-- there is no correctness reason to touch it at this stage, only risk.
+The safest Stage 1 behavior (byte-for-byte unchanged cache) was used;
+nothing required stopping for a separate cache-change approval.
+
+### Quality gates (all passing)
+
+`pnpm test`: exit code 0, all test files pass (no test references this
+new script directly -- it is a one-time ops/migration tool, matching
+the established convention for `scripts/ask-historical-backfill.mjs`
+and `scripts/relationship-facts-backfill-preview.mjs`, neither of which
+has a dedicated `tests/*.test.mjs` file either; its pure helper logic
+(`firstLine`, `expectedLegacyMemoryText`, `buildDonorCase`) is exported
+for any future test that wants it). `pnpm exec tsc --noEmit`: clean,
+zero output. `pnpm run build:staging-independent`: completed, full
+route manifest, no errors. No deploy performed or needed -- this stage
+added a scratchpad-adjacent migration script and this documentation
+only; no application route, page, or API changed.
+
+### What this stage explicitly did NOT do
+
+Did not implement Stage 2 (recommendation candidate functions are
+completely unmodified -- `lib/relationships/recommendation-candidates.ts`
+was not touched). Did not implement Stage 3 (no display surface reads
+`donor_relationship_facts`; all four narrative-consumer call sites are
+unmodified). Did not change `relationship_summary`/`institutional_memory`
+for any donor. Did not change any Ask row or status. Did not archive or
+edit any interaction. Did not touch `lib/relationships/fact-
+supersession.ts`, the general Phase 1 backfill script, or any other
+donor's facts. Did not migrate any donor outside the exact 3 named
+ones. Did not run the general legacy Relationship Facts backfill.
+
+**Stopping for review before starting Stage 2**, per explicit
+instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -13310,7 +13540,23 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Relationship Snapshot architecture
+**Genuinely open, newest first: Stage 2 (recommendation-engine
+fact-level relevance gate) -- awaiting the user's decision on whether
+to proceed (2026-08-28).** See "Relationship Snapshot Architecture --
+Stage 1 Applied: Ask-Linked Legacy Backfill (2026-08-28)" above. Stage
+1 is done: Klein, Rovinsky, and Pfeiffer each now have exactly one real
+`donor_relationship_facts` row with real, un-clamped provenance
+(verified byte-for-byte, idempotent on rerun). **The stale `solicit`/
+`relationship_opportunity` recommendation is unchanged and still fires
+for all three** -- Stage 1 deliberately did not touch recommendation
+logic or the cached `donors` columns any consumer still reads. Next
+decision: approve Stage 2 (add a strict, non-fallback fact-relevance
+check to `solicitCandidate()`/`relationshipOpportunityCandidate()` as
+an additional gate, per the architecture decision's Section 9 plan) and
+Stage 3 (move display surfaces to live synthesis), or adjust the plan
+first.
+
+**Genuinely open, newest-but-one: Relationship Snapshot architecture
 decision -- awaiting the user's decision on whether to implement
 Option B, refined (2026-08-28).** See "Relationship Snapshot
 Architecture Decision -- Live/Derived vs. Cached (2026-08-28)" above
@@ -13322,16 +13568,15 @@ instead of regex-matching a synthesized display string -- the second
 half is a correction found this round to the prior round's own
 proposed fix, which this round proved does not actually stop Klein's
 stale `solicit` recommendation by itself. Staged plan: (1) the
-previously-proposed narrow Klein/Rovinsky/Pfeiffer backfill, (2) a new
-strict, non-fallback fact-relevance check wired into the
-recommendation candidate functions as an additional gate, (3) move
-display surfaces (donor page, Meeting Brief, Assistant) to live
-synthesis one at a time, (4) optional/deferred: per-fact history UI
-and a human "mark this fact no longer current" override. Decision
-needed: approve this architecture (or an adjustment) before Stage 1
-begins.
+previously-proposed narrow Klein/Rovinsky/Pfeiffer backfill --
+**APPLIED, see above**, (2) a new strict, non-fallback fact-relevance
+check wired into the recommendation candidate functions as an
+additional gate, (3) move display surfaces (donor page, Meeting Brief,
+Assistant) to live synthesis one at a time, (4) optional/deferred:
+per-fact history UI and a human "mark this fact no longer current"
+override.
 
-**Genuinely open, newest-but-one: Relationship-Intelligence/Ask-
+**Genuinely open, newest-but-two: Relationship-Intelligence/Ask-
 supersession fix -- awaiting the user's decision on whether to
 implement the recommended design (2026-08-28).** See "Relationship-
 Intelligence / Ask-Supersession Investigation (2026-08-28)" above for
@@ -13355,7 +13600,7 @@ across every Ask-mutation route with no per-route wiring. No schema
 change judged necessary. Decision needed: approve this design (or an
 adjustment to it) for implementation, or decline.
 
-**Genuinely open, newest-but-two: Portfolio-level 30-day focus
+**Genuinely open, newest-but-three: Portfolio-level 30-day focus
 investigation, fully financial-data-corrected in a second redo --
 awaiting the user's decision on what, if anything, to build
 (2026-08-28).** See "Portfolio-Level 30-Day Focus Investigation --
@@ -13561,6 +13806,74 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T13:00:00Z (approximate)
+Claude (Sonnet 5) — Implemented Stage 1 only of the approved
+Relationship Snapshot architecture plan: a narrow, one-time migration
+moving Klein, Rovinsky, and Pfeiffer from legacy cached solicitation
+narrative into real donor_relationship_facts rows with exact
+historical provenance. Explicitly did not implement Stage 2
+(recommendation-engine changes) or Stage 3 (live Snapshot display) --
+both remain pending. Built scripts/relationship-facts-ask-linked-
+backfill.mjs as a deterministic preview/apply/verify tool (not ad hoc
+SQL), following the same wrangler-CLI + conditional-INSERT-WHERE-NOT-
+EXISTS pattern already established by scripts/relationship-facts-
+backfill-preview.mjs and scripts/ask-historical-backfill.mjs, hardcoded
+to exactly the 3 evidenced donor ids. Derived the exact legacy note
+text by reading app/api/import/monday/commit/route.ts's real
+confirm_contact code (not guessed): the interaction summary's first
+line is exactly the noteText that route's own Phase-2-wired path would
+feed to the fact pipeline today, and reproducing lib/capture/
+interaction.ts's real extractInteraction() memory template
+(`${interactionKindLabel(type)} context: ${note.trim()}`, confirmed
+interactionKindLabel("note") === "Note") let the script verify the
+current cached institutional_memory value still matches what was
+reviewed, byte for byte, before proceeding. Built 8 fail-closed checks
+per donor (donor identity/liveness, exactly one ask, non-null
+source_interaction_id, matching interaction, matching timestamps,
+solicitation classification via the real unmodified
+classifyRelationshipFact(), matching cached narrative, no conflicting
+existing fact row) -- a single failed check for any of the 3 aborts the
+entire migration rather than narrowing or broadening around it. Ran
+the preview against fresh staging data (all 3 READY), re-ran it
+immediately before applying (identical, confirming no drift), then
+applied: exactly 3 donor_relationship_facts rows inserted (Klein
+c1167225-737c-4df8-aedc-2755fe7d8612, Rovinsky
+e98cd7fc-7e95-4410-8aca-01578ff7c0c4, Pfeiffer
+466368e9-798c-43cc-97fb-de38454cf878), each solicitation/time_bound,
+status current, with the REAL source_interaction_id and REAL
+source_interaction_occurred_at (not clamped to migration time), plus a
+matching donor_relationship_fact_changes 'created' audit row for each.
+Independently re-verified every claim directly against fresh D1 (not
+just the script's own self-report): total fact count went from 3 to 6
+with the pre-existing 3 rows byte-for-byte untouched; all 3 new rows'
+fields match the preview exactly; all 3 audit rows exist as expected;
+asks and interactions for all 3 donors are byte-for-byte unchanged
+(status/amount/purpose/source_interaction_id/summary/occurred_at/
+updated_at all identical to pre-migration reads); donors.
+relationship_summary/institutional_memory for all 3 are byte-for-byte
+unchanged (this stage deliberately left the cache alone, reasoned
+explicitly: no consumer reads facts yet, so touching the cache now
+would only risk changing live donor-facing display with no
+corresponding fix in place); re-running --apply against fresh
+post-migration state reports 0 READY / 3 ALREADY_MIGRATED / 0
+FAIL_CLOSED with zero writes, confirming idempotency directly rather
+than by code inspection alone. Ran the real, unmodified
+synthesizeRelationshipSnapshot() read-only against each donor's real
+new fact and reported current relevance/pinning for each (all three:
+time_bound, not pinned since all three asks are resolved,
+~294/332/346 days since the source interaction respectively) --
+explicitly did NOT claim this fixes the stale solicit recommendation,
+since every recommendation-evidence call site still reads the
+unchanged cached columns, not facts; Stage 2 has not shipped. All 3
+quality gates passed (pnpm test exit 0, tsc --noEmit clean, build:
+staging-independent completed) with no code changes to any application
+route -- no deploy performed or needed. Updated docs/AI-HANDOFF.md with
+the full preview/apply/verification record. Committed and pushed to
+feature/independent-cloudflare-sandbox. Stopping for review before
+starting Stage 2, per explicit instruction.
+
+---
 
 2026-08-28T09:00:00Z (approximate)
 Claude (Sonnet 5) — Answered the one remaining architecture question
