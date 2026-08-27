@@ -15,7 +15,30 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`e09b10d`** -- "Document corrected redo of
+**`(pending — see follow-up commit)`** -- "Document Relationship-
+Intelligence/Ask-supersession investigation (2026-08-28)" -- docs-only,
+zero application code change, zero D1 mutation, zero migration; see
+"Relationship-Intelligence / Ask-Supersession Investigation
+(2026-08-28)" below. Root cause found: Klein/Rovinsky/Pfeiffer have
+**zero rows in `donor_relationship_facts`** -- their stale "Note
+context: Solicited for..." text is legacy Monday-import data that
+predates/bypasses the entire Phase 2 fact-lifecycle system, which
+already has a correctly-designed (but unused, for these three)
+mechanism (`pinnedFreshSourceInteractionIds` in `lib/relationships/
+fact-synthesis.ts`) that pins a solicitation fact fresh only while its
+linked ask is pending, via an already-existing, already-reliable
+shared `source_interaction_id` between `asks` and `donor_relationship_
+facts` -- no new schema needed. `lib/relationships/fact-supersession.ts`
+is confirmed NOT the right place for a fix (it only reacts to new-fact
+acceptance, correctly, and was never meant to react to Ask status).
+Smallest recommended design: (a) a narrow one-time backfill linking
+these legacy facts to their real source interaction (not a schema
+change, not the general Phase 1 backfill script), plus (b) live
+(not cached) relevance computation at evidence-build time so the fix
+works across every Ask-mutation route with no per-route wiring. Not
+implemented this round. Sits on top of `cbc5e82` ("Correct Current Git
+State to reference the new HEAD (e09b10d)" -- docs-only, zero
+application code change), which sits on top of **`e09b10d`** -- "Document corrected redo of
 the portfolio-level 30-day focus investigation (2026-08-28)" --
 docs-only, zero application code change, zero D1 mutation; see
 "Portfolio-Level 30-Day Focus Investigation -- CORRECTED REDO
@@ -11464,6 +11487,439 @@ a new capability. It should not wait on Portfolio Focus.
 
 **Stopping for review before implementation**, per instruction.
 
+## Relationship-Intelligence / Ask-Supersession Investigation (2026-08-28) -- INVESTIGATION/DESIGN ONLY, NO CODE CHANGE, NO D1 MUTATION, NO MIGRATION, NO DEPLOY
+
+**Problem, precisely:** Klein, Rovinsky, and Pfeiffer's `donors.
+institutional_memory` still reads "Note context: Solicited for..."
+long after their Ask resolved (declined/committed), and the
+recommendation engine treats that stale text as current evidence for a
+`solicit`/`relationship_opportunity` recommendation. The product
+principle to preserve is real and must not be violated: Relationship
+Intelligence should accumulate, never be destructively deleted merely
+because circumstances changed.
+
+### 1. The three real cases, reconstructed chronologically
+
+All three share one exact underlying shape, confirmed by tracing
+`asks.source_interaction_id` back to the real `interactions` row:
+
+| | Mayer Simcha Klein | Rabbi Michoel A. Rovinsky | Allen Pfeiffer |
+|---|---|---|---|
+| Source interaction | `monday-interaction-5a79919d`, 2025-11-06, "Solicited for a plaque ($5k)... Imported from Monday.com" | `monday-interaction-6d655cb9`, 2025-09-29, "Solicited for a plaque in memory of his wife ($5k)..." | `monday-interaction-7161c502`, 2025-09-15, "Solicited for $10k..." |
+| Ask created | Same id/date as above, `source_interaction_id` set to that exact interaction | Same pattern | Same pattern |
+| Ask amount/purpose | $5,000, "Plaque" | $5,000, "Plaque in memory of his wife" | $10,000, no purpose |
+| `donors.institutional_memory` | "Note context: Solicited for a plaque ($5k)" | "Note context: Solicited for a plaque in memory of his wife ($5k)" | "Note context: Solicited for $10k" |
+| `donor_historical_context` rows | 4 unrelated unconfirmed notes (a follow-up, an email reminder, "confirm gift," a photo drop-off) -- **none of them is the solicitation text itself** | (not re-checked this round; same architecture applies) | (same) |
+| Subsequent interactions | **none** -- zero interactions after the original note | **none** | **none** |
+| Gifts/commitments after the Ask | none on file (per the earlier 30-day-focus investigation, no post-ask gift exists for Klein specifically; contrast with the Rovinsky/Pfeiffer near-ask gifts already documented in the open-ask-fix round) | a $5,000 completed gift the very next day (already fixed by the shipped open-ask recommendation change) | a $5,000 partial gift 1.5 days later (already fixed) |
+| Ask status change | declined, 227 days ago | committed, ~331 days ago | declined, ~346 days ago |
+| Reminders/follow-ups | none | none | none |
+| Fact supersession/archive state | **no row exists at all** in `donor_relationship_facts` for any of the three donors (confirmed directly: `SELECT ... WHERE donor_id = ...` returns zero rows for all three) | same | same |
+| Current Relationship Snapshot | unchanged since import -- the raw text above | unchanged | unchanged |
+| Current recommendation | `solicit`, 0.4590, quoting the raw text verbatim | `relationship_opportunity`, 0.4186 (his ask is committed, so `SOLICITATION_PATTERN` still matches but the pledge-vetoes-solicit hard constraint in `buildDonorRecommendation` blocks `solicit` specifically -- `relationship_opportunity` wins instead) | `solicit`, 0.4590 |
+| Which fact produces it | `evidence.narrative.institutionalMemory` -- read directly from the `donors` table column, never from `donor_relationship_facts` | same | same |
+
+**Historically true / currently relevant / currently actionable --
+kept explicitly distinct:** "He was solicited for $5,000" is
+**historically true forever**, for all three. It stopped being
+**currently relevant as an open opportunity** the moment the Ask
+resolved (whichever way). It was **never re-evaluated for current
+actionability** at all -- not because a supersession rule decided it
+was still fine, but because no supersession rule, decay clock, or
+freshness check of any kind has ever run against this text for these
+three donors.
+
+### 2. The current lifecycle, traced end-to-end
+
+**Ask-mutation routes, all three real ones (confirmed by grep for
+every `UPDATE asks`/`INSERT INTO asks` call site):**
+1. `app/api/asks/route.ts` -- creates a new ask (direct creation flow).
+2. `app/api/interactions/route.ts` -- creates a new ask as a side
+   effect of capturing an interaction that includes an ask.
+3. `app/api/asks/[id]/route.ts` -- `PATCH`, the only status-change
+   route (`pending -> committed/declined/withdrawn`, one-way, plus
+   amount/purpose/note edits), built on the pure `planAskUpdate()` in
+   `lib/capture/ask.ts`.
+4. `app/api/asks/[id]/reminder/route.ts` -- writes only to
+   `recommendations` (an ask-linked follow-up reminder), never to
+   `asks` itself.
+5. `app/api/donors/merge/route.ts` -- re-parents an ask's `donor_id`
+   during a donor merge; does not change status, but is a real
+   mutation path worth naming for completeness.
+6. **No delete route exists for `asks` at all** -- confirmed by grep.
+   The "Ask deleted because entered incorrectly" stress-test scenario
+   below is therefore currently moot for this application (nothing to
+   fix for a capability that doesn't exist) -- worth designing for
+   only if/when a delete route is ever added, not today.
+
+**Do Ask status changes communicate anything to `donor_relationship_
+facts`? No.** `app/api/asks/[id]/route.ts`'s `PATCH` handler writes
+only to `asks` and `ask_changes` (its own audit trail). It has no
+awareness of `donor_relationship_facts` at all -- confirmed by reading
+the route in full.
+
+**Do facts connected to an Ask have explicit provenance/linkage back
+to it? Not directly, but an equivalent, already-reliable linkage
+exists for the evidenced cases.** There is no `donor_relationship_
+fact.source_ask_id` column. But `asks.source_interaction_id` and
+`donor_relationship_facts.source_interaction_id` both reference the
+same `interactions` table -- **when a fact and an ask originate from
+the identical captured interaction (confirmed true for all three real
+cases above), they already share a real, reliable key.** This is not
+a coincidence: `lib/relationships/fact-synthesis.ts`'s own `scoreFact()`
+already exploits exactly this shared key today --
+`pinnedFreshSourceInteractionIds`, "a solicitation fact whose
+sourceInteractionId matches a still-pending ask's own
+sourceInteractionId is pinned to full freshness... the one sanctioned
+channel for structured data (asks) to influence a fact's relevance,
+per the approved design." **This mechanism already exists, is already
+correctly designed, and is already wired into synthesis scoring.** It
+is simply never exercised for Klein/Rovinsky/Pfeiffer, because none of
+the three has a `donor_relationship_facts` row for it to apply to.
+
+**Does supersession currently operate only when accepting newer
+relationship facts? Yes, confirmed by reading `lib/relationships/
+fact-supersession.ts` in full.** `selectSupersessionTarget()` is a
+pure function called only from the fact-*acceptance* path (a new
+interaction producing a new candidate fact). It has no trigger, hook,
+or awareness tied to an Ask status change at all -- there is no code
+path anywhere that calls it, or anything like it, in response to a
+`PATCH /api/asks/[id]`. **This confirms the fix does not belong in
+`fact-supersession.ts`** -- that module's own logic (same-source-
+interaction correction; same-category+lifecycle auto-supersession for
+`solicitation`/`health`) is correct and sufficient for what it's
+designed to do (reacting to new facts); it was never designed to react
+to an external status change on a different table, and doesn't need
+to be.
+
+**What does `lib/relationships/fact-supersession.ts` already support,
+precisely?** Exactly two things: (a) an exact same-`sourceInteractionId`
+match always wins (a correction to what one specific interaction
+already contributed); (b) for the two "singular state" categories
+(`solicitation`, `health`) only, a new fact of the same category+
+lifecycle auto-supersedes the prior one. Nothing about Ask status.
+Nothing about time. Nothing about any table besides `donor_
+relationship_facts` itself.
+
+**Does the recommendation engine read archived/superseded facts, or
+only active ones? Neither, for these three donors -- it reads neither
+table at all.** `recommendation-evidence.ts`'s `narrative.
+relationshipSummary`/`institutionalMemory` are populated directly from
+`donors.relationship_summary`/`institutional_memory` (confirmed in
+`lib/workspace/live-data.ts`, `lib/relationships/meeting-brief.ts`, and
+`app/donors/[id]/page.tsx` -- all three read the plain `donors` table
+columns, never `donor_relationship_facts`, never `synthesizeRelationship
+Snapshot()`). **`synthesizeRelationshipSnapshot()` is called from
+exactly one place in the whole codebase: the fact-*acceptance* flow
+(`lib/relationships/fact-accept-plan.ts`/`fact-accept.ts`), itself only
+reachable by capturing a new interaction.** There is no cron, no
+scheduled job, no lazy recomputation anywhere. This means even a donor
+*correctly* wired into Phase 2 would show a frozen, non-decaying
+Snapshot for as long as no new interaction is ever captured for
+them -- decay is a pure function of "now" inside `scoreFact()`, but
+that function is only ever invoked at the moment of a *new* accepted
+fact, not continuously or on read.
+
+**Can `donors.relationship_summary`/`institutional_memory` remain
+stale independently of `donor_relationship_facts`? Yes, demonstrated
+directly and unambiguously**: all three donors have non-null
+`institutional_memory` and zero `donor_relationship_facts` rows.
+Tracing the origin further: `scripts/ask-historical-backfill.mjs`'s
+own Phase 2 (`planSummaryCleanup`) already established the right
+*principle* for exactly this situation -- once an ask exists as a real
+structured record, it deliberately NULLs the donor's free-text
+`relationship_summary` mention, reasoning "the fact now lives
+structurally in the Ask." But that script only ever targeted one
+specific legacy text format (the pre-fix "People mentioned: Solicited."
+`relationship_summary` string) and only the `relationship_summary`
+column -- never `institutional_memory`, and it predates the `donor_
+relationship_facts` table entirely (Phase 2 came later). Klein/
+Rovinsky/Pfeiffer's "Note context: ..." `institutional_memory` text
+was never in scope for that script and has simply never been touched
+since import.
+
+### 3. Stress-testing the correct semantics
+
+- **Ask declined.** "Solicited for $5,000" stays historically true
+  forever. It should stop being *pinned* fresh the moment the ask is no
+  longer pending, and fall back to ordinary `time_bound`/90-day
+  solicitation decay from its real source date -- exactly what
+  `pinnedFreshSourceInteractionIds` + `scoreFact()` already compute,
+  once the fact exists with the right linkage. It does not need to be
+  archived, deleted, or its status flipped.
+- **Ask committed/fulfilled.** Same mechanism, same outcome --
+  `pinnedFreshSourceInteractionIds` is keyed on "still pending," not on
+  "declined specifically," so committed and declined are already
+  treated identically (confirmed: Rovinsky's committed ask already
+  fails to pin his fact fresh under the existing design, no special-
+  casing needed).
+- **Ask deferred.** No such status exists in `AskStatus` (`pending |
+  committed | declined | withdrawn`) today. If a real "come back to
+  this later" need is ever evidenced, it would need either a new
+  status or a due-dated follow-up reminder (the existing "Add
+  follow-up" mechanism) -- not something this investigation found
+  evidence to design for now.
+- **Ask amount/purpose changes.** `planAskUpdate()` already supports
+  editing amount/purpose on a still-`pending` ask without touching
+  status. The linked fact's *text* would not automatically update (the
+  fact is a verbatim record of what was said, not a live mirror of the
+  ask row) -- this is correct and desired: the fact records what was
+  *said* at the time; the ask record is the current structured truth.
+  No new fact/supersession is needed for an amount/purpose edit alone.
+- **Ask deleted because it was entered incorrectly.** Moot today (no
+  delete route exists, confirmed above). If ever added, this is
+  clearly different from a real declined ask: an erroneous entry never
+  factually happened, so unpinning-and-decaying (this investigation's
+  proposal) would be the wrong response -- an erroneous ask's own
+  creation should arguably be the trigger for reconsidering the fact
+  itself, not left to silent decay. Flagged for whoever eventually
+  builds Ask deletion; not solved here.
+- **A later, genuinely new solicitation after an earlier declined
+  ask.** Already correctly handled by the *existing, unmodified*
+  `selectSupersessionTarget()`: a new `solicitation`+`time_bound` fact
+  auto-supersedes the prior current one (same category, same
+  lifecycle) the moment it's accepted from a new interaction. No
+  change needed here at all -- this is exactly why the fix must NOT
+  live in `fact-supersession.ts`: that module already does this part
+  correctly.
+- **A fact with useful information beyond the Ask itself.** None of
+  the three real cases exhibits this (each `institutional_memory`
+  value is purely the solicitation sentence, nothing else mixed in) --
+  but the existing architecture already handles it correctly by
+  design: Phase 2 classification/acceptance operates at the level of
+  one `specificFacts` sentence at a time (per `fact-classification.ts`'s
+  own comments), so a compound note ("Discussed his health and
+  mentioned wanting to make a $5k gift") would already be split into
+  separate facts with separate categories before classification ever
+  sees it -- decaying/unpinning the solicitation portion would not
+  touch a co-occurring health or family fact from the same sentence
+  batch. This is an existing property to preserve, not something to
+  build.
+- **No explicit Ask linkage exists.** For a fact with no source
+  interaction shared with any ask (a hand-typed narrative note, a
+  fact from a general conversation that merely *mentions* a dollar
+  figure), **there is no reliable way to connect it to a specific Ask,
+  and this investigation does not recommend inventing fuzzy text
+  matching to do so.** The correct, honest behavior for that case is:
+  the fact decays on its own ordinary `solicitation`/90-day
+  `time_bound` schedule (already true today for any Phase-2-native
+  fact), with no ask-awareness boost or penalty -- exactly as
+  designed, and exactly why `pinnedFreshSourceInteractionIds` was
+  built as an *opt-in*, ID-matched pin rather than a default assumption
+  that every solicitation-category fact must relate to some ask.
+
+### 4. Architectural approaches, compared against the "accumulate,
+never destructively delete" principle
+
+**A. Supersede/archive the underlying fact when the Ask resolves.**
+Has real precedent (`ask-historical-backfill.mjs`'s `relationship_
+summary`-clearing phase used exactly this reasoning). But: it requires
+explicit, event-driven wiring at every Ask-mutation route (violates
+"works across every path" without route-specific code, and risks being
+forgotten at a future new mutation path); and none of `donor_
+relationship_facts.status`'s three values (`current`/`superseded`/
+`archived_with_source`) actually *means* "true forever, just no longer
+current evidence due to elapsed time or an external resolution" --
+using `superseded` here would be a semantic misuse (nothing superseded
+the fact; it's still exactly what was said), and marking it archived
+implies something closer to correction/removal than simple time-plus-
+resolution decay. **Rejected as the primary mechanism** -- the
+underlying textual fact is not wrong and should not change state at
+all; only its *scoring* should reflect the world having moved on.
+
+**B. Preserve the fact as active history; teach recommendation
+synthesis to understand current Ask state and refuse superseded
+solicitation evidence as actionable.** This is what the existing,
+unused `pinnedFreshSourceInteractionIds` mechanism was already built
+to do. The fact's `status` never changes; only its *computed relevance
+score*, evaluated fresh against the ask's *current* live status,
+changes. This is the closest fit to the stated principle: retain what
+happened (the row, untouched, forever); understand what changed
+(query the ask's real current status, live, at the moment relevance is
+computed); synthesize current state correctly (score, don't delete).
+**This is the right primary mechanism.**
+
+**C. Explicitly link facts to the Ask they describe and derive
+relevance from that linkage/status.** Already true for the evidenced
+cases via the shared `source_interaction_id` -- **no new schema
+column is needed for what these three real cases (or any case sharing
+this same shape) demonstrate.** C is not a competing approach; it is
+the specific, already-available linkage mechanism that makes B work
+without guessing. A dedicated `source_ask_id` column would only add
+value for a fact whose source interaction is NOT the same one that
+produced the ask (e.g., a later conversation that merely *references*
+an existing ask without itself creating one) -- no real case in this
+investigation demonstrates that shape, so it is not justified now (see
+section 6).
+
+**D. Smaller approach actually recommended: B, enabled by C's existing
+linkage, plus the two structural gaps this investigation found that
+neither B nor C alone fixes:** (i) Klein/Rovinsky/Pfeiffer (and,
+almost certainly, the wider legacy-imported-narrative population --
+only 3 rows exist in `donor_relationship_facts` across the entire
+staging database) were never migrated into the fact table at all, so
+there is nothing for B's live-relevance check to operate on; and (ii)
+even a correctly-migrated fact's *cached* `donors.relationship_summary`/
+`institutional_memory` only ever refreshes when a brand-new interaction
+triggers fact acceptance -- there is no live/periodic resynthesis, so
+a quiet donor (all three have zero interactions since their ask) would
+never see their cache update even with a perfect fact row and perfect
+scoring logic. Both gaps are logic/data corrections to the existing
+architecture, not a new one -- see section 7.
+
+### 5. Relationship Snapshot implications
+
+**Fixing recommendation consumption alone is not enough.** Even with
+the fact and scoring corrected, the *displayed* Snapshot text (the
+donor page, Meeting Brief) reads from the same cached `donors` columns
+the recommendation engine reads today. If those columns are only
+refreshed at fact-acceptance time (finding (ii) above), a quiet donor's
+Snapshot would keep showing the stale "Solicited for $5,000" sentence
+indefinitely even after the underlying fact correctly decays for
+*recommendation* purposes -- a visible inconsistency between what the
+engine acts on and what the fundraiser reads.
+
+**Is "Solicited for $5,000" useful history, misleading current-state
+wording, or something needing richer synthesis?** All three, depending
+on when it's read: useful history always; misleading current-state
+wording once the ask resolves; and yes, richer synthesis is both
+possible and already the right shape for the existing architecture to
+produce *without hardcoding new wording*. The existing `joinFacts()`
+synthesis already verbatim-joins whatever `fact_text` values are
+selected -- it does not paraphrase. **The natural, non-hardcoded way
+to get "solicited for $5,000, since declined"-type language is for the
+*Ask status change itself* to become a new accepted fact through the
+existing capture pipeline** (e.g., the existing "Add follow-up"/status-
+change UI could optionally offer to log a short outcome note, which
+would flow through the same `extractInteraction`/`fact-accept` path
+every other captured fact already uses) -- not a new synthesis
+feature, just using the existing one for a new source. Absent that,
+the more conservative, still-correct behavior is simply: the stale
+solicitation sentence drops out of the *terse* `relationship_summary`
+(2-fact cap) and `institutional_memory` (5-fact cap) once it decays
+past `RELEVANCE_FLOOR`, the same as any other aged `time_bound` fact --
+Snapshot becomes shorter for THIS fact specifically only if nothing
+else is on file to say instead, which is honest (there genuinely isn't
+anything more current to say) rather than lossy (the row itself is
+untouched and could still be surfaced by a "full history" view if one
+is ever built -- not something this investigation found evidence is
+needed today).
+
+### 6. Provenance and data-model question
+
+**Does reliably connecting a fact to its Ask require a new `donor_
+relationship_fact.source_ask_id` column? No -- not for anything this
+investigation found evidence of.** The existing, shared `source_
+interaction_id` (both `asks` and `donor_relationship_facts` reference
+the same `interactions` row) is exact, reliable, and already exploited
+by `pinnedFreshSourceInteractionIds`. A new explicit column would only
+matter for a fact whose source interaction differs from the ask's own
+-- no real donor in this investigation has that shape, and inventing
+fuzzy/heuristic matching to connect an unrelated fact to an ask is
+explicitly what this investigation recommends against (see the "no
+explicit linkage exists" stress test above -- the honest answer there
+is "let it decay on its own schedule," not "guess a connection").
+**Schema change is not justified by the evidenced cases.**
+
+### 7. Smallest recommended design (not implemented this round)
+
+Two small, logic/data-only corrections, no schema change, no new
+architecture:
+
+**(a) A narrow, one-time backfill for legacy solicitation facts that
+share a source interaction with a real `asks` row** -- distinct from
+the existing, more general `scripts/relationship-facts-backfill-
+preview.mjs` (which deliberately clamps every backfilled fact's decay
+clock to "now" and never attempts real historical linkage, a correct
+design choice for the general legacy corpus where no reliable source
+exists). For the narrower subset where `donors.relationship_summary`/
+`institutional_memory` text corresponds to an interaction that is ALSO
+a real ask's `source_interaction_id` (Klein/Rovinsky/Pfeiffer, and any
+other donor sharing this exact shape), insert a `donor_relationship_
+facts` row using the real classification (`classifyRelationshipFact`,
+unmodified), the REAL `source_interaction_id` (the shared one, not
+null), and the REAL `source_interaction_occurred_at` (the interaction's
+true `occurred_at`, not clamped to backfill time) -- so the existing,
+unmodified decay math immediately reflects true elapsed time. This
+alone, with zero further changes, would already fix Klein's score
+(294+ days past a 90-day solicitation window, decaying to 0) purely
+because `scoreFact()`/`pinnedFreshSourceInteractionIds` already do the
+right thing once real data exists for them to act on.
+
+**(b) Make the recommendation engine's narrative evidence
+live-relevance-aware instead of reading the static cache verbatim.**
+Smallest form: at evidence-build time, for a donor whose `narrative`
+text originates (via (a)'s linkage) from a `donor_relationship_facts`
+row, compute `synthesizeRelationshipSnapshot()` fresh (using the SAME
+already-fetched `asks` data every caller already queries, to build
+`pinnedFreshSourceInteractionIds` live) rather than trusting `donors.
+relationship_summary`/`institutional_memory` as pre-computed truth.
+This is what makes the fix work identically **across every Ask-status
+mutation path with no route-specific wiring at all** -- there is
+nothing to remember to call from `PATCH /api/asks/[id]` or anywhere
+else, because relevance is recomputed from the ask's live status every
+time evidence is built, the same way `pinnedFreshSourceInteractionIds`
+was already designed to be computed "at call time." The existing
+cached `donors` columns remain as-is for display surfaces that don't
+need this precision (or are updated opportunistically the next time a
+real interaction triggers acceptance) -- not deleted, not redefined.
+
+**What this fixes:** Klein (declined, 294+ days -> decays to 0, drops
+out, `solicit` no longer fires from this text). Rovinsky (committed --
+already correctly never pinned, decays identically). Pfeiffer
+(declined, same as Klein). A later genuine new solicitation still
+correctly wins via the existing, untouched `selectSupersessionTarget`.
+No unrelated fact is touched (the migration only targets the narrow,
+confirmed-linked subset; sentence-level classification already
+isolates unrelated content). Relationship Snapshot synthesis is
+unmodified -- reused exactly as designed, just invoked live instead of
+trusting a stale cache for this one evidence path.
+
+**What this does NOT change, explicitly:** `lib/relationships/fact-
+supersession.ts` (already correct for its actual job); `donor_
+relationship_facts`' schema (no new column); the Ask status machine in
+`lib/capture/ask.ts` (unchanged); the general Phase 1 backfill script
+(unchanged, still correct for the broad legacy corpus it targets);
+`donors.relationship_summary`/`institutional_memory` as display-cache
+columns for surfaces that don't need live precision; any donor whose
+narrative has no shared-interaction linkage to a real ask (their
+decay behavior is unchanged, and correctly so).
+
+**Regression coverage this design would need (not written this
+round):**
+- Klein/Rovinsky/Pfeiffer's exact real dates/amounts, reconstructed as
+  fixtures: prove the fact-scoring path (once linked and backfilled)
+  produces a decayed-to-floor score for a >90-day-old solicitation fact
+  whose ask is no longer pending, for both `declined` and `committed`
+  outcomes.
+- A still-`pending` ask's linked fact remains pinned to full freshness
+  (the existing behavior, proving the fix doesn't regress the positive
+  case).
+- A fact with no linked ask at all decays on its ordinary schedule,
+  unaffected by any ask's status (proves no fuzzy inference was
+  introduced).
+- A new, later solicitation-category fact correctly supersedes an
+  older current one regardless of the older one's own ask-linkage
+  state (proves `selectSupersessionTarget` still works unmodified).
+- A compound fact batch (a solicitation sentence alongside an unrelated
+  family/health sentence from the same interaction) shows only the
+  solicitation-linked fact's relevance changing when its ask resolves
+  -- the unrelated fact's score is untouched.
+- The narrow backfill script itself: only donors whose `institutional_
+  memory`/`relationship_summary` interaction id matches a real ask's
+  `source_interaction_id` are selected; a donor with narrative text but
+  no matching ask is correctly excluded (no fuzzy matching).
+
+**Not solved or proposed this round, by explicit instruction:** no
+code change, no D1 mutation, no migration, no schema change, no
+deployment, no arbitrary age threshold (the 90-day solicitation window
+is pre-existing, evidenced, and unmodified by this investigation), no
+broad suppression of all post-decline solicitation recommendations
+(the fix is scored decay, not a blanket rule), and no destructive
+deletion of any historical Relationship Intelligence at any point.
+
+**Stopping for review before implementing anything**, per instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -12291,7 +12747,31 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Portfolio-level 30-day focus
+**Genuinely open, newest first: Relationship-Intelligence/Ask-
+supersession fix -- awaiting the user's decision on whether to
+implement the recommended design (2026-08-28).** See "Relationship-
+Intelligence / Ask-Supersession Investigation (2026-08-28)" above for
+the full record. Root cause: Klein/Rovinsky/Pfeiffer's stale
+solicitation narrative has zero backing rows in `donor_relationship_
+facts` -- it is legacy Monday-import text that never entered the
+Phase 2 fact-lifecycle system, so the system's own already-correct
+decay/pinning machinery (`pinnedFreshSourceInteractionIds`, keyed on
+the ask's live pending/not-pending status via an already-shared
+`source_interaction_id`) never gets a chance to run for them. `lib/
+relationships/fact-supersession.ts` is confirmed to be the wrong place
+for a fix. Recommended smallest design (investigation/design only,
+nothing implemented): (a) a narrow one-time backfill linking these
+specific legacy facts to their real source interaction with real
+historical dating (distinct from the existing, more general Phase 1
+backfill script, which deliberately does not attempt this), and (b)
+compute narrative relevance live at evidence-build time (reusing
+already-fetched `asks` data) instead of trusting the static `donors.
+relationship_summary`/`institutional_memory` cache -- so the fix works
+across every Ask-mutation route with no per-route wiring. No schema
+change judged necessary. Decision needed: approve this design (or an
+adjustment to it) for implementation, or decline.
+
+**Genuinely open, newest-but-one: Portfolio-level 30-day focus
 investigation, fully financial-data-corrected in a second redo --
 awaiting the user's decision on what, if anything, to build
 (2026-08-28).** See "Portfolio-Level 30-Day Focus Investigation --
@@ -12497,6 +12977,68 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T04:30:00Z (approximate)
+Claude (Sonnet 5) — Investigated the Relationship-Intelligence/Ask-
+supersession problem identified as the next priority by the corrected
+Portfolio-Level 30-Day Focus Investigation, per explicit instruction:
+investigation/design only, no code change, no D1 mutation, no
+migration, no deploy. Reconstructed Klein's, Rovinsky's, and
+Pfeiffer's complete real histories via read-only staging queries,
+tracing asks.source_interaction_id back to the exact real interactions
+row for each (all three: a single Monday-imported "Solicited for $X"
+note, zero interactions since, zero facts in donor_relationship_facts).
+Read lib/relationships/fact-classification.ts, fact-supersession.ts,
+and fact-synthesis.ts in full to understand the existing architecture
+before proposing anything. Root cause: donor_relationship_facts has
+only 3 rows in the entire staging database, none belonging to Klein/
+Rovinsky/Pfeiffer -- their stale narrative is legacy Monday-import text
+that predates/bypasses the Phase 2 fact-lifecycle system entirely.
+That system already has a correctly-designed mechanism for exactly
+this problem (pinnedFreshSourceInteractionIds in fact-synthesis.ts,
+which pins a solicitation-category fact fresh only while its linked
+ask is still pending, via the ask's own live status) -- it has simply
+never been exercised for these three donors because they have no fact
+rows to apply it to. Confirmed lib/relationships/fact-supersession.ts
+is the wrong place for a fix: it only reacts to new-fact acceptance
+(a new interaction), never to an Ask status change, and its own logic
+(same-source-interaction correction; same-category+lifecycle auto-
+supersession for solicitation/health) is already correct for what it
+does. Traced every real Ask-mutation route (creation via two paths,
+PATCH for status/amount/purpose, a reminder route that never touches
+asks itself, donor-merge re-parenting; confirmed no delete route
+exists). Found that synthesizeRelationshipSnapshot() is only ever
+called from the fact-acceptance path, with no cron/periodic
+resynthesis -- meaning even a correctly-migrated fact's cached
+donors.relationship_summary/institutional_memory would only refresh
+on a brand-new interaction, not on an Ask status change alone.
+Confirmed the existing shared source_interaction_id between asks and
+donor_relationship_facts is already reliable, exact linkage for every
+real case found -- no new schema column justified. Stress-tested 7
+named scenarios (declined/committed/deferred/amount-changed/deleted
+asks; a later genuine new solicitation; a multi-signal fact; no
+explicit linkage) against the existing architecture. Compared four
+architectural approaches (supersede/archive the fact; teach synthesis
+to read live Ask state; explicit fact-to-ask linkage; a smaller
+combined approach) against the "accumulate, never destructively
+delete" principle and recommended the smallest design: a narrow,
+one-time backfill linking these specific legacy facts to their real
+source interaction with real historical dating (distinct from the
+existing, more general Phase 1 backfill script), plus computing
+narrative relevance live at evidence-build time instead of trusting
+the static donors-table cache -- so the fix works across every
+Ask-mutation route with no per-route wiring, fixes Klein/Rovinsky/
+Pfeiffer, preserves every historical fact untouched, and lets a later
+genuine solicitation still correctly supersede via the existing,
+unmodified selectSupersessionTarget. Specified a 6-case regression
+test plan without writing any tests. Updated "Next Approval Required"
+and "Current Git State." Committed and pushed the docs-only
+investigation to feature/independent-cloudflare-sandbox. No production/
+main access, no D1 mutation, no code change, no migration, no
+deployment. Stopping for review before implementing anything, per
+instruction.
+
+---
 
 2026-08-28T02:45:00Z (approximate)
 Claude (Sonnet 5) — Redid the portfolio-level 30-day focus
