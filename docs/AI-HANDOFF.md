@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**(pending — see follow-up commit)** -- "Implement Stage 2: fact-level
+**`f2eadd1`** -- "Implement Stage 2: fact-level
 recommendation actionability (2026-08-28)" -- application code change
 (no D1 mutation, no schema, no deploy); see "Relationship Snapshot
 Architecture -- Stage 2 Implemented: Fact-Level Recommendation
