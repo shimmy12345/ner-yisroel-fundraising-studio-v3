@@ -15,7 +15,33 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`e6ed06d`** -- "Document Relationship-
+**(pending — see follow-up commit)** -- "Document Relationship
+Snapshot architecture decision (live/derived vs. cached)
+(2026-08-28)" -- docs-only, zero application code change, zero D1
+mutation, zero migration, zero backfill, zero schema, zero deploy; see
+"Relationship Snapshot Architecture Decision -- Live/Derived vs.
+Cached (2026-08-28)" below. Answers the one open architecture question
+before implementing the previously-recommended Klein/Rovinsky/Pfeiffer
+fix: recommended **Option B, refined** -- derive the Relationship
+Snapshot live from `donor_relationship_facts` for any donor with a
+fact row (cached `donors.relationship_summary`/`institutional_memory`
+remain the fallback for the other 11 of 14 narrative-bearing donors
+with no fact row yet), AND make the recommendation engine consult a
+fact's own live score/status directly instead of regex-matching a
+synthesized display string. That second half is a genuine correction
+to the prior round's own proposed fix: this round proved, by actually
+running it against Klein's real shape, that merely recomputing
+`synthesizeRelationshipSnapshot()` live does NOT stop his stale
+`solicit` recommendation, because he has exactly one current fact and
+the synthesis function's "never blank" fallback re-emits it verbatim
+regardless of its decayed score -- the old text-regex candidate
+functions still match the word "Solicited" in it either way. Real
+data gathered this round: 248 live donors, 14 with any narrative text,
+only 3 already migrated to a real fact row, 3 matching the narrow
+ask-linked backfill's shape (Klein/Rovinsky/Pfeiffer), 8 narrative-only
+with no ask at all (the general Phase 1 backfill's population,
+untouched by any of this). Nothing implemented; sits on top of
+`e6ed06d` -- "Document Relationship-
 Intelligence/Ask-supersession investigation (2026-08-28)" -- docs-only,
 zero application code change, zero D1 mutation, zero migration; see
 "Relationship-Intelligence / Ask-Supersession Investigation
@@ -11920,6 +11946,543 @@ deletion of any historical Relationship Intelligence at any point.
 
 **Stopping for review before implementing anything**, per instruction.
 
+## Relationship Snapshot Architecture Decision -- Live/Derived vs. Cached (2026-08-28) -- INVESTIGATION/DESIGN ONLY, NO CODE CHANGE, NO D1 MUTATION, NO MIGRATION, NO BACKFILL, NO SCHEMA, NO DEPLOY
+
+**Question posed, precisely:** before implementing the previously-
+proposed narrow backfill + live-relevance recommendation fix, should
+the Relationship Snapshot become a live/derived interpretation of
+`donor_relationship_facts` across the whole app, with the cached
+`donors.relationship_summary`/`institutional_memory` columns retained
+only as legacy/fallback data -- rather than only the recommendation
+engine going live while donor-facing surfaces keep reading the cache?
+
+### 1. Complete consumer/dependency map (every read/write, verified by direct grep + read, not recalled)
+
+**Reads of `donors.relationship_summary`/`institutional_memory`** --
+four independent call sites, each issuing its own SQL `SELECT`, none
+sharing a query:
+
+| Consumer | File | Purpose | What it sees today |
+|---|---|---|---|
+| Workspace/Homepage | `lib/workspace/live-data.ts:224` (bulk, all ≤500 donors in one query), fed into `buildRecommendationEvidence` at line 497 | Suggested Action ranking across the whole portfolio | **A/B mixture** -- whichever the donor's cached columns currently hold (legacy text if never migrated, Phase-2-synthesized text if migrated) |
+| Daily Fundraising Agenda email | `lib/agenda/send-agenda.ts:9` calls `loadWorkspaceBrief` (the SAME function as Workspace/Homepage) → `lib/agenda/agenda-model.ts` | Overdue/today/suggested email sections | **Identical to Workspace/Homepage -- not a separate consumer.** One shared pipeline, two renderers (web page vs. email). Anything that fixes/changes Workspace's evidence automatically changes the Agenda email's, with zero extra wiring. |
+| Meeting Brief | `lib/relationships/meeting-brief.ts:63` (own `SELECT`), fed into `buildRecommendationEvidence` at line 263 | Pre-meeting prep page: narrative text + Suggested Action | **A/B mixture**, same as above, via its own independent D1 read of the same two columns |
+| Donor page | `app/donors/[id]/page.tsx:87` (own `SELECT`) | Displays the Snapshot text directly (via `sanitizeScheduledRelationshipContext`, line 152) AND feeds its own `buildRecommendationEvidence` call (line 328) for Suggested Action | **A/B mixture**, third independent read of the same columns |
+| Assistant | `app/api/assistant/route.ts:44` (own `SELECT`) | Feeds the chat model two separately labeled context lines ("relationship summary" / "institutional memory") | **A/B mixture**, fourth independent read |
+
+**None of the four is `C` (live fact synthesis) today** -- confirmed by
+grep: `synthesizeRelationshipSnapshot` has exactly one caller in the
+whole codebase, `lib/relationships/fact-accept-plan.ts` (itself only
+reachable from the accept/archive pipeline below). No display or
+recommendation surface calls it.
+
+**Reads of `donor_relationship_facts` directly:** none, anywhere in
+`app/` or user-facing `lib/` code. The only readers are the write
+pipeline itself (`lib/relationships/fact-accept.ts`/`fact-accept-
+plan.ts`, which reads current facts to decide supersession and to
+resynthesize) and `lib/relationships/fact-fingerprint.ts` (idempotency
+check, same pipeline). There is **no donor-facing UI or API that lists
+individual facts, their category/lifecycle/status, or history** --
+confirmed: Phase 4 ("richer consumer UI... a history expander for
+superseded/archived facts") was explicitly deferred in the original
+design and was never built. Also referenced, non-user-facing: `lib/
+data-health/production-baseline.ts`, `lib/operations/staging-
+reset.ts`, `lib/operations/workspace-backup.ts` -- ops/backup tooling
+that snapshots or restores the table wholesale, not a consumer of its
+meaning.
+
+**Writes** (capture/outcome/edit/import flows) -- unchanged from the
+prior investigation round, re-confirmed still accurate: all four
+explicit-acceptance routes (`app/api/interactions/route.ts`,
+`app/api/interactions/[id]/outcome/route.ts`, `app/api/interactions/
+[id]/route.ts` PATCH+DELETE, `app/api/import/monday/commit/route.ts`)
+delegate to the shared `planFactAcceptance()`/`planFactArchival()`
+pipeline in `lib/relationships/fact-accept.ts`, which is the **only**
+place either donor column is written (re-verified by the existing
+`tests/relationship-fact-accept-wiring.test.mjs` structural assertion:
+exactly two `UPDATE donors SET ... relationship_summary` statements
+anywhere in `app/`+`lib/`, both inside that one file). Confirmed-not-
+write-paths (comment-verified, zero actual writes): gift
+acknowledgment, yahrtzeit entry, important-date entry, DOB import
+commit.
+
+**Confirmed NOT-write-paths that DO touch a related table:**
+`app/api/donors/merge/route.ts` re-parents `asks.donor_id` on merge
+(`UPDATE asks SET donor_id=?...`) but **does not re-parent
+`donor_relationship_facts.donor_id`** -- a real, previously-undocumented
+gap: merging a duplicate donor into a survivor orphans that donor's
+facts under the now-archived duplicate id, silently dropping them out
+of the survivor's synthesis. Not evidenced as having affected Klein/
+Rovinsky/Pfeiffer (none has been merged), and out of this round's scope
+to fix, but flagged here since it bears directly on "will live
+synthesis see everything it should."
+
+**Dead code, found and worth flagging so it isn't mistaken for a real
+consumer:** `lib/relationships/read.ts`'s `getRelationshipUpdates()`
+reads the same two columns but is **never imported or called anywhere
+in `app/` or `lib/`** -- confirmed by grep; its only references are two
+test files reading its *source text* as a string (`tests/monday-
+historical-context.test.mjs`, `tests/today.test.mjs`), not executing
+it. It does not affect this decision either way.
+
+### 2. Source-of-truth findings (from the actual design record and the code's own comments, not inferred from naming)
+
+**Verified directly in the code, not assumed:** `lib/relationships/
+fact-synthesis.ts`'s own header comment states plainly: "This is what
+regenerates `donors.relationship_summary`/`institutional_memory`;
+those two columns are a materialized CACHE of this function's output
+over the donor's CURRENT facts, **never an independent source of
+truth**." This is not a naming inference -- it is the literal, current,
+committed statement of intent in the file that implements the system.
+
+**Verified against the original design record** ("Relationship
+Snapshot Synthesis Design," 2026-08-21, above): the two donor columns
+were **deliberately** chosen to be "Persisted/materialized... a cache,
+explicitly not a second source of truth: always exactly reproducible
+by re-running the synthesis function over `donor_relationship_facts`,
+unlike today's system where the 'true' value has no other
+representation to regenerate from if it ever drifted," and were meant
+to be "regenerated synchronously in the SAME `env.DB.batch()` as any
+fact status transition (insert/supersede/archive)... The cache can
+never observably lag its source."
+
+**Conclusion, not inferred: `donor_relationship_facts` was designed
+from the start as the durable, authoritative accumulation layer.
+`relationship_summary`/`institutional_memory` were designed from the
+start as a performance/compatibility materialized projection over it
+-- chosen specifically so Meeting Brief/Today/Assistant would need
+zero code changes, not because the cache was ever meant to be a
+second source of truth.** This was a deliberate architectural choice,
+not organic drift.
+
+**The gap between design and reality, found live in this round:** the
+design's own invalidation promise ("the cache can never observably
+lag its source") was only ever wired to **fact status transitions**
+(insert/supersede/archive) -- it was never wired to **the passage of
+time** or to **an external Ask status change**, because neither of
+those is a fact-table mutation to hook a resynthesis call onto. This
+is the same structural gap the prior investigation round already
+found (`synthesizeRelationshipSnapshot()` has exactly one call site,
+reachable only from a new accept/archive event) -- this round confirms
+it is not a hypothetical: **it already affects a real, correctly-
+migrated donor today** (Zachter -- see stress test 4.2 below).
+
+### 3. Architecture comparison
+
+**Option A -- current mixed/cache model, only recommendation evidence made live-aware.**
+Rejected. Two independent reasons, one already known and one newly
+found this round:
+- It leaves Donor Page/Meeting Brief/Assistant permanently able to
+  show a sentence the recommendation engine has already internally
+  discounted -- the exact "same evidence, contradictory current-state
+  interpretations on different surfaces" the task explicitly asks not
+  to allow, with no strong reason to allow it here (nothing about
+  those three surfaces requires staler text than the recommendation
+  engine uses).
+- **Newly found this round: even "making recommendation evidence
+  live" does not, by itself, fix the motivating bug.** See stress test
+  4.1 below -- Klein's case survives the previously-proposed live-
+  synthesis fix intact, because the fix as originally scoped only
+  swapped which *text string* recommendation evidence reads; the
+  candidate functions still regex-match that string, and the
+  synthesis function's own "never blank while any fact exists"
+  fallback re-emits a fully-decayed sole fact verbatim regardless of
+  its computed score. Fixing this requires the SAME deeper change
+  Option B needs anyway (fact-level signal, not string-level regex) --
+  so Option A buys nothing by staying narrower.
+
+**Option B -- live Relationship Snapshot for donors with Phase-2 facts; cached columns as legacy/fallback for the rest.**
+This round's stress tests (below) show this is achievable with the
+data and query patterns already in this codebase, and-- once refined
+with the fact-level (not string-level) fix in 3.-recommendation below
+-- actually closes the Klein-shaped gap that Option A's narrower
+version does not.
+
+**Option C -- materialized projection with reliable invalidation, covering every dependency `scoreFact()` uses.**
+Rejected, for a structural reason found by taking "every dependency"
+literally: `scoreFact()`'s dependencies are the fact's own
+`lifecycle`/`category`/`sourceInteractionOccurredAt`, the ask's live
+`status` (via `pinnedFresh`), and **`now`** -- the passage of time
+itself. The first three are real table mutations a trigger could hook
+(a fact write, an ask status write). **The fourth has no mutation to
+hook at all** -- a fact's score changes every single day purely
+because "now" advanced, with nothing in any table changing. The only
+ways to make a materialized cache track that are (a) a periodic
+recompute job (this codebase has exactly one precedent, the 9am Daily
+Agenda cron -- real, but it would need to re-touch all 248 donor rows
+on some cadence merely to catch decay, introducing a staleness window
+between runs that does not exist today, for a table with 3 rows total)
+or (b) computing at read time anyway -- which is Option B by another
+name. **Option C, taken seriously, collapses into Option B's read-time
+computation plus an unnecessary second invalidation system on top,
+for a table that is trivially cheap to read live already** (see
+Performance below). Not recommended.
+
+### 4. Real-donor stress tests
+
+All values below are read-only, from real Independent Staging D1 data
+or the real, unmodified production functions run against it (via
+`pathToFileURL` dynamic import, no D1 mutation) -- see scratchpad
+`snapshot-architecture-preview.mjs` and `snapshot-fallback-gap-check.mjs`
+for the exact scripts. Real current counts: **248 live donors, 14 with
+any narrative text on file, 3 with a real `donor_relationship_facts`
+row, 3 with a narrative-and-ask overlap matching the previously-
+proposed narrow backfill's shape, 6 total asks in the database and
+all 6 already resolved (zero currently pending).**
+
+**4.1 Klein/Rovinsky/Pfeiffer (legacy, zero facts) -- the motivating case, and a correction to the prior round's fix.**
+Reconstructing Klein exactly as the previously-proposed narrow backfill
+would leave him (one `solicitation`/`time_bound` fact, ask declined 227
+days ago, so **not** in `pinnedFreshSourceInteractionIds`) and running
+the REAL `synthesizeRelationshipSnapshot()` against it:
+```
+relationship_summary (live synthesis): "Solicited for a plaque ($5k)."
+institutional_memory  (live synthesis): "Solicited for a plaque ($5k)."
+```
+Feeding that live-synthesized text into the REAL `buildRecommendationEvidence`
+→ `generateCandidates` → `buildDonorRecommendation` pipeline still
+produces: **`relationship_opportunity` candidate fires, winning
+recommendation is `solicit`, score 0.4590 -- unchanged from today.**
+**Root cause of why the previously-proposed fix doesn't work:**
+`solicitCandidate()`/`relationshipOpportunityCandidate()`
+(`recommendation-candidates.ts:319,351`) regex-match the *synthesized
+text string* (`SOLICITATION_PATTERN.test(narrativeText)`); they never
+look at the fact's own computed relevance score. Klein has exactly one
+current fact, so `synthesizeRelationshipSnapshot()`'s own "never blank
+while any accepted fact exists" fallback re-emits it verbatim even
+though its real score has decayed to 0 -- the word "Solicited" is still
+in the string, so the regex still matches, regardless of how "live"
+the resynthesis was. **This is a genuine gap in the prior round's
+"smallest recommended design," found only by actually running it
+against Klein's real shape rather than the multi-fact worked examples
+the original design was validated against.** The fix: recommendation
+evidence must consult the fact's *own* live score/status directly (or
+a strict, non-fallback synthesis variant), not a display-oriented
+string that is intentionally never allowed to go blank. See the
+recommendation in Section 9.
+With Rovinsky's real committed-ask shape (ask resolved ~331 days ago,
+same "never pinned once resolved" rule), the identical failure mode
+reproduces.
+
+**4.2 Zachter -- a donor with a genuine, correctly-migrated Phase-2 fact, and a live proof the cache already silently drifted.**
+Real row: `category: engagement, lifecycle: durable, status: current,
+source_interaction_id: null`, accepted 2026-08-21. Real cached columns,
+read live from staging right now:
+```
+relationship_summary : "Texted video from first day of Zman and thanked him for his support that makes it happen."
+institutional_memory : "Text Message context: Texted video from first day of Zman and thanked him for his support that makes it happen"
+```
+Running the REAL `synthesizeRelationshipSnapshot()` over his one real
+current fact produces **the same text for both columns** ("Texted
+video from first day of Zman..."; no "Text Message context:" prefix).
+**`institutional_memory`'s cached value is already, today, silently
+different from what live synthesis would produce for a donor who IS
+correctly represented in the fact table** -- not a bug in the
+synthesis code (Zachter's institutional_memory predates Phase 1's
+backfill, which only ever copies `relationship_summary`'s value into
+`fact_text`, and Zachter has had zero accept/archive events since, so
+nothing has ever regenerated it). This is the design gap from Section 2
+made concrete: the cache's "can never observably lag its source"
+guarantee only holds between accept/archive events, and a quiet donor
+can go stale even having done everything "right." Both the donor page
+and Assistant show these as two separately labeled pieces of
+information today, so a fundraiser or the model reading Assistant's
+context currently sees two different descriptions of the same single
+fact.
+
+**4.3 Nussbaum and Treitel -- fresh, correctly-migrated Phase-2 facts (the positive control).**
+Both real `family_milestone`/`durable` birthday facts, accepted ~1 day
+before this investigation, both with a real `source_interaction_id`.
+Both donors' cached `relationship_summary`/`institutional_memory`
+already match their `fact_text` verbatim -- proving Phase 2 synthesis
+works exactly as designed **when an accept event actually occurs**;
+Zachter's drift above is purely a function of elapsed time with no
+subsequent event, not a synthesis defect.
+
+**4.4 Synthetic multi-fact accumulation (no real donor has more than one fact row yet -- disclosed, not a real case).**
+5-fact fixture reusing the already-approved Lifecycle-Correction worked
+example's shape, run through the real function:
+```
+relationship_summary: "Asked about renewing gala support at $5,000; wants to finalize after this year's program. He's planning a trip to Israel this Sukkos and asked about visiting campus."
+institutional_memory : + "Very close with Rabbi Cohen; mentioned they study together weekly. His daughter is Danielle."
+```
+Confirms ranking/capping/durable-vs-time_bound behavior is unchanged
+from the original design when run live rather than at accept time --
+live synthesis is not a new code path, it is the same pure function
+called from a different trigger.
+
+**4.5 Pure time-decay (no mutation of any kind -- isolates "does relevance change just because time passed").**
+A single synthetic `engagement`/`time_bound` fact (120-day window),
+evaluated at 1/30/90/119/121/200 days old with nothing else on file:
+**`relationship_summary` text is identical at every single age** --
+because it is the donor's sole current fact, the "never blank" fallback
+keeps re-emitting it verbatim regardless of computed score. This is the
+same mechanism behind 4.1's Klein finding, isolated to prove it is a
+property of the synthesis function's fallback rule, not specific to
+solicitation facts or to an Ask. **Direct, load-bearing implication for
+this decision:** neither Option A, B, nor C fixes the motivating bug by
+merely "computing scores live" -- the *consumer* of those scores
+(recommendation evidence) must stop trusting text presence as a proxy
+for current relevance, regardless of which architecture supplies the
+text.
+
+**What all four surfaces would understand under each architecture, before/after an Ask resolves or a fact decays:**
+
+| | Today (all 4 surfaces) | Option A (recommendation live, display cached) | Option B, refined (Section 9) |
+|---|---|---|---|
+| Donor page / Meeting Brief text | Stale forever (A/B mixture, whichever cache) | Unchanged -- still stale | Live from facts when ≥1 exists; honest history, never contradicts the fact table |
+| Recommendation engine (Workspace/Agenda/donor page Suggested Action) | Fires off stale text forever | **Still fires (4.1 proves this)** unless the fact-level fix ships too | Correctly stops firing once the *fact's own score* clears the floor test, independent of display text |
+| Daily Agenda | Identical to Workspace (shared pipeline) | Identical to Workspace | Identical to Workspace |
+
+### 5. Performance and D1 cost -- measured, not assumed
+
+**Real current scale:** 3 fact rows total, across 3 donors, 1 fact each.
+Even the richest worked-example fixture (2.5 years, one contradiction,
+one ask, one supersession chain) tops out at 10-12 facts for a single
+donor -- this is a narrow, cheap table by construction (Phase 2 only
+ever inserts one row per accepted, human-reviewed sentence).
+
+**Existing query load, measured directly:** `lib/workspace/live-
+data.ts` (Workspace/Homepage/Daily Agenda's shared pipeline) already
+issues **18** separate `env.DB.prepare(...)` statements per brief load,
+essentially all of them per-donor-scoped batched reads (`WHERE
+donor_id IN (...)`-style, or a single bulk `SELECT` across the whole
+donor scope) grouped into `Map`s keyed by `donor_id` -- the codebase's
+own established pattern for avoiding N+1 queries, already applied to
+yahrtzeits, important dates, reminders, historical context, gifts, and
+pledges. `lib/relationships/meeting-brief.ts` issues **14**. Adding one
+more batched query (`SELECT * FROM donor_relationship_facts WHERE
+donor_id IN (...) AND status='current'`, or a single-donor equivalent
+for Meeting Brief/donor page/Assistant) is consistent with, not a
+departure from, the pattern already used for every other per-donor
+child table in this codebase.
+
+**N+1 risk: none, if the existing pattern is followed** (it already
+is, everywhere else in this file) -- a single `IN (...)` query for the
+whole `suggestionDonorIds` batch, not a query inside the per-donor
+scoring loop. **If someone did write it inside the loop, that would be
+a real regression** -- worth calling out explicitly as the one thing
+any implementation must avoid, not because this investigation found it
+done wrong anywhere, but because the loop (line 488 in `live-data.ts`)
+is exactly the kind of place a careless addition could land.
+
+**Verdict: live synthesis is operationally trivial at current scale
+(3 rows total) and at any realistically expected scale (tens of facts
+per donor after years of use, hundreds of donors) -- one additional
+batched D1 read per already-existing evidence-building call site, no
+new query pattern, no measurable CPU concern.** This investigation did
+not reject live synthesis on cost grounds because there is no real
+cost to measure yet at this data volume, and the codebase's own
+established batching convention prevents it from becoming one at
+larger volume either.
+
+### 6. Legacy migration implications -- exact real numbers, not an estimate
+
+Of the 248 live donors: **14 have any narrative text on file. Of those
+14: 3 already have a real fact row (Zachter, Nussbaum, Treitel -- fully
+migrated); 3 have narrative text AND a real ask sharing the source-
+interaction shape the previously-proposed narrow backfill targets
+(Klein, Rovinsky, Pfeiffer); 8 have narrative text and no ask at all**
+(Gavin Horn, Joel Danziger, Mark Danziger, Yaakov Abdelhak, Jacques
+Semmelman, Dovie Weinschneider, Tzvi Shlionsky, Yaakov Sonnenblick) --
+these 8 are exactly the population the general (already-designed,
+already-previewed, never-applied) Phase 1 backfill script targets, and
+are untouched by the narrow ask-linked one.
+
+**This real distribution directly answers the migration-strategy
+question: "live facts when available, cached narrative as fallback
+otherwise" is not a theoretical compromise -- it is what today's actual
+data requires**, since only 3 of 14 narrative-bearing donors (21%) have
+any fact row to synthesize from right now. A "migrate everything
+immediately" requirement would force running the general Phase 1
+backfill (a separate, already-designed, already-approved-in-shape but
+never-executed script) as a hard prerequisite; a fallback-based
+transition needs no such prerequisite -- the other 11 donors simply
+keep reading their existing cached column, byte-identical to today,
+with zero intelligence loss, until/unless that separate backfill is
+later approved and run on its own schedule.
+
+**Reassessing the narrow Klein/Rovinsky/Pfeiffer backfill under each
+architecture:** unchanged in shape under Option B -- it is still the
+correct, narrow, evidenced way to get these 3 real donors a real fact
+row with real provenance and real historical dating. Under Option A it
+would only ever help the recommendation engine (and only once the
+fact-level fix in Section 9 also ships, per 4.1); under Option B it
+also immediately corrects what the donor page/Meeting Brief/Assistant
+display for these 3 donors, which Option A never would.
+
+### 7. Editing semantics -- what happens if a Snapshot is manually corrected today
+
+**Finding: there is no manual-edit UI or route for `relationship_
+summary`/`institutional_memory` anywhere in the application, confirmed
+by grep across every `.tsx` file and `app/api/donors/route.ts`.** The
+only way either column's value ever changes is through the explicit-
+acceptance capture/outcome/edit/import flow (propose → human checks a
+box → accept) -- never free-text editing of the Snapshot itself. Every
+apparent match in `app/donors/[id]/GivingManagement.tsx` and the
+important-dates/yahrtzeits/giving-acknowledge/DOB-import routes is a
+defensive comment ("never touches relationship_summary/institutional_
+memory"), not an actual read or write.
+
+**Consequence for this decision: the specific risk the task asks about
+("I correct something; the next synthesis silently restores the
+incorrect version") cannot happen today, because there is no "correct
+something" affordance to begin with** -- neither on the cached columns
+nor on individual facts. The closest existing mechanism is the
+already-approved-but-never-built "mark this fact no longer current"
+human override, explicitly flagged as a deliberate v1 scope boundary in
+the original Lifecycle Correction design ("a known limitation and a
+deliberate v1 scope boundary, not an oversight").
+
+**Does the current fact model already support that override cleanly?
+Yes -- no new persistence layer needed.** `donor_relationship_facts.
+status` already has exactly the right shape (`current` → any other
+value is a one-way transition, exactly like `askChanges`/`pledge_
+payment_plans.endedAt`'s existing "only ever set by explicit fundraiser
+action" convention already used elsewhere in this codebase). Building
+it would mean: a small UI affordance on the donor page (once facts are
+displayed there at all -- currently they are not, per Section 1) that
+flips a fact's `status` away from `current` and writes an audit row,
+exactly like every other status transition this pipeline already
+performs. **A live-derived Snapshot is a better fit for this than
+today's cache, not a worse one:** under live synthesis, a human
+override takes effect the instant it's saved, everywhere, automatically
+(recomputed at every next read); under today's cache model, the same
+override would need its own explicit resynthesis-and-CAS-write step to
+ever become visible anywhere, or it would silently fail to update the
+donor page/Meeting Brief/Assistant until some unrelated future accept
+event happened to trigger one. **This override itself is not proposed
+for implementation in this round** -- it remains a real but separate,
+deferred enhancement, flagged here only because the task specifically
+asked whether the architecture choice constrains it (it does not; if
+anything, Option B removes a constraint Option A/today would keep).
+
+### 8. Historical intelligence vs. current Snapshot -- does the data model already support the distinction?
+
+**Yes, cleanly, with no new persistence layer, and this is already
+demonstrated by real behavior, not merely designed on paper.** The
+full historical record is every row in `donor_relationship_facts`,
+any status, forever (nothing is ever deleted; a status transition is
+the only thing that ever happens to a row). The concise current
+Snapshot is `synthesizeRelationshipSnapshot()`'s output over
+`status='current'` facts clearing the relevance floor. These are
+already two structurally distinct things today -- the only real gap is
+that nothing renders the first one anywhere (Phase 4's "history
+expander," never built, per Section 1). **One caveat this round's own
+stress test (4.5) surfaces, worth stating precisely rather than
+glossing over:** the "never go blank while any fact exists" rule means
+a donor's concise Snapshot can, correctly by current design, continue
+showing a single fully-decayed fact's *text* indefinitely when it is
+that donor's *only* fact on file -- this is a legitimate, disclosed
+choice for the *display* Snapshot (something beats nothing when there
+is genuinely nothing more current to say), but it must **not** also
+gate the *recommendation* engine's actionability decision, which
+needs a stricter "is there a fact whose score actually clears the
+floor, no fallback" signal instead. This is not a new persistence
+requirement -- it is a single additional, stricter query mode over the
+exact same rows, addressed in Section 9.
+
+### 9. Recommendation
+
+**Option B, refined: for any donor with at least one `donor_
+relationship_facts` row, derive the current Relationship Snapshot
+live from that donor's current facts wherever it is displayed or
+consumed; for every other donor, keep reading the existing cached
+`donors.relationship_summary`/`institutional_memory` columns exactly
+as today, unchanged. Additionally -- and this is the correction this
+round found, not part of the original Option B framing -- the
+recommendation engine must stop deciding actionability by regex-
+matching a synthesized display string, and instead consult the
+underlying fact's own live score/status directly (or a strict, non-
+fallback synthesis mode) so that Klein's real shape (a lone, fully-
+decayed, ask-resolved solicitation fact) is correctly excluded even
+though the display Snapshot is allowed to keep showing it as honest
+history.**
+
+This is chosen over Option A because Option A does not actually fix
+the motivating bug without the same fact-level correction Option B
+needs anyway (Section 4.1), and over Option C because "materialized
+projection with reliable invalidation" cannot cover the one dependency
+(elapsed time) that has no mutation to invalidate on, without
+degenerating into read-time computation plus an unneeded second
+system. It optimizes for one coherent interpretation across surfaces
+(display and recommendation read the same underlying facts, so they
+cannot silently disagree once both are live), preserves every row of
+history unconditionally, is deterministic (pure function, same inputs
+→ same output, no generation), is cheap at real and realistic scale
+(Section 5), and requires no schema change and no forced migration of
+the 11 non-ask-linked legacy donors (Section 6).
+
+**Smallest staged implementation plan (none of this implemented this round):**
+
+- **Stage 1 (unchanged from the prior round, now confirmed as the
+  correct first step under this architecture too):** run the narrow
+  ask-linked backfill for Klein, Rovinsky, and Pfeiffer -- 3 real rows,
+  real classification, real provenance, real historical dating. This
+  is a prerequisite for both Stage 2 and Stage 3 having anything real
+  to operate on for these three specific donors.
+- **Stage 2 -- fix the actual bug first, narrowly, at the recommendation layer.**
+  Add one small, pure, strict-mode check (e.g. `hasLiveRelevantFact
+  (facts, category, now, pinnedFresh)` in `fact-synthesis.ts`, or an
+  equivalent strict variant of `synthesizeRelationshipSnapshot` with
+  the "never blank" fallback disabled) that `solicitCandidate()`/
+  `relationshipOpportunityCandidate()` consult as an **additional
+  AND-gate alongside**, not a replacement for, the existing text-regex
+  check -- so a donor with zero fact rows (234 of 248 today, and the 8
+  narrative-only/no-ask donors) is provably unaffected, still governed
+  purely by the existing text-pattern logic exactly as today. Wire this
+  into the SAME evidence-building call sites that already fetch
+  per-donor data (`live-data.ts`, `meeting-brief.ts`, donor page),
+  reading facts via one additional batched query each, matching the
+  existing pattern (Section 5). This alone fixes Klein/Rovinsky/
+  Pfeiffer's real `solicit` misfire, which the prior round's proposed
+  fix did not (Section 4.1).
+- **Stage 3 -- move DISPLAY surfaces (donor page Snapshot text, Meeting
+  Brief, Assistant) to live synthesis, independently, one at a time,
+  each fully gated/tested/deployed on its own** (matching this repo's
+  established one-path-at-a-time migration discipline): for a donor
+  with ≥1 fact row, call `synthesizeRelationshipSnapshot()` over their
+  real current facts instead of reading the cached columns; for a
+  donor with zero fact rows, read the cached columns exactly as today
+  (the fallback). This is what closes Zachter's already-live
+  institutional_memory drift (4.2) and is what makes "historically
+  true" wording on the donor page never silently contradict what the
+  recommendation engine (Stage 2) has already decided.
+- **Stage 4 -- unchanged, optional, still deferred:** Phase 4's richer
+  per-fact history UI, and the human "mark this fact no longer
+  current" override from Section 7. Neither is required to fix the
+  evidenced bug or to satisfy this round's architecture question.
+
+**Regression coverage this design would need (not written this round):**
+Klein/Rovinsky/Pfeiffer's real shape proving the recommendation no
+longer fires via the NEW fact-level gate specifically (not merely via
+text absence, since 4.1 proves text absence alone is not guaranteed);
+a synthetic "sole decayed fact" fixture (4.5's exact shape) proving
+display text may still legitimately show it while the recommendation
+engine correctly does not act on it; a still-pending ask's fact
+remaining both pinned in display text AND eligible via the new gate
+(the positive case, unchanged); a zero-fact donor (234 of 248)
+provably unaffected end to end on both display and recommendation; a
+narrative-but-no-ask donor (the 8 real ones) provably unaffected,
+same regex-only path as today; the 5-fact synthetic accumulation
+fixture (4.4) proving ranking/capping is identical whether triggered
+at accept time or at live read time.
+
+**What this does NOT change, explicitly:** `lib/relationships/fact-
+supersession.ts` (unaffected, already correct); the `donor_
+relationship_facts` schema (no new column); the Ask status machine;
+the general Phase 1 backfill script's own design (unchanged, still the
+right tool for the 8 no-ask legacy donors, still not run this round);
+the donor-merge fact-reparenting gap found in Section 1 (flagged, not
+fixed, out of this round's scope); any donor with zero facts and no
+narrative (234 of 248, entirely unaffected by any of this).
+
+**Not solved or proposed this round, by explicit instruction:** no
+code change, no D1 mutation, no migration, no backfill execution, no
+schema change, no deployment.
+
+**Stopping for review before implementing anything**, per instruction.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading
@@ -12747,7 +13310,28 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Relationship-Intelligence/Ask-
+**Genuinely open, newest first: Relationship Snapshot architecture
+decision -- awaiting the user's decision on whether to implement
+Option B, refined (2026-08-28).** See "Relationship Snapshot
+Architecture Decision -- Live/Derived vs. Cached (2026-08-28)" above
+for the full record. Recommended: derive the Snapshot live from
+`donor_relationship_facts` for any donor with a fact row (cached
+donor columns stay the fallback for the rest), AND make the
+recommendation engine consult a fact's own live score/status directly
+instead of regex-matching a synthesized display string -- the second
+half is a correction found this round to the prior round's own
+proposed fix, which this round proved does not actually stop Klein's
+stale `solicit` recommendation by itself. Staged plan: (1) the
+previously-proposed narrow Klein/Rovinsky/Pfeiffer backfill, (2) a new
+strict, non-fallback fact-relevance check wired into the
+recommendation candidate functions as an additional gate, (3) move
+display surfaces (donor page, Meeting Brief, Assistant) to live
+synthesis one at a time, (4) optional/deferred: per-fact history UI
+and a human "mark this fact no longer current" override. Decision
+needed: approve this architecture (or an adjustment) before Stage 1
+begins.
+
+**Genuinely open, newest-but-one: Relationship-Intelligence/Ask-
 supersession fix -- awaiting the user's decision on whether to
 implement the recommended design (2026-08-28).** See "Relationship-
 Intelligence / Ask-Supersession Investigation (2026-08-28)" above for
@@ -12771,7 +13355,7 @@ across every Ask-mutation route with no per-route wiring. No schema
 change judged necessary. Decision needed: approve this design (or an
 adjustment to it) for implementation, or decline.
 
-**Genuinely open, newest-but-one: Portfolio-level 30-day focus
+**Genuinely open, newest-but-two: Portfolio-level 30-day focus
 investigation, fully financial-data-corrected in a second redo --
 awaiting the user's decision on what, if anything, to build
 (2026-08-28).** See "Portfolio-Level 30-Day Focus Investigation --
@@ -12977,6 +13561,82 @@ backfill, the Pledge Payment Plan feature, and the outcome-route fix are
 all live on Independent Staging.
 
 ## Last Updated
+
+2026-08-28T09:00:00Z (approximate)
+Claude (Sonnet 5) — Answered the one remaining architecture question
+before implementing the Relationship-Intelligence/Ask-supersession
+fix: should the Relationship Snapshot become a live/derived
+interpretation of donor_relationship_facts everywhere, with the cached
+donors.relationship_summary/institutional_memory columns retained only
+as legacy/fallback data. Investigation/design only, per explicit
+instruction: read-only staging data, no code change, no D1 mutation,
+no migration, no backfill, no schema change, no deploy. Built a
+complete consumer/dependency map by direct grep + read across the
+whole app: four independent SQL read sites for the two cached donor
+columns (lib/workspace/live-data.ts, feeding BOTH Workspace/Homepage
+AND the Daily Agenda email via one shared loadWorkspaceBrief() call;
+lib/relationships/meeting-brief.ts; app/donors/[id]/page.tsx;
+app/api/assistant/route.ts) -- none of the four is live fact synthesis
+today, all are an A/B mixture of legacy or Phase-2-cached text
+depending on the donor. Found donor_relationship_facts has zero
+direct application-code readers outside its own write pipeline (no
+Phase 4 history UI was ever built). Found a real, previously-
+undocumented gap: donor merge re-parents asks.donor_id but not
+donor_relationship_facts.donor_id, orphaning a merged-away duplicate's
+facts. Confirmed lib/relationships/read.ts is dead code (referenced
+only by its own tests reading source text, never imported/called).
+Verified source-of-truth intent directly from fact-synthesis.ts's own
+code comment ("a materialized CACHE... never an independent source of
+truth") and the original design record -- donor_relationship_facts was
+deliberately designed as the durable/authoritative layer from the
+start, the two donor columns as a deliberate performance/compatibility
+projection, not organic drift. Pulled real counts from staging: 248
+live donors, 14 with any narrative text, only 3 already migrated to a
+real fact row (Zachter, Nussbaum, Treitel), 3 matching the narrow
+ask-linked backfill's shape (Klein/Rovinsky/Pfeiffer), 8 narrative-only
+with no ask at all, 6 total asks and all 6 already resolved. Ran the
+real, unmodified synthesizeRelationshipSnapshot()/buildRecommendationEvidence()/
+generateCandidates()/buildDonorRecommendation() functions (dynamic
+import, no D1 mutation) against real and clearly-disclosed synthetic
+fixtures and found a genuine correction to the prior round's own
+proposed fix: merely recomputing the Snapshot live and feeding it to
+the existing text-regex recommendation candidate functions does NOT
+stop Klein's stale `solicit` recommendation, because his sole current
+fact triggers synthesizeRelationshipSnapshot()'s "never blank while
+any fact exists" fallback, re-emitting the fully-decayed fact's text
+verbatim regardless of its real, decayed score -- verified by directly
+running the pipeline end to end and confirming `solicit` still wins at
+score 0.4590. Also found live, on real staging data, that Zachter (a
+donor with a genuine, correctly-migrated Phase-2 fact) already shows a
+silently stale institutional_memory relative to what live synthesis
+would produce, proving the design's own "cache can never observably
+lag its source" promise already has a real gap in production data, not
+just a hypothetical one. Compared Option A (rejected: doesn't fix the
+bug without the same fix Option B needs, and permits cross-surface
+contradiction), Option B (recommended, refined), and Option C
+(rejected: "materialized projection with reliable invalidation" cannot
+cover elapsed time, one of scoreFact()'s own real dependencies, without
+degenerating into Option B's read-time computation anyway).
+Recommendation: Option B, refined so the recommendation engine consults
+a fact's own live score/status directly instead of regex-matching a
+display string, staged as (1) the existing narrow backfill, (2) a new
+strict fact-relevance gate wired into the recommendation candidates as
+an additional check, (3) moving display surfaces to live synthesis one
+at a time, (4) deferred per-fact history UI and a human override.
+Measured, not assumed, performance: 3 real fact rows system-wide today,
+18 and 14 already-parallelized D1 queries in the two main evidence-
+building files respectively, the codebase's own established batched-
+query convention already prevents N+1 risk for every other per-donor
+child table and would for this one too. Updated docs/AI-HANDOFF.md with
+the full consumer map, source-of-truth findings, A/B/C comparison, real
+stress tests (including the Klein-fallback-gap finding), performance
+measurements, legacy-transition numbers, editing-semantics findings,
+the historical-vs-current data-model answer, and the staged
+implementation plan. Committed and pushed to
+feature/independent-cloudflare-sandbox. Nothing implemented; stopping
+for review before any code change, per explicit instruction.
+
+---
 
 2026-08-28T04:30:00Z (approximate)
 Claude (Sonnet 5) — Investigated the Relationship-Intelligence/Ask-
