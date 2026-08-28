@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Implement Portfolio Focus
+**`ce428c7`** -- "Implement Portfolio Focus
 Phase 1: domain/computation engine, no UI (2026-08-28)" -- application
 code change (new `lib/portfolio-focus/` module, 12 files; three new test
 suites; a `package.json` test-script line only) -- DEPLOYED to
