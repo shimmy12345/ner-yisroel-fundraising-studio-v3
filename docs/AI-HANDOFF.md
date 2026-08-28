@@ -15,8 +15,22 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`7a9ab1a`** -- "Add Portfolio Focus Human
-Calibration Round 2 report (docs/PORTFOLIO-FOCUS-CALIBRATION-V2.md)
+**`(pending — see follow-up commit)`** -- "Add Portfolio Focus Human
+Calibration Round 3 report (docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md)
+(2026-08-28)" -- documentation only, zero application code change, zero
+D1 mutation, zero deploy; see "Portfolio Focus Human Calibration Round
+3" below and the dedicated report file itself. Fixed the shared
+Opportunity/Stewardship materiality formula (fixed real-dollar brackets
+instead of a portfolio-relative scale) and added Relationship Coverage
+as a non-competing floor on the composite -- no weight changed from
+Round 2. All financial verification gates and every Round 2 regression
+requirement held, including a fresh Spetner regression and all five
+stale-balance controls. Yale Miller moved from rank #32 to #9 and
+Manuel Schnaidman from #40 to #14 via the Coverage floor, both correctly
+labeled a relationship-review concern rather than an invented
+opportunity. Recommendation: ready for implementation with one small
+labeling-order adjustment. Sits on top of `7a9ab1a` -- "Add Portfolio
+Focus Human Calibration Round 2 report (docs/PORTFOLIO-FOCUS-CALIBRATION-V2.md)
 (2026-08-28)" -- documentation only, zero application code change, zero
 D1 mutation, zero deploy; see "Portfolio Focus Human Calibration Round
 2" below and the dedicated report file itself. Redesigned the Round 1
@@ -14711,6 +14725,57 @@ no production/main access.
 
 **Stopping for review. Round 3 was not started, per explicit
 instruction.**
+
+## Portfolio Focus Human Calibration Round 3 (2026-08-28) -- SEE docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md FOR THE FULL REPORT; INVESTIGATION/CALIBRATION ONLY, NO CODE/SCHEMA/UI/DEPLOY
+
+Per explicit instruction, the full Round 3 report lives in its own
+dedicated file, **`docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md`** -- not
+duplicated here. This round targeted exactly the two open questions
+Round 2 left unresolved, without re-litigating anything Round 2 already
+fixed: (1) small active pledges were scoring Opportunity too close to
+major commitments -- fixed by anchoring the shared materiality formula
+to fixed real-dollar brackets ($500-$100,000) instead of a scale
+relative to the portfolio's own current largest pledge; (2) the
+portfolio's largest, quietest relationships (Miller, Schnaidman,
+Rosenberg) had nowhere to register strategically -- addressed by a new
+**Relationship Coverage** concept, implemented as a non-competing floor
+on the composite (chosen over an additive weighted component after
+comparing both against real donor data) that guarantees consideration
+for exceptionally significant, poorly-documented relationships without
+ever letting silence outrank real activity. No composite weight changed
+from Round 2 (0.35/0.30/0.20/0.10/0.05 across FS/OPP/STEW/MOM/TAC);
+Coverage required no weight parameter, operating entirely outside the
+five-way split.
+
+**All financial verification gates and every Round 2 regression
+requirement held**, including a fresh Spetner regression (still
+correctly `actively_fulfilling_commitment`, never lapsed, never a new
+opportunity) and all five stale-balance controls (Pollack, Schabes,
+Myers, Chapman, Sobol -- all still neutralized, zero database change).
+Yale Miller moved from Round 2 rank #32 to Round 3 rank #9 and Manuel
+Schnaidman from #40 to #14, both via the Coverage floor and both
+correctly labeled "Relationship coverage needed (learn/review)" --
+never an invented solicitation opportunity. Small-pledge overcredit is
+substantially fixed (Yaakov Milch's Opportunity fell from 0.748 to
+0.420, Moshe Matz from 0.725 to 0.384); one partial holdout remains
+(Moishe Weber, a $9,410 lifetime donor, still ranks #6) and is disclosed
+rather than hidden. Five further questionable cases were found and
+documented without being fixed, including a small attention-type
+labeling-order issue (several zero-contact donors are mislabeled
+"Cultivate" instead of "Learn/relationship review").
+
+**Recommendation: B -- ready for implementation with one small,
+specific adjustment** (the attention-type labeling-order fix above);
+the remaining disclosed cases are calibration-level questions suitable
+for the already-planned implementation-phase calibration pass, not
+another full redesign round.
+
+**Constraints honored:** read-only analysis; zero D1 writes; zero
+application code, schema, or Recommendation Engine change; no deploy;
+no production/main access.
+
+**Stopping for review. Did not proceed to implementation despite the
+"ready" recommendation, per explicit instruction.**
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
