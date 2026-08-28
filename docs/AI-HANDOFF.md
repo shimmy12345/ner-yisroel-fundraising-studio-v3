@@ -15,14 +15,19 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Fix Portfolio
+**`(pending — see follow-up commit)`** -- "Document
+Portfolio Focus Phase 2B: dedicated Portfolio Focus view (2026-08-28)"
+-- documentation only, zero application code change, zero D1 mutation,
+zero deploy; see "Portfolio Focus Phase 2B -- Dedicated Portfolio Focus
+View" below and this section for the full implementation summary this
+commit documents. Sits on top of
+`1825e53` -- "Fix Portfolio
 Focus row-detail layout: technical detail must not share a flex row
 with Open donor (2026-08-28)" -- CSS/markup-only fix found during Phase
 2B's own live verification (the technical-detail disclosure shared a
 flex row with the "Open donor" link, so opening it visually stretched
 that link's alignment; moved to its own block), zero scoring/data
-change; see "Portfolio Focus Phase 2B -- Dedicated Portfolio Focus
-View" below. DEPLOYED to Independent Staging (Worker
+change. DEPLOYED to Independent Staging (Worker
 `59da32d1-c8fc-4d75-adb9-0776e307e21b`, superseding the same round's
 own initial deploy `d6eecb52-...`). Sits on top of
 `00a6bf5` -- "Implement Portfolio Focus
