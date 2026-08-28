@@ -15,9 +15,10 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Document
+**`f3ba545`** -- "Document
 Portfolio Focus Phase 2B: dedicated Portfolio Focus view (2026-08-28)"
--- documentation only, zero application code change, zero D1 mutation,
+(plus a same-day structural correction to this section) --
+documentation only, zero application code change, zero D1 mutation,
 zero deploy; see "Portfolio Focus Phase 2B -- Dedicated Portfolio Focus
 View" below and this section for the full implementation summary this
 commit documents. Sits on top of
