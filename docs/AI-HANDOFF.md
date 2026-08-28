@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- documentation-only
+**`0fcd217`** -- documentation-only
 update to this section covering Stage 2 credential installation and
 live verification (2026-08-28) -- zero code/workflow/Cloudflare/data
 change, zero deploy. See "D1 Nightly Backup Scheduling Reliability --
