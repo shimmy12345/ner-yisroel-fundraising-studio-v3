@@ -15,7 +15,34 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`cb97de4`** -- "Investigate
+**`(pending — see follow-up commit)`** -- documentation-only
+update to this section covering the D1 backup watchdog Stages 1+2
+verification round (2026-08-28) -- zero workflow/Cloudflare/secret/data
+change, zero deploy; see "D1 Nightly Backup Scheduling Reliability --
+Watchdog Stages 1+2" below for the full verification record. Confirms,
+against the real deployed Cloudflare state (not source/docs alone):
+Stage 1 is active and verified live twice via real Worker logs 2 hours
+apart; `GITHUB_BACKUP_DISPATCH_TOKEN` is absent (`wrangler secret list`
+→ `[]`), so Stage 2's already-deployed dispatch code remains inactive
+pending the account owner installing that one credential; the main app
+Worker gained nothing. Sits on top of
+`67f3bc7` -- "Document the backup
+watchdog setup/rollback procedure and add security-boundary tests
+(2026-08-28)" -- documentation (docs/DEPLOYMENT.md) and test-only
+(`tests/backup-watchdog-security.test.mjs`) change, zero application
+code change. Sits on top of
+`58451c7` -- "Implement D1 backup
+scheduling reliability watchdog Stages 1+2 (status-worker)
+(2026-08-28)" -- application code change: new `lib/backup-status/
+freshness.ts` (shared, reused by `lib/data-health/model.ts`), new
+`status-worker/src/watchdog.ts` + `github-dispatch.ts`, a new
+`scheduled()` handler in `status-worker/src/index.ts`, an hourly Cron
+Trigger (`17 * * * *`) in `status-worker/wrangler.jsonc`, and 3 new test
+files -- DEPLOYED to Independent Staging's `status-worker` only (Worker
+version `21be8aa8-...`); the main application Worker, the real backup/
+export/encryption/R2 pipeline, and restore verification are
+byte-for-byte unchanged. Sits on top of
+`cb97de4` -- "Investigate
 D1 nightly backup scheduling reliability (docs/BACKUP-SCHEDULING-
 RELIABILITY.md) (2026-08-28)" -- documentation only, zero workflow/
 Cloudflare/secret/data change, zero deploy; see "D1 Nightly Backup
@@ -15635,6 +15662,189 @@ and explicitly rejected, with reasoning, in the full report.
 bucket/binding, backup encryption, Worker code, or production/main
 content was changed. No backup was dispatched. Investigation/design
 only -- a 3-stage implementation plan is proposed but not started.**
+
+## D1 Nightly Backup Scheduling Reliability -- Watchdog Stages 1+2 (2026-08-28) -- STAGE 1 ACTIVE AND VERIFIED, STAGE 2 CODE DEPLOYED BUT NOT ACTIVE (BLOCKED ON A CREDENTIAL ONLY THE ACCOUNT OWNER CAN CREATE)
+
+**Implements the architecture approved in the investigation above.**
+Commits: `58451c7` (watchdog implementation), `67f3bc7` (docs +
+security tests). No further code changes were needed in the
+verification round that followed (`docs/AI-HANDOFF.md`/this section
+only) -- everything already implemented worked as designed.
+
+**Files:** `lib/backup-status/freshness.ts` (NEW -- shared freshness
+constants/logic, imported by both `lib/data-health/model.ts`'s
+dashboard and the watchdog, so the two can never drift), `status-worker/
+src/watchdog.ts` (NEW -- pure decision function), `status-worker/src/
+github-dispatch.ts` (NEW -- isolated, fetch-injectable GitHub API
+helpers), `status-worker/src/index.ts` (added the `scheduled()` handler
+and orchestration), `status-worker/wrangler.jsonc` (added an hourly Cron
+Trigger at `:17`), plus `tests/backup-watchdog*.test.mjs` (4 new files)
+and a `docs/DEPLOYMENT.md` "Backup scheduling watchdog" section. The
+real backup/export/encryption/R2 pipeline, restore verification, GitHub
+Actions workflow YAML, and main application Worker are unchanged --
+verified both by `git diff` (zero lines touched in `.github/workflows/`,
+`worker/index.ts`, `wrangler.staging.jsonc`) and by inspecting the
+actual deployed Cloudflare state directly (below), not merely the
+source.
+
+### Deployed state (verified directly against Cloudflare, not inferred from config)
+
+- **status-worker deployed version:** `21be8aa8-41c0-46ed-b82c-dbc60e2543f6`
+  (`wrangler versions view` confirms `Handlers: fetch, scheduled` and
+  exactly one binding, `env.STATUS_BUCKET` -- no D1 binding, no real
+  backup-bucket binding, `workers_dev: false`, no public route).
+- **Cron schedule:** `17 * * * *` (hourly, offset from GitHub's own
+  documented worst-case top-of-hour scheduling load).
+- **`wrangler secret list` on status-worker: `[]` -- `GITHUB_BACKUP_DISPATCH_TOKEN`
+  is ABSENT.** Confirmed directly against the deployed Worker, not the
+  source or docs.
+- **Main app Worker:** still on version `59da32d1-...` (Portfolio Focus
+  Phase 2B's own last deploy -- confirmed NOT redeployed for this
+  feature, as instructed). `wrangler secret list`/`wrangler versions
+  view` on `wrangler.staging.jsonc` confirm its only secrets are the
+  pre-existing 3 Gmail OAuth values, its only bindings are `DB`,
+  `STATUS_WORKER` (service binding), `ASSETS`, and plain env vars -- no
+  GitHub credential, no R2 binding, no new capability of any kind.
+
+### Stage 1 -- ACTIVE and verified live, twice, in two separate sessions
+
+Real Cloudflare Worker logs (`wrangler tail`), not synthetic:
+
+```
+2026-08-28T16:17:21Z  {"level":"info","source":"backup-watchdog","event":"fresh","ageMs":77897228,"tier":"healthy"}
+2026-08-28T18:17:21Z  {"level":"info","source":"backup-watchdog","event":"fresh","ageMs":85097222,"tier":"healthy"}
+```
+
+Both invocations: fired exactly on the `17 * * * *` schedule,
+`outcome: "ok"`, zero exceptions, zero GitHub API calls made (correct --
+`fresh` short-circuits before any GitHub call exists in the code path).
+`ageMs` between the two log lines increased by exactly 7,199,994 ms
+(~1h59m59s, i.e. two real hours apart minus the tiny observation-timing
+delta) -- proving the freshness clock is real elapsed wall-clock time
+against a real, unmoving `backup-latest-success.json` timestamp, not a
+canned or stubbed value.
+
+- **Current real `backup-latest-success.json`:** `completedAt:
+  2026-08-27T18:39:04Z`, `backupObjectKey:
+  daily/fundraising-os-staging-db-20260827T183902Z.sql.gz.gpg` (verified
+  live via Workspace Health, which reads this same status through the
+  same `STATUS_WORKER` binding).
+- **Current real `backup-latest-attempt.json`:** same run, `success`
+  (no newer failed attempt on record).
+- **Current age (as of the second verification, 18:17:21 UTC):** ~23h38m
+  -- still under the 26h recovery threshold, correctly classified
+  `fresh`/`healthy`. **The real GitHub nightly schedule still has not
+  fired for 2026-08-28** as of this check (confirmed via the GitHub
+  Actions API: no run created since the Aug 27 18:38:38Z one) -- the
+  investigation's own reported problem is still ongoing in production
+  right now, unresolved by anything other than this watchdog (which
+  cannot act yet -- see Stage 2 below).
+- **No GitHub dispatch occurred** during either Stage 1 verification
+  (both real logs show only the `fresh` event; the code path to
+  `checkActiveBackupRun`/`dispatchBackupWorkflow` is unreachable once
+  `action === "fresh"`).
+- **`/status` unchanged:** confirmed live via Workspace Health rendering
+  the same "Automated backup"/"Monthly restore test" cards correctly
+  both before and after every deploy/verification action this round.
+- **No R2 status writes occurred:** structurally impossible --
+  `status-worker`'s own code (unchanged guardrail, `tests/backup-
+  automation.test.mjs` + `tests/backup-watchdog-security.test.mjs`)
+  contains no `.put()`/`.delete()`/`.list()` call anywhere.
+- **No D1/application data changed:** table-count fingerprint
+  (donors/giving_activities/asks/interactions/recommendations/
+  donor_relationship_facts/important_dates/yahrtzeits) identical across
+  every checkpoint this round and the prior implementation round
+  (248/5,176/6/72/5/7/172/36) -- structurally guaranteed in any case,
+  since `status-worker` has no D1 binding of any kind, confirmed above
+  directly from the deployed version's own binding list.
+
+### Stage 2 -- code deployed, NOT active
+
+**"Stage 1 is deployed; Stage 2 code exists but auto-dispatch is not
+activated because the required fine-grained GitHub PAT is not
+installed."**
+
+This was verified directly against the real deployed Worker
+(`wrangler secret list` → `[]`), not inferred from source or docs, per
+explicit instruction not to assume. No token was created or installed
+automatically -- creating it requires the account owner's own GitHub
+session, which this session does not have and should not attempt to
+work around.
+
+**Exact remaining action, for the account owner:**
+1. Create a fine-grained GitHub PAT scoped to **only**
+   `shimmy12345/ner-yisroel-fundraising-studio-v3`, with repository
+   permission **Actions: Read and write** and every other permission
+   left at "No access."
+2. Install it **only** on `status-worker`, **never** the main app
+   Worker: `cd status-worker && wrangler secret put
+   GITHUB_BACKUP_DISPATCH_TOKEN` (paste the value when prompted -- never
+   pasted into any chat/log by this or any prior round).
+
+Once installed, Stage 2 activates automatically on the *next* hourly
+invocation -- no redeploy is required, since the Worker reads the
+secret from `env` at invocation time. No dispatch will actually occur
+immediately even then, since the real backup is currently still `fresh`
+(under 26h) -- it would only fire once/if the age crosses 26h with no
+new success recorded in the meantime.
+
+**Verified without live GitHub write access** (since no token exists to
+test with): the active-run-check logic was independently, manually
+replicated against the real GitHub API this round (`GET .../runs?
+per_page=5`, unauthenticated -- this repo is public) and correctly
+returned `hasActiveRun: false` (no run currently queued/in_progress),
+matching exactly what `checkActiveBackupRun`'s own logic computes from
+the identical endpoint/response shape. The re-check race guard (stale
+initial read → fresh on immediate re-check → no dispatch) and the full
+dispatch/failure/active-run-suppression matrix remain covered
+deterministically by `tests/backup-watchdog-scheduled.test.mjs` (all
+passing) -- no live GitHub write credential is needed to trust this
+logic, only to *exercise* it against the real API, which requires the
+PAT above.
+
+**No real `workflow_dispatch` was performed this round or any prior
+round.** Per instruction, since the only blocker is the absent PAT,
+this round does not fabricate completion, does not create a token on
+the account owner's behalf, and does not proceed to any dispatch test.
+
+### Confirmed unchanged
+
+- `.github/workflows/d1-backup-nightly.yml` on `main`: cron still `0 8
+  * * *` (the optional top-of-hour offset change remains **not
+  approved** and was **not made**), encryption/R2-upload/`latest/`-
+  promotion/concurrency/status-publish all byte-for-byte unchanged
+  (`git diff` against `main` shows zero lines changed; `tests/backup-
+  automation.test.mjs`'s full guardrail suite still passes unmodified).
+- Restore verification (`d1-restore-verify-monthly.yml`): untouched,
+  out of scope, as instructed.
+- Main application Worker: not redeployed, no new secret, no new
+  binding, no new capability -- confirmed directly against Cloudflare
+  (above), not merely by not editing its files.
+
+### Gates
+
+`pnpm test` (full suite, including 4 backup-watchdog test files): pass.
+`pnpm exec tsc --noEmit`: clean. `pnpm run build:staging-independent`:
+clean. `status-worker`'s own `wrangler deploy --dry-run` bundles cleanly
+(no separate build/test command exists for it -- its tests run through
+the root `pnpm test`, importing its source directly, same convention as
+the rest of this repo's Workers-runtime pure-logic testing).
+
+### Remaining work
+
+- **Stage 2 activation** is blocked solely on the account owner
+  installing `GITHUB_BACKUP_DISPATCH_TOKEN` (above) -- no code change
+  needed once that happens.
+- **Stage 3 (active alerting):** explicitly not started. If backup
+  freshness reaches 36 hours (`BACKUP_FRESHNESS_HEALTHY_MS`, the
+  existing dashboard "attention" threshold) despite watchdog recovery
+  attempts, actively alert the user -- proposed design (reuse the main
+  app's existing hourly cron + Gmail pipeline, no new credential) is in
+  `docs/BACKUP-SCHEDULING-RELIABILITY.md` Section 15, not built.
+- Workspace Health "Recovery triggered"/"Delayed" dashboard states,
+  `STATUS_BUCKET` write access, the backup-cron top-of-hour minute
+  change, and a restore-verification watchdog all remain explicitly
+  deferred/not approved, per every round's own instructions.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
