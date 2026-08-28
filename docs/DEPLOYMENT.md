@@ -397,6 +397,154 @@ Setup (in addition to steps 1-8 above):
     Health's new cards populate correctly before relying on the schedule
     alone (see "First run" above — this can be done in the same pass).
 
+### Backup scheduling watchdog (Cloudflare Cron)
+
+**Purpose:** GitHub Actions' `schedule` trigger is explicitly best-effort
+— GitHub's own documentation states it "can be delayed during periods of
+high loads" and "some queued jobs may be dropped." This repository
+observed exactly that: the nightly backup fired **10h39min late** on
+2026-08-27, and had not fired at all as of 2026-08-28 15:25 UTC (see
+`docs/BACKUP-SCHEDULING-RELIABILITY.md` for the full investigation). The
+watchdog does **not** replace or change the real backup pipeline above
+in any way — it only detects when the pipeline's own schedule has failed
+to fire and, once installed, asks GitHub to run the *existing*
+`d1-backup-nightly.yml` workflow again.
+
+**The actual backup still runs exclusively in GitHub Actions.** The
+watchdog lives entirely in `status-worker/` — the same isolated,
+minimal, already-`STATUS_BUCKET`-scoped Worker documented above — never
+in the main application Worker.
+
+- **Cadence:** an hourly Cloudflare Cron Trigger
+  (`status-worker/wrangler.jsonc`: `"triggers": {"crons": ["17 * * * *"]}`).
+  Offset from `:00` deliberately (GitHub's own documented worst-case
+  scheduling-load minute, and also the minute the main app Worker's own
+  unrelated hourly cron already uses) purely to reduce synchronized
+  platform load — the watchdog's own logic is rolling-elapsed-time-based,
+  so the exact minute carries no meaning on its own.
+- **Freshness thresholds** (`lib/backup-status/freshness.ts` — the same
+  module `lib/data-health/model.ts`'s Workspace Health dashboard already
+  imports, so the two can never drift apart on what "stale" means):
+  - **Recovery, 26 hours** since the last verified successful backup —
+    the watchdog dispatches a fresh backup run.
+  - **Escalation, 36 hours** (the existing `BACKUP_FRESHNESS_HEALTHY_MS`
+    the dashboard already uses) — reserved for active alerting, **not
+    implemented yet** (see "Remaining work" below).
+  - **Critical, 72 hours** (the existing `BACKUP_FRESHNESS_CRITICAL_MS`)
+    — unchanged, dashboard-only.
+- **What it reads:** only the existing, already-deployed
+  `backup-latest-success.json` / `backup-latest-attempt.json` objects in
+  the status bucket, via the Worker's existing `STATUS_BUCKET` R2
+  binding — no new binding, no access to the real backup bucket, no
+  access to backup content, no access to `latest/`'s own metadata.
+  Per the investigation's accepted tradeoff: if the nightly workflow's
+  own best-effort status-publish step ever silently fails despite the
+  real backup succeeding, the watchdog may harmlessly dispatch one extra
+  backup — the existing `concurrency: { group: d1-nightly-backup,
+  cancel-in-progress: false }` block on the nightly workflow (unchanged)
+  makes this safe: runs queue rather than race, and a duplicate same-day
+  backup is a normal, harmless, self-cleaning (90-day lifecycle rule)
+  artifact, never a correctness problem.
+- **What it does when stale:** calls GitHub's `workflow_dispatch` REST
+  API for the existing `d1-backup-nightly.yml` workflow (`ref: main`) —
+  never a second backup workflow, never a copy of the backup job. Before
+  dispatching, it makes one best-effort, **unauthenticated** check
+  (this repository is public) for an already-`in_progress`/`queued` run
+  of that workflow, and re-reads the status bucket immediately before
+  dispatching (in case a delayed scheduled run completed in the
+  meantime) — both purely to avoid an unnecessary duplicate, neither
+  required for safety (see the concurrency note above).
+- **What a successful dispatch means, and doesn't:** GitHub accepting
+  the dispatch request only means a new run was queued — it is not
+  itself proof the backup succeeded. The watchdog never writes
+  `backup-latest-success.json` or any other status object; the next
+  hourly invocation independently observes whatever the dispatched run
+  actually publishes.
+
+**Setup — the one new credential this feature needs:**
+
+1. **Create a fine-grained GitHub personal access token**
+   (github.com → Settings → Developer settings → Personal access tokens
+   → Fine-grained tokens → Generate new token):
+   - **Repository access:** "Only select repositories" →
+     `shimmy12345/ner-yisroel-fundraising-studio-v3` — this repository
+     only.
+   - **Repository permissions:** **Actions: Read and write**. Leave
+     every other permission (Contents, Administration, Issues, Pull
+     requests, Secrets, Workflows, etc.) at "No access." This is
+     confirmed, from current GitHub documentation, to be the complete
+     permission requirement for the `workflow_dispatch` endpoint — no
+     other permission is needed.
+   - Set an expiration and put a reminder on the calendar to rotate it
+     before it expires — an *expired* token degrades the watchdog back
+     to Stage 1 (detection-only) behavior silently (dispatch calls start
+     failing, logged as `recovery_dispatch_failed`, never as a false
+     success), not a loud failure. Do not create an org-wide non-
+     expiring token for this.
+2. **Store it as a Cloudflare secret on `status-worker` only** — never a
+   GitHub repository secret (it doesn't need to be; it's consumed by
+   Cloudflare, not by GitHub Actions), and never anywhere in the main
+   application Worker's config or environment:
+   ```bash
+   cd status-worker
+   wrangler secret put GITHUB_BACKUP_DISPATCH_TOKEN
+   # paste the token when prompted -- it is never echoed, logged, or
+   # written to any file by this command
+   ```
+   Its absence is what keeps the Worker in Stage 1 (logs
+   `recovery_needed_detection_only`, never calls GitHub) — there is no
+   separate feature flag to toggle.
+3. **Deploy** (`cd status-worker && wrangler deploy`) if the Cron
+   Trigger itself hasn't been deployed yet — setting the secret alone
+   does not require a redeploy, since the Worker reads it from `env` at
+   invocation time.
+
+**Verifying the Cron Trigger exists:** `wrangler deploy`'s own output
+prints `schedule: 17 * * * *` under "Deployed ... triggers" — this is
+sufficient confirmation locally; the Cloudflare dashboard (Workers →
+`fundraising-os-backup-status` → Triggers → Cron Triggers) shows the
+same schedule and each invocation's last-run time.
+
+**Inspecting watchdog logs:** `cd status-worker && wrangler tail`
+streams live structured JSON log lines (`source: "backup-watchdog"`,
+`event: "fresh" | "recovery_needed" | "recovery_needed_detection_only" |
+"already_recovering" | "active_run_check_failed" | "recovered_on_recheck" |
+"recovery_dispatch_requested" | "recovery_dispatch_failed" |
+"unexpected_error"`). The routine "fresh" case logs one compact line per
+hour (not silent, but deliberately low-noise); anything else logs a
+fuller line including the reason. The dispatch token is never present in
+any log line.
+
+**Rollback:**
+- To disable dispatch only (fall back to Stage 1 detection-only), delete
+  the Cloudflare secret: `cd status-worker && wrangler secret delete
+  GITHUB_BACKUP_DISPATCH_TOKEN`. No redeploy needed.
+- To disable the watchdog entirely, remove the `triggers` block from
+  `status-worker/wrangler.jsonc` and redeploy — the Worker reverts to
+  fetch-only (`GET /status`), exactly as it was before this feature.
+- Revoking the GitHub token (from GitHub's own token settings) at any
+  time immediately and independently disables dispatch, without
+  touching any Cloudflare deployment.
+- None of the above ever requires touching the real backup pipeline
+  above, the status bucket's contents, or any other credential.
+
+**If the PAT expires or is revoked:** the watchdog's active-run check
+(unauthenticated) keeps working; only the dispatch call starts failing,
+logged each hour as `recovery_dispatch_failed` — it never fails silently
+and never fabricates a success. Freshness detection and logging (Stage 1
+behavior) are unaffected either way, since they need no credential at
+all.
+
+**Remaining work (explicitly not built yet):** active alerting once
+freshness reaches the 36-hour escalation threshold despite watchdog
+recovery attempts (Stage 3 — see `docs/AI-HANDOFF.md`'s "D1 Nightly
+Backup Scheduling Reliability" entry), the "Recovery triggered"/"Delayed"
+Workspace Health dashboard states (would require granting
+`status-worker` write access to the status bucket, a real scope increase
+deliberately deferred), and a restore-verification watchdog (out of
+scope — restore verification's own monthly cadence and freshness model
+are unrelated to backup freshness).
+
 ### Recovering from an automated backup
 
 ```bash
