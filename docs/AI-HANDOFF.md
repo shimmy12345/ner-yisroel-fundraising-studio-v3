@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Add Portfolio Focus
+**`be83280`** -- "Add Portfolio Focus
 investigation: canonical financial model, fresh top-15 strategic
 candidates, proposed scoring architecture (2026-08-28)" -- documentation
 only, zero application code change, zero D1 mutation, zero deploy; see
