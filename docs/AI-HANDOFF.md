@@ -15,7 +15,21 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`2df4608`** -- documentation-only
+**`(pending — see follow-up commit)`** -- documentation-only
+update to this section covering Stage 2 credential installation and
+live verification (2026-08-28) -- zero code/workflow/Cloudflare/data
+change, zero deploy. See "D1 Nightly Backup Scheduling Reliability --
+Stage 2 Credential Installed, Verified Live" below. Confirms, against
+the real deployed state: `GITHUB_BACKUP_DISPATCH_TOKEN` is now PRESENT
+on `status-worker` only (main app Worker unchanged); Stage 2 is ACTIVE;
+GitHub's own `schedule` trigger recovered on its own at 2026-08-28T19:47:12Z
+(25h8m after the prior success, just under the 26h recovery threshold)
+before the watchdog ever needed to dispatch -- confirmed live via a real
+watchdog invocation correctly reading the new success as fresh. No
+staleness was manufactured; a live successful-dispatch call remains
+naturally (not artificially) pending until genuinely needed. Sits on
+top of
+`2df4608` -- documentation-only
 update to this section covering the D1 backup watchdog Stages 1+2
 verification round (2026-08-28) -- zero workflow/Cloudflare/secret/data
 change, zero deploy; see "D1 Nightly Backup Scheduling Reliability --
@@ -15845,6 +15859,96 @@ the rest of this repo's Workers-runtime pure-logic testing).
   `STATUS_BUCKET` write access, the backup-cron top-of-hour minute
   change, and a restore-verification watchdog all remain explicitly
   deferred/not approved, per every round's own instructions.
+
+## D1 Nightly Backup Scheduling Reliability -- Stage 2 Credential Installed, Verified Live (2026-08-28) -- STAGE 2 ACTIVE; RECOVERY THIS CYCLE WAS GITHUB'S OWN SCHEDULE, NOT WATCHDOG-TRIGGERED
+
+**No code change in this round** -- purely a verification pass after the
+account owner installed the credential the prior round was blocked on.
+Every check below was performed directly against the real deployed
+Cloudflare/GitHub state, not inferred from source or docs.
+
+**`GITHUB_BACKUP_DISPATCH_TOKEN`: PRESENT.** Confirmed via `wrangler
+secret list` on `status-worker` -- returns exactly one secret with that
+exact name (value never read or displayed). Main app Worker's own
+`wrangler secret list` still shows only the 3 pre-existing Gmail OAuth
+secrets -- the token was installed only where instructed.
+
+**What actually happened between the two verification rounds:** GitHub's
+own `schedule` trigger for `d1-backup-nightly.yml` -- the same one this
+whole investigation is about -- finally fired on its own, **11h47m
+after** its 08:00 UTC nominal time, at **2026-08-28T19:47:12Z** (run
+`33205391409`, `event: "schedule"`, `head_branch: "main"`, every step
+including status-publish succeeded). This landed at **~25h8m** since the
+prior success (2026-08-27T18:39:04Z) -- inside the 26h recovery
+threshold by less than an hour. **The watchdog never saw staleness and
+never dispatched anything this cycle**, because the real schedule beat
+it to it. This is exactly scenario 6 the verification instructions
+anticipated ("if GitHub's normal scheduled backup has finally run and
+the backup is fresh, do NOT manufacture staleness") -- reported
+honestly rather than forcing an unnecessary dispatch to manufacture a
+demo.
+
+**Live proof the watchdog correctly observed the new success**
+(`wrangler tail`, real invocation, not synthetic):
+```
+2026-08-28T21:17:56Z  {"level":"info","source":"backup-watchdog","event":"fresh","ageMs":5394936,"tier":"healthy"}
+```
+`ageMs: 5,394,936` (~1h29m55s) is consistent with a success timestamp of
+**≈2026-08-28T19:48:01Z** (derived directly from this real
+`ageMs`/`scheduledTime` pair -- 1,787,951,876,000 − 5,394,936 =
+1,787,946,481,064 ms), which lines up exactly with GitHub run
+`33205391409`'s own completion window (19:47:12–19:48:08). `outcome:
+"ok"`, zero exceptions, zero GitHub calls made (correct -- the `fresh`
+branch never reaches `checkActiveBackupRun`/`dispatchBackupWorkflow`).
+Exactly one watchdog invocation captured this round, zero dispatch
+attempts, zero duplicates.
+
+**Stage 2 status: ACTIVE**, in the sense that matters -- the credential
+exists, is correctly scoped and installed only on `status-worker`, and
+the code path is fully wired and unit-tested (all of `tests/backup-
+watchdog*.test.mjs` passing, including the mocked dispatch-success/
+-failure/active-run/re-check-race matrix). **A live, successful,
+authenticated `workflow_dispatch` call has not yet been naturally
+exercised**, because nothing has gone stale enough to trigger one since
+the credential was installed -- per instruction, this was not
+manufactured (no status data was altered, no artificial staleness was
+created, no dispatch was forced merely to produce a demo). This is the
+explicitly-anticipated "live stale-dispatch verification remains
+naturally pending" outcome, not a gap in the implementation. It will be
+naturally exercised automatically, without any further action, the next
+time GitHub's own schedule is delayed past 26 hours -- which, given this
+investigation's own evidence, is a matter of when, not if.
+
+**Security boundary, re-verified directly against Cloudflare (not
+source):** `status-worker` (`wrangler versions view` on the still-
+current deployed version `21be8aa8-...`) has exactly one binding,
+`STATUS_BUCKET` -- no D1 binding, no real-backup-bucket binding, no
+encryption-passphrase secret, confirmed even with the new dispatch
+secret now present alongside it. Main app Worker: still deployed at
+`59da32d1-...` (not redeployed this round or the prior one), still only
+the 3 Gmail secrets, still no GitHub credential, no R2 binding, no new
+capability of any kind.
+
+**Zero mutation:** D1 table-count fingerprint
+(donors/giving_activities/asks/interactions/recommendations/
+donor_relationship_facts/important_dates/yahrtzeits) identical across
+every checkpoint this round and every prior round
+(248/5,176/6/72/5/7/172/36); every query `rows_written: 0`.
+
+**Gates:** `pnpm test` (full suite), `pnpm exec tsc --noEmit`, `pnpm run
+build:staging-independent` -- all pass, unchanged from the prior round
+(no code was touched).
+
+**Confirmed unchanged:** `.github/workflows/d1-backup-nightly.yml` on
+`main` -- still `cron: "0 8 * * *"` (the top-of-hour offset change
+remains not approved and was not made); restore verification untouched;
+no Stage 3 alerting, no dashboard state changes, no `STATUS_BUCKET`
+write access added.
+
+**Remaining:** nothing blocking. Stage 2 is fully installed and will
+self-exercise the first time it's genuinely needed. Stage 3 (active
+alerting at the existing 36h threshold) remains the only undone item
+from the original plan, unstarted by instruction.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
