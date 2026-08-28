@@ -42,24 +42,24 @@ function PortfolioFocusRow({ row }: { row: DedicatedPortfolioFocusRow }) {
       <p className="pf-explain-confidence">{row.explanation.confidence}</p>
       <div className="pf-row-actions">
         <a href={openHref}>Open donor →</a>
-        <details className="tech-toggle">
-          <summary>Show technical detail</summary>
-          <dl className="pf-tech-grid">
-            <div><dt>Composite score</dt><dd>{t.compositeScore.toFixed(4)}</dd></div>
-            <div><dt>Base composite</dt><dd>{t.baseComposite.toFixed(4)}</dd></div>
-            <div><dt>Financial Significance</dt><dd>{t.financialSignificance.toFixed(4)}</dd></div>
-            <div><dt>Opportunity</dt><dd>{t.opportunity.toFixed(4)}</dd></div>
-            <div><dt>Stewardship</dt><dd>{t.stewardship.toFixed(4)}</dd></div>
-            <div><dt>Momentum</dt><dd>{t.momentum.toFixed(4)} ({t.momentumLabel})</dd></div>
-            <div><dt>Tactical Urgency</dt><dd>{t.tacticalUrgency.toFixed(4)}</dd></div>
-            <div><dt>Relationship Coverage</dt><dd>{t.coverage.toFixed(4)}</dd></div>
-            <div><dt>Coverage floor</dt><dd>{t.coverageFloor.toFixed(4)} {t.coverageTriggered ? "-- determined this donor's composite score" : "-- not triggered"}</dd></div>
-            <div><dt>Financial confidence</dt><dd>{t.financialConfidence}</dd></div>
-            <div><dt>Relationship confidence</dt><dd>{t.relationshipConfidence}</dd></div>
-            {t.pledgeStaleClass && <div><dt>Pledge staleness classification</dt><dd>{t.pledgeStaleClass}</dd></div>}
-          </dl>
-        </details>
       </div>
+      <details className="tech-toggle">
+        <summary>Show technical detail</summary>
+        <dl className="pf-tech-grid">
+          <div><dt>Composite score</dt><dd>{t.compositeScore.toFixed(4)}</dd></div>
+          <div><dt>Base composite</dt><dd>{t.baseComposite.toFixed(4)}</dd></div>
+          <div><dt>Financial Significance</dt><dd>{t.financialSignificance.toFixed(4)}</dd></div>
+          <div><dt>Opportunity</dt><dd>{t.opportunity.toFixed(4)}</dd></div>
+          <div><dt>Stewardship</dt><dd>{t.stewardship.toFixed(4)}</dd></div>
+          <div><dt>Momentum</dt><dd>{t.momentum.toFixed(4)} ({t.momentumLabel})</dd></div>
+          <div><dt>Tactical Urgency</dt><dd>{t.tacticalUrgency.toFixed(4)}</dd></div>
+          <div><dt>Relationship Coverage</dt><dd>{t.coverage.toFixed(4)}</dd></div>
+          <div><dt>Coverage floor</dt><dd>{t.coverageFloor.toFixed(4)} {t.coverageTriggered ? "-- determined this donor's composite score" : "-- not triggered"}</dd></div>
+          <div><dt>Financial confidence</dt><dd>{t.financialConfidence}</dd></div>
+          <div><dt>Relationship confidence</dt><dd>{t.relationshipConfidence}</dd></div>
+          {t.pledgeStaleClass && <div><dt>Pledge staleness classification</dt><dd>{t.pledgeStaleClass}</dd></div>}
+        </dl>
+      </details>
     </div>
   </details>;
 }

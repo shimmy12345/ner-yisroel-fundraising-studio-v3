@@ -895,6 +895,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .pf-explain-confidence { margin:8px 0 0; color:var(--muted); font-size:12px; line-height:1.5; }
 .pf-row-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px 18px; margin-top:14px; }
 .pf-row-actions > a { color:#315f4b; font-size:12.5px; font-weight:700; }
+.pf-row-detail .tech-toggle { margin-top:10px; }
 .tech-toggle summary { cursor:pointer; list-style:none; color:#8b958f; font-size:11px; font-weight:650; }
 .tech-toggle summary::-webkit-details-marker,.tech-toggle summary::marker { display:none; content:""; }
 .tech-toggle summary:focus-visible { outline:2px solid #315f4b; outline-offset:2px; }
