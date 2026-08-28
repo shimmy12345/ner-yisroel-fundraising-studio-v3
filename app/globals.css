@@ -836,6 +836,24 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .today-command-section,.today-actions-section,.today-brief-section { min-width:0; padding:19px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:0 5px 18px rgba(31,54,45,.045); }
 .today-agenda { border-top:3px solid #316c54; }
 .today-coming-up { border-top:3px solid #a7b8ae; background:#fbfcfa; }
+/* Portfolio Focus (Phase 2A, 2026-08-28) -- strategic orientation, not
+   another task list, so its accent (a muted sage/olive) is deliberately
+   distinct from Today's Agenda's own green so the two are never mistaken
+   for the same kind of list at a glance. See docs/PORTFOLIO-FOCUS-UX-
+   DESIGN.md Section 5. */
+.portfolio-focus-section { margin-bottom:22px; border-top:3px solid #8a9a5b; }
+.portfolio-focus-intro { max-width:640px; margin:-4px 0 14px; color:var(--muted); font-size:13px; line-height:1.55; }
+.portfolio-focus-list { border:1px solid #e6ece8; border-radius:10px; background:#fff; overflow:hidden; }
+.portfolio-focus-row { display:grid; grid-template-columns:28px minmax(0,1fr); gap:10px; padding:8px 11px; border-bottom:1px solid #eef1ee; }
+.portfolio-focus-row:last-child { border-bottom:0; }
+.portfolio-focus-row-rank { padding-top:2px; color:#a8b2ac; font-size:11px; font-weight:600; line-height:1.3; text-align:right; }
+.portfolio-focus-row-body { min-width:0; }
+.portfolio-focus-row-heading { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 8px; min-width:0; }
+.portfolio-focus-row-heading a { min-width:0; color:var(--ink); font-size:13px; font-weight:650; text-decoration:none; line-height:1.3; }
+.portfolio-focus-row-heading a:hover { text-decoration:underline; }
+.portfolio-focus-row-heading .donor-code { margin:0; font-size:9px; }
+.portfolio-focus-row-why { display:flex; align-items:center; gap:6px; margin:2px 0 0; color:#57675f; font-size:11px; line-height:1.4; }
+.portfolio-focus-row-why .event-type { flex:0 0 auto; }
 /* Desktop only (matches the 2-column .today-command-grid breakpoint just
    below): Coming Up's header stays visible while everything after it
    scrolls internally within a viewport-relative bounded height, so ~20
@@ -932,7 +950,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 }
 @media (max-width:760px) {
   .today-command-grid { gap:12px; margin-bottom:16px; }
-  .today-command-section,.today-actions-section,.today-brief-section { padding:15px; }
+  .today-command-section,.today-actions-section,.today-brief-section,.portfolio-focus-section { padding:15px; }
   .command-section-heading h2 { font-size:21px; }
   .today-actions-section .today-quick-actions { grid-template-columns:1fr 1fr; overflow:visible; }
   .today-actions-section .today-quick-actions a { min-height:68px; }
@@ -941,6 +959,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .morning-brief-complete button { grid-column:2; justify-self:start; }
   .relationship-date-row { grid-template-columns:38px minmax(0,1fr); gap:8px; padding:8px 10px; }
   .relationship-date-row-date { font-size:10px; }
+  .portfolio-focus-row { grid-template-columns:20px minmax(0,1fr); gap:8px; padding:8px 10px; }
 }
 
 /* Donor Research (Stage A) -- restrained, source-first: claim, source,

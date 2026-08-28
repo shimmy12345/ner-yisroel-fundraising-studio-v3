@@ -12,6 +12,9 @@ import { timeOfDayGreeting } from "../lib/workspace/local-time";
 import { shouldShowOnboarding } from "../lib/onboarding/status";
 import { getDataMode } from "../lib/workspace/mode";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../lib/navigation/donor-navigation";
+import { computePortfolioFocus } from "../lib/portfolio-focus/index";
+import { buildTodayPortfolioFocusRows, type TodayPortfolioFocusRow } from "../lib/portfolio-focus/today-view";
+import { logger } from "../lib/logger";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +75,30 @@ function RelationshipDateEventRow({ event, today = false }: { event: WorkspaceRe
   </article>;
 }
 
+// Portfolio Focus (Phase 2A, 2026-08-28) -- strategic orientation
+// ("where should limited attention go this month"), never a task list.
+// Rank is rendered small/muted (never the dominant element) and no raw
+// score, component value, or internal classification name is ever shown
+// here -- see docs/PORTFOLIO-FOCUS-UX-DESIGN.md Sections 5/7/8. The row
+// name is the only link, matching RelationshipDateEventRow/
+// ScheduledActivityCard's own convention above.
+function PortfolioFocusRow({ row }: { row: TodayPortfolioFocusRow }) {
+  const openHref = donorNavigationHref(row.donorId, "/#portfolio-focus-title", "today");
+  return <article className="portfolio-focus-row">
+    <div className="portfolio-focus-row-rank" aria-hidden="true">{row.rank}</div>
+    <div className="portfolio-focus-row-body">
+      <div className="portfolio-focus-row-heading">
+        <a href={openHref}>{row.displayName}</a>
+        {row.donorCode && <span className="donor-code">{row.donorCode}</span>}
+      </div>
+      <p className="portfolio-focus-row-why">
+        <span className="event-type">{row.attentionLabel}</span>
+        {row.whyNow}
+      </p>
+    </div>
+  </article>;
+}
+
 export default async function TodayPage({ searchParams }: { searchParams: Promise<{ priorities?: string }> }) {
   if (await shouldShowOnboarding()) return <WelcomeExperience />;
   const identity = await requireChatGPTUser("/");
@@ -79,7 +106,35 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const mode = await getDataMode(profile.id);
   const showAll = (await searchParams).priorities === "all";
   const now = Math.floor(Date.now() / 1000);
-  const data = await loadWorkspaceBrief(profile.id, profile.timezone, mode, now, showAll ? 50 : 10, "today");
+
+  // Portfolio Focus (Phase 2A): strategic, additive to Today, never
+  // required for the page to render, and never sharing a query/loader
+  // with loadWorkspaceBrief -- it reads via its own bounded, batched 12
+  // D1 queries (lib/portfolio-focus/data.ts). Run alongside
+  // loadWorkspaceBrief (Promise.all) rather than after it so the two
+  // independent loads overlap instead of adding sequential latency.
+  // computePortfolioFocus() only has meaning against real live data
+  // (data.ts has no demo branch), so it's skipped entirely outside live
+  // mode -- not called then discarded. This function always resolves
+  // (never rejects): a computation failure degrades this one section to
+  // empty (see item 18's zero-result handling below) rather than failing
+  // the whole Today page, and is logged, never swallowed silently, and
+  // never backed by fake/stale data.
+  async function loadPortfolioFocusForToday(): Promise<TodayPortfolioFocusRow[]> {
+    if (mode !== "live") return [];
+    try {
+      const results = await computePortfolioFocus(profile.id, profile.timezone, now);
+      return buildTodayPortfolioFocusRows(results, 5);
+    } catch (error) {
+      logger.error("portfolio_focus_today_load_failed", error, { userId: profile.id });
+      return [];
+    }
+  }
+
+  const [data, portfolioFocusRows] = await Promise.all([
+    loadWorkspaceBrief(profile.id, profile.timezone, mode, now, showAll ? 50 : 10, "today"),
+    loadPortfolioFocusForToday(),
+  ]);
   const greeting = timeOfDayGreeting(now, profile.timezone);
   const agendaQueueCount = data.relationshipQueue.overdue.length + data.relationshipQueue.today.length;
   const comingQueueCount = data.relationshipQueue.thisWeek.length + data.relationshipQueue.upcoming.length;
@@ -128,5 +183,11 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
         </div>
       </section>
     </div>
+
+    {portfolioFocusRows.length > 0 && <section className="today-command-section portfolio-focus-section" aria-labelledby="portfolio-focus-title">
+      <div className="command-section-heading"><div><p className="eyebrow">THIS MONTH</p><h2 id="portfolio-focus-title">Portfolio Focus</h2></div></div>
+      <p className="portfolio-focus-intro">Five relationships worth keeping in mind this month, independent of today&rsquo;s scheduled work.</p>
+      <div className="portfolio-focus-list">{portfolioFocusRows.map((row) => <PortfolioFocusRow row={row} key={row.donorId} />)}</div>
+    </section>}
   </AppShell>;
 }

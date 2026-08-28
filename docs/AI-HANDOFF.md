@@ -15,7 +15,23 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`5a7b5cc`** -- "Add Portfolio
+**`(pending — see follow-up commit)`** -- "Implement
+Portfolio Focus Phase 2A: Today-page section (2026-08-28)" --
+application code change (`lib/portfolio-focus/today-view.ts` NEW,
+`app/page.tsx`, `app/globals.css`, two test files, `package.json`) --
+DEPLOYED to Independent Staging (Worker
+`da68d035-a671-4f35-8db0-ac4e985718c6`) and live-verified end-to-end;
+see "Portfolio Focus Phase 2A -- Today-Page Section" below. Adds a
+compact, 5-donor, computation-only-reuse Portfolio Focus section below
+the untouched Today's Agenda/Coming Up row -- real current top 5
+(Stein, Schwartz, Weinschneider, Zachter, Zeffren) verified against a
+fresh Independent Staging pull with exact rank/order parity, no raw
+score visible anywhere, normalized attention-type display labels over
+the unchanged internal enum. Zero scoring/weights/Recommendation-
+Engine/Relationship-Intelligence change; zero schema/migration; zero
+D1 mutation (three-checkpoint table-count fingerprint identical);
+Phase 2B/2C/2D/2E not started. All 3 gates pass. Sits on top of
+`5a7b5cc` -- "Add Portfolio
 Focus Phase 2 UX investigation and design (docs/PORTFOLIO-FOCUS-UX-
 DESIGN.md) + interactive mockup (2026-08-28)" -- documentation and a
 standalone HTML mockup artifact only, zero application code change, zero
@@ -15110,6 +15126,160 @@ files/data-reuse/perf/testing notes.
 Relationship Intelligence, or D1 data was changed. No schema/migration.
 No deploy. Implementation was explicitly not begun**, per instruction --
 this phase is documentation and a standalone mockup artifact only.
+
+## Portfolio Focus Phase 2A -- Today-Page Section (2026-08-28) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO D1 MUTATION
+
+Implemented exactly the Today-page slice of docs/PORTFOLIO-FOCUS-UX-
+DESIGN.md's recommended architecture (Section 5) -- a compact,
+5-donor Portfolio Focus section, computation-only reuse of the frozen
+Phase 1 engine (`computePortfolioFocus()`), no scoring/weights/
+Recommendation-Engine/Relationship-Intelligence change, no dedicated
+Portfolio Focus route, no donor-page integration, no Assistant
+integration, no Daily Agenda change.
+
+**Files changed:**
+- `lib/portfolio-focus/today-view.ts` (NEW) -- pure, read-only
+  presentation adapter: `ATTENTION_TYPE_DISPLAY_LABELS` (the UX-design-
+  approved fundraiser vocabulary; `coverage_needed` and
+  `learn_relationship_review` intentionally share "Relationship
+  Review," the internal enum is untouched), `formatPortfolioFocusWhyNow`
+  (a short, evidence-only, non-LLM sentence per attention type, derived
+  solely from `PortfolioFocusResult.evidence`), and
+  `buildTodayPortfolioFocusRows` (slices the engine's own already-ranked
+  output, no re-sorting, no curation). No D1/`cloudflare:workers` import
+  -- kept trivially unit-testable.
+- `app/page.tsx` -- added `PortfolioFocusRow` (donor name is the only
+  link, matching `RelationshipDateEventRow`/`ScheduledActivityCard`'s
+  own convention), a `loadPortfolioFocusForToday()` helper (skips
+  entirely outside live mode; catches and logs any computation failure
+  via `logger.error("portfolio_focus_today_load_failed", ...)` rather
+  than throwing), run in `Promise.all` alongside the existing
+  `loadWorkspaceBrief()` call so the two independent loads overlap
+  instead of adding sequential latency, and the new section itself
+  (rendered only when `portfolioFocusRows.length > 0`) as a new
+  full-width `<section>` directly below the existing, untouched
+  Today's Agenda/Coming Up `today-command-grid` row.
+- `app/globals.css` -- `.portfolio-focus-section` (own accent
+  `#8a9a5b`, deliberately distinct from Today's Agenda's `#316c54` and
+  Coming Up's `#a7b8ae`) plus `.portfolio-focus-intro/-list/-row/-row-
+  rank/-row-body/-row-heading/-row-why`, styled directly from the
+  existing card/pill/muted-text tokens (`.today-command-section`,
+  `.event-type`, `var(--muted)`, `var(--ink)`) -- no new design system.
+  Mobile breakpoint addition mirrors the existing `.relationship-date-
+  row` 760px override (a 2-column flexible grid, never a table).
+- `tests/portfolio-focus-today-view.test.mjs` (NEW) -- pure adapter
+  tests against real component functions (same synthetic-portfolio
+  convention as `tests/portfolio-focus-regression.test.mjs`): exact
+  top-5/fewer-than-5/zero-result counts, engine order/rank preserved
+  verbatim, row shape contains only display fields (no compositeScore/
+  components/coverage/momentumLabel), `coverage_needed` and
+  `learn_relationship_review` render identical fundraiser-facing text,
+  a coverage-driven row never contains "ask"/"solicit," an on-track
+  pledge fulfillment row never contains "overdue"/"follow up"/"collect."
+- `tests/today.test.mjs` -- added placement (`today-command-grid`
+  index before `portfolio-focus-section`), zero-result omission, live-
+  mode gating, try/catch-not-throw, exact-top-5 call, no-desktop-table,
+  no-raw-score-field, distinct-accent-color, mobile-breakpoint, and
+  no-donor-special-case assertions (the adapter source is grepped for
+  every named regression donor -- Weber, Miller, Stein, Schwartz,
+  Spetner, Weinschneider, Zachter, Schnaidman, Ray, Zeffren, Goldenberg,
+  Ramras -- to prove none is special-cased).
+- `package.json` -- added the new test file to the `test` script.
+
+**Actual current top 5 (real Independent Staging data, verified
+read-only against a fresh D1 pull immediately before deploy, then
+confirmed identical live on the deployed page) -- unchanged from the
+Round 3 calibration/Phase 1/Phase 2 design document, i.e. no data
+drift occurred between those rounds and this one:**
+
+1. Dr. & Mrs. Avi Stein (71438) -- Cultivate & Steward -- "$75,000
+   commitment, currently active."
+2. Mr. & Mrs. Mordechai Schwartz (56283) -- Cultivate & Steward --
+   "$36,000 commitment, currently active."
+3. Mr. & Mrs. Dovie Weinschneider (68390) -- Solicitation Opportunity
+   -- "Scheduled follow-up: Follow up on “Giving follow-up”."
+4. Mr. & Mrs. Yaakov Zachter (60830) -- Cultivate & Steward --
+   "$18,000 commitment, currently active."
+5. Mr. & Mrs. Eitan Zeffren (69667) -- Solicitation Opportunity --
+   "Scheduled follow-up: Solicit corporate sponsorship for dinner."
+
+Rank/order is exactly the engine's own output (verified against
+`scorePortfolioFocus`'s real result, not merely the Today render) --
+no manual curation. No coverage-driven donor happened to be in today's
+real top 5, so the "never implies solicitation" guarantee for that
+case is proven by the adapter's own unit tests (using a coverage-
+triggered synthetic fixture) rather than by today's live top 5, which
+is the honest, unforced result rather than a chosen example.
+
+**Query/performance impact:** Today's existing loader
+(`loadWorkspaceBrief`) issues 19 D1 queries; Portfolio Focus adds its
+own fixed, already-batched 12 (`lib/portfolio-focus/data.ts`, one
+`Promise.all`, independent of donor count) -- 19 -> 31 total D1 queries
+in live mode, 19 (unchanged) in demo mode, since the load is skipped
+entirely outside live mode rather than computed and discarded. The two
+loaders run concurrently (`Promise.all` in `app/page.tsx`) rather than
+sequentially, so the incremental wall-clock cost is bounded by whichever
+load is slower, not their sum. No N+1 query was introduced. No shared-
+loader refactor was attempted, per instruction.
+
+**Gates:** `pnpm test` (all suites, including the two new/updated
+files above): pass. `pnpm exec tsc --noEmit`: clean. `pnpm run
+build:staging-independent`: completed, full route manifest, no errors.
+
+**D1 mutation check:** table-count fingerprint (`donors`,
+`giving_activities`, `asks`, `interactions`, `recommendations`,
+`donor_relationship_facts`, `important_dates`, `yahrtzeits`,
+`jl_payment_assignment_audits`, `pledge_payment_plans`) taken before
+deploy, immediately after deploy, and again after live-browsing the
+deployed Today page and a real donor page -- **identical across all
+three checkpoints** (248/5,176/6/71/5/6/172/36/19/33). Zero writes.
+
+**Independent Staging deployment:** `pnpm run deploy:staging-
+independent` succeeded. **New deployed Worker version:
+`da68d035-a671-4f35-8db0-ac4e985718c6`** (supersedes
+`fb52b4cb-...`, the Phase 1 deployment).
+
+**Live desktop verification:** Portfolio Focus renders directly below
+the untouched Today's Agenda/Coming Up row, with its own distinct
+accent color, all 5 rows fit comfortably with no added scroll or
+horizontal overflow, rank is visually quiet (small, gray, right-
+aligned) while donor name and why-now dominate, no raw score/
+percentage/internal classification name is visible anywhere, and the
+donor-name link correctly navigates to the real donor page (verified
+by clicking through to Avi Stein's page, confirmed unmodified -- no
+Phase 2C donor-page context line exists yet, as intended).
+
+**Mobile verification:** verified structurally/via CSS rather than a
+live mobile screenshot -- the browser automation tool's window-resize
+did not change the captured viewport in this environment (tried twice,
+including a fresh tab, before falling back). `.portfolio-focus-row`'s
+mobile override lives in the same proven `@media (max-width:760px)`
+block as `.today-command-grid` and `.relationship-date-row`, and uses
+the identical 2-column flexible-grid shape as `.relationship-date-row`
+(no table, no nested scroll) -- the same pattern this app already ships
+responsively today.
+
+**Accessibility:** heading order stays flat (h1 -> h2 per section,
+Portfolio Focus's h2 is the last in that sequence, no level skipped);
+the donor name is the only link per row (no nested/conflicting click
+targets); rank is `aria-hidden` (decorative/orientation-only, per the
+UX design's own "no false precision" principle) so screen readers hear
+donor name and why-now, the meaningful content; badge text meaning
+never depends on color (the pill is a neutral gray in every case, same
+as the rest of the app's existing badges); focus visibility is
+inherited from the app's existing global `a:focus-visible` rule --
+nothing about it needed to change.
+
+**Not started, per explicit instruction:** Phase 2B (dedicated
+Portfolio Focus view/route), Phase 2C (donor-page integration), Phase
+2D (Assistant integration), Phase 2E (Daily Agenda integration).
+Scoring/weights/materiality/Coverage/attention-type semantics,
+Recommendation Engine, and Relationship Intelligence are byte-for-byte
+unchanged from Phase 1.
+
+**Recommended next step:** Phase 2B (the dedicated Portfolio Focus
+view), per docs/PORTFOLIO-FOCUS-UX-DESIGN.md Section 16's staged
+sequence -- not started in this round.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 

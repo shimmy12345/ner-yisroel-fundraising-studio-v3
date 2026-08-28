@@ -19,6 +19,7 @@ const appShell = await readFile(new URL("../app/components/AppShell.tsx", import
 const briefExperience = await readFile(new URL("../app/components/BriefExperience.tsx", import.meta.url), "utf8");
 const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const recommendationCandidates = await readFile(new URL("../lib/relationships/recommendation-candidates.ts", import.meta.url), "utf8");
+const portfolioFocusTodayView = await readFile(new URL("../lib/portfolio-focus/today-view.ts", import.meta.url), "utf8");
 
 for (const action of ["Search Donor", "Import JL Export", "Add Interaction", "Create Reminder", "Workspace Health"]) assert.match(today, new RegExp(action));
 for (const section of ["Today's Agenda", "Coming Up", "Quick Actions", "Morning Brief"]) assert.match(today, new RegExp(section));
@@ -185,5 +186,38 @@ assert.match(donorPage, /isScheduledActivity\(item\.source, item\.occurred_at, i
 assert.match(unifiedTimeline, /scheduled/i);
 assert.match(relationshipRead, /source LIKE 'capture-completed:%'/);
 assert.match(relationshipRead, /source NOT LIKE 'capture-scheduled:%'.*occurred_at <= created_at/);
+
+// Portfolio Focus -- Phase 2A Today-page section (docs/PORTFOLIO-FOCUS-UX-DESIGN.md).
+// Strategic orientation, additive to Today, never a second task list --
+// see docs/AI-HANDOFF.md's Portfolio Focus Phase 2A entry for the full
+// design rationale this section implements.
+assert.ok(today.indexOf("today-command-grid") < today.indexOf("portfolio-focus-section"), "Portfolio Focus must render below the existing Today's Agenda / Coming Up row, never inside or above it");
+assert.match(today, /portfolioFocusRows\.length > 0/, "the section must be entirely omitted when there are zero results (no arbitrary/placeholder donors, no empty-state noise)");
+assert.match(today, /if \(mode !== "live"\) return \[\];/, "Portfolio Focus has no meaning against demo/sample data and must be skipped outside live mode, not called and discarded");
+assert.match(today, /try \{[\s\S]*?computePortfolioFocus\(profile\.id, profile\.timezone, now\)[\s\S]*?\} catch \(error\) \{[\s\S]*?logger\.error\("portfolio_focus_today_load_failed", error, \{ userId: profile\.id \}\);[\s\S]*?\}/, "a Portfolio Focus computation failure must be caught and logged, never thrown, so it cannot break the rest of the Today page");
+assert.doesNotMatch(today.split("portfolio-focus-section")[1] ?? "", /throw /, "the Portfolio Focus section's own render path must never rethrow");
+assert.match(today, /buildTodayPortfolioFocusRows\(results, 5\)/, "Today must show exactly the current top 5 -- no manual curation, no different limit");
+assert.match(today, /Promise\.all\(\[\s*loadWorkspaceBrief\(/, "Portfolio Focus's independent load must run alongside loadWorkspaceBrief, not add sequential latency after it");
+assert.doesNotMatch(today, /<table/i, "the Today Portfolio Focus section must never render as a desktop-only table");
+for (const rawField of ["compositeScore", "baseComposite", "coverageFloor", "momentumLabel", "pledgeStaleClass", "financialConfidence", "relationshipConfidence", "\\.components\\."]) {
+  assert.doesNotMatch(today, new RegExp(rawField), `the Today page must never reference the raw Portfolio Focus field ${rawField} -- WHO/WHY/WHAT KIND OF ATTENTION only, never internal scoring`);
+}
+assert.match(styles, /\.portfolio-focus-section \{ margin-bottom:22px; border-top:3px solid #8a9a5b; \}/, "Portfolio Focus must use its own distinct accent color, never Today's Agenda's or Coming Up's own accent");
+assert.doesNotMatch(styles, /\.portfolio-focus-section \{[^}]*#316c54/, "Portfolio Focus's accent must be visually distinct from Today's Agenda's accent, not a copy of it");
+assert.match(styles, /\.portfolio-focus-row \{ grid-template-columns:20px minmax\(0,1fr\)/, "the mobile breakpoint must keep Portfolio Focus as a simple flexible list, never a fixed multi-column table");
+
+// The presentation adapter itself must be pure (no D1/env import) and
+// must never branch on a specific donor id or name -- the model's own
+// ranking decides who appears, this file only translates the result.
+assert.doesNotMatch(portfolioFocusTodayView, /cloudflare:workers|env\.DB/, "the Today-page adapter must stay pure/read-only, with no direct D1 access of its own");
+for (const name of ["Weber", "Miller", "Stein", "Schwartz", "Spetner", "Weinschneider", "Zachter", "Schnaidman", "Ray", "Zeffren", "Goldenberg", "Ramras"]) {
+  assert.doesNotMatch(portfolioFocusTodayView, new RegExp(name), `the Today-page adapter must never special-case donor "${name}" by name`);
+}
+assert.match(portfolioFocusTodayView, /coverage_needed: "Relationship Review"/);
+assert.match(portfolioFocusTodayView, /learn_relationship_review: "Relationship Review"/);
+// The actual coverage-driven wording (not source comments, which may
+// legitimately discuss the word "solicit" as a design constraint) is
+// verified precisely against real evidence in
+// tests/portfolio-focus-today-view.test.mjs.
 
 process.stdout.write("Today 2.0 checks passed.\n");
