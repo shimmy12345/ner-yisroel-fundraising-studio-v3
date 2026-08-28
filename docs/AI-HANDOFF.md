@@ -15,7 +15,18 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`f3ba545`** -- "Document
+**`(pending — see follow-up commit)`** -- "Investigate
+D1 nightly backup scheduling reliability (docs/BACKUP-SCHEDULING-
+RELIABILITY.md) (2026-08-28)" -- documentation only, zero workflow/
+Cloudflare/secret/data change, zero deploy; see "D1 Nightly Backup
+Scheduling Reliability -- Investigation" below and the dedicated report
+file itself. Confirms the reported late/missing nightly backups trace
+entirely to GitHub Actions' best-effort `schedule` trigger (16/16 real
+runs succeeded; zero pipeline failures), recommends a Cloudflare-Cron-
+on-`status-worker` watchdog architecture with a 26h/36h SLO reusing
+existing thresholds, and proposes a 3-stage implementation plan --
+none of it started. Sits on top of
+`f3ba545` -- "Document
 Portfolio Focus Phase 2B: dedicated Portfolio Focus view (2026-08-28)"
 (plus a same-day structural correction to this section) --
 documentation only, zero application code change, zero D1 mutation,
@@ -15586,6 +15597,44 @@ above).
 context), per docs/PORTFOLIO-FOCUS-UX-DESIGN.md Section 10's
 recommendation (a single compact line above Relationship Snapshot) --
 not started in this round.
+
+## D1 Nightly Backup Scheduling Reliability -- Investigation (2026-08-28) -- INVESTIGATION/DESIGN ONLY, NO WORKFLOW/CLOUDFLARE/SECRET/DATA CHANGE
+
+**Full report: `docs/BACKUP-SCHEDULING-RELIABILITY.md`.** Confirmed
+root cause of the reported "backup running many hours late" complaint:
+GitHub Actions' `schedule` trigger itself, not the backup pipeline --
+every run in the workflow's entire history (16/16) has succeeded, with
+zero true backup failures and zero observed status-publication
+failures. Real evidence: the Aug 27 nightly run fired **10h39min late**
+(18:38 UTC instead of 08:00 UTC), and as of this investigation (Aug 28,
+15:25 UTC) **no run at all had fired for that day**, 7h26min past due.
+Confirmed from current GitHub documentation that `schedule` events are
+explicitly best-effort and "some queued jobs may be dropped" under
+high load -- and this workflow's `0 8 * * *` cron sits at the single
+most-congested minute of every hour, GitHub's own documented worst case.
+
+Recommended SLO: fresh <26h, automated recovery dispatch at >=26h,
+human escalation at the *existing* `BACKUP_FRESHNESS_HEALTHY_MS` 36h
+mark (reused, not replaced) already implemented in
+`lib/data-health/model.ts`. Recommended architecture: a Cloudflare Cron
+Trigger added to `status-worker` (not the main app Worker) -- reusing
+this repo's own already-shipped hourly-guarded-`scheduled()` pattern
+(`worker/index.ts`'s Daily Agenda cron) -- that reads the existing
+read-only `STATUS_BUCKET` binding (zero new access) and, only when
+stale, calls GitHub's `workflow_dispatch` API using one new,
+narrowly-scoped fine-grained PAT (this-repo-only, "Actions: Read and
+write," confirmed to need no other permission) stored only on
+`status-worker`, never the main app. Escalation (Stage 3) reuses the
+existing Gmail pipeline already used for the Daily Agenda, via the
+existing `STATUS_WORKER` service binding -- no new credential crosses
+either Worker's existing isolation boundary. GitHub-only (a second
+GitHub cron) and Cloudflare-performs-the-backup were both investigated
+and explicitly rejected, with reasoning, in the full report.
+
+**No workflow YAML, Cloudflare config/cron, GitHub secret, R2
+bucket/binding, backup encryption, Worker code, or production/main
+content was changed. No backup was dispatched. Investigation/design
+only -- a 3-stage implementation plan is proposed but not started.**
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
