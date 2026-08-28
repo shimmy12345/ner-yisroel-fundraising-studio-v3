@@ -15,7 +15,26 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`8203b16`** -- "Add Portfolio Focus Human
+**`(pending — see follow-up commit)`** -- "Implement Portfolio Focus
+Phase 1: domain/computation engine, no UI (2026-08-28)" -- application
+code change (new `lib/portfolio-focus/` module, 12 files; three new test
+suites; a `package.json` test-script line only) -- DEPLOYED to
+Independent Staging (Worker `fb52b4cb-2cb8-42e8-920b-1f6b950d7315`) and
+live-verified (Today page and a real donor page both render unchanged);
+see "Portfolio Focus Implementation -- Phase 1" below. Implements the
+model FROZEN in `docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md` faithfully, with
+the one approved attention-type labeling correction applied. Real-data
+verification against a fresh Independent Staging pull (through the
+actual committed code, not a reimplementation) shows **exact numeric
+parity with the frozen Round 3 calibration across the entire top 25**
+(every composite/component score matches to 4 decimal places), with the
+labeling correction visibly and correctly changing only the attention-
+type text for Ramras/Dov Zeffren/Moradian/Krull, never any score or
+rank. All mandatory regressions (Spetner; the six stale-balance
+donors) hold exactly. 12 batched D1 queries total, independent of donor
+count -- zero D1 writes; zero Recommendation Engine change; zero
+Relationship Intelligence change; zero UI added. All 3 gates pass. Sits
+on top of `8203b16` -- "Add Portfolio Focus Human
 Calibration Round 3 report (docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md)
 (2026-08-28)" -- documentation only, zero application code change, zero
 D1 mutation, zero deploy; see "Portfolio Focus Human Calibration Round
@@ -14776,6 +14795,274 @@ no production/main access.
 
 **Stopping for review. Did not proceed to implementation despite the
 "ready" recommendation, per explicit instruction.**
+
+## Portfolio Focus Implementation -- Phase 1 (2026-08-28) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, NO UI, RECOMMENDATION ENGINE/RELATIONSHIP INTELLIGENCE UNCHANGED
+
+Implements the model FROZEN in `docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md`
+faithfully -- this round was implementation, not a fourth calibration
+round. No score, weight, threshold, or formula was adjusted because a
+real donor result looked surprising; every deviation from Round 3 found
+during implementation is disclosed below, not silently smoothed over.
+
+### Architecture
+
+New module: **`lib/portfolio-focus/`** (12 files, ~994 lines), following
+this codebase's existing convention (pure domain logic in `lib/`, no D1
+access except one dedicated data-loading file, exactly like
+`lib/relationships/*.ts` + `lib/workspace/live-data.ts`):
+
+- `types.ts` -- every shared type (`PortfolioFocusDonorInput`,
+  `PortfolioFocusContext`, `PortfolioFocusResult`, `AttentionType`,
+  `MomentumLabel`, `PledgeStaleClass`, `ConfidenceLevel`).
+- `stats.ts` -- `percentileRank`/`clamp` (shared, trivial).
+- `materiality.ts` -- the frozen Round 3 materiality formula
+  (`absoluteMateriality`, `materiality`, `recencyDecay`), anchored to
+  fixed $500-$100,000 real-dollar brackets exactly as calibrated.
+- `stale-balance.ts` -- `classifyPledgeStaleness`/`pledgeRecencyDays`,
+  unchanged from Round 2/3.
+- `components.ts` -- `computeFinancialSignificance`, `computeOpportunity`,
+  `computeStewardship`, `computeMomentum`, `computeTacticalUrgency`,
+  `computeCoverage`, `computeCoverageFloor` -- one function per
+  component, each taking only already-resolved evidence.
+- `confidence.ts` -- `computeFinancialConfidence`/
+  `computeRelationshipConfidence`, kept OUTSIDE the composite.
+- `attention-type.ts` -- `resolveAttentionType`, WITH the Round 3
+  Section 9 labeling correction applied (see below).
+- `context.ts` -- `buildPortfolioContext`, builds the portfolio-wide
+  percentile bases once per scoring run.
+- `score.ts` -- `scorePortfolioFocusDonor`/`scorePortfolioFocus`, the
+  pure orchestrator; also builds the structured `evidence` object and a
+  deterministic `whyNow` sentence per donor.
+- `aggregate.ts` -- `aggregatePortfolioFocusInputs`, pure: turns raw D1
+  rows into `PortfolioFocusDonorInput[]`, using the SAME canonical
+  financial reconstruction (category-agnostic cash events, the
+  future-dated-pledge-row safeguard, the commitment-vs-payment-recency
+  distinction) and the SAME real, unmodified production functions every
+  other surface uses -- `buildRecommendationEvidence`,
+  `buildDonorRecommendation`, `resolveOpenPledgeActivityDate`,
+  `evaluatePaymentPlan`, `resolveRelationshipSnapshot`,
+  `findMostActionableFact`, `matchAskFollowUps`. Never a second,
+  competing financial-truth model.
+- `data.ts` -- **the only file that touches D1.** 12 batched queries
+  (one `Promise.all`), every WHERE clause copied verbatim from
+  `lib/workspace/live-data.ts`'s own live-mode query set so Portfolio
+  Focus scopes to exactly the same donor population as every other live
+  surface. Live-mode only (no demo branch -- financial modeling has no
+  meaning against sample data).
+- `index.ts` -- `computePortfolioFocus(userId, timezone, now)`, the
+  single public entry point; also re-exports every pure piece for future
+  UI/Assistant/test consumption.
+
+### Files added/changed
+
+- **Added:** `lib/portfolio-focus/*.ts` (12 files); `tests/portfolio-
+  focus-materiality.test.mjs`; `tests/portfolio-focus-components.test.mjs`;
+  `tests/portfolio-focus-regression.test.mjs`.
+- **Changed:** `package.json` (`test` script -- appended the three new
+  test files only; diff-reviewed, confirmed no other line touched).
+- **Not touched:** any Recommendation Engine file, any Relationship
+  Intelligence file, any UI/page/route file, any schema/migration,
+  cron/auth/Gmail config, `main`/production.
+
+### The Round 3 Section 9 labeling correction
+
+Implemented exactly as approved: `resolveAttentionType` now checks
+whether a donor has **zero documented relationship history of any kind**
+(no interaction ever, no current Relationship Fact, no Ask -- a
+deliberately stricter check than the general relationship-confidence
+tier, which also credits mere unconfirmed imported historical context;
+this correction intentionally does not) before allowing an
+`increasing`/`newly_significant` Momentum label to produce a "cultivate"
+attention type. If no real relationship thread exists, the result is
+`learn_relationship_review` instead. **Verified live against real data**
+(see Parity below): Shimmy Ramras, Dov Zeffren, Yehuda Moradian, and
+Michael Krull all flipped from Round 3's "Cultivate (real growth)" to
+"Learn / relationship review" under the implementation -- exactly the
+donors Round 3's own report named as questionable. Donors with at least
+one real interaction on file (Mordy Goldenberg, Aaron Martin, David B.
+Rosenbaum) correctly kept the "cultivate" framing, confirming the fix
+discriminates on real evidence, not blanket-suppresses the label.
+**Composite scores, ranks, and every component value are provably
+unaffected** -- this is a labeling-only change (see the exact parity
+table below).
+
+### Real-data parity verification (read-only, against Independent Staging)
+
+Ran the actual, committed `aggregatePortfolioFocusInputs` +
+`buildPortfolioContext` + `scorePortfolioFocus` (imported directly, not
+reimplemented) against a fresh, read-only D1 pull of all 248 in-scope
+donors. **Result: exact numeric parity with the frozen Round 3
+calibration report across the entire top 25** -- every composite score
+matches to 4 decimal places, every component score matches, every
+Coverage/floor/triggered value matches, every stale-balance
+classification matches, and the Spetner regression (see below) holds
+exactly, including the documented "narrow miss" of the Coverage floor
+(base composite 0.4278 vs. floor 0.421 -- the same knife-edge margin
+Round 3 itself flagged as worth preserving).
+
+| Rank | Donor | Round 3 score | Implementation score | Delta | Parity |
+|---|---|---|---|---|---|
+| 1 | Avi Stein | 0.7278 | 0.7278 | 0 | Exact |
+| 2 | Mordechai Schwartz | 0.6992 | 0.6992 | 0 | Exact |
+| 3 | Dovie Weinschneider | 0.6862 | 0.6862 | 0 | Exact |
+| 4 | Yaakov Zachter | 0.6640 | 0.6640 | 0 | Exact |
+| 5 | Eitan Zeffren | 0.6290 | 0.6290 | 0 | Exact |
+| 6 | Moishe Weber | 0.5198 | 0.5198 | 0 | Exact |
+| 7 | Shimmy Ramras | 0.5157 | 0.5157 | 0 | Exact (attention label changed -- see above) |
+| 8 | Mordy Goldenberg | 0.4714 | 0.4714 | 0 | Exact |
+| 9 | Yale Miller | 0.4446 | 0.4446 | 0 | Exact (Coverage triggered) |
+| 10 | Dovid Weinberger | 0.4399 | 0.4399 | 0 | Exact |
+| 11 | Dov Zeffren | 0.4374 | 0.4374 | 0 | Exact (attention label changed) |
+| 12 | Tzvi Ray | 0.4333 | 0.4333 | 0 | Exact (Coverage triggered) |
+| 13 | Yehuda Moradian | 0.4310 | 0.4310 | 0 | Exact (attention label changed) |
+| 14 | Manuel Schnaidman | 0.4310 | 0.4310 | 0 | Exact (Coverage triggered) |
+| 15 | Yitzchak Sperka | 0.4299 | 0.4299 | 0 | Exact |
+| 16 | Jonathan Spetner | 0.4278 | 0.4278 | 0 | Exact (narrow Coverage-floor miss preserved) |
+| 17-25 | (Donny Wiesel, Aaron Martin, Yaakov Milch, Michael Krull, Eli Davis, David B. Rosenbaum, Moshe Matz, Joshua Broide, Eitan Pfeiffer) | matches | matches | 0 | Exact |
+
+Beyond the top 25: Nachum Rosenberg (#29), Mayer Simcha Klein (#55, Coverage
+= exactly 0, confirming the closed-loop finding still holds), Ezra Fox
+(#41), Yaakov Pollack (#59), Paltiel Myers (#67), Ahron Schabes (#95),
+Eliave Sobol (#151), David Chapman (#187) -- all exact-parity matches,
+all stale-balance cases still `immaterial_artifact` with Tactical
+Urgency capped at 0.15.
+
+**No data changed between calibration and implementation** -- portfolio
+totals (248 donors, giving/asks/interactions/facts row counts) are
+byte-for-byte identical to every prior round's pull this session.
+
+### Spetner regression (mandatory)
+
+Re-verified against fresh data through the real implementation code:
+$12,000 pledge, created 336 days ago (a genuine past commitment date),
+83% paid ($10,000), $2,000 remaining, most recent payment 11 days ago,
+active on-track plan. `momentumLabel: "actively_fulfilling_commitment"`
+(never `dormant_lapsed`). `Opportunity: 0.05` (near-zero -- correctly
+not read as a new commitment). `attentionType:
+"steward_active_fulfillment"` (never solicit/reconnect/coverage).
+`pledgeStaleClass: "current"`. No underlying data changed since
+calibration -- no discrepancy to document.
+
+### Stale-balance regression (mandatory)
+
+Pollack, Schabes, Myers, Chapman, Sobol, and Ray all re-verified via the
+real implementation: every one classifies `immaterial_artifact`, every
+one's Tactical Urgency is capped at 0.15 for Portfolio Focus's own
+strategic view, and **the Recommendation Engine's real score (0.65 for
+each) and the underlying pledge row are both completely untouched** --
+confirmed via the same live donor pages, which still show these
+balances exactly as before.
+
+### Query / performance impact
+
+**Before this round:** the donor page ran 24 prepared statements per
+render, `lib/workspace/live-data.ts`'s Today loader ran 19, Meeting
+Brief ran 15, Assistant ran 4 -- all pinned in existing tests, all
+unchanged by this round (Portfolio Focus reuses none of these loaders'
+query results; it has its own, separate, dedicated query set so it can
+never affect Today/donor-page/Meeting-Brief/Assistant load behavior in
+any way).
+
+**After this round:** `computePortfolioFocus()` issues **exactly 12
+prepared statements, in one `Promise.all`, regardless of donor count**
+(248 today; the same 12 queries would run if the portfolio were 2,480
+donors). No query is issued per-donor anywhere in this module --
+verified by direct code inspection (`data.ts` is the only file with a
+`env.DB.prepare` call, and every one of its 12 calls is a single
+portfolio-wide SELECT). This is consistent with every other batched
+loader already in this codebase (live-data.ts's 19, the donor page's 24,
+Meeting Brief's 15) -- a new, comparably-sized, independent query set,
+not a multiplication of existing ones.
+
+The scoring computation itself (aggregation + component math for 248
+donors) completes in well under a second locally -- no performance
+concern at current scale, and the O(1)-in-donor-count query design means
+this remains true if the portfolio grows materially.
+
+### D1 mutation result
+
+**Zero.** Every query in `data.ts` is a `SELECT`. The real-data
+verification script (throwaway, not committed) only ever read from
+local JSON files produced by prior read-only `wrangler d1 execute`
+pulls -- it made no D1 call of its own. Fresh read-only row-count/sum
+fingerprints taken after verification and after deployment (donors,
+`giving_activities`, `asks`, `interactions`, `recommendations`,
+`donor_relationship_facts`, `important_dates`, `yahrtzeits`,
+`jl_payment_assignment_audits`, `pledge_payment_plans`) show no
+unexpected change; the exact scoped counts this session has used
+throughout (248 donors, 5,174 in-scope giving rows, 6 asks, 56 in-scope
+interactions, 3 open reminders, 36 yahrtzeits, 172 important dates, 17
+in-scope payment audits, 33 payment plans, 6 current facts) are
+byte-for-byte identical to every earlier pull this session, across
+Stage 3 and all three calibration rounds.
+
+### Test / typecheck / build gates
+
+`pnpm test`: exit 0, including three new suites (`portfolio-focus-
+materiality`, `portfolio-focus-components`, `portfolio-focus-regression`)
+covering the dollar-sensitivity curve (the exact $500-$100,000 test
+amounts, monotonicity, and donor-relative bounding requested), every
+component's core behavior (FS pledge-independence, Opportunity's
+missing-contact-produces-zero and small-pledge-vs-major-pledge
+separation, Stewardship's no-payment-plan-required fix, Momentum's noise
+protection, Tactical Urgency's stale-balance discount with
+Recommendation-Engine-score passthrough proof, Coverage's multiplicative
+bound and floor curve, both confidence axes, and the attention-type
+labeling correction), the Spetner and six-donor stale-balance
+regressions, a strong-active-case sanity check, and deterministic
+tie-break ordering. `pnpm exec tsc --noEmit`: clean, zero errors.
+`pnpm run build:staging-independent`: completed, full route manifest, no
+errors.
+
+### Independent Staging deployment
+
+`pnpm run deploy:staging-independent` succeeded. **New deployed Worker
+version: `fb52b4cb-2cb8-42e8-920b-1f6b950d7315`** (supersedes
+`8fffe6a4-...`, the Relationship Snapshot Stage 3 deployment -- no
+Worker was deployed during the three calibration rounds, which were
+documentation-only). Live-verified immediately after deploy: the Today
+page and a real donor page (Avi Stein's) both render exactly as before,
+confirming zero regression from bundling the new module. Because Phase
+1 adds no UI, deployment verification for the Portfolio Focus engine
+itself relied on the read-only, real-data parity run above (against the
+actual committed code) rather than an in-Worker invocation -- no
+temporary debug endpoint was added, per instruction.
+
+### Known monitored issue carried forward from calibration
+
+**Moishe Weber (rank #6, $9,410 lifetime) was NOT special-cased.** His
+implementation result reproduces the frozen Round 3 model exactly, per
+instruction -- no rule was added to move him. If his position continues
+to look surprising once real usage exists, that is a signal for a future
+calibration round, not something this implementation should paper over.
+
+### What does NOT exist yet
+
+**No Portfolio Focus UI of any kind** -- no page, no card, no panel, no
+Today integration, no Daily Agenda integration, no Assistant
+integration, no persistence table, no automatic recommendation/reminder
+creation. `computePortfolioFocus()` is a callable domain function with
+no caller anywhere in the application yet. This is deliberate, per
+explicit instruction, pending a separate UX decision.
+
+### Recommended next step
+
+A UX design pass (not started) deciding where/how Portfolio Focus
+surfaces -- the Investigation's own Section 13 recommendation (a
+dedicated Portfolio page, not embedded in Today) remains the leading
+candidate but was not re-litigated or decided in this implementation
+round.
+
+**Constraints honored throughout:** implementation only; zero
+Recommendation Engine change; zero Relationship Intelligence semantic
+change; zero schema/migration; zero UI; zero D1 mutation; deployed to
+Independent Staging only, never production/main; no cron/auth/Gmail
+change.
+
+**Stopping here, per explicit instruction** -- did not proceed to
+Portfolio Focus UI, homepage redesign, Daily Agenda/email/Assistant
+integration, persistence, automatic tasks, or a fourth calibration
+round.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
