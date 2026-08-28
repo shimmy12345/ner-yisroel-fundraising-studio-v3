@@ -15,7 +15,19 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`be83280`** -- "Add Portfolio Focus
+**`(pending — see follow-up commit)`** -- "Add Portfolio Focus Human
+Calibration Round report (docs/PORTFOLIO-FOCUS-CALIBRATION.md)
+(2026-08-28)" -- documentation only, zero application code change, zero
+D1 mutation, zero deploy; see "Portfolio Focus Human Calibration Round"
+below and the dedicated report file itself. Re-ran the exact, unmodified
+scoring code from the Portfolio Focus Investigation against a fresh
+Independent Staging pull (same gates, same Spetner regression check, all
+passed) and published its **raw, un-curated** output for direct
+fundraiser review -- deliberately not re-editing it to match the
+investigation's own hand-curated top 15. The two lists differ
+materially (see the report for the full diff and a 7-case critique of
+the proposed weights); no weight was changed to correct this. Sits on
+top of `be83280` -- "Add Portfolio Focus
 investigation: canonical financial model, fresh top-15 strategic
 candidates, proposed scoring architecture (2026-08-28)" -- documentation
 only, zero application code change, zero D1 mutation, zero deploy; see
@@ -14590,6 +14602,42 @@ committed to the repository.
 **Stopping for review before implementing anything**, per explicit
 instruction. Awaiting review before Stage/Step 1 (calibration) of the
 plan above.
+
+## Portfolio Focus Human Calibration Round (2026-08-28) -- SEE docs/PORTFOLIO-FOCUS-CALIBRATION.md FOR THE FULL REPORT; INVESTIGATION/CALIBRATION ONLY, NO CODE/SCHEMA/UI/DEPLOY
+
+Per explicit instruction, the full calibration report lives in its own
+dedicated file, **`docs/PORTFOLIO-FOCUS-CALIBRATION.md`**, designed for
+direct human (fundraiser) review rather than as an engineering log --
+not duplicated here. Read that file for the actual Top 15, ranks 16-25,
+the named-donor audit, tactical-vs-strategic disagreement tables,
+missing-information cases, and the model-weakness critique.
+
+**Summary for this index:** re-ran the exact, unmodified scoring code
+from the Portfolio Focus Investigation above against a fresh Independent
+Staging pull -- same verification gates, same Spetner regression check,
+same financial-model safeguards, all passed. Per instruction, this round
+deliberately shows the **raw, un-curated** formula output rather than
+the investigation's hand-edited top 15, and the two lists differ
+materially: the raw model's real top 15 is Zachter, Goldenberg,
+Schwartz, Stein, Ramras, Spetner, Weber, Zeffren, Weill, Pollack,
+Weinschneider, Broide, Moradian, Musman, Ray -- notably including
+several modest-lifetime donors (Weber, Weill, Pollack, Moradian) whose
+score is driven by a small pledge, and notably placing Yale Miller at
+raw rank #25, Manuel Schnaidman at #48, and Nachum Rosenberg at #82 (all
+three were in the investigation's curated top 15). No weight was
+adjusted to correct this or to match the prior document -- the
+calibration report's critique section documents seven specific cases
+where the proposed weighting deserves human scrutiny before any of this
+becomes application code, including a near-tie between an 11x
+lifetime-giving gap (Spetner vs. Weber) and a case where LESS documented
+contact produces a HIGHER Opportunity score (Schwartz vs. Stein).
+
+**Constraints honored:** read-only analysis; zero D1 writes; zero
+application code, schema, or scoring-formula change; no deploy; no
+production/main access.
+
+**Stopping for review before any further calibration or
+implementation**, per explicit instruction.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
