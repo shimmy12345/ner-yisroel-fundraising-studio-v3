@@ -9,13 +9,12 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 35 as of 0034_donor_relationship_facts.sql — adds the donor_
-// relationship_facts/donor_relationship_fact_changes tables (Relationship
-// Intelligence Phase 1, new tables, not a rebuild of anything existing),
-// so PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
-// stays "0019": that label identifies the single bootstrap file's
-// origin, not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 35;
+// 36 as of 0035_backup_alert_state.sql — adds the backup_alert_state
+// table (Backup Scheduling Reliability Stage 3, a new table, not a
+// rebuild of anything existing), so PRODUCTION_BASELINE_HASH changed
+// again (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies
+// the single bootstrap file's origin, not its current contents).
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 36;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
@@ -24,7 +23,12 @@ export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019"
 // data. Used only by the independent-staging Workspace Health summary — the
 // backup-safety gate and rehearsal scripts keep using the untouched,
 // intentionally conservative BUSINESS_DATA_COUNT_SQL above.
-export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences"];
+//
+// backup_alert_state holds the same kind of thing: operational dedupe
+// state for the Backup Scheduling Reliability Stage 3 email alert (which
+// stale-incident an email was already sent for), never donor or
+// fundraising data. See drizzle/0035_backup_alert_state.sql.
+export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences", "backup_alert_state"];
 export const FUNDRAISING_DATA_TABLES = PRODUCTION_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table));
 export const FUNDRAISING_DATA_COUNT_SQL = `SELECT ${FUNDRAISING_DATA_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 export const ACCOUNT_CONFIGURATION_COUNT_SQL = `SELECT COUNT(*) AS count FROM "users"`;

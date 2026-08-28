@@ -33,3 +33,16 @@ export function freshnessStatus(ageMs: number, healthyBelowMs: number, criticalA
   if (ageMs > criticalAboveMs) return "critical";
   return "attention";
 }
+
+// Shared "does a newer, non-success attempt floor an older success" check --
+// previously duplicated inline in both lib/data-health/model.ts and
+// status-worker/src/watchdog.ts. A later failed/in-progress attempt means
+// the last KNOWN state is worse than the last success alone would suggest,
+// so callers use this to avoid reporting stale-but-successful as fully
+// healthy when a more recent attempt is known to have failed.
+export function hasNewerFailedAttempt(successAtMs: number, attempt: { attemptAt: string; attemptStatus: string } | null | undefined): boolean {
+  if (!attempt) return false;
+  const attemptAtMs = new Date(attempt.attemptAt).getTime();
+  if (!Number.isFinite(attemptAtMs)) return false;
+  return attempt.attemptStatus !== "success" && attemptAtMs > successAtMs;
+}

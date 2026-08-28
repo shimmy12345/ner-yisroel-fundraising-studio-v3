@@ -11,7 +11,7 @@
 // the Workspace Health dashboard already ships (lib/backup-status/
 // freshness.ts) -- this module never invents a second, competing
 // freshness model.
-import { BACKUP_FRESHNESS_CRITICAL_MS, BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_RECOVERY_THRESHOLD_MS, freshnessStatus } from "../../lib/backup-status/freshness.ts";
+import { BACKUP_FRESHNESS_CRITICAL_MS, BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_RECOVERY_THRESHOLD_MS, freshnessStatus, hasNewerFailedAttempt } from "../../lib/backup-status/freshness.ts";
 
 export type BackupSuccessStatus = { completedAt: string } | null;
 export type BackupAttemptStatus = { attemptAt: string; attemptStatus: string } | null;
@@ -74,15 +74,14 @@ export function evaluateBackupFreshness(input: {
   const ageMs = input.now - successAt;
   const tier = freshnessStatus(ageMs, BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_FRESHNESS_CRITICAL_MS);
 
-  const attemptAt = parseTimestampMs(input.attempt?.attemptAt ?? null);
   // Same "a newer failed attempt must prevent an older success from
   // reading as healthy" rule as lib/data-health/model.ts's
-  // pipelineStatusCheck (attemptIsNewerFailure), applied to the
-  // watchdog's own recovery decision rather than the dashboard's display
-  // tier. A malformed attempt record (attemptAt fails to parse) is
-  // treated as "no attempt on record" -- it can never itself manufacture
-  // a false "newer failed attempt" signal.
-  const newerFailedAttempt = attemptAt !== null && input.attempt?.attemptStatus !== "success" && attemptAt > successAt;
+  // pipelineStatusCheck, applied to the watchdog's own recovery decision
+  // rather than the dashboard's display tier -- now the same shared
+  // hasNewerFailedAttempt helper both call. A malformed attempt record
+  // (attemptAt fails to parse) is treated as "no attempt on record" -- it
+  // can never itself manufacture a false "newer failed attempt" signal.
+  const newerFailedAttempt = hasNewerFailedAttempt(successAt, input.attempt);
 
   const stale = ageMs >= BACKUP_RECOVERY_THRESHOLD_MS || newerFailedAttempt;
   if (!stale) {

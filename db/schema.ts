@@ -876,3 +876,23 @@ export const donorRelationshipFactChanges = sqliteTable("donor_relationship_fact
   afterJson: text("after_json", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [index("donor_relationship_fact_changes_fact_idx").on(table.factId, table.createdAt)]);
+
+// Backup Scheduling Reliability Stage 3 (see
+// docs/BACKUP-SCHEDULING-RELIABILITY.md and drizzle/0035_backup_alert_state.sql
+// for the full design rationale). Operational dedupe state for the
+// hourly backup-alert email check (lib/backup-alert/) -- never donor or
+// fundraising data, see lib/data-health/production-baseline.ts's
+// ACCOUNT_CONFIGURATION_TABLES. One row per user, upserted in place.
+export const backupAlertState = sqliteTable("backup_alert_state", {
+  userId: text("user_id").primaryKey().references(() => users.id),
+  // Identity of the CURRENT stale incident already alerted on -- the
+  // alerted-on success's own completedAt, or the literal
+  // 'no-success-ever' when no successful backup has ever been recorded.
+  // See lib/backup-alert/decision.ts's NO_SUCCESS_INCIDENT_KEY.
+  incidentKey: text("incident_key").notNull(),
+  // Real timestamps, not the generic created_at/updated_at every other
+  // table uses -- both are overwritten together whenever a new incident
+  // begins, unlike a normal created_at, which never changes.
+  firstAlertedAt: integer("first_alerted_at", { mode: "timestamp" }).notNull(),
+  lastAlertedAt: integer("last_alerted_at", { mode: "timestamp" }).notNull(),
+});

@@ -54,6 +54,14 @@ CREATE TABLE `asks` (
   FOREIGN KEY (`source_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `backup_alert_state` (
+	`user_id` text PRIMARY KEY NOT NULL,
+	`incident_key` text NOT NULL,
+	`first_alerted_at` integer NOT NULL,
+	`last_alerted_at` integer NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `data_health_repair_audits` (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` text NOT NULL,
@@ -839,5 +847,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','438970f3383cc52ae27dea859a1235a50ea03dc31a7adb82c2aa147212db5ec9',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','e29ba42b1870ea1ce1986790ca1e4abd9adf7a6fc9acaa8fa24a15306062e05e',1785944072);
 PRAGMA optimize;

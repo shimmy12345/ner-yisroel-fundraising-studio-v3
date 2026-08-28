@@ -88,9 +88,10 @@ test("production baseline is isolated from staging and future drift fails closed
 });
 
 test("fundraising-data count excludes account/configuration tables while the backup-safety gate stays untouched", () => {
-  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences"]);
+  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences", "backup_alert_state"]);
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("users"), "users must never count toward fundraising data");
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("onboarding_preferences"), "onboarding_preferences must never count toward fundraising data");
+  assert.ok(!FUNDRAISING_DATA_TABLES.includes("backup_alert_state"), "backup_alert_state (backup-alert dedupe state) must never count toward fundraising data");
   assert.ok(FUNDRAISING_DATA_TABLES.includes("donors"));
   assert.ok(FUNDRAISING_DATA_TABLES.includes("gifts"));
   assert.match(BUSINESS_DATA_COUNT_SQL, /"users"/, "the pre-existing backup-safety gate SQL is unchanged and still counts users");
@@ -233,8 +234,17 @@ test("baseline picks up the schema-changing 0034 donor relationship facts migrat
   // donor_relationship_fact_changes tables (Relationship Intelligence
   // Phase 1, new tables, not a rebuild), so the schema hash must change
   // again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0034_donor_relationship_facts.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 35);
+  assert.ok(manifest.sourceMigrations.includes("0034_donor_relationship_facts.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0035 backup alert state migration", () => {
+  // 0035_backup_alert_state.sql adds the backup_alert_state table (Backup
+  // Scheduling Reliability Stage 3, a new table, not a rebuild), so the
+  // schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0035_backup_alert_state.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 36);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

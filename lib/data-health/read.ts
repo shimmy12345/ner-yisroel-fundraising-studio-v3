@@ -87,7 +87,10 @@ const asRestoreAttempt: (value: unknown) => RestoreAttemptStatus | null = asBack
 // JSON) is reported as "unreachable", never as "healthy" and never
 // re-thrown into the caller's own broader D1-failure handling -- a status-
 // worker problem must not take down the rest of the health report.
-async function fetchBackupStatus(): Promise<Pick<DataHealthFacts, "backupStatusReachable" | "backupSuccess" | "backupAttempt" | "restoreSuccess" | "restoreAttempt">> {
+// Exported for reuse by the Backup Scheduling Reliability Stage 3 email
+// alert (lib/backup-alert/) -- the identical STATUS_WORKER read/validate
+// this file's own report already needed, not a second implementation.
+export async function fetchBackupStatus(): Promise<Pick<DataHealthFacts, "backupStatusReachable" | "backupSuccess" | "backupAttempt" | "restoreSuccess" | "restoreAttempt">> {
   const unreachable = { backupStatusReachable: false, backupSuccess: null, backupAttempt: null, restoreSuccess: null, restoreAttempt: null };
   if (!env.STATUS_WORKER) return unreachable;
   try {

@@ -1,4 +1,4 @@
-import { HOUR_MS, BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_FRESHNESS_CRITICAL_MS, freshnessStatus } from "../backup-status/freshness.ts";
+import { HOUR_MS, BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_FRESHNESS_CRITICAL_MS, freshnessStatus, hasNewerFailedAttempt } from "../backup-status/freshness.ts";
 
 export type HealthStatus = "healthy" | "attention" | "critical" | "info" | "unavailable";
 
@@ -380,7 +380,7 @@ function pipelineStatusCheck(params: PipelineStatusParams): HealthCheck {
   // even while the last success is still within its healthy window --
   // otherwise a failure from the most recent run stays invisible until
   // the age-based threshold alone catches up, up to 36h/40d later.
-  const attemptIsNewerFailure = params.attempt && params.attempt.attemptStatus !== "success" && new Date(params.attempt.attemptAt).getTime() > successDate.getTime();
+  const attemptIsNewerFailure = hasNewerFailedAttempt(successDate.getTime(), params.attempt);
   if (attemptIsNewerFailure && status === "healthy") status = "attention";
   const success = params.success!;
   return {
@@ -460,7 +460,7 @@ function restoreVerificationCheck(facts: DataHealthFacts, now: number): HealthCh
   // most-recent attempt (newer than the last recorded success) always
   // floors this card at "attention", even while the last success is still
   // within its healthy window.
-  const attemptIsNewerFailure = Boolean(attempt) && attempt!.attemptStatus !== "success" && new Date(attempt!.attemptAt).getTime() > successDate.getTime();
+  const attemptIsNewerFailure = hasNewerFailedAttempt(successDate.getTime(), attempt);
   if (attemptIsNewerFailure && status === "healthy") status = "attention";
 
   // Honest provenance: only ever names a specific backup date when the

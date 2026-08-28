@@ -3,6 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import { runWithWorkspaceBriefRequestScope } from "../lib/workspace/live-data";
 import { runScheduledAgendaSend } from "../lib/agenda/send-agenda";
+import { runScheduledBackupAlertCheck } from "../lib/backup-alert/run";
 
 interface Env {
   ASSETS: Fetcher;
@@ -78,8 +79,21 @@ const worker = {
   // its failure) completes. 23 of every 24 hourly invocations are an
   // intentional, silent no-op; only the one where the real local hour
   // reads 9 actually sends.
+  // Backup Scheduling Reliability Stage 3 email alert -- APPROVED and
+  // ACTIVE, sharing this same hourly Cron Trigger rather than adding a
+  // second one. A completely separate waitUntil() from the Daily Agenda
+  // above: each waitUntil() is tracked independently by Cloudflare, so a
+  // failure or rejection in one can never affect whether the other runs
+  // or how it's reported (see lib/backup-alert/run.ts's own header
+  // comment for why this check specifically never throws on its own).
+  // Passed controller.scheduledTime directly (epoch milliseconds) rather
+  // than the Daily Agenda's epoch-SECONDS `now` above -- lib/backup-alert
+  // and lib/backup-status/freshness.ts share the millisecond convention
+  // already used by lib/data-health/model.ts and
+  // status-worker/src/watchdog.ts, not the agenda code's own seconds one.
   async scheduled(controller: ScheduledController, _env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runScheduledAgendaSend(Math.floor(controller.scheduledTime / 1000)));
+    ctx.waitUntil(runScheduledBackupAlertCheck(controller.scheduledTime));
   },
 };
 
