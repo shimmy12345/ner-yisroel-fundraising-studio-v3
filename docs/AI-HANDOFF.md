@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- documentation-only
+**`2df4608`** -- documentation-only
 update to this section covering the D1 backup watchdog Stages 1+2
 verification round (2026-08-28) -- zero workflow/Cloudflare/secret/data
 change, zero deploy; see "D1 Nightly Backup Scheduling Reliability --
