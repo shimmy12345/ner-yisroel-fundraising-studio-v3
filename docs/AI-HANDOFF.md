@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Add Portfolio
+**`5a7b5cc`** -- "Add Portfolio
 Focus Phase 2 UX investigation and design (docs/PORTFOLIO-FOCUS-UX-
 DESIGN.md) + interactive mockup (2026-08-28)" -- documentation and a
 standalone HTML mockup artifact only, zero application code change, zero
