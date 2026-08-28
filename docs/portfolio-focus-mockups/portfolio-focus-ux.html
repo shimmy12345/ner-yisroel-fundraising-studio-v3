@@ -1,0 +1,798 @@
+<title>Portfolio Focus UX</title>
+<style>
+  :root {
+    --paper: #f8f7f2;
+    --card: #ffffff;
+    --line: #e4e6df;
+    --ink: #25352f;
+    --muted: #707d77;
+    --eyebrow: #87918b;
+    --green: #135c45;
+    --green-accent: #316c54;
+    --green-soft: #e8f1ec;
+    --green-soft-ink: #175c46;
+    --badge-bg: #f0f2ef;
+    --badge-ink: #7a8580;
+    --amber-soft: #fbf1de;
+    --amber-ink: #8a6a1f;
+    --shadow: 0 8px 28px rgba(31, 54, 45, 0.06);
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    --serif: Georgia, "Times New Roman", serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    margin: 0;
+    padding: 0;
+  }
+  body { min-height: 100vh; }
+  .lab {
+    display: flex;
+    min-height: 100vh;
+  }
+  .lab-nav {
+    width: 240px;
+    flex: 0 0 240px;
+    background: var(--card);
+    border-right: 1px solid var(--line);
+    padding: 28px 20px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+  .lab-nav h1 {
+    font-family: var(--serif);
+    font-size: 20px;
+    font-weight: 500;
+    margin: 0 0 4px;
+  }
+  .lab-nav .sub {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: 0 0 26px;
+  }
+  .lab-nav .group-label {
+    font-size: 10.5px;
+    font-weight: 680;
+    letter-spacing: 1.4px;
+    color: var(--eyebrow);
+    text-transform: uppercase;
+    margin: 22px 0 8px;
+  }
+  .lab-nav button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 10px;
+    font-size: 13.5px;
+    font-family: var(--sans);
+    color: var(--ink);
+    cursor: pointer;
+    margin-bottom: 2px;
+  }
+  .lab-nav button:hover { background: var(--badge-bg); }
+  .lab-nav button.active { background: var(--green-soft); color: var(--green-soft-ink); font-weight: 600; }
+  .lab-nav button:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+  .lab-nav .note {
+    margin-top: 28px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .lab-main {
+    flex: 1;
+    padding: 36px 40px 80px;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .screen { display: none; }
+  .screen.active { display: block; }
+  .screen-head {
+    max-width: 760px;
+    margin-bottom: 26px;
+  }
+  .screen-head .kicker {
+    font-size: 10.5px;
+    font-weight: 680;
+    letter-spacing: 1.4px;
+    color: var(--eyebrow);
+    text-transform: uppercase;
+    margin: 0 0 6px;
+  }
+  .screen-head h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 26px;
+    margin: 0 0 8px;
+  }
+  .screen-head p {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* ---------- App-frame chrome (mirrors the real Fundraising OS shell) ---------- */
+  .app-frame {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    display: flex;
+  }
+  .app-sidebar {
+    width: 170px;
+    flex: 0 0 170px;
+    background: var(--paper);
+    border-right: 1px solid var(--line);
+    padding: 18px 14px;
+  }
+  .app-sidebar .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 13.5px;
+    margin-bottom: 22px;
+  }
+  .app-sidebar .brand .mark {
+    width: 22px; height: 22px; border-radius: 7px;
+    background: var(--green); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--serif); font-size: 13px;
+  }
+  .app-sidebar nav a {
+    display: block;
+    font-size: 12.5px;
+    color: var(--ink);
+    padding: 6px 8px;
+    border-radius: 7px;
+    margin-bottom: 2px;
+    text-decoration: none;
+  }
+  .app-sidebar nav a.current { background: var(--green-soft); color: var(--green-soft-ink); font-weight: 600; }
+  .app-body { flex: 1; padding: 26px 30px 40px; min-width: 0; }
+  .app-body .date { font-size: 10.5px; font-weight: 680; letter-spacing: 1.4px; color: var(--eyebrow); text-transform: uppercase; margin-bottom: 6px; }
+  .app-body h3.greet { font-family: var(--serif); font-weight: 500; font-size: 27px; margin: 0 0 4px; }
+  .app-body .lede { font-size: 13.5px; color: var(--muted); margin: 0 0 22px; }
+
+  .stack { display: flex; flex-direction: column; gap: 18px; }
+  .row2 { display: grid; grid-template-columns: 1fr 380px; gap: 18px; align-items: start; }
+
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 18px 20px;
+  }
+  .panel.accent-top { border-top: 2.5px solid var(--green-accent); }
+  .panel .eyebrow { font-size: 10.5px; font-weight: 680; letter-spacing: 1.4px; color: var(--eyebrow); text-transform: uppercase; margin: 0 0 4px; }
+  .panel h4 { font-family: var(--serif); font-weight: 500; font-size: 18px; margin: 0 0 10px; }
+  .panel .placeholder-line { font-size: 12.5px; color: var(--muted); background: var(--badge-bg); border-radius: 8px; padding: 9px 12px; }
+  .qa-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .qa-grid .qa { border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 11.5px; color: var(--muted); text-align: center; background: #fff; }
+
+  /* ---------- Portfolio Focus: Today section ---------- */
+  .pf-today-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  .pf-today-head .titles .eyebrow { margin-bottom: 2px; }
+  .pf-today-head a.see-all { font-size: 12px; color: var(--green); font-weight: 600; text-decoration: none; white-space: nowrap; }
+  .pf-list { display: flex; flex-direction: column; }
+  .pf-row {
+    display: grid;
+    grid-template-columns: 22px minmax(150px,220px) 150px 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 11px 4px;
+    border-top: 1px solid var(--line);
+  }
+  .pf-row:first-child { border-top: none; }
+  .pf-rownum { font-family: var(--serif); font-size: 14px; color: var(--muted); }
+  .pf-name { font-weight: 600; font-size: 13.5px; color: var(--ink); }
+  .pf-name .code { font-weight: 400; color: var(--muted); font-size: 11px; margin-left: 5px; }
+  .pf-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10.5px; font-weight: 650; border-radius: 10px; padding: 4px 9px;
+    white-space: nowrap; width: fit-content;
+  }
+  .pf-badge.solicit { background: #e8f1ec; color: #175c46; }
+  .pf-badge.cultivate { background: #f0f2ef; color: #46524c; }
+  .pf-badge.review { background: #f2eee2; color: #7a6a3f; }
+  .pf-badge.steward { background: #eef2f6; color: #3d5a72; }
+  .pf-why { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+  .pf-link { font-size: 11.5px; color: var(--green); text-decoration: none; font-weight: 600; white-space: nowrap; }
+
+  /* ---------- Dedicated view ---------- */
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .chip {
+    font-size: 12px; padding: 6px 13px; border-radius: 999px; border: 1px solid var(--line);
+    background: #fff; color: var(--ink); cursor: default;
+  }
+  .chip.active { background: var(--green); border-color: var(--green); color: #fff; font-weight: 600; }
+  .dv-table { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .dv-headrow, .dv-row {
+    display: grid;
+    grid-template-columns: 40px minmax(170px,1fr) 150px 2fr 90px 34px;
+    gap: 14px;
+    align-items: center;
+    padding: 12px 18px;
+  }
+  .dv-headrow {
+    font-size: 10.5px; font-weight: 680; letter-spacing: 1px; text-transform: uppercase; color: var(--eyebrow);
+    border-bottom: 1px solid var(--line);
+  }
+  .dv-row { border-bottom: 1px solid var(--line); cursor: pointer; }
+  .dv-row:last-child { border-bottom: none; }
+  .dv-row:hover { background: #fbfbf9; }
+  .dv-rank { font-family: var(--serif); font-size: 15px; color: var(--muted); }
+  .dv-name { font-weight: 600; font-size: 13.5px; }
+  .dv-name .code { color: var(--muted); font-weight: 400; font-size: 11px; }
+  .dv-why { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+  .dv-conf { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .dot.high { background: var(--green); }
+  .dot.medium { background: #c9a227; }
+  .dot.low { background: #b9beb8; }
+  .dv-flag { font-size: 15px; text-align: center; color: var(--green-accent); }
+  .dv-monitor-note {
+    margin-top: 12px; font-size: 12px; color: var(--muted); background: var(--amber-soft); border: 1px solid #ecdcb0;
+    padding: 10px 14px; border-radius: 10px; line-height: 1.5;
+  }
+  .dv-monitor-note b { color: var(--amber-ink); }
+  .expand-more { text-align: center; margin-top: 16px; }
+  .expand-more button {
+    font-size: 12.5px; font-family: var(--sans); background: #fff; border: 1px solid var(--line); border-radius: 999px;
+    padding: 8px 18px; color: var(--ink); cursor: pointer;
+  }
+
+  /* ---------- Why-detail drawer ---------- */
+  .why-shell { display: flex; gap: 20px; }
+  .why-donor-picker { width: 220px; flex: 0 0 220px; display: flex; flex-direction: column; gap: 6px; }
+  .why-donor-picker button {
+    text-align: left; border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 10px 12px;
+    font-family: var(--sans); font-size: 12.5px; cursor: pointer;
+  }
+  .why-donor-picker button.active { border-color: var(--green); background: var(--green-soft); }
+  .why-donor-picker button .n { display: block; font-weight: 600; font-size: 13px; color: var(--ink); }
+  .why-donor-picker button .a { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .why-drawer {
+    flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 26px 30px;
+  }
+  .why-drawer-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 18px; }
+  .why-drawer-head h4 { font-family: var(--serif); font-size: 22px; font-weight: 500; margin: 0 0 4px; }
+  .why-drawer-head .rank-tag { font-size: 11.5px; color: var(--muted); }
+  .why-lede { font-size: 14.5px; line-height: 1.6; margin: 0 0 22px; color: var(--ink); }
+  .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; margin-bottom: 20px; }
+  .why-item .label { font-size: 10.5px; font-weight: 680; letter-spacing: 1px; text-transform: uppercase; color: var(--eyebrow); margin-bottom: 4px; }
+  .why-item .body { font-size: 13px; line-height: 1.5; color: var(--ink); }
+  .why-tactical {
+    background: var(--badge-bg); border-radius: 10px; padding: 13px 16px; font-size: 12.5px; color: var(--ink); line-height: 1.55;
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  }
+  .why-tactical a { color: var(--green); font-weight: 600; text-decoration: none; font-size: 12px; white-space: nowrap; }
+  .why-confidence { margin-top: 16px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .tech-toggle { margin-top: 22px; }
+  .tech-toggle summary { font-size: 11.5px; color: var(--muted); cursor: pointer; }
+  .tech-table { margin-top: 10px; font-size: 11.5px; color: var(--muted); border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  .tech-table td { padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  .tech-table td:first-child { color: var(--eyebrow); }
+
+  /* ---------- Mobile frame ---------- */
+  .phones { display: flex; gap: 30px; flex-wrap: wrap; }
+  .phone {
+    width: 360px; border: 10px solid #1c1c1c; border-radius: 34px; overflow: hidden; background: var(--paper);
+    box-shadow: var(--shadow);
+  }
+  .phone-screen { height: 720px; overflow-y: auto; padding: 18px 16px 40px; }
+  .phone-screen .date { font-size: 10px; font-weight: 680; letter-spacing: 1px; color: var(--eyebrow); text-transform: uppercase; }
+  .phone-screen h3.greet { font-family: var(--serif); font-size: 22px; font-weight: 500; margin: 4px 0 14px; }
+  .m-panel { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  .m-panel.accent-top { border-top: 2.5px solid var(--green-accent); }
+  .m-panel .eyebrow { font-size: 10px; font-weight: 680; letter-spacing: 1.2px; color: var(--eyebrow); text-transform: uppercase; margin-bottom: 3px; }
+  .m-panel h4 { font-family: var(--serif); font-size: 15.5px; font-weight: 500; margin: 0 0 8px; }
+  .m-card { border-top: 1px solid var(--line); padding: 10px 0; }
+  .m-card:first-child { border-top: none; padding-top: 2px; }
+  .m-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; gap: 8px; }
+  .m-card-name { font-weight: 600; font-size: 13px; }
+  .m-card-why { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+  .m-list-card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+  .m-list-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .m-rank { font-family: var(--serif); font-size: 13px; color: var(--muted); margin-right: 6px; }
+  figcaption.phone-label { text-align: center; font-size: 12px; color: var(--muted); margin-top: 10px; font-family: var(--sans); }
+
+  code.inline { background: var(--badge-bg); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+</style>
+
+<div class="lab">
+  <div class="lab-nav">
+    <h1>Portfolio Focus UX</h1>
+    <p class="sub">Phase 2 design exploration &mdash; mocked with real Phase 1 engine output. No application code changed.</p>
+
+    <div class="group-label">Screens</div>
+    <button class="nav-btn active" data-screen="today">A &middot; Today page</button>
+    <button class="nav-btn" data-screen="dedicated">B &middot; Dedicated view</button>
+    <button class="nav-btn" data-screen="why">C &middot; &ldquo;Why this donor?&rdquo;</button>
+    <button class="nav-btn" data-screen="mobile">D &middot; Mobile</button>
+
+    <p class="note">Colors, type, and card patterns are read directly from the deployed Independent Staging app (Georgia headings, system-sans body, #135c45 green, #f8f7f2 paper) &mdash; not a new design system.</p>
+  </div>
+
+  <div class="lab-main">
+
+    <!-- ============================================================ SCREEN A: TODAY ============================================================ -->
+    <div class="screen active" id="screen-today">
+      <div class="screen-head">
+        <p class="kicker">Option A &middot; Today page</p>
+        <h2>Compact Portfolio Focus section</h2>
+        <p>Inserted as a new full-width section directly below the existing Today&rsquo;s Agenda / Coming Up row &mdash; that row is reproduced here unchanged. Five relationships, one line of &ldquo;why,&rdquo; no scores.</p>
+      </div>
+
+      <div class="app-frame">
+        <div class="app-sidebar">
+          <div class="brand"><span class="mark">F</span> Fundraising OS</div>
+          <nav>
+            <a class="current">&#9737; Today</a>
+            <a>&#9678; Donors</a>
+            <a>&uarr; Import</a>
+            <a>&#10022; Assistant</a>
+          </nav>
+        </div>
+        <div class="app-body">
+          <div class="date">Friday, August 28</div>
+          <h3 class="greet">Good morning, Shimmy.</h3>
+          <p class="lede">Start with today. The most urgent relationship work is already at the top.</p>
+
+          <div class="stack">
+            <div class="panel accent-top">
+              <p class="eyebrow">Daily Prep</p>
+              <h4>Morning Brief</h4>
+              <div class="placeholder-line">10 relationship priorities, 0 scheduled activities, and 5 recent gifts are visible from your live workspace. <em>(unchanged)</em></div>
+            </div>
+
+            <div class="panel">
+              <p class="eyebrow">Start Something</p>
+              <h4>Quick Actions</h4>
+              <div class="qa-grid">
+                <div class="qa">Find any relationship</div>
+                <div class="qa">Refresh households or gifts</div>
+                <div class="qa">Log a call, email, or note</div>
+                <div class="qa">Add it with an interaction</div>
+              </div>
+            </div>
+
+            <div class="row2">
+              <div class="panel accent-top">
+                <p class="eyebrow">Today</p>
+                <h4>Today&rsquo;s Agenda</h4>
+                <div class="placeholder-line">&#10003; No activities or follow-ups need attention today. <em>(unchanged)</em></div>
+              </div>
+              <div class="panel">
+                <p class="eyebrow">Next</p>
+                <h4>Coming Up</h4>
+                <div class="placeholder-line" style="margin-bottom:6px;">Aug 31 &middot; Paltiel Myers &middot; Birthday <em>(unchanged, truncated)</em></div>
+                <div class="placeholder-line">Sep 3 &middot; Shimmy Ramras &middot; Birthday</div>
+              </div>
+            </div>
+
+            <!-- NEW: Portfolio Focus section -->
+            <div class="panel accent-top" style="border-top-color:#8a9a5b;">
+              <div class="pf-today-head">
+                <div class="titles">
+                  <p class="eyebrow">This Month</p>
+                  <h4 style="margin-bottom:0;">Portfolio Focus</h4>
+                </div>
+                <a class="see-all" href="#" onclick="return false;">See full portfolio &rarr;</a>
+              </div>
+              <p style="font-size:12.5px;color:var(--muted);margin:0 0 6px;">Five relationships worth keeping in mind this month, independent of today&rsquo;s scheduled work.</p>
+
+              <div class="pf-list">
+                <div class="pf-row">
+                  <span class="pf-rownum">1</span>
+                  <span class="pf-name">Dr. &amp; Mrs. Avi Stein <span class="code">71438</span></span>
+                  <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+                  <span class="pf-why">$75,000 commitment, 12 days old &mdash; actively being fulfilled.</span>
+                  <a class="pf-link" href="#" onclick="return false;">View &rarr;</a>
+                </div>
+                <div class="pf-row">
+                  <span class="pf-rownum">2</span>
+                  <span class="pf-name">Mr. &amp; Mrs. Mordechai Schwartz</span>
+                  <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+                  <span class="pf-why">$36,000 commitment, 60 days old, no relationship history on file.</span>
+                  <a class="pf-link" href="#" onclick="return false;">View &rarr;</a>
+                </div>
+                <div class="pf-row">
+                  <span class="pf-rownum">3</span>
+                  <span class="pf-name">Mr. &amp; Mrs. Dovie Weinschneider</span>
+                  <span class="pf-badge solicit">Solicitation Opportunity</span>
+                  <span class="pf-why">Warm relationship &mdash; a follow-up is already scheduled for after Succos.</span>
+                  <a class="pf-link" href="#" onclick="return false;">View &rarr;</a>
+                </div>
+                <div class="pf-row">
+                  <span class="pf-rownum">4</span>
+                  <span class="pf-name">Mr. &amp; Mrs. Yaakov Zachter</span>
+                  <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+                  <span class="pf-why">$18,000 commitment, 71 days old, tied to a recent, warm conversation.</span>
+                  <a class="pf-link" href="#" onclick="return false;">View &rarr;</a>
+                </div>
+                <div class="pf-row">
+                  <span class="pf-rownum">5</span>
+                  <span class="pf-name">Mr. &amp; Mrs. Eitan Zeffren</span>
+                  <span class="pf-badge solicit">Solicitation Opportunity</span>
+                  <span class="pf-why">A corporate-sponsorship ask is already scheduled; recent giving has softened.</span>
+                  <a class="pf-link" href="#" onclick="return false;">View &rarr;</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p style="font-size:12px;color:var(--muted);max-width:760px;margin-top:18px;">Real Phase 1 output, ranks 1&ndash;5 of 248 &mdash; composite scores (0.7278, 0.6992, 0.6862, 0.6640, 0.6290) are intentionally not shown. See Section 4 of the design doc for why this placement was chosen over a third Today column.</p>
+    </div>
+
+    <!-- ============================================================ SCREEN B: DEDICATED VIEW ============================================================ -->
+    <div class="screen" id="screen-dedicated">
+      <div class="screen-head">
+        <p class="kicker">Option B &middot; Dedicated Portfolio Focus page</p>
+        <h2>The full ranked view</h2>
+        <p>Default shows the calibrated Top 25 as a scannable list; &ldquo;Show full portfolio&rdquo; expands to all 248, still ranked. Filter chips narrow by attention type without hiding the default order.</p>
+      </div>
+
+      <div class="filters">
+        <span class="chip active">All Focus Relationships</span>
+        <span class="chip">Solicitation Opportunity</span>
+        <span class="chip">Cultivate &amp; Steward</span>
+        <span class="chip">Relationship Review</span>
+        <span class="chip">Reconnect</span>
+        <span class="chip" style="opacity:.6;">Suggested Action available</span>
+      </div>
+
+      <div class="dv-table">
+        <div class="dv-headrow">
+          <span>#</span><span>Donor</span><span>Attention</span><span>Why now</span><span>Confidence</span><span></span>
+        </div>
+
+        <div class="dv-row" onclick="showWhy('stein')">
+          <span class="dv-rank">1</span>
+          <span class="dv-name">Dr. &amp; Mrs. Avi Stein <span class="code">71438</span></span>
+          <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+          <span class="dv-why">$75,000 commitment, 12 days old, currently active.</span>
+          <span class="dv-conf"><span class="dot high"></span>Well documented</span>
+          <span class="dv-flag" title="No open tactical Suggested Action">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('schwartz')">
+          <span class="dv-rank">2</span>
+          <span class="dv-name">Mr. &amp; Mrs. Mordechai Schwartz</span>
+          <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+          <span class="dv-why">$36,000 commitment, 60 days old, currently active.</span>
+          <span class="dv-conf"><span class="dot medium"></span>Financially clear, relationship thin</span>
+          <span class="dv-flag" title="Suggested Action available: Follow up on pledge">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('weinschneider')">
+          <span class="dv-rank">3</span>
+          <span class="dv-name">Mr. &amp; Mrs. Dovie Weinschneider</span>
+          <span class="pf-badge solicit">Solicitation Opportunity</span>
+          <span class="dv-why">An explicit follow-up is already scheduled: &ldquo;Follow up on Giving follow-up.&rdquo;</span>
+          <span class="dv-conf"><span class="dot high"></span>Well documented</span>
+          <span class="dv-flag" title="Suggested Action available: Honor reminder">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('zachter')">
+          <span class="dv-rank">4</span>
+          <span class="dv-name">Mr. &amp; Mrs. Yaakov Zachter</span>
+          <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+          <span class="dv-why">$18,000 commitment, 71 days old, tied to a current, warm relationship note.</span>
+          <span class="dv-conf"><span class="dot high"></span>Well documented</span>
+          <span class="dv-flag" title="Suggested Action available: Relationship opportunity">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('zeffren')">
+          <span class="dv-rank">5</span>
+          <span class="dv-name">Mr. &amp; Mrs. Eitan Zeffren</span>
+          <span class="pf-badge solicit">Solicitation Opportunity</span>
+          <span class="dv-why">An explicit follow-up is already scheduled: &ldquo;Solicit corporate sponsorship for dinner.&rdquo;</span>
+          <span class="dv-conf"><span class="dot high"></span>Well documented</span>
+          <span class="dv-flag" title="Suggested Action available: Honor reminder">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('weber')">
+          <span class="dv-rank">6</span>
+          <span class="dv-name">Mr. &amp; Mrs. Moishe Weber</span>
+          <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+          <span class="dv-why">$5,000 commitment, 11 days old, currently active.</span>
+          <span class="dv-conf"><span class="dot high"></span>Well documented</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('ramras')">
+          <span class="dv-rank">7</span>
+          <span class="dv-name">Rabbi &amp; Mrs. Shimmy Ramras</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">$110,155 lifetime relationship with limited current relationship documentation.</span>
+          <span class="dv-conf"><span class="dot medium"></span>Financially clear, relationship thin</span>
+          <span class="dv-flag" title="Suggested Action available: Follow up on pledge">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('goldenberg')">
+          <span class="dv-rank">8</span>
+          <span class="dv-name">Dr. &amp; Mrs. Mordy Goldenberg</span>
+          <span class="pf-badge cultivate">Cultivate</span>
+          <span class="dv-why">Giving grew from $2,400 to $9,500 year-over-year.</span>
+          <span class="dv-conf"><span class="dot high"></span>Well documented</span>
+          <span class="dv-flag" title="Suggested Action available: Follow up on pledge">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('miller')">
+          <span class="dv-rank">9</span>
+          <span class="dv-name">Mr. &amp; Mrs. Yale Miller</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">One of the portfolio&rsquo;s largest relationships ($199,150), but little current relationship information is documented.</span>
+          <span class="dv-conf"><span class="dot low"></span>Limited relationship context</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('weinberger')">
+          <span class="dv-rank">10</span>
+          <span class="dv-name">Mr. &amp; Mrs. Dovid Weinberger</span>
+          <span class="pf-badge cultivate">Cultivate &amp; Steward</span>
+          <span class="dv-why">$1,800 commitment, 22 days old, currently active.</span>
+          <span class="dv-conf"><span class="dot low"></span>Limited relationship context</span>
+          <span class="dv-flag" title="Suggested Action available: Follow up on pledge">&#9998;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('dovzeffren')">
+          <span class="dv-rank">11</span>
+          <span class="dv-name">Dr. &amp; Mrs. Dov Zeffren</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">$25,851 lifetime relationship with limited current relationship documentation.</span>
+          <span class="dv-conf"><span class="dot medium"></span>Financially clear, relationship thin</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('ray')">
+          <span class="dv-rank">12</span>
+          <span class="dv-name">Mr. &amp; Mrs. Tzvi Ray</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">Top-tier historical relationship ($114,026) with a significant recent decline and little documented relationship context.</span>
+          <span class="dv-conf"><span class="dot low"></span>Limited relationship context</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('moradian')">
+          <span class="dv-rank">13</span>
+          <span class="dv-name">Rabbi &amp; Mrs. Yehuda Moradian</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">$37,708 lifetime relationship with limited current relationship documentation.</span>
+          <span class="dv-conf"><span class="dot medium"></span>Financially clear, relationship thin</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('schnaidman')">
+          <span class="dv-rank">14</span>
+          <span class="dv-name">Mr. &amp; Mrs. Manuel Schnaidman</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">One of the portfolio&rsquo;s largest relationships ($158,202), but little current relationship information is documented.</span>
+          <span class="dv-conf"><span class="dot low"></span>Limited relationship context</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('sperka')">
+          <span class="dv-rank">15</span>
+          <span class="dv-name">Rabbi &amp; Mrs. Yitzchak Sperka</span>
+          <span class="pf-badge review">Relationship Review</span>
+          <span class="dv-why">$54,837 lifetime relationship with limited current relationship documentation.</span>
+          <span class="dv-conf"><span class="dot low"></span>Limited relationship context</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+        <div class="dv-row" onclick="showWhy('spetner')">
+          <span class="dv-rank">16</span>
+          <span class="dv-name">Mr. &amp; Mrs. Jonathan Spetner</span>
+          <span class="pf-badge steward">Active Stewardship</span>
+          <span class="dv-why">An active pledge is being paid down on schedule &mdash; $2,000 remaining of $12,000.</span>
+          <span class="dv-conf"><span class="dot medium"></span>Financially clear, relationship thin</span>
+          <span class="dv-flag">&nbsp;</span>
+        </div>
+      </div>
+
+      <div class="dv-monitor-note"><b>Row 6, Moishe Weber</b> is shown exactly as the calibrated engine ranks him &mdash; a real $5,000 active pledge on a $9,410 lifetime relationship. Round 3 calibration flagged his position as worth watching once real usage exists, not as a defect to hide. This list intentionally does not special-case him &mdash; see design doc &sect;12.</div>
+
+      <div class="expand-more"><button>Show full portfolio (248 relationships, ranked) &darr;</button></div>
+    </div>
+
+    <!-- ============================================================ SCREEN C: WHY THIS DONOR ============================================================ -->
+    <div class="screen" id="screen-why">
+      <div class="screen-head">
+        <p class="kicker">Option C &middot; Expanded explanation</p>
+        <h2>&ldquo;Why is this donor here?&rdquo;</h2>
+        <p>Opens from a row in the dedicated view (or a &ldquo;More detail&rdquo; link on Today). Translates the five components into fundraiser language; raw numbers are one click further, never the headline.</p>
+      </div>
+
+      <div class="why-shell">
+        <div class="why-donor-picker">
+          <button class="active" onclick="pickWho('miller', this)"><span class="n">Yale Miller</span><span class="a">Relationship Review &middot; #9</span></button>
+          <button onclick="pickWho('spetner', this)"><span class="n">Jonathan Spetner</span><span class="a">Active Stewardship &middot; #16</span></button>
+          <button onclick="pickWho('weber', this)"><span class="n">Moishe Weber</span><span class="a">Cultivate &amp; Steward &middot; #6</span></button>
+        </div>
+
+        <div class="why-drawer" id="why-drawer">
+          <!-- filled by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ SCREEN D: MOBILE ============================================================ -->
+    <div class="screen" id="screen-mobile">
+      <div class="screen-head">
+        <p class="kicker">Option D &middot; Mobile</p>
+        <h2>Same information, no tables</h2>
+        <p>Today&rsquo;s five-item section stays a simple vertical stack (it already was one). The dedicated view drops its row-grid for a card stack &mdash; tapping a card expands it in place; nothing pushes to a second page or scrolls sideways.</p>
+      </div>
+
+      <div class="phones">
+        <figure style="margin:0;">
+          <div class="phone"><div class="phone-screen">
+            <div class="date">Fri, Aug 28</div>
+            <h3 class="greet">Good morning, Shimmy.</h3>
+
+            <div class="m-panel accent-top">
+              <p class="eyebrow">Daily Prep</p>
+              <h4>Morning Brief</h4>
+              <div class="m-card-why">10 relationship priorities visible today. <em>(unchanged)</em></div>
+            </div>
+
+            <div class="m-panel accent-top">
+              <p class="eyebrow">Today</p>
+              <h4>Today&rsquo;s Agenda</h4>
+              <div class="m-card-why">&#10003; Nothing needs attention today.</div>
+            </div>
+
+            <div class="m-panel" style="border-top:2.5px solid #8a9a5b;">
+              <p class="eyebrow">This Month</p>
+              <h4>Portfolio Focus</h4>
+
+              <div class="m-card">
+                <div class="m-card-top"><span class="m-card-name">1&ensp;Avi Stein</span><span class="pf-badge cultivate">Cultivate &amp; Steward</span></div>
+                <div class="m-card-why">$75,000 commitment, 12 days old, actively being fulfilled.</div>
+              </div>
+              <div class="m-card">
+                <div class="m-card-top"><span class="m-card-name">2&ensp;Mordechai Schwartz</span><span class="pf-badge cultivate">Cultivate &amp; Steward</span></div>
+                <div class="m-card-why">$36,000 commitment, 60 days old, no relationship history on file.</div>
+              </div>
+              <div class="m-card">
+                <div class="m-card-top"><span class="m-card-name">3&ensp;Dovie Weinschneider</span><span class="pf-badge solicit">Solicitation</span></div>
+                <div class="m-card-why">Follow-up already scheduled for after Succos.</div>
+              </div>
+              <div class="m-card">
+                <div class="m-card-top"><span class="m-card-name">4&ensp;Yaakov Zachter</span><span class="pf-badge cultivate">Cultivate &amp; Steward</span></div>
+                <div class="m-card-why">$18,000 commitment, tied to a recent warm conversation.</div>
+              </div>
+              <div class="m-card">
+                <div class="m-card-top"><span class="m-card-name">5&ensp;Eitan Zeffren</span><span class="pf-badge solicit">Solicitation</span></div>
+                <div class="m-card-why">Corporate-sponsorship ask already scheduled.</div>
+              </div>
+              <div style="text-align:center;margin-top:10px;"><a class="pf-link" href="#" onclick="return false;">See full portfolio &rarr;</a></div>
+            </div>
+          </div></div>
+          <figcaption class="phone-label">Today &mdash; 375px width</figcaption>
+        </figure>
+
+        <figure style="margin:0;">
+          <div class="phone"><div class="phone-screen">
+            <div class="date">Portfolio Focus</div>
+            <h3 class="greet">This month&rsquo;s focus</h3>
+
+            <div class="filters" style="margin-bottom:12px;">
+              <span class="chip active" style="font-size:11px;padding:5px 10px;">All</span>
+              <span class="chip" style="font-size:11px;padding:5px 10px;">Solicit</span>
+              <span class="chip" style="font-size:11px;padding:5px 10px;">Review</span>
+            </div>
+
+            <div class="m-list-card">
+              <div class="m-list-top"><span><span class="m-rank">1</span><b>Avi Stein</b></span><span class="pf-badge cultivate">Cultivate &amp; Steward</span></div>
+              <div class="m-card-why">$75,000 commitment, 12 days old, currently active.</div>
+            </div>
+            <div class="m-list-card">
+              <div class="m-list-top"><span><span class="m-rank">9</span><b>Yale Miller</b></span><span class="pf-badge review">Review</span></div>
+              <div class="m-card-why">Largest relationship in the portfolio; little current relationship information documented. <a href="#" onclick="return false;" style="color:var(--green);font-weight:600;">Why &rarr;</a></div>
+            </div>
+            <div class="m-list-card">
+              <div class="m-list-top"><span><span class="m-rank">16</span><b>Jonathan Spetner</b></span><span class="pf-badge steward">Stewardship</span></div>
+              <div class="m-card-why">Active pledge being paid down on schedule &mdash; $2,000 of $12,000 remaining.</div>
+            </div>
+          </div></div>
+          <figcaption class="phone-label">Dedicated view &mdash; card stack, tap to expand</figcaption>
+        </figure>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const screens = document.querySelectorAll('.screen');
+  const navBtns = document.querySelectorAll('.nav-btn');
+  navBtns.forEach(btn => btn.addEventListener('click', () => {
+    navBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    screens.forEach(s => s.classList.remove('active'));
+    document.getElementById('screen-' + btn.dataset.screen).classList.add('active');
+  }));
+
+  const WHY = {
+    miller: {
+      name: 'Mr. & Mrs. Yale Miller', tag: 'Relationship Review &middot; Rank #9 of 248',
+      lede: 'One of the largest lifetime relationships in the entire portfolio &mdash; $199,150 given over 54 years &mdash; but Fundraising OS has almost no current relationship information on file. This is a request to learn more, not a signal to ask for money.',
+      grid: [
+        ['Financial significance', 'Among the most significant relationships in your portfolio ($199,150 lifetime, one of the largest single gifts on record).'],
+        ['Opportunity', 'No current pledge or scheduled next step on file.'],
+        ['Stewardship need', 'No recent commitment or open reminder requiring active follow-through right now.'],
+        ['Relationship visibility', 'No interaction, Relationship Fact, or Ask has ever been logged for this donor.'],
+      ],
+      tactical: 'Suggested Actions currently has no urgent tactical item for this donor (their most recent gift is outside the usual follow-up window).',
+      tacticalLink: null,
+      confidence: 'Financial history: well documented &middot; Relationship context: limited',
+      tech: [['Financial Significance','0.996'], ['Opportunity','0.000'], ['Stewardship','0.083'], ['Momentum','0.050 (noisy swing &mdash; not a real trend)'], ['Coverage','0.996 (floor triggered)'], ['Tactical Urgency','0.238']],
+    },
+    spetner: {
+      name: 'Mr. & Mrs. Jonathan Spetner', tag: 'Active Stewardship &middot; Rank #16 of 248',
+      lede: 'A longstanding, significant relationship actively fulfilling a real commitment on schedule. This is not an overdue balance to chase &mdash; it is a pledge progressing exactly as expected.',
+      grid: [
+        ['Financial significance', 'A well-established relationship: $100,361 given over 31 years.'],
+        ['Opportunity', 'This commitment was made about a year ago &mdash; not a new or emerging opportunity.'],
+        ['Stewardship need', 'An active pledge is being paid down on schedule: $2,000 remaining of $12,000, most recent payment 11 days ago.'],
+        ['Relationship visibility', 'No one-on-one interaction has been logged, though the pledge itself is well documented and on track.'],
+      ],
+      tactical: 'No urgent tactical action &mdash; Suggested Actions is correctly quiet while this pledge is on track.',
+      tacticalLink: null,
+      confidence: 'Financial history: well documented &middot; Relationship context: limited',
+      tech: [['Financial Significance','0.978'], ['Opportunity','0.050'], ['Stewardship','0.143'], ['Momentum','0.300 (actively fulfilling commitment)'], ['Coverage','0.978 (floor not triggered &mdash; real activity already explains the rank)'], ['Tactical Urgency','0.238']],
+    },
+    weber: {
+      name: 'Mr. & Mrs. Moishe Weber', tag: 'Cultivate &amp; Steward &middot; Rank #6 of 248',
+      lede: 'A real, active $5,000 pledge, three-quarters paid and on schedule. Ranked here on the strength of that one active commitment &mdash; his overall lifetime giving is modest, which is worth your own judgment when deciding how much time this relationship earns.',
+      grid: [
+        ['Financial significance', 'A modest lifetime relationship ($9,410) &mdash; well below most others on this list.'],
+        ['Opportunity', 'A real $5,000 pledge, 11 days into being paid down, judged large relative to his own giving history.'],
+        ['Stewardship need', 'The pledge is on track and being actively fulfilled.'],
+        ['Relationship visibility', 'A recent text exchange is on file.'],
+      ],
+      tactical: 'No urgent tactical action on file for this donor right now.',
+      tacticalLink: null,
+      confidence: 'Financial history: well documented &middot; Relationship context: well documented',
+      tech: [['Financial Significance','0.680'], ['Opportunity','0.583'], ['Stewardship','0.324'], ['Momentum','0.300 (actively fulfilling commitment)'], ['Coverage','0.476 (floor not triggered)'], ['Tactical Urgency','0.238']],
+    },
+  };
+
+  function renderWhy(key) {
+    const d = WHY[key];
+    const el = document.getElementById('why-drawer');
+    el.innerHTML = `
+      <div class="why-drawer-head">
+        <div><h4>${d.name}</h4><div class="rank-tag">${d.tag}</div></div>
+        <a class="pf-link" href="#" onclick="return false;">Open donor page &rarr;</a>
+      </div>
+      <p class="why-lede">${d.lede}</p>
+      <div class="why-grid">
+        ${d.grid.map(([label, body]) => `<div class="why-item"><div class="label">${label}</div><div class="body">${body}</div></div>`).join('')}
+      </div>
+      <div class="why-tactical"><span>${d.tactical}</span>${d.tacticalLink ? `<a href="#" onclick="return false;">${d.tacticalLink} &rarr;</a>` : ''}</div>
+      <div class="why-confidence">&#9432; ${d.confidence}</div>
+      <details class="tech-toggle">
+        <summary>Show technical detail (component scores)</summary>
+        <table class="tech-table">${d.tech.map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
+      </details>
+    `;
+  }
+  function showWhy(key) {
+    navBtns.forEach(b => b.classList.remove('active'));
+    document.querySelector('.nav-btn[data-screen="why"]').classList.add('active');
+    screens.forEach(s => s.classList.remove('active'));
+    document.getElementById('screen-why').classList.add('active');
+    const target = WHY[key] ? key : 'miller';
+    document.querySelectorAll('.why-donor-picker button').forEach(b => b.classList.remove('active'));
+    renderWhy(target);
+  }
+  function pickWho(key, btn) {
+    document.querySelectorAll('.why-donor-picker button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderWhy(key);
+  }
+  renderWhy('miller');
+</script>

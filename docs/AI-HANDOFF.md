@@ -15,7 +15,19 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`ce428c7`** -- "Implement Portfolio Focus
+**`(pending — see follow-up commit)`** -- "Add Portfolio
+Focus Phase 2 UX investigation and design (docs/PORTFOLIO-FOCUS-UX-
+DESIGN.md) + interactive mockup (2026-08-28)" -- documentation and a
+standalone HTML mockup artifact only, zero application code change, zero
+scoring/weights change, zero D1 mutation, zero deploy; see "Portfolio
+Focus Phase 2 -- UX Investigation and Design" below and the dedicated
+report file itself. Recommends a 5-donor Portfolio Focus section on
+Today plus a dedicated Top-25 (expandable to 248) Portfolio Focus view,
+raw scores hidden everywhere by default, normalized attention-type
+display labels over the unchanged internal enum, Daily Agenda deferred,
+and a staged 2A-2E implementation sequence. Investigation/design only --
+implementation was explicitly not begun. Sits on top of
+`ce428c7` -- "Implement Portfolio Focus
 Phase 1: domain/computation engine, no UI (2026-08-28)" -- application
 code change (new `lib/portfolio-focus/` module, 12 files; three new test
 suites; a `package.json` test-script line only) -- DEPLOYED to
@@ -15063,6 +15075,41 @@ change.
 Portfolio Focus UI, homepage redesign, Daily Agenda/email/Assistant
 integration, persistence, automatic tasks, or a fourth calibration
 round.
+
+## Portfolio Focus Phase 2 -- UX Investigation and Design (2026-08-28) -- INVESTIGATION/DESIGN ONLY, NO CODE/SCORING/DATA/DEPLOY CHANGE
+
+**Full report: `docs/PORTFOLIO-FOCUS-UX-DESIGN.md` (17 sections).
+Interactive mockup: `docs/portfolio-focus-mockups/portfolio-focus-ux.html`
+(4 screens -- Today page, dedicated view, "why this donor?" detail,
+mobile -- built with real Phase 1 engine output and the real app's
+extracted visual tokens, not a new design system).**
+
+Audited the real current product live on Independent Staging (Today
+page, donor page, Relationship Snapshot) before designing anything.
+Recommended architecture: a 5-donor Portfolio Focus section on Today
+(new full-width section below the existing, unmodified Today's
+Agenda/Coming Up row) plus a dedicated Portfolio Focus view (Top 25
+default, expandable to the full 248). Raw composite/component scores
+hidden from all default views everywhere, available only behind an
+explicit "show technical detail" disclosure. Attention-type internal
+enum values preserved exactly as implemented in Phase 1; only display
+labels are normalized (6-word vocabulary). Coverage-driven donors
+(Miller, Schnaidman, Ray) are explicitly designed to never read as "ask
+this donor." Moishe Weber (rank #6) shown honestly, not special-cased or
+hidden, per the same monitored-question framing carried since Round 2.
+Daily Agenda integration recommended as **deferred** pending real
+Today-page usage data. Donor-page integration and Assistant integration
+given design-only recommendations (small context line above
+Relationship Snapshot; Assistant calls the same engine, never
+reconstructs strategic logic itself). Staged implementation plan
+(2A Today section -> 2B dedicated view -> 2C donor-page line -> 2D
+Assistant -> 2E re-evaluate Daily Agenda) proposed with per-phase
+files/data-reuse/perf/testing notes.
+
+**No application code, scoring model, weights, Recommendation Engine,
+Relationship Intelligence, or D1 data was changed. No schema/migration.
+No deploy. Implementation was explicitly not begun**, per instruction --
+this phase is documentation and a standalone mockup artifact only.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
