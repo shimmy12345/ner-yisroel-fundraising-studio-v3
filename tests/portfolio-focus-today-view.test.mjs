@@ -129,7 +129,7 @@ const results = scorePortfolioFocus(donors, ctx);
 
 // ---- formatPortfolioFocusWhyNow is pure and evidence-only ----
 {
-  const evidence = { lifetimeCents: dollars(50000), last365Cents: 0, prior365Cents: 0, openPledgeBalanceCents: null, openPledgeTotalCents: null, pledgeStaleClass: null, mostRecentCashCents: null, mostRecentCashKind: null, daysSinceLastGift: null, daysSinceSubstantiveContact: null, hasCurrentFact: false, hasOpenReminder: false, openReminderAction: null, currentSnapshotSummary: null, upcomingDateDescription: null, recommendationKind: null, recommendationScore: null };
+  const evidence = { lifetimeCents: dollars(50000), last365Cents: 0, prior365Cents: 0, openPledgeBalanceCents: null, openPledgeTotalCents: null, pledgeStaleClass: null, mostRecentCashCents: null, mostRecentCashKind: null, daysSinceLastGift: null, daysSinceSubstantiveContact: null, hasCurrentFact: false, hasOpenReminder: false, openReminderAction: null, currentSnapshotSummary: null, upcomingDateDescription: null, recommendationKind: null, recommendationScore: null, recommendationAction: null };
   assert.equal(formatPortfolioFocusWhyNow("learn_relationship_review", evidence), formatPortfolioFocusWhyNow("coverage_needed", evidence), "the two coverage-adjacent types must produce identical fundraiser-facing wording given identical evidence");
   assert.equal(formatPortfolioFocusWhyNow("monitor_routine", evidence), "No significant financial or relationship signal this period.");
 }

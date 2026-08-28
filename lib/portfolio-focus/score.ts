@@ -61,6 +61,7 @@ function buildEvidence(input: PortfolioFocusDonorInput, staleClass: ReturnType<t
     upcomingDateDescription: input.upcomingDateDescription,
     recommendationKind: input.recommendation?.kind ?? null,
     recommendationScore: input.recommendation?.score ?? null,
+    recommendationAction: input.recommendation?.action ?? null,
   };
 }
 

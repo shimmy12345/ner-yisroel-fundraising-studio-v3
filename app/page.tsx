@@ -188,6 +188,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
       <div className="command-section-heading"><div><p className="eyebrow">THIS MONTH</p><h2 id="portfolio-focus-title">Portfolio Focus</h2></div></div>
       <p className="portfolio-focus-intro">Five relationships worth keeping in mind this month, independent of today&rsquo;s scheduled work.</p>
       <div className="portfolio-focus-list">{portfolioFocusRows.map((row) => <PortfolioFocusRow row={row} key={row.donorId} />)}</div>
+      <a className="view-all-link command-view-all" href="/portfolio-focus">See full portfolio →</a>
     </section>}
   </AppShell>;
 }

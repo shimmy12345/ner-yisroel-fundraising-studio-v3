@@ -136,6 +136,15 @@ export type PortfolioFocusEvidence = {
   upcomingDateDescription: string | null;
   recommendationKind: string | null;
   recommendationScore: number | null;
+  // The real Recommendation Engine's own action text (same
+  // buildDonorRecommendation() call already made once during
+  // aggregation for Tactical Urgency -- never re-run, never a second
+  // computation) -- for display/explanation only, per this type's own
+  // convention (see currentSnapshotSummary/upcomingDateDescription
+  // above). Phase 2B's Suggested Action cross-reference (docs/
+  // PORTFOLIO-FOCUS-UX-DESIGN.md Section 7F) reads this instead of
+  // re-deriving or inventing a tactical action.
+  recommendationAction: string | null;
 };
 
 export type PortfolioFocusResult = {
