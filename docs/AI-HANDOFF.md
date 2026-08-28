@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Implement Stage 3: live/
+**`1606f4f`** -- "Implement Stage 3: live/
 derived Relationship Snapshot across user-facing surfaces (2026-08-28)"
 -- application code change (new shared `resolveRelationshipSnapshot()`
 resolver in `lib/relationships/fact-synthesis.ts`; donor page, Meeting
