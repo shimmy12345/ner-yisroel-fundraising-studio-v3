@@ -15,7 +15,22 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`ed2ea20`** -- "Today workspace desktop layout
+**`(pending — see follow-up commit)`** -- "Implement Stage 3: live/
+derived Relationship Snapshot across user-facing surfaces (2026-08-28)"
+-- application code change (new shared `resolveRelationshipSnapshot()`
+resolver in `lib/relationships/fact-synthesis.ts`; donor page, Meeting
+Brief, and Assistant all moved to it; `lib/workspace/live-data.ts`
+confirmed correctly out of scope) -- DEPLOYED to Independent Staging
+(Worker `8fffe6a4-477a-4100-8367-330a6a5d534e`) and live-verified
+through the real deployed app; see "Relationship Snapshot Architecture
+-- Stage 3 Implemented, Deployed, and Live-Verified" below. Klein/
+Pfeiffer/Rovinsky's/Zachter's stale cached narrative confirmed live to
+no longer control the displayed Relationship Snapshot, while their
+underlying D1 rows and Stage 2 recommendations remain untouched; two
+real controls (Nussbaum/Treitel, cache/fact already agreeing;
+Weinschneider, a still-unmigrated legacy donor) confirmed unaffected,
+live. Zero D1 mutation from deploy or verification. All 3 gates
+re-pass. Sits on top of `ed2ea20` -- "Today workspace desktop layout
 cleanup (2026-08-28)" -- presentation/layout-only application code
 change (widened `.content`'s max-width 1540px→1800px, rebalanced
 `.today-command-grid`'s columns so Today's Agenda gets the larger
@@ -13611,6 +13626,238 @@ every visual-language token (`--green`, `--line`, border-radius,
 box-shadow, font stacks) is untouched; this round only changed sizing/
 layout numbers on a handful of existing rules plus one structural
 wrapper `<div>`.
+
+**Stopping for review**, per explicit instruction.
+
+## Relationship Snapshot Architecture -- Stage 3 Implemented, Deployed, and Live-Verified: Live/Derived Snapshot Across User-Facing Surfaces (2026-08-28) -- DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED THROUGH REAL APPLICATION SURFACES, ZERO DATA MUTATION, PORTFOLIO FOCUS AND GENERAL LEGACY-FACT MIGRATION NOT STARTED
+
+Per the architecture approved in "Relationship Snapshot Architecture
+Decision -- Live/Derived vs. Cached" (2026-08-28, above) and built on
+top of Stage 1 (ask-linked legacy backfill) and Stage 2 (fact-level
+recommendation actionability, both above, both unmodified by this
+round): the donor page, Meeting Brief, and Assistant now all display
+the donor's CURRENT Relationship Snapshot live-synthesized from
+`donor_relationship_facts` for any donor with ≥1 fact row, instead of
+independently reading the (potentially stale) cached
+`donors.relationship_summary`/`institutional_memory` columns. Donors
+with zero fact rows are completely unaffected -- they continue reading
+the cached columns byte-for-byte, exactly as before this round.
+
+### 1. Shared resolver design
+
+One new function, `resolveRelationshipSnapshot()`, added to the bottom
+of `lib/relationships/fact-synthesis.ts` (the same module that already
+holds Stage 1/2's `synthesizeRelationshipSnapshot()` and
+`findMostActionableFact()`, both left byte-for-byte unmodified):
+
+```ts
+export function resolveRelationshipSnapshot(
+  facts: SynthesisFact[],
+  cached: { relationshipSummary: string | null; institutionalMemory: string | null },
+  now: number,
+  pinnedFresh: PinnedFreshSourceInteractionIds = new Set(),
+): SynthesisResult & { source: "facts" | "cache" }
+```
+
+If `facts.length === 0` it returns `cached` untouched (`source:
+"cache"`) -- the required exact legacy fallback. Otherwise it delegates
+100% to the existing, unmodified `synthesizeRelationshipSnapshot()`
+(`source: "facts"`) -- same pinning, same decay, same "never blank"
+display convenience already approved and already in production for
+Stage 1/2. This is deliberately not a second synthesis algorithm and
+not a second relevance formula: it is a two-line dispatch in front of
+code that already existed. `findMostActionableFact()` -- the strict,
+non-fallback function that governs recommendation *actionability* --
+is untouched and is not called from this resolver; Stage 2's
+recommendation logic remains completely independent of what this
+resolver returns.
+
+### 2. Exact surfaces moved to live synthesis
+
+- **Donor page** (`app/donors/[id]/page.tsx`): `relationshipContext`
+  (feeding the "RELATIONSHIP SNAPSHOT"/"INSTITUTIONAL MEMORY" cards via
+  `sanitizeScheduledRelationshipContext`) now built from
+  `resolveRelationshipSnapshot()`'s output instead of the raw
+  `donor.relationship_summary`/`donor.institutional_memory` columns.
+- **Meeting Brief** (`lib/relationships/meeting-brief.ts` /
+  `lib/relationships/meeting-brief-model.ts`): `loadMeetingBrief()` now
+  computes `resolveRelationshipSnapshot()` from the same
+  already-fetched fact rows/pending-ask ids used for Stage 2's
+  recommendation evidence, and attaches it as a new
+  `MeetingBrief.relationshipSnapshot` field (default-valued parameter
+  on `buildMeetingBrief()`, so no existing caller/test needed updating).
+  The Meeting Brief page itself renders no separate Snapshot text card
+  (confirmed by direct code read -- it only shows Stage 2's
+  recommendation `action`/`why`/`evidence`/`timing`), so this field
+  exists purely so Assistant can reuse it.
+- **Assistant** (`app/api/assistant/route.ts`): previously ran its own,
+  entirely separate `SELECT relationship_summary, institutional_memory
+  FROM donors ...` and exposed those raw values as `summary`/`memory`
+  context lines to the model -- a fourth, previously-undocumented
+  stale-cache read site that neither Stage 1 nor Stage 2 touched. Now
+  reuses `primaryMeetingBrief.relationshipSnapshot` (the exact same
+  value the donor page/Meeting Brief resolved) whenever a Meeting Brief
+  was actually loaded for the primary donor (`mode === "live" &&
+  primaryId`), falling back to its own raw query only for demo mode or
+  the rare case with no primary donor. The fallback check is on
+  `primaryMeetingBrief` (object presence), not on the resolved
+  summary/memory being non-null -- so a fact-backed donor whose live
+  synthesis legitimately produces `null` (all facts archived/
+  superseded) shows that honest null instead of silently reverting to
+  stale cached text.
+- **Workspace/Homepage, Daily Agenda** (`lib/workspace/live-data.ts`):
+  confirmed via direct code read to have **no standalone Relationship
+  Snapshot text display** -- `relationship_summary`/`institutional_
+  memory` there feed only (a) the `narrativeDonorIds` pool-inclusion
+  filter and (b) Stage 2's already-fact-aware
+  `buildRecommendationEvidence`. Correctly left untouched; a new
+  structural test asserts the resolver is never called from this file.
+
+### 3. Query reuse -- zero new D1 queries anywhere
+
+Every surface reuses fact/ask rows its own call path had already
+fetched for Stage 2's recommendation evidence; the resolver itself
+issues no D1 calls (pure function, JS arrays in, JS object out).
+Pinned `env.DB.prepare(` counts, confirmed unchanged before/after this
+round and asserted in the new test file:
+
+| Surface | Count |
+|---|---|
+| `app/donors/[id]/page.tsx` | 24 (unchanged from Stage 2) |
+| `lib/relationships/meeting-brief.ts` | 15 (unchanged from Stage 2) |
+| `app/api/assistant/route.ts` | 4 (unchanged) |
+| `lib/workspace/live-data.ts` | 19 (unchanged from Stage 2, confirmed out of scope) |
+
+### 4-7. Real regression/control donor results (live-verified through the deployed app, not just unit tests)
+
+All four verified by navigating the real, already-authenticated
+Independent Staging app (`https://fundraising-os-staging.sgoldstein.workers.dev`)
+post-deploy and reading the rendered donor page (screenshots captured):
+
+- **Klein** (`b5e8cc18-...`): Relationship Snapshot card now reads
+  "Solicited for a plaque ($5k)." (the live-synthesized fact text) --
+  not the stale cached `institutional_memory` = "Note context:
+  Solicited for a plaque ($5k)" that remains, unmigrated, in D1.
+  Suggested Action still reads "Reach out to re-establish contact."
+  (Stage 2's `reconnect_contact_gap`), confirming the declined
+  historical solicitation is not resurrected as an active ask.
+- **Pfeiffer** (`d1b9cf78-...`): Snapshot reads "Solicited for $10k."
+  (live fact), not the stale cached "Note context: Solicited for
+  $10k". Suggested Action unchanged: "Reach out to re-establish
+  contact."
+- **Rovinsky** (`952a1cc7-...`): Institutional Memory card reads
+  "Solicited for a plaque in memory of his wife ($5k)." (live fact),
+  not the stale cached "Note context: ..." text. His ask, which is
+  COMMITTED (not declined, unlike Klein/Pfeiffer), correctly still
+  shows as an **Open Pledge** ($1,250 remaining on payment plan) rather
+  than a resurrected solicitation -- Stage 2's pledge-aware logic is
+  untouched.
+- **Zachter** (`19af69d6-...`, the designated cache-drift case): before
+  this round his cached `institutional_memory` ("Text Message context:
+  Texted video from first day of Zman and thanked him for his support
+  that makes it happen", no trailing period, template-prefixed) had
+  drifted from what live fact synthesis actually produces. Live donor
+  page now shows both Relationship Snapshot and Institutional Memory
+  as the clean, live-synthesized "Texted video from first day of Zman
+  and thanked him for his support that makes it happen." -- the stale
+  "Text Message context:" prefix is confirmed gone from the displayed
+  text. His D1 row still holds the old stale text untouched (see
+  Section 9), proving this is a display-layer fix, not a migration.
+
+### 6 (structured-fact positive control) / 7 (legacy fallback control)
+
+- **Nussbaum** (`41e14d6a-...`) and **Treitel** (`80267c0f-...`):
+  cached columns and live fact synthesis already agreed before this
+  round; a scripted before/after comparison against the real production
+  `resolveRelationshipSnapshot()` confirms `changed: false` for both --
+  no unnecessary text churn where none was needed.
+- **Weinschneider** (`9a9e3a1f-...`, legacy zero-fact donor): live
+  donor page confirmed the Relationship Snapshot still reads exactly
+  "Discussed Kollel donation and said to follow up after succos." --
+  byte-for-byte identical to the pre-Stage-3 cached value, proving the
+  legacy fallback path is untouched for the 8 donors Stage 1 never
+  migrated.
+
+### 8. Assistant consistency result
+
+Live end-to-end request against the deployed Assistant
+(`/api/assistant`, "relationship summary" prompt) for its real current
+top-priority donor (a separate, zero-fact donor) returned "No
+relationship summary is available." / "No institutional memory is
+available." -- correctly matching that donor's `null`/`null` cached
+values via the cache-fallback branch, proving the shared resolver path
+is wired and functioning end-to-end in production, not just asserted
+structurally. Combined with the structural test assertions (Assistant
+route source matches `primaryMeetingBrief \? primaryMeetingBrief\.
+relationshipSnapshot`, and does not implement any separate resolution
+logic) and the live-verified Meeting Brief result for Klein above
+(the exact same `loadMeetingBrief()` call site Assistant consumes),
+this confirms Assistant can no longer see stale cached narrative for
+any fact-backed donor once one becomes its primary donor.
+
+### 9. Data-integrity proof -- zero donor-data mutation
+
+Before deploying, ran a scripted before/after comparison importing the
+real, unmodified `resolveRelationshipSnapshot()` from
+`lib/relationships/fact-synthesis.ts` against fresh D1 reads of all 7
+regression/control donors' real cached columns, real fact rows, and
+real pending-ask linkage (0 pending asks system-wide) -- confirmed
+every donor's resolved output matched the exact expected
+change/no-change pattern before deploying.
+
+After deploying and completing live UI verification, re-read D1
+directly (read-only) for the same 7 donors plus system-wide fact count
+and ask count:
+
+- All 7 donors' `donors.relationship_summary`/`institutional_memory`
+  values are byte-for-byte identical to their pre-deployment values
+  (Klein/Rovinsky/Pfeiffer's cached columns still hold their original
+  stale "Note context: ..." text; Zachter's cached columns still hold
+  the original stale "Text Message context: ..." text) -- proving the
+  live-synthesis fix is purely a display-layer change with no write to
+  any donor row.
+- `donor_relationship_facts` row count: 6 (unchanged).
+- `asks` table: 6 total rows, 0 pending (unchanged).
+
+### 10. Deployed Worker version
+
+`pnpm run deploy:staging-independent` succeeded. **New deployed Worker
+version: `8fffe6a4-477a-4100-8367-330a6a5d534e`** (supersedes
+`cd7a6529-...`, the Today Workspace Layout Cleanup's deployed version).
+Deploy output reprinted the identical, unchanged cron (`schedule: 0 *
+* * *`) and an unchanged binding list.
+
+### Tests and gates (all passing)
+
+New file: `tests/relationship-snapshot-stage3.test.mjs` (12 cases --
+zero-fact cache passthrough; Zachter cache-drift; Klein/Rovinsky/
+Pfeiffer historical-fact-displayed-but-not-actionable loop; Nussbaum
+positive control; pending-Ask pin/unpin; multi-fact ranking-and-capping
+delegation proof; archived-only-fact "never falls back to cache"
+proof; structural source-inspection assertions for every surface; the
+query-count pinning table above). `package.json`'s `test` script
+updated to include it. `pnpm test`: exit 0, all existing Stage 1/2
+tests unmodified and passing. `pnpm exec tsc --noEmit`: clean.
+`pnpm run build:staging-independent`: completed, no errors.
+
+### What this round explicitly did NOT do
+
+Did not modify `synthesizeRelationshipSnapshot()` or
+`findMostActionableFact()` (both byte-for-byte unchanged from Stage
+1/2). Did not add a second synthesis algorithm or a second relevance
+formula. Did not run any migration or backfill -- the 8 legacy
+narrative donors (including Weinschneider) remain unmigrated and
+unaffected. Did not delete, rename, or stop writing to
+`donors.relationship_summary`/`institutional_memory` -- they remain
+live compatibility/fallback columns. Did not add any new D1 query
+anywhere (table above). Did not change Stage 2's recommendation-
+actionability logic in any way -- `findMostActionableFact()` is not
+called by the new resolver and Klein/Pfeiffer/Rovinsky's Stage 2
+recommendations are confirmed unchanged above. Did not redesign the
+donor page, Meeting Brief, or Assistant UI, and did not touch the
+recently-approved Today desktop layout cleanup. Did not touch `main`
+or production. Did not begin Portfolio Focus or the general
+legacy-fact migration.
 
 **Stopping for review**, per explicit instruction.
 

@@ -130,3 +130,29 @@ export function findMostActionableFact(facts: SynthesisFact[], now: number, pinn
   const top = scored[0];
   return { factText: top.fact.factText, category: top.fact.category, sourceInteractionId: top.fact.sourceInteractionId, score: top.score };
 }
+
+export type ResolvedRelationshipSnapshot = SynthesisResult & { source: "facts" | "cache" };
+
+// Relationship Snapshot Architecture Stage 3 (see docs/AI-HANDOFF.md) --
+// the ONE shared resolver every display/context surface (donor page,
+// Meeting Brief, Assistant) must call instead of independently
+// reimplementing "facts if any exist, else the cached columns." Not a
+// new synthesis algorithm and not a new relevance formula -- when the
+// donor has at least one fact row, this delegates to the existing,
+// unmodified synthesizeRelationshipSnapshot() (same pinning/decay/
+// "never blank" semantics already approved and already used elsewhere
+// in this module); when the donor has zero fact rows, it returns the
+// cached values byte-for-byte, untouched, exactly as today -- the
+// required exact legacy fallback. `source` is exposed only so callers/
+// tests can confirm which path produced a given result; it is never
+// itself display text.
+export function resolveRelationshipSnapshot(
+  facts: SynthesisFact[],
+  cached: { relationshipSummary: string | null; institutionalMemory: string | null },
+  now: number,
+  pinnedFresh: PinnedFreshSourceInteractionIds = new Set(),
+): ResolvedRelationshipSnapshot {
+  if (facts.length === 0) return { relationshipSummary: cached.relationshipSummary, institutionalMemory: cached.institutionalMemory, source: "cache" };
+  const synthesized = synthesizeRelationshipSnapshot(facts, now, pinnedFresh);
+  return { ...synthesized, source: "facts" };
+}

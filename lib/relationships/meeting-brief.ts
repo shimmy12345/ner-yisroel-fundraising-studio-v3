@@ -15,7 +15,7 @@ import { importedContextLine } from "./historical-context";
 import { financialDateLabel } from "../financial-date";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "./recommendation-evidence";
 import { buildDonorRecommendation } from "./recommendation-rank";
-import type { SynthesisFact } from "./fact-synthesis.ts";
+import { resolveRelationshipSnapshot, type SynthesisFact } from "./fact-synthesis.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment";
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { nextGregorianRecurrence, yearsSinceForOccurrence } from "../calendar/gregorian-recurring-date.ts";
@@ -274,6 +274,12 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     openAskReminderRows.results.map((row) => ({ id: row.id, dueAt: row.due_at })),
   );
   const openAskForEvidence = openAskRows.results[0] ? { id: openAskRows.results[0].id, amountCents: openAskRows.results[0].amount_cents, purpose: openAskRows.results[0].purpose, askedAt: openAskRows.results[0].asked_at, activeFollowUpDueAt: followUpByAsk.get(openAskRows.results[0].id)?.dueAt ?? null } : null;
+  // Computed once, reused by both recommendation-evidence building
+  // (Stage 2's fact-level actionability) and the Stage 3 live Snapshot
+  // resolver just below -- one query (relationshipFactRows/openAskRows,
+  // already fetched above), one pair of derived values, two consumers.
+  const relationshipFacts = relationshipFactRows.results.map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at }));
+  const pendingAskSourceInteractionIds = openAskRows.results.map((row) => row.source_interaction_id).filter((id): id is string => id !== null);
   const recommendationEvidence = buildRecommendationEvidence({
     donorId,
     mostRecentPaidGift: mostRecentPaidGiftForEvidence,
@@ -288,10 +294,16 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
     historicalContext: historicalContextRows.results.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
     yahrtzeits: yahrtzeitEvidenceInput,
     importantDates: importantDateEvidenceInput,
-    relationshipFacts: relationshipFactRows.results.map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
-    pendingAskSourceInteractionIds: openAskRows.results.map((row) => row.source_interaction_id).filter((id): id is string => id !== null),
+    relationshipFacts,
+    pendingAskSourceInteractionIds,
   }, now, timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
+  // Stage 3: the donor's CURRENT Relationship Snapshot for display --
+  // live-synthesized from the SAME relationshipFacts/pendingAskSourceInteractionIds
+  // used for recommendation evidence above when the donor has any fact
+  // rows, otherwise the cached columns byte-for-byte. Never a second
+  // resolution path -- see resolveRelationshipSnapshot's own doc comment.
+  const relationshipSnapshot = resolveRelationshipSnapshot(relationshipFacts, { relationshipSummary: donor.relationship_summary, institutionalMemory: donor.institutional_memory }, now, new Set(pendingAskSourceInteractionIds));
   const openAsks: MeetingBriefAsk[] = openAskRows.results.map((row) => ({ id: row.id, amountCents: row.amount_cents, purpose: row.purpose, askedAt: row.asked_at, followUpDueAt: followUpByAsk.get(row.id)?.dueAt ?? null }));
 
   // Same single open pledge already reflected in Suggested Action above --
@@ -317,5 +329,5 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
       }
     : null;
 
-  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyImportantDates, openAsks, openPledgePlanSummary);
+  return buildMeetingBrief(identity, gifts, interactionData, reminderData, unconfirmedHistoricalContext, historicalContextCount?.count ?? 0, recommendation, familyImportantDates, openAsks, openPledgePlanSummary, relationshipSnapshot);
 }

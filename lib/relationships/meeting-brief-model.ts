@@ -205,6 +205,18 @@ export type MeetingBrief = {
   // never called an "opportunity." committed/declined/withdrawn asks are
   // history, not this brief's concern.
   openAsks: MeetingBriefAsk[];
+  // Relationship Snapshot Architecture Stage 3 -- the donor's CURRENT
+  // Relationship Snapshot, resolved via lib/relationships/fact-
+  // synthesis.ts's shared resolveRelationshipSnapshot(): live-synthesized
+  // from donor_relationship_facts when the donor has any, otherwise the
+  // existing cached donors.relationship_summary/institutional_memory
+  // byte-for-byte. Attached by loadMeetingBrief() (lib/relationships/
+  // meeting-brief.ts), not by buildMeetingBrief() itself, so this pure
+  // model function never needs D1-shaped fact rows threaded through its
+  // own already-long parameter list. This is the ONE value Assistant
+  // must read for relationship context when it has a Meeting Brief for
+  // the donor -- never a second, independent resolution.
+  relationshipSnapshot: { relationshipSummary: string | null; institutionalMemory: string | null };
 };
 
 function firstLine(value: string) {
@@ -227,6 +239,13 @@ export function buildMeetingBrief(
   // has no active plan, in which case the pre-existing generic
   // "outstanding pledge balance" wording below is unchanged.
   openPledgePlan: MeetingBriefPledgePlanSummary | null = null,
+  // Already resolved by the caller via lib/relationships/fact-
+  // synthesis.ts's resolveRelationshipSnapshot() (live facts when the
+  // donor has any, else the cached columns byte-for-byte) -- this
+  // function only threads it through, never resolves it itself, so
+  // there is exactly one resolution path for every caller. Defaults to
+  // both-null for existing callers/fixtures that predate this field.
+  relationshipSnapshot: { relationshipSummary: string | null; institutionalMemory: string | null } = { relationshipSummary: null, institutionalMemory: null },
 ): MeetingBrief {
   const paidGifts = gifts.filter((gift) => gift.paidCents > 0);
   const recentGift = [...paidGifts].sort((a, b) => (b.occurredAt ?? 0) - (a.occurredAt ?? 0))[0] ?? null;
@@ -292,6 +311,7 @@ export function buildMeetingBrief(
     recommendation,
     familyImportantDates,
     openAsks,
+    relationshipSnapshot,
   };
 }
 import { relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";

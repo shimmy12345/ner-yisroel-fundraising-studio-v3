@@ -59,8 +59,23 @@ export async function POST(request: Request) {
     // exact donor -- confirmed evidence (a real asks row), never called an
     // "opportunity."
     const openAsks = (primaryMeetingBrief?.openAsks ?? []).map((item) => askLine(item, dateLabel));
+    // Relationship Snapshot Architecture Stage 3 -- reuse Meeting Brief's
+    // already-resolved live Snapshot (lib/relationships/fact-synthesis.ts's
+    // resolveRelationshipSnapshot(), same shared path the donor page uses)
+    // rather than the raw donors.relationship_summary/institutional_memory
+    // columns fetched by the query below. Never a separate Assistant-only
+    // resolution: checked on `primaryMeetingBrief` itself (was a Meeting
+    // Brief actually loaded for this donor?), not on its snapshot fields --
+    // a fact-backed donor whose current synthesis is legitimately null
+    // (e.g. their only fact is archived/superseded) must show that honest
+    // null, never silently fall back to stale cached text. The `donor`
+    // query's own relationship_summary/institutional_memory below remain
+    // the correct source only for demo mode or the rare case with no
+    // primary donor at all, where loadMeetingBrief was never called.
+    const resolvedSummary = primaryMeetingBrief ? primaryMeetingBrief.relationshipSnapshot.relationshipSummary : (donor?.relationship_summary ?? null);
+    const resolvedMemory = primaryMeetingBrief ? primaryMeetingBrief.relationshipSnapshot.institutionalMemory : (donor?.institutional_memory ?? null);
     const snapshot: AssistantContextSnapshot = {
-      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: donor?.relationship_summary ?? "No relationship summary is available.", memory: donor?.institutional_memory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyImportantDates, openAsks },
+      donor: { id: donor?.id ?? "", name: donor?.display_name ?? "No donor selected", summary: resolvedSummary ?? "No relationship summary is available.", memory: resolvedMemory ?? "No institutional memory is available.", unconfirmedHistoricalContext: historicalContext.results.map((item) => importedContextLine(item.text, item.source, item.source_date ? dateLabel(item.source_date) : null)), recommendation: primaryRecommendation, familyImportantDates, openAsks },
       // Prefer the shared_activities parent's summary when linked (same
       // single-canonical-copy rule as the timeline/Meeting Brief), and
       // append a count-only note for a shared activity -- "sent to N

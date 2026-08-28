@@ -22,7 +22,7 @@ import { financialDateLabel } from "../../../lib/financial-date";
 import { donorInitials, numericDonorCode } from "../../../lib/relationships/donor-identity";
 import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
-import type { SynthesisFact } from "../../../lib/relationships/fact-synthesis";
+import { resolveRelationshipSnapshot, type SynthesisFact } from "../../../lib/relationships/fact-synthesis";
 import { evaluatePaymentPlan } from "../../../lib/relationships/pledge-payment-plan";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
@@ -156,7 +156,9 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   const address = [donor.address_line_1, [donor.city, donor.state, donor.postal_code].filter(Boolean).join(" "), donor.country].filter(Boolean);
   const next = recommendationResult.results.find((item) => item.status === "open");
   const completedInteractions = interactionResult.results.filter((item) => !isScheduledActivity(item.source, item.occurred_at, item.created_at) && !isCancelledActivity(item.source));
-  const relationshipContext = sanitizeScheduledRelationshipContext(donor.relationship_summary, donor.institutional_memory, interactionResult.results.map((item) => ({ type: item.type, summary: item.summary, source: item.source, occurredAt: item.occurred_at, createdAt: item.created_at })));
+  // relationshipContext (below, after relationshipFacts/openAsks are
+  // available) now resolves via the Stage 3 shared resolver -- see that
+  // computation for why it moved here from immediately after `donor`.
   const donorDirectoryHref = returnTo === "/donors" || returnTo.startsWith("/donors?") ? returnTo : "/donors";
   const donorCode = numericDonorCode({ donorCode: donor.donor_code, externalId: donor.external_id });
 
@@ -332,6 +334,13 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   );
   const openAskForEvidence = openAsks[0] ? { id: openAsks[0].id, amountCents: openAsks[0].amount_cents, purpose: openAsks[0].purpose, askedAt: openAsks[0].asked_at, activeFollowUpDueAt: openFollowUpByAskId.get(openAsks[0].id)?.dueAt ?? null } : null;
   const evidenceStart = Date.now();
+  const now = Math.floor(Date.now() / 1000);
+  // Computed once, reused by both recommendation-evidence building
+  // (Stage 2's fact-level actionability) and the Stage 3 live Snapshot
+  // resolver just below -- one query (relationshipFactResult/asks,
+  // already fetched above), one pair of derived values, two consumers.
+  const relationshipFacts = relationshipFactResult.results.map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at }));
+  const pendingAskSourceInteractionIds = openAsks.map((item) => item.source_interaction_id).filter((sourceId): sourceId is string => sourceId !== null);
   const recommendationEvidence = buildRecommendationEvidence({
     donorId: id,
     mostRecentPaidGift: mostRecentPaidGiftForEvidence,
@@ -346,11 +355,21 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     historicalContext: historicalContextRows.map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
     yahrtzeits: yahrtzeitRows.map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
     importantDates: importantDateRows.map((row) => ({ type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
-    relationshipFacts: relationshipFactResult.results.map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
-    pendingAskSourceInteractionIds: openAsks.map((item) => item.source_interaction_id).filter((sourceId): sourceId is string => sourceId !== null),
-  }, Math.floor(Date.now() / 1000), profile.timezone);
+    relationshipFacts,
+    pendingAskSourceInteractionIds,
+  }, now, profile.timezone);
   const recommendation = buildDonorRecommendation(recommendationEvidence);
   const recommendationSummary = recommendation ? summarizeRecommendationForSnapshot(recommendation) : null;
+  // Relationship Snapshot Architecture Stage 3 -- the donor's CURRENT
+  // Relationship Snapshot for display: live-synthesized from the SAME
+  // relationshipFacts/pendingAskSourceInteractionIds used for
+  // recommendation evidence above when the donor has any fact rows,
+  // otherwise the cached columns byte-for-byte (the required exact
+  // legacy fallback). sanitizeScheduledRelationshipContext's own
+  // scheduled-activity guard applies on top, unchanged, regardless of
+  // which of the two the resolved value came from.
+  const resolvedSnapshot = resolveRelationshipSnapshot(relationshipFacts, { relationshipSummary: donor.relationship_summary, institutionalMemory: donor.institutional_memory }, now, new Set(pendingAskSourceInteractionIds));
+  const relationshipContext = sanitizeScheduledRelationshipContext(resolvedSnapshot.relationshipSummary, resolvedSnapshot.institutionalMemory, interactionResult.results.map((item) => ({ type: item.type, summary: item.summary, source: item.source, occurredAt: item.occurred_at, createdAt: item.created_at })));
   marks.evidenceMs = Date.now() - evidenceStart;
 
   // Single compact structured log line, timings/counts only -- no donor
