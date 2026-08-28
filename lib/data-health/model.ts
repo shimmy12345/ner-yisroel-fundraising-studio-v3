@@ -1,3 +1,5 @@
+import { HOUR_MS, BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_FRESHNESS_CRITICAL_MS, freshnessStatus } from "../backup-status/freshness.ts";
+
 export type HealthStatus = "healthy" | "attention" | "critical" | "info" | "unavailable";
 
 // "unavailable" is this report's Unknown state: evidence could not be read,
@@ -298,24 +300,23 @@ function manualExportCheck(timestamp: number | null): HealthCheck {
 // (see .github/workflows/*.yml):
 //   - Nightly backup (`0 8 * * *`, ~24h cadence): healthy under 36h (24h +
 //     12h grace for GitHub's own best-effort scheduling delay), attention
-//     36-72h (one cycle clearly missed), critical over 72h.
+//     36-72h (one cycle clearly missed), critical over 72h. These two
+//     constants (and the shared freshnessStatus/HOUR_MS logic) now live in
+//     lib/backup-status/freshness.ts -- the single source of truth also
+//     used by status-worker's backup watchdog (status-worker/src/watchdog.ts),
+//     so the dashboard and the watchdog can never drift apart on what
+//     "stale" means. See docs/BACKUP-SCHEDULING-RELIABILITY.md.
 //   - Monthly restore verification (`0 9 1 * *`, ~28-31 day cadence,
 //     always after that day's backup): healthy under 40 days (one full
 //     month + ~9-12 days grace for the longest calendar month plus
 //     scheduling slack), attention 40-60 days, critical over 60 days
-//     (roughly two missed cycles).
-const HOUR_MS = 3_600_000;
+//     (roughly two missed cycles). Restore verification has no watchdog
+//     (docs/BACKUP-SCHEDULING-RELIABILITY.md Section 13) so these two
+//     constants stay local -- nothing outside this file needs them.
 const DAY_MS = 24 * HOUR_MS;
-export const BACKUP_FRESHNESS_HEALTHY_MS = 36 * HOUR_MS;
-export const BACKUP_FRESHNESS_CRITICAL_MS = 72 * HOUR_MS;
 export const RESTORE_FRESHNESS_HEALTHY_MS = 40 * DAY_MS;
 export const RESTORE_FRESHNESS_CRITICAL_MS = 60 * DAY_MS;
-
-export function freshnessStatus(ageMs: number, healthyBelowMs: number, criticalAboveMs: number): "healthy" | "attention" | "critical" {
-  if (ageMs < healthyBelowMs) return "healthy";
-  if (ageMs > criticalAboveMs) return "critical";
-  return "attention";
-}
+export { BACKUP_FRESHNESS_HEALTHY_MS, BACKUP_FRESHNESS_CRITICAL_MS, freshnessStatus };
 
 type PipelineStatusParams = {
   id: string;

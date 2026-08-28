@@ -24,5 +24,13 @@
       "bucket_name": "fundraising-os-backup-status"
     }
   ],
+  // Backup-freshness watchdog (docs/BACKUP-SCHEDULING-RELIABILITY.md) --
+  // hourly, deliberately offset from :00 (GitHub's own documented
+  // highest-load minute for its `schedule` trigger, and also the minute
+  // the main app Worker's own unrelated hourly cron already uses -- see
+  // wrangler.staging.jsonc) purely to reduce synchronized load; the
+  // watchdog's own logic is rolling-elapsed-time-based (a 26-hour
+  // recovery threshold), so the exact minute has no semantic meaning.
+  "triggers": { "crons": ["17 * * * *"] },
   "observability": { "enabled": true }
 }
