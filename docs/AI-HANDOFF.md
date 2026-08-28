@@ -15,7 +15,27 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`a1ad0fb`** -- "Add Portfolio Focus Human
+**`(pending — see follow-up commit)`** -- "Add Portfolio Focus Human
+Calibration Round 2 report (docs/PORTFOLIO-FOCUS-CALIBRATION-V2.md)
+(2026-08-28)" -- documentation only, zero application code change, zero
+D1 mutation, zero deploy; see "Portfolio Focus Human Calibration Round
+2" below and the dedicated report file itself. Redesigned the Round 1
+scoring component definitions first (Financial Significance no longer
+touches pledges; Opportunity's missing-contact bonus removed and a
+general engagement-opportunity track added; Stewardship no longer
+requires a payment plan; Momentum gated on real dollar materiality;
+Relationship Intelligence folded into Opportunity; a new deterministic
+stale-balance gate added), froze the resulting formula, and ran it once
+unedited against fresh Independent Staging data -- all financial
+verification gates passed including a fresh Spetner regression check.
+All five mandatory stale-balance regression cases (Pollack, Schabes,
+Myers, Chapman, Sobol) were successfully neutralized without touching
+any database value or the Recommendation Engine itself. A new,
+previously-absent failure mode surfaced and was disclosed rather than
+tuned away: several very small relationships now rank in the top 12
+because a small pledge still scores too close to a major commitment
+under the redesigned materiality formula. Not yet recommended for
+implementation. Sits on top of `a1ad0fb` -- "Add Portfolio Focus Human
 Calibration Round report (docs/PORTFOLIO-FOCUS-CALIBRATION.md)
 (2026-08-28)" -- documentation only, zero application code change, zero
 D1 mutation, zero deploy; see "Portfolio Focus Human Calibration Round"
@@ -14638,6 +14658,59 @@ production/main access.
 
 **Stopping for review before any further calibration or
 implementation**, per explicit instruction.
+
+## Portfolio Focus Human Calibration Round 2 (2026-08-28) -- SEE docs/PORTFOLIO-FOCUS-CALIBRATION-V2.md FOR THE FULL REPORT; INVESTIGATION/CALIBRATION ONLY, NO CODE/SCHEMA/UI/DEPLOY
+
+Per explicit instruction, the full Round 2 report lives in its own
+dedicated file, **`docs/PORTFOLIO-FOCUS-CALIBRATION-V2.md`** -- not
+duplicated here. This round redesigned the Round 1 component
+*definitions* first (Financial Significance no longer touches pledges;
+Opportunity no longer rewards missing contact and adds a general
+engagement-based track independent of pledge status; Stewardship no
+longer requires a payment plan; Momentum gates ratio swings on real
+dollar materiality; Relationship Intelligence folded into Opportunity
+rather than scored independently; a new deterministic stale-balance
+gate classifies every open pledge as current/legacy/immaterial-artifact
+and discounts both Opportunity and Portfolio Focus's own consumption of
+the Recommendation Engine's tactical score for artifact-class balances)
+-- then froze the resulting formula and ran it once, unedited, against
+fresh Independent Staging data. Only one weight changed from Round 1
+(Relationship Intelligence's 0.05 slot mechanically merged into
+Opportunity, where its function moved); every other weight is
+unchanged.
+
+**All financial verification gates passed, including a fresh Spetner
+regression check.** All five mandatory stale-balance regression cases
+(Pollack $60/27.7yr, Schabes $10/11yr, Myers $2,000/9.9yr, Chapman
+$915/24yr, Sobol $25/19.8yr) were successfully neutralized -- each now
+classified an "immaterial artifact," each with a real database balance
+left completely untouched, each dropped far down the strategic ranking
+while remaining fully visible and unmodified in the tactical
+Recommendation Engine. The Round 1 Schwartz-vs-Stein "less documented
+contact produces a higher Opportunity score" inversion is confirmed
+gone. The Round 2 Top 15 differs materially from Round 1's: Avi Stein
+now ranks #1 (was #4), Mordechai Schwartz #2 (was #3), Yaakov Zachter
+#3 (was #1, though his absolute score rose), Dovie Weinschneider #4
+(was #11) -- and a genuinely new problem surfaced that Round 1 didn't
+have: several very small relationships (Yaakov Milch, $6,297 lifetime;
+Moshe Matz, $6,620; Dovid Weinberger, $12,872) now rank in the top 12
+because a small on-track pledge still scores surprisingly high on
+Opportunity under the redesigned materiality formula -- disclosed in
+full in the report's Section 7, not tuned away.
+
+**Recommendation: not yet ready for implementation.** The structural
+fixes verified correctly; the small-pledge overcrediting problem and an
+open policy question about whether the portfolio's largest, currently-
+quiet relationships (Miller, Schnaidman) should have a stronger
+Financial-Significance floor both need human judgment before this
+becomes application code.
+
+**Constraints honored:** read-only analysis; zero D1 writes; zero
+application code, schema, or Recommendation Engine change; no deploy;
+no production/main access.
+
+**Stopping for review. Round 3 was not started, per explicit
+instruction.**
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
