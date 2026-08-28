@@ -15,7 +15,7 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`(pending — see follow-up commit)`** -- "Investigate
+**`cb97de4`** -- "Investigate
 D1 nightly backup scheduling reliability (docs/BACKUP-SCHEDULING-
 RELIABILITY.md) (2026-08-28)" -- documentation only, zero workflow/
 Cloudflare/secret/data change, zero deploy; see "D1 Nightly Backup
