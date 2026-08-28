@@ -15,7 +15,34 @@ Branch:
 feature/independent-cloudflare-sandbox
 
 Current HEAD (committed and pushed):
-**`224cf46`** -- "Implement
+**`(pending — see follow-up commit)`** -- "Fix Portfolio
+Focus row-detail layout: technical detail must not share a flex row
+with Open donor (2026-08-28)" -- CSS/markup-only fix found during Phase
+2B's own live verification (the technical-detail disclosure shared a
+flex row with the "Open donor" link, so opening it visually stretched
+that link's alignment; moved to its own block), zero scoring/data
+change; see "Portfolio Focus Phase 2B -- Dedicated Portfolio Focus
+View" below. DEPLOYED to Independent Staging (Worker
+`59da32d1-c8fc-4d75-adb9-0776e307e21b`, superseding the same round's
+own initial deploy `d6eecb52-...`). Sits on top of
+`00a6bf5` -- "Implement Portfolio Focus
+Phase 2B: dedicated Portfolio Focus view (2026-08-28)" -- application
+code change: new `/portfolio-focus` route
+(`app/portfolio-focus/page.tsx` + `PortfolioFocusExperience.tsx`), new
+`lib/portfolio-focus/dedicated-view.ts` presentation adapter, a small
+justified passthrough addition to `PortfolioFocusEvidence`
+(`recommendationAction`, no scoring/rank change), a `donor-navigation.ts`
+origin addition, a quiet "See full portfolio" link on Today, CSS, and
+three test files -- see "Portfolio Focus Phase 2B -- Dedicated
+Portfolio Focus View" below for full detail. Real Top 25/full-248
+ranking verified with exact engine order/rank parity, filters preserve
+original rank under narrowing, coverage-driven donors (Miller/
+Schnaidman/Ray) explicitly read as non-solicitation, Spetner/
+Weinschneider/Weber regressions all held with zero special-casing. Zero
+scoring/weights/Recommendation-Engine/Relationship-Intelligence change;
+zero schema/migration; zero D1 mutation; Phase 2C/2D/2E not started.
+All 3 gates pass. Sits on top of
+`224cf46` -- "Implement
 Portfolio Focus Phase 2A: Today-page section (2026-08-28)" --
 application code change (`lib/portfolio-focus/today-view.ts` NEW,
 `app/page.tsx`, `app/globals.css`, two test files, `package.json`) --
@@ -15280,6 +15307,279 @@ unchanged from Phase 1.
 **Recommended next step:** Phase 2B (the dedicated Portfolio Focus
 view), per docs/PORTFOLIO-FOCUS-UX-DESIGN.md Section 16's staged
 sequence -- not started in this round.
+
+## Portfolio Focus Phase 2B -- Dedicated Portfolio Focus View (2026-08-28) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO D1 MUTATION
+
+Implemented the dedicated `/portfolio-focus` route from docs/PORTFOLIO-
+FOCUS-UX-DESIGN.md's staged plan (Section 16, "2B") -- the full ranked
+portfolio with filters, per-donor "why is this donor here?" expansion,
+and a collapsed technical-detail disclosure. No scoring/weight/
+materiality/Coverage/attention-type-semantics change. Recommendation
+Engine and Relationship Intelligence untouched.
+
+**Route:** `/portfolio-focus` (`app/portfolio-focus/page.tsx` +
+`app/portfolio-focus/PortfolioFocusExperience.tsx`, a client component
+for filtering/expansion only). `AppShell active="today"` -- see
+"Navigation decision" below for why no new nav section was created.
+
+**Files changed:**
+- `lib/portfolio-focus/types.ts` / `lib/portfolio-focus/score.ts` --
+  the ONE Phase-1-adjacent touch this round: added
+  `recommendationAction: string | null` to `PortfolioFocusEvidence`,
+  populated from `input.recommendation?.action` in `buildEvidence()`.
+  This exposes text the aggregation layer already computes once per
+  donor via the real, unmodified `buildDonorRecommendation()` (the same
+  function the donor page's own Suggested Action card calls) -- it was
+  computed but discarded before Phase 2A/2B; nothing new is queried or
+  recomputed, no score/rank/threshold changed. Existing Phase 1 tests
+  (materiality/components/regression) still pass unmodified.
+- `lib/portfolio-focus/dedicated-view.ts` (NEW) -- pure, read-only
+  presentation adapter (no D1/`cloudflare:workers` import), reusing
+  Phase 2A's `ATTENTION_TYPE_DISPLAY_LABELS`/`formatPortfolioFocusWhyNow`
+  (`lib/portfolio-focus/today-view.ts`) rather than a second mapping.
+  Exports: `RELATIONSHIP_CONTEXT_LABELS` (high/medium/low ->
+  "Well documented"/"Some context"/"Limited relationship context"),
+  `PORTFOLIO_FOCUS_FILTERS` (7 filters grouped by DISPLAY label --
+  `coverage_needed` and `learn_relationship_review` share one
+  "Relationship Review" filter, matching their shared display label),
+  and `buildDedicatedPortfolioFocusRows()`, which translates each
+  `PortfolioFocusResult` into WHO/WHY/WHAT-KIND-OF-ATTENTION/HOW-MUCH-
+  DOES-FOS-KNOW display fields plus a 7-part fundraiser-language
+  explanation (lede, financial significance, opportunity, stewardship,
+  relationship visibility, tactical cross-reference, confidence) and a
+  separate `technical` object (raw composite/component/Coverage/
+  confidence/stale-class values) used only by the disclosure. Component-
+  value thresholds here (e.g. FS>=0.85 -> "among the most significant")
+  are presentation buckets with zero effect on any score/rank.
+  **Suggested Action indicator definition:** `recommendationKind !==
+  null && recommendationKind !== "reconnect_contact_gap"` -- real data
+  showed 247/248 donors have SOME recommendation (`reconnect_contact_gap`
+  is a generic, bounded "it's been a while" fallback --
+  `lib/workspace/suggestion-candidates.ts`'s own documentation notes it
+  scales with total donor count, unlike every other kind), so flagging
+  on that alone would be meaningless noise; excluding it narrows the
+  flag to 48/248 (~19%), a genuinely informative signal, with zero new
+  queries.
+- `app/portfolio-focus/page.tsx` (NEW) -- server component: auth, one
+  `computePortfolioFocus()` call gated to live mode (skipped, not
+  computed-and-discarded, outside live mode), wrapped in try/catch
+  (`logger.error("portfolio_focus_dedicated_load_failed", ...)` on
+  failure, never a thrown error, never fake/stale rows), a restrained
+  empty state for zero results, and the page header (concept
+  explanation + explicit Portfolio-Focus-vs-Suggested-Actions
+  distinction line, per docs/PORTFOLIO-FOCUS-UX-DESIGN.md Section 3).
+- `app/portfolio-focus/PortfolioFocusExperience.tsx` (NEW) -- client
+  component, same architecture as the existing
+  `app/donors/[id]/UnifiedRelationshipTimeline.tsx` precedent: the full,
+  already-scored row array arrives as props from the one server-side
+  engine call; every filter/toggle/expand interaction only slices or
+  filters that same in-memory array -- nothing is ever recomputed,
+  refetched, or re-ranked. Filter chips (`aria-pressed`, hidden when
+  their count is 0 except "All," matching
+  `UnifiedRelationshipTimeline`'s own convention) + a "Suggested Action
+  available only" checkbox (compound AND filter) + a default Top-25
+  view with a "Show full portfolio"/"Show top 25 only" toggle over the
+  SAME loaded array (no second computation, no network request). Each
+  row is a native `<details>`/`<summary>` (no clickable divs); the
+  donor-page link lives only in the expanded body, never inside
+  `<summary>`, so it can never create a conflicting click target with
+  the row's own open/close toggle. The nested "Show technical detail"
+  disclosure is the only place composite/component/Coverage/confidence/
+  stale-class values ever render.
+- `lib/navigation/donor-navigation.ts` -- added `"portfolio-focus"` to
+  `DonorNavigationOrigin`/`ORIGINS` and `"Back to Portfolio Focus"` to
+  `donorBackLabel()`, so the donor page's back-link is accurate when
+  reached from this new route (previously would have silently fallen
+  back to "Back to Today").
+- `app/page.tsx` -- added a quiet "See full portfolio →" link
+  (`.view-all-link.command-view-all`, the same class already used for
+  Coming Up's "View all upcoming activities") inside the existing Phase
+  2A card, after the row list. Nothing else about the Phase 2A card was
+  redesigned.
+- `app/globals.css` -- new `.pf-*`/`.portfolio-focus-scope`/
+  `.portfolio-focus-toggle`/`.tech-toggle` rules built from the app's
+  existing tokens (`.event-type` pill, `var(--muted)`/`var(--ink)`, the
+  `.historical-context-disclosure`/`.reschedule-control` convention of
+  hiding the native `<details>` marker and relying on
+  text/hover/chevron affordances instead); `.timeline-filters` and the
+  new `.portfolio-focus-filters` now share one ruleset (grouped
+  selector) rather than duplicating the pill/chip styling. Mobile
+  breakpoint (820px for row stacking, 700px for the horizontally-
+  scrolling filter row) mirrors the existing `.relationship-date-row`/
+  `.timeline-filters` mobile overrides.
+- `tests/portfolio-focus-dedicated-view.test.mjs` (NEW),
+  `tests/portfolio-focus-route.test.mjs` (NEW),
+  `tests/portfolio-focus-today-view.test.mjs` (updated fixture for the
+  new evidence field), `package.json` (added both new test files).
+
+**Navigation decision: Option B -- no persistent primary sidebar item**
+(the starting hypothesis in the instruction was "yes, add one"; this
+implementation deliberately differs, with reasoning). AppShell's
+primary nav is 4 items (Today/Donors/Import/Assistant), each an
+independent, freestanding daily destination reached directly, and the
+mobile bottom tab bar is already exactly budgeted at 4 + "More" (`.nav {
+grid-template-columns: repeat(5, 1fr) }`) -- a 5th primary item would
+shrink every existing tab's touch target on every page, for a feature
+whose own product framing is a 30-day/monthly cadence, not an
+anywhere-anytime lookup like Donors/Assistant. Portfolio Focus already
+has a guaranteed, prominent, daily-visible entry point via Today's own
+new link, on the app's own home route. `tests/portfolio-focus-
+route.test.mjs` pins this decision (asserts `"portfolio-focus"` is
+absent from `AppShell.tsx`) so it isn't silently added later without a
+documented reconsideration -- revisit if real usage shows people want
+direct access.
+
+**Current Top 25 / full portfolio count (real Independent Staging data,
+verified read-only against a fresh D1 pull immediately before deploy,
+identical to the Phase 2A verification -- no drift):** 248 total ranked
+donors. Top 5 unchanged from Phase 2A (Stein, Schwartz, Weinschneider,
+Zachter, Zeffren); ranks 6-25 continue Weber, Ramras, Goldenberg,
+Miller, Weinberger, Dov Zeffren, Ray, Moradian, Schnaidman, Sperka,
+Spetner, Wiesel, Martin, Milch, Krull, Davis, Rosenbaum, Matz, Broide,
+Pfeiffer -- exactly matching docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md
+Section 2-3's Top 25 and Phase 1's own verified output. Filter counts:
+Solicitation Opportunity 3, Cultivate & Steward 6, Active Stewardship
+18, Cultivate 40, Reconnect 11, Relationship Review 65 (remaining ~105
+are `monitor_routine`, visible under "All," not given their own filter
+chip -- consistent with the design doc's own expectation that this
+label essentially never needs surfacing as a strategic category).
+**Engine rank/order parity: exact** -- `buildDedicatedPortfolioFocusRows`
+preserves `results`' own array order and each row's own `rank` field
+verbatim; verified both by a real-data script (rank/order/donor-id
+identical to the raw scored array) and by a unit test that filters a
+scored array and asserts every surviving row's rank is unchanged from
+its rank in the full, unfiltered array (docs/PORTFOLIO-FOCUS-UX-DESIGN.md's
+"filtering must never renumber" principle) -- confirmed live (Section
+below): filtering to "Solicitation Opportunity" shows ranks #3/#5/#17,
+never renumbered to #1/#2/#3.
+
+**Suggested Action cross-reference:** flagged for 48/248 donors (see
+above for the `reconnect_contact_gap`-exclusion reasoning); the
+expanded explanation's tactical line shows the real recommendation text
+verbatim (e.g. Schwartz: "Suggested Action: Follow up on the open
+$36,000 pledge."; Miller/Schnaidman/Spetner/Weber: "No urgent Suggested
+Action on file." -- their real recommendation is the generic fallback,
+correctly not flagged). Tzvi Ray is a deliberate, real exception worth
+naming: he IS flagged (`follow_up_pledge` on his stale $10/1,914-day
+balance) even though Portfolio Focus itself treats that balance as
+`immaterial_artifact` for TAC purposes -- this is accurate, unedited
+product behavior (the real Recommendation Engine and Portfolio Focus
+legitimately disagree in emphasis here), and demonstrates exactly the
+"two distinct systems that may both mention the same donor" principle
+item 2 asked to preserve, not a bug.
+
+**Mandatory donor verification (real data, all 16 named donors
+inspected):**
+- **Miller (#9), Schnaidman (#14), Ray (#12)** -- all "Relationship
+  Review," lede always ends "This is a relationship-review signal, not
+  a solicitation recommendation," Opportunity always reads "No current
+  solicitation opportunity identified -- this is a call to learn more,
+  not to ask," never "weak relationship." Confirmed live via the Miller
+  card's full expansion + technical detail (Coverage 0.9960, floor
+  0.4446, **triggered**, matching docs/PORTFOLIO-FOCUS-CALIBRATION-V3.md
+  exactly to 4 decimals).
+- **Spetner (#16)** -- "Active Stewardship"; Opportunity: "An existing
+  commitment is already being fulfilled -- not a new solicitation
+  opportunity"; Stewardship: "Commitment is actively being fulfilled --
+  $2,000 remaining of $12,000, on schedule." Never "overdue"/"lapsed"/
+  "collect" (asserted in both the unit test and a live expansion).
+- **Weinschneider (#3)** -- "Solicitation Opportunity" with Stewardship
+  explicitly "No active stewardship signal on file right now" (no
+  pledge exists), proving Portfolio Focus isn't a pledge leaderboard.
+- **Weber (#6)** -- rendered with the exact same generic, uniform
+  per-attention-type logic as every other `cultivate_steward_active`
+  donor; Financial Significance correctly buckets him as "A well-
+  established, meaningful relationship" (not "among the most
+  significant" -- his FS is 0.68, below the 0.85 top bucket), which a
+  fundraiser can see sitting next to his #6 rank and judge for
+  themselves. No special case, no hidden/demoted row, no warning
+  callout of any kind -- confirmed by grepping `dedicated-view.ts` for
+  his name (absent) and by his real row rendering identically to every
+  other donor's markup.
+- Ramras, Goldenberg, Weinberger, Dov Zeffren, Moradian, Sperka all
+  render with the correct generic per-type explanation, no drift from
+  Phase 1/Round 3.
+
+**Query/performance impact:** exactly one `computePortfolioFocus()`
+call per page render (12 batched D1 queries, same as Phase 1/2A,
+independent of donor count) -- zero recomputation per filter, per
+expand, or per "Show full portfolio" click (all client-side array
+operations against data already in memory). Client JS bundle for the
+whole interactive experience
+(`PortfolioFocusExperience-*.js`): **6.5 KB uncompressed** -- kept small
+by precomputing all display strings server-side and shipping only
+final text/numbers to the client, never raw evidence or the translator
+logic itself. Expanding to all 248 rows (each with its own `<details>`
+and technical-detail sub-disclosure already in the DOM, closed) was
+visually instant in live testing; no perceptible lag.
+
+**Gates:** `pnpm test` (full suite, all new/updated files): pass.
+`pnpm exec tsc --noEmit`: clean. `pnpm run build:staging-independent`:
+clean, `/portfolio-focus` present in the route manifest.
+
+**D1 mutation check:** the same 10-table fingerprint from Phase 2A,
+taken before this deploy, immediately after, and again after extensive
+live browsing (Today, the dedicated page, filtering, expanding rows,
+"Show full portfolio," navigating to a donor page and back) --
+**identical across all checkpoints** (248/5,176/6/71/5/6/172/36/19/33).
+Zero writes.
+
+**Independent Staging deployment:** two deploys this round --
+`d6eecb52-5b56-4148-b9ec-6b60ca76dde1` (initial Phase 2B deploy), then
+**`59da32d1-c8fc-4d75-adb9-0776e307e21b`** (current) after a layout fix
+found during live verification (the technical-detail disclosure shared
+a flex row with the "Open donor" link, so opening it visually stretched
+that link's alignment -- moved to its own block; CSS/markup only, no
+scoring/data change, committed separately as `1825e53`).
+
+**Live desktop verification:** confirmed all of -- Today's "See full
+portfolio" link works and the existing card is visually unchanged;
+Top 25 renders as a clean, scannable list with subordinate rank; filter
+chips correctly narrow the list AND preserve original rank numbers
+(tested live: Solicitation Opportunity shows #3/#5/#17); "Show full
+portfolio" reveals all 248 instantly with no network request, and
+toggles back to "Show top 25 only"; expanding Miller's row shows the
+full translated explanation plus the coverage-floor-aware technical
+detail; expanding Spetner's row confirms the active-fulfillment wording
+live; "Open donor →" navigates to the real donor page and back-links
+correctly as "Back to Portfolio Focus."
+
+**Mobile verification:** as in Phase 2A, the browser automation tool's
+window-resize did not change the captured viewport in this environment
+(tried twice, including a fresh tab, before falling back) -- verified
+structurally/via CSS instead: `.pf-row-summary` stacks to a vertical
+card at 820px, `.portfolio-focus-filters` scrolls horizontally at
+700px rather than wrapping densely, and no `<table>` element exists
+anywhere in the experience.
+
+**Today-page regression:** confirmed live -- exactly 5 rows, same
+order/labels/why-now text as Phase 2A, Today's Agenda/Coming Up
+unchanged, only the new quiet link added.
+
+**Accessibility:** filter chips are real `<button>`s with
+`aria-pressed`; the Suggested Action toggle is a real `<input
+type="checkbox">`; every row is a native `<details>`/`<summary>` (full
+keyboard operability, native focus handling, no ARIA needed for
+open/close state) with a custom `:focus-visible` outline matching the
+app's existing pattern; the donor link is never nested inside
+`<summary>`, so it can never conflict with the row's own toggle; rank
+is `aria-hidden` (decorative/orientation-only); confidence is conveyed
+by text label, never color alone; heading order stays flat
+(h1 -> h2 section headings, no skipped levels, same as Phase 2A).
+
+**Not started, per explicit instruction:** Phase 2C (donor-page
+integration), Phase 2D (Assistant integration), Phase 2E (Daily Agenda
+integration), and no calibration round was started. Scoring, weights,
+materiality, Coverage, ranking, confidence, and Recommendation
+Engine/Relationship Intelligence behavior are unchanged from Phase 1
+(the one touch this round, `recommendationAction` passthrough, is
+purely additive to the read-only evidence/explanation surface -- see
+above).
+
+**Recommended next step:** Phase 2C (donor-page Portfolio Focus
+context), per docs/PORTFOLIO-FOCUS-UX-DESIGN.md Section 10's
+recommendation (a single compact line above Relationship Snapshot) --
+not started in this round.
 
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
