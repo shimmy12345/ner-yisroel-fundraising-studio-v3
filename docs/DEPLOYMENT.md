@@ -428,8 +428,9 @@ in the main application Worker.
   - **Recovery, 26 hours** since the last verified successful backup —
     the watchdog dispatches a fresh backup run.
   - **Escalation, 36 hours** (the existing `BACKUP_FRESHNESS_HEALTHY_MS`
-    the dashboard already uses) — reserved for active alerting, **not
-    implemented yet** (see "Remaining work" below).
+    the dashboard already uses) — the threshold at which the main app
+    Worker's own Stage 3 email alert fires (see "Backup alert email
+    (Stage 3)" below) if recovery hasn't happened by then.
   - **Critical, 72 hours** (the existing `BACKUP_FRESHNESS_CRITICAL_MS`)
     — unchanged, dashboard-only.
 - **What it reads:** only the existing, already-deployed
@@ -535,15 +536,83 @@ and never fabricates a success. Freshness detection and logging (Stage 1
 behavior) are unaffected either way, since they need no credential at
 all.
 
-**Remaining work (explicitly not built yet):** active alerting once
-freshness reaches the 36-hour escalation threshold despite watchdog
-recovery attempts (Stage 3 — see `docs/AI-HANDOFF.md`'s "D1 Nightly
-Backup Scheduling Reliability" entry), the "Recovery triggered"/"Delayed"
-Workspace Health dashboard states (would require granting
+**Remaining work (explicitly not built):** the "Recovery triggered"/
+"Delayed" Workspace Health dashboard states (would require granting
 `status-worker` write access to the status bucket, a real scope increase
 deliberately deferred), and a restore-verification watchdog (out of
 scope — restore verification's own monthly cadence and freshness model
-are unrelated to backup freshness).
+are unrelated to backup freshness). Stage 3 active alerting (below) is
+now built.
+
+### Backup alert email (Stage 3)
+
+**Purpose:** if the watchdog above hasn't recovered a stale backup by
+the existing 36-hour escalation threshold (`BACKUP_FRESHNESS_HEALTHY_MS`
+— the same constant the Workspace Health dashboard already uses), the
+main app Worker sends the owner a plain operational email so they don't
+have to remember to check Workspace Health or the GitHub Actions tab
+themselves.
+
+**This lives entirely in the main app Worker** (`lib/backup-alert/`,
+wired into `worker/index.ts`'s existing hourly `scheduled()` handler via
+its own independent `ctx.waitUntil()`, alongside the unrelated Daily
+Agenda send) — never in `status-worker`, and it adds no new credential
+or binding to either Worker:
+
+- **Reads:** the exact same `STATUS_WORKER` service-binding read the
+  Workspace Health dashboard already performs
+  (`fetchBackupStatus()`, exported from `lib/data-health/read.ts`
+  specifically for this reuse) — no new service binding, no R2 access of
+  any kind.
+- **Sends:** the exact same Gmail secrets/send path the Daily Agenda
+  already uses (`sendGmail()`, `lib/agenda/gmail-client.ts`) — no new
+  OAuth credential. Recipient is the existing `STAGING_OWNER_EMAIL`, the
+  same single canonical address the Daily Agenda already sends to.
+- **Dedup:** a new, tiny D1 table, `backup_alert_state`
+  (`drizzle/0035_backup_alert_state.sql` — one row per user; holds no
+  donor/fundraising data, see `ACCOUNT_CONFIGURATION_TABLES` in
+  `lib/data-health/production-baseline.ts`), records which stale
+  *incident* was last alerted on (identified by the alerted-on success's
+  own `completedAt`, or the literal `no-success-ever`). This lets the
+  hourly check alert immediately the first hour any incident crosses
+  36h, then suppress duplicate emails for the remainder of that same
+  incident — resolved automatically the moment a new successful backup
+  lands (a different `completedAt` is a different incident), with no
+  reminder emails and no explicit "resolved" email (see
+  `lib/backup-alert/decision.ts`'s own header comment for the full
+  incident-lifecycle rationale).
+- **Failure behavior:** a Gmail-send failure, a `STATUS_WORKER`-read
+  failure, or any other error in this check is logged and swallowed —
+  it never throws, never affects the Daily Agenda's own unrelated send
+  (a fully separate `waitUntil()`), and never writes a dedup row unless
+  the email actually sent successfully (so a Gmail failure leaves the
+  incident eligible for a retry on the very next hourly invocation).
+- **Content:** deliberately plain and operational — the last known
+  success timestamp (or an honest "cannot verify a recent successful
+  backup" if none is known), its current age, that automatic recovery
+  was expected at 26h, that this alert fired because 36h was exceeded,
+  the latest attempt's status if any, and a pointer to check Workspace
+  Health / GitHub Actions. Never a credential, a token, encrypted backup
+  content, or any donor/fundraising data (`lib/backup-alert/email.ts`).
+- **Tests:** `tests/backup-alert-decision.test.mjs` (pure decision
+  function, ~20 scenarios including the 26h/36h/72h boundaries, the
+  newer-failed-attempt-floors-a-fresh-success rule, missing/malformed
+  status, incident suppression and resolution, and a DST-boundary
+  check), `tests/backup-alert-email.test.mjs` (pure content, including
+  that no credential/donor data ever appears in the rendered output),
+  `tests/backup-alert-safety.test.mjs` and
+  `tests/backup-alert-security.test.mjs` (source-inspection, matching
+  `tests/agenda-safety.test.mjs`/`tests/backup-watchdog-security.test.mjs`'s
+  own convention for Workers-runtime code that cannot be unit-tested
+  directly).
+- **Rollback:** remove the two `runScheduledBackupAlertCheck` call sites
+  (the import and the `ctx.waitUntil()` in `worker/index.ts`) and
+  redeploy — no secret to unwind, since none was added. The
+  `backup_alert_state` table can be left in place harmlessly (it holds
+  no application data) or dropped if desired.
+
+See `docs/AI-HANDOFF.md`'s own Stage 3 entry for the full implementation
+record, live-verification result, and security-boundary confirmation.
 
 ### Recovering from an automated backup
 

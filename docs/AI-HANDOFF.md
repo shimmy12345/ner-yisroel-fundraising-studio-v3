@@ -15950,6 +15950,186 @@ self-exercise the first time it's genuinely needed. Stage 3 (active
 alerting at the existing 36h threshold) remains the only undone item
 from the original plan, unstarted by instruction.
 
+## D1 Nightly Backup Scheduling Reliability -- Stage 3 Implemented, Tested, Deployed, Live-Verified (2026-08-28) -- STAGE 3 ACTIVE; ALL THREE STAGES NOW COMPLETE
+
+**Implementation commit:** `9f10182` -- "Implement Stage 3: active email
+alert for stale D1 backups". **Documentation commit:** this entry
+(committed separately, per this task's own instruction to keep commits
+understandable).
+
+**What Stage 3 is:** the last of the three approved stages from
+`docs/BACKUP-SCHEDULING-RELIABILITY.md`. Stages 1 (detection) and 2
+(auto-dispatch recovery) live in `status-worker/` and are unchanged by
+this round. Stage 3 lives entirely in the **main app Worker**
+(`fundraising-os-staging`): if a stale backup hasn't recovered by the
+existing 36h escalation threshold (`BACKUP_FRESHNESS_HEALTHY_MS`), it
+emails the owner so they don't have to remember to check Workspace
+Health or GitHub Actions themselves.
+
+**Files changed** (see commit `9f10182` for the full diff):
+- New: `drizzle/0035_backup_alert_state.sql` (migration), `lib/backup-alert/decision.ts`
+  (pure incident/alert decision), `lib/backup-alert/email.ts` (pure email
+  content), `lib/backup-alert/run.ts` (Workers-runtime orchestration
+  shell), `tests/backup-alert-decision.test.mjs`,
+  `tests/backup-alert-email.test.mjs`, `tests/backup-alert-safety.test.mjs`,
+  `tests/backup-alert-security.test.mjs`.
+- Modified: `worker/index.ts` (a second, independent `ctx.waitUntil()` in
+  the existing `scheduled()` handler), `lib/data-health/read.ts`
+  (exported the existing `fetchBackupStatus()` for reuse, no behavior
+  change), `lib/backup-status/freshness.ts` (added the shared
+  `hasNewerFailedAttempt()` helper), `lib/data-health/model.ts` and
+  `status-worker/src/watchdog.ts` (both now call the shared helper
+  instead of their own previously-duplicated inline computation --
+  behavior-preserving refactor, verified by the full existing test
+  suite passing unchanged), `lib/data-health/production-baseline.ts` and
+  `db/schema.ts` (the new `backup_alert_state` table --
+  `PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length` 35 -> 36,
+  `backup_alert_state` added to `ACCOUNT_CONFIGURATION_TABLES`),
+  `production-baseline/drizzle/0000_production_baseline_0019.sql` +
+  `production-baseline/schema-manifest.json` (regenerated via
+  `pnpm db:baseline:generate`, new hash, rehearsed clean via
+  `pnpm db:baseline:rehearse`), `tests/production-baseline.test.mjs`
+  (new 0035 assertions), `package.json` (wired the 4 new test files into
+  `pnpm test`).
+
+**Alert threshold:** exactly the existing `BACKUP_FRESHNESS_HEALTHY_MS`
+(36h) constant, reused directly -- no new/hardcoded number. Also fires
+(regardless of age) when a newer attempt than the last recorded success
+failed, matching the existing "attempt floors status" rule.
+
+**Recipient mechanism:** the existing `env.STAGING_OWNER_EMAIL` -- the
+same single canonical address the Daily Agenda already sends to. No new
+or hardcoded address anywhere.
+
+**Dedupe/incident mechanism:** new D1 table `backup_alert_state` (one
+row per user, upserted via `ON CONFLICT(user_id)`). `incident_key` is
+the alerted-on success's own `completedAt`, or the literal
+`no-success-ever`. The hourly check alerts the first time any incident's
+key differs from the last-alerted one (immediate, not once-a-day-later),
+then suppresses further emails for that same incident indefinitely (no
+reminder emails implemented -- didn't fit cleanly, per the task's own
+"only if it fits existing patterns cleanly"). A new successful backup
+automatically resolves the incident (its `completedAt` differs), with no
+explicit "resolved" email sent. Approved via `AskUserQuestion` earlier
+this round -- user selected the new-D1-table option over a time-window
+heuristic.
+
+**Gmail failure behavior:** logged via `logger.error`, never thrown --
+the top-level `try/catch` in `lib/backup-alert/run.ts` swallows every
+failure so it can never affect the unrelated Daily Agenda send (a fully
+separate `ctx.waitUntil()`). Because the D1 dedupe row is only written
+*after* `sendGmail()` succeeds, a Gmail failure leaves the incident
+un-recorded, so the very next hourly invocation retries automatically --
+no separate retry logic needed.
+
+**STATUS_WORKER failure behavior:** `fetchBackupStatus()`'s own existing
+unreachable/malformed-response handling is reused unchanged
+(`backupStatusReachable: false`); `evaluateBackupAlert()` treats this as
+`shouldSend: false` unconditionally -- an unreachable read can never
+produce a misleading email in either direction.
+
+**Tests/typecheck/build:** `pnpm test` (full suite, all pre-existing
+tests plus the 4 new files) -- all passing, `fail 0` throughout,
+including the new `tests/production-baseline.test.mjs` 0035 assertions.
+`pnpm exec tsc --noEmit` -- clean, zero errors. `pnpm run
+build:staging-independent` -- succeeded (vinext build, all 5 stages).
+
+**Pre/post main Worker versions:** pre-deploy `59da32d1-c8fc-4d75-adb9-0776e307e21b`
+(2026-08-28T14:09:11Z, Stage 2 verification round's own deployed
+version, unchanged since) -> post-deploy `23d1b292-d286-4390-8bc7-66a2d5e96c87`.
+Deploy output confirmed exactly the same binding set as before
+(`DB`, `STATUS_WORKER`, `ASSETS`, plus the 3 existing `vars`) -- no new
+binding, no new secret.
+
+**status-worker: confirmed unchanged.** Not redeployed this round; its
+own `wrangler deployments list` still shows `21be8aa8-41c0-46ed-b82c-dbc60e2543f6`
+(2026-08-28T16:00:51Z, the Stage 2 verification round's own version)
+both before and after the main Worker's Stage 3 deploy. Its Cron Trigger
+(`17 * * * *`) is untouched.
+
+**Migration applied to the real Independent Staging D1** (not just
+generated/rehearsed offline): pre-check confirmed `backup_alert_state`
+did not already exist; `wrangler d1 execute --remote --file=drizzle/0035_backup_alert_state.sql`
+succeeded (`num_tables: 49`, up from 48, `1 rows written` -- the
+`sqlite_schema`/`d1_migrations`-style bookkeeping row, not application
+data); post-check confirmed the new table exists and is empty
+(`backup_alert_state_rows: 0`).
+
+**Zero mutation:** D1 fundraising-data fingerprint
+(donors/giving_activities/gifts/asks/interactions/recommendations/
+donor_relationship_facts/important_dates/yahrtzeits) identical before
+the migration, after the migration, and after the Worker deploy --
+`248/5,176/0/6/72/5/7/172/36` throughout (the `248/5,176/6/72/5/7/172/36`
+subset matches every prior round's own recorded fingerprint exactly).
+
+**Security boundary:** re-verified directly against the deployed state
+(not just source) -- the post-deploy `wrangler deploy` output's own
+binding table shows the main Worker gained nothing beyond the new table
+inside its existing `DB` binding; `status-worker` was not touched at
+all this round. `tests/backup-alert-security.test.mjs` additionally
+verifies structurally: no file under `lib/backup-alert/` references the
+GitHub dispatch credential, `workflow_dispatch`, or any R2/write
+capability; there is still exactly one `STATUS_WORKER.fetch()` call site
+in the entire app; the `backup_alert_state` table's own DDL has exactly
+four columns, none donor/fundraising/credential-shaped; the rendered
+alert email's actual output contains no credential-shaped string in any
+of subject/text/html; no new dashboard wording
+("Recovery triggered"/"Watchdog dispatched"/"Alert sent") was added
+anywhere in `lib/data-health/model.ts`.
+
+**Confirmed unchanged:** `.github/workflows/d1-backup-nightly.yml` on
+`main` -- still `cron: "0 8 * * *"`; `status-worker`'s own Cron Trigger
+and dispatch logic; Workspace Health dashboard semantics; no new public
+HTTP route was introduced.
+
+**No artificial staleness was created at any point.** The real backup
+status was read as-is, both for this task's own investigation and for
+live verification below -- nothing was deleted, edited, or altered in
+the status bucket or GitHub Actions to force the alert path.
+
+**Live verification, real hourly Cron invocation (`wrangler tail`, not
+synthetic):**
+```
+{"level":"info","message":"backup_alert_check_no_alert","now":1787961656000,"reason":"fresh"}
+```
+`scheduledTime: 1787961656000` = `2026-08-29T00:00:56.000Z` -- the real
+top-of-the-hour Cron firing, not a manual trigger. The check ran,
+`fetchBackupStatus()` (the `STATUS_WORKER` read) succeeded, freshness
+evaluated `fresh` (the real backup is well under 36h old), and,
+correctly, **no email was sent**. D1 fingerprint (see above) and
+`backup_alert_state`'s own row count (`0`) were re-checked immediately
+after this invocation and are identical to the pre-verification values
+-- zero mutation. `status-worker`'s own `wrangler deployments list`
+re-checked at the same time still shows `21be8aa8-...`, unchanged.
+
+**A first, nested-background attempt at this same live verification
+(started ~22:17 UTC, intended to span the 23:00 UTC firing) failed
+silently** -- the `timeout 3000 wrangler tail ... &` process was lost
+before the 23:00 firing (empty log file, process gone by the time of the
+next check), most likely killed along with its parent shell's process
+group rather than surviving as a detached background job. No incorrect
+conclusion was drawn from this: the empty file was recognized as a
+tooling failure, not as "the check didn't run," and the verification was
+simply re-armed correctly (a directly-tracked live stream, not a
+manually-backgrounded nested process) for the following hourly firing
+instead of being reported as inconclusive or skipped.
+
+**Live `>=36h` alert delivery itself remains naturally unexercised** --
+exactly as expected, since the real backup is fresh. This is the correct,
+truthful current state, not a gap: it will be naturally exercised the
+first time a real backup incident actually crosses 36h, the same way
+Stage 2's live dispatch path was documented as "naturally pending" until
+it was later naturally exercised (see the Stage 2 entries above).
+
+**Remaining:** nothing blocking. All three approved stages
+(detection, auto-dispatch recovery, active alerting) are now
+implemented, deployed, and either live-verified or naturally pending
+their first genuine trigger, as documented above and in each stage's
+own prior entry. The only items explicitly still out of scope (by
+design, not oversight) are the Workspace Health "Recovery triggered"/
+"Delayed" dashboard states and a restore-verification watchdog -- both
+noted as deliberate future work in `docs/DEPLOYMENT.md`.
+
 ## Relationship-Intelligence Quality Pass (2026-08-19) -- historical, no longer the latest task
 
 **Retitled 2026-08-21** (was "## Latest Completed Task" -- misleading

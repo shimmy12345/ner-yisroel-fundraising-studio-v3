@@ -1,9 +1,20 @@
 # D1 Nightly Backup Scheduling Reliability — Investigation & Corrective Plan (2026-08-28)
 
-**Status: investigation/design only.** No workflow YAML, Cloudflare
-configuration, GitHub secrets, R2 buckets, Worker bindings, backup
-encryption, or application behavior was changed. Nothing was deployed,
-dispatched, or mutated. All findings below come from read-only
+**Status: this document is the original investigation/design record and
+is left as-written below (historical) — it is no longer the current
+implementation status.** Stage 1 (detection), Stage 2 (auto-dispatch
+recovery), and Stage 3 (active email alerting) have since all been
+implemented, tested, and deployed to Independent Staging; see
+`docs/AI-HANDOFF.md`'s "D1 Nightly Backup Scheduling Reliability" entries
+(chronological, newest first) for the full implementation, verification,
+and live-proof record, and this file's own "Stage 3 — Implementation
+Notes" addendum at the end for how the actual Stage 3 alerting design
+ended up differing from Section 15's original sketch below. Nothing in
+the body text below has been edited to reflect what was actually built —
+read it as "what this investigation proposed on 2026-08-28," not "what
+exists today."
+
+All findings below come from read-only
 inspection of `.github/workflows/*.yml` on `main` (the branch scheduled
 workflows actually execute from), `docs/DEPLOYMENT.md`,
 `status-worker/`, `lib/data-health/model.ts`, and the real GitHub
@@ -926,3 +937,43 @@ configuration, Cloudflare Cron trigger, GitHub secret, R2 bucket/binding,
 backup encryption, Worker code, or production/main content was changed.
 No backup was dispatched. No data was mutated. Investigation and design
 only.
+
+---
+
+## Stage 3 — Implementation Notes (2026-08-28, added after Stages 1–3 shipped)
+
+The Stage 3 sketch above (Section 15) was written before a later, far
+more detailed Stage 3 specification was given directly (reproduced in
+full in `docs/AI-HANDOFF.md`'s own Stage 3 entry). The actual
+implementation follows that later, more specific instruction, which
+differs from this document's own earlier sketch in one material way
+worth recording here so the two documents don't read as contradicting
+each other:
+
+- **Dedup mechanism:** this document's Section 15 sketch proposed a
+  "once-per-day guarded check" (mirroring `isDailyAgendaSendHour()`'s
+  own time-of-day guard). The actual Stage 3 instruction explicitly
+  rejected any local-time/day-based guard as "fragile" and required
+  **incident-based deduplication** instead: a new, tiny D1 table
+  (`backup_alert_state` — `drizzle/0035_backup_alert_state.sql`) records
+  which stale *incident* (identified by the alerted-on success's own
+  `completedAt`, or the literal `no-success-ever`) was last alerted on,
+  so the hourly check can suppress a duplicate email for the same
+  ongoing incident while still alerting immediately (not once a day
+  later) the first hour any *new* incident crosses the 36h threshold.
+  See `lib/backup-alert/decision.ts`'s own header comment and
+  `NO_SUCCESS_INCIDENT_KEY`.
+- **Everything else matches the sketch above:** the existing hourly
+  `scheduled()` handler is extended (a second, independent
+  `ctx.waitUntil()` in `worker/index.ts`, not a second Cron Trigger);
+  the existing `STATUS_WORKER` service binding and existing Gmail-sending
+  pipeline (`lib/agenda/gmail-client.ts`) are reused, not duplicated; no
+  new secret or permission was added anywhere; a Gmail-send failure is
+  logged and never affects the Daily Agenda's own unrelated send path
+  (a fully separate `waitUntil()`, not a shared code path); the send
+  threshold reuses the existing `BACKUP_FRESHNESS_HEALTHY_MS` (36h)
+  constant directly, never a new hardcoded number.
+
+See `docs/AI-HANDOFF.md`'s own Stage 3 entry for the full implementation
+record: files changed, commit SHAs, test results, deployment versions,
+live-verification outcome, and security-boundary confirmation.
