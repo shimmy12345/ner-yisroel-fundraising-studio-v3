@@ -15950,6 +15950,206 @@ self-exercise the first time it's genuinely needed. Stage 3 (active
 alerting at the existing 36h threshold) remains the only undone item
 from the original plan, unstarted by instruction.
 
+## D1 Monthly Restore Verification Repair (2026-09-01) -- REPAIRED, PORTED TO MAIN, LIVE-VERIFIED SUCCESSFUL END-TO-END
+
+**Feature-branch investigation/fix commit:** `e9edf8b40d2d8bcd74e459e4208b00b5d07b9afb`
+-- "Add D1 restore-order dependency tracking for the current schema"
+(adds `lib/operations/d1-restore-order.ts`, new to this branch, plus
+`tests/d1-restore-order.test.mjs`; `pnpm test`/`pnpm exec tsc --noEmit`/
+`pnpm run build:staging-independent` all passed, including a synthetic
+49-table full-schema fixture run through the repaired planner before
+`main` was ever touched). **Narrow main repair commit:**
+`62628b393f6538b6240c1a533883de0a08774b56` -- "Fix D1 monthly restore
+verification: add missing tables to restore order" (5 files: `lib/data-health/production-baseline.ts`,
+`lib/operations/d1-restore-order.ts`, `lib/operations/staging-reset.ts`,
+`production-baseline/schema-manifest.json`, `test/d1-restore-order.test.mjs`
+-- `main`'s own full test suite, 140/140, and `npm run build` both passed
+before this was pushed).
+
+**Original failed run:** 33515781926 (`main`, scheduled, 2026-09-01T13:50Z).
+**Successful verification run:** 33521658046 (`main`, `workflow_dispatch`
+against the repaired tip `62628b3`, 2026-09-01T14:47:25Z-14:51:05Z,
+conclusion `success`) -- confirmed via the GitHub API, not assumed. A
+same-SHA re-run of the ORIGINAL failed run (33515781926, `run_attempt: 2`)
+was tried first and failed identically, because GitHub's `rerun` API
+re-executes against the run's own originally-triggered SHA
+(`4ea1d5e`, the pre-fix commit), never the branch's current tip --
+`workflow_dispatch` against `main` was the correct mechanism to prove the
+fix, and is what produced 33521658046.
+
+**The full scratch-D1 restore and integrity-check step genuinely ran --
+this was not merely the workflow's setup steps succeeding.** Step 8,
+"Restore into a scratch D1 database and run every integrity check," took
+3m21s (14:47:38Z-14:50:59Z) on the successful run, versus under 1 second
+on the original failing run (an instant `planD1Restore` throw, before any
+scratch database existed) -- direct evidence the real restore path
+executed this time. Pulled directly from that step's own job log:
+`PRAGMA quick_check` passed, `PRAGMA foreign_key_check` returned zero
+violations, "Validating restored schema against the current packaged
+manifest (structural integrity + migration readiness)" passed,
+`production_schema_baseline` backup-fidelity check passed, and "Restore
+verification passed." printed a full per-table row count covering every
+`FUNDRAISING_DATA_TABLES` entry, explicitly including all 8 previously-
+failing tables with real, non-zero counts: `asks: 6, ask_changes: 12,
+pledge_payment_plans: 33, pledge_payment_plan_changes: 36,
+donor_relationship_facts: 7, donor_relationship_fact_changes: 7,
+shared_activities: 7, shared_activity_recipient_audits: 49`. The overall
+job conclusion could not have been `success` unless the schema comparison
+against the (now-synced) packaged manifest also matched exactly --
+including `backup_alert_state`'s own schema, which is part of
+`PRODUCTION_BASELINE_OBJECTS` even though excluded from
+`FUNDRAISING_DATA_TABLES`'s row-count loop by design (see below).
+
+**Restored backup object:** `daily/fundraising-os-staging-db-20260901T125357Z.sql.gz.gpg`
+-- the exact same immutable backup object named in this investigation's
+own starting instructions, and the same one the ORIGINAL failed run
+33515781926 had already correctly identified, downloaded, decrypted, and
+decompressed before failing on the (now-fixed) restore-order check. This
+proves the specific backup that failed under the stale restore-order code
+now passes the restore planner and a full scratch-D1 restore, unchanged
+and untouched throughout.
+
+**`restore-latest-success.json` published** (job log, "Publish restore-
+verification status" step, both `aws s3api put-object` calls returned a
+successful `ETag`/`VersionId`, no `::warning::` emitted): `databaseName:
+"fundraising-os-staging-db"`, `completedAt` ~= `2026-09-01T14:51:00Z`
+(the workflow's own completion timestamp), `verifiedLatestObjectKey:
+"latest/fundraising-os-staging-db.sql.gz.gpg"`, `verifiedBackupObjectKey:
+"daily/fundraising-os-staging-db-20260901T125357Z.sql.gz.gpg"`,
+`verifiedBackupCompletedAt: "2026-09-01T12:53:59Z"` (the immutable dated
+object's own R2 `LastModified`, confirmed via the job's own
+`TESTED_AT`/`TESTED_KNOWN: true` env values), `workflowRunId:
+"33521658046"`. `restore-latest-attempt.json` published alongside it with
+`attemptStatus: "success"`. Workspace Health's "Monthly restore test"
+card (`lib/data-health/model.ts`'s `restoreVerificationCheck`, reading
+this exact object via the existing `STATUS_WORKER` service binding) will
+report this as the new `healthy` state on its next read -- not
+independently re-queried here beyond confirming the object write itself
+succeeded, since doing so would require no new tooling beyond what
+Workspace Health already provides on its own next page load.
+
+**`backup_alert_state` is now explicitly, proactively covered** by
+restore-order semantics (positioned as a fourth root table, directly
+after `users`, its own real foreign key target) on both branches. It held
+zero rows in this specific backup (no alert has ever fired), so its own
+trigger of the unknown-table guardrail remains naturally untested until
+it ever holds a real row -- an honest, disclosed gap, not a silent one;
+the coverage test (below) guarantees it can never silently regress back
+out of the order in the meantime.
+
+**Recurrence-prevention guardrail:** `main`'s own pre-existing
+`test/d1-restore-order.test.mjs` coverage test was one-directional (only
+checked that every `FUNDRAISING_DATA_TABLES` entry was covered by
+`D1_RESTORE_DATA_ORDER` or the skip list) -- a stale-but-LARGER
+`D1_RESTORE_DATA_ORDER` trivially satisfies that, which is exactly why
+this specific drift went undetected for as long as it did (confirmed
+empirically: the new bidirectional test failed against the pre-sync
+manifest, then passed once the manifest was synced). Both this repair's
+commits add a strict bidirectional equality assertion --
+`STAGING_RESET_TABLE_ORDER` (equivalently, `D1_RESTORE_DATA_ORDER`'s
+non-root tail, reversed) must equal `FUNDRAISING_DATA_TABLES` exactly, in
+either direction -- on `main` (`test/d1-restore-order.test.mjs`, new
+test) and confirmed already present and passing on the feature branch
+(`tests/staging-reset.test.mjs`, pre-existing;
+`tests/d1-restore-order.test.mjs`, new, derives its own coverage
+assertion from `PRODUCTION_BASELINE_TABLES` directly rather than
+duplicating a manually-maintained list). The underlying reason this class
+of drift is possible at all -- `main` and the feature branch share one
+real backed-up database but keep separate, only-occasionally-synced
+copies of its schema knowledge -- is structural to how this repository is
+organized (two branches, one physical D1) and is not something a test
+alone can close; the guardrail added here ensures that the NEXT time
+`main`'s copy is resynced (whenever that happens), a real coverage gap
+fails loudly immediately rather than passing silently the way this one
+did.
+
+**Live D1 mutation result: zero.** The entire restore ran into a
+freshly-created scratch database (`fundraising-os-restore-verify-20260901t144739z-0clg3i`),
+confirmed deleted immediately after verification (job log: "Deleting
+scratch database... Scratch database deleted.") -- the real
+`fundraising-os-staging-db` was only ever read from (via the R2 backup
+object), never written to, at any point in this repair.
+
+**Confirmed unchanged:** backup creation, AES256 encryption, R2 bucket
+keys/credentials, the nightly backup GitHub Actions cron (`0 8 * * *`),
+the monthly restore-verification cron (`0 9 1 * *`), the backup
+scheduling watchdog (`status-worker/`, Stages 1-2), and Backup Scheduling
+Reliability Stage 3's active email alerting -- none of these files were
+touched by either commit (`git diff --stat` on both commits shows only
+the 3 restore-order/schema files + their tests, confirmed before
+pushing to `main`). **Confirmed no unrelated feature code reached
+`main`:** the main-branch commit was authored directly on an isolated
+`git worktree` checkout of `origin/main` (never a merge of the feature
+branch), touching only the 5 files named above -- no Portfolio Focus,
+Relationship Intelligence, backup watchdog, Stage 3 alerting, or donor-
+model code of any kind was ported.
+
+**Root cause:** GitHub Actions run 33515781926 (`main`, scheduled,
+2026-09-01T13:50Z) failed in ~10 seconds, inside
+`scripts/verify-remote-restore.mjs`'s `planD1Restore()` call, before any
+scratch database was even created. The backup itself was fully healthy
+(identity resolved, downloaded, decrypted, decompressed, expected PRAGMA
+present) -- the failure was `planD1Restore found INSERT statements for
+table(s) not present in the dependency order: shared_activity_recipient_audits,
+shared_activities, asks, ask_changes, pledge_payment_plans,
+pledge_payment_plan_changes, donor_relationship_facts,
+donor_relationship_fact_changes`.
+
+`lib/operations/d1-restore-order.ts` exists ONLY on `main` -- it was never
+ported to `feature/independent-cloudflare-sandbox` (that branch's own
+`scripts/verify-remote-restore.mjs` restores a decrypted export directly,
+without reordering, by explicit prior design; see
+`lib/operations/d1-backup-rows.ts`'s header comment). The real
+`fundraising-os-staging-db` that both branches' identical backup/restore
+workflows target is schema-owned by the feature branch (where all
+migrations actually land); `main` only receives a copy of that schema
+knowledge (`production-baseline/schema-manifest.json`,
+`lib/operations/staging-reset.ts`'s `STAGING_RESET_TABLE_ORDER`) via an
+occasional manual sync -- the same mechanism commit `4ea1d5e` used for
+migration 0029. Migrations `0030_shared_activities.sql` through
+`0034_donor_relationship_facts.sql` landed on the feature branch and were
+never ported to `main`, so `main`'s restore-order tracking silently fell
+8 tables behind the schema of the database it actually verifies.
+
+**Coverage audit:** compared `main`'s `D1_RESTORE_DATA_ORDER` (39
+tables + 3 roots) against the feature branch's current, independently
+schema-verified table set (48 application tables + `production_schema_baseline`).
+Exactly 9 tables were missing: the 8 named in the failed run, plus
+`backup_alert_state` (Backup Scheduling Reliability Stage 3, landed on
+the feature branch 2026-08-28 -- absent from run 33515781926's own
+failure list only because the table had zero rows at export time, so it
+produced no INSERT statement to trip the guardrail; it would fail
+identically the first time it ever holds a real row). No other current
+table was missing -- confirmed both by the coverage audit and by running
+the repaired planner against a full 49-table synthetic export before
+touching `main`.
+
+**Dependency order** (verified against the real `db/schema.ts` column
+definitions on the feature branch, never inferred from names):
+- `shared_activities.user_id -> users.id`. `shared_activity_recipient_audits.shared_activity_id -> shared_activities.id`, `.donor_id -> donors.id`, `.user_id -> users.id`. `interactions.shared_activity_id -> shared_activities.id` (nullable) -- so `shared_activities` must precede both `shared_activity_recipient_audits` AND `interactions`.
+- `asks.user_id -> users.id`, `.donor_id -> donors.id`, `.source_interaction_id -> interactions.id` (nullable). `ask_changes.ask_id -> asks.id`.
+- `pledge_payment_plans.user_id -> users.id`, `.donor_id -> donors.id`, `.pledge_activity_id -> giving_activities.id`. `pledge_payment_plan_changes.plan_id -> pledge_payment_plans.id`.
+- `donor_relationship_facts.donor_id -> donors.id`, `.user_id -> users.id`, `.source_interaction_id -> interactions.id` (nullable; `supersedes_fact_id` is NOT a real FK). `donor_relationship_fact_changes.fact_id -> donor_relationship_facts.id`.
+- `backup_alert_state.user_id -> users.id` (primary key); nothing references it.
+
+This matches exactly what `feature/independent-cloudflare-sandbox`'s own
+`STAGING_RESET_TABLE_ORDER` already encoded (children-before-parents, for
+staging resets) -- independently spot-checked against the schema rather
+than trusted on comment text alone, then ported by reversal (main's own
+established, unchanged pattern: `D1_RESTORE_DATA_ORDER = [roots...,
+...reverse(STAGING_RESET_TABLE_ORDER)]`).
+
+**Restore planner contract (confirmed unchanged and NOT weakened):**
+`planD1Restore`/`reorderD1ExportForRestore` still throw immediately on any
+INSERT for a table outside `D1_RESTORE_DATA_ORDER`/`D1_RESTORE_SKIP_DATA_TABLES`
+-- this fix only ever adds correctly-positioned entries, never loosens
+the unknown-table guardrail. Schema statements (CREATE TABLE/INDEX) are
+never reordered (foreign keys aren't validated at CREATE time). Data is
+grouped per table and interleaved in one pass so a table's oversized
+(`D1_SAFE_STATEMENT_BYTES`+) rows never get deferred past a later table's
+foreign-key check. No migrations table exists in this schema, and no
+cycles exist among these tables' foreign keys.
+
 ## D1 Nightly Backup Scheduling Reliability -- Stage 3 Implemented, Tested, Deployed, Live-Verified (2026-08-28) -- STAGE 3 ACTIVE; ALL THREE STAGES NOW COMPLETE
 
 **Implementation commit:** `9f10182` -- "Implement Stage 3: active email
