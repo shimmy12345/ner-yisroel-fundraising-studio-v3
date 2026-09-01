@@ -41,8 +41,13 @@ const FIXTURE = [
   'INSERT INTO "sqlite_stat1" ("tbl","idx","stat") VALUES(\'donors\',\'donors_owner_idx\',\'1 1\');',
 ].join('\n') + '\n';
 
-test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the three true roots, with no duplicates', () => {
-  const roots = ['production_schema_baseline', 'users', 'onboarding_preferences'];
+test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the four true roots, with no duplicates', () => {
+  // backup_alert_state added 2026-09-01 (D1 Monthly Restore Verification
+  // Repair, porting Backup Scheduling Reliability Stage 3's addition from
+  // feature/independent-cloudflare-sandbox) -- a fourth
+  // ACCOUNT_CONFIGURATION_TABLE root, not part of STAGING_RESET_TABLE_ORDER's
+  // reversal (same reasoning as users/onboarding_preferences).
+  const roots = ['production_schema_baseline', 'users', 'backup_alert_state', 'onboarding_preferences'];
   for (const root of roots) assert.ok(D1_RESTORE_DATA_ORDER.includes(root), `missing root table "${root}"`);
   assert.equal(new Set(D1_RESTORE_DATA_ORDER).size, D1_RESTORE_DATA_ORDER.length, 'no table should appear twice');
   // Every real fundraising table (from the same authoritative source the
@@ -56,8 +61,33 @@ test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the three true r
   // STAGING_RESET_TABLE_ORDER exactly -- proves insertion order really is
   // the deletion order run backwards, not a separately hand-maintained
   // list that could quietly drift from it.
-  const tail = D1_RESTORE_DATA_ORDER.slice(3);
+  const tail = D1_RESTORE_DATA_ORDER.slice(4);
   assert.deepEqual([...tail].reverse(), [...STAGING_RESET_TABLE_ORDER]);
+});
+
+test('backup_alert_state is positioned after "users", its own real foreign key target', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const backupAlertIndex = D1_RESTORE_DATA_ORDER.indexOf('backup_alert_state');
+  assert.ok(usersIndex >= 0 && backupAlertIndex > usersIndex, 'backup_alert_state must be inserted after users');
+});
+
+// Bidirectional coverage, mirroring
+// feature/independent-cloudflare-sandbox's own tests/staging-reset.test.mjs
+// ("the reset table order covers every fundraising-data table and nothing
+// else"). The pre-existing coverage test above only ever checked ONE
+// direction (every FUNDRAISING_DATA_TABLES entry is present in
+// D1_RESTORE_DATA_ORDER or the skip list) -- which is exactly why the drift
+// that caused GitHub Actions run 33515781926's failure went undetected for
+// as long as it did: D1_RESTORE_DATA_ORDER/STAGING_RESET_TABLE_ORDER can be
+// a strict SUPERSET of a stale FUNDRAISING_DATA_TABLES (derived from this
+// branch's own, separately-synced production-baseline manifest) and that
+// one-directional check still passes. This exact-equality check closes
+// that gap: it fails the moment STAGING_RESET_TABLE_ORDER and
+// FUNDRAISING_DATA_TABLES disagree in EITHER direction, which is what
+// should have caught this drift automatically the next time either file
+// was touched.
+test('STAGING_RESET_TABLE_ORDER is exactly FUNDRAISING_DATA_TABLES, in some order (bidirectional -- closes the gap that let run 33515781926 fail silently)', () => {
+  assert.deepEqual([...STAGING_RESET_TABLE_ORDER].sort(), [...FUNDRAISING_DATA_TABLES].sort());
 });
 
 test('parseRestoreStatements splits every statement shape correctly, including multi-line CREATE TABLE', () => {

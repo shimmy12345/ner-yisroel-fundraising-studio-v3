@@ -7,15 +7,25 @@ import { STAGING_RESET_TABLE_ORDER } from "./staging-reset.ts";
 // requirement is the opposite: every parent row must exist before any
 // child row whose foreign key references it.
 //
-// Three tables are prepended as true roots -- nothing in the schema has a
-// foreign key pointing at any of them, so their relative order never
-// matters, but all of them must be inserted before anything that could
-// reference them:
-//   - "users" and "onboarding_preferences" are the two
+// Four tables are prepended as true roots -- nothing in the schema has a
+// foreign key pointing at any of them (except backup_alert_state, which
+// only depends on users -- already listed before it here), so their
+// relative order otherwise never matters, but all of them must be
+// inserted before anything that could reference them:
+//   - "users" and "onboarding_preferences" are two of the three
 //     ACCOUNT_CONFIGURATION_TABLES (lib/data-health/production-baseline.ts).
 //     STAGING_RESET_TABLE_ORDER never includes them -- a staging reset
 //     deliberately preserves the owner's account rows instead of deleting
 //     them -- so they are not part of its reversed order either.
+//   - "backup_alert_state" is the third ACCOUNT_CONFIGURATION_TABLE
+//     (added by Backup Scheduling Reliability Stage 3 on
+//     feature/independent-cloudflare-sandbox, ported here 2026-09-01 --
+//     see the D1 Monthly Restore Verification Repair entry in
+//     docs/AI-HANDOFF.md). Also excluded from STAGING_RESET_TABLE_ORDER
+//     for the same reason. Its own `user_id` column IS a real foreign key
+//     to users.id, so it is listed here AFTER "users" specifically (not
+//     merely alongside it as a true zero-dependency root like
+//     production_schema_baseline below).
 //   - "production_schema_baseline" is the schema-verification marker
 //     table. Nothing references it and it references nothing.
 //
@@ -47,6 +57,7 @@ import { STAGING_RESET_TABLE_ORDER } from "./staging-reset.ts";
 export const D1_RESTORE_DATA_ORDER: readonly string[] = [
   "production_schema_baseline",
   "users",
+  "backup_alert_state",
   "onboarding_preferences",
   ...[...STAGING_RESET_TABLE_ORDER].reverse(),
 ];

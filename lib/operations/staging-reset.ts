@@ -22,6 +22,29 @@ export const STAGING_RESET_TABLE_ORDER = [
   "import_preview_sessions",
   // Depend only on `interactions` or `donors`.
   "activity_status_audits",
+  // References shared_activities, not interactions directly -- deleted here
+  // (before shared_activities itself, further down) for the same
+  // children-before-parents reason as activity_status_audits above.
+  "shared_activity_recipient_audits",
+  // ask_changes references ask_id (a real FK here, unlike yahrtzeit_id --
+  // see db/schema.ts's askChanges comment), so it's deleted first. asks
+  // references interactions (nullable, source_interaction_id) and donors,
+  // so it's deleted before both of those, further down.
+  "ask_changes",
+  "asks",
+  // pledge_payment_plan_changes references plan_id (a real FK, same
+  // pattern as ask_changes above), so it's deleted first.
+  // pledge_payment_plans references giving_activities.id and donors.id,
+  // so it's deleted before both of those, further down.
+  "pledge_payment_plan_changes",
+  "pledge_payment_plans",
+  // donor_relationship_fact_changes references fact_id (a real FK, same
+  // pattern as ask_changes/pledge_payment_plan_changes above), so it's
+  // deleted first. donor_relationship_facts references donors.id,
+  // users.id, and interactions.id (nullable), so it's deleted before all
+  // three, further down.
+  "donor_relationship_fact_changes",
+  "donor_relationship_facts",
   "donor_contact_audits",
   "donor_historical_context",
   "donor_merge_audits",
@@ -60,6 +83,10 @@ export const STAGING_RESET_TABLE_ORDER = [
   // `donors` self-references itself (merged_into_donor_id), which is safe
   // once nothing else in this list still points at any donor row.
   "interactions",
+  // References by interactions.shared_activity_id (and by
+  // shared_activity_recipient_audits, already deleted above) -- deleted
+  // once interactions is gone, same reasoning as every other parent here.
+  "shared_activities",
   "giving_activities",
   "data_imports",
   "donors",

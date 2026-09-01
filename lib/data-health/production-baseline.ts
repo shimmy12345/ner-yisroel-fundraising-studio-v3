@@ -9,11 +9,23 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 29 as of 0028_important_dates.sql — adds the important_dates/
-// important_date_changes tables, so PRODUCTION_BASELINE_HASH changed again
-// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the single
-// bootstrap file's origin, not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 29;
+// 36 as of 0035_backup_alert_state.sql (D1 Monthly Restore Verification
+// Repair, 2026-09-01 -- schema-manifest.json copied verbatim from
+// feature/independent-cloudflare-sandbox's own current, verified manifest,
+// the same kind of sync commit 4ea1d5e already performed for migration
+// 0029; see docs/AI-HANDOFF.md). Adds shared_activities/
+// shared_activity_recipient_audits, asks/ask_changes,
+// pledge_payment_plans/pledge_payment_plan_changes,
+// donor_relationship_facts/donor_relationship_fact_changes, and
+// backup_alert_state -- new tables, not a rebuild of anything existing --
+// so PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
+// stays "0019": that label identifies the single bootstrap file's origin,
+// not its current contents). This also corrects the prior hardcoded count
+// of 29, which had already drifted one migration behind the manifest's
+// own real 30 (0029 landed in the manifest via commit 4ea1d5e without this
+// separate assertion being bumped to match) -- PRODUCTION_BASELINE_VERIFIED
+// was therefore already silently false immediately before this fix.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 36;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
@@ -22,7 +34,12 @@ export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019"
 // data. Used only by the independent-staging Workspace Health summary — the
 // backup-safety gate and rehearsal scripts keep using the untouched,
 // intentionally conservative BUSINESS_DATA_COUNT_SQL above.
-export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences"];
+//
+// backup_alert_state (added 2026-09-01, ported from
+// feature/independent-cloudflare-sandbox's Backup Scheduling Reliability
+// Stage 3) holds the same kind of thing: operational dedupe state for a
+// scheduled email-alert check, never donor or fundraising data.
+export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences", "backup_alert_state"];
 export const FUNDRAISING_DATA_TABLES = PRODUCTION_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table));
 export const FUNDRAISING_DATA_COUNT_SQL = `SELECT ${FUNDRAISING_DATA_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 export const ACCOUNT_CONFIGURATION_COUNT_SQL = `SELECT COUNT(*) AS count FROM "users"`;
