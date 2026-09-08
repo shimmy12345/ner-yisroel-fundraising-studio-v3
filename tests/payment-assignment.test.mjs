@@ -151,13 +151,20 @@ assert.doesNotMatch(OPEN_PLEDGES_FOR_DONORS_SQL, /category\s+IN/i, "open-pledge 
 assert.match(rollbackRoute, /DELETE FROM jl_payment_assignments WHERE user_id = \? AND applied_import_id = \?/);
 assert.match(experience, /Apply to open pledge/);
 assert.match(experience, /New gift\/payment/);
-assert.match(experience, /No duplicate gift will be created/);
 assert.match(experience, /automatic-match confidence do not hide pledge choices/);
 assert.match(experience, /aria-required="true"/);
 assert.match(experience, /Remaining balance/);
-assert.match(experience, /Resulting status/);
 assert.match(experience, /split_remainder_new_gift/);
 assert.doesNotMatch(experience, /disabled=\{exceedsBalance\}/);
+// Giving Import Reconciliation: Skip -- already recorded, duplicate-match
+// banner, and multi-pledge allocation summary/remainder controls.
+assert.match(experience, /Skip — already recorded/);
+assert.match(experience, /payment-duplicate-banner/);
+assert.match(experience, /Possible duplicate:/);
+assert.match(experience, /Apply the remainder to another open pledge/);
+assert.match(experience, /Leave remaining balance unresolved/);
+assert.match(experience, /payment-allocation-summary/);
+assert.match(experience, /Remaining:/);
 assert.match(migration, /PRIMARY KEY \(`user_id`, `payment_fingerprint`\)/);
 assert.match(auditMigration, /CREATE TABLE `jl_payment_assignment_audits`/);
 assert.match(auditMigration, /`applied_cents` integer NOT NULL/);

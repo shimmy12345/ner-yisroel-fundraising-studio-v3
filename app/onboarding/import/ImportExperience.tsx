@@ -57,8 +57,12 @@ type JlFieldChange = { externalId: string; field: string; currentValue: string; 
 type ExistingDonorReview = { externalId: string; donorName: string; changed: boolean; localOverrideCount: number; signature: string; comparisons: JlFieldChange[] };
 type JlPreview = { households: number; newRelationships: number; existingRelationships: number; recordsWithUpdates: number; reviewMode: ReviewMode; existingDonorReviews: ExistingDonorReview[]; changes: JlFieldChange[]; conflicts: JlFieldChange[]; codeCollisions: Array<{ externalId: string; donorIds: string[] }>; mergeCandidates: MergeCandidate[]; duplicateRows: number; rejectedRows: number };
 type OpenPledgePreview = { id: string; activity_date: number | null; committed_cents: number; paid_cents: number; balance_cents: number; description: string | null; source_campaign: string | null };
-type PaymentAssignmentPreview = { row: number; fingerprint: string; donorName: string; donorMatched: boolean; paymentDate: number | null; amountCents: number | null; campaign: string; action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; remembered: boolean; alreadyApplied: boolean; reason: string | null; openPledges: OpenPledgePreview[] };
-type PaymentDecisionState = { action: "apply_to_pledge" | "new_gift" | "needs_review"; pledgeId: string | null; overpaymentAction: "split_remainder_new_gift" | null };
+type PaymentDuplicateMatchPreview = { confidence: "confirmed" | "likely" | "possible"; existingActivityId: string; existingDonorId: string; existingActivityDate: number | null; existingAmountCents: number | null; existingCampaign: string; existingDescription: string; reason: string };
+type PaymentAction = "apply_to_pledge" | "new_gift" | "needs_review" | "skip_duplicate";
+type PaymentAssignmentPreview = { row: number; fingerprint: string; donorName: string; donorMatched: boolean; paymentDate: number | null; amountCents: number | null; campaign: string; action: PaymentAction; pledgeId: string | null; remembered: boolean; alreadyApplied: boolean; blocked: boolean; reason: string | null; openPledges: OpenPledgePreview[]; duplicateMatch: PaymentDuplicateMatchPreview | null };
+type PledgeAllocationState = { pledgeId: string; amountCents: number };
+type OverpaymentAction = "split_remainder_new_gift" | "leave_unresolved" | null;
+type PaymentDecisionState = { action: PaymentAction; pledgeId: string | null; allocations?: PledgeAllocationState[]; overpaymentAction: OverpaymentAction };
 type PendingGiftMatch = { id: string; activityDate: number; amountCents: number; designation: string | null; note: string | null };
 type PendingGiftMatchPreview = { fingerprint: string; candidates: PendingGiftMatch[] };
 type PendingGiftDecisionState = { action: "needs_decision" | "merge" | "keep_separate"; pendingGiftId: string | null };
@@ -574,29 +578,48 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   }
 
   const stepNumber = step === "upload" ? 1 : step === "recognition" ? 2 : step === "preview" ? 3 : 4;
-  const paymentAllocations = new Map<string, { priorAllocatedCents: number; appliedCents: number; remainderCents: number; resolved: boolean }>();
+  // One or more pledge allocations per payment row (Giving Import
+  // Reconciliation, Problem B) -- generalizes the old single-pledge
+  // computation. `allocatedByPledge` is a running, cross-row ledger
+  // (processed in the same order the rows render) so two different
+  // payments can never jointly plan to over-allocate the same pledge in
+  // this client-side preview -- the server independently re-validates and
+  // is the actual source of truth for what gets committed.
+  const paymentAllocations = new Map<string, { allocations: PledgeAllocationState[]; appliedTotalCents: number; remainderCents: number; resolved: boolean }>();
   const allocatedByPledge = new Map<string, number>();
   for (const item of donationPreview?.paymentAssignments ?? []) {
     if (item.alreadyApplied) continue;
     const decision = paymentDecisions[item.fingerprint];
-    if (decision?.action !== "apply_to_pledge" || !decision.pledgeId) continue;
-    const pledge = item.openPledges.find((option) => option.id === decision.pledgeId);
-    if (!pledge) continue;
-    const priorAllocation = allocatedByPledge.get(pledge.id) ?? 0;
-    const availableCents = Math.max(0, pledge.balance_cents - priorAllocation);
-    const appliedCents = Math.min(item.amountCents ?? 0, availableCents);
-    const remainderCents = Math.max(0, (item.amountCents ?? 0) - appliedCents);
-    const resolved = appliedCents > 0 && (remainderCents === 0 || decision.overpaymentAction === "split_remainder_new_gift");
-    paymentAllocations.set(item.fingerprint, { priorAllocatedCents: priorAllocation, appliedCents, remainderCents, resolved });
-    if (resolved) allocatedByPledge.set(pledge.id, priorAllocation + appliedCents);
+    if (!decision || decision.action !== "apply_to_pledge") continue;
+    const requested: PledgeAllocationState[] = decision.allocations && decision.allocations.length > 0
+      ? decision.allocations
+      : decision.pledgeId
+        ? [{ pledgeId: decision.pledgeId, amountCents: item.amountCents ?? 0 }]
+        : [];
+    if (requested.length === 0) continue;
+    const resolvedAllocations: PledgeAllocationState[] = [];
+    let appliedTotalCents = 0;
+    for (const allocation of requested) {
+      const pledge = item.openPledges.find((option) => option.id === allocation.pledgeId);
+      if (!pledge) continue;
+      const priorAllocation = allocatedByPledge.get(pledge.id) ?? 0;
+      const availableCents = Math.max(0, pledge.balance_cents - priorAllocation);
+      const appliedCents = Math.max(0, Math.min(allocation.amountCents, availableCents, (item.amountCents ?? 0) - appliedTotalCents));
+      if (appliedCents <= 0) continue;
+      resolvedAllocations.push({ pledgeId: pledge.id, amountCents: appliedCents });
+      appliedTotalCents += appliedCents;
+      allocatedByPledge.set(pledge.id, priorAllocation + appliedCents);
+    }
+    const remainderCents = Math.max(0, (item.amountCents ?? 0) - appliedTotalCents);
+    const resolved = appliedTotalCents > 0 && (remainderCents === 0 || decision.overpaymentAction === "split_remainder_new_gift" || decision.overpaymentAction === "leave_unresolved");
+    paymentAllocations.set(item.fingerprint, { allocations: resolvedAllocations, appliedTotalCents, remainderCents, resolved });
   }
   const unresolvedPayments = donationPreview?.paymentAssignments.filter((item) => {
     if (item.alreadyApplied) return false;
     const decision = paymentDecisions[item.fingerprint];
     if (!decision || decision.action === "needs_review") return true;
-    if (decision.action !== "apply_to_pledge") return false;
-    const pledge = item.openPledges.find((option) => option.id === decision.pledgeId);
-    return !pledge || !paymentAllocations.get(item.fingerprint)?.resolved;
+    if (decision.action === "skip_duplicate" || decision.action === "new_gift") return false;
+    return !paymentAllocations.get(item.fingerprint)?.resolved;
   }).length ?? 0;
   const relevantPendingMatches = (donationPreview?.pendingGiftMatches ?? []).filter((match) => {
     if (!donationPreview?.paymentAssignments.length) return true;
@@ -635,8 +658,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
     return decision.action === "field_by_field" && donor.comparisons.filter((item) => item.changed).some((change) => (fieldDecisions[`${donor.externalId}:${change.field}`] ?? "needs_decision") === "needs_decision");
   }).length ?? 0;
   const codeCollisions = jlPreview?.codeCollisions.length ?? 0;
-  const proposedNewPayments = donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && (paymentDecisions[item.fingerprint]?.action === "new_gift" || (paymentAllocations.get(item.fingerprint)?.remainderCents ?? 0) > 0 && paymentAllocations.get(item.fingerprint)?.resolved)).length ?? 0;
-  const proposedPledgeUpdates = new Set(donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && paymentAllocations.get(item.fingerprint)?.resolved && paymentDecisions[item.fingerprint]?.pledgeId).map((item) => paymentDecisions[item.fingerprint].pledgeId) ?? []).size;
+  const proposedNewPayments = donationPreview?.paymentAssignments.filter((item) => !item.alreadyApplied && (paymentDecisions[item.fingerprint]?.action === "new_gift" || paymentDecisions[item.fingerprint]?.action === "apply_to_pledge" && (paymentAllocations.get(item.fingerprint)?.remainderCents ?? 0) > 0 && paymentDecisions[item.fingerprint]?.overpaymentAction === "split_remainder_new_gift" && paymentAllocations.get(item.fingerprint)?.resolved)).length ?? 0;
+  const proposedPledgeUpdates = new Set((donationPreview?.paymentAssignments ?? []).filter((item) => !item.alreadyApplied && paymentAllocations.get(item.fingerprint)?.resolved).flatMap((item) => paymentAllocations.get(item.fingerprint)!.allocations.map((allocation) => allocation.pledgeId))).size;
   const crossImportResolvedCount = (donationPreview?.crossImportRows ?? []).filter((item) => (crossImportDecisions[item.fingerprint]?.action ?? "needs_decision") !== "needs_decision").length;
   const draftProgressTotal = resolvableReviewRows.length + dateReviewRows.length + (donationPreview?.crossImportRows.length ?? 0) + reviewableRejectedRows.length;
   const draftProgressResolved = (resolvableReviewRows.length - unresolvedReviewRows) + (dateReviewRows.length - unresolvedDateRows) + crossImportResolvedCount + resolvedRejectedRows;
@@ -960,20 +983,44 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
               {donationPreview.paymentAssignments.length > 0 && <section className="payment-assignment-section" aria-labelledby="payment-assignment-title">
                 <div><p className="eyebrow">MANUAL PAYMENT ASSIGNMENT</p><h2 id="payment-assignment-title">Decide how each payment should be recorded.</h2><p>Nothing is assigned automatically. Review every proposed change before importing.</p></div>
                 <div className="payment-assignment-list">{donationPreview.paymentAssignments.map((item) => {
-                  const decision = paymentDecisions[item.fingerprint] ?? { action: item.action, pledgeId: item.pledgeId, overpaymentAction: null };
-                  const invalid = Boolean(item.reason && !item.reason.startsWith("Choose whether") && !item.alreadyApplied);
-                  const selectedPledge = item.openPledges.find((pledge) => pledge.id === decision.pledgeId);
+                  const decision: PaymentDecisionState = paymentDecisions[item.fingerprint] ?? { action: item.action, pledgeId: item.pledgeId, allocations: undefined, overpaymentAction: null };
+                  const invalid = item.blocked && !item.alreadyApplied;
                   const allocation = paymentAllocations.get(item.fingerprint);
+                  const activeAllocations: PledgeAllocationState[] = decision.allocations && decision.allocations.length > 0
+                    ? decision.allocations
+                    : decision.pledgeId
+                      ? [{ pledgeId: decision.pledgeId, amountCents: Math.min(item.amountCents ?? 0, item.openPledges.find((pledge) => pledge.id === decision.pledgeId)?.balance_cents ?? 0) }]
+                      : [];
+                  const usedPledgeIds = new Set(activeAllocations.map((allocationItem) => allocationItem.pledgeId));
+                  const remainingPledgeOptions = item.openPledges.filter((pledge) => !usedPledgeIds.has(pledge.id));
+                  const setDecision = (next: PaymentDecisionState) => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: next }));
                   return <article className="payment-assignment-card" key={item.fingerprint}>
                     <header><div><strong>{item.donorName}</strong><span>Row {item.row} · {epochDateLabel(item.paymentDate)} · {item.campaign || "No campaign"}</span></div><b>{centsLabel(item.amountCents)}</b></header>
+                    {item.duplicateMatch && !item.alreadyApplied && <p className={`payment-duplicate-banner payment-duplicate-${item.duplicateMatch.confidence}`}>{item.duplicateMatch.confidence === "confirmed" ? "Duplicate: " : "Possible duplicate: "}a {centsLabel(item.duplicateMatch.existingAmountCents)}{item.duplicateMatch.existingCampaign ? ` ${item.duplicateMatch.existingCampaign}` : ""} gift dated {epochDateLabel(item.duplicateMatch.existingActivityDate)} is already recorded in Fundraising OS{item.duplicateMatch.existingDonorId ? <> (<a href={`/donors/${item.duplicateMatch.existingDonorId}`} target="_blank" rel="noreferrer">view donor</a>)</> : null}.</p>}
                     {item.alreadyApplied ? <p className="payment-remembered">Already processed: {item.action === "apply_to_pledge" ? "applied to the saved pledge" : "recorded as a new gift"}. It will not be counted again.</p> : <>
-                      <label><span>Classify payment</span><select aria-label={`Classify payment for row ${item.row}`} value={decision.action} disabled={invalid} onChange={(event) => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { action: event.target.value as "apply_to_pledge" | "new_gift" | "needs_review", pledgeId: null, overpaymentAction: null } }))}><option value="needs_review">Needs review</option><option value="apply_to_pledge" disabled={!item.openPledges.length}>Apply to open pledge</option><option value="new_gift">New gift/payment</option></select></label>
+                      <label><span>Classify payment</span><select aria-label={`Classify payment for row ${item.row}`} value={decision.action} disabled={invalid} onChange={(event) => setDecision({ action: event.target.value as PaymentAction, pledgeId: null, allocations: undefined, overpaymentAction: null })}><option value="needs_review">Needs review</option><option value="apply_to_pledge" disabled={!item.openPledges.length}>Apply to open pledge</option><option value="new_gift">New gift/payment</option><option value="skip_duplicate">Skip — already recorded</option></select></label>
                       {invalid && <p className="onboarding-error">{item.reason}</p>}
-                      {decision.action === "apply_to_pledge" && item.openPledges.length > 0 && <fieldset className="open-pledge-options" aria-required="true"><legend>Select any open pledge for this donor <span>Required</span></legend><p>Campaign, description, date, item number, amount, and automatic-match confidence do not hide pledge choices.</p>{item.openPledges.map((pledge) => <label key={pledge.id} className={decision.pledgeId === pledge.id ? "selected" : ""}><input type="radio" name={`pledge-${item.fingerprint}`} required checked={decision.pledgeId === pledge.id} onChange={() => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { action: "apply_to_pledge", pledgeId: pledge.id, overpaymentAction: null } }))}/><span><strong>{epochDateLabel(pledge.activity_date)} · {pledge.description || "Open pledge"}</strong><small>Original {centsLabel(pledge.committed_cents)} · Paid {centsLabel(pledge.paid_cents)} · Remaining balance {centsLabel(pledge.balance_cents)} · Campaign {pledge.source_campaign || "Not recorded"}</small></span></label>)}</fieldset>}
+                      {decision.action === "skip_duplicate" && <p className="payment-proposal">Proposed change: none. No gift, payment, or pledge update will be created. This row will be marked resolved.</p>}
+                      {decision.action === "apply_to_pledge" && item.openPledges.length > 0 && activeAllocations.length === 0 && <fieldset className="open-pledge-options" aria-required="true"><legend>Select an open pledge for this donor <span>Required</span></legend><p>Campaign, description, date, item number, amount, and automatic-match confidence do not hide pledge choices.</p>{item.openPledges.map((pledge) => <label key={pledge.id}><input type="radio" name={`pledge-${item.fingerprint}`} required checked={false} onChange={() => setDecision({ action: "apply_to_pledge", pledgeId: pledge.id, allocations: undefined, overpaymentAction: null })}/><span><strong>{epochDateLabel(pledge.activity_date)} · {pledge.description || "Open pledge"}</strong><small>Original {centsLabel(pledge.committed_cents)} · Paid {centsLabel(pledge.paid_cents)} · Remaining balance {centsLabel(pledge.balance_cents)} · Campaign {pledge.source_campaign || "Not recorded"}</small></span></label>)}</fieldset>}
                       {decision.action === "apply_to_pledge" && !item.openPledges.length && <p className="payment-review-note">This donor has no open pledges available.</p>}
                       {decision.action === "new_gift" && <p className="payment-proposal">Proposed change: create one separate paid gift for {centsLabel(item.amountCents)}.</p>}
-                      {decision.action === "apply_to_pledge" && selectedPledge && allocation && allocation.remainderCents > 0 && <fieldset className="overpayment-options"><legend>Payment exceeds the available pledge balance by {centsLabel(allocation.remainderCents)}. Choose what to do.</legend><button type="button" className={decision.overpaymentAction === "split_remainder_new_gift" ? "selected" : ""} onClick={() => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { ...decision, overpaymentAction: "split_remainder_new_gift" } }))}>Apply {centsLabel(allocation.appliedCents)} to pledge and treat {centsLabel(allocation.remainderCents)} as a new gift</button><button type="button" onClick={() => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { action: "apply_to_pledge", pledgeId: null, overpaymentAction: null } }))}>Choose another pledge</button><button type="button" onClick={() => setPaymentDecisions((current) => ({ ...current, [item.fingerprint]: { action: "needs_review", pledgeId: null, overpaymentAction: null } }))}>Return to review</button></fieldset>}
-                      {decision.action === "apply_to_pledge" && selectedPledge && allocation?.resolved && <p className="payment-proposal">Proposed change: apply {centsLabel(allocation.appliedCents)} to this pledge. Paid amount: {centsLabel(selectedPledge.paid_cents + allocation.priorAllocatedCents + allocation.appliedCents)}. New balance: {centsLabel(selectedPledge.balance_cents - allocation.priorAllocatedCents - allocation.appliedCents)}. Resulting status: {allocation.priorAllocatedCents + allocation.appliedCents === selectedPledge.balance_cents ? "Fulfilled" : "Partially paid"}.{allocation.remainderCents > 0 ? ` Create one separate gift for the ${centsLabel(allocation.remainderCents)} remainder.` : " No duplicate gift will be created."}</p>}
+                      {decision.action === "apply_to_pledge" && activeAllocations.length > 0 && <ul className="pledge-allocation-list">{activeAllocations.map((allocationItem) => {
+                        const pledge = item.openPledges.find((option) => option.id === allocationItem.pledgeId);
+                        return <li key={allocationItem.pledgeId}><span>→ {pledge?.description || "Open pledge"} ({pledge?.source_campaign || "No campaign"}): {centsLabel(allocationItem.amountCents)}</span><button type="button" onClick={() => {
+                          const remaining = activeAllocations.filter((entry) => entry.pledgeId !== allocationItem.pledgeId);
+                          setDecision(remaining.length > 1 ? { action: "apply_to_pledge", pledgeId: null, allocations: remaining, overpaymentAction: null } : remaining.length === 1 ? { action: "apply_to_pledge", pledgeId: remaining[0].pledgeId, allocations: undefined, overpaymentAction: null } : { action: "apply_to_pledge", pledgeId: null, allocations: undefined, overpaymentAction: null });
+                        }}>Remove</button></li>;
+                      })}</ul>}
+                      {decision.action === "apply_to_pledge" && activeAllocations.length > 0 && allocation && allocation.remainderCents > 0 && <fieldset className="overpayment-options"><legend>Remaining: {centsLabel(allocation.remainderCents)}</legend>
+                        {remainingPledgeOptions.length > 0 && <div className="pledge-remainder-picker"><p>Apply the remainder to another open pledge:</p>{remainingPledgeOptions.map((pledge) => {
+                          const applyCents = Math.min(allocation.remainderCents, pledge.balance_cents);
+                          return <button type="button" key={pledge.id} onClick={() => setDecision({ action: "apply_to_pledge", pledgeId: null, allocations: [...activeAllocations, { pledgeId: pledge.id, amountCents: applyCents }], overpaymentAction: null })}>Apply {centsLabel(applyCents)} to {pledge.description || "Open pledge"} ({pledge.source_campaign || "No campaign"})</button>;
+                        })}</div>}
+                        <button type="button" className={decision.overpaymentAction === "split_remainder_new_gift" ? "selected" : ""} onClick={() => setDecision({ action: "apply_to_pledge", pledgeId: null, allocations: activeAllocations, overpaymentAction: "split_remainder_new_gift" })}>Record {centsLabel(allocation.remainderCents)} as a new gift/payment</button>
+                        <button type="button" className={decision.overpaymentAction === "leave_unresolved" ? "selected" : ""} onClick={() => setDecision({ action: "apply_to_pledge", pledgeId: null, allocations: activeAllocations, overpaymentAction: "leave_unresolved" })}>Leave remaining balance unresolved</button>
+                        <button type="button" onClick={() => setDecision({ action: "needs_review", pledgeId: null, allocations: undefined, overpaymentAction: null })}>Return to review</button>
+                      </fieldset>}
+                      {decision.action === "apply_to_pledge" && allocation?.resolved && <div className="payment-proposal"><p>Proposed change:</p><ul className="payment-allocation-summary"><li>Payment: {centsLabel(item.amountCents)}</li>{allocation.allocations.map((allocationItem) => <li key={allocationItem.pledgeId}>→ {item.openPledges.find((option) => option.id === allocationItem.pledgeId)?.description || "Open pledge"}: {centsLabel(allocationItem.amountCents)}</li>)}{decision.overpaymentAction === "split_remainder_new_gift" && allocation.remainderCents > 0 && <li>→ New gift: {centsLabel(allocation.remainderCents)}</li>}<li>Remaining: {centsLabel(decision.overpaymentAction === "leave_unresolved" ? allocation.remainderCents : 0)}</li></ul></div>}
                       {decision.action === "needs_review" && !invalid && <p className="payment-review-note">{item.reason}</p>}
                     </>}
                   </article>;

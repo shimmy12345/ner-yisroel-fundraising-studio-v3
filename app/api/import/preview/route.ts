@@ -11,6 +11,7 @@ import { buildRejectedRows } from "../../../../lib/import/jl-donation-rejection-
 import { chunkJsonRows } from "../../../../lib/import/d1-json-chunks";
 import { isPreviewSessionUsable, isReopenableForFollowUp, parseDraftDecisions, previewSessionExpiresAt, reconstructRowsFromChunks, type PreviewSessionRow } from "../../../../lib/import/preview-session";
 import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, type OpenPledge, type RememberedPaymentDecision } from "../../../../lib/import/jl-payment-assignment";
+import { EXISTING_COMPLETED_GIFTS_FOR_DUPLICATE_MATCH_SQL, type ExistingCompletedGiftRow } from "../../../../lib/import/jl-payment-duplicate-match";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../../lib/import/jl-refresh";
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-deduplication";
@@ -164,7 +165,17 @@ export async function POST(request: Request) {
       : { results: [] as RememberedPaymentDecision[] };
     const rememberedFingerprints = new Set(remembered.results.map((decision) => decision.payment_fingerprint));
     const rememberedWithLegacyGifts = [...remembered.results, ...existing.results.filter((activity) => paymentFingerprints.has(activity.source_fingerprint) && !rememberedFingerprints.has(activity.source_fingerprint)).map((activity) => ({ payment_fingerprint: activity.source_fingerprint, decision_type: "new_gift" as const, pledge_activity_id: null, applied_import_id: "existing-gift" }))];
-    const paymentAssignments = buildPaymentCandidates(paymentActivities, households.results, openPledges.results, rememberedWithLegacyGifts);
+    // Confidence-aware duplicate detection (Giving Import Reconciliation):
+    // matches an incoming payment against existing COMPLETED gifts by
+    // donor/date/amount/campaign, independent of source_fingerprint --
+    // catches a payment reported through a different JL export shape than
+    // the one that originally recorded the gift (see
+    // lib/import/jl-payment-duplicate-match.ts's own header comment for
+    // why fingerprint-only matching can miss this).
+    const existingCompletedGifts = donorIds.length
+      ? await env.DB.prepare(EXISTING_COMPLETED_GIFTS_FOR_DUPLICATE_MATCH_SQL).bind(profile.id, JSON.stringify(donorIds)).all<ExistingCompletedGiftRow>()
+      : { results: [] as ExistingCompletedGiftRow[] };
+    const paymentAssignments = buildPaymentCandidates(paymentActivities, households.results, openPledges.results, rememberedWithLegacyGifts, existingCompletedGifts.results);
     const publicPaymentAssignments = paymentAssignments.map(({ donorId, openPledges: candidatePledges, ...candidate }) => ({ ...candidate, donorMatched: Boolean(donorId), openPledges: candidatePledges.map((pledge) => ({ id: pledge.id, activity_date: pledge.activity_date, committed_cents: pledge.committed_cents, paid_cents: pledge.paid_cents, balance_cents: pledge.balance_cents, description: pledge.description, source_campaign: pledge.source_campaign })) }));
     const pendingInputs = [
       ...match.newActivities.map((activity) => ({ fingerprint: activity.fingerprint, donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents })),

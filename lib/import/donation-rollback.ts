@@ -104,6 +104,19 @@ export function buildDonationRollbackPreview(
   if (changes.length === 0) blockers.push("This batch has no recorded database changes to reverse.");
 
   for (const change of changes) {
+    // A "Skip -- already recorded" duplicate-payment decision (Giving
+    // Import Reconciliation) makes no giving_activities mutation of any
+    // kind -- see lib/import/jl-payment-assignment.ts's
+    // PlannedSkippedDuplicate. There is nothing to reverse, so this row
+    // contributes neither a blocker nor a restorable change. Checked
+    // before the `current` lookup below (which is keyed to an actual
+    // giving_activities row and would otherwise treat a skip's own
+    // payment fingerprint -- which never has a matching activity row --
+    // as "a gift changed by this batch is no longer present," incorrectly
+    // blocking rollback of the rest of a batch that also skipped a
+    // duplicate).
+    if (change.change_type === "skipped_duplicate") continue;
+
     const current = currentByFingerprint.get(change.source_fingerprint);
     if (!current) {
       blockers.push(`A gift changed by this batch is no longer present (${change.source_fingerprint.slice(0, 12)}…).`);
