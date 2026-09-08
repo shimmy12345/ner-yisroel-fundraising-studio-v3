@@ -15950,6 +15950,291 @@ self-exercise the first time it's genuinely needed. Stage 3 (active
 alerting at the existing 36h threshold) remains the only undone item
 from the original plan, unstarted by instruction.
 
+## Giving Import Reconciliation: Duplicate Detection + Multi-Pledge Allocation (2026-09-08) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO MUTATION
+
+**Implementation commit:** `5c6f9be` -- "Add duplicate-payment detection and
+multi-pledge allocation to giving import".
+
+**Scope:** a narrow upgrade to the JL "Manual Payment Assignment" review
+step (`lib/import/jl-payment-assignment.ts`, `app/api/import/route.ts`,
+`app/api/import/preview/route.ts`, `app/onboarding/import/ImportExperience.tsx`)
+fixing two related defects. No changes to the Recommendation Engine,
+Portfolio Focus, Relationship Intelligence, Ask lifecycle, backup
+systems, auth, Gmail, donor-page rendering, or the broader giving data
+model.
+
+### Problem A -- already-recorded payments not recognized as duplicates
+
+**Root cause:** the existing content-fingerprint duplicate check
+(`lib/import/jl-donation-cross-import.ts`) hashes `Item Num`/`Desc`/
+`Company` columns from the FULL JL export format
+(`canonicalFingerprint`, `lib/import/jl-donations.ts`). A compact
+payments-report export (`Code, First Name, Last Name, Date, Campaign,
+Amount`) never has those columns, so the exact same real-world
+transaction produces a structurally different fingerprint depending on
+which export format originally recorded it -- fingerprint equality can
+never catch this class of duplicate, no matter how the check is tuned.
+Confirmed directly against the real Independent Staging record named in
+the task: **Mr. & Mrs. Mordechai Schwartz** (JL code `56283`), an
+existing `completed_gift` row dated **2026-09-07**, campaign **CT2026**,
+`committed_cents`/`paid_cents` = **967000** ($9,670), `balance_cents` = 0.
+
+**Fix:** `lib/import/jl-payment-duplicate-match.ts` (new, pure, no I/O) --
+`findPaymentDuplicateMatch()` matches an incoming payment against
+existing `completed_gift` rows for the same donor by **date + amount**
+(never fingerprint), independent of source format, then narrows
+confidence using campaign and a stable transaction ID where available:
+- **"confirmed"**: a stable transaction/reference/check identifier
+  already recorded on an existing gift's own source snapshot matches.
+- **"likely"**: donor + date + amount match exactly one existing gift,
+  and that gift's campaign also matches (case-insensitive).
+- **"possible"**: donor + date + amount match, but campaign differs (or
+  either side has none), or more than one existing gift matches --
+  deliberately never escalated to "likely", so two legitimate same-day
+  equal payments are never conflated into one.
+
+Scoped intentionally to `category = 'completed_gift'` only: an
+`open_pledge`/`partially_paid_pledge` row's own `activity_date` is the
+pledge's commitment date, not any individual payment's received date --
+there is no per-payment date recorded for those in the current schema,
+so matching a payment's date against a pledge's own date would be
+unreliable. This is a disclosed, honest scope limit, not an oversight.
+
+`buildPaymentCandidates()` now accepts the existing donors' completed
+gifts (`EXISTING_COMPLETED_GIFTS_FOR_DUPLICATE_MATCH_SQL`, queried
+identically in both the preview and commit routes so a decision made
+against a stale preview can never bypass the check at commit time) and
+attaches `duplicateMatch` to each `PaymentCandidate`. A "confirmed" or
+"likely" match defaults the row's `action` toward the new
+`"skip_duplicate"` action -- **a visible, submitted, overridable
+decision, never a silent auto-skip**: the row still renders in the
+review list with its classification dropdown showing "Skip -- already
+recorded" pre-selected, and the user must still confirm the whole
+import. A "possible" match is surfaced (banner + reason text) but never
+pre-selected toward anything.
+
+### Skip -- already recorded: semantics
+
+Selecting Skip (`decision.action === "skip_duplicate"`) creates **no
+new gift, no new payment, no pledge update of any kind** -- confirmed by
+`planPaymentAssignments()` routing it straight into a new
+`skippedDuplicates` output array, never touching `newGifts`/
+`pledgeUpdates`/`assignments`. It is available regardless of whether a
+duplicate was automatically detected (Section 4's own requirement) --
+tested explicitly with zero evidence present.
+
+**Audit trail, no schema change needed:** `giving_activity_import_changes`
+(`drizzle/0003_jl_donation_import.sql`) already has a free-string
+`change_type` column with no CHECK constraint (unlike
+`jl_payment_assignments`/`jl_payment_assignment_audits`, whose
+`decision_type` columns ARE CHECK-constrained to
+`('apply_to_pledge','new_gift')`). A skip is recorded there under a new
+`change_type = 'skipped_duplicate'` value, `previous_json` carrying
+`{matchedActivityId, matchConfidence}` when a match was found -- fully
+queryable provenance, never dependent only on rendered UI text, with
+zero migration required. Taught `lib/import/donation-rollback.ts` to
+treat `'skipped_duplicate'` as a safe, blocker-free no-op (it previously
+fell into the catch-all "unsupported change type" blocker, which would
+have made an entire batch un-rollbackable merely because one row in it
+was skipped) -- verified with a dedicated test.
+
+**Idempotency, deliberately without persistence:** unlike
+`apply_to_pledge`/`new_gift` decisions (remembered in
+`jl_payment_assignments` so a re-uploaded identical payment isn't
+re-asked), a skip decision is **never** written to that table. This is
+intentional, not an oversight: Skip makes zero mutation, so re-deriving
+the exact same live duplicate-match result on a later re-upload
+naturally reproduces the exact same (harmless) outcome every time --
+there is nothing to "remember" that changes the result. Verified with a
+repeated-submit test.
+
+### Problem B -- payment larger than one open pledge
+
+**Root cause:** `planPaymentAssignments()` only ever supported a single
+`pledgeId` per decision; a payment exceeding that one pledge's balance
+could only become an error, a new gift for the whole remainder, or
+require choosing an entirely different single pledge -- there was no way
+to split one real payment across multiple pledges.
+
+**Data-model decision (Section 25 checkpoint):** investigated whether
+the current schema can represent one payment allocated to multiple
+pledges *before* writing any allocation code. **Conclusion: yes, with no
+schema change**, by generalizing the exact pattern this codebase already
+used for the overpayment-remainder gift
+(`remainderGiftFingerprint(paymentFingerprint)` -- a deterministic
+synthetic fingerprint derived from the source payment's own
+fingerprint). `jl_payment_assignments` (PK `(user_id,
+payment_fingerprint)`) and `jl_payment_assignment_audits` (UNIQUE
+`(import_id, payment_fingerprint)`) both already tolerate any number of
+*distinct* fingerprints per logical payment; they only ever prevented
+two rows sharing the *same* fingerprint. A new
+`pledgeAllocationFingerprint(paymentFingerprint, pledgeId)` (deterministic
+per pledge id, not array position, so re-rendering the same decision
+with allocations reordered, or removing and re-adding one, never
+produces a different key) gives each pledge in a multi-pledge decision
+its own row in both tables using the **already-allowed**
+`decision_type: 'apply_to_pledge'` value -- no CHECK-constraint widening,
+no migration, no table rebuild. One additional "parent marker" row keyed
+by the *original*, un-suffixed payment fingerprint (`pledgeActivityId:
+null`) preserves the exact same `alreadyApplied` idempotency check a
+single-pledge decision already had, for a genuine 2+-pledge split.
+
+**Allocation model:** `PaymentDecisionInput` gained an optional
+`allocations: Array<{pledgeId, amountCents}>` (the existing single-pledge
+`pledgeId` field is preserved unchanged and still auto-caps to the
+pledge's outstanding balance for the common case -- fully backward
+compatible with every pre-existing test). `OverpaymentAction` gained a
+new `"leave_unresolved"` value alongside the existing
+`"split_remainder_new_gift"`, so a genuine remainder can be deliberately
+left unresolved (no gift, no error, no pledge update for that slice) as
+a first-class, visible terminal state -- distinct from simply never
+deciding, which still blocks commit. Invariants enforced in
+`planPaymentAssignments()` before anything is applied: allocations sum
+never exceeds the payment amount; no single allocation exceeds its
+pledge's own outstanding balance (no override semantic exists, by
+design); the same pledge can never appear twice in one decision;
+amounts must be positive integers (whole cents); all arithmetic is
+integer-cents throughout, never floating point.
+
+**Confirmed already correct, no fix needed:** the existing
+"remainder becomes a new gift" path (`overpaymentAction:
+"split_remainder_new_gift"`) already creates a `completed_gift` (
+`paidCents = amountCents`, `balanceCents = 0`) -- money already
+received -- never a new unpaid pledge. Investigated per the task's own
+Section 13 concern and found no defect; documented rather than changed.
+
+### Regression cases, verified against real Independent Staging data
+
+Investigated (read-only) before implementation:
+- The exact Schwartz Sep 7 2026 / CT2026 / $9,670 `completed_gift`
+  record named in the task (confirmed above).
+- Real donors with 2 open pledges: e.g. **Rabbi & Mrs. Avraham
+  Rosenbaum** (JL code `69341`) -- $150.00 outstanding on campaign
+  `DYSP5777`, $200.00 outstanding on campaign `DIN2025` -- used as the
+  live multi-pledge verification case below.
+
+### Tests
+
+New: `tests/payment-duplicate-match.test.mjs` (confidence-tier matrix:
+exact match, campaign mismatch, ambiguous multiple matches, date-only
+match, amount-only match, missing evidence, stable-ID confirmation,
+case-insensitivity), `tests/payment-skip-duplicate.test.mjs` (the
+mandatory Schwartz regression case end-to-end, manual skip with zero
+evidence, user-override of a suggested skip, repeated-submit
+idempotency, rollback-safety of a batch containing a skipped row),
+`tests/payment-multi-pledge-allocation.test.mjs` (all 12 scenarios in
+the task's own test matrix: exact/partial/over-balance payments,
+2-pledge and 3-pledge splits, remainder-as-new-gift,
+remainder-left-unresolved, overallocation rejected, single-pledge
+overpay rejected, duplicate-pledge-in-one-decision rejected, exact cents
+arithmetic, multi-pledge idempotency marker). `tests/payment-assignment.test.mjs`
+(pre-existing) updated only where its own assertions named UI text that
+legitimately changed shape (the old single-pledge "Resulting status"
+summary paragraph replaced by the new itemized allocation summary); every
+pre-existing assertion about single-pledge behavior, `aria-required`,
+and `split_remainder_new_gift` still passes unchanged.
+`lib/import/donation-rollback.ts` also has a new inline test case in
+`tests/payment-skip-duplicate.test.mjs` covering the `'skipped_duplicate'`
+no-op fix.
+
+**Gates:** `pnpm test` (full suite, 145 test files including all 4 new/
+updated ones) -- all pass except the one pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure already documented in
+this file's own D1 Monthly Restore Verification Repair entry above
+(confirmed identical on a clean checkout before this work began, and
+untouched by any file this round changed). `pnpm exec tsc --noEmit` --
+clean, zero errors. `pnpm run build:staging-independent` -- succeeded.
+
+**Schema change: none required for either feature.**
+
+**Deployment:** Independent Staging only, via
+`pnpm run deploy:staging-independent`. Pre-deploy Worker version
+`23d1b292-d286-4390-8bc7-66a2d5e96c87` -> post-deploy
+`72af31f1-49dc-4b43-a256-5c101ac39ee7`. No production/main deploy.
+
+**Live verification (browser, Independent Staging, no financial
+commit):**
+- Uploaded a synthetic compact-format row (Code `56283`, Date
+  2026-09-07, Campaign CT2026, Amount 9670.00) through the real Upload ->
+  Review -> Preview flow. The Manual Payment Assignment card correctly
+  showed: *"Possible duplicate: a $9,670.00 CT2026 gift dated Sep 7, 2026
+  is already recorded in Fundraising OS (view donor)."*, with
+  "Skip -- already recorded" pre-selected in the classification dropdown,
+  and "Proposed change: none. No gift, payment, or pledge update will be
+  created. This row will be marked resolved." The "view donor" link
+  opened the real Mr. & Mrs. Mordechai Schwartz donor page in a new tab,
+  independently confirming "Most recent paid gift: $9,670 · Sep 7, 2026"
+  on that donor's own live record. Overriding the dropdown to "New
+  gift/payment" correctly changed the proposed-change text while leaving
+  the duplicate banner visible (user-override confirmed working).
+- Uploaded a second synthetic row for the real Rosenbaum donor (JL
+  `69341`, a fresh, non-matching date/campaign/amount so no duplicate was
+  suggested) for **$400.00** against their two real open pledges
+  ($200.00 and $150.00 outstanding). Selecting the first pledge
+  auto-capped the allocation at its $200.00 balance (never the raw
+  payment amount) and exposed "Remaining: $200.00"; clicking "Apply
+  $150.00 to Open pledge (DYSP5777)" (the auto-computed maximum for the
+  second pledge) correctly reduced the remainder to "Remaining: $50.00"
+  and removed both now-used pledges from the picker; selecting "Leave
+  remaining balance unresolved" produced the exact itemized summary:
+  `Payment: $400.00 / -> Open pledge: $200.00 / -> Open pledge: $150.00 /
+  Remaining: $50.00`.
+- **Neither preview session was ever committed** -- both were abandoned
+  by navigating away before reaching "Confirm and import"; the temporary
+  local CSV files used to drive the upload were deleted afterward and
+  never committed to the repository.
+- Mobile/narrow-viewport layout was **not independently re-confirmed**
+  in this session (a `resize_window` call did not visibly change the
+  captured viewport in this browser-automation environment) -- the new
+  markup reuses the same block-level list/paragraph structure as the
+  pre-existing payment-assignment card, which the app already renders
+  responsively elsewhere, so this is a low-risk, disclosed gap rather
+  than a confirmed pass.
+
+**D1 mutation result: zero**, confirmed by an explicit before/after
+fingerprint spanning `donors`, `giving_activities`, `gifts`, `asks`,
+`interactions`, `recommendations`, `donor_relationship_facts`, and
+`pledge_payment_plans`, plus targeted re-checks of the exact two records
+the live verification touched: Schwartz's `paid_cents` (967000,
+unchanged) and both Rosenbaum pledges' `balance_cents` (15000/20000,
+both unchanged). The fingerprint itself legitimately differs from this
+same file's D1 Monthly Restore Verification Repair entry's own recorded
+numbers eight days earlier (`giving_activities` 5176->5185,
+`interactions` 72->73, `donor_relationship_facts` 7->8,
+`pledge_payment_plans` 33->35) -- Independent Staging is a live,
+actively-used environment between sessions, and none of that drift
+occurred during this task's own before/after window.
+
+**Human-usefulness review (Section 31):**
+1. Does FOS reconcile before asking to create something new? **Yes** --
+   duplicate detection runs before offering Apply-to-pledge/New-gift.
+2. Can the user immediately tell a payment may already be recorded?
+   **Yes** -- the possible-duplicate banner names the exact matching
+   record.
+3. Can the user intentionally skip an already-recorded payment? **Yes**
+   -- Skip -- already recorded, zero mutation.
+4. Can one payment satisfy several real pledges? **Yes** -- verified
+   live across two real pledges plus a third scenario in tests.
+5. Does the UI make remaining balance obvious? **Yes** -- "Remaining:
+   $X" plus the itemized summary.
+6. Is received cash counted only once? **Yes** -- `paymentCents`/
+   `appliedCents`/`newGiftCents` invariants tested explicitly; the
+   overpayment-remainder path was already correct.
+7. Is the user ever forced to create a fake new pledge merely to absorb
+   cash already received? **No** -- confirmed the existing remainder
+   path already creates a `completed_gift`, and "leave unresolved" gives
+   an explicit third option that fabricates nothing at all.
+
+**Remaining limitations (disclosed, not blocking):** duplicate detection
+is scoped to `completed_gift` records only (a payment against an
+already-partially-paid pledge is not separately duplicate-checked, since
+that schema has no per-payment date to match against -- see Problem A's
+root-cause section above); a possible-duplicate confidence tier is never
+auto-suggested by design, which means a genuinely-duplicate payment with
+a differing campaign requires a manual Skip; mobile/narrow-viewport
+rendering of the new multi-pledge controls was not independently
+re-confirmed this round.
+
 ## D1 Monthly Restore Verification Repair (2026-09-01) -- REPAIRED, PORTED TO MAIN, LIVE-VERIFIED SUCCESSFUL END-TO-END
 
 **Feature-branch investigation/fix commit:** `e9edf8b40d2d8bcd74e459e4208b00b5d07b9afb`
