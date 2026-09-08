@@ -23,7 +23,7 @@ type ValidationSummary = { totalRows: number; passedRows: number; failedRows: nu
 type ResultSummary = { validRows: number; householdsMatched: number; newHouseholds: number; giftsImported: number; giftsUpdated: number; duplicateRowsSkipped: number; rowsRequiringReview: number; skippedRows?: number; reviewLaterRows?: number; rejectedRows: number; unmatchedJlCodes: number; elapsedMs: number };
 type ImportFailure = { error: string; fatalError?: string | null; importId?: string; databaseChangesMade: boolean; noChangesMade: boolean; outcomeStatus?: "not_committed" | "processing" | "unknown"; rollbackCauses: FailureCategory[]; validation: ValidationSummary; reviewRows?: RowFailure[]; rejectedRows: RowFailure[]; results: ResultSummary };
 type DuplicateImportBlock = { error: string; importId: string; duplicateBlocked: true; canForceReprocess: boolean; priorStatus: string; completedAt: number | null; warning: string };
-type UnresolvedDecisionsFailure = { error: string; sessionExpired?: boolean; attemptStatus?: string; invalidDateDecisions?: Array<{ fingerprint: string | null; reason: string }>; unresolvedDateFingerprints?: string[]; unresolvedReviewFingerprints?: string[]; unresolvedRejectionFingerprints?: string[] };
+type UnresolvedDecisionsFailure = { error: string; sessionExpired?: boolean; attemptStatus?: string; invalidDateDecisions?: Array<{ fingerprint: string | null; reason: string }>; unresolvedDateFingerprints?: string[]; unresolvedReviewFingerprints?: string[]; unresolvedRejectionFingerprints?: string[]; invalidPaymentDecisions?: Array<{ fingerprint: string | null; row?: number | null; reason: string }> };
 type ImportReport = {
   importId: string;
   fileName: string;
@@ -422,14 +422,17 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
         // D1 write), so send the user straight back to the exact rows that
         // need attention with everything else untouched.
         const unresolved = payload as UnresolvedDecisionsFailure;
+        const invalidPaymentFingerprints = (unresolved.invalidPaymentDecisions ?? []).map((entry) => entry.fingerprint).filter((fp): fp is string => Boolean(fp));
         const staleFingerprints = [
           ...(unresolved.invalidDateDecisions ?? []).map((entry) => entry.fingerprint).filter((fp): fp is string => Boolean(fp)),
           ...(unresolved.unresolvedDateFingerprints ?? []),
           ...(unresolved.unresolvedReviewFingerprints ?? []),
           ...(unresolved.unresolvedRejectionFingerprints ?? []),
+          ...invalidPaymentFingerprints,
         ];
         if (staleFingerprints.length) {
           const staleSet = new Set(staleFingerprints);
+          const paymentStaleSet = new Set(invalidPaymentFingerprints);
           setDateDecisions((current) => {
             const next = { ...current };
             for (const fingerprint of staleSet) if (next[fingerprint]) next[fingerprint] = { action: "correct_date", correctedDate: undefined };
@@ -445,12 +448,25 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             for (const fingerprint of staleSet) delete next[fingerprint];
             return next;
           });
+          // Sends each affected payment row back to "Needs review" rather
+          // than leaving whatever malformed/stale decision the user had
+          // selected in place -- the specific validation reason is shown in
+          // the banner text below, and the row's own reason note (already
+          // rendered per-card) points the user at what to redo.
+          if (paymentStaleSet.size) {
+            setPaymentDecisions((current) => {
+              const next = { ...current };
+              for (const fingerprint of paymentStaleSet) delete next[fingerprint];
+              return next;
+            });
+          }
           const affectedRows = [...staleSet]
-            .map((fingerprint) => donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.row ?? donationPreview?.rejectedRowDetails.find((item) => item.fingerprint === fingerprint)?.row)
+            .map((fingerprint) => donationPreview?.reviewRows.find((item) => item.fingerprint === fingerprint)?.row ?? donationPreview?.rejectedRowDetails.find((item) => item.fingerprint === fingerprint)?.row ?? donationPreview?.paymentAssignments.find((item) => item.fingerprint === fingerprint)?.row)
             .filter((row): row is number => row !== undefined)
             .sort((a, b) => a - b);
           const rowLabel = affectedRows.length ? `Row${affectedRows.length === 1 ? "" : "s"} ${affectedRows.join(", ")}` : `${staleFingerprints.length} row${staleFingerprints.length === 1 ? "" : "s"}`;
-          setError(`${unresolved.error} ${rowLabel} need${affectedRows.length === 1 ? "s" : ""} attention below. Every other decision you already made is unchanged. No changes were made to the database.`);
+          const paymentReasonNote = unresolved.invalidPaymentDecisions?.length ? ` (${unresolved.invalidPaymentDecisions.map((entry) => entry.reason).filter((reason, index, all) => all.indexOf(reason) === index).join("; ")})` : "";
+          setError(`${unresolved.error} ${rowLabel} need${affectedRows.length === 1 ? "s" : ""} attention below${paymentReasonNote}. Every other decision you already made is unchanged. No changes were made to the database.`);
           setStep("preview");
           return;
         }

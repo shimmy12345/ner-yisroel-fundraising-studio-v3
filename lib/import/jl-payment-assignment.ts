@@ -32,6 +32,64 @@ export type PaymentDecisionInput = {
   allocations?: PledgeAllocationInput[];
   overpaymentAction?: OverpaymentAction;
 };
+
+export type PaymentDecisionShapeError = { fingerprint: string | null; reason: string };
+
+// Validates the RAW shape of one payment decision exactly as submitted by
+// the client, before any database lookup -- a separate, earlier
+// defense-in-depth gate than planPaymentAssignments's own richer,
+// data-aware validation (which needs the live candidate/pledge data this
+// function never sees). This is the SINGLE source of truth for "what does
+// a syntactically valid PaymentDecisionInput look like" -- app/api/import/route.ts
+// must call this rather than re-implementing its own copy of the check.
+//
+// This exact class of bug already happened once (see docs/AI-HANDOFF.md's
+// Giving Import Reconciliation "commit-time validation failure" entry):
+// "skip_duplicate", "leave_unresolved", and the `allocations` array were
+// all added to PaymentDecisionAction/OverpaymentAction/PaymentDecisionInput
+// and to planPaymentAssignments, but this earlier shape gate in route.ts
+// was a hand-inlined, separate copy of the same check and was never
+// updated to match -- so every real decision using any of those three
+// values failed this gate and the entire batch rolled back with a generic
+// "The payment decisions could not be validated" error, even though every
+// decision was semantically correct. Keeping this validator here, next to
+// the types it validates, and covered by
+// tests/payment-decision-shape.test.mjs's own "every PaymentDecisionAction/
+// OverpaymentAction value must round-trip" test, is what prevents the next
+// such addition from silently reintroducing the same class of bug.
+export function validatePaymentDecisionShape(decision: unknown): PaymentDecisionShapeError | null {
+  if (!decision || typeof decision !== "object") return { fingerprint: null, reason: "Decision is not an object" };
+  const value = decision as Record<string, unknown>;
+  const fingerprint = typeof value.fingerprint === "string" ? value.fingerprint : null;
+  if (!fingerprint || !/^[a-f0-9]{64}$/.test(fingerprint)) return { fingerprint, reason: "Missing or malformed payment fingerprint" };
+  const action = value.action;
+  if (action !== "apply_to_pledge" && action !== "new_gift" && action !== "needs_review" && action !== "skip_duplicate") {
+    return { fingerprint, reason: `Unrecognized classification "${String(action)}"` };
+  }
+  if (action === "apply_to_pledge") {
+    const allocationsValue = value.allocations;
+    const hasAllocations = Array.isArray(allocationsValue) && allocationsValue.length > 0;
+    if (hasAllocations) {
+      const seenPledgeIds = new Set<string>();
+      for (const entry of allocationsValue as unknown[]) {
+        if (!entry || typeof entry !== "object") return { fingerprint, reason: "Each pledge allocation must be an object" };
+        const allocation = entry as Record<string, unknown>;
+        if (typeof allocation.pledgeId !== "string" || !allocation.pledgeId) return { fingerprint, reason: "Each pledge allocation must include a pledge ID" };
+        if (!Number.isInteger(allocation.amountCents) || (allocation.amountCents as number) <= 0) return { fingerprint, reason: "Each pledge allocation amount must be a positive whole number of cents" };
+        if (seenPledgeIds.has(allocation.pledgeId)) return { fingerprint, reason: "The same pledge cannot receive two allocations from one payment" };
+        seenPledgeIds.add(allocation.pledgeId);
+      }
+    } else if (typeof value.pledgeId !== "string" || !value.pledgeId) {
+      return { fingerprint, reason: "Select an open pledge, or provide pledge allocations" };
+    }
+  }
+  const overpaymentAction = value.overpaymentAction;
+  if (overpaymentAction !== undefined && overpaymentAction !== null && overpaymentAction !== "split_remainder_new_gift" && overpaymentAction !== "leave_unresolved") {
+    return { fingerprint, reason: `Unrecognized remainder action "${String(overpaymentAction)}"` };
+  }
+  return null;
+}
+
 export type PaymentHousehold = { id: string; external_id: string; display_name?: string };
 export type OpenPledge = {
   id: string;

@@ -16,7 +16,7 @@ import { isReopenableForFollowUp, reconstructRowsFromChunks, type PreviewSession
 import { resolveAttemptCommitAction, type ImportAttemptRow } from "../../../lib/import/import-attempt";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { donationExportRange, isoDate } from "../../../lib/import/jl-refresh";
-import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
+import { buildPaymentCandidates, OPEN_PLEDGES_FOR_DONORS_SQL, planPaymentAssignments, validatePaymentDecisionShape, type OpenPledge, type PaymentDecisionInput, type RememberedPaymentDecision } from "../../../lib/import/jl-payment-assignment";
 import { EXISTING_COMPLETED_GIFTS_FOR_DUPLICATE_MATCH_SQL, type ExistingCompletedGiftRow } from "../../../lib/import/jl-payment-duplicate-match";
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReprocessBatch, hasForceReprocessConfirmation } from "../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../lib/donors/merge-preview";
@@ -143,16 +143,19 @@ export async function POST(request: Request) {
     return Response.json({ error: "The column mapping contains an unsupported field" }, { status: 422 });
   }
   const paymentDecisions = body.paymentDecisions ?? [];
+  if (!Array.isArray(paymentDecisions)) return Response.json({ error: "The payment decisions could not be validated" }, { status: 422 });
   const decisionFingerprints = new Set<string>();
-  if (!Array.isArray(paymentDecisions) || paymentDecisions.some((decision) => {
-    const valid = /^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "")
-      && ["apply_to_pledge", "new_gift", "needs_review"].includes(decision?.action)
-      && (decision.action !== "apply_to_pledge" || typeof decision.pledgeId === "string")
-      && (decision.overpaymentAction === undefined || decision.overpaymentAction === null || decision.overpaymentAction === "split_remainder_new_gift");
-    if (!valid || decisionFingerprints.has(decision.fingerprint)) return true;
-    decisionFingerprints.add(decision.fingerprint);
-    return false;
-  })) return Response.json({ error: "The payment decisions could not be validated" }, { status: 422 });
+  const invalidPaymentDecisions: Array<{ fingerprint: string | null; reason: string }> = [];
+  for (const decision of paymentDecisions) {
+    const shapeError = validatePaymentDecisionShape(decision);
+    if (shapeError) { invalidPaymentDecisions.push(shapeError); continue; }
+    const fingerprint = (decision as PaymentDecisionInput).fingerprint;
+    if (decisionFingerprints.has(fingerprint)) { invalidPaymentDecisions.push({ fingerprint, reason: "Duplicate decision submitted for the same payment" }); continue; }
+    decisionFingerprints.add(fingerprint);
+  }
+  if (invalidPaymentDecisions.length) {
+    return Response.json({ error: "The payment decisions could not be validated", invalidPaymentDecisions }, { status: 422 });
+  }
   const pendingDecisionFingerprints = new Set<string>();
   if (body.pendingGiftDecisions !== undefined && (!Array.isArray(body.pendingGiftDecisions) || body.pendingGiftDecisions.some((decision) => {
     const valid = /^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["merge", "keep_separate"].includes(decision?.action)
@@ -393,7 +396,12 @@ export async function POST(request: Request) {
       // selection (e.g. the pledge was fully allocated by a concurrent
       // import since preview was loaded) is a decision that needs
       // re-review, not a row that quietly falls out of the import.
-      return Response.json({ error: "Review every payment assignment before importing.", unresolvedPaymentRows: assignmentPlan.errors.map((error) => error.row) }, { status: 422 });
+      const fingerprintByRow = new Map(paymentCandidates.map((candidate) => [candidate.row, candidate.fingerprint]));
+      return Response.json({
+        error: "Review every payment assignment before importing.",
+        unresolvedPaymentRows: assignmentPlan.errors.map((error) => error.row),
+        invalidPaymentDecisions: assignmentPlan.errors.map((error) => ({ fingerprint: fingerprintByRow.get(error.row) ?? null, row: error.row, reason: error.reason })),
+      }, { status: 422 });
     }
     const candidateByFingerprint = new Map(paymentCandidates.map((candidate) => [candidate.fingerprint, candidate]));
     const activityByFingerprint = new Map(donationPreview.activities.map((activity) => [activity.fingerprint, activity]));
