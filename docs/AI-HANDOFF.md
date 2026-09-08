@@ -16235,6 +16235,145 @@ a differing campaign requires a manual Skip; mobile/narrow-viewport
 rendering of the new multi-pledge controls was not independently
 re-confirmed this round.
 
+## Giving Import Reconciliation -- Commit-Time Validation Regression Fix (2026-09-08) -- REPAIRED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED (INCLUDING ONE APPROVED REAL COMMIT), ZERO UNINTENDED MUTATION
+
+**Implementation commit:** `16b68c4` -- "Fix commit-time payment-decision
+validation rejecting valid new decisions".
+
+**Symptom:** after the feature above shipped, the Manual Payment
+Assignment UI correctly offered Skip/duplicate and multi-pledge
+allocation, but clicking "Confirm and import" rolled back the *entire*
+38-row import with only `{"error": "The payment decisions could not be
+validated"}` -- no imported/updated/skipped rows, 38 rows shown as both
+"review" and "rejected". The rollback itself was correct behavior
+(never weakened); the bug was that the UI could produce decisions the
+server then refused to accept.
+
+**Root cause:** `app/api/import/route.ts` had a second, separate,
+hand-inlined shape-validation gate that ran on the raw
+`paymentDecisions` array before any DB lookups -- distinct from
+`planPaymentAssignments()`'s own data-aware validation. When
+`skip_duplicate`, `leave_unresolved`, and the `allocations[]`
+multi-pledge path were added in commit `5c6f9be`, this second gate's
+hardcoded `action` allowlist (`apply_to_pledge`/`new_gift`/
+`needs_review` only) and its blanket "`apply_to_pledge` must have a
+string `pledgeId`" rule were never updated. All three new decision
+shapes -- Skip, Leave-unresolved, and multi-pledge `allocations[]`
+(which correctly sends `pledgeId: null`) -- failed this stale gate, and
+because the check used `.some()` across the whole array, ANY one
+unrecognized decision rejected the entire submission. Proven empirically:
+the exact pre-fix validation logic was extracted via `git show
+905bfd8:app/api/import/route.ts` and run standalone against the three
+new shapes, confirming it rejected all three.
+
+The client-side "0/0/0/0/38/38/0" counts the user saw were not a
+server computation bug -- the server's minimal `{error}` response
+(no `invalidDateDecisions`/`unresolved*Fingerprints`/`validation`
+field) fell through every specific recovery branch in
+`ImportExperience.tsx` into its generic `unexpectedFailure(message)`
+fallback, which synthesizes placeholder stats client-side using the
+browser's own `rows.length` (38) for both "review" and "rejected" and
+hardcodes everything else to 0.
+
+**Fix:**
+- `lib/import/jl-payment-assignment.ts` -- extracted the single,
+  pure, exported `validatePaymentDecisionShape()` as the sole source of
+  truth for wire-shape validation (accepts `skip_duplicate`,
+  `leave_unresolved`, and `allocations[]` with per-entry pledge-ID/
+  positive-integer-cents/no-duplicate-pledge checks), replacing the
+  drifted inline copy.
+- `app/api/import/route.ts` -- both payment-validation failure paths
+  (the early shape gate and the `planPaymentAssignments`-driven
+  `assignmentPlan.errors` gate) now return a structured
+  `invalidPaymentDecisions: Array<{fingerprint, row?, reason}>` field
+  instead of a bare `{error}`.
+- `app/onboarding/import/ImportExperience.tsx` -- extended the
+  existing "defense in depth" recovery pattern (already used for
+  date/review/rejection decisions) to also recognize
+  `invalidPaymentDecisions`: it clears only the specific invalid
+  fingerprints back to "needs review", returns the user to the preview
+  step with every other decision intact, and appends the specific
+  reason strings to the error banner. No validation rule was loosened
+  anywhere -- every genuinely invalid shape (zero/negative/non-integer
+  cents, duplicate pledge ID within one decision, missing pledge
+  reference, unrecognized action/remainder value) is still rejected,
+  now with a specific reason instead of a generic failure.
+
+**Tests added:** `tests/payment-decision-shape.test.mjs` (new; wired
+into `pnpm test`) -- exercises every UI-representable decision shape
+through a real `JSON.stringify`/`JSON.parse` round-trip matching
+`ImportExperience.tsx`'s actual request-body construction (proving
+`allocations`/`pledgeId` fields that become `undefined` survive
+correctly), plus a preview-session save/reopen round-trip
+(`lib/import/preview-session.ts`'s `parseDraftDecisions()` shape), plus
+an end-to-end check that shape-valid decisions are also semantically
+accepted by `planPaymentAssignments()`, plus confirmation that a stale
+pledge reference is rejected with the specific reason "Select an open
+pledge belonging to this donor" rather than a generic message. No
+schema change was required or made.
+
+**Gates:** `pnpm test` (all suites, including the new one), `pnpm exec
+tsc --noEmit`, and `pnpm run build:staging-independent` all passed.
+
+**Deployment:** Independent Staging, version
+`8ad153c2-b8b2-44c7-a9fa-b746b4b50049`. `wrangler deployments list`
+confirmed no binding changes.
+
+**Live verification (non-mutating):** reopened the user's real,
+previously-failed 38-row draft (`payments 9-8.csv`) via the "Unfinished
+review" resume flow. All previously-entered decisions were restored
+correctly with no generic validation error: the Schwartz duplicate
+(Row 36, $9,670.00, CT2026) and a second duplicate (Bresler, Row 35)
+both showed "Skip -- already recorded" / "Proposed change: none. No
+gift, payment, or pledge update will be created."; a real multi-pledge
+case in the user's own data (Weinberger, Row 37, $540.00 split
+$360.00 + $180.00 across two DYSP5786 pledges, remaining $0.00) was
+also intact; dozens of single-pledge applies rendered correctly
+throughout. The session was exited via "Exit import" without clicking
+"Confirm and import" -- the real draft was left exactly as found, not
+discarded. Separately, a synthetic multi-pledge case was built against
+a real staging donor with two open pledges (Mr. & Mrs. Eliave A Sobol,
+code 60237, pledges of $25.00/LXSL2006 and $36.00/LXDL2009) and run
+through preview only with a $40.00 payment, confirming the full
+$25.00 + $15.00 split-across-two-pledges UI renders correctly under
+the fix; this test was also exited without committing.
+
+**Live verification (one approved real commit):** per the explicit
+"STOP and tell me exactly what will be written" instruction, asked for
+and received approval for exactly one controlled write: submitting the
+real Schwartz row with "Skip -- already recorded" through the actually
+deployed commit endpoint. Result: "IMPORT COMPLETE... 0 new giving
+activities and 0 pledge updates were processed," no validation error.
+D1 measured immediately before and after:
+- `giving_activities`: 5185 -> 5185 (unchanged)
+- `giving_activity_import_changes`: 5202 -> 5203 (+1, exactly the
+  expected `skipped_duplicate` audit row; its `previous_json` records
+  `{"matchedActivityId":"1eeb09ff-...","matchConfidence":"likely"}`)
+- Schwartz's own `paid_cents`: 967000 -> 967000 (unchanged)
+- `data_imports` count: 6 -> 7 (+1, the new completed import record)
+
+No other row, table, donor, gift, or pledge was touched by this or any
+other action this round. A follow-up D1 check after the multi-pledge
+preview exploration and the real-draft resume/exit confirmed all four
+counts unchanged from the post-commit baseline, and Sobol's two real
+pledge balances ($25.00/$36.00) remained untouched.
+
+**Known minor/open observation, not a validated bug:** the import
+completion screen's "skipped by you: 0" tile did not reflect the new
+duplicate-skip count after the approved Schwartz commit; it likely maps
+to a separate, pre-existing counter (`skippedRows`, for review-row
+skip dispositions) rather than payment-duplicate skips. Not
+investigated further this round -- worth a follow-up if the user wants
+that tile corrected.
+
+**Rollback protection:** unchanged and confirmed still intact by
+inspection -- the fix aligns which shapes are accepted, it does not
+change the "no DB write before validation passes" transaction
+structure. It was not exercised failing this round (the approved test
+succeeded), since forcing a genuine failure would have required
+submitting a deliberately invalid real payload against real data,
+which was out of scope.
+
 ## D1 Monthly Restore Verification Repair (2026-09-01) -- REPAIRED, PORTED TO MAIN, LIVE-VERIFIED SUCCESSFUL END-TO-END
 
 **Feature-branch investigation/fix commit:** `e9edf8b40d2d8bcd74e459e4208b00b5d07b9afb`
