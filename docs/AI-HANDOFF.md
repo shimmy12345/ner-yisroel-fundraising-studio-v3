@@ -17066,6 +17066,161 @@ mentions shouldn't become relationship facts. Solicitation amounts
 found their home via the Ask feature, not a `FACT_SIGNAL_PATTERN`
 change, exactly matching option (b) considered above.
 
+## JL Codes Export Convenience Action (2026-09-09) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO MUTATION
+
+**Implementation commit:** `bdc40db` -- "Add Copy JL Codes / Download CSV
+convenience action to the JL import page".
+
+**Scope:** a narrow, read-only convenience feature on the JL import
+upload page (`app/onboarding/import/ImportExperience.tsx`), plus one new
+GET-only endpoint (`app/api/import/jl-codes/route.ts`) and one new pure
+lib module (`lib/import/jl-codes.ts`). No change to giving
+reconciliation, duplicate detection, multi-pledge allocation, the
+Recommendation Engine, Relationship Intelligence, donor-page behavior,
+backups, or auth. No schema change.
+
+**Canonical JL Code source (investigated before writing any code):**
+`donors.donor_code` (TEXT, nullable) -- the same field the importer
+itself trusts. Traced through `app/api/import/route.ts`'s own
+code-lookup query (`lower(external_id) IN (...) OR lower(donor_code) IN
+(...)`) and every donor-insert/update path in that file:
+`donor_code` and `external_id` are always written together, in
+lockstep, for any JL-sourced or JL-matched donor (see the `INSERT INTO
+donors` at line ~776 and the Manual->JL conversion `UPDATE` at line
+~765, both of which set both columns to the identical value) --
+`external_id` is a JL-specific mirror of `donor_code`, never set
+without it. Manual/household-only donors (no JL match) have
+`donor_code` set but `external_id` NULL; donors created purely through
+the app UI (`app/api/donors/route.ts`) have both NULL. `donor_code`
+alone is therefore already the complete set -- no coalesce needed, and
+none was added.
+- **Belongs to:** the donor row, which in this schema represents a
+  household (e.g. one row for "Mr. & Mrs. Eliave A Sobol") -- there is
+  no separate household table.
+- **Duplicates:** possible in principle -- `lib/import/jl-match.ts`
+  already ships `findJlCodeCollisions()` specifically to detect this,
+  confirming it's a known, handled condition. The export de-duplicates.
+- **Historical/inactive records:** cannot retain a code. The only
+  archival path (`app/api/donors/merge/route.ts`'s duplicate-donor
+  archive) explicitly nulls `donor_code`/`external_source`/
+  `external_id` in the same `UPDATE` that sets `archived_at` --
+  confirmed by reading that route directly. The query still filters
+  `archived_at IS NULL` (belt-and-suspenders, and consistent with the
+  `owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL`
+  filter used everywhere else in this codebase for "real, currently
+  represented" donor rows -- `lib/data-health/queries.ts`,
+  `lib/portfolio-focus/data.ts`, `lib/relationships/meeting-brief.ts`,
+  etc.).
+- **Non-donor/system records:** `data_source = 'sample'` rows (seed/demo
+  data, never real) are excluded by the same standard filter; there is
+  no other non-donor table carrying this value.
+
+**Inclusion/exclusion rules implemented:** all unique, nonblank
+`donor_code` values for donors with `owner_user_id = <the authenticated
+user>`, `data_source = 'live'`, `archived_at IS NULL`. No "active
+donor"/recent-giving filter of any kind -- a donor with no recent gifts
+is still included, per the task's explicit instruction not to invent
+one. Never cast to a number for identity or storage -- `donor_code` is
+opaque text throughout, so a leading zero (or a non-numeric code, if
+one ever exists) survives unchanged.
+
+**Sort:** numeric only when *every* code in the set is purely digits
+(`sortJlCodes()` in `lib/import/jl-codes.ts`); otherwise lexical. This
+avoids an ambiguous mixed-mode ordering if a non-numeric code is ever
+present alongside numeric ones. Equal-numeric-value-but-different-string
+codes (e.g. "007" vs "7") are never collapsed into one -- Set-based
+dedup operates on the exact string, so both would appear, tie-broken by
+string comparison.
+
+**Endpoint (`GET /api/import/jl-codes`):** auth via the same
+`getChatGPTUser()`/`ensureUserProfile()` pattern as every other import
+route; a single `SELECT donor_code FROM donors WHERE owner_user_id = ?
+AND data_source = 'live' AND archived_at IS NULL AND donor_code IS NOT
+NULL`; the raw column values are handed to the pure extraction/sort
+function and returned as `{ codes, count }` JSON, or -- with
+`?format=csv` -- as a `text/csv` response with a
+`content-disposition: attachment` header (same pattern as the existing
+`/api/import/backup` download). Only the code column is ever selected
+or returned; no donor name, email, address, giving amount, note, or
+unrelated ID.
+
+**UI:** a "JL Solutions Donations" card on the import upload step (same
+visual language as the existing "Also available" cards), with a
+primary **Copy JL Codes** button and a secondary **Download CSV** link.
+Copy fetches the endpoint, joins codes with `\n`, and calls
+`navigator.clipboard.writeText()`; on success it shows "N JL Codes
+copied" (or "No JL Codes on file yet." for zero, or a specific failure
+message on a fetch error -- never a silent failure); on a clipboard
+permission failure it falls back to an inline read-only `<textarea>`
+with the same text, so the user can select-and-copy manually.
+
+**Tests added:** `tests/jl-codes.test.mjs` (new; wired into `pnpm
+test`) -- duplicate codes returned once; blank/null/whitespace-only
+codes excluded; purely-numeric codes sort numerically while
+mixed/non-numeric codes sort lexically; a leading-zero code ("00042")
+survives distinct from its non-padded form ("42") rather than being
+parsed to a number; zero-code input returns an empty list, not an
+error; clipboard text is exactly one code per line with no header and
+no trailing newline; CSV output has exactly one header row ("JL Code")
+plus one code per line with a trailing newline; a code containing a
+comma is CSV-quoted rather than corrupting the column. Workspace/user
+scoping and "no unrelated donor data is ever selected" are properties
+of the route's single-column, owner-scoped SQL query itself (verified
+by reading the query, not independently unit-testable without a live
+D1) -- confirmed against real data below.
+
+**Gates:** `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. One pre-existing, unrelated test
+failure (`tests/backup-watchdog-scheduled.test.mjs`) was confirmed
+present on this branch before this feature's changes (via `git stash`)
+and is unaffected by this work -- backup systems were explicitly out of
+scope for this task.
+
+**Deployment:** Independent Staging, version
+`130d28c9-40d7-4d8d-ac6f-ebf43f5a87f9`. Bindings unchanged (same D1
+database, same Cloudflare Access config).
+
+**Real-data verification against Independent Staging (read-only,
+confirmed via `wrangler d1 execute` SELECTs and the live UI -- no
+mutation):**
+- Current unique JL Code count for this workspace: **254** (254 live,
+  unarchived donor rows, all with a distinct, non-null `donor_code`;
+  zero blank codes present).
+- All 254 current codes are purely numeric with no leading zeros --
+  the numeric sort path is exercised, not the lexical fallback.
+- Known donors confirmed present: Mordechai Schwartz (`56283`) and
+  Eliave A Sobol (`60237`), both from the prior Giving Import
+  Reconciliation verification work.
+- Live-clicked "Copy JL Codes" in the browser: showed "254 JL Codes
+  copied", matching the D1-verified count exactly. A direct call to the
+  same endpoint confirmed the underlying list is exactly 254 unique
+  values, sorted ascending numerically, with no blanks and no
+  non-donor-code fields.
+- The `?format=csv` endpoint was confirmed correct via a direct
+  authenticated fetch from the live page: HTTP 200, body starting with
+  the `JL Code` header row followed by the sorted codes (including
+  `56283` and `60237`), matching the JSON path exactly.
+- **Known automation-environment limitation, not a product defect:**
+  clicking "Download CSV" (and, identically, the pre-existing "Download
+  backup" link elsewhere on this same page) as a real anchor-navigation
+  inside this browser-automation session consistently returns an
+  intercepted 503, while a same-origin `fetch()` to the identical URL
+  from the identical page succeeds every time. Since the already-shipped
+  "Download backup" feature exhibits the exact same pattern, this is a
+  pre-existing constraint of completing real file downloads inside this
+  automation environment (consistent with the browser tool's own
+  restriction on downloads a page initiates itself), not a regression
+  introduced by this feature. The endpoint's correctness was fully
+  confirmed via direct fetch instead. Genuine mobile/narrow-viewport
+  visual QA also could not be independently confirmed in this
+  environment (`resize_window` did not change the page's actual
+  viewport) -- same pre-existing limitation already on record elsewhere
+  in this document.
+- D1 mutation check: `donors_total`/`donors_live` = 254/254, unchanged
+  across every step of this investigation, deployment, and live
+  verification (all requests made were `SELECT`s or GETs against a
+  read-only endpoint; nothing in this feature has a write path).
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
