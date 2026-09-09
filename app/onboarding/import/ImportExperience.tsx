@@ -9,6 +9,7 @@ import { classifyJlImportType, countStrongDonationIndicators } from "../../../li
 import { UndoDonationImport } from "./UndoDonationImport";
 import { financialDateLabel, parseFinancialDate } from "../../../lib/financial-date";
 import { isDateDecisionComplete } from "../../../lib/import/jl-donation-date-review";
+import { HOUSEHOLD_IMPORT_TEMPLATE_FILENAME, buildHouseholdImportTemplateCsv } from "../../../lib/import/household-import-template";
 
 type Step = "upload" | "recognition" | "preview" | "importing" | "complete" | "failed";
 type FailureCategory = "unmatched_jl_codes" | "duplicate_records" | "invalid_dates" | "invalid_amounts" | "missing_required_fields" | "classification_review" | "nonfinancial_entries" | "transaction_database_errors" | "unexpected_exceptions";
@@ -818,6 +819,10 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
                 </li>
               ))}</ol>
             </section>}
+            <div className="household-template-note">
+              <button type="button" onClick={() => download(HOUSEHOLD_IMPORT_TEMPLATE_FILENAME, buildHouseholdImportTemplateCsv(), "text/csv")}>Download household import template</button>
+              <span>Use this template when preparing a new household upload. Do not rename the columns.</span>
+            </div>
             <div
               className={`import-dropzone ${dragging ? "dragging" : ""}`}
               onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
