@@ -183,6 +183,8 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
   const [followUpReview, setFollowUpReview] = useState(false);
   const [rowDrillDown, setRowDrillDown] = useState<{ title: string; description: string; rows: RowFailure[] } | null>(null);
   const [changedRowsNotice, setChangedRowsNotice] = useState<number>(0);
+  const [jlCodeStatus, setJlCodeStatus] = useState<string | null>(null);
+  const [jlCodeFallback, setJlCodeFallback] = useState<string | null>(null);
   const saveDraftTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function inspectFile(file: File) {
@@ -361,6 +363,28 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
       await fetch(`/api/import/draft?previewSessionId=${encodeURIComponent(id)}`, { method: "DELETE" });
     } finally {
       void fetchResumableDrafts();
+    }
+  }
+
+  async function copyJlCodes() {
+    setJlCodeFallback(null);
+    setJlCodeStatus("Fetching JL Codes…");
+    try {
+      const response = await fetch("/api/import/jl-codes");
+      if (!response.ok) { setJlCodeStatus("Could not load JL Codes. Try again."); return; }
+      const data = await response.json() as { codes: string[]; count: number };
+      if (!data.count) { setJlCodeStatus("No JL Codes on file yet."); return; }
+      const text = data.codes.join("\n");
+      const plural = data.count === 1 ? "" : "s";
+      try {
+        await navigator.clipboard.writeText(text);
+        setJlCodeStatus(`${data.count.toLocaleString()} JL Code${plural} copied`);
+      } catch {
+        setJlCodeFallback(text);
+        setJlCodeStatus(`${data.count.toLocaleString()} JL Code${plural} ready -- copy them below.`);
+      }
+    } catch {
+      setJlCodeStatus("Could not load JL Codes. Try again.");
     }
   }
 
@@ -729,6 +753,21 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
               <article className={refreshOverview.pendingReviews ? "attention" : ""}><span>Pending reviews</span><strong>{refreshOverview.pendingReviews.toLocaleString()}</strong><small>{refreshOverview.pendingReviews ? "Rows needing a decision" : "Nothing waiting"}</small></article>
               <article><span>Undo available</span><strong>{refreshOverview.undoAvailable.toLocaleString()}</strong><small>{refreshOverview.undoAvailable === 1 ? "Recent import" : "Recent imports"}</small></article>
             </div>
+            <section className="import-other-sources jl-code-export" aria-label="JL Solutions donor codes">
+              <div><p className="eyebrow">JL SOLUTIONS DONATIONS</p><h2>Get your current JL Codes.</h2><p>Copy every JL Code Fundraising OS already has on file, to run updated donation information in JL Solutions.</p></div>
+              <div className="jl-code-export-actions">
+                <button type="button" className="onboarding-primary" onClick={() => void copyJlCodes()}>Copy JL Codes</button>
+                <a href="/api/import/jl-codes?format=csv">Download CSV</a>
+              </div>
+            </section>
+            {jlCodeStatus && <p className="import-status" role="status">{jlCodeStatus}</p>}
+            {jlCodeFallback && (
+              <div className="jl-code-fallback" role="dialog" aria-label="JL Codes to copy manually">
+                <p>Clipboard access was blocked. Select all and copy manually:</p>
+                <textarea readOnly value={jlCodeFallback} onFocus={(event) => event.currentTarget.select()} rows={8} />
+                <button type="button" onClick={() => setJlCodeFallback(null)}>Close</button>
+              </div>
+            )}
             <section className="import-other-sources" aria-label="Other import sources">
               <div><p className="eyebrow">ALSO AVAILABLE</p><h2>Monday.com Historical Context</h2><p>Bring uncertain historical contact and future planned actions in from a Monday.com pipeline export. Parsed, classified, and committed separately -- nothing here touches JL gifts or pledges.</p></div>
               <a className="onboarding-primary" href="/onboarding/import/monday">Open Monday.com import →</a>
