@@ -5,6 +5,7 @@ import { ensureUserProfile } from "../../../lib/auth/profile";
 import { isoDate, suggestedDonationRange } from "../../../lib/import/jl-refresh";
 import { IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL } from "../../../lib/data-health/queries";
 import { countUnresolvedDecisions } from "../../../lib/import/preview-session";
+import { logger } from "../../../lib/logger";
 import { ImportExperience, type RefreshOverview } from "./ImportExperience";
 
 export const metadata: Metadata = { title: "Import donor data" };
@@ -26,6 +27,15 @@ export default async function ImportPage() {
     env.DB.prepare(IMPORT_PREVIEW_SESSIONS_FOR_HEALTH_SQL).bind(profile.id).all<{ status: string; decisions_json: string; expires_at: number }>(),
   ]);
   const suggestion = suggestedDonationRange(state?.last_donation_range_end ?? null);
+  // The range calculation can never invert (see lib/import/jl-refresh.ts),
+  // but a stored coverage end that is itself future-dated is still worth a
+  // diagnostic signal -- it means some prior donation import's own detected
+  // range end was future-dated, which the UI now safely shows as "already
+  // current" instead of an inverted range, but is still worth investigating
+  // if it keeps recurring for a workspace.
+  if (suggestion.state === "already_current" && suggestion.futureCoverageDetected) {
+    logger.info("suggested_donation_range_future_coverage_end", { userId: profile.id, lastDonationRangeEnd: state?.last_donation_range_end ?? 0 });
+  }
   let latestCompletedDonationId: string | null = null;
   let latestCompletedHouseholdId: string | null = null;
   const parsedImports = (imports.results ?? []).map((row) => {
@@ -60,6 +70,7 @@ export default async function ImportPage() {
     lastHouseholdRefreshAt: state?.last_household_refresh_at ? new Date(state.last_household_refresh_at * 1000).toISOString() : null,
     lastDonationRefreshAt: state?.last_donation_refresh_at ? new Date(state.last_donation_refresh_at * 1000).toISOString() : null,
     lastDonationRangeStart: isoDate(state?.last_donation_range_start ?? null), lastDonationRangeEnd: isoDate(state?.last_donation_range_end ?? null),
+    suggestedRangeState: suggestion.state,
     suggestedRangeStart: isoDate(suggestion.start), suggestedRangeEnd: isoDate(suggestion.end),
     pendingReviews,
     undoAvailable: history.filter((item) => item.canUndo).length,

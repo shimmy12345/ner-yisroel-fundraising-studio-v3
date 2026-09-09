@@ -83,8 +83,10 @@ type ResumableDraft = { id: string; file_name: string; file_hash: string; row_co
 type ResumableReviewLater = ResumableDraft & { reviewLaterCount: number };
 type DecisionMaps = { reviewDecisions: Record<string, ReviewDecisionState>; crossImportDecisions: Record<string, ReviewDecisionState>; rejectionDecisions: Record<string, RejectionDecisionState>; dateDecisions: Record<string, DateDecisionState> };
 
+export type SuggestedRangeState = "no_prior_coverage" | "range" | "already_current" | "unknown_coverage";
 export type RefreshOverview = {
   lastHouseholdRefreshAt: string | null; lastDonationRefreshAt: string | null; lastDonationRangeStart: string | null; lastDonationRangeEnd: string | null;
+  suggestedRangeState: SuggestedRangeState;
   suggestedRangeStart: string | null; suggestedRangeEnd: string | null;
   pendingReviews: number;
   undoAvailable: number;
@@ -133,6 +135,20 @@ const dateLabel = (value: string | null) => {
   }
   return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(value));
 };
+// Never renders an inverted range -- lib/import/jl-refresh.ts's
+// suggestedDonationRange() already classifies "coverage caught up to (or
+// past) today" and "coverage unknown" as their own explicit states rather
+// than a numeric start/end, so this only ever has a real range to join when
+// state === "range".
+function suggestedDonationExportLabel(overview: Pick<RefreshOverview, "suggestedRangeState" | "suggestedRangeStart" | "suggestedRangeEnd">) {
+  const end = dateLabel(overview.suggestedRangeEnd);
+  switch (overview.suggestedRangeState) {
+    case "range": return `${dateLabel(overview.suggestedRangeStart)} – ${end}`;
+    case "already_current": return `Already current through ${end}`;
+    case "unknown_coverage": return "Coverage could not be determined — review manually";
+    default: return `Most recent available range through ${end}`;
+  }
+}
 const centsLabel = (value: number | null) => value === null ? "Amount unavailable" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value / 100);
 const epochDateLabel = (value: number | null) => value === null ? "Date unavailable" : financialDateLabel(value);
 const REVIEW_MODE_COPY: Record<ReviewMode, { label: string; description: string }> = {
@@ -783,7 +799,7 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
             </section>
             <section className="jl-refresh-overview" aria-label="JL refresh status">
               <div><p className="eyebrow">NEXT REFRESH</p><h2>Use the most recent export you have.</h2><p>Fundraising OS checks overlapping rows, keeps your relationship history, and shows every proposed change before writing.</p></div>
-              <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{refreshOverview.suggestedRangeStart ? `${dateLabel(refreshOverview.suggestedRangeStart)} – ${dateLabel(refreshOverview.suggestedRangeEnd)}` : `Most recent available range through ${dateLabel(refreshOverview.suggestedRangeEnd)}`}</dd></div></dl>
+              <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{suggestedDonationExportLabel(refreshOverview)}</dd></div></dl>
             </section>
             {resumableDrafts.length > 0 && <section className="resumable-drafts-section" aria-labelledby="resumable-drafts-title">
               <p className="eyebrow">UNFINISHED REVIEW</p>
