@@ -17221,6 +17221,112 @@ mutation):**
   verification (all requests made were `SELECT`s or GETs against a
   read-only endpoint; nothing in this feature has a write path).
 
+## New Household Import Template (2026-09-09) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO MUTATION
+
+**Implementation commit:** `1d28fff` -- "Add downloadable household import
+template to the JL import page".
+
+**Scope:** a narrow, static, no-data convenience feature on the JL import
+upload page (`app/onboarding/import/ImportExperience.tsx`), one new pure
+lib module (`lib/import/household-import-template.ts`), and one new test
+file. No new API endpoint, no D1 query, no change to giving
+reconciliation, payment assignment, duplicate detection, Portfolio
+Focus, Relationship Intelligence, the Recommendation Engine, backups,
+or auth. No schema change.
+
+**Template verified against the real importer before writing any
+code:** the user-provided 15-column template
+(`Code, Name, Address, City, State, Zip Code, Last Name, Home, Cell,
+Country, Fathers E-mail, Fathers Cell, Husband First Name, Wife First
+Name, Husband Title`) was checked character-for-character (name,
+capitalization, spacing, order) against `JL_COLUMNS`/`JL_MAPPING` in
+`lib/import/jl-solutions.ts` -- the importer's own accepted-header
+list and mapping. All 15 are accepted, with identical names and
+identical relative order. **One finding, not a defect:** the importer
+actually accepts a 16th column, `Wife Title` (mapped to `spouseTitle`),
+which the approved template omits. This is not a stale importer or a
+stale template -- `isJlSolutionsExport()`'s own comment in that file
+explicitly anticipates and accepts a configurable export missing
+optional columns like this one, so a 15-column file is already a fully
+valid, importer-supported upload. No listed column was invalid, so no
+semantics needed to change and no stop was required; this is
+transparently documented here rather than silently ship a template
+that happens to omit one real, optional, importer-accepted field.
+
+**Canonical template definition:**
+`lib/import/household-import-template.ts` --
+`HOUSEHOLD_IMPORT_TEMPLATE_COLUMNS` is *derived* from `JL_COLUMNS`
+(`JL_COLUMNS.filter((column) => column !== "Wife Title")`), not a
+separately hand-typed duplicate list, so a future header rename/add/
+remove in `JL_COLUMNS` is automatically reflected in the template
+instead of silently drifting out of sync. The same module also exports
+`HOUSEHOLD_IMPORT_TEMPLATE_FILENAME` and `buildHouseholdImportTemplateCsv()`.
+
+**Download filename:** `fundraising-os-household-import-template.csv`.
+
+**Implementation:** generated entirely client-side, at click time, using
+`ImportExperience.tsx`'s existing `download()` blob helper (the same one
+already used for review/rejected-row/import-report downloads) -- no new
+API endpoint, no D1 access, no auth check needed, and no user data can
+ever appear in the file, since the content is a fixed header string with
+no data rows. This also sidesteps the Cloudflare Access
+document-navigation quirk recorded in the JL Codes Export section above
+(a real anchor navigation to a server route intermittently 503s inside
+this browser-automation environment; a blob-URL download triggered
+entirely in-page never goes through that path at all).
+
+**UI:** a small, unobtrusive line directly above the upload dropzone on
+the JL import page (`app/onboarding/import/ImportExperience.tsx`) --
+a **Download household import template** button (styled like the
+existing dropzone's own secondary button) plus the helper text "Use
+this template when preparing a new household upload. Do not rename the
+columns."
+
+**Drift-guard test:** `tests/household-import-template.test.mjs` (new;
+wired into `pnpm test`) -- freezes the exact approved 15-column
+contract as an independent literal and asserts the canonical module's
+derived list matches it exactly (names + order); asserts no duplicate
+columns; asserts every approved column is still a key in `JL_MAPPING`
+and still present in `JL_COLUMNS` (the importer-parity check); asserts
+`Wife Title` remains a real `JL_COLUMNS` entry (so its exclusion stays
+meaningful) while staying excluded from the template; asserts the exact
+filename; asserts the generated CSV is exactly the comma-joined header
+row plus one trailing newline, with zero data rows, matching the exact
+literal string byte-for-byte.
+
+**Gates:** `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. The same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure noted in the JL
+Codes Export section above is still present and still unrelated;
+backup systems remain untouched and out of scope.
+
+**Deployment:** Independent Staging, version
+`14327841-1a1c-48ad-88a4-c88523dd6e09`. No new route appears in the
+build output (confirming no API endpoint was added); bindings
+unchanged.
+
+**Live verification (read-only, zero mutation):** confirmed in the
+real browser that the button and helper text render correctly, directly
+above the dropzone on the JL import upload step. Rather than rely on
+observing a saved file (blocked by the same automation-environment
+download restriction already on record in the JL Codes Export
+section), `URL.createObjectURL` and `document.createElement("a")` were
+instrumented in-page to capture the exact `Blob` and filename the
+click handler produces: MIME type `text/csv`, exactly one line, exactly
+15 headers in the exact approved order, byte-for-byte equal to
+`Code,Name,Address,City,State,Zip Code,Last Name,Home,Cell,Country,
+Fathers E-mail,Fathers Cell,Husband First Name,Wife First Name,Husband
+Title\n`, and filename exactly `fundraising-os-household-import-
+template.csv`. No example or user data present. Genuine narrow-
+viewport visual QA could not be independently confirmed
+(`resize_window` does not change the page's actual viewport in this
+environment -- the same pre-existing limitation already on record
+elsewhere in this document); the new block uses the same flex-wrap
+layout pattern already proven responsive elsewhere on this page.
+D1 mutation check: `donors_total`/`donors_live` = 254/254, unchanged --
+expected, since this feature has no write path and never queries D1 at
+all.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
