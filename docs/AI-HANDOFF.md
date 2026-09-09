@@ -17327,6 +17327,145 @@ D1 mutation check: `donors_total`/`donors_live` = 254/254, unchanged --
 expected, since this feature has no write path and never queries D1 at
 all.
 
+## Suggested Donation Export -- Inverted Range Fix (2026-09-09) -- REPAIRED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO D1 MUTATION
+
+**Implementation commit:** `7a6c576` -- "Fix inverted Suggested Donation
+Export range: only completed gifts prove import coverage".
+
+**Symptom:** the JL import upload page showed "SUGGESTED DONATION EXPORT:
+Feb 23, 2027 – Sep 9, 2026" -- an impossible range where the suggested
+start was after the end.
+
+**Exact calculation before this fix (`lib/import/jl-refresh.ts`):**
+`donationExportRange(activities)` took `Math.min`/`Math.max` of
+`activityDate` across every `GivingActivity` in the just-committed (or
+just-previewed) import batch -- `match.matched` (every matched donation
+row) plus `paymentActivities` (payment-decision rows) -- with **no
+filtering by category**. The result was persisted as
+`jl_refresh_state.last_donation_range_end` at commit
+(`app/api/import/route.ts`) and also drove the "Detected export range"
+preview banner (`app/api/import/preview/route.ts`) -- both call sites
+share the same function. `suggestedDonationRange(lastRangeEnd)` then set
+`end = today` and `start = lastRangeEnd - 6 days` (a 7-day overlap
+window, `overlapDays: 7`, intentionally preserved by this fix, not
+invented or removed).
+
+**Exact source of Feb 23, 2027 (reproduced against real Independent
+Staging data, no mutation):**
+- `jl_refresh_state.last_donation_range_end` = `1803859200` =
+  **2027-03-01T00:00:00Z**. `2027-03-01 minus 6 days = 2027-02-23`,
+  exactly the impossible start date shown in the UI.
+- That value traces to `giving_activities` row id
+  `660f2401-6a5d-4f8d-b0bf-bc3b4f66f4d5`: `category = "partially_paid_pledge"`,
+  `activity_date = 1803859200` (2027-03-01), `committed_cents = 500000`
+  ($5,000.00), `paid_cents = 250002` ($2,500.02), `balance_cents = 249998`
+  ($2,499.98), `source_campaign = "DIN2022"`.
+- **This is a real, legitimate record, not malformed data.** It is an
+  ongoing, partially-paid pledge whose remaining-balance "Due Date" is a
+  genuine future installment date -- `classifyJlDonation()`
+  (`lib/import/jl-donations.ts`) doesn't even flag dates this close to
+  now as suspicious (its own suspicious-date window is "more than 1 year
+  out"), and nothing about this record should be repaired or touched.
+  `jl_refresh_state.last_donation_range_start` (`665798400` =
+  1991-02-06) shows the same underlying problem from the other
+  direction: an unrelated old record's date was also swept into the
+  same unfiltered min/max.
+
+**Root cause, in one sentence:** the "Due Date" field means two
+different things depending on category -- for a `completed_gift` it
+marks money that has actually been received, but for an `open_pledge`
+or `partially_paid_pledge` it marks a forward-looking due date on an
+*unresolved* balance -- and the range calculation treated both the same
+way as proof of "how current is our imported donation history."
+
+**Corrected business rule:** *"What proves Fundraising OS already has
+donation data through a particular date?"* -- only a fully-received,
+fully-reconciled transaction does. `donationExportRange()` now filters
+to `category === "completed_gift"` before taking min/max. An open or
+partially-paid pledge's date can never again establish "coverage,"
+regardless of how far in the future or past it is. This fix lives in
+the one shared function both the commit-time `jl_refresh_state` write
+and the preview-time "Detected export range" banner already called, so
+both are corrected together -- no separate logic to keep in sync.
+
+**Invariant added (`suggestedDonationRange()`, same file):**
+`suggestedStart <= suggestedEnd`, enforced structurally by returning an
+explicit `state` instead of a bare numeric start whenever a real range
+isn't appropriate:
+- `"no_prior_coverage"` -- no prior donation import at all (fallback A;
+  UI still shows the existing "Most recent available range through
+  &lt;today&gt;" copy, unchanged).
+- `"range"` -- prior coverage ends before today: `start = coverageEnd -
+  6 days` (the existing 7-day overlap, preserved exactly), `end =
+  today` (fallback B; also covers "coverage ends yesterday").
+- `"already_current"` -- prior coverage is at or after today (fallback
+  C: exactly today; fallback D: accidentally future-dated, which is
+  exactly the real staging case). The UI shows "Already current through
+  &lt;today&gt;" in both cases -- never an inverted range -- and a
+  `futureCoverageDetected` flag distinguishes the future-dated case for
+  a diagnostic log line (`app/onboarding/import/page.tsx`, via the
+  existing `logger.info`, no donor-sensitive fields).
+- `"unknown_coverage"` -- malformed input (negative, `NaN`, `Infinity`)
+  (fallback E). The UI shows "Coverage could not be determined —
+  review manually" rather than fabricating a date.
+
+**Timezone-safety:** unchanged and already correct -- `end` is computed
+from `Date.UTC(now.getUTCFullYear(), now.getUTCMonth(),
+now.getUTCDate())` and the UI's `dateLabel()`/`financialDateLabel()`
+already format with `timeZone: "UTC"` (`lib/financial-date.ts`); a test
+confirms the time-of-day portion of `now` never changes the computed
+calendar day.
+
+**UI:** `app/onboarding/import/ImportExperience.tsx` -- `RefreshOverview`
+now carries `suggestedRangeState`, and a small
+`suggestedDonationExportLabel()` helper renders the four states'
+copy (replacing the old two-way ternary that could only distinguish
+"has a start" from "doesn't").
+
+**Tests added:** `tests/suggested-donation-range.test.mjs` (new; wired
+into `pnpm test`) -- `donationExportRange()` excludes a future-dated
+partially-paid pledge and an open pledge from the computed range
+(the exact regression); with no completed gifts at all the range is
+`null`/`null`, never fabricated from pledge due dates; all five
+`suggestedDonationRange()` fallback states (A-E) with an injected fixed
+`now`; the timezone/DST-insensitivity check; a swept invariant check
+(`start <= end`) across seven `lastRangeEnd` probes including the exact
+real staging value; and a final regression assertion reproducing the
+*exact* real `jl_refresh_state` value (`1803859200`) against the real
+current date, confirming it now returns `"already_current"` rather than
+a `"range"` state. The pre-existing `tests/incremental-refresh.test.mjs`
+was re-verified to still pass unchanged, since its fixture's both
+activities are `completed_gift`.
+
+**Gates:** `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. The same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure noted in the JL
+Codes Export section above remains present and untouched.
+
+**Deployment:** Independent Staging, version
+`d793c6aa-2655-4830-8397-70e3cbe0be6f`.
+
+**Live verification result:** the upload page now shows "SUGGESTED
+DONATION EXPORT: Already current through Sep 9, 2026" -- no inverted
+range. Copy JL Codes (254 codes), the JL Codes CSV endpoint, and the
+household import template download were all re-verified working
+unchanged (no regression from this fix touching a shared file). No CSS
+was changed by this fix, so no new layout risk was introduced;
+mobile/narrow-viewport confirmation carries the same pre-existing
+automation-environment limitation already on record elsewhere in this
+document.
+
+**D1 mutation result:** zero. `donors_total` (254), `giving_activities`
+(5430), and `jl_refresh_state.last_donation_range_start`/
+`last_donation_range_end` (665798400 / 1803859200, the same corrupted
+value from before this fix) are all byte-identical before and after --
+confirmed directly via `wrangler d1 execute`. This was intentional and
+required: `jl_refresh_state` is import-tracking state, explicitly out
+of scope to mutate directly. The already-corrupted stored value now
+renders safely ("already current") instead of inverting, and the next
+real donation import will naturally overwrite it with a correctly
+completed-gift-filtered value.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
