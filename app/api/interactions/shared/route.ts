@@ -3,6 +3,7 @@ import { getChatGPTUser } from "../../../chatgpt-auth";
 import { logger } from "../../../../lib/logger";
 import type { InteractionKind } from "../../../../lib/capture/interaction";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
+import { chunk } from "../../../../lib/collections";
 
 // Logs ONE outreach activity (a shared meeting, or a broadcast text/email/
 // photo) and links it to MULTIPLE donors -- see db/schema.ts's
@@ -37,6 +38,17 @@ const ROLES = new Set(["participant", "recipient"]);
 // N interactions inserts + N recipient-audit inserts) well within a single
 // bounded transaction rather than open-ended.
 const MAX_RECIPIENTS = 200;
+
+// D1's own hard limit is 100 bound parameters per statement (confirmed
+// live against Independent Staging: a 101-donor ownership lookup -- 1 for
+// owner_user_id plus 101 for the IN clause, 102 total -- failed with
+// "D1_ERROR: too many SQL variables at offset 280: SQLITE_ERROR"; a
+// 99-donor lookup, 100 bound params total, succeeded). MAX_RECIPIENTS
+// (200) is comfortably above this, so the ownership lookup must be
+// chunked rather than sent as one IN clause. Leaves room for the
+// owner_user_id bind (1) plus a safety margin under the 100-param wall,
+// so this never needs to be retuned if D1's own limit shifts slightly.
+const OWNERSHIP_QUERY_CHUNK_SIZE = 90;
 
 // Idempotent-retry window (docs/AI-HANDOFF.md, the "Unexpected end of JSON
 // input" incident): there is no client-generated idempotency key, so an
@@ -88,21 +100,39 @@ export async function POST(request: Request) {
   // propagate uncaught: an uncaught exception's response is controlled by
   // the Workers runtime, not this route, and is not guaranteed to be JSON
   // (or even a non-empty body) -- exactly the "Unexpected end of JSON
-  // input" incident this fixes.
+  // input" incident this fixes. The profile upsert and the donor-ownership
+  // lookup are two DIFFERENT operations with two DIFFERENT failure modes,
+  // so they get two DIFFERENT log events -- collapsing them into one, as
+  // the first version of this fix did, is exactly what made the follow-up
+  // "too many SQL variables" incident ambiguous to diagnose from logs
+  // alone.
   let userId: string;
-  let ownedIds: Set<string>;
   try {
     const profile = await ensureUserProfile(user);
     userId = profile.id;
-    // Every requested donor must resolve to one this user owns -- never
-    // silently drop an unresolvable id from the batch (matches the
-    // single-donor route's "donor not found" -> 404, applied here to the
-    // whole set rather than one id).
-    const placeholders = donorIds.map(() => "?").join(",");
-    const ownedRows = await env.DB.prepare(`SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND id IN (${placeholders})`).bind(userId, ...donorIds).all<{ id: string }>();
-    ownedIds = new Set(ownedRows.results.map((row) => row.id));
   } catch (error) {
-    logger.error("shared_activity_precheck_failed", error, { donorCount: donorIds.length });
+    logger.error("shared_activity_profile_precheck_failed", error, { donorCount: donorIds.length });
+    return failure("The shared activity could not be validated. Nothing was saved.", 500);
+  }
+
+  // Every requested donor must resolve to one this user owns -- never
+  // silently drop an unresolvable id from the batch (matches the
+  // single-donor route's "donor not found" -> 404, applied here to the
+  // whole set rather than one id). Chunked because D1 caps a single
+  // statement at 100 bound parameters total (owner_user_id + the IN
+  // clause) -- see OWNERSHIP_QUERY_CHUNK_SIZE above for the live-confirmed
+  // proof. Each chunk is an independent read, so they run concurrently
+  // rather than round-tripping one at a time.
+  let ownedIds: Set<string>;
+  try {
+    const chunks = chunk(donorIds, OWNERSHIP_QUERY_CHUNK_SIZE);
+    const chunkResults = await Promise.all(chunks.map((idsInChunk) => {
+      const placeholders = idsInChunk.map(() => "?").join(",");
+      return env.DB.prepare(`SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND id IN (${placeholders})`).bind(userId, ...idsInChunk).all<{ id: string }>();
+    }));
+    ownedIds = new Set(chunkResults.flatMap((result) => result.results.map((row) => row.id)));
+  } catch (error) {
+    logger.error("shared_activity_ownership_precheck_failed", error, { donorCount: donorIds.length });
     return failure("The shared activity could not be validated. Nothing was saved.", 500);
   }
   const missing = donorIds.filter((id) => !ownedIds.has(id));

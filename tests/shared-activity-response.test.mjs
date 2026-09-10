@@ -116,15 +116,35 @@ const captureExperience = await readFile(new URL("../app/capture/CaptureExperien
 }
 
 {
-  // The two pre-write D1 calls (profile upsert + donor-ownership check) are
-  // now inside their own try/catch, so an exception there can never
-  // propagate uncaught out of the handler.
-  const precheckTry = sharedRoute.indexOf("let userId: string;");
-  const precheckCatch = sharedRoute.indexOf("shared_activity_precheck_failed");
-  assert.ok(precheckTry !== -1 && precheckCatch !== -1 && precheckTry < precheckCatch, "the pre-write profile/ownership lookups must be wrapped in their own try/catch");
-  const precheckBlock = sharedRoute.slice(precheckTry, precheckCatch);
-  assert.match(precheckBlock, /ensureUserProfile\(user\)/, "the profile upsert must be inside the guarded pre-write block");
-  assert.match(precheckBlock, /SELECT id FROM donors WHERE owner_user_id/, "the donor-ownership check must be inside the guarded pre-write block");
+  // The two pre-write D1 calls (profile upsert, donor-ownership check) are
+  // now inside their OWN, SEPARATE try/catch blocks with distinct log
+  // event names -- so an exception in either can never propagate uncaught
+  // out of the handler, and a future failure never again collapses into
+  // one ambiguous log event (docs/AI-HANDOFF.md, the "too many SQL
+  // variables" follow-up incident).
+  const profileTry = sharedRoute.indexOf("const profile = await ensureUserProfile(user);");
+  const profileCatch = sharedRoute.indexOf("shared_activity_profile_precheck_failed");
+  assert.ok(profileTry !== -1 && profileCatch !== -1 && profileTry < profileCatch, "the profile upsert must be wrapped in its own try/catch");
+
+  const ownershipTry = sharedRoute.indexOf("const chunks = chunk(donorIds, OWNERSHIP_QUERY_CHUNK_SIZE);");
+  const ownershipCatch = sharedRoute.indexOf("shared_activity_ownership_precheck_failed");
+  assert.ok(ownershipTry !== -1 && ownershipCatch !== -1 && ownershipTry < ownershipCatch, "the donor-ownership lookup must be wrapped in its own try/catch, distinct from the profile upsert's");
+  assert.ok(profileCatch < ownershipTry, "the profile precheck must run, and be fully resolved, before the ownership lookup begins");
+
+  const ownershipBlock = sharedRoute.slice(ownershipTry, ownershipCatch);
+  assert.match(ownershipBlock, /SELECT id FROM donors WHERE owner_user_id/, "the donor-ownership check must be inside its own guarded block");
+}
+
+{
+  // The ownership lookup is chunked to stay under D1's 100-bound-parameter
+  // limit -- live-confirmed on Independent Staging: 101 donors (102 bound
+  // params) failed with "D1_ERROR: too many SQL variables at offset 280:
+  // SQLITE_ERROR"; 99 donors (100 bound params) succeeded.
+  assert.match(sharedRoute, /const OWNERSHIP_QUERY_CHUNK_SIZE = 90;/);
+  assert.ok(1 + 90 <= 100, "OWNERSHIP_QUERY_CHUNK_SIZE plus the owner_user_id bind must stay at or under D1's 100-parameter limit");
+  assert.match(sharedRoute, /chunk\(donorIds, OWNERSHIP_QUERY_CHUNK_SIZE\)/);
+  assert.match(sharedRoute, /Promise\.all\(chunks\.map\(/, "ownership chunks are independent reads and should run concurrently, not one at a time");
+  assert.match(sharedRoute, /new Set\(chunkResults\.flatMap\(\(result\) => result\.results\.map\(\(row\) => row\.id\)\)\)/, "owned ids from every chunk must be merged into one set, not just the last chunk's");
 }
 
 {
