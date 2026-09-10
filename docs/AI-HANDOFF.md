@@ -17790,6 +17790,139 @@ exercised without a real two-donor write. A controlled real save
 own instruction) remains available if the user wants that last branch
 specifically verified end-to-end.
 
+## Log Interaction -> Multiple Donors Save Failure, Follow-Up -- Ownership Lookup Exceeded D1's 100-Bound-Parameter Limit (2026-09-10) -- REPAIRED, TESTED, DEPLOYED TO INDEPENDENT STAGING, NON-MUTATING LIVE VERIFICATION PASSED ACROSS THE FULL 2-200 DONOR RANGE, ZERO D1 MUTATION DURING INVESTIGATION
+
+**Implementation commit:** `e6b62fe` -- "Fix shared-activity ownership
+lookup exceeding D1's 100-bound-parameter limit".
+
+**Context:** after the prior fix (commit `3f1cb3c`) made the pre-write
+D1 calls exception-safe, the same route started reliably reporting "The
+shared activity could not be validated. Nothing was saved." instead of
+the raw JSON parse error -- proving the new structured zero-write path
+worked, but exposing that the underlying pre-write validation itself
+was genuinely failing for a real donor selection.
+
+**Latest failed attempt write state: ZERO WRITE**, re-confirmed the
+same way as the prior incident (direct count/timestamp check against
+`shared_activities`/`interactions`/`shared_activity_recipient_audits`
+before, during, and after this entire investigation -- all three
+stayed at 7/73/49 throughout).
+
+**How the exact failing operation was identified:** historical
+Cloudflare Workers Logs for the user's own prior click were not
+retrievable without an interactive dashboard login (declined again, for
+the same reason as the prior incident -- entering/submitting a
+password is out of bounds regardless of who benefits, and `wrangler
+tail` only streams new, real-time invocations). Instead, live-
+reproduced the same code path via `wrangler tail` running against
+Independent Staging while sending a series of deliberately-non-
+mutating, safe requests: real, owned donor ids plus exactly one
+deliberately-nonexistent id appended, so every probe was guaranteed to
+stop at the "One or more donors were not found" 404 branch (before the
+idempotency check or any write statement) regardless of outcome. This
+produced the ACTUAL live Worker log for the exact failing operation:
+
+```
+{"level":"error","message":"shared_activity_precheck_failed",
+ "error":"D1_ERROR: too many SQL variables at offset 280: SQLITE_ERROR",
+ "donorCount":101}
+```
+
+**Exact failing operation: the donor-ownership lookup** (`SELECT id
+FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND id IN
+(...)`), not `ensureUserProfile()`. Binary-searched the precise
+threshold with the same safe probe technique: 99 donors (100 total
+bound parameters: 1 for `owner_user_id` + 99 for the `IN` clause)
+succeeded; 100 donors (101 bound parameters) failed with the same D1
+error. This confirms **D1 hard-caps a single statement at 100 bound
+parameters**, independent of anything this app's code does.
+
+**Root cause:** `MAX_RECIPIENTS` already allowed up to 200 donors per
+shared activity, but the ownership lookup bound one parameter per donor
+id (plus one for `owner_user_id`) in a single unbounded `IN` clause --
+so any request with 100 or more donors was guaranteed to fail
+deterministically, regardless of D1 load, network conditions, or
+anything transient. This was never hit before because the old search-
+only `RecipientPicker` made selecting 100+ donors tedious; the new A-Z
+browseable directory (a prior task, unrelated to this bug itself, but
+the reason it started surfacing) makes it trivial.
+
+**Fix:** the ownership lookup is now chunked. New
+`lib/collections.ts`'s `chunk()` (pure, unit-tested) splits `donorIds`
+into groups of `OWNERSHIP_QUERY_CHUNK_SIZE` (90 -- comfortably under
+the confirmed 100-parameter wall, even with the `owner_user_id` bind
+included), and the route runs one bounded `SELECT ... IN (...)` per
+chunk concurrently (`Promise.all`), merging every chunk's owned ids
+into one `Set`. Ownership validation itself is unweakened: every
+requested donor id still must resolve to a real, live, owned donor
+before anything is written -- only the query shape changed, not what it
+validates. Live-confirmed the merge is correct, not just crash-free: a
+141-id request (140 real, owned donors + 1 fake id, spanning 2 chunks
+of 90 + 51) correctly reported exactly the one fake id as missing, with
+all 140 real donors recognized as owned.
+
+**Diagnostic logging improved (per the task's own request):** the
+previous single `shared_activity_precheck_failed` event (covering both
+the profile upsert and the ownership lookup) is now two events --
+`shared_activity_profile_precheck_failed` and
+`shared_activity_ownership_precheck_failed` -- each with only safe
+metadata (`donorCount`, never donor ids or names), so a future failure
+in either operation is unambiguous from logs alone without needing a
+live reproduction to tell them apart.
+
+**Tests added:** `tests/shared-activity-ownership-chunking.test.mjs`
+(new; wired into `pnpm test`) -- `chunk()`'s own correctness (splits,
+never drops/duplicates, rejects a size below 1); a deterministic proof,
+for donor counts 2/10/25/50/100/200, that every resulting chunk's bound
+parameter count (`1 + chunk.length`) stays at or under D1's real,
+live-confirmed 100-parameter limit; an explicit reproduction that the
+exact reported failure size (101 donors, 102 unchunked bound params)
+truly exceeds the limit while every chunk of it does not; the
+`MAX_RECIPIENTS` ceiling case (200 donors -> 3 chunks of 90+90+20, all
+within limit); and source-level assertions that the two precheck
+operations are in separate try/catch blocks with the two new distinct
+log event names, that chunks run concurrently via `Promise.all`, and
+that owned ids are merged across every chunk rather than just the last
+one. `tests/shared-activity-response.test.mjs`'s route-wiring
+assertions were updated to match the new two-block structure (same
+validated behavior -- these are the same operations, just split and
+chunked).
+
+**Gates:** `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. The same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure noted in earlier
+sections of this document remains present and untouched.
+
+**Deployment:** Independent Staging, version
+`edd1c951-b44c-447b-a0c4-577df2469d66`.
+
+**Non-mutating live verification result:** against the real deployed
+Worker, re-ran the exact same probe technique across the full
+supported range -- 2, 10, 25, 50, 99, 100, 101, and 200 donor ids (the
+last two using synthetic, guaranteed-nonexistent ids to make the check
+maximally safe) -- every single one now returns a clean `404`
+("One or more donors were not found") instead of the previous `500` at
+100+. The exact same donor selection size that previously failed (101
+donors) now passes ownership validation cleanly. The 141-real-id merge-
+correctness check above additionally confirms the fix is correct, not
+merely non-crashing.
+
+**D1 mutation result during investigation:** zero, throughout,
+including the reproduction of the actual failure itself.
+`shared_activities` (7), `interactions` (73),
+`shared_activity_recipient_audits` (49), and `donors` (254) were
+identical before and after this entire investigation and fix.
+
+**Whether a controlled real save test is still needed:** the exact
+same donor selection size that previously failed now passes pre-write
+validation end-to-end (confirmed above), and the underlying write path
+(one atomic `env.DB.batch()`) was already proven sound in the prior
+incident's writeup. A controlled real save with a specific, reported-
+in-advance payload remains available if the user wants the actual
+write exercised end-to-end at a large donor count specifically -- not
+performed here, per the task's explicit instruction to stop and ask
+first.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
