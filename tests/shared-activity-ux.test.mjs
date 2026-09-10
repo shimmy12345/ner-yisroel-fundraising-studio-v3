@@ -30,7 +30,7 @@ assert.match(captureExperience, /fetch\(initialActivity \? `\/api\/interactions\
 assert.match(captureExperience, /acceptRelationshipSnapshot: acceptRelationshipSnapshot && preview\.relationshipSummary !== null,/, "the single-donor request body must still send the relationship-snapshot flag, now correctly gated on the current preview");
 
 // 2. Multi-donor recipient flow submits the shared route only for 2+ donors.
-assert.match(sharedRoute, /donorIds\.length < 2\)\s*return Response\.json\(\{ error: "A shared activity needs at least two donors/, "the backend itself refuses fewer than 2 donors");
+assert.match(sharedRoute, /donorIds\.length < 2\) return failure\("A shared activity needs at least two donors/, "the backend itself refuses fewer than 2 donors");
 assert.match(captureExperience, /const sharedReady = recipientIds\.length >= 2 && sharedSummary\.trim\(\)\.length >= 4 && sharedValidDate;/, "the UI must gate save on at least 2 selected donors");
 assert.match(captureExperience, /fetch\("\/api\/interactions\/shared", \{/, "multi-donor save must POST to the shared route");
 assert.match(captureExperience, /donorIds: recipientIds,/, "the shared-route request body must carry every selected donor id");
@@ -46,7 +46,7 @@ assert.match(captureExperience, /setRoleOverride\("recipient"\)/, "the UI must l
 // the server (the shared route rejects a body containing a duplicate).
 assert.match(recipientPicker, /const selectedSet = useMemo\(\(\) => new Set\(selectedIds\)/, "the picker must track selection with a Set, structurally preventing duplicates");
 assert.match(recipientPicker, /if \(selectedSet\.has\(donorId\)\) \{\s*onChange\(selectedIds\.filter/, "toggling an already-selected donor must remove, never duplicate, them");
-assert.match(sharedRoute, /new Set\(donorIds\)\.size !== donorIds\.length\) return Response\.json\(\{ error: "Duplicate donor in recipient list"/, "the backend must reject a duplicate donor id even if the client somehow sent one");
+assert.match(sharedRoute, /new Set\(donorIds\)\.size !== donorIds\.length\) return failure\("Duplicate donor in recipient list"/, "the backend must reject a duplicate donor id even if the client somehow sent one");
 
 // 5. Recipient count matches selected donors.
 assert.match(sharedRoute, /recipientCount: donorIds\.length,/, "the published recipientCount must equal the actual number of donor ids submitted");

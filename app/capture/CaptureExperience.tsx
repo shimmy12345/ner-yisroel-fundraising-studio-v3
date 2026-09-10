@@ -13,6 +13,7 @@ import type { DonorSearchRecord } from "../../lib/relationships/donor-search";
 import { DonorAutocomplete } from "./DonorAutocomplete";
 import { RecipientPicker } from "./RecipientPicker";
 import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
+import { interpretSharedActivityResponse, NETWORK_FAILURE_MESSAGE, type SharedSaveResult } from "../../lib/capture/shared-activity-response";
 
 const kinds: Array<{ value: InteractionKind; icon: string }> = [
   { value: "call", icon: "☎" },
@@ -48,8 +49,6 @@ const ROLE_DEFAULT_BY_KIND: Record<InteractionKind, "participant" | "recipient">
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 15;
 // Mirrors MAX_RECIPIENTS in app/api/interactions/shared/route.ts.
 const MAX_SHARED_RECIPIENTS = 200;
-
-type SharedSaveResult = { sharedActivityId: string; interactionIds: string[]; recipientCount: number; occurredAt: string };
 
 type SaveResult = {
   interactionId: string;
@@ -100,6 +99,11 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
   const [sharedStatus, setSharedStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [sharedResult, setSharedResult] = useState<SharedSaveResult | null>(null);
   const [sharedErrorMessage, setSharedErrorMessage] = useState("");
+  // "Your note is still here -- try again" is only ever true when the
+  // outcome is known-safe to retry -- an unknown outcome's own message
+  // already tells the user NOT to resubmit yet, and appending "try again"
+  // to it would directly contradict that (see docs/AI-HANDOFF.md).
+  const [sharedRetryUnsafe, setSharedRetryUnsafe] = useState(false);
   const sharedKind = selectedKind ?? "meeting";
   const role = roleOverride ?? ROLE_DEFAULT_BY_KIND[sharedKind];
   const sharedValidDate = Boolean(parseScheduledDate(sharedOccurredAt));
@@ -114,8 +118,21 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     setShowLargeConfirm(false);
     setSharedStatus("saving");
     setSharedErrorMessage("");
+    setSharedRetryUnsafe(false);
+
+    // The fetch and the response-body read are two genuinely different
+    // failure modes, and must be told apart: if fetch() itself throws, the
+    // request never reached the server (or the server never answered at
+    // all), so nothing could have been written -- safe to retry. If fetch()
+    // succeeds but response.json() throws (an empty, truncated, or non-JSON
+    // body -- the exact "Unexpected end of JSON input" incident this
+    // guards against), the request DID reach the server and we simply
+    // cannot read its answer -- the write outcome is unknown, and must
+    // never be presented as safe to retry. See
+    // lib/capture/shared-activity-response.ts for why.
+    let response: Response;
     try {
-      const response = await fetch("/api/interactions/shared", {
+      response = await fetch("/api/interactions/shared", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -126,14 +143,24 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           occurredAt: parseScheduledDate(sharedOccurredAt)?.toISOString(),
         }),
       });
-      const payload = await response.json() as SharedSaveResult & { error?: string };
-      if (!response.ok) throw new Error(payload.error || "The shared activity could not be saved.");
-      setSharedResult(payload);
-      setSharedStatus("saved");
-    } catch (error) {
-      setSharedErrorMessage(error instanceof Error ? error.message : "The shared activity could not be saved.");
+    } catch {
+      setSharedErrorMessage(NETWORK_FAILURE_MESSAGE);
       setSharedStatus("error");
+      return;
     }
+
+    let payload: unknown = null;
+    try { payload = await response.json(); } catch { payload = null; }
+
+    const outcome = interpretSharedActivityResponse(response.ok, payload);
+    if (outcome.kind === "success") {
+      setSharedResult(outcome.result);
+      setSharedStatus("saved");
+      return;
+    }
+    setSharedErrorMessage(outcome.message);
+    setSharedRetryUnsafe(outcome.kind === "unknown_outcome");
+    setSharedStatus("error");
   }
 
   function resetShared() {
@@ -145,6 +172,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
     setSharedStatus("idle");
     setSharedResult(null);
     setSharedErrorMessage("");
+    setSharedRetryUnsafe(false);
   }
 
   const inferredKind = useMemo(() => inferInteractionKind(note), [note]);
@@ -499,7 +527,7 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
             <button type="button" onClick={() => setSharedOccurredAt(toLocalDateTimeValue(new Date()))}>Now</button>
           </div>
 
-          {sharedStatus === "error" && <p className="capture-error">{sharedErrorMessage} Your note is still here—try again.</p>}
+          {sharedStatus === "error" && <p className="capture-error">{sharedErrorMessage}{!sharedRetryUnsafe && " Your note is still here—try again."}</p>}
 
           {showLargeConfirm && (
             <div className="large-selection-confirm">

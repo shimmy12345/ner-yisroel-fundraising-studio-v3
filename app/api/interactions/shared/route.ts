@@ -38,42 +38,109 @@ const ROLES = new Set(["participant", "recipient"]);
 // bounded transaction rather than open-ended.
 const MAX_RECIPIENTS = 200;
 
+// Idempotent-retry window (docs/AI-HANDOFF.md, the "Unexpected end of JSON
+// input" incident): there is no client-generated idempotency key, so an
+// identical resubmission is instead recognized by exact content match
+// (user, type, occurred_at, summary, recipient_count) within this window.
+// Long enough to cover a genuine "I got an error, let me try again"
+// re-click; short enough that two real, unrelated activities would need to
+// share every one of those fields byte-for-byte AND land in the same
+// 5-minute window to be mistaken for each other, which does not happen in
+// practice for free-text summaries.
+const DEDUPE_WINDOW_SECONDS = 300;
+
+// Every application-controlled response from this route carries `ok` and
+// `databaseChangesMade` explicitly -- see docs/AI-HANDOFF.md. `ok: false`
+// is this route's own promise that nothing was written; the client only
+// ever treats a failure as "safe to retry" when it sees this shape.
+function failure(error: string, status: number, extra: Record<string, unknown> = {}) {
+  return Response.json({ ok: false, error, databaseChangesMade: false, ...extra }, { status });
+}
+
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
-  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (!user) return failure("Authentication required", 401);
 
   let body: RequestBody;
   try { body = await request.json() as RequestBody; }
-  catch { return Response.json({ error: "Invalid request" }, { status: 400 }); }
+  catch { return failure("Invalid request", 400); }
 
   const donorIds = Array.isArray(body.donorIds) ? body.donorIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
   const summary = body.summary?.trim() ?? "";
 
-  if (donorIds.length < 2) return Response.json({ error: "A shared activity needs at least two donors -- use POST /api/interactions for a single donor" }, { status: 422 });
-  if (donorIds.length > MAX_RECIPIENTS) return Response.json({ error: `A shared activity can link at most ${MAX_RECIPIENTS} donors` }, { status: 422 });
-  if (new Set(donorIds).size !== donorIds.length) return Response.json({ error: "Duplicate donor in recipient list" }, { status: 422 });
-  if (!body.type || !KINDS.has(body.type)) return Response.json({ error: "Invalid interaction type" }, { status: 422 });
-  if (!body.role || !ROLES.has(body.role)) return Response.json({ error: "role must be 'participant' or 'recipient'" }, { status: 422 });
-  if (summary.length < 4 || summary.length > 5000) return Response.json({ error: "A summary is required" }, { status: 422 });
+  if (donorIds.length < 2) return failure("A shared activity needs at least two donors -- use POST /api/interactions for a single donor", 422);
+  if (donorIds.length > MAX_RECIPIENTS) return failure(`A shared activity can link at most ${MAX_RECIPIENTS} donors`, 422);
+  if (new Set(donorIds).size !== donorIds.length) return failure("Duplicate donor in recipient list", 422);
+  if (!body.type || !KINDS.has(body.type)) return failure("Invalid interaction type", 422);
+  if (!body.role || !ROLES.has(body.role)) return failure("role must be 'participant' or 'recipient'", 422);
+  if (summary.length < 4 || summary.length > 5000) return failure("A summary is required", 422);
 
-  const profile = await ensureUserProfile(user);
-  const userId = profile.id;
   const capturedAt = new Date();
   const occurredAt = body.occurredAt ? new Date(body.occurredAt) : capturedAt;
-  if (!Number.isFinite(occurredAt.getTime())) return Response.json({ error: "Choose a valid activity date" }, { status: 422 });
-
-  // Every requested donor must resolve to one this user owns -- never
-  // silently drop an unresolvable id from the batch (matches the
-  // single-donor route's "donor not found" -> 404, applied here to the
-  // whole set rather than one id).
-  const placeholders = donorIds.map(() => "?").join(",");
-  const ownedRows = await env.DB.prepare(`SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND id IN (${placeholders})`).bind(userId, ...donorIds).all<{ id: string }>();
-  const ownedIds = new Set(ownedRows.results.map((row) => row.id));
-  const missing = donorIds.filter((id) => !ownedIds.has(id));
-  if (missing.length > 0) return Response.json({ error: "One or more donors were not found", donorIds: missing }, { status: 404 });
-
+  if (!Number.isFinite(occurredAt.getTime())) return failure("Choose a valid activity date", 422);
   const occurredAtEpoch = Math.floor(occurredAt.getTime() / 1000);
   const now = Math.floor(capturedAt.getTime() / 1000);
+
+  // Everything from here through the ownership check is read-only -- no
+  // write statement has run yet, so ANY exception in this block (a
+  // transient D1 error, a network blip to D1, or anything else) is still
+  // provably a zero-write failure. Caught explicitly rather than left to
+  // propagate uncaught: an uncaught exception's response is controlled by
+  // the Workers runtime, not this route, and is not guaranteed to be JSON
+  // (or even a non-empty body) -- exactly the "Unexpected end of JSON
+  // input" incident this fixes.
+  let userId: string;
+  let ownedIds: Set<string>;
+  try {
+    const profile = await ensureUserProfile(user);
+    userId = profile.id;
+    // Every requested donor must resolve to one this user owns -- never
+    // silently drop an unresolvable id from the batch (matches the
+    // single-donor route's "donor not found" -> 404, applied here to the
+    // whole set rather than one id).
+    const placeholders = donorIds.map(() => "?").join(",");
+    const ownedRows = await env.DB.prepare(`SELECT id FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND id IN (${placeholders})`).bind(userId, ...donorIds).all<{ id: string }>();
+    ownedIds = new Set(ownedRows.results.map((row) => row.id));
+  } catch (error) {
+    logger.error("shared_activity_precheck_failed", error, { donorCount: donorIds.length });
+    return failure("The shared activity could not be validated. Nothing was saved.", 500);
+  }
+  const missing = donorIds.filter((id) => !ownedIds.has(id));
+  if (missing.length > 0) return failure("One or more donors were not found", 404, { donorIds: missing });
+
+  // Idempotent retry guard -- see DEDUPE_WINDOW_SECONDS above. Also
+  // read-only, so an exception here is likewise a provable zero-write
+  // failure.
+  let existingActivityId: string | null = null;
+  try {
+    const existing = await env.DB.prepare(
+      `SELECT id FROM shared_activities WHERE user_id = ? AND type = ? AND occurred_at = ? AND summary = ? AND recipient_count = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1`,
+    ).bind(userId, body.type, occurredAtEpoch, summary, donorIds.length, now - DEDUPE_WINDOW_SECONDS).first<{ id: string }>();
+    existingActivityId = existing?.id ?? null;
+  } catch (error) {
+    logger.error("shared_activity_dedupe_check_failed", error, { userId, donorCount: donorIds.length });
+    return failure("The shared activity could not be validated. Nothing was saved.", 500);
+  }
+  if (existingActivityId) {
+    let priorInteractionIds: string[];
+    try {
+      const priorInteractions = await env.DB.prepare("SELECT id FROM interactions WHERE shared_activity_id = ? ORDER BY created_at").bind(existingActivityId).all<{ id: string }>();
+      priorInteractionIds = priorInteractions.results.map((row) => row.id);
+    } catch (error) {
+      logger.error("shared_activity_dedupe_lookup_failed", error, { userId, sharedActivityId: existingActivityId });
+      return failure("The shared activity could not be validated. Nothing was saved.", 500);
+    }
+    logger.info("shared_activity_duplicate_retry_returned_existing", { userId, sharedActivityId: existingActivityId, donorCount: donorIds.length });
+    return Response.json({
+      ok: true,
+      sharedActivityId: existingActivityId,
+      interactionIds: priorInteractionIds,
+      recipientCount: donorIds.length,
+      occurredAt: occurredAt.toISOString(),
+      databaseChangesMade: false,
+    }, { status: 200 });
+  }
+
   const sharedActivityId = crypto.randomUUID();
   const source = "manual";
 
@@ -98,15 +165,28 @@ export async function POST(request: Request) {
   try {
     await env.DB.batch(statements);
   } catch (error) {
+    // D1's batch() is all-or-nothing (see docs/AI-HANDOFF.md) -- a thrown
+    // error here means NONE of these statements committed.
     logger.error("shared_activity_capture_failed", error, { userId, donorCount: donorIds.length });
-    return Response.json({ error: "Shared activity could not be saved" }, { status: 500 });
+    return failure("Shared activity could not be saved", 500);
   }
 
-  logger.info("shared_activity_captured", { userId, sharedActivityId, donorCount: donorIds.length, role: body.role });
+  // The write above already succeeded -- everything past this point must
+  // never report databaseChangesMade: false, no matter what happens. A
+  // logging failure is swallowed rather than allowed to mask a successful
+  // save; the final Response.json() call below only ever serializes
+  // already-validated primitives (plain strings/numbers), which does not
+  // throw in practice.
+  try {
+    logger.info("shared_activity_captured", { userId, sharedActivityId, donorCount: donorIds.length, role: body.role });
+  } catch { /* never let a logging failure mask a successful write */ }
+
   return Response.json({
+    ok: true,
     sharedActivityId,
     interactionIds,
     recipientCount: donorIds.length,
     occurredAt: occurredAt.toISOString(),
+    databaseChangesMade: true,
   }, { status: 201 });
 }
