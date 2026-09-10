@@ -17466,6 +17466,162 @@ renders safely ("already current") instead of inverting, and the next
 real donation import will naturally overwrite it with a correctly
 completed-gift-filtered value.
 
+## Log Interaction -> Multiple Donors Browseable Directory (2026-09-10) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO D1 MUTATION
+
+**Implementation commit:** `4af3fdc` -- "Add browseable All/A-Z donor
+directory to Log Interaction -> Multiple donors".
+
+**Scope:** a narrow interaction-entry UX upgrade to
+`app/capture/RecipientPicker.tsx` (used only by the Multiple-donors branch
+of `app/capture/CaptureExperience.tsx`) plus small additions to
+`lib/relationships/donor-search.ts`. No change to interaction semantics,
+shared-activity storage, recipient/participant logic, Last Contact
+behavior, recommendation logic, or the donor data model. No schema
+change, no new API endpoint.
+
+**Donor source (investigated before writing any code):** the exact same
+already-loaded `donors: DonorSearchRecord[]` array every donor picker in
+this app already uses -- one server-side query in `app/capture/page.tsx`
+(`SELECT id, display_name, primary_first_name, last_name, spouse,
+spouse_first_name, donor_code, external_id, email, phone, home_phone,
+alternate_mobile_phone FROM donors WHERE owner_user_id = ? AND
+data_source = 'live' AND archived_at IS NULL ORDER BY ... LIMIT 1000`),
+passed once into `CaptureExperience` and down into `RecipientPicker`.
+No second donor-loading path was built -- the whole directory (browse,
+letter-filter, search) is a synchronous in-memory operation over this
+one array, exactly like the pre-existing `DonorAutocomplete`/
+`searchDonors` search already was.
+
+**Staging donor count observed:** 254 live, unarchived donors -- well
+under the 1000-row query limit and squarely in "a few hundred," so no
+pagination or virtualization was added (confirmed before choosing an
+approach, per the task's own instruction); the existing
+`max-height:320px; overflow-y:auto` scrollable list container was
+already sufficient.
+
+**Canonical last-name field:** `effectiveDonorLastName()`
+(`lib/relationships/donor-search.ts`, pre-existing, reused unchanged) --
+prefers the donor's actual `lastName` DB column, and only falls back to
+parsing the display name when `lastName` is missing or is itself a bare
+honorific ("rabbi", "mr", etc.). Confirmed against real Independent
+Staging data: every "Rabbi & Mrs. ___" record already has a clean,
+separate `last_name` column value (e.g. "Rabbi & Mrs. Aryeh Adler" ->
+`last_name = "Adler"`), so grouping by display text was never actually
+needed for real data, but the honorific-fallback path exists and is
+tested for the case where it would be. New: `donorDirectoryLetter()`
+takes that canonical last name's first character, uppercased, and maps
+it to one of 27 fixed buckets -- A-Z (`DIRECTORY_ALPHABET`) or `#`
+(`DIRECTORY_OTHER_LETTER`) for anything that doesn't start with a plain
+A-Z letter once the canonical name is resolved (missing last name AND
+no usable word in the display name -- confirmed zero such donors exist
+on staging today, all 254 have a clean `last_name`).
+
+**Alphabet-filter behavior:** always the same 27 buttons (All, A-Z, #)
+in the same order, every time -- an empty letter is disabled
+(`donorDirectoryNonEmptyLetters()` derives this from the already-loaded
+array, no extra query), never hidden, so the control surface never
+changes shape. Confirmed live: Q, X, Y had zero real donors on staging
+and rendered disabled; A (11), M (21), S (many, including the real
+Mordechai Schwartz record from the Giving Import Reconciliation work)
+rendered normally and were browsed without typing.
+
+**Search + letter interaction (the one place this task asked for an
+explicit, documented choice):** search filters WITHIN the active letter
+-- "S" + "sch" only matches S-lettered donors containing "sch"; to match
+a name regardless of letter, the letter must be reset to "All" first
+("All" + "schwartz" matches Schwartz regardless of letter). This is the
+behavior the task itself named as preferred, and it is exactly what
+`filterDonorDirectory()` implements (letter filter applied first,
+search filter applied second, both derived from the same
+`matchesDonorQuery()` predicate `searchDonors()` already used, so the
+two never silently diverge).
+
+**Selection persistence (the critical requirement):** selection state
+(`selectedIds`, owned by the parent `CaptureExperience` component) is
+structurally separate React state from filter state (`query`, `letter`,
+both local to `RecipientPicker`) -- a letter switch, a search, clearing
+search, or returning to All only ever changes the derived `results`
+list (`useMemo` over `filterDonorDirectory`), and never calls
+`onChange`. Live-verified: selected one donor each from letters A, M,
+and S (4 total, including via a mid-search selection), switched
+directly between letters and back to All, cleared an active search --
+the running count and chip summary correctly showed all 4 selections
+intact at every step, in the real browser against real staging data.
+
+**Selected count / Clear selection:** a visible running count ("N
+selected donors") plus an explicit **Clear selection** button (never
+automatic) sits above the existing chip summary (unchanged, still
+lets an individual donor be removed one at a time). The pre-existing,
+tested "N selected" wording (`` `${selectedIds.length} selected` ``,
+asserted by `tests/shared-activity-ux.test.mjs`) was preserved exactly
+and a pluralized "donor(s)" suffix appended alongside it, rather than
+rewritten, so that pre-existing test needed no change.
+
+**Accessibility:** donor rows are a real `<label>` wrapping a real
+`<input type="checkbox">` (native click-toggles-the-row semantics, no
+JS click handler needed on the row itself); the alphabet strip is real
+`<button>` elements with `aria-pressed` reflecting the active letter
+(never color alone) and `disabled` on empty letters (still keyboard-
+focusable-skippable, not a dead visual trap).
+
+**Mobile:** the alphabet strip switches from wrapping to horizontal
+scroll under the existing `max-width:760px` breakpoint
+(`-webkit-overflow-scrolling:touch`), with buttons kept at a full
+32-36px hit area rather than shrunk to fit -- never unreadable text.
+The donor-row checkbox grows slightly (18px -> 20px) at the same
+breakpoint for a larger tap target. No new horizontal page overflow was
+introduced (the search input, alphabet strip, and results panel all
+already respect the existing `.recipient-picker` full-width container).
+
+**Preserved unchanged (verified via existing, still-passing tests):**
+Single-donor mode's markup and save path; the shared-activity request
+payload (`donorIds: recipientIds`, `role`, `summary`, `occurredAt`);
+the Set-backed duplicate-proof toggle; the `disabled={!checked &&
+atCap}` cap enforcement; the large-selection confirmation threshold and
+the 200-recipient cap; the no-absolutely-positioned-dropdown mobile
+layout rule; the `.recipient-picker-results`/`.recipient-picker-result
+.autocomplete-identity small` CSS truncation fix from the prior mobile
+round. A new regression test confirms the single-donor save request
+body has no reference to `recipientIds` at all, structurally
+guaranteeing a hidden multi-selection can never be submitted after
+switching back to Single donor.
+
+**Tests added:** `tests/donor-directory-picker.test.mjs` (new; wired
+into `pnpm test`) -- title prefixes never affect grouping; the
+honorific-only-lastName fallback path; the genuinely-no-usable-name
+fallback to `#`; All shows every donor; a letter filter shows only
+that letter; sorting by canonical last name then display name;
+letter+search interaction (including the "search never escapes the
+active letter" case); empty-letter detection; plus the source-level
+assertions described above (filter state never triggers `onChange`,
+default filter is "All", Clear selection is explicit, accessible
+checkbox/button markup, and the single-donor-payload safety check).
+
+**Gates:** `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. The same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure noted in earlier
+sections of this document remains present and untouched.
+
+**Deployment:** Independent Staging, version
+`b743350a-31c1-4b2c-aa41-fbe6852cc23d`.
+
+**Live verification result:** Multiple donors now opens directly to
+Search + All/A-Z (+ #) + a full browseable checkbox list, no typing
+required. Selected 4 real donors across letters A, M, and S (including
+mid-search); switching letters, searching, clearing search, and
+returning to All never dropped a selection; the count and chip summary
+were correct throughout; Clear selection worked; Single donor mode was
+confirmed visually and structurally unaffected (no hidden-selection
+leakage possible). No interaction or shared activity was ever saved
+during verification -- the save buttons were never clicked.
+
+**D1 mutation result:** zero. `donors` (254) matches the pre-existing
+baseline; `interactions`/`shared_activities` counts were read only,
+never written to, during this task -- confirmed both by the D1 read
+itself and by the fact that `RecipientPicker.tsx` makes no network
+calls of its own (only `CaptureExperience.tsx`'s explicit Save buttons
+do, and neither was clicked).
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
