@@ -1132,12 +1132,25 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .capture-mode-toggle button.active { border-color:#315f4b; background:#dfece4; color:#1f4a38; }
 .recipient-picker { display:grid; gap:8px; margin:14px 0; }
 .recipient-picker label { font-size:11px; font-weight:750; color:#455a50; text-transform:uppercase; letter-spacing:.04em; }
-.recipient-picker > input { min-height:44px; padding:10px 12px; border:1px solid #cad8d0; border-radius:8px; font:inherit; font-size:14px; }
+.recipient-picker-search { position:relative; }
+.recipient-picker-search > input { width:100%; min-height:44px; padding:10px 40px 10px 12px; border:1px solid #cad8d0; border-radius:8px; font:inherit; font-size:14px; }
+.recipient-picker-search-clear { position:absolute; top:29px; right:6px; display:grid; place-items:center; width:32px; height:32px; border:0; border-radius:50%; background:transparent; color:#64756d; font-size:15px; cursor:pointer; }
+.recipient-picker-search-clear:hover, .recipient-picker-search-clear:focus-visible { background:#e7eeea; color:#214f3d; outline:none; }
+/* All + A-Z + # -- always the same 27 buttons in the same order (never
+   hidden), so browsing is predictable; an empty letter is disabled rather
+   than removed. flex-wrap here (desktop); the mobile media query switches
+   this row to horizontal scroll instead of wrapping across many lines. */
+.recipient-picker-alphabet { display:flex; flex-wrap:wrap; gap:6px; margin:2px 0; }
+.recipient-picker-alphabet button { flex:0 0 auto; min-width:32px; min-height:32px; padding:0 8px; border:1px solid #cad8d0; border-radius:7px; background:#fff; color:#455a50; font-size:13px; font-weight:650; cursor:pointer; }
+.recipient-picker-alphabet button:hover:not(:disabled) { background:#eef4f0; }
+.recipient-picker-alphabet button.active { border-color:#315f4b; background:#315f4b; color:#fff; }
+.recipient-picker-alphabet button:disabled { cursor:not-allowed; opacity:.35; }
 .recipient-picker-results { display:grid; grid-auto-rows:min-content; gap:2px; max-height:320px; overflow-y:auto; margin-top:4px; padding:6px; border:1px solid #dde5e0; border-radius:9px; background:#fbfcfb; }
+.recipient-picker-empty { margin:0; padding:14px; color:var(--muted); font-size:13px; text-align:center; }
 .recipient-picker-result { display:grid; grid-template-columns:20px 34px minmax(0,1fr); align-items:start; gap:10px; min-height:44px; padding:10px; border:none; border-radius:7px; background:transparent; text-align:left; font:inherit; cursor:pointer; }
 .recipient-picker-result:hover { background:#eef4f0; }
 .recipient-picker-result.selected { background:#dfece4; }
-.recipient-picker-result:disabled { cursor:not-allowed; opacity:.45; }
+.recipient-picker-result.disabled { cursor:not-allowed; opacity:.45; }
 .recipient-picker-result .recipient-picker-check, .recipient-picker-result .autocomplete-avatar { margin-top:2px; }
 /* The shared .autocomplete-identity small (used by the single-donor
    DonorAutocomplete too) wraps onto multiple lines by design there; this
@@ -1148,10 +1161,13 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
    compact and predictable by truncating to one line instead). Scoped to
    this component only -- DonorAutocomplete's own rows are untouched. */
 .recipient-picker-result .autocomplete-identity small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.recipient-picker-check { color:#315f4b; font-weight:800; }
+.recipient-picker-check { width:18px; height:18px; accent-color:#315f4b; cursor:pointer; }
 .recipient-picker-selected { margin-top:4px; }
-.recipient-picker-count { margin:0 0 8px; color:var(--muted); font-size:12px; font-weight:700; }
+.recipient-picker-selected-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; }
+.recipient-picker-count { margin:0; color:var(--muted); font-size:12px; font-weight:700; }
 .recipient-picker-cap-note { color:#874437; }
+.recipient-picker-clear-selection { padding:6px 10px; border:1px solid #cad8d0; border-radius:7px; background:#fff; color:#7b493f; font-size:12px; font-weight:700; cursor:pointer; }
+.recipient-picker-clear-selection:hover { background:#faf1ef; }
 .recipient-picker-chips { display:flex; flex-wrap:wrap; gap:8px; margin:0; padding:0; list-style:none; }
 .recipient-picker-chip { display:flex; align-items:center; gap:6px; min-height:36px; padding:6px 6px 6px 12px; border:1px solid #cad8d0; border-radius:20px; background:#fff; font-size:13px; }
 .recipient-picker-chip small { margin-left:4px; color:var(--muted); }
@@ -1176,6 +1192,13 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .shared-activity-edit-warning { margin:0 0 13px; padding:9px 11px; border-radius:8px; background:#fff2d7; color:#805b18; font-size:11px; font-weight:650; line-height:1.5; }
 @media (max-width:760px) {
   .recipient-picker-results { max-height:260px; }
+  /* A horizontally scrollable strip reads more naturally on a narrow
+     screen than wrapping 27 buttons across many short lines, and keeps
+     every button full-size (never shrunk into unreadable text). */
+  .recipient-picker-alphabet { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:4px; }
+  .recipient-picker-alphabet button { min-width:36px; min-height:36px; }
+  .recipient-picker-check { width:20px; height:20px; }
+  .recipient-picker-selected-header { flex-direction:column; align-items:flex-start; }
   .role-picker-options { flex-direction:column; }
   .large-selection-confirm { bottom:8px; }
   .large-selection-confirm div { flex-direction:column; }
