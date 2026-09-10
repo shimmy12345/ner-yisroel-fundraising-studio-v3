@@ -17622,6 +17622,174 @@ itself and by the fact that `RecipientPicker.tsx` makes no network
 calls of its own (only `CaptureExperience.tsx`'s explicit Save buttons
 do, and neither was clicked).
 
+## Log Interaction -> Multiple Donors Save Failure -- "Unexpected end of JSON input" (2026-09-10) -- REPAIRED, TESTED, DEPLOYED TO INDEPENDENT STAGING, NON-MUTATING LIVE VERIFICATION PASSED, ZERO D1 MUTATION DURING INVESTIGATION
+
+**Implementation commit:** `3f1cb3c` -- "Fix shared-activity save:
+guarantee JSON responses, make retries idempotent".
+
+**Reported symptom:** saving a Multiple-donors shared activity showed
+`Failed to execute 'json' on 'Response': Unexpected end of JSON input` --
+the raw browser `SyntaxError` message, verbatim, surfacing as the user-
+facing error text. The UI stayed on the form with the note preserved and
+said "Your note is still here—try again."
+
+**Live write-state finding (established BEFORE any code change, per the
+task's explicit priority): ZERO WRITE.** Checked all three tables this
+route can write to, directly against Independent Staging D1, both by
+absolute count and by latest timestamp:
+- `shared_activities`: 7 rows, latest `2026-08-19 16:07:40` -- unchanged
+  from this same count/timestamp recorded during the prior task's own
+  live verification, well before this incident was reported.
+- `interactions`: 73 rows, latest `2026-09-03 16:12:56` -- likewise
+  unchanged, and predates the incident.
+- `shared_activity_recipient_audits`: 49 rows, latest `2026-08-19
+  16:07:40` -- likewise unchanged.
+
+No new row appeared in any of the three tables the shared-activity write
+touches. This rules out FULL WRITE and PARTIAL WRITE for the reported
+incident -- it was a genuine zero-write failure (case A: zero write +
+malformed/empty response). This also means atomicity was never actually
+tested by this real incident (nothing committed at all), but see below
+for why the write is atomic by construction regardless.
+
+**Root cause:** `app/api/interactions/shared/route.ts` had two D1 calls
+-- the `ensureUserProfile()` upsert and the donor-ownership `SELECT` --
+that ran with no try/catch around them, between the request's own
+input-validation checks (all of which correctly used `Response.json`)
+and the one write statement that WAS already wrapped in a try/catch. If
+either of those two unguarded calls throws for any reason (a transient
+D1 error, a network blip, or anything else), the exception propagates
+out of the Worker's `fetch` handler uncaught -- and the resulting
+response is then controlled by the Cloudflare Workers runtime's own
+fallback error handling, not by this route's code, with no guarantee of
+a JSON (or even non-empty) body. That is exactly consistent with the
+browser's "Unexpected end of JSON input" (a genuinely empty response
+body). Historical Cloudflare Workers Logs for the exact failed request
+were not retrievable: the dashboard's Logs view requires an interactive
+login, and `wrangler tail` only streams new, real-time invocations, so
+the browser's own saved-credential autofill on the Cloudflare login
+screen was deliberately not submitted (entering/submitting a password
+is out of bounds regardless of who benefits). The root-cause chain
+above was established through direct code inspection and the
+zero-write D1 finding, not a captured stack trace -- the fix eliminates
+this entire class of failure regardless of the exact transient trigger.
+
+**Did the new A-Z donor directory (commit `4af3fdc`) cause or
+contribute to this? No -- confirmed, not inferred.** `git diff
+4af3fdc~1 4af3fdc -- app/capture/CaptureExperience.tsx` is empty: the
+component that builds and sends the shared-activity request body was
+not touched by that commit at all. `RecipientPicker.tsx`'s
+`selectedIds`/`toggle()`/`onChange` contract (a plain `string[]`,
+Set-backed deduplication, the same cap enforcement) is structurally
+identical before and after the redesign -- only the browsing/filtering
+UI around it changed. The submitted payload shape (`donorIds:
+recipientIds`) is therefore unchanged.
+
+**Atomicity:** confirmed sound by construction, independent of this
+incident. The whole shared activity (1 `shared_activities` insert + N
+`interactions` inserts + N `shared_activity_recipient_audits` inserts)
+is issued as exactly one `env.DB.batch(statements)` call -- D1's
+`batch()` commits all statements or none, so no subset of donors can
+ever end up partially linked. A test now asserts there is exactly one
+`batch()` call in the route.
+
+**Idempotency / retry safety:** there was no client-generated
+idempotency key, and the UI's "try again" copy was previously
+unconditional -- unsafe exactly as the task described, since a naive
+retry after an ambiguous failure could have created a genuine duplicate
+(a fresh `crypto.randomUUID()` on every request, no dedup). Fixed with
+the smallest safe protection that needs no schema change: before
+writing, the route now checks for an existing `shared_activities` row
+with the same `user_id`, `type`, `occurred_at`, `summary`, and
+`recipient_count`, created within the last 5 minutes
+(`DEDUPE_WINDOW_SECONDS`) -- and if found, returns that existing
+activity (`databaseChangesMade: false`) instead of writing a duplicate.
+This makes a retry safe regardless of whether the original attempt
+actually succeeded.
+
+**Server-response fix:** every response from this route now explicitly
+carries `ok` and `databaseChangesMade`. The two previously-unguarded
+pre-write D1 calls are now inside their own try/catch, returning a
+structured 500 (`ok: false, databaseChangesMade: false`) instead of
+propagating uncaught. A post-write logging call is now isolated in its
+own try/catch that can never mask a successful write (the write already
+committed by the time it runs).
+
+**Client-response fix:** `lib/capture/shared-activity-response.ts`
+(new, pure, fully unit-tested) distinguishes four outcomes: `success`,
+`known_failure` (the server's own `ok: false` -- confirmed safe to
+retry), `network_failure` (the `fetch()` call itself never reached the
+server -- confirmed safe to retry), and `unknown_outcome` (the response
+body could not be read as the expected JSON shape at all -- outcome
+genuinely unknown, never presented as safe to retry). The client's
+`saveSharedActivity()` now separates the `fetch()`-level try/catch from
+the `response.json()`-level try/catch (previously one combined
+try/catch whose `catch` block displayed the raw `SyntaxError.message`
+straight to the user -- this is the literal, verbatim source of what
+the user saw). The unconditional "Your note is still here—try again."
+suffix is now suppressed specifically for `unknown_outcome`, whose own
+message already says not to resubmit yet.
+
+**Tests added:** `tests/shared-activity-response.test.mjs` (new; wired
+into `pnpm test`) -- the full response matrix from the task (2xx with a
+body, 2xx/4xx/5xx with an empty/unparseable body, a well-formed 4xx/5xx
+JSON error, a stray/malformed-but-parseable payload, a 2xx body missing
+required fields) all correctly classified, with an explicit assertion
+that `unknown_outcome`'s message never contains "try again"; plus
+source-level assertions that every response carries `ok`/
+`databaseChangesMade`, that the pre-write profile/ownership lookups are
+inside their own try/catch, that there is exactly one `batch()` call,
+that the post-write logging call is isolated, that the dedupe guard
+matches on real content and runs before any insert statement is built,
+and that the client's retry-safety flag and message-suffix logic are
+wired correctly. Two pre-existing assertions in
+`tests/shared-activity-ux.test.mjs` were updated to match the new
+`failure()` helper's call shape (same validated behavior, same
+messages/status codes -- only the internal code structure changed).
+
+**Gates:** `pnpm test`, `pnpm exec tsc --noEmit`, and `pnpm run
+build:staging-independent` all passed. The same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure noted in earlier
+sections of this document remains present and untouched.
+
+**Deployment:** Independent Staging, version
+`f72a2314-c5ee-4449-b8b2-8a6e4e0d6d18`.
+
+**Non-mutating live verification (no real interaction was created):**
+against the real deployed Worker, three deliberately-invalid requests
+confirmed the fix end-to-end with zero writes:
+- `donorIds` with only one id -> `422`, `application/json`, body
+  `{"ok":false,"error":"A shared activity needs at least two
+  donors...","databaseChangesMade":false}`.
+- Two syntactically-valid-but-nonexistent donor ids -> `404`, exercising
+  the newly-guarded pre-write profile/ownership lookup against the real
+  live D1 (a genuine read-only query, no write reached) -> clean JSON
+  `{"ok":false,"error":"One or more donors were not found",...}`.
+- An empty summary -> `422`, clean JSON `{"ok":false,"error":"A summary
+  is required","databaseChangesMade":false}`.
+
+No "Unexpected end of JSON input" occurred in any of the three checks.
+The A-Z donor directory (All/letters/checkboxes) was re-confirmed
+rendering and functioning correctly post-deploy. Single donor mode was
+not touched by this fix at all (`app/api/interactions/route.ts` has an
+empty diff for this commit).
+
+**D1 mutation result during investigation:** zero, throughout. Before
+and after this entire investigation and fix, `shared_activities` (7),
+`interactions` (73), `shared_activity_recipient_audits` (49), and
+`donors` (254) were identical.
+
+**Whether a controlled real save test is still needed:** not required
+to confirm the fix works -- the three non-mutating checks above already
+exercise every new code path (validation `failure()` shape, the
+guarded pre-write lookup against real D1, and the response-shape
+contract) except the dedupe-guard's actual duplicate-detection branch
+and the final successful-write response, neither of which can be
+exercised without a real two-donor write. A controlled real save
+(exact payload to be reported and approved in advance, per the task's
+own instruction) remains available if the user wants that last branch
+specifically verified end-to-end.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
