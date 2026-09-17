@@ -18310,6 +18310,135 @@ unrelated failure as both prior rounds (`backup-watchdog-scheduled.test.mjs`).
 none.** Per the explicit stopping instruction, work stops here -- the
 next decision is whether the calibrated engine is ready for UI.
 
+## Fundraising Intelligence Brief -- UI Phase (2026-09-17) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO D1 MUTATION, ZERO ENGINE RULE CHANGES
+
+Exposes the calibrated `lib/fundraising-intelligence/` engine (Phase 1
++ Round 2 + Final Calibration, all three entries above -- byte-for-byte
+unchanged this round except one additive `export` keyword) through the
+previously-recommended hybrid UX.
+
+**Today teaser:** a new "RIGHT NOW / Fundraising Intelligence" section,
+max 3 items, derived deterministically from the already-computed Brief
+(`lib/fundraising-intelligence/today-view.ts`'s
+`buildTodayIntelligenceTeaserRows()`) -- prioritizes DO/KNOW_DO items in
+the Brief's own order, backfills with KNOW items when too few
+actionable items exist, and shows the single strongest KNOW item
+(rather than an empty section) when zero DO/KNOW_DO items exist at all
+(a documented product choice). Placed below Today's Agenda/Coming Up,
+above Portfolio Focus.
+
+**Dedicated page:** `/fundraising-intelligence` (title "Fundraising
+Intelligence," subhead "What deserves your attention right now"),
+mirrors `/portfolio-focus`'s own page structure exactly (same
+`<AppShell active="today">`, same fail-soft/empty-state pattern, no new
+sidebar nav entry -- reached only via the Today teaser's "See full
+Fundraising Intelligence" link, same as Portfolio Focus's own dedicated
+page). Groups the full Brief by human meaning -- Needs Action / Worth
+Knowing & Doing / Worth Knowing -- never by technical situation type.
+Each card shows donor name, a plain-language disposition badge, a
+plain-language situation label (`lib/fundraising-intelligence/
+labels.ts`'s centralized `SITUATION_TYPE_LABELS`), headline,
+explanation, why-now, the engine-supplied action only if one exists,
+and a restrained "Why FOS surfaced this" evidence disclosure using
+native `<details>/<summary>` (no JS, keyboard-accessible by default).
+Confidence is translated to plain language (`CONFIDENCE_LABELS`/
+`CONFIDENCE_EXPLANATIONS`); Portfolio Focus rank is shown as the one
+reused, already-familiar numeric concept -- no raw composite score,
+component value, or internal enum ever reaches either surface (asserted
+by tests). KNOW cards carry no checkbox, due date, or urgency styling;
+DO/KNOW_DO cards show only the plain action sentence, never a task-
+management control.
+
+**Query/performance:** zero new D1 queries. New
+`lib/fundraising-intelligence/compute.ts` (the only file in this module
+that touches D1, kept separate so tests/calibration scripts importing
+the rest of the module stay Node-safe) reuses Portfolio Focus's
+existing bounded 12-query pull (`loadPortfolioFocusRawData`) exactly
+once per page load. The Today page now derives BOTH its existing
+Portfolio Focus section and the new Brief teaser from one shared call
+(`computePortfolioFocusAndBrief`) -- adding the teaser cost Today zero
+additional D1 queries (confirmed by refactoring the existing single
+raw-data call site, not adding a second one). The dedicated page issues
+its own separate 12-query pull, exactly like `/portfolio-focus` already
+does.
+
+**Donor navigation:** reuses the existing convention unchanged
+(`lib/navigation/donor-navigation.ts`) with one new origin,
+`"fundraising-intelligence"` (`donorBackLabel` -> "Back to Fundraising
+Intelligence") -- no second routing pattern.
+
+**Real live output (Independent Staging, read-only):** the dedicated
+page rendered the exact real final-calibration Brief -- 15 items, 4
+Needs Action / 5 Worth Knowing & Doing / 6 Worth Knowing, live-verified
+in the browser to include Mordechai Schwartz, Dovie Weinschneider,
+Eitan Zeffren, Joshua Broide, Paul S. Richman, Tzvi Ray, Nachum
+Rosenberg, Yaakov Zachter, Avi Stein, and Michie Nudell (plus the
+remaining real items) -- exactly matching
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-FINAL-CALIBRATION.md`'s own
+exact-15 list, none hardcoded. The Today teaser showed exactly Schwartz,
+Weinschneider, and Goldenberg (the top 3 KNOW_DO items in Brief order).
+Avi Stein's card correctly showed no action ("Actively engaged
+relationship," Stewardship, Worth Knowing) and separately showed a real
+secondary "limited recent relationship context" note in its evidence
+disclosure -- the same nuanced finding the calibration doc's own §8
+called out. Evidence disclosure, donor navigation (round-tripped
+Fundraising Intelligence -> donor page -> back), and the "Portfolio
+Focus rank: #N" reused-concept line all verified against real data
+(e.g. Shimmy Pianko's card correctly showed "Portfolio Focus rank: #78,"
+matching the real calibration data exactly).
+
+**Tests:** `tests/fundraising-intelligence-ui.test.mjs` (new) covers:
+adapter order/count preservation (no donor outside the Brief, no item
+silently dropped), all 8 situation-label mappings, disposition
+grouping, KNOW-never-gains-an-action / DO-always-keeps-its-action,
+no-raw-score-or-enum-in-the-row-shape, teaser max-3/DO-KNOW_DO-priority/
+KNOW-backfill/single-strongest-KNOW-when-zero-actionable, file-content
+wiring (teaser placement, load-failure caught and logged, distinct
+accent color, no task-management vocabulary in the actual markup,
+correct donor-navigation origin, native `<details>` evidence
+disclosure, no technical field references in the dedicated-page
+component), and the new navigation origin/back-label. `tests/
+today.test.mjs`'s existing Portfolio Focus assertions were updated
+(not weakened) to match the shared-load-function refactor. All prior
+Fundraising Intelligence engine tests (Phase 1 + Round 2 + Final
+Calibration) pass unchanged.
+
+**Gates:** `pnpm exec tsc --noEmit` clean. `pnpm run
+build:staging-independent` clean (confirmed `/fundraising-intelligence`
+registered as a dynamic route). `pnpm test`: same single pre-existing,
+unrelated failure as every prior round (`backup-watchdog-scheduled.test.mjs`).
+
+**Deployed to Independent Staging only** via `pnpm run
+deploy:staging-independent` -- Worker version
+`1c02b64f-92a9-4282-b8f5-06f8b9045b5d`,
+`https://fundraising-os-staging.sgoldstein.workers.dev`.
+**`origin/main`/production: untouched, not deployed.**
+
+**Live verification (read-only browser session, zero D1 mutation):**
+Today page confirmed compact with the teaser visible and correctly
+gated; dedicated page confirmed full 15-item real output, correct
+grouping, working evidence disclosure, correct KNOW/DO visual treatment
+(no task-management styling on KNOW cards), and full donor-navigation
+round-trip. **One tooling limitation encountered and disclosed
+honestly, not glossed over:** the browser-automation session's window-
+resize tool did not change the effective rendering viewport in this
+environment (screenshots stayed full-width after two independent resize
+attempts, including in a freshly created tab), so the mobile layout
+could not be visually confirmed live this round. The responsive CSS
+(`@media (max-width:820px)` in `app/globals.css`) reuses the exact same
+breakpoint and stacking technique already shipping for Portfolio
+Focus's own `.pf-row-summary`, not a new, unverified pattern -- but an
+actual mobile-viewport check (real device, or a working resize/emulation
+tool) remains a recommended follow-up before treating mobile as fully
+verified.
+
+**Engine rule changes: none.** Confirmed by a one-line diff to
+`lib/fundraising-intelligence/index.ts` (an additive `export` keyword
+on an already-existing internal helper, nothing else) -- the 15-item
+cap, the 3-slot KNOW reservation, the 90-day ask-resolution window,
+`relationship_visibility`'s recency logic, Portfolio Focus, the
+Recommendation Engine, and Relationship Intelligence are all untouched.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
@@ -18825,10 +18954,20 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Fundraising Intelligence Brief -- the
-next decision is whether the calibrated Phase 1 engine is ready for UI
-work (2026-09-17).** See "Fundraising Intelligence Brief -- Phase 1
-Final Calibration: Ask Resolution Recency" above and
+**Genuinely open, newest first: Fundraising Intelligence Brief UI is
+live on Independent Staging -- the next decision is whether to proceed
+with Assistant integration, Daily Agenda email content, or further
+engine tuning, none of which this round touched (2026-09-17).** See
+"Fundraising Intelligence Brief -- UI Phase" above. One concrete,
+recommended follow-up from this round: a real mobile-viewport check
+(the browser-automation session's resize tool did not take effect this
+round, so mobile layout was reviewed by CSS inspection/reuse of an
+already-shipped breakpoint, not a live screenshot -- see that section's
+own disclosed limitation).
+
+**Prior, still-relevant note: Fundraising Intelligence Brief -- the
+calibrated Phase 1 engine (2026-09-17).** See "Fundraising Intelligence
+Brief -- Phase 1 Final Calibration: Ask Resolution Recency" above and
 `docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-FINAL-CALIBRATION.md`. This
 round's own change (the 90-day ask-resolution Brief-novelty window) is
 not itself an open decision -- it was calibrated against real data and
