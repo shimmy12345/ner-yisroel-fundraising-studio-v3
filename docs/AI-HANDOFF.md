@@ -18113,6 +18113,108 @@ open decisions the calibration run surfaced (tier-balance/cap
 reservation, `relationship_visibility`'s confidence-axis gap, whether to
 expand stewardship detection to unstructured narrative text).
 
+## Fundraising Intelligence Brief -- Phase 1 Calibration Round 2 (2026-09-17) -- IMPLEMENTED, TESTED, NOT DEPLOYED, ZERO SCHEMA, ZERO D1 MUTATION
+
+Full report: `docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-CALIBRATION-V2.md`.
+
+A narrow follow-up to the entry immediately above, addressing exactly
+the two product-rule gaps that calibration round surfaced. No UI,
+schema, deploy, Portfolio Focus/Recommendation Engine scoring change, or
+change to `relationshipConfidence`'s own definition. No free-text/
+narrative inference added.
+
+**Issue A (tier-balance) fixed:** added `selectWithKnowReservation()` to
+`lib/fundraising-intelligence/index.ts` -- reserves
+`DEFAULT_RESERVED_KNOW_SLOTS = 3` of the 15-item cap for the highest-
+Portfolio-Focus-*rank* KNOW-disposition candidates that clear the
+existing `financialSignificance >= 0.5` materiality floor (not a new
+score; rank is a tie-break atop that gate, never the sole criterion).
+Unused reserved slots return to the general pool (tested directly). 3
+was chosen, not 4 or 5, because the real tier-1 (task-like) population
+in this dataset is exactly 12 items and `15 - 3 = 12` -- the largest
+reservation size that recovers strategic KNOW items with zero real DO
+item displaced; 4 and 5 were tested and confirmed to start cutting real
+DO items (Moshe Herzog at 4; Herzog + Donny Wiesel at 5). Ordering the
+reserved pool by rank rather than `financialSignificance` alone was a
+necessary correction found live during testing: FS-based ordering kept
+recovering the highest-FS donors (Tzvi Ray, Nachum Rosenberg, both 0.98)
+instead of Avi Stein (0.87 FS but rank #1 overall via his Opportunity/
+Stewardship components) -- exactly the donor the round named.
+
+**Issue B (relationship visibility) fixed:** replaced
+`relationship_visibility`'s dependency on Portfolio Focus's
+`relationshipConfidence` (untouched, still used everywhere else it
+always was) with a new, Brief-specific
+`mostRecentStructuredEvidenceDays()` read in
+`lib/fundraising-intelligence/situations.ts` -- the minimum age across a
+donor's substantive-contact recency, most-recent current relationship
+fact, and most-recent Ask, gated by a 2-band `financialSignificance`
+threshold (>=0.9 -> 180 days; >=0.75 -> 365 days; below -> no signal at
+all) rather than one universal cadence. Real-data finding: with only 8
+structured facts and 6 Asks across 254 donors, the specific day-count
+threshold barely moved the real qualifying population (45-48 donors
+across a 2x threshold range) -- almost all qualifiers have literally
+zero structured evidence ever, not merely old evidence, so the FS-band
+gate itself is the load-bearing lever, not the day count. No narrative/
+interaction-text reading was added.
+
+**Real 254-donor re-run (read-only, re-verified for zero drift --
+254/5,428/6/8/3, identical to both prior rounds):** 15 items (cap hit
+again), KNOW 6 / DO 4 / KNOW_DO 5 (same totals as V1; composition
+shifted). **Avi Stein now appears** (KNOW, `stewardship_moment`, no
+reconnect/solicitation action) -- the round's headline goal, achieved at
+zero cost to any DO item. Yaakov Zachter and Michie Nudell (ranks #4 and
+#6) came along as a result of the same rank-based fix. Yale Miller and
+Manuel Schnaidman's detector-level gap is closed (`relationship_
+visibility` now fires for both -- confirmed directly), though neither
+survives the real 254-donor final 15 (both far outranked by the 3
+stewardship items that win the reserved slots) -- a disclosed, honest
+near-miss, not a bug. **Disclosed trade-off:** Jonathan Spetner (rank
+#20) exits the real final 15 under this rank-based rule, losing a
+reserved slot to higher-ranked competitors; his own per-donor
+classification (`commitment_progress`, KNOW, no reconnect action)
+remains unchanged and is separately unit-tested, independent of
+population-level competition. `financial_change`/`commitment_progress`
+situation types (present in V1's final 15) are absent from V2's final
+15 in this specific run, replaced by the 3 higher-ranked
+`stewardship_moment` items -- situation-type diversity within the
+visible 15 decreased slightly while strategic-rank representation
+improved; disclosed as the real trade-off this mechanism makes, not
+hidden. Full item-by-item detail, all four reservation-size variants,
+and all three recency-threshold variants tested are in the V2
+calibration doc.
+
+**Known limitation, unchanged and not solved this round (per explicit
+instruction):** Dr. Jacques Semmelman's only real recent touchpoint (a
+Yahrtzeit-acknowledgment note) lives in unstructured interaction text,
+not a structured `donor_relationship_facts` row -- Round 2 deliberately
+does not read narrative text, so he remains a documented
+`no_qualifying_situation` case.
+
+**Tests:** `tests/fundraising-intelligence.test.mjs` extended (not
+replaced) with a Round 2 section covering: reservation activates only
+when legitimate KNOW candidates exist and unused slots return to the
+general pool; urgent DO items are not dropped when tier-1 supply exactly
+fills the general capacity; weak/low-materiality KNOW items are never
+forced into a reserved slot when real competing supply exists; an
+Avi-Stein-shaped active-stewardship item is crowded out without
+reservation and recovered with it; a Miller-shaped major historical
+donor with zero structured evidence now produces `relationship_
+visibility`; a below-median-significance donor with the same gap does
+not; recent substantive contact and a recent structured fact each
+independently suppress the signal; the new wording stays neutral; no
+raw score leaks into end-user text; and the generic reconnect fallback
+still cannot independently qualify. Every V1 regression test still
+passes unchanged.
+
+**Gates:** `pnpm exec tsc --noEmit` clean. `pnpm run
+build:staging-independent` clean. `pnpm test`: same single pre-existing,
+unrelated failure as the prior round (`backup-watchdog-scheduled.test.mjs`
+timing test), confirmed unrelated to this work.
+
+**D1 mutation: zero. Schema: none added. UI: none added. Deployment:
+none.** Per the explicit stopping instruction, work stops here.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
@@ -18628,28 +18730,33 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Fundraising Intelligence Brief -- Phase 1
-calibration surfaced 4 new open decisions, on top of the still-open
-design-round decisions (2026-09-17).** See "Fundraising Intelligence
-Brief -- Phase 1 Computation Layer" above and
-`docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-CALIBRATION.md` section 10:
-(1) whether tier-2/3 KNOW items (e.g. Avi Stein's stewardship signal)
-should get a reserved minimum share of the 15-item cap so tier-1 volume
-can never crowd them out entirely; (2) how to close `relationship_
-visibility`'s real gap against `relationshipConfidence` (Yale Miller/
-Manuel Schnaidman produce no signal today) -- a new Brief-specific
-recency signal vs. leaving it as a known Phase 1 boundary; (3) whether
-to expand stewardship detection to unstructured narrative text (risks
-reopening the "invented opportunity from narrative text" problem, so
-leaning toward "no" pending your input); (4) whether the several real
-12-27-year-old, trivial-balance open pledges found live (see the
-calibration doc §3) warrant a separate bookkeeping cleanup. The prior
-design-round decisions (UX architecture, schema timing, Relationship
-Intention, Daily Agenda scope, the two "Staging ask test" rows) remain
-open and unaffected by this round -- see
-`docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md` section 20.
-No implementation has begun; nothing here blocks any other in-flight
-work.
+**Genuinely open, newest first: Fundraising Intelligence Brief -- Round 2
+calibration resolved 2 prior open decisions and surfaced 2 new ones
+(2026-09-17).** See "Fundraising Intelligence Brief -- Phase 1
+Calibration Round 2" above and
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-CALIBRATION-V2.md`:
+**resolved** -- tier-balance now uses a 3-slot, rank-based KNOW
+reservation (Avi Stein recovered at zero DO cost); `relationship_
+visibility` now uses a new Brief-specific recency signal instead of
+`relationshipConfidence` (Yale Miller/Manuel Schnaidman's detector-level
+gap is closed). **New, open:** (1) whether Jonathan Spetner's real
+exclusion from the final 15 under the rank-based reservation (a
+disclosed trade-off -- his own classification is unaffected) is
+acceptable, or whether the reservation should be widened despite the
+real DO-item cost that was measured at 4-5 slots; (2) whether the
+resulting decrease in situation-type diversity within the visible 15
+(financial_change/commitment_progress items displaced by 3 higher-
+ranked stewardship_moment items in this run) is an acceptable trade-off
+or needs a diversity-aware refinement. Still open, unaffected by this
+round: (3) whether to expand stewardship detection to unstructured
+narrative text (leaning "no," per Semmelman remaining a documented
+limitation); (4) whether the several real 12-27-year-old, trivial-
+balance open pledges found live (calibration V1 §3) warrant a separate
+bookkeeping cleanup; and the still-open design-round decisions (UX
+architecture, schema timing, Relationship Intention, Daily Agenda
+scope, the two "Staging ask test" rows) -- see
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md` section 20. No UI has
+been built; nothing here blocks any other in-flight work.
 
 **Note, not itself awaiting a decision:** the Today workspace desktop
 layout cleanup (2026-08-28, see "Today Workspace Desktop Layout Cleanup"

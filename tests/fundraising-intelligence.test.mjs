@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { buildPortfolioContext } from "../lib/portfolio-focus/context.ts";
 import { scorePortfolioFocus, scorePortfolioFocusDonor } from "../lib/portfolio-focus/score.ts";
-import { buildFundraisingIntelligenceBrief } from "../lib/fundraising-intelligence/index.ts";
+import { buildFundraisingIntelligenceBrief, selectWithKnowReservation, isReservedKnowEligible, DEFAULT_RESERVED_KNOW_SLOTS } from "../lib/fundraising-intelligence/index.ts";
 import { safeDays } from "../lib/fundraising-intelligence/situations.ts";
 
 // Fundraising Intelligence Brief -- Phase 1 tests. Fixtures reuse the
@@ -298,6 +298,113 @@ async function run() {
     const brief1 = buildFundraisingIntelligenceBrief(probes, results, new Map(), new Map(), NOW);
     const brief2 = buildFundraisingIntelligenceBrief(probes, results, new Map(), new Map(), NOW);
     assert.deepEqual(brief1.items.map((i) => i.donorId), brief2.items.map((i) => i.donorId), "ordering must be deterministic across identical runs");
+  }
+
+  // ==================================================================
+  // Round 2: KNOW-reservation mechanism (§3-4) + recency-based
+  // relationship_visibility (§5-9). See docs/FUNDRAISING-INTELLIGENCE-
+  // BRIEF-PHASE1-CALIBRATION-V2.md for the real-data calibration this
+  // implements.
+  // ==================================================================
+
+  function makeCandidate(overrides) {
+    return {
+      donorId: "x", displayName: "x", disposition: "DO", situationType: "pledge_follow_up",
+      headline: "h", explanation: "e", whyNow: "w", whatFosDoesNotKnow: null, possibleAction: "a",
+      confidence: "medium", sourceSignals: [], included: false, suppressionReason: null,
+      debug: { portfolioFocusRank: 1, compositeScore: 0.5, financialSignificance: 0.9, recommendationKind: null, recommendationScore: null, priorityTier: 1 },
+      ...overrides,
+      debug: { portfolioFocusRank: 1, compositeScore: 0.5, financialSignificance: 0.9, recommendationKind: null, recommendationScore: null, priorityTier: 1, ...(overrides.debug ?? {}) },
+    };
+  }
+
+  // ---------------- Reservation activates only when legitimate KNOW candidates exist; unused reserved slots return to the general pool ----------------
+  {
+    // 5 tier-1 DO candidates, zero KNOW candidates at all.
+    const doOnly = Array.from({ length: 5 }, (_, i) => makeCandidate({ donorId: `do-${i}`, disposition: "DO", debug: { portfolioFocusRank: i + 1, financialSignificance: 0.9, priorityTier: 1 } }));
+    const { included, excluded } = selectWithKnowReservation(doOnly, 15, 3);
+    assert.equal(included.length, 5, "with no KNOW candidates at all, every real DO candidate must still be included -- reserved slots must not sit empty or force filler");
+    assert.equal(excluded.length, 0);
+  }
+
+  // ---------------- Urgent DO items are not incorrectly dropped when tier-1 supply exactly matches the general capacity ----------------
+  {
+    const tier1 = Array.from({ length: 12 }, (_, i) => makeCandidate({ donorId: `t1-${i}`, disposition: "DO", debug: { portfolioFocusRank: i + 1, financialSignificance: 0.9, priorityTier: 1 } }));
+    const tier2Know = Array.from({ length: 3 }, (_, i) => makeCandidate({ donorId: `t2-${i}`, disposition: "KNOW", debug: { portfolioFocusRank: 20 + i, financialSignificance: 0.8, priorityTier: 2 } }));
+    const all = [...tier1, ...tier2Know];
+    const { included } = selectWithKnowReservation(all, 15, DEFAULT_RESERVED_KNOW_SLOTS);
+    for (const t of tier1) assert.ok(included.some((c) => c.donorId === t.donorId), `tier-1 DO candidate ${t.donorId} must not be dropped by reservation when it exactly fills the general capacity`);
+  }
+
+  // ---------------- Weak KNOW filler does not get forced into a reserved slot (real competing supply exists) ----------------
+  {
+    const tier1 = Array.from({ length: 20 }, (_, i) => makeCandidate({ donorId: `t1-${i}`, disposition: "DO", debug: { portfolioFocusRank: i + 1, financialSignificance: 0.9, priorityTier: 1 } }));
+    const weakKnow = makeCandidate({ donorId: "weak-know", disposition: "KNOW", debug: { portfolioFocusRank: 200, financialSignificance: 0.1, priorityTier: 2 } });
+    const sorted = [...tier1, weakKnow].sort((a, b) => a.debug.priorityTier - b.debug.priorityTier || b.debug.financialSignificance - a.debug.financialSignificance);
+    const { included } = selectWithKnowReservation(sorted, 15, 3);
+    assert.ok(!included.some((c) => c.donorId === "weak-know"), "a low-materiality KNOW item must never be forced into a reserved slot when real, higher-priority supply exists");
+    assert.ok(!isReservedKnowEligible(weakKnow));
+  }
+
+  // ---------------- Avi-Stein-style: an active-stewardship KNOW item, crowded out by tier-1 volume, survives the final cap via reservation ----------------
+  {
+    const tier1 = Array.from({ length: 15 }, (_, i) => makeCandidate({ donorId: `t1-${i}`, disposition: "DO", debug: { portfolioFocusRank: 50 + i, financialSignificance: 0.6, priorityTier: 1 } }));
+    const stein = makeCandidate({ donorId: "stein-like", disposition: "KNOW", situationType: "stewardship_moment", possibleAction: null, debug: { portfolioFocusRank: 1, financialSignificance: 0.87, priorityTier: 2 } });
+    const sorted = [...tier1, stein].sort((a, b) => a.debug.priorityTier - b.debug.priorityTier || b.debug.financialSignificance - a.debug.financialSignificance);
+    const { included: withoutReservation } = selectWithKnowReservation(sorted, 15, 0);
+    assert.ok(!withoutReservation.some((c) => c.donorId === "stein-like"), "sanity check: without reservation, 15 tier-1 items alone fill the cap and crowd out the strategic KNOW item");
+    const { included: withReservation } = selectWithKnowReservation(sorted, 15, DEFAULT_RESERVED_KNOW_SLOTS);
+    assert.ok(withReservation.some((c) => c.donorId === "stein-like"), "with reservation, the #1-ranked strategic KNOW item must survive the final cap");
+  }
+
+  // ---------------- Miller-style: a major historical donor with stale current context now produces relationship_visibility ----------------
+  {
+    const miller = donor({ donorId: "miller2", lifetimeCents: dollars(199150), distinctActivityYears: 20, historicalPeakGiftCents: dollars(40000), daysSinceLastGift: 114, daysSinceSubstantiveContact: null });
+    const brief = briefForOne(miller); // no asks, no facts -- zero structured evidence ever
+    assert.equal(brief.items.length, 1);
+    assert.equal(brief.items[0].situationType, "relationship_visibility");
+    assert.equal(brief.items[0].disposition, "KNOW");
+    assert.equal(brief.items[0].possibleAction, null, "relationship_visibility must never auto-create a DO action");
+  }
+
+  // ---------------- Low-value donor with the same contact gap does not qualify ----------------
+  {
+    const lowValue = donor({ donorId: "low-value", lifetimeCents: dollars(1500), daysSinceSubstantiveContact: null });
+    const brief = briefForOne(lowValue);
+    assert.equal(brief.items.length, 0, "a below-median-significance donor must not trigger relationship_visibility regardless of contact gap");
+  }
+
+  // ---------------- Recent contact suppresses relationship_visibility ----------------
+  {
+    const recentContact = donor({ donorId: "recent-contact", lifetimeCents: dollars(199150), distinctActivityYears: 20, historicalPeakGiftCents: dollars(40000), daysSinceSubstantiveContact: 30 });
+    const brief = briefForOne(recentContact);
+    assert.equal(brief.items.length, 0, "recent substantive contact must suppress the visibility gap");
+  }
+
+  // ---------------- Recent structured fact suppresses relationship_visibility ----------------
+  {
+    const recentFactDonor = donor({ donorId: "recent-fact", lifetimeCents: dollars(199150), distinctActivityYears: 20, historicalPeakGiftCents: dollars(40000), daysSinceSubstantiveContact: null });
+    const facts = [fact({ donor_id: "recent-fact", category: "engagement", lifecycle: "durable", fact_text: "Recent note.", source_interaction_occurred_at: NOW - 60 * DAY })];
+    const brief = briefForOne(recentFactDonor, [], facts);
+    // The same recent fact is also legitimate stewardship evidence in its own right (a different, correct
+    // situation type) -- the requirement here is only that relationship_visibility specifically stays suppressed.
+    assert.ok(!brief.items.some((i) => i.situationType === "relationship_visibility"), "a recent structured relationship fact must suppress the visibility gap even with no logged interaction");
+  }
+
+  // ---------------- Missing-context wording stays neutral (new phrasing) ----------------
+  {
+    const miller = donor({ donorId: "miller3", lifetimeCents: dollars(199150), distinctActivityYears: 20, historicalPeakGiftCents: dollars(40000), daysSinceSubstantiveContact: null });
+    const brief = briefForOne(miller);
+    assert.ok(brief.items[0].explanation.includes("FOS has limited recent relationship context"), "must use the neutral, knowledge-describing phrase");
+    assertNoRawScoreInText(brief.items[0]);
+  }
+
+  // ---------------- Generic reconnect fallback still cannot independently qualify (re-verified after Round 2 changes) ----------------
+  {
+    const d = donor({ donorId: "generic2", lifetimeCents: dollars(5000), daysSinceLastGift: 400, recommendation: { kind: "reconnect_contact_gap", score: 0.2375, action: "Reach out to re-establish contact." } });
+    const brief = briefForOne(d);
+    assert.equal(brief.items.length, 0);
+    assert.equal(brief.rejected[0].suppressionReason, "reconnect_fallback_only_no_independent_situation");
   }
 
   console.log("fundraising-intelligence.test.mjs: all assertions passed");

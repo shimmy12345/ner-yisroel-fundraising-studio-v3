@@ -309,11 +309,57 @@ function detectRecentMeaningfulGift(donor: PortfolioFocusDonorInput): DetectedSi
 
 // --- Tier 3 --------------------------------------------------------
 
-const RELATIONSHIP_VISIBILITY_MATERIALITY_FLOOR = 0.75; // top quartile by the existing financialSignificance component
+// Round 2 (calibration finding): `relationshipConfidence`
+// (lib/portfolio-focus/confidence.ts) answers "has FOS EVER recorded any
+// interaction/fact/ask" -- it stays "high" for a real donor (Yale
+// Miller, Manuel Schnaidman) who has thin CURRENT context but some
+// interaction from years ago, so reusing it here under-detects exactly
+// the situation this signal exists for (see docs/FUNDRAISING-
+// INTELLIGENCE-BRIEF-PHASE1-CALIBRATION.md §4). This is a NEW, Brief-
+// specific recency read -- `relationshipConfidence` itself is untouched
+// and still used everywhere else it always was. Reads only structured,
+// already-available fields (substantive-contact recency, structured
+// fact recency, Ask recency) -- no free-text/narrative inference (a
+// donor whose only recent touch lives in unstructured interaction notes,
+// e.g. Dr. Jacques Semmelman, is a documented, deliberate Phase 1 gap,
+// not solved here).
+function mostRecentStructuredEvidenceDays(donor: PortfolioFocusDonorInput, asks: RawAskRow[], facts: RawRelationshipFactRow[], now: number): number | null {
+  const candidates: number[] = [];
+  const contactDays = safeDays(donor.daysSinceSubstantiveContact);
+  if (contactDays !== null) candidates.push(contactDays);
+  for (const f of facts) {
+    const d = safeDays(Math.floor((now - f.source_interaction_occurred_at) / DAY));
+    if (d !== null) candidates.push(d);
+  }
+  for (const a of asks) {
+    const d = safeDays(Math.floor((now - a.asked_at) / DAY));
+    if (d !== null) candidates.push(d);
+  }
+  return candidates.length > 0 ? Math.min(...candidates) : null; // null = literally zero structured evidence ever recorded
+}
 
-function detectRelationshipVisibility(donor: PortfolioFocusDonorInput, result: PortfolioFocusResult): DetectedSignal | null {
-  if (result.relationshipConfidence !== "low") return null;
-  if (result.components.financialSignificance < RELATIONSHIP_VISIBILITY_MATERIALITY_FLOOR) return null;
+// Threshold bands tied to the EXISTING financialSignificance percentile
+// component (no new score) -- deliberately NOT one universal cadence
+// ("no contact in 90 days" would apply the same bar to every donor
+// regardless of importance, which Round 2's instruction explicitly
+// forbids). A top-decile relationship going quiet is noticed sooner; a
+// below-median relationship never triggers this signal at all --
+// calibrated against the real 254-donor population, see the V2
+// calibration doc §5.
+const VISIBILITY_TOP_BAND_FS = 0.9;
+const VISIBILITY_TOP_BAND_THRESHOLD_DAYS = 180;
+const VISIBILITY_MID_BAND_FS = 0.75;
+const VISIBILITY_MID_BAND_THRESHOLD_DAYS = 365;
+
+function detectRelationshipVisibility(donor: PortfolioFocusDonorInput, result: PortfolioFocusResult, asks: RawAskRow[], facts: RawRelationshipFactRow[], now: number): DetectedSignal | null {
+  const fs = result.components.financialSignificance;
+  let thresholdDays: number;
+  if (fs >= VISIBILITY_TOP_BAND_FS) thresholdDays = VISIBILITY_TOP_BAND_THRESHOLD_DAYS;
+  else if (fs >= VISIBILITY_MID_BAND_FS) thresholdDays = VISIBILITY_MID_BAND_THRESHOLD_DAYS;
+  else return null; // below the mid band: not strategically significant enough for a visibility gap to be Brief-worthy
+
+  const mostRecentDays = mostRecentStructuredEvidenceDays(donor, asks, facts, now);
+  if (mostRecentDays !== null && mostRecentDays <= thresholdDays) return null; // real, recent-enough structured evidence already exists
 
   return {
     situationType: "relationship_visibility",
@@ -323,12 +369,17 @@ function detectRelationshipVisibility(donor: PortfolioFocusDonorInput, result: P
     headline: "Limited current relationship context on a significant relationship",
     // Rule E, enforced structurally by using this exact fixed phrase --
     // never "this relationship is weak."
-    explanation: `${fmtCents(donor.lifetimeCents)} lifetime giving, but FOS has limited recent relationship context on this donor.`,
+    explanation: `${fmtCents(donor.lifetimeCents)} lifetime giving, but FOS has limited recent relationship context for this donor.`,
     whyNow: "A large financial relationship with thin current context is easy to overlook -- this is a gap in FOS's knowledge, not a judgment about the relationship.",
-    whatFosDoesNotKnow: "No current relationship fact and no recent substantive contact is on file for this donor.",
+    whatFosDoesNotKnow: mostRecentDays === null
+      ? "No structured contact, relationship fact, or Ask activity has ever been recorded for this donor."
+      : `The most recent structured evidence FOS has on file is ${mostRecentDays} days old.`,
+    // Never an invented "call them" action -- a DO can only ever come
+    // from another, independently-firing detector's own action, merged
+    // in by synthesize.ts's existing KNOW_DO combination (see rule §9).
     possibleAction: null,
     confidence: "limited",
-    evidence: [{ kind: "portfolio_focus_confidence", detail: `relationshipConfidence: low, financialSignificance percentile: ${result.components.financialSignificance.toFixed(2)}` }],
+    evidence: [{ kind: "portfolio_focus_confidence", detail: `financialSignificance percentile: ${fs.toFixed(2)}, most recent structured evidence: ${mostRecentDays ?? "none ever"} days ago, threshold: ${thresholdDays} days` }],
   };
 }
 
@@ -376,7 +427,7 @@ export function detectSituations(
     detectStewardshipMoment(donor, result, facts),
     detectFinancialChange(donor, result),
     detectRecentMeaningfulGift(donor),
-    detectRelationshipVisibility(donor, result),
+    detectRelationshipVisibility(donor, result, asks, facts, now),
     detectUpcomingMoment(donor, result),
   ];
   return signals.filter((s): s is DetectedSignal => s !== null);
