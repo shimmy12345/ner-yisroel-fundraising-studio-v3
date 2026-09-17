@@ -17992,6 +17992,127 @@ stopped after the design document and this handoff update -- see "Next
 Approval Required" below for the 7 open decisions requiring approval
 before any implementation begins.
 
+## Fundraising Intelligence Brief -- Phase 1 Computation Layer (2026-09-17) -- IMPLEMENTED, TESTED, NOT DEPLOYED, ZERO SCHEMA, ZERO D1 MUTATION
+
+Full report: `docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-CALIBRATION.md`. Design this implements: `docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md` (see the entry immediately above).
+
+Explicitly scoped as computation-only this round (no UI, no schema, no
+Relationship Intention, no Portfolio Focus/Recommendation Engine/
+Relationship Intelligence changes, no Daily Agenda integration, no
+deploy -- see the calibration doc's confirmations).
+
+**New module: `lib/fundraising-intelligence/`** (`types.ts`,
+`text-safety.ts`, `situations.ts`, `synthesize.ts`, `index.ts`). Pure,
+in-memory selection/synthesis layer over Portfolio Focus's already-
+computed output -- ZERO new D1 queries (reuses the exact same raw
+`asks`/`donor_relationship_facts` rows Portfolio Focus's own bounded
+12-query pull already fetches, plus its already-computed
+`PortfolioFocusDonorInput[]`/`PortfolioFocusResult[]`) and ZERO new
+weighted composite score. Public entry points:
+`buildFundraisingIntelligenceBrief(donorInputs, results, asksByDonor,
+factsByDonor, now)` and a raw-data convenience wrapper
+`buildFundraisingIntelligenceBriefFromRaw(raw, now, timezone)`.
+
+**Architecture:** 8 independent situation detectors
+(`explicit_follow_up`, `ask_resolution`, `pledge_follow_up`,
+`commitment_progress`, `stewardship_moment`, `financial_change`
+[including a distinct "recent meaningful gift" sub-signal],
+`relationship_visibility`, `upcoming_moment`), none of which ever
+branches on `recommendation.kind` as a qualifying condition -- the
+generic `reconnect_contact_gap` fallback (209/254 donors in the design
+round's hand investigation) is never itself sufficient evidence. Per-
+donor signals collapse to exactly ONE Brief item via a fixed priority
+order (tier 1: explicit follow-up / ask resolution / stale pledge
+follow-up; tier 2: commitment progress / financial change / stewardship;
+tier 3: relationship visibility / upcoming date), with every other fired
+signal preserved as separately-labeled supporting evidence rather than
+merged into one number (the Schwartz regression: a real $9,670 gift and
+a separate $36,000 unpaid pledge stay distinguishable). Disposition is
+KNOW / DO / KNOW_DO, upgraded to KNOW_DO only for two named, narrow
+combinations (a DO-tier-1-or-2 winner plus a genuinely opposite-
+disposition secondary signal) -- "used sparingly," per instruction.
+Selection caps at 15 items (ties broken by the existing
+`financialSignificance` percentile component, never a new score); fewer
+than 8 is returned as-is, never padded.
+
+**Hard safety rules implemented and tested:** an active/on-track pledge
+or `actively_fulfilling_commitment` momentum always produces a KNOW
+stewardship item, never a solicitation/reconnect DO; a declined or
+withdrawn Ask always produces a caution-worded KNOW item with
+`possibleAction: null`, never an opportunity; a birthday/date alone on a
+financially immaterial donor never qualifies; a negative (future-dated)
+day count (`safeDays()`) is never presented as recent; missing-
+relationship-context wording is runtime-enforced neutral
+(`text-safety.ts`'s banned-phrase guard throws on "weak relationship"-
+style text, `assertSafeBriefText()`, called on every end-user field).
+
+**Bug found and fixed live during calibration (not a post-hoc tuning
+pass -- an obvious implementation bug):** the first real 254-donor run
+surfaced pledges 12-27 years old (10,121 / 6,442 / 4,552 days) as "gone
+stale, worth a follow-up" DO items. Root cause: `detectPledgeFollowUp`/
+`detectCommitmentProgress` never consulted Portfolio Focus's own,
+already-calibrated `pledgeStaleClass` (`current` /
+`legacy_needs_verification` / `immaterial_artifact`,
+`lib/portfolio-focus/stale-balance.ts`) -- built specifically to prevent
+exactly this. Fixed by gating both detectors on
+`pledgeStaleClass !== "immaterial_artifact"` and downgrading confidence
+to `limited` for the `legacy_needs_verification` tier. Re-run: the
+`pledge_follow_up` count in the final included set dropped from 11 to 6,
+every remaining one a real, evidenced, sub-2-year-old stale balance.
+
+**Real 254-donor run (read-only, re-verified for drift against a fresh
+row-count query before running -- 254 donors / 5,428 giving rows / 6
+asks / 8 facts / 3 open reminders, identical to the design round, zero
+rows written):** 15 included items (hit the cap exactly), 239 rejected
+(129 reconnect-fallback-only, 95 cut by the cap, 15 with no signal at
+all). Disposition split KNOW 6 / DO 4 / KNOW_DO 5. Every named control
+case from the design round was re-run (none hardcoded in the module):
+Weinschneider, Schwartz, Spetner, Klein, Richman, Pfeiffer, and Broide
+all produced exactly the expected shape; Avi Stein, Yaakov Zachter, and
+Shimmy Ramras produced the expected KNOW stewardship signal but were
+narrowly excluded by the 15-item cap (a disclosed tier-balance finding,
+not a bug -- see the calibration doc's Open Decision 1); Yale Miller and
+Manuel Schnaidman produced no signal at all, because `relationship_
+visibility`'s reuse of Portfolio Focus's `relationshipConfidence` axis
+(whose real definition is "any interaction/fact/ask ever," not "thin
+*current* context") cannot detect the situation it was designed for --
+disclosed as Open Decision 2, not patched (fixing it would mean either
+inventing a new Brief-specific recency signal or touching Portfolio
+Focus's own confidence axis, both out of scope this round).
+
+**Tests:** `tests/fundraising-intelligence.test.mjs` (new, added to
+`pnpm test`) -- covers reconnect-fallback-alone-does-not-qualify,
+independently-evidenced-reconnect-can-qualify, active-pledge-suppresses-
+solicitation, explicit-reminder-qualifies, declined/withdrawn-Ask-never-
+an-opportunity, committed-Ask-produces-no-standalone-item (documented
+Phase 1 limitation), birthday-materiality-gate, future-dated-gift-safety
+(`safeDays()`), newly-significant-materiality-floor, neutral-missing-
+context-wording (runtime-enforced), duplicate-signal-collapse-to-one-
+item, distinct-financial-facts-never-merged (Schwartz), KNOW-has-no-
+action / DO-always-has-an-action invariant, 15-item cap, sub-8 returned
+as-is, deterministic ordering, and no-raw-score-in-end-user-text.
+Fixtures reuse the real, already-documented Spetner/Stein profiles from
+`tests/portfolio-focus-regression.test.mjs` plus realistic-shaped
+profiles matching the real numbers found in the design-round
+investigation for the other named controls -- no donor name appears
+inside the production module itself.
+
+**Gates:** `pnpm exec tsc --noEmit` clean. `pnpm run
+build:staging-independent` clean. `pnpm test`: every test passes except
+one pre-existing, unrelated failure (`backup-watchdog-scheduled.test.mjs`,
+a scheduled-dispatch re-check timing test) -- confirmed present and
+identical on the base commit with this round's changes stashed out, not
+caused by this work.
+
+**D1 mutation: zero.** **Schema: none added.** **UI: none added.**
+**Portfolio Focus / Recommendation Engine / Relationship Intelligence:
+not modified** (the new module only reads their existing output).
+**Deployment: none.** Per the explicit stopping instruction for this
+round, work stops here -- see "Next Approval Required" below for the
+open decisions the calibration run surfaced (tier-balance/cap
+reservation, `relationship_visibility`'s confidence-axis gap, whether to
+expand stewardship detection to unstructured narrative text).
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
@@ -18507,19 +18628,26 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Fundraising Intelligence Brief -- 7 open
-decisions awaiting the user's review (2026-09-17).** See "Fundraising
-Intelligence Brief -- Investigation & Design" above and
-`docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md` section 20 for the exact
-list: (1) approve the eligibility-gate + `reconnect_contact_gap`-
-suppression selection mechanism over a new weighted score; (2) approve
-the hybrid Today-teaser + dedicated-page UX; (3) approve deferring the
-one small snapshot-diff table out of Phase 1; (4) approve not building a
-Relationship Intention concept for Phase 1; (5) approve not adding Brief
-content to the Daily Agenda email this round; (6) decide who reviews the
-raw Phase-1 output and over what real time window before Phase 3 UI
-work is authorized; (7) decide whether to clean up the two "Staging ask
-test"/"Staging withdraw test" rows found live in Independent Staging.
+**Genuinely open, newest first: Fundraising Intelligence Brief -- Phase 1
+calibration surfaced 4 new open decisions, on top of the still-open
+design-round decisions (2026-09-17).** See "Fundraising Intelligence
+Brief -- Phase 1 Computation Layer" above and
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-CALIBRATION.md` section 10:
+(1) whether tier-2/3 KNOW items (e.g. Avi Stein's stewardship signal)
+should get a reserved minimum share of the 15-item cap so tier-1 volume
+can never crowd them out entirely; (2) how to close `relationship_
+visibility`'s real gap against `relationshipConfidence` (Yale Miller/
+Manuel Schnaidman produce no signal today) -- a new Brief-specific
+recency signal vs. leaving it as a known Phase 1 boundary; (3) whether
+to expand stewardship detection to unstructured narrative text (risks
+reopening the "invented opportunity from narrative text" problem, so
+leaning toward "no" pending your input); (4) whether the several real
+12-27-year-old, trivial-balance open pledges found live (see the
+calibration doc §3) warrant a separate bookkeeping cleanup. The prior
+design-round decisions (UX architecture, schema timing, Relationship
+Intention, Daily Agenda scope, the two "Staging ask test" rows) remain
+open and unaffected by this round -- see
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md` section 20.
 No implementation has begun; nothing here blocks any other in-flight
 work.
 
