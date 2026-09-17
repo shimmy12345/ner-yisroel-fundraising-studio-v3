@@ -1,6 +1,6 @@
-export type DonorNavigationOrigin = "donors" | "search" | "today" | "queue" | "recent" | "meeting-brief" | "timeline" | "portfolio-focus";
+export type DonorNavigationOrigin = "donors" | "search" | "today" | "queue" | "recent" | "meeting-brief" | "timeline" | "portfolio-focus" | "fundraising-intelligence";
 
-const ORIGINS = new Set<DonorNavigationOrigin>(["donors", "search", "today", "queue", "recent", "meeting-brief", "timeline", "portfolio-focus"]);
+const ORIGINS = new Set<DonorNavigationOrigin>(["donors", "search", "today", "queue", "recent", "meeting-brief", "timeline", "portfolio-focus", "fundraising-intelligence"]);
 
 export function safeInternalReturnPath(value: string | null | undefined, fallback = "/donors") {
   if (!value || value.length > 2_000 || !value.startsWith("/") || value.startsWith("//")) return fallback;
@@ -32,6 +32,7 @@ export function donorBackLabel(origin: DonorNavigationOrigin) {
   if (origin === "meeting-brief") return "Back to Meeting Brief";
   if (origin === "timeline") return "Back to Timeline";
   if (origin === "portfolio-focus") return "Back to Portfolio Focus";
+  if (origin === "fundraising-intelligence") return "Back to Fundraising Intelligence";
   if (origin === "today" || origin === "queue" || origin === "recent") return "Back to Today";
   return "Back to Donors";
 }

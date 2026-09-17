@@ -104,7 +104,7 @@ export function selectWithKnowReservation(
   };
 }
 
-function group<T, K extends string>(rows: T[], key: (row: T) => K): Map<K, T[]> {
+export function group<T, K extends string>(rows: T[], key: (row: T) => K): Map<K, T[]> {
   const map = new Map<K, T[]>();
   for (const row of rows) {
     const k = key(row);

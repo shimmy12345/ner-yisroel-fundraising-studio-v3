@@ -193,10 +193,10 @@ assert.match(relationshipRead, /source NOT LIKE 'capture-scheduled:%'.*occurred_
 // design rationale this section implements.
 assert.ok(today.indexOf("today-command-grid") < today.indexOf("portfolio-focus-section"), "Portfolio Focus must render below the existing Today's Agenda / Coming Up row, never inside or above it");
 assert.match(today, /portfolioFocusRows\.length > 0/, "the section must be entirely omitted when there are zero results (no arbitrary/placeholder donors, no empty-state noise)");
-assert.match(today, /if \(mode !== "live"\) return \[\];/, "Portfolio Focus has no meaning against demo/sample data and must be skipped outside live mode, not called and discarded");
-assert.match(today, /try \{[\s\S]*?computePortfolioFocus\(profile\.id, profile\.timezone, now\)[\s\S]*?\} catch \(error\) \{[\s\S]*?logger\.error\("portfolio_focus_today_load_failed", error, \{ userId: profile\.id \}\);[\s\S]*?\}/, "a Portfolio Focus computation failure must be caught and logged, never thrown, so it cannot break the rest of the Today page");
+assert.match(today, /if \(mode !== "live"\) return \{ portfolioFocusRows: \[\], intelligenceTeaserRows: \[\] \};/, "Portfolio Focus has no meaning against demo/sample data and must be skipped outside live mode, not called and discarded");
+assert.match(today, /try \{[\s\S]*?computePortfolioFocusAndBrief\(profile\.id, profile\.timezone, now\)[\s\S]*?\} catch \(error\) \{[\s\S]*?logger\.error\("today_strategic_sections_load_failed", error, \{ userId: profile\.id \}\);[\s\S]*?\}/, "a Portfolio Focus/Brief computation failure must be caught and logged, never thrown, so it cannot break the rest of the Today page");
 assert.doesNotMatch(today.split("portfolio-focus-section")[1] ?? "", /throw /, "the Portfolio Focus section's own render path must never rethrow");
-assert.match(today, /buildTodayPortfolioFocusRows\(results, 5\)/, "Today must show exactly the current top 5 -- no manual curation, no different limit");
+assert.match(today, /buildTodayPortfolioFocusRows\(portfolioFocus, 5\)/, "Today must show exactly the current top 5 -- no manual curation, no different limit");
 assert.match(today, /Promise\.all\(\[\s*loadWorkspaceBrief\(/, "Portfolio Focus's independent load must run alongside loadWorkspaceBrief, not add sequential latency after it");
 assert.doesNotMatch(today, /<table/i, "the Today Portfolio Focus section must never render as a desktop-only table");
 for (const rawField of ["compositeScore", "baseComposite", "coverageFloor", "momentumLabel", "pledgeStaleClass", "financialConfidence", "relationshipConfidence", "\\.components\\."]) {

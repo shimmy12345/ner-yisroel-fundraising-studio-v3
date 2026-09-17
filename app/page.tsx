@@ -12,8 +12,10 @@ import { timeOfDayGreeting } from "../lib/workspace/local-time";
 import { shouldShowOnboarding } from "../lib/onboarding/status";
 import { getDataMode } from "../lib/workspace/mode";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../lib/navigation/donor-navigation";
-import { computePortfolioFocus } from "../lib/portfolio-focus/index";
 import { buildTodayPortfolioFocusRows, type TodayPortfolioFocusRow } from "../lib/portfolio-focus/today-view";
+import { computePortfolioFocusAndBrief } from "../lib/fundraising-intelligence/compute";
+import { buildTodayIntelligenceTeaserRows } from "../lib/fundraising-intelligence/today-view";
+import type { IntelligenceBriefRow } from "../lib/fundraising-intelligence/dedicated-view";
 import { logger } from "../lib/logger";
 
 export const dynamic = "force-dynamic";
@@ -99,6 +101,25 @@ function PortfolioFocusRow({ row }: { row: TodayPortfolioFocusRow }) {
   </article>;
 }
 
+// Fundraising Intelligence Brief teaser (UI phase) -- "what should I
+// know and do right now," complementary to Portfolio Focus's "who
+// matters" above. Deliberately tiny (2-3 items, see
+// lib/fundraising-intelligence/today-view.ts's own selection rule) and
+// deliberately not another task list: a KNOW row never gets a checkbox,
+// due date, or urgency styling (see .fib-badge-know in globals.css) --
+// only the disposition label and headline distinguish it from a DO row.
+function FundraisingIntelligenceTeaserRow({ row }: { row: IntelligenceBriefRow }) {
+  const openHref = donorNavigationHref(row.donorId, "/#fundraising-intelligence-title", "today");
+  return <article className="fib-teaser-row">
+    <span className={`fib-badge fib-badge-${row.disposition.toLowerCase()}`}>{row.dispositionLabel}</span>
+    <div className="fib-teaser-row-body">
+      <div className="fib-teaser-row-heading"><a href={openHref}>{row.displayName}</a></div>
+      <p className="fib-teaser-row-headline">{row.headline}</p>
+    </div>
+    <a className="fib-teaser-row-open" href={openHref}>Open donor →</a>
+  </article>;
+}
+
 export default async function TodayPage({ searchParams }: { searchParams: Promise<{ priorities?: string }> }) {
   if (await shouldShowOnboarding()) return <WelcomeExperience />;
   const identity = await requireChatGPTUser("/");
@@ -107,33 +128,36 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
   const showAll = (await searchParams).priorities === "all";
   const now = Math.floor(Date.now() / 1000);
 
-  // Portfolio Focus (Phase 2A): strategic, additive to Today, never
-  // required for the page to render, and never sharing a query/loader
-  // with loadWorkspaceBrief -- it reads via its own bounded, batched 12
-  // D1 queries (lib/portfolio-focus/data.ts). Run alongside
+  // Portfolio Focus (Phase 2A) + the Fundraising Intelligence Brief
+  // teaser (UI phase): both strategic, additive to Today, never required
+  // for the page to render, and never sharing a query/loader with
+  // loadWorkspaceBrief -- they read via the SAME bounded, batched 12 D1
+  // queries (lib/portfolio-focus/data.ts), issued exactly ONCE by
+  // computePortfolioFocusAndBrief() and reused for both sections -- the
+  // Brief adds zero additional D1 queries to Today. Run alongside
   // loadWorkspaceBrief (Promise.all) rather than after it so the two
-  // independent loads overlap instead of adding sequential latency.
-  // computePortfolioFocus() only has meaning against real live data
-  // (data.ts has no demo branch), so it's skipped entirely outside live
-  // mode -- not called then discarded. This function always resolves
-  // (never rejects): a computation failure degrades this one section to
-  // empty (see item 18's zero-result handling below) rather than failing
-  // the whole Today page, and is logged, never swallowed silently, and
-  // never backed by fake/stale data.
-  async function loadPortfolioFocusForToday(): Promise<TodayPortfolioFocusRow[]> {
-    if (mode !== "live") return [];
+  // independent loads overlap instead of adding sequential latency. Only
+  // has meaning against real live data (data.ts has no demo branch), so
+  // it's skipped entirely outside live mode -- not called then
+  // discarded. This function always resolves (never rejects): a
+  // computation failure degrades both sections to empty (see the
+  // zero-result handling below) rather than failing the whole Today
+  // page, and is logged, never swallowed silently, and never backed by
+  // fake/stale data.
+  async function loadStrategicSectionsForToday(): Promise<{ portfolioFocusRows: TodayPortfolioFocusRow[]; intelligenceTeaserRows: IntelligenceBriefRow[] }> {
+    if (mode !== "live") return { portfolioFocusRows: [], intelligenceTeaserRows: [] };
     try {
-      const results = await computePortfolioFocus(profile.id, profile.timezone, now);
-      return buildTodayPortfolioFocusRows(results, 5);
+      const { portfolioFocus, brief } = await computePortfolioFocusAndBrief(profile.id, profile.timezone, now);
+      return { portfolioFocusRows: buildTodayPortfolioFocusRows(portfolioFocus, 5), intelligenceTeaserRows: buildTodayIntelligenceTeaserRows(brief.items) };
     } catch (error) {
-      logger.error("portfolio_focus_today_load_failed", error, { userId: profile.id });
-      return [];
+      logger.error("today_strategic_sections_load_failed", error, { userId: profile.id });
+      return { portfolioFocusRows: [], intelligenceTeaserRows: [] };
     }
   }
 
-  const [data, portfolioFocusRows] = await Promise.all([
+  const [data, { portfolioFocusRows, intelligenceTeaserRows }] = await Promise.all([
     loadWorkspaceBrief(profile.id, profile.timezone, mode, now, showAll ? 50 : 10, "today"),
-    loadPortfolioFocusForToday(),
+    loadStrategicSectionsForToday(),
   ]);
   const greeting = timeOfDayGreeting(now, profile.timezone);
   const agendaQueueCount = data.relationshipQueue.overdue.length + data.relationshipQueue.today.length;
@@ -183,6 +207,12 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
         </div>
       </section>
     </div>
+
+    {intelligenceTeaserRows.length > 0 && <section className="today-command-section fib-teaser-section" aria-labelledby="fundraising-intelligence-title">
+      <div className="command-section-heading"><div><p className="eyebrow">RIGHT NOW</p><h2 id="fundraising-intelligence-title">Fundraising Intelligence</h2></div></div>
+      <div className="fib-teaser-list">{intelligenceTeaserRows.map((row) => <FundraisingIntelligenceTeaserRow row={row} key={row.donorId} />)}</div>
+      <a className="view-all-link command-view-all" href="/fundraising-intelligence">See full Fundraising Intelligence →</a>
+    </section>}
 
     {portfolioFocusRows.length > 0 && <section className="today-command-section portfolio-focus-section" aria-labelledby="portfolio-focus-title">
       <div className="command-section-heading"><div><p className="eyebrow">THIS MONTH</p><h2 id="portfolio-focus-title">Portfolio Focus</h2></div></div>
