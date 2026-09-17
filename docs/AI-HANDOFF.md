@@ -18215,6 +18215,101 @@ timing test), confirmed unrelated to this work.
 **D1 mutation: zero. Schema: none added. UI: none added. Deployment:
 none.** Per the explicit stopping instruction, work stops here.
 
+## Fundraising Intelligence Brief -- Phase 1 Final Calibration: Ask Resolution Recency (2026-09-17) -- IMPLEMENTED, TESTED, NOT DEPLOYED, ZERO SCHEMA, ZERO D1 MUTATION
+
+Full report: `docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-FINAL-CALIBRATION.md`.
+
+An intentionally narrow, final calibration round before any UI decision
+-- exactly one change: `ask_resolution`'s Brief-eligibility window for a
+declined/withdrawn ask. The 3-slot KNOW reservation, `relationship_
+visibility`, Portfolio Focus, the Recommendation Engine, Relationship
+Intelligence, pledge/financial-change/stewardship logic, the 15-item
+cap, and KNOW/DO/KNOW_DO semantics are all byte-for-byte unchanged from
+Round 2. No UI, schema, D1 writes, free-text inference, or new score.
+
+**Product distinction this round formalizes:** (A) historical truth /
+recommendation suppression -- a declined or withdrawn ask must
+permanently prevent that solicitation from ever being read as a live
+opportunity, at any age, forever (structural, not a window -- untouched)
+-- vs. (B) Brief novelty -- whether a *resolved* ask still deserves one
+of the Brief's 15 scarce, today-facing slots. The prior single 545-day
+window conflated these; they are now independently governed.
+
+**Chosen rule:** `ASK_RESOLUTION_BRIEF_NOVELTY_WINDOW_DAYS = 90` in
+`lib/fundraising-intelligence/situations.ts`, replacing the old 545-day
+window for declined/withdrawn asks only (pending-ask handling and the
+"committed asks never independently qualify" behavior are unchanged).
+30/60/90/180-day windows were tested against the real Ask population
+(4 real declined/withdrawn rows, ages 29/29/315/367 days) -- all four
+produced an identical real-world result, since no real data point falls
+between 30 and 315 days. 90 was chosen not as an arbitrary number but by
+reusing an *already-existing* convention: `lib/relationships/
+fact-classification.ts`'s `CATEGORY_DECAY_WINDOW_DAYS.solicitation` is
+already 90 days -- the same window Relationship Intelligence's own
+fact-decay architecture already uses for "how long does a solicitation
+stay current." No threshold was chosen to force a particular donor into
+the final 15 -- 90 was fixed before the real 254-donor re-run.
+
+**Current-relevance exception: investigated, not implemented.** A newer
+pending ask already supersedes an old resolution for free (existing
+"most recent ask only" logic). A recent interaction "relating to" the
+old ask would require narrative correlation -- out of scope. Fresh
+giving already produces its own, independent `financial_change` signal
+via the existing `detectRecentMeaningfulGift` detector -- no bespoke
+ask-specific exception was needed to cover that case, confirmed by a
+direct test. No exception was added.
+
+**Real 254-donor re-run (read-only, re-verified for zero drift --
+254/5,428/6/8/3, identical to all three prior rounds):** 15 items,
+KNOW 6 / DO 4 / KNOW_DO 5 (identical totals to V1 and V2).
+**Removed:** Mayer Simcha Klein (315-day-old decline) and Allen Pfeiffer
+(367-day-old decline) no longer occupy a standalone `ask_resolution`
+slot -- both direct, intended effects. Pfeiffer's own real
+`financial_change` signal (already visible as secondary evidence in his
+V2 item) survives independently but loses the cap on rank -- he is not
+erased, just no longer news via that specific detector. **Added:** Tzvi
+Ray (rank 16, real giving decline) and Nachum Rosenberg (rank 34, real
+recent gift) naturally re-entered the vacated slots -- neither was
+forced; both were already real, documented near-misses in the V1/V2
+reports. Avi Stein, Yaakov Zachter, Mordechai Schwartz, Dovie
+Weinschneider, Eitan Zeffren, and Joshua Broide are all unchanged.
+**Inspected per instruction, confirmed NOT forced:** Jonathan Spetner
+does not naturally re-enter (the vacated slots went to higher-ranked
+Ray/Rosenberg instead) -- remains a real, disclosed near-miss, unchanged
+in kind from V2.
+
+**Historical-truth suppression confirmed intact:** a new direct test
+constructs a 315-day-old declined ask with a matching solicitation-
+category fact and asserts the Brief produces no item at all, and
+specifically nothing containing "opportunity"/"solicit" -- proving the
+Brief-slot change did not weaken the permanent suppression. A real,
+pre-existing (not introduced this round), unrelated data-quality detail
+surfaced during this check: Dr. & Dr. Joseph Resnikoff's two literal
+test-data Ask rows ("Staging ask test"/"Staging withdraw test") share
+the exact same timestamp; a stable sort on an exact tie means the
+`committed` row wins over the `withdrawn` one, so neither produces an
+`ask_resolution` signal -- disclosed for completeness, not a new
+finding this round created. The existing open decision to clean up
+those two test rows (see the design doc) remains the right place to fix
+it, not a code change here.
+
+**Tests:** `tests/fundraising-intelligence.test.mjs` extended with:
+recent declined ask still qualifies (unchanged from V1/V2, fixture
+updated from 300 to 29 days to reflect the new window); old declined/
+withdrawn asks no longer qualify as standalone items; an old committed
+ask still never qualifies (pre-existing behavior, reconfirmed); the
+historical-truth-suppression test described above; the no-exception-
+needed test; and exact boundary-day behavior (90 days qualifies, 91 does
+not). Every V1/V2 regression test still passes unchanged.
+
+**Gates:** `pnpm exec tsc --noEmit` clean. `pnpm run
+build:staging-independent` clean. `pnpm test`: same single pre-existing,
+unrelated failure as both prior rounds (`backup-watchdog-scheduled.test.mjs`).
+
+**D1 mutation: zero. Schema: none added. UI: none added. Deployment:
+none.** Per the explicit stopping instruction, work stops here -- the
+next decision is whether the calibrated engine is ready for UI.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
@@ -18730,9 +18825,17 @@ relationship-intelligence quality work):
 
 ## Next Approval Required
 
-**Genuinely open, newest first: Fundraising Intelligence Brief -- Round 2
-calibration resolved 2 prior open decisions and surfaced 2 new ones
-(2026-09-17).** See "Fundraising Intelligence Brief -- Phase 1
+**Genuinely open, newest first: Fundraising Intelligence Brief -- the
+next decision is whether the calibrated Phase 1 engine is ready for UI
+work (2026-09-17).** See "Fundraising Intelligence Brief -- Phase 1
+Final Calibration: Ask Resolution Recency" above and
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-FINAL-CALIBRATION.md`. This
+round's own change (the 90-day ask-resolution Brief-novelty window) is
+not itself an open decision -- it was calibrated against real data and
+implemented. The Round 2 open decisions below remain exactly as they
+were; this round did not touch either of them.
+
+**Round 2 open decisions (2026-09-17), still awaiting review:** See "Fundraising Intelligence Brief -- Phase 1
 Calibration Round 2" above and
 `docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-CALIBRATION-V2.md`:
 **resolved** -- tier-balance now uses a 3-slot, rank-based KNOW

@@ -83,7 +83,31 @@ function detectExplicitFollowUp(donor: PortfolioFocusDonorInput, facts: RawRelat
 }
 
 const ASK_MATERIALITY_FLOOR_CENTS = 100_000; // $1,000 -- documented, not derived
-const ASK_RECENCY_WINDOW_DAYS = 545; // ~18 months -- an ancient declined ask is no longer live context
+
+// Final calibration round: separates two distinct concepts that the
+// original 545-day window conflated. (1) HISTORICAL TRUTH / suppression
+// -- a declined/withdrawn ask must PERMANENTLY prevent that solicitation
+// from ever being re-read as a live opportunity (rule D). This is
+// structural, not a window: no detector in this file ever reads Ask
+// status to manufacture a NEW solicitation signal, at any age -- see the
+// file header. (2) BRIEF NOVELTY -- whether a resolved ask still
+// deserves a scarce, today-facing Brief slot. A decline from 315+ days
+// ago (Mayer Simcha Klein, Allen Pfeiffer -- real Independent Staging
+// examples) is not "news" the way a 29-day-old decline (Paul S. Richman)
+// is, even though both remain equally true and equally protected from
+// (1) forever. 30/60/90/180-day windows were tested against the real
+// Ask population (docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-FINAL-
+// CALIBRATION.md §1) -- the real population is small and clustered
+// (29-day and 315+/367-day ages, nothing in between), so all four
+// windows produce an identical real-world result. 90 was chosen as the
+// simplest defensible value specifically because it is NOT a new
+// invented number: it is the exact same window Relationship
+// Intelligence's own fact-decay architecture already uses for
+// solicitation-category facts (CATEGORY_DECAY_WINDOW_DAYS.solicitation,
+// lib/relationships/fact-classification.ts) -- reusing an existing,
+// already-calibrated "how long does a solicitation stay current"
+// convention rather than inventing a second one.
+const ASK_RESOLUTION_BRIEF_NOVELTY_WINDOW_DAYS = 90;
 
 function detectAskResolution(asks: RawAskRow[], now: number): DetectedSignal | null {
   if (asks.length === 0) return null;
@@ -112,7 +136,15 @@ function detectAskResolution(asks: RawAskRow[], now: number): DetectedSignal | n
   }
 
   if (mostRecent.status === "declined" || mostRecent.status === "withdrawn") {
-    if (ageDays === null || ageDays > ASK_RECENCY_WINDOW_DAYS) return null;
+    // Brief-novelty gate only (see the constant's own comment above) --
+    // this NEVER affects Ask lifecycle state, historical Ask display,
+    // Relationship Snapshot, or recommendation suppression: those all
+    // live entirely outside this file and are untouched. A decline/
+    // withdrawal older than this window simply stops claiming one of
+    // the Brief's 15 scarce slots as "current" news -- it remains
+    // exactly as historically true and exactly as protected from ever
+    // being read as a live opportunity (rule D) at any age, forever.
+    if (ageDays === null || ageDays > ASK_RESOLUTION_BRIEF_NOVELTY_WINDOW_DAYS) return null;
     return {
       situationType: "ask_resolution",
       disposition: "KNOW",

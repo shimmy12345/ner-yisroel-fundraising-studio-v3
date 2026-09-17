@@ -136,14 +136,14 @@ async function run() {
     assert.ok(brief.items[0].possibleAction, "an explicit follow-up must always carry a concrete action");
   }
 
-  // ---------------- 5/6. Declined and withdrawn Asks must never surface as an opportunity (Mayer Simcha Klein / Paul Richman shape) ----------------
+  // ---------------- 5/6. Declined and withdrawn Asks must never surface as an opportunity (Paul Richman shape -- recent, within the 90-day Brief-novelty window) ----------------
   {
     for (const status of ["declined", "withdrawn"]) {
       const d = donor({ donorId: `ask-${status}`, lifetimeCents: dollars(8250) });
-      const asks = [ask({ donor_id: `ask-${status}`, status, amount_cents: dollars(10000), purpose: "Dinner sponsorship", asked_at: NOW - 300 * DAY })];
-      const facts = [fact({ donor_id: `ask-${status}`, category: "solicitation", lifecycle: "time_bound", fact_text: `Solicited for a ${status} ask ($100)`, source_interaction_occurred_at: NOW - 300 * DAY })];
+      const asks = [ask({ donor_id: `ask-${status}`, status, amount_cents: dollars(10000), purpose: "Dinner sponsorship", asked_at: NOW - 29 * DAY })];
+      const facts = [fact({ donor_id: `ask-${status}`, category: "solicitation", lifecycle: "time_bound", fact_text: `Solicited for a ${status} ask ($100)`, source_interaction_occurred_at: NOW - 29 * DAY })];
       const brief = briefForOne(d, asks, facts);
-      assert.equal(brief.items.length, 1, `a ${status} ask must still surface as a KNOW caution item, not silently vanish`);
+      assert.equal(brief.items.length, 1, `a recent ${status} ask must still surface as a KNOW caution item, not silently vanish`);
       assert.equal(brief.items[0].situationType, "ask_resolution");
       assert.equal(brief.items[0].disposition, "KNOW");
       assert.equal(brief.items[0].possibleAction, null, `a ${status} ask must never carry a solicitation-flavored action`);
@@ -405,6 +405,83 @@ async function run() {
     const brief = briefForOne(d);
     assert.equal(brief.items.length, 0);
     assert.equal(brief.rejected[0].suppressionReason, "reconnect_fallback_only_no_independent_situation");
+  }
+
+  // ==================================================================
+  // Final Calibration: ask_resolution Brief-novelty window (90 days),
+  // distinct from permanent historical-truth suppression. See
+  // docs/FUNDRAISING-INTELLIGENCE-BRIEF-PHASE1-FINAL-CALIBRATION.md.
+  // ==================================================================
+
+  // ---------------- Old declined Ask no longer qualifies as a standalone Brief item (Mayer Simcha Klein shape, real: 315 days) ----------------
+  {
+    const d = donor({ donorId: "old-declined", lifetimeCents: dollars(17336) });
+    const asks = [ask({ donor_id: "old-declined", status: "declined", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 315 * DAY })];
+    const brief = briefForOne(d, asks);
+    assert.equal(brief.items.length, 0, "a 315-day-old declined ask must no longer automatically consume a standalone Brief slot");
+  }
+
+  // ---------------- Old withdrawn Ask no longer qualifies as a standalone Brief item ----------------
+  {
+    const d = donor({ donorId: "old-withdrawn", lifetimeCents: dollars(17336) });
+    const asks = [ask({ donor_id: "old-withdrawn", status: "withdrawn", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 200 * DAY })];
+    const brief = briefForOne(d, asks);
+    assert.equal(brief.items.length, 0, "a 200-day-old withdrawn ask must no longer automatically consume a standalone Brief slot");
+  }
+
+  // ---------------- Old committed Ask does not qualify merely because it once resolved (pre-existing behavior, reconfirmed) ----------------
+  {
+    const d = donor({ donorId: "old-committed", lifetimeCents: dollars(17336) });
+    const asks = [ask({ donor_id: "old-committed", status: "committed", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 10 * DAY })];
+    const brief = briefForOne(d, asks);
+    assert.equal(brief.items.length, 0, "a committed ask, at any age, never independently produces an ask_resolution item (Phase 1's documented limitation)");
+  }
+
+  // ---------------- Historical-truth suppression is permanent and independent of the Brief-novelty window ----------------
+  {
+    // An old declined ask (past the 90-day Brief-novelty window) with a
+    // matching, equally old solicitation-category fact must NEVER be
+    // read as a live opportunity, at any age -- this is the critical
+    // distinction this round exists to prove: Brief eligibility changed,
+    // suppression did not.
+    const d = donor({ donorId: "old-declined-with-fact", lifetimeCents: dollars(17336) });
+    const asks = [ask({ donor_id: "old-declined-with-fact", status: "declined", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 315 * DAY })];
+    const facts = [fact({ donor_id: "old-declined-with-fact", category: "solicitation", lifecycle: "time_bound", fact_text: "Solicited for a plaque ($5k)", source_interaction_occurred_at: NOW - 315 * DAY })];
+    const brief = briefForOne(d, asks, facts);
+    assert.equal(brief.items.length, 0, "no item at all should result -- specifically, no opportunity-flavored item");
+    assert.ok(!brief.items.some((i) => /opportunity|solicit/i.test(i.headline + i.explanation + (i.possibleAction ?? ""))), "an old declined ask's matching solicitation fact must never resurface as a live opportunity, regardless of Brief-novelty eligibility");
+  }
+
+  // ---------------- No current-relevance exception was implemented (deliberate Phase 1 decision) ----------------
+  {
+    // A donor with an old declined ask AND a genuinely fresh, unrelated
+    // gift does not resurrect the old ask_resolution item -- the fresh
+    // gift instead independently produces its OWN, already-existing
+    // situation type (financial_change's "recent meaningful gift"
+    // sub-signal). No bespoke ask-specific exception was added; the
+    // existing multi-detector architecture already covers "something
+    // new happened" without it.
+    const d = donor({
+      donorId: "old-declined-but-fresh-gift", lifetimeCents: dollars(17336),
+      mostRecentCashKind: "gift", mostRecentCashCents: dollars(2000), daysSinceLastGift: 10,
+    });
+    const asks = [ask({ donor_id: "old-declined-but-fresh-gift", status: "declined", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 315 * DAY })];
+    const brief = briefForOne(d, asks);
+    assert.equal(brief.items.length, 1);
+    assert.equal(brief.items[0].situationType, "financial_change", "current relevance is already covered by the existing recent-gift detector, not by resurrecting the old ask");
+  }
+
+  // ---------------- Boundary-day behavior around the chosen 90-day threshold ----------------
+  {
+    const atBoundary = donor({ donorId: "boundary-90", lifetimeCents: dollars(17336) });
+    const asksAt90 = [ask({ donor_id: "boundary-90", status: "declined", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 90 * DAY })];
+    const briefAt90 = briefForOne(atBoundary, asksAt90);
+    assert.equal(briefAt90.items.length, 1, "exactly 90 days old must still qualify (the window is inclusive)");
+
+    const pastBoundary = donor({ donorId: "boundary-91", lifetimeCents: dollars(17336) });
+    const asksAt91 = [ask({ donor_id: "boundary-91", status: "declined", amount_cents: dollars(5000), purpose: "Plaque", asked_at: NOW - 91 * DAY })];
+    const briefAt91 = briefForOne(pastBoundary, asksAt91);
+    assert.equal(briefAt91.items.length, 0, "91 days old must no longer qualify");
   }
 
   console.log("fundraising-intelligence.test.mjs: all assertions passed");
