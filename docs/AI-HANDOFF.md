@@ -17923,6 +17923,75 @@ write exercised end-to-end at a large donor count specifically -- not
 performed here, per the task's explicit instruction to stop and ask
 first.
 
+## Fundraising Intelligence Brief -- Investigation & Design (2026-09-17) -- INVESTIGATION/DESIGN ONLY, NO CODE/SCHEMA/D1/DEPLOY CHANGE
+
+Full report: `docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md`.
+
+Scoped explicitly as investigation-and-design-only (no engine, UI,
+schema, or deployment work this round -- see that document's stopping
+point). Goal: determine whether/how FOS should synthesize a "what should
+I know and do right now" Intelligence Brief on top of existing engines,
+without becoming a traditional CRM (manually-maintained pipeline,
+mandatory next-actions, arbitrary contact cadences).
+
+Method: pulled real, read-only D1 rows for all 254 Independent Staging
+donors via `wrangler d1 execute --json`, then ran the actual, unmodified,
+exported `aggregatePortfolioFocusInputs`/`buildPortfolioContext`/
+`scorePortfolioFocus` functions from `lib/portfolio-focus/*.ts` locally
+in Node (zero D1/I/O dependency in that layer) to get genuine production
+`PortfolioFocusResult[]` output -- not a simulation or hand-built mockup.
+25 real donors examined in depth, including the 8 named controls
+(Spetner, Klein, Stein, Schwartz, Miller, Schnaidman, Zachter,
+Weinschneider) -- none special-cased.
+
+**Key finding:** `computePortfolioFocus()`'s existing output (composite
+score, 5 components, `momentumLabel`, `attentionType`, coverage
+floor/trigger, dual confidence axes, `whyNow` text, embedded
+Recommendation Engine result) already contains nearly everything a
+Phase-1 Brief needs -- no new D1 queries, no new scoring model required.
+The missing piece is a selection/dedup/synthesis layer on top of the
+existing per-donor output.
+
+**Largest quantified false positive found:** the generic
+`reconnect_contact_gap` recommendation ("Reach out to re-establish
+contact") wins as the per-donor Recommendation Engine result for **209
+of 254 real donors (82%)**, including the #1-ranked donor in the entire
+portfolio (Avi Stein, who is actively and on-schedule fulfilling a real
+$75,000 pledge). Any Brief that ranks/selects by raw recommendation
+score or "top recommendation per donor" will be dominated by this
+fallback and must explicitly exclude or heavily discount it unless it is
+the donor's only qualifying signal at all. Also disclosed: a live data-
+integrity anomaly (David B. Rosenbaum's computed `daysSinceLastGift` is
+`-105`, i.e. a future-dated cash event) and two literal "Staging ask
+test"/"Staging withdraw test" rows in the real Asks table -- neither
+fixed nor mutated, flagged for awareness only.
+
+Produced a real, hand-synthesized 12-item raw Intelligence Brief from
+the actual computed data (no tuning for appearance) and an aggressive
+false-positive critique against every failure mode the task named (stale
+info as current, active commitment mistaken for lapsed, missing info as
+weak relationship, large historical giving overwhelming recency,
+duplicate Portfolio-Focus/Suggested-Actions insights, dates crowding out
+substance, stewardship-vs-solicitation confusion, generic-reconnect
+noise, etc.) -- full detail and every real name/number in the design
+doc's sections 4-6.
+
+Recommended (not implemented): a hybrid UX (small Today teaser of 2-3
+DO-only items + a dedicated Intelligence Brief page with the full 8-15
+item set), zero new schema for Phase 1 (one small
+`intelligence_brief_snapshots`-style table deferred until "Portfolio
+Focus movement since last run" is actually wanted), and a 4-phase
+rollout (pure computation -> human calibration against real output ->
+Today/dedicated UX -> Assistant integration).
+
+**D1 mutation during this task: zero** -- every command run was a
+read-only `SELECT`. **No application code, schema, Portfolio Focus,
+Recommendation Engine, or Relationship Intelligence logic was changed.**
+**Nothing deployed.** Per the task's explicit stopping instruction, work
+stopped after the design document and this handoff update -- see "Next
+Approval Required" below for the 7 open decisions requiring approval
+before any implementation begins.
+
 ## Important Product Decisions
 
 Durable — do not accidentally reverse these:
@@ -18437,6 +18506,22 @@ relationship-intelligence quality work):
   an oversight.
 
 ## Next Approval Required
+
+**Genuinely open, newest first: Fundraising Intelligence Brief -- 7 open
+decisions awaiting the user's review (2026-09-17).** See "Fundraising
+Intelligence Brief -- Investigation & Design" above and
+`docs/FUNDRAISING-INTELLIGENCE-BRIEF-DESIGN.md` section 20 for the exact
+list: (1) approve the eligibility-gate + `reconnect_contact_gap`-
+suppression selection mechanism over a new weighted score; (2) approve
+the hybrid Today-teaser + dedicated-page UX; (3) approve deferring the
+one small snapshot-diff table out of Phase 1; (4) approve not building a
+Relationship Intention concept for Phase 1; (5) approve not adding Brief
+content to the Daily Agenda email this round; (6) decide who reviews the
+raw Phase-1 output and over what real time window before Phase 3 UI
+work is authorized; (7) decide whether to clean up the two "Staging ask
+test"/"Staging withdraw test" rows found live in Independent Staging.
+No implementation has begun; nothing here blocks any other in-flight
+work.
 
 **Note, not itself awaiting a decision:** the Today workspace desktop
 layout cleanup (2026-08-28, see "Today Workspace Desktop Layout Cleanup"
