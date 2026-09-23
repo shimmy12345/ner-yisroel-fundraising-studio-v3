@@ -21812,3 +21812,179 @@ data cleaned up via normal app routes (archiving automatically reverted
 the donor's relationship_summary/institutional_memory via existing
 `contextStatement` logic — no manual SQL needed), this handoff updated to
 reflect live state. Session `session_01DoQiMShaMrVYHvopkVj581`.
+
+---
+
+2026-09-23T00:00:00Z (approximate)
+Claude (Sonnet 5) — Giving Import: Third-Party Source Attribution shipped.
+Real case: Eitan Pfeiffer's (donor_code 48637) gifts are often recorded in
+JL under a third party's own household code (JL 22297, "Price Waterhouse
+Foundation" — his employer/funding-source account) rather than his own.
+Every 22297 transaction must NOT be auto-assigned to him; FOS now
+recognizes 22297 as a known third-party source and SUGGESTS Pfeiffer as
+the attribution during import, but always requires an explicit,
+per-transaction human decision.
+
+**Architecture (investigated before building anything new).** The JL
+donation importer has two structurally separate, mutually exclusive
+pipelines over the same parsed rows: (1) the category/rejection-review
+flow (`matchJlDonationActivities` buckets rows as matched/unknown/needs-
+review/nonfinancial by household-code lookup; unmatched rows go through
+`lib/import/jl-donation-rejection-review.ts`), and (2) the payment-
+assignment/pledge-allocation flow (`paymentActivitiesForAssignment` pulls
+"payment" rows out of (1) entirely; `lib/import/jl-payment-assignment.ts`
+resolves donor identity purely by household-code match). Flow (1) already
+supported an explicit `donorId` on a `match_donor` decision without
+touching `externalHouseholdId`/`sourceValues` — no changes needed there
+beyond a display-layer suggestion. Flow (2) had no mechanism at all to
+resolve an unmatched code to any donor (always hard-blocked), so it
+needed a real, backward-compatible extension.
+
+**Source payer vs. attributed donor.** These were already structurally
+separate in `giving_activities` (`donor_id` vs. `external_household_id`/
+`source_snapshot`) — exactly the distinction the task required. An
+attribution decision sets `donor_id` to the suggested donor while
+`external_household_id`/`source_snapshot` continue to record the real JL
+source (22297 / Price Waterhouse Foundation) untouched, so both "who JL
+recorded this under" and "whose fundraising relationship it counts
+toward" remain visible and true. `COUNTED_GIVING_SQL`/downstream giving
+totals key only on `donor_id`, so an attributed gift flows into Pfeiffer's
+giving history, Portfolio Focus, Fundraising Intelligence, etc.
+automatically, with zero special-casing.
+
+**Where the mapping lives (schema change: yes, minimal).** A new table,
+`donor_source_attributions` (migration `drizzle/0036_donor_source_
+attributions.sql`): `(id, user_id, external_source, source_external_id,
+source_name, suggested_donor_id, note, created_at, updated_at)`, unique on
+`(user_id, external_source, source_external_id)`, FK to `users` and
+`donors`. No existing generic alias/mapping table existed to reuse (all 43
+`sqliteTable(...)` declarations were checked). This is data, not code —
+nothing in `lib/import` or `app/api/import` ever names "22297" or
+"Pfeiffer"; `lib/import/donor-source-attribution.ts` just builds a
+`Map<sourceCode, suggestion>` from whatever rows exist. The same migration
+adds two nullable columns (`source_external_id`, `source_name`) to the
+existing `jl_payment_assignment_audits` table, needed because an
+"apply to pledge" payment outcome creates no new `giving_activities` row
+— without these, the original JL source identity for an attributed
+payment would survive only as an opaque fingerprint hash.
+
+**Attribution is never automatic.** The rejected-rows review UI shows a
+"Known attribution" panel — "KNOWN ATTRIBUTION: Mr. & Mrs. Eitan Pfeiffer
+48637" plus a button "Attribute to Mr. & Mrs. Eitan Pfeiffer (48637)" —
+above the *unchanged* normal donor-matching input and action dropdown
+("Match donor with corrected code" / "Skip" / "Review later"), so all of
+the task's required alternative handling stays available; nothing forces
+a 22297 row into only "Pfeiffer or Skip". The payment-assignment card gets
+the equivalent panel, gated behind a NEW server-side verification step:
+a client-submitted `attributedDonorId` on a payment decision is only
+honored if it exactly matches the server's own independently-computed
+suggestion for that exact transaction's own source code — a client can
+never attribute an arbitrary donor to an arbitrary payment. No "remember
+and auto-apply forever" checkbox exists.
+
+**Duplicate detection unweakened.** `canonicalFingerprint`/`source_
+fingerprint` are computed purely from JL row content (code, date, item,
+description, campaign, amount, company) and never include donor identity,
+so this was already attribution-agnostic. The `giving_activities` upsert
+(`ON CONFLICT(owner_user_id, external_source, source_fingerprint) DO
+UPDATE ...`) never updates `donor_id` on conflict, so re-importing the
+same Price Waterhouse transaction preserves whichever donor was attributed
+on the first import. Zero changes were needed to the dedup mechanism.
+
+**Pledge allocation unduplicated.** Attribution only resolves donor
+identity inside `buildPaymentCandidates`, before candidates reach
+`planPaymentAssignments` — the entire pledge-matching/multi-pledge-
+allocation loop is untouched and handles an attributed Pfeiffer payment
+exactly as it would a directly-coded one.
+
+**Validation.** `validatePaymentDecisionShape` — the same canonical shared
+validator route.ts's commit path and the review path both already used
+(created after a documented prior review/commit-validator divergence
+incident) — was extended in place to accept the new optional
+`attributedDonorId` field, so review-valid and commit-valid attribution
+decisions can never diverge. An invalid/unverified `attributedDonorId`
+leaves the candidate `blocked`, and `planPaymentAssignments` unconditionally
+errors on any blocked candidate regardless of decision — so a bad
+attribution fails the whole batch closed with zero financial writes,
+never a partial write.
+
+**Tests.** New `tests/giving-import-source-attribution.test.mjs` covers
+all 13 required cases plus an identity-boundary regression proving that
+if JL 22297 ever became a real matched household, ordinary code matching
+would win completely and the suggestion would disappear — proving this is
+attribution, never identity equivalence. `pnpm test` (all green except the
+same single pre-existing, unrelated `backup-watchdog-scheduled.test.mjs`
+failure this session has consistently found on every round),
+`pnpm exec tsc --noEmit`, and `pnpm run build:staging-independent` all
+pass. Adding migration 0036 also required regenerating
+`production-baseline/*` (`pnpm run db:baseline:generate`) and updating
+three small hand-maintained "current migration count" assertions that
+don't auto-derive (`lib/data-health/production-baseline.ts`'s
+`PRODUCTION_BASELINE_VERIFIED` 36→37 check, a mirrored assertion in
+`tests/production-baseline.test.mjs`, plus registering the new table in
+`lib/operations/staging-reset.ts`'s `STAGING_RESET_TABLE_ORDER` and in
+`lib/operations/workspace-backup.ts`'s `WORKSPACE_BACKUP_EXCLUDED_TABLES`
+— excluded rather than included in the partial JSON export, same
+treatment as `asks`/`pledge_payment_plans`/`donor_relationship_facts`,
+since correct owner-scoping for a new export column is a separate,
+unrequested decision).
+
+**Real-data verification (read-only, before any write).** Confirmed live
+against `fundraising-os-staging-db`: donor `a28d46dc-0dd5-4222-be2e-
+fd4ebae8199b`, `display_name` "Mr. & Mrs. Eitan Pfeiffer", `donor_code`
+'48637', `owner_user_id` 'user_sgoldstein@nirc.edu', `data_source`='live',
+not archived — matches exactly. Price Waterhouse Foundation/22297 does
+not exist as its own donor record (expected — it is purely a source-side
+payer identity, never itself a fundraising relationship in FOS).
+
+**Historical 22297 findings (read-only; nothing changed).** Three
+independent queries against `giving_activities` (by
+`external_household_id`, by `source_snapshot LIKE '%22297%'`, and by
+`source_snapshot LIKE '%rice Waterhouse%'`) found **zero** historical rows
+referencing JL code 22297 or "Price Waterhouse Foundation" anywhere in
+Independent Staging. Nothing to list; nothing already attributed to
+Pfeiffer; no historical cleanup decision needed yet, and none was made.
+
+**Seeding the real mapping.** Built a small, generic, reusable
+`scripts/seed-donor-source-attribution.mjs` (dry-run by default, `--apply`
+to write) — the only place the 22297 → Pfeiffer configuration is named as
+data, mirroring `scripts/ask-historical-backfill.mjs`'s fresh-read-
+immediately-before-write, idempotent-guarded-INSERT pattern. Dry run
+confirmed eligibility against fresh live data; `--apply` wrote one row
+(`a0465834-f435-49f3-8317-9d2ad6471246`: `external_source`='JL Solutions',
+`source_external_id`='22297', `source_name`='Price Waterhouse Foundation',
+`suggested_donor_id`=Pfeiffer's id); re-running confirmed idempotent
+no-op (`ALREADY_APPLIED`).
+
+**Deployment + live verification.** Committed `01260eb`, pushed to
+`feature/independent-cloudflare-sandbox`, deployed to Independent Staging
+only (Worker version `7b51e74c-8ff7-4bb3-a445-850643a56fd5`; production/
+main untouched). In a real, already-authenticated Cloudflare Access
+browser session against the live deployed Worker, uploaded a one-row
+synthetic JL donation CSV (Code 22297, "Price Waterhouse Foundation",
+$100 completed gift) through the real upload UI. The review screen
+correctly showed: "JL Code '22297' does not match any imported
+household," a "KNOWN ATTRIBUTION: Mr. & Mrs. Eitan Pfeiffer 48637" panel
+with an "Attribute to Mr. & Mrs. Eitan Pfeiffer (48637)" button and the
+note "This confirms only this transaction. Every other Price Waterhouse
+Foundation transaction still needs its own decision," and, unchanged
+below it, the normal "Correct JL Code" input plus a "Choose an action"
+dropdown offering "Match donor with corrected code" / "Skip" / "Review
+later" — confirming all required alternative handling remains available.
+The page itself read "Nothing has been written yet." Neither the
+suggestion button nor any commit action was clicked; the import was
+cancelled and its review draft explicitly discarded afterward. The only
+D1 write during this verification was the app's own normal, expected
+`import_preview_sessions`/`import_preview_session_chunks` ephemeral draft
+row (14-day TTL, already excluded from `WORKSPACE_BACKUP_TABLES`,
+`FUNDRAISING_DATA_TABLES`, and `D1_RESTORE_DATA_ORDER` data as non-
+financial working state) — no `giving_activities`, `gifts`, or
+`jl_payment_assignment*` row was created, and that draft was discarded
+before finishing.
+
+Per this task's explicit stopping point: no historical Price Waterhouse
+gift was reattributed (none exist yet to reattribute), Price Waterhouse
+Foundation and Eitan Pfeiffer were never merged, Pfeiffer's own JL code
+was never touched, no future 22297 gift will be auto-attributed, nothing
+was deployed to production/main, and this was not expanded into general
+soft-credit management or employer/company CRM features. Stopping here.
