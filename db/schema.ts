@@ -341,11 +341,53 @@ export const jlPaymentAssignmentAudits = sqliteTable("jl_payment_assignment_audi
   nextStatus: text("next_status"),
   paymentDate: integer("payment_date", { mode: "timestamp" }),
   remainingBalanceCents: integer("remaining_balance_cents"),
+  // Third-Party Source Attribution (see docs/AI-HANDOFF.md and
+  // lib/import/donor-source-attribution.ts): populated ONLY when this
+  // payment's own JL source code did not match `donorId`'s household
+  // (i.e. the user explicitly attributed a third-party payer's payment,
+  // such as "Price Waterhouse Foundation" (JL 22297), to this donor's
+  // fundraising relationship). Null for every ordinary payment, where
+  // the source code already equals the donor's own JL code. This is the
+  // only durable, human-readable record of the original source payer for
+  // an "apply_to_pledge" outcome, since that path never creates a new
+  // giving_activities row of its own (only source_fingerprint, an opaque
+  // hash, would otherwise survive) -- never rewritten, never inferred,
+  // always the literal value recorded on the source row at commit time.
+  sourceExternalId: text("source_external_id"),
+  sourceName: text("source_name"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [
   uniqueIndex("jl_payment_assignment_audits_import_payment_idx").on(table.importId, table.paymentFingerprint),
   index("jl_payment_assignment_audits_user_date_idx").on(table.userId, table.createdAt),
   index("jl_payment_assignment_audits_pledge_idx").on(table.pledgeActivityId, table.createdAt),
+]);
+
+// Third-Party Source Attribution (see docs/AI-HANDOFF.md "Giving Import --
+// Third-Party Source Attribution"). Represents ONLY a SUGGESTION: "a
+// transaction recorded by JL under this external source code is commonly,
+// but not always, this donor's fundraising relationship." Never consulted
+// to auto-attribute anything -- every importer/UI consumer treats a row
+// here purely as a one-click suggestion the user must still explicitly
+// confirm per transaction (see lib/import/donor-source-attribution.ts).
+// Reusable for any future third-party payer relationship, not specific to
+// any one donor/code -- the importer never special-cases a source code by
+// name. suggestedDonorId is intentionally NOT the same field as a donor's
+// own JL external_id/donor_code: adding a source code there would make
+// EVERY transaction under that code auto-match the donor globally, which
+// is exactly the behavior this table exists to avoid.
+export const donorSourceAttributions = sqliteTable("donor_source_attributions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  externalSource: text("external_source").notNull(),
+  sourceExternalId: text("source_external_id").notNull(),
+  sourceName: text("source_name"),
+  suggestedDonorId: text("suggested_donor_id").notNull().references(() => donors.id),
+  note: text("note"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("donor_source_attributions_source_idx").on(table.userId, table.externalSource, table.sourceExternalId),
+  index("donor_source_attributions_donor_idx").on(table.suggestedDonorId),
 ]);
 
 export const donationImportRollbackAudits = sqliteTable("donation_import_rollback_audits", {

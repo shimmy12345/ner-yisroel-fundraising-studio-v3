@@ -278,6 +278,20 @@ CREATE TABLE `donor_research_sources` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `donor_source_attributions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`external_source` text NOT NULL,
+	`source_external_id` text NOT NULL,
+	`source_name` text,
+	`suggested_donor_id` text NOT NULL,
+	`note` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`suggested_donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `donor_views` (
   `user_id` text NOT NULL,
   `donor_id` text NOT NULL,
@@ -488,7 +502,7 @@ CREATE TABLE `jl_payment_assignment_audits` (
   `next_balance_cents` integer,
   `previous_status` text,
   `next_status` text,
-  `created_at` integer NOT NULL, `payment_date` integer, `remaining_balance_cents` integer,
+  `created_at` integer NOT NULL, `payment_date` integer, `remaining_balance_cents` integer, `source_external_id` text, `source_name` text,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
@@ -737,6 +751,10 @@ CREATE INDEX `donor_research_sources_user_domain_idx` ON `donor_research_sources
 
 CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`);
 
+CREATE INDEX `donor_source_attributions_donor_idx` ON `donor_source_attributions` (`suggested_donor_id`);
+
+CREATE UNIQUE INDEX `donor_source_attributions_source_idx` ON `donor_source_attributions` (`user_id`,`external_source`,`source_external_id`);
+
 CREATE INDEX `donor_views_user_date_idx` ON `donor_views` (`user_id`,`viewed_at`);
 
 CREATE INDEX `donors_merged_into_idx`
@@ -847,5 +865,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','e29ba42b1870ea1ce1986790ca1e4abd9adf7a6fc9acaa8fa24a15306062e05e',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','9249dde15caff5b29dce1ca7423ddc1cfff8339ee5c84975a816ad80b3ec9d3a',1785944072);
 PRAGMA optimize;

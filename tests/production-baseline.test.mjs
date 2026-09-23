@@ -243,8 +243,18 @@ test("baseline picks up the schema-changing 0035 backup alert state migration", 
   // 0035_backup_alert_state.sql adds the backup_alert_state table (Backup
   // Scheduling Reliability Stage 3, a new table, not a rebuild), so the
   // schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0035_backup_alert_state.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 36);
+  assert.ok(manifest.sourceMigrations.includes("0035_backup_alert_state.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0036 donor source attributions migration", () => {
+  // 0036_donor_source_attributions.sql adds the donor_source_attributions
+  // table (Giving Import Third-Party Source Attribution, a new table, not
+  // a rebuild) plus two nullable columns on jl_payment_assignment_audits,
+  // so the schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0036_donor_source_attributions.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 37);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

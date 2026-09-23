@@ -92,6 +92,14 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // TTL (lib/import/preview-session.ts) -- deliberately not backup-worthy.
   "import_preview_sessions",
   "import_preview_session_chunks",
+  // Giving Import Third-Party Source Attribution -- same reason as asks/
+  // pledge_payment_plans/donor_relationship_facts above: a table added
+  // after this route was written. Deliberately not added to
+  // WORKSPACE_BACKUP_TABLES in this phase -- that would require its own
+  // correct owner-scoping work verified against real data, a separate
+  // decision from building the feature itself. Covered today only by the
+  // nightly whole-database R2 backup.
+  "donor_source_attributions",
 ] as const;
 
 export type WorkspaceBackupCoverage = {

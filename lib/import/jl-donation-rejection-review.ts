@@ -1,4 +1,5 @@
 import type { DonationPreview, GivingActivity } from "./jl-donations.ts";
+import type { KnownSourceAttribution } from "./donor-source-attribution.ts";
 
 export type RejectedRowCategory = "duplicate_transaction_id" | "unmatched_jl_code" | "nonfinancial_entry";
 export type RejectionSeverity = "hard" | "reviewable";
@@ -16,6 +17,11 @@ export type RejectedRow = {
   amountCents: number | null;
   // The in-file row this one duplicates, when known (duplicate_transaction_id only).
   existingMatchRow: number | null;
+  // Third-Party Source Attribution -- set only for an `unmatched_jl_code`
+  // row whose source code has a known, suggested donor attribution
+  // (lib/import/donor-source-attribution.ts). Purely a display/decision
+  // convenience: never applied automatically. Null for every other row.
+  knownAttribution: KnownSourceAttribution | null;
 };
 
 // Hard rejections have no safe resolution -- nothing the user can decide
@@ -23,7 +29,7 @@ export type RejectedRow = {
 // ever offered for them. Reviewable rejections have a real decision that
 // can safely resolve the row (attach a donor, or accept a $0/nonfinancial
 // entry on purpose).
-export function buildRejectedRows(duplicateRows: DonationPreview["duplicateRows"], unknownActivities: GivingActivity[], nonfinancialActivities: GivingActivity[]): RejectedRow[] {
+export function buildRejectedRows(duplicateRows: DonationPreview["duplicateRows"], unknownActivities: GivingActivity[], nonfinancialActivities: GivingActivity[], knownAttributionsByCode: Map<string, KnownSourceAttribution> = new Map()): RejectedRow[] {
   const hard: RejectedRow[] = duplicateRows.map((item) => ({
     fingerprint: item.fingerprint,
     row: item.row,
@@ -36,6 +42,7 @@ export function buildRejectedRows(duplicateRows: DonationPreview["duplicateRows"
     date: item.date,
     amountCents: item.amountCents,
     existingMatchRow: item.originalRow,
+    knownAttribution: null,
   }));
   const unmatched: RejectedRow[] = unknownActivities.map((activity) => ({
     fingerprint: activity.fingerprint,
@@ -49,6 +56,7 @@ export function buildRejectedRows(duplicateRows: DonationPreview["duplicateRows"
     date: activity.activityDate,
     amountCents: activity.committedCents,
     existingMatchRow: null,
+    knownAttribution: knownAttributionsByCode.get((activity.externalHouseholdId || "").trim().toLowerCase()) ?? null,
   }));
   const nonfinancial: RejectedRow[] = nonfinancialActivities.map((activity) => ({
     fingerprint: activity.fingerprint,
@@ -62,6 +70,7 @@ export function buildRejectedRows(duplicateRows: DonationPreview["duplicateRows"
     date: activity.activityDate,
     amountCents: activity.committedCents,
     existingMatchRow: null,
+    knownAttribution: null,
   }));
   return [...hard, ...unmatched, ...nonfinancial].sort((a, b) => a.row - b.row);
 }

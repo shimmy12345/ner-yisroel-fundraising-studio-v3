@@ -79,6 +79,9 @@ export const STAGING_RESET_TABLE_ORDER = [
   "giving_activity_import_changes",
   "giving_activity_management_audits",
   "household_import_rollback_audits",
+  // References `donors` (suggested_donor_id) and `users`; nothing else
+  // references it, so it only needs to precede `donors` below.
+  "donor_source_attributions",
   // Parents — deleted last, once everything referencing them is gone.
   // `donors` self-references itself (merged_into_donor_id), which is safe
   // once nothing else in this list still points at any donor row.

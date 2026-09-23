@@ -18,6 +18,7 @@ import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL } from "../../../../lib/import/import-de
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../../lib/donors/merge-preview";
 import { buildExistingDonorReviews } from "../../../../lib/import/household-review";
 import { pendingGiftMatches, type PendingGiftMatchRow } from "../../../../lib/giving/management";
+import { buildKnownAttributionsByCode, type RawDonorSourceAttributionRow } from "../../../../lib/import/donor-source-attribution";
 
 type PreviewRequest = { rows?: ImportRow[]; mapping?: ColumnMapping; fileHash?: string; fileName?: string; compactPaymentStatus?: "review" | "fully_paid"; forceType?: "household" | "donation"; previewSessionId?: string };
 
@@ -155,7 +156,21 @@ export async function POST(request: Request) {
     const crossImportMatches = [...stableIdMatches, ...findFingerprintCrossImportMatches(unchangedExistingActivities, existingByFingerprintRecord, new Set(stableIdMatches.map((item) => item.fingerprint)))];
     const crossImportSourceByFingerprint = new Map([...match.newActivities, ...unchangedExistingActivities].map((activity) => [activity.fingerprint, activity]));
     const range = donationExportRange([...match.matched, ...paymentActivities]);
-    const donorIds = households.results.map((household) => household.id);
+    // Third-Party Source Attribution (see docs/AI-HANDOFF.md and
+    // lib/import/donor-source-attribution.ts): loaded here too, read-only,
+    // so the review UI can show the SAME suggestion (and the suggested
+    // donor's own open pledges, pre-fetched below) before any decision is
+    // submitted -- purely a display convenience, never a resolution.
+    const knownAttributions = await env.DB.prepare(`SELECT a.source_external_id, a.source_name, a.suggested_donor_id, d.donor_code AS suggested_donor_code, d.display_name AS suggested_donor_name, a.note
+      FROM donor_source_attributions a JOIN donors d ON d.id = a.suggested_donor_id
+      WHERE a.user_id = ? AND a.external_source = 'JL Solutions' AND d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL`).bind(profile.id, profile.id).all<RawDonorSourceAttributionRow>();
+    const knownAttributionsByCode = buildKnownAttributionsByCode(knownAttributions.results);
+    const suggestedDonorIds = [...new Set([...knownAttributionsByCode.values()].map((item) => item.suggestedDonorId))];
+    const suggestedHouseholds = suggestedDonorIds.length
+      ? await env.DB.prepare(`SELECT id, external_id, display_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND id IN (SELECT value FROM json_each(?))`).bind(profile.id, JSON.stringify(suggestedDonorIds)).all<MatchedHousehold & { display_name: string }>()
+      : { results: [] as Array<MatchedHousehold & { display_name: string }> };
+    const householdsForPayments = [...households.results, ...suggestedHouseholds.results];
+    const donorIds = [...new Set([...households.results.map((household) => household.id), ...suggestedDonorIds])];
     const openPledges = donorIds.length
       ? await env.DB.prepare(OPEN_PLEDGES_FOR_DONORS_SQL).bind(profile.id, JSON.stringify(donorIds)).all<OpenPledge>()
       : { results: [] as OpenPledge[] };
@@ -175,7 +190,7 @@ export async function POST(request: Request) {
     const existingCompletedGifts = donorIds.length
       ? await env.DB.prepare(EXISTING_COMPLETED_GIFTS_FOR_DUPLICATE_MATCH_SQL).bind(profile.id, JSON.stringify(donorIds)).all<ExistingCompletedGiftRow>()
       : { results: [] as ExistingCompletedGiftRow[] };
-    const paymentAssignments = buildPaymentCandidates(paymentActivities, households.results, openPledges.results, rememberedWithLegacyGifts, existingCompletedGifts.results);
+    const paymentAssignments = buildPaymentCandidates(paymentActivities, householdsForPayments, openPledges.results, rememberedWithLegacyGifts, existingCompletedGifts.results, knownAttributionsByCode);
     const publicPaymentAssignments = paymentAssignments.map(({ donorId, openPledges: candidatePledges, ...candidate }) => ({ ...candidate, donorMatched: Boolean(donorId), openPledges: candidatePledges.map((pledge) => ({ id: pledge.id, activity_date: pledge.activity_date, committed_cents: pledge.committed_cents, paid_cents: pledge.paid_cents, balance_cents: pledge.balance_cents, description: pledge.description, source_campaign: pledge.source_campaign })) }));
     const pendingInputs = [
       ...match.newActivities.map((activity) => ({ fingerprint: activity.fingerprint, donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents })),
@@ -220,7 +235,7 @@ export async function POST(request: Request) {
         resolvable: activity.duplicateStatus === "possible_duplicate" || activity.dateIssue !== null,
       })),
       rejectedRows: donationPreview.duplicateRows.length + match.unknownHousehold + match.nonfinancial,
-      rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities),
+      rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities, knownAttributionsByCode),
       rangeStart: isoDate(range.start),
       rangeEnd: isoDate(range.end),
       paymentAssignments: publicPaymentAssignments,

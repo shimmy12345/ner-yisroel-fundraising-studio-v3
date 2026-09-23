@@ -641,6 +641,18 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .rejected-row-correction { flex-direction:column; align-items:flex-start; gap:6px; }.rejected-row-correction input { min-height:38px; padding:7px 10px; border:1px solid #d5ded8; border-radius:8px; width:180px; font:inherit; }
 .date-review-actions { flex-direction:column; align-items:flex-start; gap:6px; }.date-review-actions input[type="date"] { min-height:38px; padding:7px 10px; border:1px solid #d5ded8; border-radius:8px; font:inherit; }
 .date-issue-badge { background:#fbe4e0; color:#8a3f34; }
+/* Giving Import -- Third-Party Source Attribution. A restrained, distinct
+   (blue, not green/amber) tint so a known suggestion never reads as
+   already-decided -- the "Attribute to <donor>" button is the one
+   explicit confirmation action, never pre-selected. */
+.known-attribution-suggestion { display:flex; flex-direction:column; align-items:flex-start; gap:6px; width:100%; margin:8px 0; padding:11px 13px; border:1px solid #cfdae6; border-radius:9px; background:#f2f6fa; }
+.known-attribution-suggestion p { margin:0; color:#2f4a63; font-size:13px; line-height:1.5; }
+.known-attribution-suggestion p small { color:#5c728a; font-weight:600; }
+.known-attribution-label { display:inline-block; margin-right:8px; padding:2px 7px; border-radius:10px; background:#dde8f2; color:#2f5a78; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.known-attribution-suggestion > button { padding:9px 12px; border:1px solid #7ba0c2; border-radius:8px; background:#fff; color:#2f5a78; font-size:12.5px; font-weight:700; cursor:pointer; }
+.known-attribution-suggestion > button:hover { background:#e8f0f7; }
+.known-attribution-suggestion > button.selected { background:#2f5a78; border-color:#2f5a78; color:#fff; }
+.known-attribution-note { color:#5c728a; font-size:12px; font-style:italic; }
 .resumable-drafts-section { margin:22px 0; padding:18px 20px; border:1px solid #cddcd2; border-radius:14px; background:#f7faf8; }
 .resumable-drafts-list { display:grid; gap:10px; margin:12px 0 0; padding:0; list-style:none; }
 .resumable-draft-row { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; padding:14px 16px; border:1px solid #dce5df; border-radius:10px; background:#fff; }

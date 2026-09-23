@@ -1,6 +1,7 @@
 import type { GivingActivity } from "./jl-donations.ts";
 import { stableTransactionId } from "./jl-donations.ts";
 import { findPaymentDuplicateMatch, type ExistingCompletedGiftRow, type PaymentDuplicateMatch } from "./jl-payment-duplicate-match.ts";
+import type { KnownSourceAttribution } from "./donor-source-attribution.ts";
 
 export const OPEN_PLEDGES_FOR_DONORS_SQL = `SELECT id, donor_id, source_fingerprint, activity_date,
   COALESCE(committed_cents, COALESCE(paid_cents, 0) + balance_cents) AS committed_cents,
@@ -31,6 +32,16 @@ export type PaymentDecisionInput = {
   // identically to the equivalent `pledgeId` decision.
   allocations?: PledgeAllocationInput[];
   overpaymentAction?: OverpaymentAction;
+  // Third-Party Source Attribution -- set ONLY when the user explicitly
+  // clicked "Attribute to <donor>" for a payment whose own JL source
+  // code did not match any known household. The server (app/api/import/
+  // route.ts) re-verifies this value against its OWN computed known-
+  // attribution suggestion for this exact fingerprint before ever
+  // trusting it -- this field is never taken at face value the way a
+  // free-form donor match would be, and it can only ever confirm the
+  // server's own suggestion, never select an arbitrary donor. Absent for
+  // every ordinary payment decision.
+  attributedDonorId?: string;
 };
 
 export type PaymentDecisionShapeError = { fingerprint: string | null; reason: string };
@@ -87,6 +98,12 @@ export function validatePaymentDecisionShape(decision: unknown): PaymentDecision
   if (overpaymentAction !== undefined && overpaymentAction !== null && overpaymentAction !== "split_remainder_new_gift" && overpaymentAction !== "leave_unresolved") {
     return { fingerprint, reason: `Unrecognized remainder action "${String(overpaymentAction)}"` };
   }
+  // Shape only -- whether this ID is actually THIS fingerprint's known
+  // attribution suggestion is verified separately, with live data, by
+  // the caller (app/api/import/route.ts) before it is ever trusted.
+  if (value.attributedDonorId !== undefined && (typeof value.attributedDonorId !== "string" || !value.attributedDonorId)) {
+    return { fingerprint, reason: "Attributed donor ID must be a non-empty string" };
+  }
   return null;
 }
 
@@ -141,6 +158,22 @@ export type PaymentCandidate = {
   // it only ever informs the default `action` above and what the review
   // UI shows -- the user must still submit an explicit decision.
   duplicateMatch: PaymentDuplicateMatch | null;
+  // Third-Party Source Attribution -- present only when this row's own
+  // JL source code did NOT match a household, but a known suggestion
+  // exists for that code (lib/import/donor-source-attribution.ts). Shown
+  // regardless of whether the row has been attributed yet, so the review
+  // UI can render the suggestion (and its donor's own open pledges,
+  // already resolved into `openPledges` below) before any decision is
+  // made. Never used to resolve `donorId` on its own -- only an
+  // explicit, confirmed `attributedDonorId` (see below) does that.
+  knownAttribution: KnownSourceAttribution | null;
+  // Set only once this row has actually been resolved via an explicit
+  // attribution decision (donorId came from `attributedDonors`, not from
+  // the row's own JL code matching a household). Distinguishes "this
+  // donor was attributed" from "this donor was already the code match"
+  // for audit purposes (see app/api/import/route.ts's use of this field
+  // to populate jl_payment_assignment_audits.source_external_id/name).
+  attributedDonorId: string | null;
 };
 
 export function buildPaymentCandidates(
@@ -149,8 +182,16 @@ export function buildPaymentCandidates(
   openPledges: OpenPledge[],
   remembered: RememberedPaymentDecision[],
   existingCompletedGifts: ExistingCompletedGiftRow[] = [],
+  knownAttributionsByCode: Map<string, KnownSourceAttribution> = new Map(),
+  // Fingerprint -> CONFIRMED donor id, already verified by the caller
+  // against `knownAttributionsByCode` for that exact fingerprint's code
+  // (see app/api/import/route.ts) -- never trusted here as arbitrary
+  // client input. Empty by default, so every existing caller's behavior
+  // is completely unchanged when this parameter is unused.
+  attributedDonors: Map<string, string> = new Map(),
 ) {
   const householdByCode = new Map(households.map((household) => [household.external_id.toLowerCase(), household]));
+  const householdById = new Map(households.map((household) => [household.id, household]));
   const pledgesByDonor = new Map<string, OpenPledge[]>();
   for (const pledge of openPledges) {
     const list = pledgesByDonor.get(pledge.donor_id) ?? [];
@@ -166,7 +207,23 @@ export function buildPaymentCandidates(
   }
 
   return activities.map<PaymentCandidate>((activity) => {
-    const household = householdByCode.get(activity.externalHouseholdId.toLowerCase());
+    const code = activity.externalHouseholdId.toLowerCase();
+    const codeMatchedHousehold = householdByCode.get(code);
+    const knownAttribution = !codeMatchedHousehold ? knownAttributionsByCode.get(code) ?? null : null;
+    const confirmedAttributedId = attributedDonors.get(activity.fingerprint);
+    const attributedHousehold = confirmedAttributedId ? householdById.get(confirmedAttributedId) : undefined;
+    // The confirmed attribution always wins once it exists -- but a
+    // household record for it should always exist too, since the caller
+    // is responsible for resolving/verifying it before ever populating
+    // `attributedDonors`. Falling back to undefined (never silently
+    // inventing a donor) if that invariant is somehow violated.
+    const household = codeMatchedHousehold ?? attributedHousehold;
+    // Shown for DISPLAY (open pledges) even before an explicit decision
+    // exists, so the review UI can render "here is what applying this to
+    // <suggested donor> would look like" without a second server call --
+    // this never resolves `donorId`/`blocked` on its own.
+    const suggestedHousehold = !household && knownAttribution ? householdById.get(knownAttribution.suggestedDonorId) : undefined;
+    const displayHousehold = household ?? suggestedHousehold;
     const prior = rememberedByFingerprint.get(activity.fingerprint);
     const reason = !household
       ? "JL Code does not match an imported household"
@@ -188,7 +245,7 @@ export function buildPaymentCandidates(
       row: activity.rowNumber,
       fingerprint: activity.fingerprint,
       donorId: household?.id ?? null,
-      donorName: household?.display_name ?? (activity.sourceName || `JL ${activity.externalHouseholdId}`),
+      donorName: displayHousehold?.display_name ?? (activity.sourceName || `JL ${activity.externalHouseholdId}`),
       paymentDate: activity.activityDate,
       amountCents: activity.committedCents,
       campaign: activity.sourceCampaign,
@@ -198,8 +255,10 @@ export function buildPaymentCandidates(
       alreadyApplied: Boolean(prior?.applied_import_id),
       reason: reason ?? (prior ? "This identical JL payment was already processed using the saved decision" : duplicateMatch ? duplicateMatch.reason : "Choose whether this payment applies to an open pledge or is a new gift"),
       blocked: Boolean(reason),
-      openPledges: household ? (pledgesByDonor.get(household.id) ?? []) : [],
+      openPledges: displayHousehold ? (pledgesByDonor.get(displayHousehold.id) ?? []) : [],
       duplicateMatch,
+      knownAttribution,
+      attributedDonorId: attributedHousehold ? attributedHousehold.id : null,
     };
   });
 }
