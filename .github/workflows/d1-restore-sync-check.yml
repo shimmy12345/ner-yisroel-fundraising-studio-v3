@@ -1,0 +1,77 @@
+# Preventative guard for the failure class behind GitHub Actions run
+# 36887668901 (D1 monthly restore verification, main, 2026-10-01):
+# migration 0036 (donor_source_attributions) landed on this branch --
+# which owns fundraising-os-staging-db's real schema -- but `main`'s own,
+# separately and manually synced restore-order/schema-baseline tracking
+# was never updated, so the next scheduled monthly restore test failed a
+# full month after the actual schema change, not when it happened. See
+# docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair" entries
+# for the full incident history.
+#
+# This workflow runs scripts/check-main-restore-sync.mjs (generic, derived
+# from lib/operations/restore-drift-guard.ts -- never hardcodes a table
+# name) whenever a change on THIS branch could affect the real D1 schema
+# or this branch's own restore-order tracking, comparing this branch's
+# current, freshly-generated schema/restore state against `origin/main`'s
+# COMMITTED copy. It only reads `origin/main`'s files (via `git show`) and
+# never checks out, modifies, or pushes to `main` or any other branch --
+# detection only, never an automatic sync. A human still reviews and lands
+# the narrow main sync, exactly as commits 4ea1d5e, 62628b3, and ad80cf6
+# were (see docs/AI-HANDOFF.md).
+#
+# This is the PRIMARY, early-detection line of defense -- the monthly
+# restore-verification workflow (d1-restore-verify-monthly.yml, which
+# actually restores a real backup into a scratch D1 database) remains the
+# independent, periodic, real-backup proof; it is now the LAST line of
+# defense, not the first place this class of drift is discovered.
+name: D1 restore/schema sync check
+
+on:
+  push:
+    branches:
+      - feature/independent-cloudflare-sandbox
+    paths:
+      - "drizzle/**"
+      - "db/schema.ts"
+      - "lib/operations/staging-reset.ts"
+      - "lib/operations/d1-restore-order.ts"
+      - "lib/operations/restore-drift-guard.ts"
+      - "lib/data-health/production-baseline.ts"
+      - "production-baseline/**"
+      - "scripts/generate-production-baseline.mjs"
+      - "scripts/check-main-restore-sync.mjs"
+  pull_request:
+    branches:
+      - feature/independent-cloudflare-sandbox
+    paths:
+      - "drizzle/**"
+      - "db/schema.ts"
+      - "lib/operations/staging-reset.ts"
+      - "lib/operations/d1-restore-order.ts"
+      - "lib/operations/restore-drift-guard.ts"
+      - "lib/data-health/production-baseline.ts"
+      - "production-baseline/**"
+      - "scripts/generate-production-baseline.mjs"
+      - "scripts/check-main-restore-sync.mjs"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed so `origin/main` is a real, fetchable ref for `git show`
+          # -- this job never checks main out, only reads its files.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Compare this branch's canonical D1 schema/restore state against main
+        run: node scripts/check-main-restore-sync.mjs

@@ -22425,3 +22425,168 @@ against a real current backup and a real remote D1 restore: the original
 `donor_source_attributions` drift is fixed on `main`, and a fresh,
 independently-triggered monthly restore verification run against that
 exact fix passed completely.
+
+---
+
+2026-10-01T00:00:00Z (approximate, same day, round 6) — Preventative
+generic D1 restore/schema drift guard.
+
+With the `donor_source_attributions` incident closed, this round builds
+the systemic prevention the incident exposed: `feature/independent-
+cloudflare-sandbox` owns the real D1 schema, while `main` owns the
+scheduled GitHub Actions restore workflows and carries a manually
+synchronized copy of the restore-order/baseline tracking they need — so a
+future migration can again make the live backup newer than `main`'s
+restore planner, and the existing `donor_source_attributions`-specific
+regression only guards that one table. This adds a generic guard that
+detects the DRIFT MECHANISM itself, for any future table or migration,
+without hardcoding any table name.
+
+**New module: `lib/operations/restore-drift-guard.ts`.** Pure, derived-
+only functions, no git/file/network I/O of their own:
+- `extractForeignKeyTargets(sql)` — regex-extracts every real FK target
+  table name from one `CREATE TABLE` statement.
+- `validateRestoreOrderAgainstSchema(ddlTopology, restoreOrder,
+  skipDataTables)` — the single structural invariant a restore order must
+  satisfy relative to a schema's own `ddlTopology`: every table present,
+  and every table positioned after all of its own FK targets. This is the
+  generalized version of the ordering check `planD1Restore` itself
+  depends on — evaluated entirely offline.
+- `diffMigrationLists(featureMigrations, mainMigrations)` — named,
+  bidirectional migration-list diff.
+- `compareCrossBranchRestoreState(feature, main)` — the single entry
+  point: takes two plain `{ddlTopology, sourceMigrations, restoreOrder,
+  skipDataTables}` states and returns a full drift report covering
+  missing-from-order tables, stale-in-order tables, migration drift,
+  full schema/column comparison (reusing the exact same comparison
+  semantics as `lib/data-health/production-baseline.ts`'s
+  `compareSchemaObjects`, re-implemented dependency-free here so this
+  module never needs a live D1 connection or that file's manifest import
+  side effect), and FK-ordering violations.
+- `formatDriftReport(report)` — the human-readable failure message,
+  literally "D1 restore metadata on main is out of sync with the
+  canonical schema. Sync main before relying on monthly restore
+  verification." plus every specific finding, by name.
+
+**New CI script: `scripts/check-main-restore-sync.mjs`** (feature branch).
+Reuses `scripts/generate-production-baseline.mjs`'s existing
+`generateBaseline()` (already used by `tests/production-baseline.test.mjs`)
+to get THIS branch's current, freshly-computed schema state — never
+trusts a possibly-stale committed file for its own side. For `main`'s
+side, runs `git fetch origin main` (if not already available) and `git
+show origin/main:<path>` for exactly the four files `main` carries
+(`lib/operations/staging-reset.ts`, `lib/operations/d1-restore-order.ts`,
+`lib/data-health/production-baseline.ts`,
+`production-baseline/schema-manifest.json`), writes them into a temp
+directory preserving their real relative layout (so their own relative
+imports resolve correctly), and dynamically imports them as real,
+executed TypeScript modules — never re-parses or re-implements their
+logic. Read-only throughout: no checkout of `main`, no working-tree
+changes, no push. Exits 1 with the full drift report on any mismatch, 0
+when in sync.
+
+**New regression tests: `tests/restore-drift-guard.test.mjs`.** All 8
+required scenarios, entirely synthetic (no real git/network calls, and
+deliberately never referencing `donor_source_attributions` by name, to
+prove the guard generalizes): (1) identical schema both sides -> PASS;
+(2) new table on the canonical branch missing from main's restore order
+-> FAIL; (3) new table present in main's restore order but absent from
+main's own baseline manifest -> FAIL; (4) migration count differs ->
+FAIL; (5) existing table gains a column, main's manifest stale -> FAIL;
+(6) a new foreign key changes dependency requirements and main's restore
+order no longer guarantees correct ordering -> FAIL; (7) an extra stale
+table remains in main's restore order after removal from the canonical
+schema -> detected and reported by name; (8) confirmed the real
+entry-point function exists and is exercised against actual current
+branch state separately by `scripts/check-main-restore-sync.mjs` (see
+below) rather than duplicating a live git-dependent integration test
+inside this synthetic-fixture file.
+
+**Current-state verification (required before considering this guard
+trustworthy).** Ran `node scripts/check-main-restore-sync.mjs` against
+the real `feature/independent-cloudflare-sandbox` vs. real `origin/main`
+(at `ad80cf6`): **PASS** — "D1 restore/schema state on main is in sync
+with the canonical schema. No drift detected." As a direct, concrete
+proof the guard actually would have caught the real incident (not merely
+a plausible design on paper), re-ran it with `MAIN_REF` pointed at main's
+PRE-FIX commit `62628b393f6538b6240c1a533883de0a08774b56`: **FAIL**, with
+this exact, fully generic (never-hardcoded) output:
+```
+Tables missing from main's restore order: donor_source_attributions
+Migrations present on the canonical branch but missing from main's manifest: 0036_donor_source_attributions.sql
+Schema/baseline differences:
+  - Missing table: donor_source_attributions.
+  - Table definition differs: jl_payment_assignment_audits (columns or constraints).
+  - Missing index: donor_source_attributions_donor_idx.
+  - Missing index: donor_source_attributions_source_idx.
+Restore-order foreign-key violations:
+  - donor_source_attributions is not present in main's restore order at all.
+```
+This independently reproduces every finding from the original
+investigation (rounds 1-2 above), derived entirely generically.
+
+**Where the guard runs.** New workflow
+`.github/workflows/d1-restore-sync-check.yml` on
+`feature/independent-cloudflare-sandbox`: triggers on `push`/
+`pull_request` to this branch with path filters covering `drizzle/**`,
+`db/schema.ts`, `lib/operations/staging-reset.ts`,
+`lib/operations/d1-restore-order.ts`,
+`lib/operations/restore-drift-guard.ts`,
+`lib/data-health/production-baseline.ts`, `production-baseline/**`, and
+the two new scripts, plus `workflow_dispatch` for manual runs. Checks out
+with `fetch-depth: 0` (needed so `origin/main` is a real local ref for
+`git show`) and runs `node scripts/check-main-restore-sync.mjs` — fails
+the job loudly on any drift. This workflow never checks out, modifies, or
+pushes to `main`; detection only, exactly as required. (`push`/
+`pull_request` triggers fire on whichever branch receives them,
+regardless of default-branch status -- unlike `schedule` triggers, which
+GitHub only ever fires from the repository's default branch, which is
+why this branch's own dormant copies of the two D1 `schedule`-triggered
+workflows never actually run here.)
+
+**Secondary protection: `scripts/check-migration-sync.mjs`, prepared on
+branch `chore/monthly-restore-migration-preflight` (commit `8d719cd`,
+off `main` at `ad80cf6` — pushed to `origin`, NOT merged into `main`,
+same explicit-owner-authorization pattern as every other `main` change in
+this incident).** A cheap, read-only preflight added as a new step in
+`main`'s own `d1-restore-verify-monthly.yml`, immediately before the
+backup-download step: fetches only `feature/independent-cloudflare-
+sandbox`'s `drizzle/` directory listing (`git fetch --depth 1` + `git
+ls-tree`, no checkout, no schema replay, no D1 access) and compares it
+against `main`'s own already-committed
+`production-baseline/schema-manifest.json`'s migration list, failing
+immediately and by name if the canonical branch has a migration `main`
+doesn't know about yet. Verified against real state: passes against the
+current synced state (37/37 migrations); confirmed it WOULD have caught
+the original incident by temporarily substituting `main`'s pre-fix
+manifest and observing the identical "missing: `0036_donor_source_
+attributions.sql`" failure, then restored the real file. `npm test`
+(142/142) and `npm run build` both still pass on this branch with the
+change applied. **This is secondary, best-effort protection only** — the
+PRIMARY detection is the feature-branch-triggered guard above, which
+fires the moment a migration lands, not once a month. Per this task's
+explicit instruction not to auto-merge `main`, this preflight is
+prepared, tested, and pushed to its own branch, awaiting the same
+explicit repository-owner review and push authorization every other
+`main` change in this incident required — it has NOT been applied to
+`main`.
+
+**Gates (feature branch).** `pnpm test`: all green except the same
+single pre-existing, unrelated `backup-watchdog-scheduled.test.mjs`
+failure this session has found on every round of this entire incident
+(confirmed, once again, unrelated to and not blocking this work);
+`pnpm exec tsc --noEmit`: clean; `pnpm run build:staging-independent`:
+succeeds.
+
+**Scope discipline.** Nothing about backup encryption, R2 object naming,
+retention, nightly backup cadence, restore semantics, or the actual
+restore-verification SLOs changed. No Fundraising OS application
+behavior changed. No donor/giving data touched. The Giving Import
+Third-Party Source Attribution feature (Price Waterhouse/Pfeiffer) was
+not touched. `feature/independent-cloudflare-sandbox` was not merged into
+`main`; only the already-reviewed, narrow restore-order fix (`ad80cf6`,
+closed above) is live there.
+
+See `docs/DEPLOYMENT.md`'s new "Keeping main's restore metadata in sync
+with the canonical schema" section for the operating rule this
+establishes going forward.

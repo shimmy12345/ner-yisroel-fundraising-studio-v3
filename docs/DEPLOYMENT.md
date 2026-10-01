@@ -272,6 +272,65 @@ export` runs.
   R2. `tests/backup-automation.test.mjs` asserts neither workflow contains
   a `git add`/`git commit`/`git push` of any backup artifact.
 
+### Keeping main's restore metadata in sync with the canonical schema
+
+Both scheduled workflows above live on `main` because GitHub Actions
+`schedule` triggers only ever fire from a repository's default branch —
+but `main` hosts a separate, unrelated application and does not itself
+own `fundraising-os-staging-db`'s schema. `feature/independent-
+cloudflare-sandbox` owns that schema; `main` carries only a thin,
+necessarily duplicated mirror of the files these two workflows need
+(`lib/operations/staging-reset.ts`, `lib/operations/d1-restore-order.ts`,
+`lib/data-health/production-baseline.ts`,
+`production-baseline/schema-manifest.json`), synced over by hand
+whenever it falls behind.
+
+This mirror fell out of sync once already: migration 0036
+(`donor_source_attributions`) landed on the canonical branch and was
+applied directly to the real database, but `main`'s restore-order/
+baseline tracking was never updated — so the next scheduled monthly
+restore-verification run (GitHub Actions run `36887668901`, 2026-10-01)
+failed a full month after the actual schema change, the first and only
+place the drift was ever caught. See `docs/AI-HANDOFF.md`'s "D1 Monthly
+Restore Verification Repair" entries for the full incident, repair, and
+closure.
+
+**The operating rule now in place, whenever a D1 schema migration lands
+on the canonical branch:**
+
+1. A generic, derived drift guard
+   (`lib/operations/restore-drift-guard.ts`, invoked by
+   `scripts/check-main-restore-sync.mjs`) runs automatically via
+   `.github/workflows/d1-restore-sync-check.yml` on every push/PR to
+   `feature/independent-cloudflare-sandbox` that touches `drizzle/**`,
+   `db/schema.ts`, the restore-order files above, or
+   `production-baseline/**`. It compares this branch's current, freshly
+   generated schema/restore state against `origin/main`'s committed copy
+   of the same files and fails loudly, by name, on any missing table,
+   stale table, migration-count drift, schema/column drift, or
+   foreign-key ordering violation it finds — it never hardcodes a table
+   name, so it works unchanged for migration 0037, 0038, and beyond.
+2. If `main` is stale, that CI check fails immediately, at the moment the
+   migration lands — not one month later.
+3. A human reviews and lands the narrow restore/baseline sync on `main`
+   (the same four files, replaced verbatim from the canonical branch's
+   current state — see the repair commits referenced in
+   `docs/AI-HANDOFF.md` for the exact pattern). The guard never modifies
+   or pushes to `main` itself, and never syncs schema files
+   automatically — detection only.
+4. The guard turns green once `main` is synced.
+5. The monthly restore-verification workflow also runs a cheap,
+   secondary preflight (`scripts/check-migration-sync.mjs`, prepared on
+   `chore/monthly-restore-migration-preflight` — see
+   `docs/AI-HANDOFF.md`) immediately before downloading/decrypting a real
+   backup, confirming `main`'s own committed migration list is not
+   missing anything the canonical branch's `drizzle/` directory has. This
+   is a backstop, not the primary detection mechanism.
+6. The monthly restore-verification workflow itself remains the
+   independent, periodic proof against a real backup and a real remote D1
+   restore — it is now the LAST line of defense, not the first place this
+   class of drift is ever discovered.
+
 ### One-time setup (manual — dashboard/CLI actions the owner must do)
 
 1. **Enable R2** for this Cloudflare account: dashboard → R2 → follow the
