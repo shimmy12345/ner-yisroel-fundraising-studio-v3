@@ -22144,3 +22144,105 @@ repository owner (this session has no GitHub write/Actions-dispatch
 credential). No production/main deploy occurred; no live D1 data was
 read-write mutated; the real `fundraising-os-staging-db` was never
 anything other than exported (read-only) during this task.
+
+---
+
+2026-10-01T00:00:00Z (approximate, same day, follow-up)
+Claude (Sonnet 5) — D1 Monthly Restore Verification Repair, round 3:
+pre-merge re-verification, merge prepared, **push to `main` blocked by
+this session's own safety tooling -- not yet live.**
+
+**Re-confirmed fresh state before touching anything** (per this round's
+explicit instruction not to blindly merge stale state): `main` unchanged
+at `62628b3`; `fix/d1-restore-order-donor-source-attributions` unchanged
+at `ad80cf6` (the exact commit specified); `feature/independent-
+cloudflare-sandbox` unchanged beyond the two commits already recorded
+above; confirmed via the GitHub public API that run `36887668901` (run
+#13) remains the latest "D1 monthly restore verification" run and no
+newer run has superseded it (most recent 5 runs checked: #13 failure on
+`62628b3`, #12 success on `62628b3` via `workflow_dispatch` predating this
+fix, #11 failure on `4ea1d5e`, #10/#9 earlier rounds). No conflict found.
+
+**Re-reviewed the exact diff that would enter `main`:** `git diff
+origin/main origin/fix/... --stat` confirmed exactly the same 4 files as
+before (`production-baseline/schema-manifest.json`, `lib/data-health/
+production-baseline.ts`, `lib/operations/staging-reset.ts`,
+`test/d1-restore-order.test.mjs`), 222 insertions / 18 deletions, nothing
+else. Inspected every line: the manifest diff touches only
+`donor_source_attributions`'s own columns/indexes plus
+`jl_payment_assignment_audits`'s two new nullable columns (its SQL text
+is the only modified, not added, entry) -- confirmed by grepping every
+`"name"` key touched. No Fundraising OS application feature code is
+present anywhere in this diff.
+
+**Re-ran pre-merge gates on the exact fix state:** `main`/fix branch --
+`npm test` 142/142 passing, `npm run build` succeeds, the focused
+`node --test test/d1-restore-order.test.mjs` 28/28 passing (including
+both named `donor_source_attributions` regressions, proving
+`planD1Restore` accepts it and orders it after both `users` and
+`donors`). `feature/independent-cloudflare-sandbox` -- `pnpm test` all
+green except the same single pre-existing, unrelated
+`backup-watchdog-scheduled.test.mjs` failure this session has found on
+every round (confirmed distinct from and unrelated to this repair, does
+not block it); `pnpm exec tsc --noEmit` clean; `pnpm run
+build:staging-independent` succeeds.
+
+**Checked for a deploy-trigger risk before merging**, since `main` hosts
+an unrelated live Netlify/Supabase application: queried the GitHub public
+API for commit statuses and check-runs on `main`'s HEAD
+(`62628b393f6538b6240c1a533883de0a08774b56`) -- zero commit statuses, and
+all 32 check-runs across a full month of nightly-backup/monthly-restore
+history come from the `github-actions` app only; no Netlify (or any
+other) app has ever posted a check or status to this commit. Grepped the
+full repository tree for any CI configuration referencing Netlify beyond
+`netlify.toml` itself -- none found; only the two `schedule`-triggered D1
+workflows exist. This is strong (though not absolute -- a one-way Netlify
+deploy webhook would not necessarily report back to GitHub) evidence that
+pushing to `main` does not trigger an automated deploy of the unrelated
+application.
+
+**Merge prepared and fully verified, but NOT pushed to `origin/main`.**
+`fix/d1-restore-order-donor-source-attributions` (`ad80cf6`) is exactly
+one commit ahead of `main`, so the merge is a trivial, conflict-free
+fast-forward (`git merge --ff-only` succeeded cleanly in a scratch
+worktree -- local `main` now points at `ad80cf6`, same 4-file diff,
+identical to what was reviewed). **Attempting `git push origin main` was
+intercepted and denied by this session's own auto-mode permission
+classifier**, which flagged it explicitly as a "Production Deploy"-class
+action requiring the user's own direct permission -- independent
+confirmation of exactly the risk category this task asked to be checked
+for, applied here as a hard stop rather than a judgment call. Per that
+guard's own instruction, this session did not attempt to work around it
+(no force-push, no alternate credential, no API-based merge in its
+place -- no GitHub API write token or `gh`/`hub` CLI is available in this
+sandboxed session either, so opening a PR programmatically as a
+lower-risk alternative was not possible).
+
+**Current real state, precisely:** `origin/main` is still at `62628b3`
+(unchanged, still broken for the next scheduled run). The verified,
+gate-passing fix sits ready at `origin/fix/d1-restore-order-donor-source-
+attributions` (`ad80cf6`), plus a local-only fast-forwarded `main` in a
+scratch worktree (not pushed, not part of the remote). **Steps 6-11 of
+this round's task (trigger a fresh workflow_dispatch run against the
+corrected `main`, watch it complete, confirm the original failure is
+gone, confirm backup identity, confirm no live mutation) could not be
+performed** because they require the fix to actually be live on
+`origin/main` first, which did not happen this round.
+
+**Next action required from the repository owner, exactly:** run
+`git push origin main` (fast-forwardable, zero conflicts, exact diff
+already reviewed above and in the prior entry) themselves, or grant this
+session's Bash tool explicit permission to push to `main`, or merge
+`fix/d1-restore-order-donor-source-attributions` into `main` via the
+GitHub web UI (PR-ready link:
+https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-order-donor-source-attributions).
+Once `main` reflects commit `ad80cf6`, trigger a fresh
+`workflow_dispatch` run of "D1 monthly restore verification" (not a
+rerun of `36887668901`, which GitHub Actions would simply re-execute
+against the old broken SHA) and this task can resume to completion.
+
+**This incident is NOT closed.** No fresh verification run has occurred.
+No production/main deploy occurred. No live D1 data was mutated --
+`fundraising-os-staging-db` was never touched this round at all (no
+export, no scratch database, nothing); only read-only GitHub API queries
+and local git/test operations were performed.
