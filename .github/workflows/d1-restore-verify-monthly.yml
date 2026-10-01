@@ -128,6 +128,21 @@ jobs:
           set -euo pipefail
           command -v aws >/dev/null 2>&1 || pip install --quiet awscli
 
+      # Secondary, cheap preflight (see docs/AI-HANDOFF.md's "D1 Monthly
+      # Restore Verification Repair" entries) -- the PRIMARY, early-
+      # detection guard is scripts/check-main-restore-sync.mjs, which runs
+      # on every schema-relevant push to feature/independent-cloudflare-
+      # sandbox (the branch that owns the real schema), not once a month.
+      # This backstop catches the proximate cause of run 36887668901 (a
+      # new migration landed on that branch without this repository's
+      # restore-order/baseline tracking being synced) before spending any
+      # time downloading or decrypting a real backup that would just fail
+      # later in the same predictable way. Read-only: fetches only the
+      # canonical branch's drizzle/ directory listing, never checks it
+      # out, and never writes anywhere.
+      - name: Preflight -- confirm main's migration tracking is current with the canonical branch
+        run: node scripts/check-migration-sync.mjs
+
       - name: Determine and validate the immutable backup identity from latest/'s metadata
         id: identity
         env:
