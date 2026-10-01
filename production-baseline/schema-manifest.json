@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "e29ba42b1870ea1ce1986790ca1e4abd9adf7a6fc9acaa8fa24a15306062e05e",
+  "schemaHash": "9249dde15caff5b29dce1ca7423ddc1cfff8339ee5c84975a816ad80b3ec9d3a",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -37,7 +37,8 @@
     "0032_asks.sql",
     "0033_pledge_payment_plans.sql",
     "0034_donor_relationship_facts.sql",
-    "0035_backup_alert_state.sql"
+    "0035_backup_alert_state.sql",
+    "0036_donor_source_attributions.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -2243,6 +2244,125 @@
         ]
       },
       {
+        "name": "donor_source_attributions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "external_source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_external_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "suggested_donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "suggested_donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_source_attributions_donor_idx",
+            "columns": [
+              "suggested_donor_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_source_attributions_donor_idx` ON `donor_source_attributions` (`suggested_donor_id`)"
+          },
+          {
+            "name": "donor_source_attributions_source_idx",
+            "columns": [
+              "user_id",
+              "external_source",
+              "source_external_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `donor_source_attributions_source_idx` ON `donor_source_attributions` (`user_id`,`external_source`,`source_external_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
         "name": "donor_views",
         "columns": [
           {
@@ -4335,6 +4455,20 @@
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_external_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source_name",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6040,6 +6174,11 @@
     },
     {
       "type": "table",
+      "name": "donor_source_attributions",
+      "sql": "CREATE TABLE `donor_source_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `external_source` text NOT NULL, `source_external_id` text NOT NULL, `source_name` text, `suggested_donor_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`suggested_donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "donor_views",
       "sql": "CREATE TABLE `donor_views` ( `user_id` text NOT NULL, `donor_id` text NOT NULL, `viewed_at` integer NOT NULL, PRIMARY KEY (`user_id`,`donor_id`), FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -6111,7 +6250,7 @@
     {
       "type": "table",
       "name": "jl_payment_assignment_audits",
-      "sql": "CREATE TABLE `jl_payment_assignment_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `import_id` text NOT NULL, `payment_fingerprint` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text, `decision_type` text NOT NULL CHECK (`decision_type` IN ('apply_to_pledge', 'new_gift')), `payment_cents` integer NOT NULL, `applied_cents` integer NOT NULL, `new_gift_cents` integer NOT NULL, `overpayment_action` text CHECK (`overpayment_action` IS NULL OR `overpayment_action` = 'split_remainder_new_gift'), `previous_paid_cents` integer, `next_paid_cents` integer, `previous_balance_cents` integer, `next_balance_cents` integer, `previous_status` text, `next_status` text, `created_at` integer NOT NULL, `payment_date` integer, `remaining_balance_cents` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `jl_payment_assignment_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `import_id` text NOT NULL, `payment_fingerprint` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text, `decision_type` text NOT NULL CHECK (`decision_type` IN ('apply_to_pledge', 'new_gift')), `payment_cents` integer NOT NULL, `applied_cents` integer NOT NULL, `new_gift_cents` integer NOT NULL, `overpayment_action` text CHECK (`overpayment_action` IS NULL OR `overpayment_action` = 'split_remainder_new_gift'), `previous_paid_cents` integer, `next_paid_cents` integer, `previous_balance_cents` integer, `next_balance_cents` integer, `previous_status` text, `next_status` text, `created_at` integer NOT NULL, `payment_date` integer, `remaining_balance_cents` integer, `source_external_id` text, `source_name` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`import_id`) REFERENCES `data_imports`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -6312,6 +6451,16 @@
       "type": "index",
       "name": "donor_research_sources_user_normalized_url_uidx",
       "sql": "CREATE UNIQUE INDEX `donor_research_sources_user_normalized_url_uidx` ON `donor_research_sources` (`user_id`,`normalized_url`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_source_attributions_donor_idx",
+      "sql": "CREATE INDEX `donor_source_attributions_donor_idx` ON `donor_source_attributions` (`suggested_donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_source_attributions_source_idx",
+      "sql": "CREATE UNIQUE INDEX `donor_source_attributions_source_idx` ON `donor_source_attributions` (`user_id`,`external_source`,`source_external_id`)"
     },
     {
       "type": "index",

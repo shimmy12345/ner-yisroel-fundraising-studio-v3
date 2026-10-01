@@ -71,6 +71,49 @@ test('backup_alert_state is positioned after "users", its own real foreign key t
   assert.ok(usersIndex >= 0 && backupAlertIndex > usersIndex, 'backup_alert_state must be inserted after users');
 });
 
+// donor_source_attributions (Giving Import Third-Party Source Attribution,
+// migration 0036 on feature/independent-cloudflare-sandbox, ported here
+// 2026-10-01) -- depends on both `users` and `donors` (suggested_donor_id),
+// nothing else references it. This is a direct, named regression for
+// GitHub Actions run 36887668901 (D1 monthly restore verification,
+// 2026-10-01, scheduled on this branch), which failed with exactly:
+// "planD1Restore found INSERT statements for table(s) not present in the
+// dependency order: donor_source_attributions" -- the real backup (a
+// `wrangler d1 export` of fundraising-os-staging-db, the database this
+// branch's own GitHub Actions workflows back up and restore-test) already
+// contained this table's rows, but this branch's own, separately-synced
+// D1_RESTORE_DATA_ORDER had never been updated past migration 0035.
+test('donor_source_attributions is present in D1_RESTORE_DATA_ORDER, positioned after both "users" and "donors"', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const donorsIndex = D1_RESTORE_DATA_ORDER.indexOf('donors');
+  const attributionsIndex = D1_RESTORE_DATA_ORDER.indexOf('donor_source_attributions');
+  assert.ok(attributionsIndex >= 0, 'donor_source_attributions must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(usersIndex >= 0 && attributionsIndex > usersIndex, 'donor_source_attributions must be inserted after users (donor_source_attributions.user_id references users.id)');
+  assert.ok(donorsIndex >= 0 && attributionsIndex > donorsIndex, 'donor_source_attributions must be inserted after donors (donor_source_attributions.suggested_donor_id references donors.id)');
+});
+
+test('planD1Restore accepts a real INSERT for donor_source_attributions and orders it after users and donors', () => {
+  const exported = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE `donor_source_attributions` (`id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `suggested_donor_id` text NOT NULL);',
+    'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL);',
+    'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);',
+    'INSERT INTO "donor_source_attributions" ("id","user_id","suggested_donor_id") VALUES(\'attribution-1\',\'user-1\',\'donor-1\');',
+    'INSERT INTO "donors" ("id","owner_user_id") VALUES(\'donor-1\',\'user-1\');',
+    'INSERT INTO "users" ("id") VALUES(\'user-1\');',
+  ].join('\n') + '\n';
+  assert.doesNotThrow(() => planD1Restore(exported), 'planD1Restore must accept an INSERT for donor_source_attributions, not reject it as an unrecognized table (the exact failure in run 36887668901)');
+  const plan = planD1Restore(exported);
+  const tableOrder = plan.steps.map((step) => step.table);
+  assert.ok(tableOrder.indexOf('users') < tableOrder.indexOf('donor_source_attributions'), 'users must be restored before donor_source_attributions');
+  assert.ok(tableOrder.indexOf('donors') < tableOrder.indexOf('donor_source_attributions'), 'donors must be restored before donor_source_attributions');
+  const reordered = reorderD1ExportForRestore(exported);
+  const usersAt = reordered.indexOf('INSERT INTO "users"');
+  const donorsAt = reordered.indexOf('INSERT INTO "donors"');
+  const attributionsAt = reordered.indexOf('INSERT INTO "donor_source_attributions"');
+  assert.ok(usersAt < attributionsAt && donorsAt < attributionsAt, 'users and donors must both precede donor_source_attributions in the reordered output');
+});
+
 // Bidirectional coverage, mirroring
 // feature/independent-cloudflare-sandbox's own tests/staging-reset.test.mjs
 // ("the reset table order covers every fundraising-data table and nothing
