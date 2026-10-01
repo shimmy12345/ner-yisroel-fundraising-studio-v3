@@ -22590,3 +22590,132 @@ closed above) is live there.
 See `docs/DEPLOYMENT.md`'s new "Keeping main's restore metadata in sync
 with the canonical schema" section for the operating rule this
 establishes going forward.
+
+---
+
+2026-10-01T00:00:00Z (approximate, same day, round 7) — Secondary
+monthly-workflow preflight landed on `main`; three-layer protection now
+complete.
+
+**Re-reviewed, not merely re-trusted.** Fetched fresh `origin/main`,
+`origin/feature/independent-cloudflare-sandbox`, and `origin/chore/
+monthly-restore-migration-preflight` -- all three unchanged since round 6
+(`main` still `ad80cf6`, chore branch still exactly `8d719cd`, a clean
+fast-forward of `main`). Re-inspected the complete diff between `main`
+and the chore branch from scratch: exactly 2 files,
+`.github/workflows/d1-restore-verify-monthly.yml` (+15 lines, one new
+step) and `scripts/check-migration-sync.mjs` (new, 69 lines) -- nothing
+else. **The original implementation required no changes**; it was
+correct as prepared in round 6.
+
+**Scope verification.** Confirmed the diff touches nothing about backup
+encryption, R2 object naming/retention, backup cadence, or restore
+semantics -- `scripts/verify-remote-restore.mjs` and every download/
+decrypt/restore step are byte-for-byte untouched; the new step is a pure
+insertion immediately before them. No table is skipped, no integrity
+check weakened, no failure suppressed -- the new step is an ADDITIONAL
+hard gate (non-zero exit on drift) ahead of the existing ones, which
+remain fully intact. No live D1 write anywhere in the new script (only
+`git fetch --depth 1`/`git ls-tree` against the canonical branch's ref
+plus a local JSON read). No Fundraising OS application code touched; the
+canonical branch was not merged into `main`.
+
+**Logic review.** Confirmed: runs immediately after "Install AWS CLI" and
+before "Determine and validate the immutable backup identity" (i.e.,
+before any backup download/decrypt/restore work begins); compares
+`main`'s own committed `production-baseline/schema-manifest.json`
+migration list against the canonical branch's live `drizzle/` directory
+listing; fails loudly with the exact missing migration name(s) printed;
+performs no synchronization or repair of any kind; requires no D1
+credential at all; never touches the real backup; and the real,
+unchanged monthly restore remains the authoritative end-to-end proof --
+this is strictly an earlier diagnostic layer in front of it.
+
+**Current-state verification (re-run fresh this round, not reused from
+round 6).** `node scripts/check-migration-sync.mjs` against real current
+state: **PASS** -- "main's migration count/list (37) is current with
+feature/independent-cloudflare-sandbox's drizzle/ directory (37).
+Proceeding." **Controlled stale-state test** (no live D1 touched):
+temporarily substituted `main`'s pre-fix (`62628b3`) committed manifest
+into the local working copy, re-ran the script -- **FAIL**, with the
+exact expected message naming `0036_donor_source_attributions.sql` as
+the missing migration -- then restored the real file from a backup copy
+(`git status`/`git diff --stat` confirmed byte-identical afterward, no
+residual change).
+
+**Gates.** `npm test`: 142/142 passing, no pre-existing failures on this
+branch. `npm run build`: succeeds. (The one known, pre-existing,
+unrelated `backup-watchdog-scheduled.test.mjs` failure belongs to
+`feature/independent-cloudflare-sandbox`'s own, much larger test suite,
+not this branch -- not applicable here and not touched.)
+
+**Landed on `main`, explicitly authorized by the repository owner for
+this specific, already-reviewed change.** Fast-forward merge
+(`ad80cf6..8d719cd`), pushed to `origin/main`. **Resulting `origin/main`
+SHA: `8d719cdf6655909c50817753fe3e170c301548fb`** -- confirmed
+independently via two separate GitHub API calls (`GET .../commits/main`
+and `GET .../commits/8d719cd`'s own `files` list), both returning exactly
+`.github/workflows/d1-restore-verify-monthly.yml` and
+`scripts/check-migration-sync.mjs` as the only files in this commit, no
+unrelated files. A follow-up check found zero commit statuses and zero
+check-runs from any app on the new `main` HEAD -- no sign of an unrelated
+deploy firing.
+
+**No further full monthly restore run was triggered, and none was
+necessary.** The actual restore logic (`scripts/verify-remote-
+restore.mjs`, the download/decrypt/schema-restore/data-restore/integrity-
+check steps) is completely unchanged by this round's diff, and already
+has a fresh, complete, successful proof on exactly the code it will run
+against next (run `36905729508`, closed above). The only genuinely new
+behavior -- the preflight step itself -- was validated directly, twice
+(pass on real state, fail on an intentionally stale fixture), which does
+not require spending a full restore cycle to trust. The one thing this
+round's direct validation could not reach is the real GitHub Actions
+runner's own environment for `git fetch`/`git ls-tree` against a remote
+ref specifically (local validation used this same git binary, network,
+and auth as every other check in this investigation, but not literally
+inside an Actions runner) -- the repository owner may optionally trigger
+a `workflow_dispatch` run once, at their convenience, to confirm the new
+step's first real execution there; this was not treated as required to
+close this round, since this session still cannot trigger any workflow
+run itself (same credential limitation as every prior round).
+
+**Three-layer D1 restore protection, now complete:**
+- **Layer 1 (earliest detection):** the generic restore/schema drift
+  guard (`lib/operations/restore-drift-guard.ts`,
+  `scripts/check-main-restore-sync.mjs`,
+  `.github/workflows/d1-restore-sync-check.yml` -- round 6, commit
+  `6151491`) runs on every schema-relevant push/PR to
+  `feature/independent-cloudflare-sandbox` -- the branch that owns the
+  real schema -- and fails CI the moment a migration lands if `main`'s
+  restore-order/baseline tracking would no longer be able to restore it
+  correctly.
+- **Layer 2 (cheap backstop):** `main`'s own monthly restore-verification
+  workflow now runs `scripts/check-migration-sync.mjs` (this round,
+  commit `8d719cd`) immediately before any backup download/decrypt/
+  restore work, confirming `main`'s own committed migration list has not
+  fallen behind the canonical branch -- a last, inexpensive check in case
+  Layer 1 was ever bypassed, skipped, or not run for some reason.
+- **Layer 3 (authoritative proof):** the monthly workflow's real,
+  unchanged end-to-end restore of an encrypted, immutable backup into a
+  throwaway scratch D1 database, with the full set of integrity checks
+  (`PRAGMA quick_check`, `PRAGMA foreign_key_check`, schema/baseline
+  comparison, per-table row-count sanity) -- this remains the one
+  authoritative proof that a real backup actually restores; Layers 1 and
+  2 only catch CONFIGURATION/schema drift early, they never substitute
+  for it.
+
+**Operating principle, stated explicitly for future maintainers:** a
+monthly Layer 3 failure must never be silenced, skipped, or worked around
+merely to keep the workflow green. Layers 1 and 2 exist to make Layer 3
+failures about configuration drift rare and fast to fix -- never to make
+a genuine backup/restore failure (corruption, a real foreign-key
+violation in production data, an actual broken restore path) invisible.
+If Layer 3 ever fails for a reason Layers 1 and 2 did not predict, that
+is a genuine incident requiring the same investigation rigor as the
+original `donor_source_attributions` incident, not a suppression.
+
+No live D1 data was mutated this round. No backup/restore semantics
+changed. `feature/independent-cloudflare-sandbox` was not merged into
+`main`. The Giving Import Third-Party Source Attribution feature was not
+touched.
