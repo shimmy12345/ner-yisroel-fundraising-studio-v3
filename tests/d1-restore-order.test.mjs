@@ -143,6 +143,33 @@ function insertOrderInOutput(sqlText, ...tables) {
   assert.ok(usersAt < alertAt, "users must precede backup_alert_state (backup_alert_state.user_id references users.id)");
 }
 
+// donor_source_attributions (Giving Import Third-Party Source Attribution,
+// migration 0036) -- depends on both users and donors
+// (suggested_donor_id), nothing else references it. Added here as a
+// direct, named regression: GitHub Actions run 36887668901 (D1 monthly
+// restore verification, 2026-10-01, scheduled on `main`) failed exactly
+// because this table existed in the real backup but not in `main`'s own,
+// separately-synced D1_RESTORE_DATA_ORDER -- the derived structural
+// coverage check above (Section 6) already proves this table is present
+// on THIS branch, but a concrete fixture proving planD1Restore specifically
+// accepts an INSERT for it, ordered after both of its real FK targets,
+// guards against the exact failure shape seen in that run.
+{
+  const exported = buildExport(
+    ["users", "donors", "donor_source_attributions"],
+    [["donor_source_attributions", "attribution-1"], ["donors", "donor-1"], ["users", "user-1"]],
+  );
+  assert.doesNotThrow(() => planD1Restore(exported), "planD1Restore must accept an INSERT for donor_source_attributions, not reject it as an unrecognized table");
+  const restored = reorderD1ExportForRestore(exported);
+  const [usersAt, donorsAt, attributionAt] = insertOrderInOutput(restored, "users", "donors", "donor_source_attributions");
+  assert.ok(usersAt < attributionAt, "users must precede donor_source_attributions (donor_source_attributions.user_id references users.id)");
+  assert.ok(donorsAt < attributionAt, "donors must precede donor_source_attributions (donor_source_attributions.suggested_donor_id references donors.id)");
+  const plan = planD1Restore(exported);
+  const tablesInStepOrder = plan.steps.map((step) => step.table);
+  assert.ok(tablesInStepOrder.indexOf("users") < tablesInStepOrder.indexOf("donor_source_attributions"));
+  assert.ok(tablesInStepOrder.indexOf("donors") < tablesInStepOrder.indexOf("donor_source_attributions"));
+}
+
 // interactions must precede shared_activities' own dependent, and
 // shared_activities itself must precede interactions (interactions.
 // shared_activity_id references shared_activities.id) -- the one
