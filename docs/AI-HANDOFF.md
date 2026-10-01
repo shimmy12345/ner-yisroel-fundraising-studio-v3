@@ -22317,3 +22317,111 @@ observed or indicated by this push (no check-run or status from any
 non-`github-actions` app appeared on the new `main` HEAD in a follow-up
 check). No live D1 data was mutated by this round -- `fundraising-os-
 staging-db` was not touched at all.
+
+---
+
+2026-10-01T00:00:00Z (approximate, same day, round 5) — **INCIDENT
+CLOSED.**
+Claude (Sonnet 5) — D1 Monthly Restore Verification Repair: final
+closure. The repository owner triggered the fresh `workflow_dispatch` run
+this session could not trigger itself (see round 4); this round inspected
+and recorded its results.
+
+**Original incident.** GitHub Actions run `36887668901` (#13, `schedule`,
+`main` at `62628b393f6538b6240c1a533883de0a08774b56`) failed:
+`planD1Restore found INSERT statements for table(s) not present in the
+dependency order: donor_source_attributions`. Root cause: migration 0036
+added `donor_source_attributions` on `feature/independent-cloudflare-
+sandbox` and it was already present in the real `fundraising-os-
+staging-db` backup, but `main`'s manually-synchronized
+`D1_RESTORE_DATA_ORDER`/`production-baseline/schema-manifest.json` had
+not been updated past migration 0035 (full analysis in rounds 1-2 above).
+
+**Fix.** Commit `ad80cf6a38e4b93dd84cd87021d5333e5538d53c`, merged to
+`main` by fast-forward with explicit repository-owner authorization
+(round 4): adds `donor_source_attributions` to `STAGING_RESET_TABLE_ORDER`
+(and therefore `D1_RESTORE_DATA_ORDER` by reversal) after both of its real
+foreign-key targets (`users`, `donors`); syncs `production-baseline/
+schema-manifest.json` to the current 37-migration manifest; corrects
+`PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length` from 36 to 37; adds a
+direct, named regression in `test/d1-restore-order.test.mjs`.
+`origin/main` confirmed at this exact SHA via the GitHub API.
+
+**Fresh verification run.** Run `36905729508` (#14), `workflow_dispatch`,
+`main` at `ad80cf6a38e4b93dd84cd87021d5333e5538d53c`, conclusion
+`success`, 2026-10-01T18:17:30Z-18:21:21Z (3m46s). Verified via the
+GitHub Actions Jobs API (not inferred from the overall green badge) that
+all 9 real steps reported `success` individually: checkout, setup-node,
+install AWS CLI, "Determine and validate the immutable backup identity
+from latest/'s metadata", "Download the backup object to verify",
+"Decrypt and decompress", **"Restore into a scratch D1 database and run
+every integrity check"**, "Clean up local files", and "Publish
+restore-verification status". Only one notice-level annotation exists on
+this run, an unrelated `ubuntu-latest` image-migration deprecation
+notice -- no warnings or errors.
+
+**Evidence disclosure (per this round's explicit instruction not to
+infer from a green badge alone):** this sandboxed session has no
+authenticated GitHub session or API token with log-read access (`GET
+.../actions/jobs/{id}/logs` returned `403 Must have admin rights to
+Repository`; the browser's own view of this job also showed "Sign in to
+view logs" -- the browser session is not signed in to GitHub). The
+literal console output (the exact immutable backup object key string
+printed by step 5, the literal `PRAGMA quick_check` / `foreign_key_check`
+output lines, etc.) could **not** be directly read or quoted this round.
+What IS directly verified, structurally rather than by inference: the
+single "Restore into a scratch D1 database and run every integrity
+check" step runs `scripts/verify-remote-restore.mjs` end-to-end in one
+shell invocation that `throw`s/`assert`s synchronously (non-zero exit,
+step marked `failure`) on each of: `planD1Restore` rejecting any INSERT
+table (the exact previous `donor_source_attributions` failure),
+`PRAGMA quick_check` returning anything other than `"ok"`, `PRAGMA
+foreign_key_check` returning any violation row, and `compareSchemaObjects`
+finding any schema/baseline mismatch -- confirmed by this session's own
+prior full reading of that script's source in round 2. This step's
+individually-reported `success` conclusion is therefore direct, specific
+proof that `donor_source_attributions` was accepted and restored in
+correct dependency order, `quick_check` = `ok`, `foreign_key_check` found
+zero violations, and the restored schema matched
+`PRODUCTION_BASELINE_OBJECTS` exactly -- not merely that "the job didn't
+crash for some unrelated reason." The script also includes the oversized-
+statement (D1 HTTP query API) path for any row at/above
+`D1_SAFE_STATEMENT_BYTES` (this session's own round-2 local verification
+found the real backup has one such ~160KB `data_imports` row) -- the real
+GitHub Actions job holds the `CLOUDFLARE_D1_API_TOKEN` secret this
+session's local verification lacked, so if that row was present in the
+backup tested here, this run is the first time that exact path was
+exercised against this specific repair end-to-end, and it succeeded. The
+immutable backup object's exact key/timestamp and the scratch database's
+generated name were not directly observed (log access, as above); the
+workflow's own step 5 ("Determine and validate the immutable backup
+identity") succeeding confirms an immutable `daily/...` object was
+resolved and validated against the strict allowlist pattern before
+download, per that step's own code (see `.github/workflows/
+d1-restore-verify-monthly.yml`'s header comment) -- not a direct
+download of the mutable `latest/` pointer with unknown identity.
+
+**Status publication.** Step 10 ("Publish restore-verification status")
+succeeded, meaning (per the workflow's own logic) a `restore-latest-
+success.json` was written to the status bucket recording this run's
+outcome; its exact contents were not directly read this round (requires
+either the status bucket's write credential, which this session never
+holds, or the deployed app's own Workspace Health view, which requires
+signing into the Independent Staging app -- out of scope for this
+read-only verification).
+
+**No live D1 mutation.** Per the workflow's own design (unchanged,
+confirmed in round 2's full reading of the script): restore target is
+always a newly-created, randomly-named scratch database, never
+`fundraising-os-staging-db`; step 8's own `try/finally` deletes it
+unconditionally, including on failure. Step 8 succeeded, and step 9
+("Clean up local files") separately succeeded for the local decrypted
+artifacts on the runner. No step in this run writes to the real
+database. The real `fundraising-os-staging-db` was not touched by this
+documentation-only round at all.
+
+**INCIDENT STATUS: CLOSED.** The backup pipeline is proven, end-to-end,
+against a real current backup and a real remote D1 restore: the original
+`donor_source_attributions` drift is fixed on `main`, and a fresh,
+independently-triggered monthly restore verification run against that
+exact fix passed completely.
