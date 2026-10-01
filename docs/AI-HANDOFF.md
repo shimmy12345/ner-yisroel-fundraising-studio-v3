@@ -21988,3 +21988,159 @@ Foundation and Eitan Pfeiffer were never merged, Pfeiffer's own JL code
 was never touched, no future 22297 gift will be auto-attributed, nothing
 was deployed to production/main, and this was not expanded into general
 soft-credit management or employer/company CRM features. Stopping here.
+
+---
+
+2026-10-01T00:00:00Z (approximate)
+Claude (Sonnet 5) — D1 Monthly Restore Verification Repair, round 2:
+donor_source_attributions. GitHub Actions run `36887668901` (D1 monthly
+restore verification, scheduled on `main`, head SHA `62628b393f6538b6240
+c1a533883de0a08774b56`) failed in `planD1Restore`:
+"found INSERT statements for table(s) not present in the dependency
+order: donor_source_attributions."
+
+**Root cause (confirmed, not assumed).** `main` is a structurally
+separate, unrelated repository content-wise: it hosts a real, live
+Netlify + Supabase application ("Ner Yisroel Fundraising Studio"
+v3.0.0) with its own test suite (`test/`, `node --test`), completely
+independent of Fundraising OS's Cloudflare Workers + D1 stack. `main`
+carries only a minimal, deliberately narrow ported subset --
+`lib/operations/{d1-restore-order.ts,staging-reset.ts}`,
+`lib/data-health/production-baseline.ts`,
+`production-baseline/schema-manifest.json`,
+`scripts/verify-remote-restore.mjs`, and the two D1 backup/restore
+GitHub Actions workflows -- solely so those scheduled workflows (which
+GitHub always runs from the default branch) can back up and restore-test
+the real `fundraising-os-staging-db`, which `feature/independent-
+cloudflare-sandbox` actually owns and writes to. This mirror is
+synced to that branch manually and periodically, not automatically
+(previously done for migration 0029 in commit `4ea1d5e`, and for
+migrations 0030-0035 in commit `62628b3`, 2026-09-01 -- see that round's
+own entry above). Migration 0036 (`donor_source_attributions`, the
+Giving Import Third-Party Source Attribution feature, commit `01260eb`)
+was applied directly to `fundraising-os-staging-db` and therefore
+already appears in its real nightly backups, but the corresponding sync
+to `main`'s restore-order tracking was never performed -- the identical
+class of gap, one migration later. A full table-by-table diff between
+`feature/independent-cloudflare-sandbox`'s current manifest (37 source
+migrations, 49 tables) and `main`'s pre-fix manifest (36 migrations, 48
+tables) confirmed `donor_source_attributions` is the **only** table
+difference -- no other table was found missing.
+
+**Dependency position.** `donor_source_attributions` has exactly two
+real foreign keys -- `user_id -> users.id` and
+`suggested_donor_id -> donors.id` -- and nothing else in the schema
+references it (confirmed by searching every `CREATE TABLE` statement in
+a real export for `REFERENCES \`donor_source_attributions\``: zero
+matches). It needs no new restore-order entry on
+`feature/independent-cloudflare-sandbox` (already added there in commit
+`01260eb`, alongside the table itself). On `main`, it was added to
+`STAGING_RESET_TABLE_ORDER` immediately after the other import-audit
+tables (`jl_payment_assignment_audits`, `jl_payment_assignments`,
+`household_import_changes`, etc.) and before the `interactions`/
+`donors`/`users` parent block -- `D1_RESTORE_DATA_ORDER` derives its
+insertion position automatically by reversing this list, so it is
+restored after both real FK targets.
+
+**jl_payment_assignment_audits (migration 0036's other change).**
+Gained two nullable columns, `source_external_id`/`source_name` -- no
+new foreign key, so no restore-order change is needed for it on either
+branch. Its updated `CREATE TABLE` SQL is carried automatically by the
+`schema-manifest.json` sync and was confirmed structurally correct by
+`compareSchemaObjects` matching exactly during local restore
+verification (see below).
+
+**Fix (branch `fix/d1-restore-order-donor-source-attributions`, off
+`main`, commit `ad80cf6` -- NOT merged or pushed to `main`; see
+"Branch/deployment strategy" below).** Four files: `production-baseline/
+schema-manifest.json` replaced verbatim with
+`feature/independent-cloudflare-sandbox`'s current manifest (same
+mechanism as every prior sync); `lib/data-health/production-baseline.ts`'s
+hardcoded `PRODUCTION_BASELINE_VERIFIED` migration-count assertion
+corrected 36 -> 37 with an updated comment; `lib/operations/
+staging-reset.ts` gains the one `donor_source_attributions` entry
+described above; `test/d1-restore-order.test.mjs` gains two new, directly
+named tests (mirroring the file's existing `backup_alert_state`-specific
+tests) proving `planD1Restore` accepts an INSERT for
+`donor_source_attributions` and orders it after both `users` and
+`donors` -- the exact failure shape from run `36887668901`. No workflow
+YAML, backup encryption, R2 object naming/retention, or backup schedule
+was touched; no application behavior changed.
+
+**Other missing tables: none.** The diff above was the authoritative
+check (not a guess); `donor_source_attributions` was the only gap. The
+bidirectional `STAGING_RESET_TABLE_ORDER === FUNDRAISING_DATA_TABLES`
+test already on `main` (added in the 2026-09-01 round specifically to
+close this exact class of drift) now passes again once the manifest and
+restore order are both synced together.
+
+**Local/representative restore verification (no live D1 mutated).**
+Ran a real `wrangler d1 export --remote` of `fundraising-os-staging-db`
+(the same read-only operation the nightly backup performs), confirmed it
+contains exactly one `donor_source_attributions` INSERT among 50
+`CREATE TABLE` statements. Ran the fixed `planD1Restore` against this
+real export: accepted cleanly (no "not present in the dependency order"
+error), with `donor_source_attributions` ordered at step 9 of 40, after
+`users` (step 1) and `donors` (step 3). Restored this real, representative
+export into a throwaway scratch D1 database (`fos-restore-verify-*`,
+created and deleted by this verification only, via the already-
+authenticated `wrangler` OAuth session -- this sandboxed environment has
+no `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_D1_API_TOKEN`, only interactive
+OAuth): all 35 restore steps succeeded, `PRAGMA quick_check` returned
+`"ok"`, `PRAGMA foreign_key_check` found zero violations, and
+`compareSchemaObjects` matched `PRODUCTION_BASELINE_OBJECTS` exactly.
+`donor_source_attributions` restored with its real 1 row. The scratch
+database was deleted immediately after. One honest limitation: this
+specific real export's single `data_imports` row is ~160KB, over
+`D1_SAFE_STATEMENT_BYTES`, and restoring it requires the D1 HTTP query
+API with a real `CLOUDFLARE_API_TOKEN` (a GitHub Actions secret, not
+available in this session) -- rather than fake that path, `data_imports`
+and its 5 FK-dependent tables (`donation_import_rollback_audits`,
+`giving_activity_import_changes`, `household_import_changes`,
+`household_import_rollback_audits`, `jl_payment_assignment_audits`) were
+excluded from DATA restore for this one local verification pass only
+(their schema was still created and verified). This exclusion is
+unrelated to the `donor_source_attributions` fix; the oversized-statement
+mechanism itself is already covered by its own separate, passing
+`SQLITE_TOOBIG` unit tests, and will run for real the next time the
+actual GitHub Actions job -- which does hold that credential -- restores
+a full export.
+
+**Tests/typecheck/build.** `main`: `npm test` 142/142 passing (clean,
+no pre-existing failures on this branch), `npm run build` succeeds.
+`feature/independent-cloudflare-sandbox`: added the same kind of direct,
+named `donor_source_attributions` regression to its own
+`tests/d1-restore-order.test.mjs` (commit `73ca6a2`) even though this
+branch's restore order was never out of sync -- `pnpm test` all green
+except the same single pre-existing, unrelated `backup-watchdog-
+scheduled.test.mjs` failure this session has found on every prior round;
+`pnpm exec tsc --noEmit` clean; `pnpm run build:staging-independent`
+succeeds.
+
+**Branch/deployment strategy -- explicit stop, not a silent merge.**
+`main` is the default branch and therefore the one GitHub Actions
+`schedule`-triggered workflows always execute from -- the fix cannot take
+effect for the real monthly job until it exists on `main`. However,
+`main` also hosts a real, separate, live Netlify-deployed application
+with its own `netlify.toml` build config; this session has no visibility
+into whether Netlify's GitHub integration auto-deploys on every push to
+`main`, and pushing or merging directly into `main` risks triggering an
+unrelated, unintended **production deploy of that other live
+application** -- exactly the accidental-deployment risk this task
+explicitly warned against. The fix was therefore committed to a new
+branch, `fix/d1-restore-order-donor-source-attributions`, branched from
+and pushed to `origin` alongside (but not into) `main`
+(https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-order-donor-source-attributions
+has a ready-to-open PR link). **Nothing was merged or pushed to `main`.**
+This must be explicitly reviewed and merged into `main` by the repository
+owner before the scheduled or a manual restore-verification run can
+succeed -- re-running the failed run `36887668901` itself would not help
+even after merging (GitHub Actions confirmed via the public API that a
+rerun always re-executes the original run's exact head SHA,
+`62628b393f6538b6240c1a533883de0a08774b56`); a fresh `workflow_dispatch`
+run (already supported by `d1-restore-verify-monthly.yml`) against
+`main` after the merge is the correct next trigger, run manually by the
+repository owner (this session has no GitHub write/Actions-dispatch
+credential). No production/main deploy occurred; no live D1 data was
+read-write mutated; the real `fundraising-os-staging-db` was never
+anything other than exported (read-only) during this task.
