@@ -253,8 +253,17 @@ test("baseline picks up the schema-changing 0036 donor source attributions migra
   // table (Giving Import Third-Party Source Attribution, a new table, not
   // a rebuild) plus two nullable columns on jl_payment_assignment_audits,
   // so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0036_donor_source_attributions.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 37);
+  assert.ok(manifest.sourceMigrations.includes("0036_donor_source_attributions.sql"));
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+});
+
+test("baseline picks up the schema-changing 0037 donor rebbeim migration", () => {
+  // 0037_donor_rebbeim.sql adds the rebbeim/donor_rebbeim tables (Donor
+  // Rebbeim, two new tables, not a rebuild), so the schema hash must
+  // change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0037_donor_rebbeim.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 38);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
 });

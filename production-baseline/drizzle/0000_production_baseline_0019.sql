@@ -151,6 +151,18 @@ CREATE TABLE `donor_merge_audits` (
   FOREIGN KEY (`archived_donor_id`) REFERENCES `donors`(`id`)
 );
 
+CREATE TABLE `donor_rebbeim` (
+	`donor_id` text NOT NULL,
+	`rebbi_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`source` text DEFAULT 'manual' NOT NULL CHECK(`source` IN ('manual','bulk_import')),
+	`created_at` integer NOT NULL,
+	PRIMARY KEY(`donor_id`, `rebbi_id`),
+	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`rebbi_id`) REFERENCES `rebbeim`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `donor_relationship_fact_changes` (
 	`id` text PRIMARY KEY NOT NULL,
 	`fact_id` text NOT NULL,
@@ -585,6 +597,16 @@ CREATE TABLE `pledge_payment_plans` (
   CHECK (`expected_day_of_month` BETWEEN 1 AND 31)
 );
 
+CREATE TABLE `rebbeim` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`display_name` text NOT NULL,
+	`normalized_name` text NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `recommendations` (
   `id` text PRIMARY KEY NOT NULL,
   `donor_id` text NOT NULL,
@@ -725,6 +747,8 @@ ON `donor_merge_audits` (`archived_donor_id`);
 CREATE INDEX `donor_merge_audits_user_date_idx`
 ON `donor_merge_audits` (`user_id`,`created_at`);
 
+CREATE INDEX `donor_rebbeim_rebbi_idx` ON `donor_rebbeim` (`rebbi_id`);
+
 CREATE INDEX `donor_relationship_fact_changes_fact_idx` ON `donor_relationship_fact_changes` (`fact_id`,`created_at`);
 
 CREATE INDEX `donor_relationship_facts_donor_status_idx` ON `donor_relationship_facts` (`donor_id`,`status`);
@@ -838,6 +862,8 @@ CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_chan
 
 CREATE INDEX `pledge_payment_plans_pledge_idx` ON `pledge_payment_plans` (`pledge_activity_id`);
 
+CREATE UNIQUE INDEX `rebbeim_normalized_name_idx` ON `rebbeim` (`user_id`,`normalized_name`);
+
 CREATE INDEX `recommendations_user_status_idx` ON `recommendations` (`user_id`,`status`);
 
 CREATE INDEX `relationship_queue_dismissals_user_date_idx` ON `relationship_queue_dismissals` (`user_id`,`dismissed_at`);
@@ -865,5 +891,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','9249dde15caff5b29dce1ca7423ddc1cfff8339ee5c84975a816ad80b3ec9d3a',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','b7d9d6a1b3550304e8c7a9287b0110a1e392725173f47fa42bb21b3cc14e5f63',1785944072);
 PRAGMA optimize;

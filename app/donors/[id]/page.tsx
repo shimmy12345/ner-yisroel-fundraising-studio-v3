@@ -30,6 +30,7 @@ import { GiftAcknowledgmentActions } from "./GivingManagement";
 import { ImportantDatesManagement, type ManagedDateItem } from "./ImportantDatesManagement";
 import type { HebrewMonthName } from "../../../lib/calendar/hebrew-date.ts";
 import type { ImportantDateType } from "../../../lib/important-dates/validation.ts";
+import { RebbeimManagement } from "./RebbeimManagement";
 
 export const metadata: Metadata = { title: "Donor relationship" };
 export const dynamic = "force-dynamic";
@@ -49,6 +50,7 @@ type AskRow = { id: string; amount_cents: number | null; purpose: string | null;
 type RelationshipFactRow = { category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
 type YahrtzeitRow = { id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number; hebrew_year: number | null };
 type ImportantDateRow = { id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null; notes: string | null };
+type RebbiRow = { id: string; display_name: string };
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const date = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
 const dateTime = (epoch: number, timezone: string) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(epoch * 1000));
@@ -226,6 +228,16 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   marks.importantDatesMs = Date.now() - importantDatesStart;
   marks.importantDatesRows = importantDateRows.length;
   if (mode === "live") d1Calls += 1;
+  const rebbeimStart = Date.now();
+  const [donorRebbeimRows, canonicalRebbeimRows]: [RebbiRow[], RebbiRow[]] = mode === "live"
+    ? await Promise.all([
+      env.DB.prepare("SELECT r.id, r.display_name FROM donor_rebbeim dr JOIN rebbeim r ON r.id = dr.rebbi_id WHERE dr.donor_id=? AND dr.user_id=? ORDER BY r.display_name").bind(id, profile.id).all<RebbiRow>().then((result) => result.results),
+      env.DB.prepare("SELECT id, display_name FROM rebbeim WHERE user_id=? ORDER BY display_name").bind(profile.id).all<RebbiRow>().then((result) => result.results),
+    ])
+    : [[], []];
+  marks.rebbeimMs = Date.now() - rebbeimStart;
+  marks.rebbeimRows = donorRebbeimRows.length;
+  if (mode === "live") d1Calls += 2;
   const managedDateItems: ManagedDateItem[] = [
     ...yahrtzeitRows.map((row): ManagedDateItem => ({
       id: row.id,
@@ -406,6 +418,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       <section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>{relationshipContext.memory ? "Recorded relationship context" : "No institutional memory recorded"}</h2></div></div>{relationshipContext.memory && <p className="summary">{relationshipContext.memory}</p>}</section>
       {mode === "live" && <DonorResearch donorId={id} lastResearchedAt={researchViewProps.lastResearchedAt} openRun={researchViewProps.openRun} findings={researchViewProps.findings} />}
       {mode === "live" && <section className="story-card yahrtzeit-card"><div className="card-heading"><div><p className="eyebrow">IMPORTANT DATES</p><h2>Birthdays, anniversaries, and remembrance dates</h2><p>Background context, not a logged interaction. Never counted as contact.</p></div></div><ImportantDatesManagement donorId={id} timezone={profile.timezone} items={managedDateItems} /></section>}
+      {mode === "live" && <section className="story-card rebbeim-card"><div className="card-heading"><div><p className="eyebrow">REBBEIM</p><h2>Rebbeim this donor is connected to</h2><p>A simple relationship, not a status to manage.</p></div></div><RebbeimManagement donorId={id} items={donorRebbeimRows.map((row) => ({ id: row.id, displayName: row.display_name }))} canonical={canonicalRebbeimRows.map((row) => ({ id: row.id, displayName: row.display_name }))} /></section>}
       <section className="story-card timeline unified-relationship-timeline"><div className="card-heading"><div><p className="eyebrow">UNIFIED RELATIONSHIP TIMELINE</p><h2>One chronological story</h2><p>Giving, conversations, reminders, and scheduled work—ordered by when each event happened or is due.</p></div>{mode === "live" && <PendingGiftForm donors={donorDirectoryResult.results} initialDonorId={id} />}</div><UnifiedRelationshipTimeline donorId={id} giving={activities} legacyGifts={legacyGifts} payments={paymentEvents} interactions={interactionResult.results} reminders={recommendationResult.results} donors={donorDirectoryResult.results} timezone={profile.timezone} live={mode === "live"} now={Math.floor(Date.now() / 1000)} acknowledgments={acknowledgmentsRecord} /></section>
     </main><aside className="relationship-rail"><section className="detail-card"><div className="detail-heading"><h2>Household</h2></div><dl className="at-a-glance"><div><dt>Members</dt><dd>{people || "Not supplied"}</dd></div><div><dt>{donor.external_source === "Manual" ? "Source" : "JL reference"}</dt><dd>{donor.external_source === "Manual" ? "Manual" : donor.external_id || donor.donor_code || "Not supplied"}</dd></div><div><dt>Last meaningful contact</dt><dd>{completedInteractions[0] ? date(completedInteractions[0].occurred_at, profile.timezone) : "None recorded"}</dd></div></dl></section><section className="detail-card"><div className="detail-heading"><h2>Contact</h2></div><div className="facts contact-facts">{donor.email && <div className="fact"><label>Email</label><a href={`mailto:${donor.email}`}>{donor.email}</a></div>}{donor.phone && <div className="fact"><label>Mobile</label><a href={`tel:${donor.phone.replace(/\D/g, "")}`}>{donor.phone}</a></div>}{donor.home_phone && <div className="fact"><label>Home</label><a href={`tel:${donor.home_phone.replace(/\D/g, "")}`}>{donor.home_phone}</a></div>}{address.length > 0 && <div className="fact"><label>Mailing address</label>{address.map((line) => <p key={line}>{line}</p>)}</div>}{donor.contact_note && <div className="fact"><label>Contact note</label><p>{donor.contact_note}</p></div>}</div></section>{contactAuditResult.results.length > 0 && <section className="detail-card contact-audit"><div className="detail-heading"><h2>Contact history</h2></div>{contactAuditResult.results.map((audit) => { let fields: string[] = []; try { fields = JSON.parse(audit.changed_fields); } catch { fields = []; } return <div key={audit.id}><strong>{audit.action === "created" ? "Contact created" : audit.action === "merged_with_jl" ? "Linked to JL record" : "Contact updated"}</strong><span>{dateTime(audit.created_at, profile.timezone)}</span>{fields.length > 0 && <small>{fields.join(", ")}</small>}</div>; })}</section>}</aside></div>
   </AppShell>;

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "9249dde15caff5b29dce1ca7423ddc1cfff8339ee5c84975a816ad80b3ec9d3a",
+  "schemaHash": "b7d9d6a1b3550304e8c7a9287b0110a1e392725173f47fa42bb21b3cc14e5f63",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -38,7 +38,8 @@
     "0033_pledge_payment_plans.sql",
     "0034_donor_relationship_facts.sql",
     "0035_backup_alert_state.sql",
-    "0036_donor_source_attributions.sql"
+    "0036_donor_source_attributions.sql",
+    "0037_donor_rebbeim.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -1239,6 +1240,95 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "donor_rebbeim",
+        "columns": [
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "rebbi_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "source",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'manual'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "rebbi_id",
+            "toTable": "rebbeim",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "donor_rebbeim_rebbi_idx",
+            "columns": [
+              "rebbi_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `donor_rebbeim_rebbi_idx` ON `donor_rebbeim` (`rebbi_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "donor_id",
+              "rebbi_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK(`source` IN ('manual','bulk_import'))"
+        ]
       },
       {
         "name": "donor_relationship_fact_changes",
@@ -5121,6 +5211,86 @@
         ]
       },
       {
+        "name": "rebbeim",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "display_name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "normalized_name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "rebbeim_normalized_name_idx",
+            "columns": [
+              "user_id",
+              "normalized_name"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `rebbeim_normalized_name_idx` ON `rebbeim` (`user_id`,`normalized_name`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
         "name": "recommendations",
         "columns": [
           {
@@ -6134,6 +6304,11 @@
     },
     {
       "type": "table",
+      "name": "donor_rebbeim",
+      "sql": "CREATE TABLE `donor_rebbeim` ( `donor_id` text NOT NULL, `rebbi_id` text NOT NULL, `user_id` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL CHECK(`source` IN ('manual','bulk_import')), `created_at` integer NOT NULL, PRIMARY KEY(`donor_id`, `rebbi_id`), FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`rebbi_id`) REFERENCES `rebbeim`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "donor_relationship_fact_changes",
       "sql": "CREATE TABLE `donor_relationship_fact_changes` ( `id` text PRIMARY KEY NOT NULL, `fact_id` text NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `action` text NOT NULL, `changed_fields` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`fact_id`) REFERENCES `donor_relationship_facts`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`action` IN ('created','superseded','archived_with_source','restored')) )"
     },
@@ -6284,6 +6459,11 @@
     },
     {
       "type": "table",
+      "name": "rebbeim",
+      "sql": "CREATE TABLE `rebbeim` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `display_name` text NOT NULL, `normalized_name` text NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "recommendations",
       "sql": "CREATE TABLE `recommendations` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `reason` text NOT NULL, `score` integer NOT NULL, `status` text DEFAULT 'open' NOT NULL, `due_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `due_at_date_only` integer DEFAULT 0 NOT NULL, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -6386,6 +6566,11 @@
       "type": "index",
       "name": "donor_merge_audits_user_date_idx",
       "sql": "CREATE INDEX `donor_merge_audits_user_date_idx` ON `donor_merge_audits` (`user_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "donor_rebbeim_rebbi_idx",
+      "sql": "CREATE INDEX `donor_rebbeim_rebbi_idx` ON `donor_rebbeim` (`rebbi_id`)"
     },
     {
       "type": "index",
@@ -6656,6 +6841,11 @@
       "type": "index",
       "name": "pledge_payment_plans_pledge_idx",
       "sql": "CREATE INDEX `pledge_payment_plans_pledge_idx` ON `pledge_payment_plans` (`pledge_activity_id`)"
+    },
+    {
+      "type": "index",
+      "name": "rebbeim_normalized_name_idx",
+      "sql": "CREATE UNIQUE INDEX `rebbeim_normalized_name_idx` ON `rebbeim` (`user_id`,`normalized_name`)"
     },
     {
       "type": "index",

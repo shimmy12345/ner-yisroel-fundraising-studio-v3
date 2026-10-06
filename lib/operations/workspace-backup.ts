@@ -100,6 +100,13 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // decision from building the feature itself. Covered today only by the
   // nightly whole-database R2 backup.
   "donor_source_attributions",
+  // Donor Rebbeim -- same reason as asks/pledge_payment_plans/
+  // donor_relationship_facts/donor_source_attributions above: tables
+  // added after this route was written. Deliberately not added to
+  // WORKSPACE_BACKUP_TABLES in this phase. Covered today only by the
+  // nightly whole-database R2 backup.
+  "rebbeim",
+  "donor_rebbeim",
 ] as const;
 
 export type WorkspaceBackupCoverage = {

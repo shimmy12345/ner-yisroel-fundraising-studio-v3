@@ -1273,3 +1273,36 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .fib-teaser-row-open { flex-basis:100%; }
   .fib-card { padding:13px 14px; }
 }
+
+.rebbeim-management { display:grid; gap:10px; margin-top:14px; }
+.rebbeim-empty { color:#7a8580; font-size:13px; }
+.rebbeim-chips { display:flex; flex-wrap:wrap; gap:8px; }
+.rebbeim-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 8px 6px 12px; border:1px solid #d8dfda; border-radius:999px; background:#f2f7f4; color:#315f4b; font-size:13px; font-weight:650; }
+.rebbeim-chip button { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border:0; border-radius:50%; background:transparent; color:#7a8580; font-size:14px; line-height:1; cursor:pointer; }
+.rebbeim-chip button:hover { background:#e1ebe5; color:#a1533a; }
+.add-rebbi-button { align-self:flex-start; }
+.rebbeim-add { display:grid; gap:8px; padding:12px; border:1px solid #d8dfda; border-radius:9px; background:#fafcfb; }
+.rebbeim-add input { padding:8px 10px; border:1px solid #d8dfda; border-radius:7px; font:inherit; font-size:13px; }
+.rebbeim-add-results { display:flex; flex-wrap:wrap; gap:6px; max-height:180px; overflow-y:auto; }
+.rebbeim-add-results button { padding:7px 11px; border:1px solid #b7c9bd; border-radius:7px; background:#fff; color:#315f4b; font-size:12.5px; font-weight:650; cursor:pointer; }
+.rebbeim-add-results button:hover:not(:disabled) { background:#f2f7f4; border-color:#8fa89a; }
+.rebbeim-add-results button:disabled { opacity:.5; cursor:not-allowed; }
+.rebbeim-add-empty { color:#9aa19e; font-size:12.5px; }
+.rebbeim-add-cancel { justify-self:start; border:0; background:transparent; color:#7a8580; font-size:12.5px; text-decoration:underline; cursor:pointer; padding:0; }
+
+.rebbeim-directory-list { display:grid; gap:8px; margin-top:16px; }
+.rebbeim-directory-row { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border:1px solid #e3e8e5; border-radius:9px; background:#fff; text-decoration:none; color:inherit; }
+.rebbeim-directory-row:hover { border-color:#8fa89a; background:#fafcfb; }
+.rebbeim-directory-name { font-weight:650; color:#1f2a24; }
+.rebbeim-directory-count { color:#7a8580; font-size:13px; }
+.rebbeim-donor-list { display:grid; gap:0; margin-top:16px; border:1px solid #e3e8e5; border-radius:9px; overflow:hidden; background:#fff; }
+.rebbeim-donor-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid #f0f2f1; text-decoration:none; color:inherit; }
+.rebbeim-donor-row:last-child { border-bottom:0; }
+.rebbeim-donor-row:hover { background:#fafcfb; }
+.rebbeim-donor-name { font-weight:650; color:#1f2a24; }
+.rebbeim-donor-meta { color:#7a8580; font-size:12.5px; }
+.rebbeim-empty-state { color:#7a8580; font-size:13px; padding:16px; }
+.rebbeim-import-rows { display:grid; gap:8px; margin:12px 0; }
+.rebbeim-import-row { padding:10px 12px; border:1px solid #e3e8e5; border-radius:8px; background:#fafcfb; }
+.rebbeim-import-row p { margin:0 0 4px; font-size:13px; }
+.rebbeim-import-row p:last-child { margin-bottom:0; }

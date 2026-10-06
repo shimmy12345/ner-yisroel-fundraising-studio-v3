@@ -390,6 +390,53 @@ export const donorSourceAttributions = sqliteTable("donor_source_attributions", 
   index("donor_source_attributions_donor_idx").on(table.suggestedDonorId),
 ]);
 
+// Donor Rebbeim -- lightweight relationship intelligence recording which
+// Rebbeim a donor is meaningfully connected to (see docs/AI-HANDOFF.md's
+// "Donor Rebbeim" entry). A canonical directory, never free text on the
+// donor row: "Harav Berkowitz" must be one record reused across every
+// donor connected to him, not a string repeated and inconsistently
+// spelled per donor. normalizedName strips common honorific prefixes
+// (Harav/Rav/Rabbi/HaRav) and collapses whitespace/case purely for exact-
+// duplicate prevention (lib/relationships/rebbeim.ts's
+// normalizeRebbiName) -- it is NOT a fuzzy-match field; two genuinely
+// different Rebbeim are never forced to collide here.
+export const rebbeim = sqliteTable("rebbeim", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  displayName: text("display_name").notNull(),
+  normalizedName: text("normalized_name").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("rebbeim_normalized_name_idx").on(table.userId, table.normalizedName),
+]);
+
+// The donor <-> Rebbi relationship itself -- binary (exists or does not),
+// deliberately no strength/status/notes/current-vs-former lifecycle (see
+// the Donor Rebbeim design in docs/AI-HANDOFF.md for why this stays
+// intentionally minimal). Composite primary key, same shape as
+// donorViews/relationshipQueueDismissals above -- a relationship has no
+// identity of its own beyond the (donor, Rebbi) pair, so no separate `id`
+// column. Removing a row only ever removes THIS relationship; the
+// canonical `rebbeim` row is never touched by a removal.
+export const donorRebbeim = sqliteTable("donor_rebbeim", {
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  rebbiId: text("rebbi_id").notNull().references(() => rebbeim.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  // Provenance only, never surfaced as a status to manage -- distinguishes
+  // a fundraiser's own manual add from a row created by the bulk
+  // donor-code/Rebbeim import, for audit purposes only.
+  source: text("source", { enum: ["manual", "bulk_import"] }).notNull().default("manual"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.donorId, table.rebbiId] }),
+  // The one additional access pattern beyond the primary key's own
+  // donor-leading lookup: "every donor connected to this Rebbi" (the
+  // Rebbeim query page) -- same single-evidence-based-index discipline as
+  // asks_donor_status_idx/pledge_payment_plans_pledge_idx above.
+  index("donor_rebbeim_rebbi_idx").on(table.rebbiId),
+]);
+
 export const donationImportRollbackAudits = sqliteTable("donation_import_rollback_audits", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),

@@ -22719,3 +22719,248 @@ No live D1 data was mutated this round. No backup/restore semantics
 changed. `feature/independent-cloudflare-sandbox` was not merged into
 `main`. The Giving Import Third-Party Source Attribution feature was not
 touched.
+
+---
+
+2026-10-06T00:00:00Z (approximate)
+Claude (Sonnet 5) — New feature: Donor Rebbeim.
+
+**Product boundary, as scoped.** For each donor, record zero, one, or
+many Rebbeim the donor is meaningfully connected to. Deliberately binary
+(a relationship either exists or it does not) -- no strength score, no
+primary/secondary hierarchy, no current/former lifecycle, no notes/status
+per relationship, no employer/company CRM. Canonical directory, never
+free text on the donor row.
+
+**Schema (migration `drizzle/0037_donor_rebbeim.sql`, applied to
+Independent Staging; `db/schema.ts` updated).**
+- `rebbeim`: `id, user_id, display_name, normalized_name, created_at,
+  updated_at`, unique on `(user_id, normalized_name)`. The canonical
+  directory.
+- `donor_rebbeim`: `donor_id, rebbi_id, user_id, source
+  ('manual'|'bulk_import'), created_at`, composite PRIMARY KEY
+  `(donor_id, rebbi_id)` (no separate `id`, matching `donor_views`'
+  existing shape) -- the SQLite PK itself rejects a raw duplicate pair;
+  every write path additionally uses a guarded `INSERT ... WHERE NOT
+  EXISTS` so a duplicate add is a safe no-op, never an error. One index,
+  `donor_rebbeim_rebbi_idx` on `rebbi_id`, for the "all donors connected
+  to this Rebbi" access pattern (the `donor_id`-leading PK already covers
+  "this donor's Rebbeim"). Removing a relationship only ever deletes the
+  one `donor_rebbeim` row -- the canonical `rebbeim` row is never
+  touched, and a donor's own soft-archive (`archived_at`) needs no special
+  handling here, matching every other per-donor relationship table in
+  this schema (asks, yahrtzeits, etc. -- nothing cascades on archive).
+
+**Canonical name handling
+(`lib/relationships/rebbeim.ts`).** `normalizeRebbiName` strips a small,
+known set of honorific prefixes (Harav/Horav/Ha-rav/Rabbi/Rav/Reb) plus
+case/whitespace, purely for exact-duplicate prevention -- "Harav
+Berkowitz"/"Rav Berkowitz"/"Rabbi Berkowitz" all normalize to the same
+value. Verified all 41 seeded names remain pairwise distinct after
+normalization, including the six Neuberger, two Tendler, and two Mintz
+Rebbeim who share a surname but are different people.
+`likelyRebbiMatches` is a deliberately simple, explainable "same surname"
+heuristic (no fuzzy/Levenshtein matcher exists safely reusable in this
+codebase -- `lib/donors/merge-preview.ts` is donor-specific) used ONLY to
+annotate an unrecognized bulk-import name for human review (e.g. "Harav
+Tzvi Berkowitz" surfaces "Harav Berkowitz" as a suggestion) -- it never
+auto-applies, and when multiple canonical Rebbeim share a surname (the
+six Neubergers), every one of them is surfaced, never collapsed to a
+guess.
+
+**Initial canonical directory.** Seeded via
+`scripts/seed-rebbeim-directory.mjs` (dry-run by default, `--apply` to
+write) -- the user's own exact 41-name approved list, verbatim, never
+"corrected." Idempotent (`planRebbeimSeed`, pure, unit-tested): reports
+existing vs. to-insert, never deletes or recreates, reports any existing
+row outside its own list without touching it. Applied to Independent
+Staging: all 41 inserted on first run; re-run confirmed 0 to insert, 41
+already present.
+
+**Donor page UX
+(`app/donors/[id]/RebbeimManagement.tsx`).** A compact "REBBEIM" section
+(gated to live mode only, matching the existing Important Dates section's
+own convention), rendered as removable chips with a restrained empty
+state. "+ Add Rebbi" opens a search box filtering the canonical
+directory client-side (no server round-trip per keystroke) -- selecting
+an entry POSTs to `/api/donors/[id]/rebbeim` (looks up the existing
+canonical id, never accepts or creates from free text; guarded
+`INSERT ... WHERE NOT EXISTS`). V1 deliberately has **no "create new
+Rebbi" UI** here -- per the task's own "prefer the simpler safe
+implementation" guidance, manual add is restricted to the seeded
+directory; a future canonical name is added by re-running the seed
+script with an updated list (or a direct, reviewed insert), never
+invented inline by a fundraiser's typo. Remove calls `DELETE
+/api/donors/[id]/rebbeim/[rebbiId]`, confirmed via `window.confirm` --
+the same confirmation pattern this app's own `ImportantDatesManagement.
+tsx` already uses for its own deletes (not a new pattern).
+
+**Rebbeim query UX.** `/rebbeim`: the full canonical directory with a
+live donor count per Rebbi (one `LEFT JOIN` + `GROUP BY`, no N+1), linking
+to `/rebbeim/[id]`: that Rebbi's connected, live, unarchived donors
+(name, donor code, city/state), with a "Download CSV" link
+(`/api/rebbeim/[id]/export`, donor code/name/Rebbi columns) shown only
+when at least one donor is connected. A "Rebbeim" link was added to the
+donor directory's own action bar.
+
+**Bulk donor-code/Rebbeim assignment import.** CSV only, reusing the
+already-existing shared `lib/import/file-parsers.ts` (`parseCsv`/
+`decodeCsv`/`rowsToRecords` -- the same parser the main JL CSV path
+already uses, not a new one). Both requested formats accepted in one
+code path (`flattenRebbeimImportRows`): a `Rebbeim` column
+(semicolon-separated) or a `Rebbi` column (one name per row, repeated
+donor codes) -- flattened into one `{donorCodeRaw, rebbiNameRaw}` pair
+per requested Rebbi, deduplicating an exact-duplicate Rebbi within one
+donor code (or an exact-duplicate row across the file) before
+classification ever sees it. Donor identity is EXACT donor code only
+(via the existing `numericDonorCode` helper, same as the DOB/yahrtzeit
+importers) -- never name/address matching.
+
+Per-row classification
+(`classifyRebbeimRow`/`buildRebbeimImportPreview`), mirroring
+`lib/import/dob-pipeline.ts`'s pure-classification-function pattern
+exactly:
+- known donor + known Rebbi, no existing relationship -> `ready_to_add`
+- known donor + known Rebbi, relationship already exists ->
+  `already_exists` (safe no-op, never re-added)
+- unknown donor code -> `unmatched_donor` (blocked; never guessed by
+  name)
+- donor code matches more than one live donor -> `ambiguous_donor`
+  (blocked; resolve the duplicate code first)
+- unrecognized Rebbi name -> `unrecognized_rebbi` (blocked; NEVER
+  auto-created; annotated with `likelyRebbiMatches` candidates when
+  applicable)
+- blank Rebbeim/Rebbi field -> no preview row at all (a true no-op, not
+  an error)
+
+**Preview (`/api/import/rebbeim/preview`) and commit
+(`/api/import/rebbeim/commit`) share the exact same classification
+function** (`buildRebbeimImportPreview`), never two parallel validators
+-- directly addressing the prior giving-import incident's own lesson
+(see this file's "D1 Monthly Restore Verification Repair" entries'
+sibling concern about validator drift, and the Giving Import Third-Party
+Source Attribution entry's own canonical-validator discipline). The
+commit route independently RE-fetches donors/canonical Rebbeim/existing
+pairs and RE-classifies every row server-side -- the client's own preview
+is never trusted as the basis for a write (same discipline as
+`app/api/import/dob/commit/route.ts`). Every write is a guarded
+`INSERT ... WHERE NOT EXISTS`, keyed on the real `(donor_id, rebbi_id)`
+pair, so: a duplicate row within one submitted file collapses to one
+guarded insert (explicit in-batch dedup, defense in depth beyond the
+guard itself); and re-submitting an already-committed file is fully
+idempotent -- every previously-added row re-classifies as
+`already_exists` and is never re-inserted. No partial-write risk beyond
+what `env.DB.batch()` already provides elsewhere in this codebase (same
+atomicity guarantee as every other bulk-import commit route here).
+
+**No donor was actually assigned to any Rebbi this round, beyond the
+canonical directory seed itself** -- per the task's explicit "do not
+invent or infer any donor-to-Rebbi relationship" instruction. The real
+donor-code/Rebbeim assignment spreadsheet will be provided separately
+after this feature is reviewed.
+
+**Tests.** `tests/rebbeim-directory.test.mjs` -- exactly 41 canonical
+names, all pairwise distinct after normalization (including the six
+Neuberger Rebbeim), `normalizeRebbiName` prefix-stripping behavior,
+`likelyRebbiMatches`/`findCanonicalRebbi` (including the "six Neubergers
+surfaced together, never collapsed" case), and `planRebbeimSeed`
+idempotency (empty DB -> 41 to insert; fully-seeded DB -> 0 to insert;
+40-of-41 -> exactly the missing one; an unrelated existing row is
+reported as "extra," never reduces the insert count).
+`tests/rebbeim-import.test.mjs` -- every classification status above,
+flattening (semicolon-split, both column formats, in-row and
+cross-row exact-duplicate dedup, blank no-op), the required summary
+counts, and an explicit preview-then-re-preview-after-commit check
+proving re-import idempotency.
+`tests/rebbeim-relationships.test.mjs` -- against a REAL, fresh
+in-memory SQLite database built from this branch's own current schema
+(`generateBaseline()`, the same mechanism `tests/production-baseline.
+test.mjs` uses, not a mock): zero/one/multiple Rebbeim per donor, the
+real composite PRIMARY KEY rejecting a raw duplicate insert, the app's
+own guarded insert being a true no-op on a duplicate, removal keeping the
+canonical Rebbi record, and the query pattern (a donor with multiple
+Rebbeim appears under each; unrelated donors never appear under a Rebbi
+they aren't connected to). Route-level ownership/no-free-text-creation
+concerns verified by reading the real, committed route source, matching
+this codebase's own established convention for routes with no D1/env
+test harness (see `tests/asks.test.mjs`'s own header comment).
+`tests/today.test.mjs` and `tests/relationship-snapshot-stage3.test.mjs`
+updated: the donor page's pinned `env.DB.prepare(...)` count moved from
+24 to 26 (two new queries -- this donor's Rebbeim and the canonical
+directory, run together in one `Promise.all`, timed via a direct
+`marks.rebbeimMs` assignment) -- both historical pins' own underlying
+claims ("Stage 3 added zero queries," "every render phase is
+instrumented") remain true; only the absolute baseline moved, with an
+updated comment explaining why.
+
+**Restore/schema drift guard result (per this task's explicit
+requirement).** Ran `node scripts/check-main-restore-sync.mjs`: **FAIL**
+-- `main` is out of sync, reporting exactly `rebbeim`/`donor_rebbeim`
+missing from `main`'s restore order, migration
+`0037_donor_rebbeim.sql` missing from `main`'s manifest, the two new
+tables'/indexes' schema differences, and the corresponding FK-ordering
+violations -- precisely the generic drift class the guard (added in the
+prior round) exists to catch, firing correctly for the very first
+migration after it was built. **A narrow `main` sync IS required**
+before `main`'s monthly restore-verification workflow would successfully
+restore a backup containing this migration. Per this task's explicit
+instruction, `main` was NOT touched -- this requires the same
+explicit-owner-review-then-authorization step every prior `main` change
+in this repository's D1 restore history has required.
+
+**Gates.** `pnpm test`: all green except the same single pre-existing,
+unrelated `backup-watchdog-scheduled.test.mjs` failure this session has
+found on every round; `pnpm exec tsc --noEmit`: clean; `pnpm run
+build:staging-independent`: succeeds, including the three new routes
+(`/rebbeim`, `/rebbeim/[id]`, `/onboarding/import/rebbeim`).
+
+**Deployed to Independent Staging** (Worker version
+`14071deb-68ee-4e2a-b9fa-88479d5fec86`; an earlier version,
+`4d5cf822-01fc-4112-83a0-d6dd34b051de`, was superseded within the same
+round by a one-line copy fix -- "41 Rebbeim" had briefly read "41
+Rebbim" due to a naive pluralization suffix).
+
+**Live verification (real browser session, Independent Staging).**
+`/rebbeim` showed exactly 41 canonical names, alphabetically listed, no
+duplicates. `/rebbeim/<id>` (Harav Berkowitz) rendered the correct empty
+state with 0 donors connected. The donor page's Rebbeim section rendered
+correctly with "No Rebbeim recorded for this donor yet." on a real donor
+(Eitan Pfeiffer, id `a28d46dc-0dd5-4222-be2e-fd4ebae8199b`). **Manual
+add/remove was verified end-to-end against this same real donor,
+fully reversed afterward with zero net change**: "+ Add Rebbi" ->
+searched "Frand" -> selected "Harav Frand" -> confirmed the chip
+appeared -> removed it -> confirmed the donor page again reads "No
+Rebbeim recorded for this donor yet." and `/rebbeim/<frand-id>` again
+reads "No donors are currently connected to Harav Frand." Bulk-import
+preview was exercised with a synthetic 4-row test CSV (two ready-to-add
+rows for a real donor, one unknown donor code, one unrecognized Rebbi
+name) via the real `/onboarding/import/rebbeim` page -- the preview
+counts and per-row messages matched exactly ("2 ready to add, 0 already
+connected, 1 unknown donor code, 0 duplicate donor code, 1 unrecognized
+Rebbi"); the commit button ("Add 2 relationships") was never clicked.
+
+**Incident during live verification, disclosed.** The Remove button's
+`window.confirm()` dialog (an existing pattern, not new to this feature
+-- see above) blocked that browser tab to all further CDP commands, the
+documented hazard for browser automation interacting with native
+dialogs. Recovery: opened a second tab on the same authenticated session,
+looked up the Rebbi id via the already-existing read-only `/api/rebbeim`
+endpoint, and called the existing `DELETE /api/donors/[id]/rebbeim/
+[rebbiId]` endpoint directly to complete the removal -- using only
+endpoints this feature itself already exposes, no new or hidden
+mechanism. Verified the net result independently afterward (both the
+donor page and the Rebbi's own donor-list page). The blocked tab was then
+closed (which dismisses a pending native dialog). No other tab,
+dialog, or data was affected.
+
+**Real donor relationship mutations: NONE remain.** The only
+donor_rebbeim row ever written during this entire round was the
+temporary Pfeiffer/Frand test pair described above, and it was deleted
+in the same round, confirmed. The canonical `rebbeim` directory (41
+rows) is the only data this round left in Independent Staging.
+
+**Scope discipline.** No relationship-strength/scoring, no
+primary/secondary hierarchy, no current/former lifecycle, no
+Assistant/Fundraising Intelligence integration, no mass emailing, no
+generic tagging system, and no employer/company CRM were added. No real
+donor was assigned to any Rebbi. `main` was not pushed to.

@@ -803,6 +803,10 @@ export function ImportExperience({ refreshOverview, initialReviewMode }: { refre
               <div><p className="eyebrow">ALSO AVAILABLE</p><h2>Date of birth spreadsheet</h2><p>Bring donors' own birthdays in from a spreadsheet, matched by donor Code only. Never touches gifts, pledges, interactions, or Last Contact.</p></div>
               <a className="onboarding-primary" href="/onboarding/import/dob">Open date of birth import →</a>
             </section>
+            <section className="import-other-sources" aria-label="Other import sources">
+              <div><p className="eyebrow">ALSO AVAILABLE</p><h2>Donor Rebbeim</h2><p>Connect donors to existing Rebbeim in the canonical directory, matched by donor Code only. An unrecognized Rebbi name is never created automatically.</p></div>
+              <a className="onboarding-primary" href="/onboarding/import/rebbeim">Open Rebbeim import →</a>
+            </section>
             <section className="jl-refresh-overview" aria-label="JL refresh status">
               <div><p className="eyebrow">NEXT REFRESH</p><h2>Use the most recent export you have.</h2><p>Fundraising OS checks overlapping rows, keeps your relationship history, and shows every proposed change before writing.</p></div>
               <dl><div><dt>Households last refreshed</dt><dd>{dateLabel(refreshOverview.lastHouseholdRefreshAt)}</dd></div><div><dt>Donations last refreshed</dt><dd>{dateLabel(refreshOverview.lastDonationRefreshAt)}</dd></div><div><dt>Suggested donation export</dt><dd>{suggestedDonationExportLabel(refreshOverview)}</dd></div></dl>

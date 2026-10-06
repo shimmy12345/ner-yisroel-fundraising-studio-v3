@@ -82,6 +82,13 @@ export const STAGING_RESET_TABLE_ORDER = [
   // References `donors` (suggested_donor_id) and `users`; nothing else
   // references it, so it only needs to precede `donors` below.
   "donor_source_attributions",
+  // Donor Rebbeim -- donor_rebbeim references both `donors` and
+  // `rebbeim` (and `users`), so it is deleted before both; `rebbeim`
+  // itself references only `users`, so it only needs to precede
+  // `donors` (no dependency on it) -- deleted here, right after its own
+  // join table, for locality rather than necessity.
+  "donor_rebbeim",
+  "rebbeim",
   // Parents — deleted last, once everything referencing them is gone.
   // `donors` self-references itself (merged_into_donor_id), which is safe
   // once nothing else in this list still points at any donor row.

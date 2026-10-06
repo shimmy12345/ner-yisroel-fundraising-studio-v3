@@ -162,7 +162,7 @@ for (const phase of ["giving", "gifts", "interactions", "reminders", "paymentEve
 // invented mechanism.
 assert.match(donorPage, /headers\(\)\)\.get\("cf-ray"\)/, "the donor page must read cf-ray via next/headers, matching the app's existing header-access pattern");
 // Instrumentation must only wrap already-issued promises, never add a new
-// D1 statement of its own -- 24 env.DB.prepare(...) call sites: the
+// D1 statement of its own -- 26 env.DB.prepare(...) call sites: the
 // original 21 (verified directly via the same regex on origin/feature/
 // independent-cloudflare-sandbox before this task, not assumed) plus one
 // legitimate new query added by the Ask feature (asks by donor, timed via
@@ -173,9 +173,14 @@ assert.match(donorPage, /headers\(\)\)\.get\("cf-ray"\)/, "the donor page must r
 // Relationship Snapshot Architecture Stage 2 (this donor's current
 // donor_relationship_facts rows, timed via timedAll(marks,
 // "relationshipFacts", ...), feeding fact-level recommendation
-// actionability -- see docs/AI-HANDOFF.md) -- all real, intentional
-// additions, not an instrumentation leak.
-assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 24, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query, the one new payment-plans query, and the one new relationship-facts query");
+// actionability -- see docs/AI-HANDOFF.md) plus two more legitimate new
+// queries added by Donor Rebbeim (this donor's connected Rebbeim, and the
+// canonical Rebbeim directory for the "Add Rebbi" search, run together in
+// one Promise.all and timed as a single phase via a direct
+// marks.rebbeimMs/marks.rebbeimRows assignment -- see docs/AI-HANDOFF.md's
+// "Donor Rebbeim" entry) -- all real, intentional additions, not an
+// instrumentation leak.
+assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 26, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query, the one new payment-plans query, the one new relationship-facts query, and the two new Donor Rebbeim queries");
 
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);

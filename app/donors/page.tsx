@@ -25,7 +25,7 @@ export default async function DonorsPage({ searchParams }: { searchParams: Promi
 
   return <AppShell active="donors"><main className="donor-directory">
     <DonorDirectoryPosition returnPath={returnPath} />
-    <header className="directory-heading"><div><p className="eyebrow">RELATIONSHIPS · {mode === "demo" ? "DEMO MODE" : "LIVE WORKSPACE"}</p><h1>Your donor households</h1><p>{result.results.length} relationship{result.results.length === 1 ? "" : "s"} in your workspace</p></div><nav className="directory-actions" aria-label="Donor actions">{mode === "live" && <a href="/donors/new">New Donor</a>}<a href="/onboarding/import">Import or refresh data</a></nav></header>
+    <header className="directory-heading"><div><p className="eyebrow">RELATIONSHIPS · {mode === "demo" ? "DEMO MODE" : "LIVE WORKSPACE"}</p><h1>Your donor households</h1><p>{result.results.length} relationship{result.results.length === 1 ? "" : "s"} in your workspace</p></div><nav className="directory-actions" aria-label="Donor actions">{mode === "live" && <a href="/donors/new">New Donor</a>}<a href="/rebbeim">Rebbeim</a><a href="/onboarding/import">Import or refresh data</a></nav></header>
     <DonorDirectoryExperience relationships={result.results} initialQuery={query} initialReturnPath={returnPath} />
   </main></AppShell>;
 }

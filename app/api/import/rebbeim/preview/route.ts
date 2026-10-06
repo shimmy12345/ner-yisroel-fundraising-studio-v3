@@ -1,0 +1,47 @@
+import { env } from "cloudflare:workers";
+import { getChatGPTUser } from "../../../../chatgpt-auth";
+import { ensureUserProfile } from "../../../../../lib/auth/profile";
+import { numericDonorCode } from "../../../../../lib/relationships/donor-identity";
+import { buildRebbeimImportPreview, summarizeRebbeimImportPreview, type RebbeimImportDonorLookup, type RebbiRecord } from "../../../../../lib/relationships/rebbeim.ts";
+import type { ImportRow } from "../../../../../lib/import/recognition.ts";
+
+type DonorRow = { id: string; display_name: string; donor_code: string | null; external_id: string | null };
+type RebbiRow = { id: string; display_name: string; normalized_name: string };
+type ExistingPairRow = { donor_id: string; rebbi_id: string };
+type Body = { rows?: ImportRow[] };
+
+// Read-only preview for the donor-code/Rebbeim bulk assignment import
+// (see docs/AI-HANDOFF.md's "Donor Rebbeim" entry). Nothing is written
+// here -- the exact same classification logic the commit route
+// independently re-runs, so a row that previews as ready_to_add is
+// guaranteed to commit the same way (never a separate, drifting
+// validator).
+export async function POST(request: Request) {
+  const identity = await getChatGPTUser();
+  if (!identity) return Response.json({ error: "Authentication required" }, { status: 401 });
+  const profile = await ensureUserProfile(identity);
+
+  const body = await request.json().catch(() => null) as Body | null;
+  if (!body?.rows || !Array.isArray(body.rows) || body.rows.length === 0) {
+    return Response.json({ error: "No rows were found in this file." }, { status: 422 });
+  }
+
+  const [donorRows, canonicalRows, existingPairRows] = await Promise.all([
+    env.DB.prepare("SELECT id, display_name, donor_code, external_id FROM donors WHERE owner_user_id=? AND data_source='live' AND archived_at IS NULL").bind(profile.id).all<DonorRow>(),
+    env.DB.prepare("SELECT id, display_name, normalized_name FROM rebbeim WHERE user_id=?").bind(profile.id).all<RebbiRow>(),
+    env.DB.prepare("SELECT donor_id, rebbi_id FROM donor_rebbeim WHERE user_id=?").bind(profile.id).all<ExistingPairRow>(),
+  ]);
+
+  const donorLookup: RebbeimImportDonorLookup = new Map();
+  for (const row of donorRows.results) {
+    const code = numericDonorCode({ donorCode: row.donor_code, externalId: row.external_id });
+    if (!code) continue;
+    if (!donorLookup.has(code)) donorLookup.set(code, []);
+    donorLookup.get(code)!.push({ donorId: row.id, donorName: row.display_name });
+  }
+  const canonical: RebbiRecord[] = canonicalRows.results.map((row) => ({ id: row.id, displayName: row.display_name, normalizedName: row.normalized_name }));
+  const existingPairs = new Set(existingPairRows.results.map((row) => `${row.donor_id}\u001f${row.rebbi_id}`));
+
+  const preview = buildRebbeimImportPreview(body.rows, donorLookup, canonical, existingPairs);
+  return Response.json({ rows: preview, summary: summarizeRebbeimImportPreview(preview), totalRows: preview.length });
+}

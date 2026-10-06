@@ -169,16 +169,21 @@ async function run() {
   // --- 12: no N+1 / new query introduced -- exact D1 prepared-statement
   // counts for every affected surface, pinned so a future regression
   // (or this round's own change) cannot silently add a query. Donor
-  // page (24) and live-data.ts (19) are unchanged from Stage 2's own
-  // pinned counts (see tests/today.test.mjs, tests/workspace-brief-
-  // instrumentation.test.mjs); meeting-brief.ts and the Assistant route
-  // are newly pinned here. ---
+  // page (24 at Stage 3 time) and live-data.ts (19) were unchanged from
+  // Stage 2's own pinned counts (see tests/today.test.mjs, tests/
+  // workspace-brief-instrumentation.test.mjs); meeting-brief.ts and the
+  // Assistant route were newly pinned here. The donor-page count has
+  // since grown to 26 for a reason entirely unrelated to Stage 3: Donor
+  // Rebbeim added two new queries (this donor's connected Rebbeim plus
+  // the canonical directory, see tests/today.test.mjs's own updated
+  // comment) -- Stage 3's own "adds zero queries relative to Stage 2"
+  // claim is still true, this assertion's baseline simply moved with it. ---
   {
     const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
     const meetingBrief = await readFile(new URL("../lib/relationships/meeting-brief.ts", import.meta.url), "utf8");
     const assistantRoute = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
     const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
-    assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 24, "Stage 3 must add zero new queries to the donor page (still the Stage 2 count)");
+    assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 26, "Stage 3 must add zero new queries to the donor page beyond what Donor Rebbeim separately added (26 = Stage 2's 24 + Donor Rebbeim's 2)");
     assert.equal((meetingBrief.match(/env\.DB\.prepare\(/g) ?? []).length, 15, "Stage 3 must add zero new queries to meeting-brief.ts -- the resolver reuses the already-fetched relationshipFactRows/openAskRows");
     assert.equal((assistantRoute.match(/env\.DB\.prepare\(/g) ?? []).length, 4, "Stage 3 must add zero new queries to the Assistant route -- it reuses Meeting Brief's already-resolved Snapshot instead of a second lookup");
     assert.equal((liveData.match(/env\.DB\.prepare\(/g) ?? []).length, 19, "live-data.ts must be completely untouched by Stage 3");
