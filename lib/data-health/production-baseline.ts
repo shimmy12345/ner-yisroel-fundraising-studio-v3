@@ -9,29 +9,23 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 37 as of 0036_donor_source_attributions.sql (D1 Monthly Restore
-// Verification Repair, 2026-10-01 -- schema-manifest.json copied verbatim
-// from feature/independent-cloudflare-sandbox's own current, verified
-// manifest, the same kind of sync commit 62628b3 already performed for
-// migration 0035 and commit 4ea1d5e performed for migration 0029; see
-// docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair" entry).
-// Adds donor_source_attributions (Giving Import Third-Party Source
-// Attribution) -- a new table, not a rebuild of anything existing -- plus
-// two nullable columns on the existing jl_payment_assignment_audits table
-// -- so PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
-// stays "0019": that label identifies the single bootstrap file's origin,
-// not its current contents). This also corrects the prior hardcoded count
-// of 36, which had drifted one migration behind the real current schema on
-// fundraising-os-staging-db (the database this branch's own GitHub Actions
-// workflows back up and restore-test) the moment migration 0036 landed on
-// feature/independent-cloudflare-sandbox without this separate assertion,
-// STAGING_RESET_TABLE_ORDER, or this file's own manifest being synced to
-// match -- PRODUCTION_BASELINE_VERIFIED was therefore already silently
-// false, and GitHub Actions run 36887668901 (scheduled on this branch,
-// 2026-10-01) failed in planD1Restore with "INSERT statements for
-// table(s) not present in the dependency order: donor_source_attributions"
-// before this file was ever consulted.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 37;
+// 38 as of 0037_donor_rebbeim.sql (Donor Rebbeim feature,
+// feature/independent-cloudflare-sandbox commit 1339521, synced to this
+// branch 2026-10-06 -- schema-manifest.json copied verbatim from that
+// branch's own current, verified manifest, the same sync mechanism as
+// commits 4ea1d5e/62628b3/ad80cf6; see docs/AI-HANDOFF.md's "D1 Monthly
+// Restore Verification Repair" entries). Adds rebbeim/donor_rebbeim (two
+// new tables, not a rebuild of anything existing, no columns changed on
+// any existing table) so PRODUCTION_BASELINE_HASH changed again
+// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
+// single bootstrap file's origin, not its current contents). This also
+// corrects the prior hardcoded count of 37, which would otherwise drift
+// one migration behind the real current schema on fundraising-os-
+// staging-db the moment this migration was applied there -- caught this
+// time by this repository's own new generic restore/schema drift guard
+// (feature/independent-cloudflare-sandbox's scripts/check-main-restore-
+// sync.mjs), not by a failed scheduled GitHub Actions run.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 38;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

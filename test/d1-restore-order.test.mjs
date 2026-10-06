@@ -114,6 +114,72 @@ test('planD1Restore accepts a real INSERT for donor_source_attributions and orde
   assert.ok(usersAt < attributionsAt && donorsAt < attributionsAt, 'users and donors must both precede donor_source_attributions in the reordered output');
 });
 
+// Donor Rebbeim (migration 0037 on feature/independent-cloudflare-
+// sandbox, ported here 2026-10-06) -- `rebbeim` (the canonical directory)
+// references only `users`. `donor_rebbeim` (the binary donor<->Rebbi
+// join) references `donors`, `rebbeim`, AND `users` -- all three real
+// foreign keys, confirmed directly from migration 0037's own CREATE
+// TABLE statements, not inferred from names. This is a direct, named
+// regression for the exact drift class the generic restore/schema drift
+// guard (scripts/check-main-restore-sync.mjs) was built to catch: this
+// branch's own restore tracking had never heard of these two tables
+// before this sync.
+test('rebbeim is present in D1_RESTORE_DATA_ORDER, positioned after "users" (its only real foreign key target)', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const rebbeimIndex = D1_RESTORE_DATA_ORDER.indexOf('rebbeim');
+  assert.ok(rebbeimIndex >= 0, 'rebbeim must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(usersIndex >= 0 && rebbeimIndex > usersIndex, 'rebbeim must be inserted after users (rebbeim.user_id references users.id)');
+});
+
+test('donor_rebbeim is present in D1_RESTORE_DATA_ORDER, positioned after "users", "donors", AND "rebbeim" (all three real foreign key targets)', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const donorsIndex = D1_RESTORE_DATA_ORDER.indexOf('donors');
+  const rebbeimIndex = D1_RESTORE_DATA_ORDER.indexOf('rebbeim');
+  const donorRebbeimIndex = D1_RESTORE_DATA_ORDER.indexOf('donor_rebbeim');
+  assert.ok(donorRebbeimIndex >= 0, 'donor_rebbeim must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(usersIndex >= 0 && donorRebbeimIndex > usersIndex, 'donor_rebbeim must be inserted after users (donor_rebbeim.user_id references users.id)');
+  assert.ok(donorsIndex >= 0 && donorRebbeimIndex > donorsIndex, 'donor_rebbeim must be inserted after donors (donor_rebbeim.donor_id references donors.id)');
+  assert.ok(rebbeimIndex >= 0 && donorRebbeimIndex > rebbeimIndex, 'donor_rebbeim must be inserted after rebbeim (donor_rebbeim.rebbi_id references rebbeim.id)');
+});
+
+test('planD1Restore accepts real INSERTs for rebbeim and donor_rebbeim, ordering donor_rebbeim after all three of its real foreign key targets', () => {
+  const exported = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE `rebbeim` (`id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL);',
+    'CREATE TABLE `donor_rebbeim` (`donor_id` text NOT NULL, `rebbi_id` text NOT NULL, `user_id` text NOT NULL, PRIMARY KEY(`donor_id`,`rebbi_id`));',
+    'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL);',
+    'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);',
+    // Deliberately exported in the "wrong" (pre-dependency-order) sequence,
+    // matching how `wrangler d1 export` actually orders real tables (by
+    // sqlite_master position, not by FK dependency) -- the same shape that
+    // caused the original donor_source_attributions failure.
+    'INSERT INTO "donor_rebbeim" ("donor_id","rebbi_id","user_id") VALUES(\'donor-1\',\'rebbi-1\',\'user-1\');',
+    'INSERT INTO "rebbeim" ("id","user_id") VALUES(\'rebbi-1\',\'user-1\');',
+    'INSERT INTO "donors" ("id","owner_user_id") VALUES(\'donor-1\',\'user-1\');',
+    'INSERT INTO "users" ("id") VALUES(\'user-1\');',
+  ].join('\n') + '\n';
+  // A: planD1Restore accepts an INSERT for rebbeim.
+  // B: planD1Restore accepts an INSERT for donor_rebbeim.
+  assert.doesNotThrow(() => planD1Restore(exported), 'planD1Restore must accept INSERTs for both rebbeim and donor_rebbeim, not reject either as an unrecognized table');
+  const plan = planD1Restore(exported);
+  const tableOrder = plan.steps.map((step) => step.table);
+  // C: rebbeim is restored after its real parent (users).
+  assert.ok(tableOrder.indexOf('users') < tableOrder.indexOf('rebbeim'), 'users must be restored before rebbeim');
+  // D: donor_rebbeim is restored after donors, rebbeim, AND users.
+  assert.ok(tableOrder.indexOf('donors') < tableOrder.indexOf('donor_rebbeim'), 'donors must be restored before donor_rebbeim');
+  assert.ok(tableOrder.indexOf('rebbeim') < tableOrder.indexOf('donor_rebbeim'), 'rebbeim must be restored before donor_rebbeim');
+  assert.ok(tableOrder.indexOf('users') < tableOrder.indexOf('donor_rebbeim'), 'users must be restored before donor_rebbeim');
+  // E: donor_rebbeim is not restored before either side of the relationship.
+  assert.ok(!(tableOrder.indexOf('donor_rebbeim') < tableOrder.indexOf('donors')) && !(tableOrder.indexOf('donor_rebbeim') < tableOrder.indexOf('rebbeim')), 'donor_rebbeim must never be restored before donors or rebbeim');
+  const reordered = reorderD1ExportForRestore(exported);
+  const usersAt = reordered.indexOf('INSERT INTO "users"');
+  const donorsAt = reordered.indexOf('INSERT INTO "donors"');
+  const rebbeimAt = reordered.indexOf('INSERT INTO "rebbeim"');
+  const donorRebbeimAt = reordered.indexOf('INSERT INTO "donor_rebbeim"');
+  assert.ok(usersAt < rebbeimAt, 'users must precede rebbeim in the reordered output');
+  assert.ok(usersAt < donorRebbeimAt && donorsAt < donorRebbeimAt && rebbeimAt < donorRebbeimAt, 'users, donors, and rebbeim must all precede donor_rebbeim in the reordered output');
+});
+
 // Bidirectional coverage, mirroring
 // feature/independent-cloudflare-sandbox's own tests/staging-reset.test.mjs
 // ("the reset table order covers every fundraising-data table and nothing

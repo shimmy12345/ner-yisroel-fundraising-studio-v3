@@ -85,6 +85,15 @@ export const STAGING_RESET_TABLE_ORDER = [
   // feature/independent-cloudflare-sandbox, ported here 2026-10-01 -- see
   // the D1 Monthly Restore Verification Repair entry in docs/AI-HANDOFF.md.
   "donor_source_attributions",
+  // Donor Rebbeim -- donor_rebbeim references both `donors` and
+  // `rebbeim` (and `users`), so it is deleted before both; `rebbeim`
+  // itself references only `users`, so it only needs to precede
+  // `donors` (no dependency on it) -- deleted here, right after its own
+  // join table, for locality rather than necessity. Added by migration
+  // 0037 on feature/independent-cloudflare-sandbox, ported here
+  // 2026-10-06 -- see docs/AI-HANDOFF.md.
+  "donor_rebbeim",
+  "rebbeim",
   // Parents — deleted last, once everything referencing them is gone.
   // `donors` self-references itself (merged_into_donor_id), which is safe
   // once nothing else in this list still points at any donor row.
