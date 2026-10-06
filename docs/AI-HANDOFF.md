@@ -22964,3 +22964,134 @@ primary/secondary hierarchy, no current/former lifecycle, no
 Assistant/Fundraising Intelligence integration, no mass emailing, no
 generic tagging system, and no employer/company CRM were added. No real
 donor was assigned to any Rebbi. `main` was not pushed to.
+
+---
+
+2026-10-06T00:00:00Z (approximate, same day, follow-up) — Narrow `main`
+restore/baseline sync for migration 0037 (Donor Rebbeim).
+
+**Drift re-proven fresh, not assumed.** Fetched fresh `origin/main`
+(unchanged, still `8d719cd`) and `origin/feature/independent-cloudflare-
+sandbox` (unchanged, still `1339521`). Ran `scripts/check-main-restore-
+sync.mjs`: confirmed the exact drift is `rebbeim`/`donor_rebbeim` missing
+from `main`'s restore order, migration `0037_donor_rebbeim.sql` missing
+from `main`'s manifest, the two tables' two indexes missing from the
+schema comparison, and the corresponding FK-ordering violations -- no
+other finding. A full programmatic table/column/index/migration diff
+between the canonical branch's current manifest (38 migrations, 51
+tables) and `main`'s pre-fix manifest (37 migrations, 49 tables)
+independently confirmed `donor_rebbeim`/`rebbeim` are the ONLY schema
+difference in either direction, and zero tables present on both sides
+have any differing SQL -- migration 0037 added no column to any existing
+table. **No other drift existed; the narrow sync proceeded as scoped.**
+
+**Real foreign keys, read directly from migration 0037's own CREATE
+TABLE statements (never inferred from names):** `rebbeim.user_id ->
+users.id` (its only FK); `donor_rebbeim.donor_id -> donors.id`,
+`donor_rebbeim.rebbi_id -> rebbeim.id`, `donor_rebbeim.user_id ->
+users.id` (all three real).
+
+**Narrow sync, branch `fix/d1-restore-sync-0037-rebbeim` (off `main` at
+`8d719cd`), commit `5e48837`.** Exactly 4 files, confirmed via `git diff
+--stat` before committing and independently via the GitHub API after
+pushing: `lib/operations/staging-reset.ts` (adds `donor_rebbeim` then
+`rebbeim` to `STAGING_RESET_TABLE_ORDER`, positioned immediately before
+the `donors`/`interactions` parent block -- confirmed via
+`D1_RESTORE_DATA_ORDER` indices: `users`@1 < `donors`@4 < `rebbeim`@9 <
+`donor_rebbeim`@10, satisfying all three of `donor_rebbeim`'s real
+parents and `rebbeim`'s one real parent), `lib/data-health/production-
+baseline.ts` (hardcoded migration-count assertion 37 -> 38, updated
+comment), `production-baseline/schema-manifest.json` (replaced verbatim
+from the canonical branch's current manifest -- the same generator-based
+sync mechanism as every prior round, no hand-editing), and `test/
+d1-restore-order.test.mjs` (named regressions, see below). No
+application UI, API route, or seed script was copied to `main`.
+
+**Regression tests added (main's `test/d1-restore-order.test.mjs`):**
+(A) `planD1Restore` accepts a real INSERT for `rebbeim`; (B) accepts one
+for `donor_rebbeim`; (C) `rebbeim` restored after `users`; (D)
+`donor_rebbeim` restored after `donors`, `rebbeim`, AND `users`; (E) an
+explicit assertion that `donor_rebbeim` is never ordered before either
+`donors` or `rebbeim`; (F) the file's existing generic, derived
+`D1_RESTORE_DATA_ORDER`/`FUNDRAISING_DATA_TABLES` coverage test and the
+bidirectional `STAGING_RESET_TABLE_ORDER` test both pass with migration
+0037 present -- no hardcoded behavior unrelated to the real FK shape.
+
+**Current data / backup safety (read-only, confirmed, unaltered).** Live
+Independent Staging: `rebbeim` = 41 rows, `donor_rebbeim` = 0 rows --
+exactly as expected, nothing changed.
+
+**Local/scratch restore verification (real data, real remote restore,
+zero live mutation).** Exported a fresh `wrangler d1 export --remote` of
+`fundraising-os-staging-db` (read-only); confirmed it contains exactly 41
+`rebbeim` INSERTs and 0 `donor_rebbeim` INSERTs, matching the live counts
+exactly. Ran the sync branch's own `planD1Restore` against this real
+export: accepted cleanly, `rebbeim` positioned at step 9 of 41 (after
+`users`@1 and `donors`@3). Restored the full export (minus the same
+unrelated, separately-tested oversized-`data_imports`-row family excluded
+in the prior round's restore verification, for the identical reason:
+that path needs a `CLOUDFLARE_API_TOKEN` this sandboxed session does not
+hold) into a throwaway scratch D1 database, created and deleted by this
+verification only: all restore steps succeeded, `PRAGMA quick_check` =
+`"ok"`, `PRAGMA foreign_key_check` = zero violations, restored schema
+matched the UPDATED `PRODUCTION_BASELINE_OBJECTS` exactly, and `rebbeim`
+restored with its real 41 rows. Because this real export's
+`donor_rebbeim` has zero rows, its DATA-restore acceptance path (A and D
+above) is proven instead by the synthetic fixture in the new regression
+tests, per this round's own explicit instruction -- its SCHEMA restored
+and verified correctly either way (part of `schemaSql`, confirmed via the
+passing schema comparison). Scratch database confirmed deleted via
+`wrangler d1 list` afterward; no orphan left.
+
+**Generic drift guard re-run against the real prepared/pushed state
+(the new operating rule's own central check).** Before pushing: `MAIN_REF=
+fix/d1-restore-sync-0037-rebbeim node scripts/check-main-restore-sync.mjs`
+-> **PASS**. After pushing: re-run with the default `MAIN_REF=origin/main`
+(freshly fetched) -> **PASS** -- "D1 restore/schema state on main is in
+sync with the canonical schema. No drift detected."
+
+**Monthly migration-sync preflight (`scripts/check-migration-sync.mjs`,
+landed on `main` last round) re-run against the updated `main`** -> **PASS**
+-- "main's migration count/list (38) is current with
+feature/independent-cloudflare-sandbox's drizzle/ directory (38)."
+
+**Gates.** `main`/sync branch: `npm test` 145/145 passing (including the
+new regressions), `npm run build` succeeds. `feature/independent-
+cloudflare-sandbox`: unaffected by this round (no files on this branch
+were touched); its own `pnpm test`/`tsc`/build status is unchanged from
+the prior round's entry.
+
+**Pushed to `main`, explicitly authorized by the repository owner for
+this specific, already-reviewed change.** Fast-forward merge
+(`8d719cd..5e48837`), pushed with no blocker. **Resulting `origin/main`
+SHA: `5e48837d7b1c4748cfae13b28d126000691aaf33`** -- confirmed
+independently via the GitHub API (`GET .../commits/main` and
+`GET .../commits/5e48837`'s own `files` list, both returning exactly the
+4 files above). A follow-up check found zero commit statuses and zero
+check-runs from any app on the new `main` HEAD -- no unrelated deploy
+fired.
+
+**Full GitHub Actions monthly restore run: not triggered, and not judged
+necessary.** The actual restore logic (`scripts/verify-remote-
+restore.mjs`) is completely unchanged by this sync, and this round's own
+local scratch restore already proved, end-to-end, against a real current
+export containing the new tables' real data, that the restore path
+works with the updated baseline (schema, data, both integrity checks,
+and the schema comparison). This session also still has no credential to
+trigger a GitHub Actions run regardless (unchanged from every prior
+round). If the repository owner wants the extra, independent confidence
+of seeing it proven inside the real Actions runner specifically, a
+`workflow_dispatch` of "D1 monthly restore verification" remains
+available at their discretion -- not treated as required to close this
+round.
+
+**No live D1 data was mutated.** Only read-only exports and a throwaway,
+fully-deleted scratch database were used for verification; `rebbeim`
+(41 rows) and `donor_rebbeim` (0 rows) on `fundraising-os-staging-db`
+are exactly as they were before this round.
+
+**Scope discipline.** No donor_rebbeim relationship was populated, no
+canonical Rebbi was altered, the Donor Rebbeim feature itself was not
+touched, `feature/independent-cloudflare-sandbox` was not merged into
+`main`, and the donor-code/Rebbeim bulk assignment import was not
+started.
