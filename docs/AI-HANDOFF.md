@@ -23293,3 +23293,88 @@ zero unrecognized Rebbeim, zero donor-name mismatches, zero duplicate-
 assignment problems, and zero unexpected existing relationships. **The
 import was NOT committed.** Explicit authorization is required before
 any real donor_rebbeim write occurs.
+
+---
+
+2026-10-07T00:00:00Z (approximate, follow-up) — **REAL IMPORT COMMITTED.
+138 donor_rebbeim relationships written to Independent Staging.**
+Explicitly authorized by the user following the SAFE TO COMMIT preview
+above, via a six-step gated process (preserve audit trail, reconfirm
+pre-import state, controlled import, post-commit verification,
+idempotency re-preview, documentation).
+
+**Step 1 — audit trail.** The preview-only documentation commit
+(`525429d`) had been created locally but failed to push to `origin/
+feature/independent-cloudflare-sandbox` six times with a GitHub-side
+`500 Internal Server Error` on the write path (reads worked fine; local
+repo verified healthy via `git fsck`/`git log`/`git status`). Verified
+`525429d` touched only `docs/AI-HANDOFF.md` (+103 lines, no application
+code or data changes) before retrying. The retry succeeded; `git fetch`
+confirmed `origin/feature/independent-cloudflare-sandbox` at `525429d`
+before proceeding.
+
+**Step 2 — reconfirm pre-import state.** Re-copied the exact same
+Desktop workbook (`\\nircserv\Data\Users\sgoldstein\Desktop\
+Rebbeim_Bulk_Upload_Template_FIXED_PRESERVED.xlsx`, byte-size 96906,
+unchanged since the original preview) and re-ran the full validation:
+254 rows, 0 blank/duplicate donor codes, 98 donors with assignment, 138
+raw pairs, 0 in-row duplicates, 27 unique Rebbi names all recognized (0
+unrecognized) against a fresh read of the 43 canonical rebbeim, and a
+fresh donor-code/name cross-check against all 254 live donors (98
+matched, 0 unmatched, 0 ambiguous, 0 name mismatches). Confirmed
+`donor_rebbeim` = 0 and `rebbeim` = 43 on Independent Staging
+immediately beforehand. Re-ran the real preview (CSV built from the
+workbook's two authoritative columns, driven through the actual
+`/onboarding/import/rebbeim` upload UI): 138 ready_to_add, 0
+already_exists, 0 unknown donor code, 0 duplicate donor code, 0
+unrecognized Rebbi -- every one of the 138 rendered rows individually
+read "Ready to add" (DOM-verified, not just the summary counters),
+including "Harav Sax" (donor 69459) and all three "Harav Yosef Kalman
+Neuberger" rows (donors 68849, 70656, 71008). All gate values matched
+the required thresholds exactly.
+
+**Step 3 — controlled real import.** With both gates passed, clicked
+the real "Add 138 relationships" commit button on the real `/onboarding/
+import/rebbeim` page. Result banner: "Import complete -- 138
+relationships added, 0 already connected (no-op)." No other action was
+taken; no canonical Rebbi, donor record, schema, or application code was
+touched.
+
+**Step 4 — post-commit verification (read-only D1 queries).**
+`donor_rebbeim` = 138 (0 -> 138). `COUNT(DISTINCT donor_id)` = 98
+distinct donors. `COUNT(DISTINCT donor_id, rebbi_id)` = 138 (equal to
+total rows -- no duplicate pairs); an explicit `GROUP BY donor_id,
+rebbi_id HAVING COUNT(*) > 1` query returned zero rows. `rebbeim`
+remained 43; `donors` remained 254 (0 mutations). "Harav Sax" has
+exactly one relationship, to donor code 69459. "Harav Yosef Kalman
+Neuberger" has exactly three relationships, to donor codes 68849,
+70656, and 71008 -- all confirmed by joining `donor_rebbeim` directly
+against `donors`/`rebbeim`. `Harav Yosef Neuberger` and `Harav Yosef
+Kalman Neuberger` remain two separate canonical rows with distinct ids
+and distinct `normalized_name` values. Spot-checked via the real donor
+pages: donor 988 (single-Rebbi case) shows exactly "Harav Cook"; donor
+1192 (multi-Rebbi case) shows exactly "Harav Beryl", "Harav Cook",
+"Harav Frand"; donor 68849 (four-Rebbi case) shows exactly "Harav
+Beryl", "Harav Boruch Neuberger", "Harav Sheftel Neuberger", "Harav
+Yosef Kalman Neuberger" -- each matching the workbook exactly. The real
+`/rebbeim` directory page confirmed "43 Rebbeim in the canonical
+directory" with per-Rebbi donor counts matching the workbook's own
+per-Rebbi tallies exactly (spot-checked: Harav Berkowitz 29, Harav Beryl
+6, Harav Boruch Neuberger 9).
+
+**Step 5 — idempotency / reimport safety.** Re-ran the identical
+workbook-derived CSV through the real preview a second time, without
+clicking commit. Result: 0 ready_to_add, 138 already_connected (no-op),
+0 unknown donor code, 0 duplicate donor code, 0 unrecognized Rebbi -- no
+errors. `donor_rebbeim` was re-checked immediately after this second
+preview and remained exactly 138, confirming the preview endpoint wrote
+nothing and that re-running the same file is safe and will never
+duplicate relationships.
+
+**Donor mutation count:** 0. **Schema/migration status:** no schema or
+migration changes of any kind were made or required -- this was a pure
+data-only import against the existing `donor_rebbeim` join table.
+
+**Scratch artifacts** (local workbook copy, analysis scripts, live-data
+JSON snapshots, generated CSV) all contained real donor PII and were
+deleted at the end of this round; none were ever staged or committed.
