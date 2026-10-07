@@ -23190,3 +23190,106 @@ logic were all read but not modified. `main` was not touched.
 **Next step:** a controlled preview of the completed donor/Rebbeim
 assignment workbook (not a commit) -- a separate, later, explicitly-
 reviewed task. This round stops before that.
+
+---
+
+2026-10-07T00:00:00Z (approximate, follow-up) — **PREVIEW ONLY. ZERO
+DONOR/REBBI RELATIONSHIPS WRITTEN.** Controlled preview of the completed
+Donor Rebbeim assignment workbook, via the REAL Independent Staging
+Rebbeim import preview endpoint. No commit occurred.
+
+**Workbook.** `\\nircserv\Data\Users\sgoldstein\Desktop\
+Rebbeim_Bulk_Upload_Template_FIXED_PRESERVED.xlsx` (note: the filename
+actually present has no "(1)" suffix; the user's follow-up message gave
+this exact path/name directly, superseding the originally-typed
+filename -- used as explicitly instructed, not substituted). Parsed with
+this codebase's own existing `lib/import/file-parsers.ts`'s `parseXlsx`
+(already used by every other importer here; no new parser written). The
+real header row ("Donor Code", "Donor Name", "Rebbeim (Upload Ready)",
+"Rebbi 1".."Rebbi 12") sits after three title/instruction rows; 254 data
+rows follow.
+
+**Pre-import validation (all passed):** 254 donor rows; 0 blank donor
+codes; 98 donors with a non-blank "Rebbeim (Upload Ready)" value; 156
+blank/no-op rows; 0 donor codes repeated within the workbook; 138 raw
+semicolon-separated pairs with 0 in-row exact-duplicate Rebbi entries (0
+collapsed); all 27 unique Rebbi names referenced matched a live canonical
+`rebbeim.display_name` exactly (fetched fresh from Independent Staging,
+43 rows) -- 0 unrecognized. Before touching the preview:
+`donor_rebbeim` = 0 on Independent Staging, confirmed.
+
+**Donor-code/name cross-check (independent safety check, never used for
+matching).** For all 98 donors with an assignment, matched by the exact
+same `numericDonorCode` helper the real importer uses, against a fresh
+read of all 254 live donors: 98 matched, 0 unmatched, 0 ambiguous, and
+**0 name mismatches** (workbook "Donor Name" vs. FOS's current
+`display_name`, case-insensitive exact compare) -- every one was
+identical.
+
+**Real preview, run through the actual upload path (not simulated
+logic).** Converted the workbook's two authoritative columns (Donor
+Code, Rebbeim (Upload Ready)) into the exact CSV shape the real importer
+accepts, byte-identical to the workbook's own values (Donor Name was
+intentionally excluded from the CSV, matching the design that donor
+identity is never matched by name), then drove the real `/onboarding/
+import/rebbeim` page in an authenticated browser session exactly as a
+fundraiser would -- real file input, real client-side `parseCsv`/
+`rowsToRecords`, real `POST /api/import/rebbeim/preview`, real server-side
+`buildRebbeimImportPreview` classification. Result, read directly from
+the rendered page (138 rendered row-cards, each individually inspected
+via its own DOM status, not assumed from the summary alone):
+
+| Status | Count |
+|---|---|
+| ready_to_add | **138** |
+| already_exists | 0 |
+| unmatched_donor | 0 |
+| ambiguous_donor | 0 |
+| unrecognized_rebbi | 0 |
+
+Every one of the 138 rendered rows individually read "Ready to add" --
+confirmed by querying the DOM for all 138 row statuses, not merely
+trusting the 4 summary counters.
+
+**Special checks.** "Harav Sax" (1 occurrence, donor code 69459) and
+"Harav Yosef Kalman Neuberger" (3 occurrences, donor codes 68849, 70656,
+71008) each individually rendered "Ready to add" in the real preview.
+"Harav Yosef Neuberger" is not referenced anywhere in this workbook at
+all (confirmed) -- so there was no occasion for it to collide with
+"Harav Yosef Kalman Neuberger" in this data, but both remain distinct,
+separately seeded canonical rows regardless (confirmed in the prior
+round's directory-expansion entry and re-confirmed structurally here:
+the real preview resolved "Harav Yosef Kalman Neuberger" to its own
+distinct canonical match, never to "Harav Yosef Neuberger").
+
+**Reconciliation.** Workbook donor rows: 254. Donors with assignments:
+98. Intended donor/Rebbi pairs: 138 (raw split) = 138 (after in-row
+dedup, since 0 in-row duplicates existed) = 138 (ready_to_add in the
+real preview) -- fully reconciled, no discrepancy from the expected
+~98/~138 given at the start of this task; the actual figures matched
+the expectation exactly, not merely approximately. Unique Rebbeim
+referenced: 27 (of 43 canonical). Blank/no-op rows: 156 (254 - 98).
+Duplicate assignments: 0. Donor-name mismatches: 0.
+
+**No-write verification.** `donor_rebbeim`: 0 before, 0 after (confirmed
+via direct read-only D1 queries immediately before and immediately after
+the browser preview session). `rebbeim`: 43 before and after,
+unchanged. `donors`: 254 before and after, unchanged. The preview
+endpoint (`/api/import/rebbeim/preview`) performs no D1 write of any
+kind by design (re-confirmed by reading its own route source, unchanged
+since round 1 of this feature) -- no `data_imports` or any other
+audit/import-tracking row was created by this preview, consistent with
+it being genuinely, structurally read-only. The commit button ("Add 138
+relationships") was visible but never clicked.
+
+**No application defect found.** Everything -- workbook structure,
+donor-code matching, canonical-name recognition (including both
+recently-added names), and donor-name agreement -- reconciled perfectly
+on the first real pass; no code was changed this round.
+
+**SAFE TO COMMIT.** All 138 intended relationships classify as
+ready_to_add, with zero unknown donor codes, zero ambiguous donor codes,
+zero unrecognized Rebbeim, zero donor-name mismatches, zero duplicate-
+assignment problems, and zero unexpected existing relationships. **The
+import was NOT committed.** Explicit authorization is required before
+any real donor_rebbeim write occurs.
