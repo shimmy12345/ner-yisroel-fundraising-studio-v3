@@ -24138,3 +24138,71 @@ implementation-and-verification round (checked twice). No code
 exercised a write path during verification -- the real route was
 verified by source/test, not by an end-to-end HTTP call (same caveat as
 prior rounds).
+
+---
+
+2026-10-07T00:00:00Z (approximate, follow-up) -- **JL Code export: added
+First Name/Last Name (narrow addition, not a new export).**
+
+**Located**: `app/api/import/jl-codes/route.ts` (the route) +
+`lib/import/jl-codes.ts` (the pure logic) -- the existing "Copy JL
+Codes" / "Download CSV" feature on the Import Center page
+(`app/onboarding/import/ImportExperience.tsx`'s `jl-code-export`
+section), used to paste/export the workspace's donor JL Codes for
+running updated donation information in JL Solutions.
+
+**Change, scoped to the CSV download only.** A new pure function,
+`extractUniqueJlCodeIdentities` (`lib/import/jl-codes.ts`), reuses the
+EXACT SAME dedup (`Set`-by-trimmed-code, blank/null excluded) and
+ordering (`sortJlCodes` -- numeric when every code is purely digits,
+else lexical) as the existing `extractUniqueJlCodes`, now also carrying
+each code's `primary_first_name`/`last_name` -- the same canonical,
+structured donor-name fields `lib/donors/merge.ts` and
+`lib/relationships/donor-identity.ts` already treat as authoritative,
+never parsed from `display_name`. A blank/whitespace-only name reports
+as `null`, rendered as an empty CSV cell -- never invented or inferred.
+New `jlCodeIdentitiesToCsv` emits exactly `JL Code,First Name,Last Name`
+as the header, three columns, nothing more. The route's SQL gained
+exactly two more selected columns (`primary_first_name, last_name`) on
+the identical `WHERE` clause (`owner_user_id`/`data_source='live'`/
+`archived_at IS NULL`/`donor_code IS NOT NULL`) -- the donor population,
+filtering, and eligibility rules are completely unchanged.
+
+**The separate "Copy JL Codes" clipboard feature and the plain
+`{codes, count}` JSON response are untouched** -- confirmed by tracing
+`app/onboarding/import/ImportExperience.tsx`'s `copyJlCodes()`, a
+different use case (pasting bare codes into JL's own search box), still
+backed by the original `extractUniqueJlCodes`/`jlCodesToClipboardText`,
+unmodified. No change to the JL donation import process or matching
+logic -- this route is a read-only convenience export, structurally
+separate from `app/api/import/route.ts`'s own import/matching code.
+
+**Tests** (`tests/jl-codes.test.mjs`, extended): exact 3-column header;
+correct code/name association (not parallel-array coincidence -- each
+code's own name travels with it through dedup and sorting); leading-zero
+preservation (identical guarantee to the existing `extractUniqueJlCodes`);
+blank-name handling (`null`/empty/whitespace-only all render as an empty
+cell, for first name, last name, or both); a name containing a comma is
+quoted, not corrupting the column count; zero-donors still produces just
+the header; and an explicit equivalence test proving the new function's
+code list is byte-for-byte identical (same codes, same order) to the
+original `extractUniqueJlCodes` given the same raw rows, including a
+duplicate-code edge case.
+
+**Gates.** `tsc --noEmit` clean. `eslint` on every changed file: zero
+errors, zero warnings. Full suite passes except the same pre-existing,
+unrelated `tests/backup-watchdog-scheduled.test.mjs` failure. `node
+scripts/build-staging.mjs` succeeds. Deployed to Independent Staging,
+Version ID `05be9567-43c7-4d79-9ca5-f6037b3d0073`.
+
+**Live, read-only verification** against the real 254-donor population:
+the new function's code list is identical (same 254 codes, same order)
+to what the original function produces from the same raw rows; 1 donor
+has a legitimately blank first name (correctly rendered blank, not
+invented); 0 blank last names; a real CSV sample (first 5 rows) reads
+correctly with names correctly associated to their own codes.
+
+**D1 mutation count: 0.** `donors`=254, `giving_activities`=5459,
+`pledge_payment_plans`=45 -- identical immediately before and
+immediately after this entire round (checked twice). Every verification
+query was a read-only `SELECT`.

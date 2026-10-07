@@ -40,3 +40,42 @@ export function jlCodesToCsv(codes: string[]): string {
 export function jlCodesToClipboardText(codes: string[]): string {
   return codes.join("\n");
 }
+
+// JL Code + name CSV export (docs/AI-HANDOFF.md) -- the same donor
+// population, dedup, and ordering as extractUniqueJlCodes/jlCodesToCsv
+// above (this is a narrow addition to that existing export, not a new
+// one), with First Name/Last Name added from donors.primary_first_name/
+// donors.last_name -- the same structured, canonical name fields
+// lib/donors/merge.ts and lib/relationships/donor-identity.ts already
+// treat as authoritative, never parsed from display_name. Only the CSV
+// download gains the new columns; the separate "Copy JL Codes" clipboard
+// feature (plain codes, for pasting into JL's own search box) is a
+// different use case and is untouched.
+export type JlCodeIdentityRow = { donor_code: string | null; primary_first_name: string | null; last_name: string | null };
+export type JlCodeIdentity = { code: string; firstName: string | null; lastName: string | null };
+
+// A blank/whitespace-only name is reported as `null` (never invented or
+// inferred) -- the caller renders that as an empty CSV cell, exactly the
+// same way a donor who legitimately has no name on file already looks
+// elsewhere in this app. If more than one donor row happens to share the
+// same JL Code (not the normal case, but not structurally impossible),
+// the FIRST row's name wins -- deterministic, and the code itself is
+// still deduplicated exactly as before; which single name accompanies a
+// shared code was never a decision the prior, name-less export had to
+// make at all.
+export function extractUniqueJlCodeIdentities(rows: JlCodeIdentityRow[]): JlCodeIdentity[] {
+  const byCode = new Map<string, { firstName: string | null; lastName: string | null }>();
+  for (const row of rows) {
+    const code = typeof row.donor_code === "string" ? row.donor_code.trim() : "";
+    if (!code || byCode.has(code)) continue;
+    const firstName = typeof row.primary_first_name === "string" && row.primary_first_name.trim() ? row.primary_first_name.trim() : null;
+    const lastName = typeof row.last_name === "string" && row.last_name.trim() ? row.last_name.trim() : null;
+    byCode.set(code, { firstName, lastName });
+  }
+  return sortJlCodes([...byCode.keys()]).map((code) => ({ code, ...byCode.get(code)! }));
+}
+
+export function jlCodeIdentitiesToCsv(identities: JlCodeIdentity[]): string {
+  const rows = identities.map((identity) => [csvField(identity.code), csvField(identity.firstName ?? ""), csvField(identity.lastName ?? "")].join(","));
+  return ["JL Code,First Name,Last Name", ...rows].join("\n") + "\n";
+}
