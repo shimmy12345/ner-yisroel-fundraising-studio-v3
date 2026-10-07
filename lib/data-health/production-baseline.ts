@@ -9,23 +9,21 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 38 as of 0037_donor_rebbeim.sql (Donor Rebbeim feature,
-// feature/independent-cloudflare-sandbox commit 1339521, synced to this
-// branch 2026-10-06 -- schema-manifest.json copied verbatim from that
-// branch's own current, verified manifest, the same sync mechanism as
-// commits 4ea1d5e/62628b3/ad80cf6; see docs/AI-HANDOFF.md's "D1 Monthly
-// Restore Verification Repair" entries). Adds rebbeim/donor_rebbeim (two
-// new tables, not a rebuild of anything existing, no columns changed on
-// any existing table) so PRODUCTION_BASELINE_HASH changed again
-// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
-// single bootstrap file's origin, not its current contents). This also
-// corrects the prior hardcoded count of 37, which would otherwise drift
-// one migration behind the real current schema on fundraising-os-
-// staging-db the moment this migration was applied there -- caught this
-// time by this repository's own new generic restore/schema drift guard
-// (feature/independent-cloudflare-sandbox's scripts/check-main-restore-
-// sync.mjs), not by a failed scheduled GitHub Actions run.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 38;
+// 39 as of 0038_pledge_payment_plan_reviews.sql (Pledge payment-plan
+// cleanup review, feature/independent-cloudflare-sandbox commit 51a54de,
+// synced to this branch 2026-10-07 -- schema-manifest.json copied
+// verbatim from that branch's own current, verified manifest, the same
+// sync mechanism as commits 4ea1d5e/62628b3/ad80cf6/5e48837; see
+// docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair" entries).
+// Adds pledge_payment_plan_reviews (one new table, not a rebuild of
+// anything existing, no columns changed on any existing table) so
+// PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
+// stays "0019": that label identifies the single bootstrap file's
+// origin, not its current contents). Caught by this repository's own
+// generic restore/schema drift guard (feature/independent-cloudflare-
+// sandbox's scripts/check-main-restore-sync.mjs) before any scheduled
+// GitHub Actions run would have found it.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 39;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

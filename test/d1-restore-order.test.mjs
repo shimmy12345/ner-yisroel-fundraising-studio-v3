@@ -180,6 +180,52 @@ test('planD1Restore accepts real INSERTs for rebbeim and donor_rebbeim, ordering
   assert.ok(usersAt < donorRebbeimAt && donorsAt < donorRebbeimAt && rebbeimAt < donorRebbeimAt, 'users, donors, and rebbeim must all precede donor_rebbeim in the reordered output');
 });
 
+// Pledge payment-plan cleanup review (migration 0038 on feature/
+// independent-cloudflare-sandbox, ported here 2026-10-07) -- a narrow,
+// temporary human-review-decision table, structurally unrelated to
+// pledge_payment_plans (selecting a review outcome never creates a
+// payment plan). `pledge_payment_plan_reviews` references `users` and
+// `giving_activities` -- both real foreign keys, confirmed directly from
+// migration 0038's own CREATE TABLE statement, not inferred from names.
+// Another direct, named regression for the exact drift class the generic
+// restore/schema drift guard (scripts/check-main-restore-sync.mjs) was
+// built to catch.
+test('pledge_payment_plan_reviews is present in D1_RESTORE_DATA_ORDER, positioned after "users" AND "giving_activities" (both real foreign key targets)', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const givingActivitiesIndex = D1_RESTORE_DATA_ORDER.indexOf('giving_activities');
+  const reviewsIndex = D1_RESTORE_DATA_ORDER.indexOf('pledge_payment_plan_reviews');
+  assert.ok(reviewsIndex >= 0, 'pledge_payment_plan_reviews must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(usersIndex >= 0 && reviewsIndex > usersIndex, 'pledge_payment_plan_reviews must be inserted after users (its user_id references users.id)');
+  assert.ok(givingActivitiesIndex >= 0 && reviewsIndex > givingActivitiesIndex, 'pledge_payment_plan_reviews must be inserted after giving_activities (its pledge_activity_id references giving_activities.id)');
+});
+
+test('planD1Restore accepts a real INSERT for pledge_payment_plan_reviews, ordering it after both of its real foreign key targets', () => {
+  const exported = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE `pledge_payment_plan_reviews` (`id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `review_status` text NOT NULL);',
+    'CREATE TABLE `giving_activities` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL);',
+    'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);',
+    // Deliberately exported in the "wrong" (pre-dependency-order)
+    // sequence, matching how `wrangler d1 export` actually orders real
+    // tables (by sqlite_master position, not by FK dependency).
+    'INSERT INTO "pledge_payment_plan_reviews" ("id","user_id","pledge_activity_id","review_status") VALUES(\'review-1\',\'user-1\',\'pledge-1\',\'needs_payment_plan\');',
+    'INSERT INTO "giving_activities" ("id","owner_user_id") VALUES(\'pledge-1\',\'user-1\');',
+    'INSERT INTO "users" ("id") VALUES(\'user-1\');',
+  ].join('\n') + '\n';
+  assert.doesNotThrow(() => planD1Restore(exported), 'planD1Restore must accept an INSERT for pledge_payment_plan_reviews, not reject it as an unrecognized table');
+  const plan = planD1Restore(exported);
+  const tableOrder = plan.steps.map((step) => step.table);
+  assert.ok(tableOrder.indexOf('users') < tableOrder.indexOf('pledge_payment_plan_reviews'), 'users must be restored before pledge_payment_plan_reviews');
+  assert.ok(tableOrder.indexOf('giving_activities') < tableOrder.indexOf('pledge_payment_plan_reviews'), 'giving_activities must be restored before pledge_payment_plan_reviews');
+  // pledge_payment_plan_reviews must never be restored before either of its real foreign key targets.
+  assert.ok(!(tableOrder.indexOf('pledge_payment_plan_reviews') < tableOrder.indexOf('users')) && !(tableOrder.indexOf('pledge_payment_plan_reviews') < tableOrder.indexOf('giving_activities')));
+  const reordered = reorderD1ExportForRestore(exported);
+  const usersAt = reordered.indexOf('INSERT INTO "users"');
+  const givingActivitiesAt = reordered.indexOf('INSERT INTO "giving_activities"');
+  const reviewsAt = reordered.indexOf('INSERT INTO "pledge_payment_plan_reviews"');
+  assert.ok(usersAt < reviewsAt && givingActivitiesAt < reviewsAt, 'users and giving_activities must both precede pledge_payment_plan_reviews in the reordered output');
+});
+
 // Bidirectional coverage, mirroring
 // feature/independent-cloudflare-sandbox's own tests/staging-reset.test.mjs
 // ("the reset table order covers every fundraising-data table and nothing

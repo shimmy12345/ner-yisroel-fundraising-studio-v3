@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "b7d9d6a1b3550304e8c7a9287b0110a1e392725173f47fa42bb21b3cc14e5f63",
+  "schemaHash": "ba2f75a4f944e873a0d26cb4d87507e5a6c925cf4065d16958064c95a4e5ebe6",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -39,7 +39,8 @@
     "0034_donor_relationship_facts.sql",
     "0035_backup_alert_state.sql",
     "0036_donor_source_attributions.sql",
-    "0037_donor_rebbeim.sql"
+    "0037_donor_rebbeim.sql",
+    "0038_pledge_payment_plan_reviews.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -5066,6 +5067,102 @@
         ]
       },
       {
+        "name": "pledge_payment_plan_reviews",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "pledge_activity_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "review_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reviewed_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "pledge_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "pledge_payment_plan_reviews_user_pledge_uidx",
+            "columns": [
+              "user_id",
+              "pledge_activity_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `pledge_payment_plan_reviews_user_pledge_uidx` ON `pledge_payment_plan_reviews` (`user_id`,`pledge_activity_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`review_status` IN ('needs_payment_plan','no_payment_plan_needed','need_to_investigate'))"
+        ]
+      },
+      {
         "name": "pledge_payment_plans",
         "columns": [
           {
@@ -6454,6 +6551,11 @@
     },
     {
       "type": "table",
+      "name": "pledge_payment_plan_reviews",
+      "sql": "CREATE TABLE `pledge_payment_plan_reviews` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `review_status` text NOT NULL CHECK (`review_status` IN ('needs_payment_plan','no_payment_plan_needed','need_to_investigate')), `reviewed_at` integer NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "pledge_payment_plans",
       "sql": "CREATE TABLE `pledge_payment_plans` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `cadence` text NOT NULL DEFAULT 'monthly' CHECK (`cadence` IN ('monthly')), `installment_amount_cents` integer, `expected_day_of_month` integer NOT NULL, `next_expected_payment_at` integer NOT NULL, `final_expected_payment_at` integer NOT NULL, `note` text, `ended_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`expected_day_of_month` BETWEEN 1 AND 31) )"
     },
@@ -6836,6 +6938,11 @@
       "type": "index",
       "name": "pledge_payment_plan_changes_plan_idx",
       "sql": "CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_changes` (`plan_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "pledge_payment_plan_reviews_user_pledge_uidx",
+      "sql": "CREATE UNIQUE INDEX `pledge_payment_plan_reviews_user_pledge_uidx` ON `pledge_payment_plan_reviews` (`user_id`,`pledge_activity_id`)"
     },
     {
       "type": "index",
