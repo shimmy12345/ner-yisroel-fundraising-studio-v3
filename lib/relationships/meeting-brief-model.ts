@@ -154,6 +154,7 @@ export type MeetingBriefPledgePlanSummary = {
   isPlanEndedWithBalance: boolean;
   isCompleted: boolean;
   nextExpectedLabel: string | null;
+  milestoneDaysBefore: 15 | 10 | 5 | null;
 };
 
 // One shared line-formatter, mirroring askLine/familyDateLine above, so
@@ -167,6 +168,7 @@ export function pledgePlanLine(plan: MeetingBriefPledgePlanSummary): string {
   if (plan.isCompleted) return `${remaining} The recorded monthly payment plan appears paid in full.`;
   if (plan.isPlanEndedWithBalance) return `${remaining} The monthly payment plan's final expected date has passed with balance still open.`;
   if (plan.isLate) return `${remaining} Being paid monthly; the expected monthly payment appears overdue.`;
+  if (plan.milestoneDaysBefore !== null) return `${remaining} Being paid monthly; the plan's final expected payment is ${plan.milestoneDaysBefore} days away.`;
   if (plan.nextExpectedLabel) return `${remaining} Being paid monthly; next expected payment ${plan.nextExpectedLabel}.`;
   return `${remaining} Being paid monthly.`;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { buildYahrtzeitRelationshipDateEvents, possessivePhrase } from "../lib/workspace/relationship-date-events.ts";
+import { buildYahrtzeitRelationshipDateEvents, buildPaymentPlanMilestoneEvents, partitionRelationshipDateEventsByToday, possessivePhrase } from "../lib/workspace/relationship-date-events.ts";
 
 // NOW (2026-08-13T12:00:00Z) is 30 Av 5786. "3 Elul" is 3 days out
 // (inside the 14-day lead window); "28 Av" already passed this year and
@@ -169,6 +169,34 @@ async function run() {
   assert.match(rowComponentSource, /dir="rtl"/, "a Hebrew provenance name must be rendered with explicit directionality");
 
   console.log("Relationship-date row presentation checks passed.");
+
+  // --- buildPaymentPlanMilestoneEvents: a milestone row always lands in
+  // the TODAY bucket (dateEpoch = today, never the future final date),
+  // while the prominently-rendered dateLabel still shows the real final
+  // date -- see the function's own doc comment for why these differ. ---
+  {
+    const rows = [{ donorId: "donor-1", pledgeActivityId: "pledge-1", balanceCents: 16800, finalExpectedPaymentAt: Math.floor(Date.UTC(2026, 9, 23) / 1000), milestoneDaysBefore: 15 }];
+    const events = buildPaymentPlanMilestoneEvents(rows, identityByDonor, TIMEZONE, NOW);
+    assert.equal(events.length, 1);
+    const event = events[0];
+    assert.equal(event.type, "payment_plan_milestone");
+    assert.equal(event.relationshipPhrase, "Payment plan ending in 15 days");
+    assert.equal(event.secondaryDateLabel, "$168.00 remaining");
+    assert.match(event.dateLabel, /Oct 23, 2026/, "the rendered date column must show the real final expected date, not today");
+    const { today, upcoming } = partitionRelationshipDateEventsByToday(events, NOW, TIMEZONE);
+    assert.equal(today.length, 1, "a milestone must always land in the TODAY bucket (it fires only on its exact day), never Coming Up's upcoming list");
+    assert.equal(upcoming.length, 0);
+  }
+
+  // --- a donor missing from identityByDonor is silently skipped, same
+  // "never show a card it can't fully populate" discipline as yahrtzeit/
+  // important-date events. ---
+  {
+    const rows = [{ donorId: "unknown-donor", pledgeActivityId: "pledge-x", balanceCents: 100, finalExpectedPaymentAt: NOW, milestoneDaysBefore: 5 }];
+    assert.equal(buildPaymentPlanMilestoneEvents(rows, identityByDonor, TIMEZONE, NOW).length, 0);
+  }
+
+  console.log("Payment-plan milestone event checks passed.");
 }
 
 run().catch((error) => { console.error(error); process.exitCode = 1; });

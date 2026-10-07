@@ -26,7 +26,8 @@ export type SituationType =
   | "financial_change"
   | "relationship_visibility"
   | "ask_resolution"
-  | "upcoming_moment";
+  | "upcoming_moment"
+  | "payment_plan_milestone";
 
 // Describes FOS's KNOWLEDGE, never the relationship itself (see
 // text-safety.ts's banned-phrase guard, which enforces this at runtime).

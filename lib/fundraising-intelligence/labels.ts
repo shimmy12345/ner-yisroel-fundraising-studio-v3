@@ -17,6 +17,7 @@ export const SITUATION_TYPE_LABELS: Record<SituationType, string> = {
   relationship_visibility: "Relationship visibility",
   ask_resolution: "Ask update",
   upcoming_moment: "Upcoming moment",
+  payment_plan_milestone: "Payment plan milestone",
 };
 
 // Disposition labels describe DIFFERENT PURPOSES, never a priority

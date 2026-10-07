@@ -81,6 +81,7 @@ const KIND_PRIORITY: RecommendationCandidateKind[] = [
   "birthday_outreach",
   "anniversary_outreach",
   "follow_up_pledge",
+  "cultivate_next_pledge",
   "open_ask",
   "relationship_opportunity",
   "continue_conversation",

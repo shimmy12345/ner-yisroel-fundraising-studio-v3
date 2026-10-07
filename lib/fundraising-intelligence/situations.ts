@@ -436,6 +436,39 @@ function detectUpcomingMoment(donor: PortfolioFocusDonorInput, result: Portfolio
   };
 }
 
+// Exact-day milestone (15/10/5 days before a payment plan's own final
+// expected date) -- KNOW only, never DO. Reads pledgePlanMilestoneDaysBefore
+// directly (set by aggregate.ts from evaluatePaymentPlan's own
+// milestoneDaysBefore, fixed together with the pledgePlanOnTrack bug --
+// see docs/AI-HANDOFF.md) rather than recomputing anything here, so this
+// can never disagree with Today/Meeting Brief about the same plan.
+// Mutually exclusive with detectPledgeFollowUp by construction:
+// milestoneDaysBefore is only ever non-null when the plan is genuinely
+// on track (evaluatePaymentPlan never sets both at once).
+function detectPaymentPlanMilestone(donor: PortfolioFocusDonorInput): DetectedSignal | null {
+  // `!donor.pledgePlanMilestoneDaysBefore`, not `=== null` -- this field
+  // did not exist before this round, so every pre-existing test fixture
+  // constructed without it has `undefined` here, not `null`. 15/10/5 are
+  // the only real values this field ever takes (never 0), so treating
+  // any other falsy value (undefined OR null) as "no milestone" is safe
+  // and correct, not merely a workaround.
+  if (!donor.pledgePlanMilestoneDaysBefore) return null;
+  const days = donor.pledgePlanMilestoneDaysBefore;
+  return {
+    situationType: "payment_plan_milestone",
+    disposition: "KNOW",
+    priorityTier: 2,
+    priorityOrder: 8,
+    headline: `Payment plan ending in ${days} days`,
+    explanation: `${fmtCents(donor.openPledgeBalanceCents)} remains on a pledge being paid monthly, with the plan's final expected payment ${days} days away.`,
+    whyNow: "Worth knowing before the plan concludes -- not yet a follow-up gap.",
+    whatFosDoesNotKnow: null,
+    possibleAction: null,
+    confidence: "high",
+    evidence: [{ kind: "pledge_plan", detail: `${fmtCents(donor.openPledgeBalanceCents)} remaining, final expected payment in ${days} days` }],
+  };
+}
+
 export function detectSituations(
   donor: PortfolioFocusDonorInput,
   result: PortfolioFocusResult,
@@ -461,6 +494,7 @@ export function detectSituations(
     detectRecentMeaningfulGift(donor),
     detectRelationshipVisibility(donor, result, asks, facts, now),
     detectUpcomingMoment(donor, result),
+    detectPaymentPlanMilestone(donor),
   ];
   return signals.filter((s): s is DetectedSignal => s !== null);
 }

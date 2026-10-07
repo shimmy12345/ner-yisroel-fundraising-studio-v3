@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   advanceOneCalendarMonth,
   enumerateExpectedCycles,
   matchPaymentsToCycles,
   evaluatePaymentPlan,
   dayOfMonthFromDateOnlyEpoch,
+  adjustNewPlanAnchorForPastDate,
   MONTHLY_PAYMENT_PLAN_GRACE_DAYS,
 } from "../lib/relationships/pledge-payment-plan.ts";
+import { pledgePlanLine } from "../lib/relationships/meeting-brief-model.ts";
 
 const DAY = 86400;
 const epoch = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d) / 1000);
@@ -267,6 +270,131 @@ function run() {
   assert.equal(evaluatePaymentPlan.length, 4, "evaluatePaymentPlan must accept exactly (plan, paymentDates, balanceCents, now) -- no payment-amount parameter exists to be inspected");
 
   console.log("Edge-case checks passed.");
+
+  // ============================================================
+  // Payment-plan intelligence: milestones, fulfillment, born-late fix
+  // ============================================================
+
+  // --- milestoneDaysBefore: fires on the EXACT day, never a window. ---
+  {
+    const plan = { nextExpectedPaymentAt: epoch(2026, 9, 18), expectedDayOfMonth: 18, finalExpectedPaymentAt: epoch(2026, 11, 1), endedAt: null };
+    const paid = [epoch(2026, 9, 18), epoch(2026, 10, 18)]; // on-track through both cycles
+    for (const [daysBefore, expected] of [[16, null], [15, 15], [14, null], [11, null], [10, 10], [9, null], [6, null], [5, 5], [4, null], [0, null]]) {
+      const now = plan.finalExpectedPaymentAt - daysBefore * DAY;
+      const evalResult = evaluatePaymentPlan(plan, paid, 1000, now);
+      assert.equal(evalResult.milestoneDaysBefore, expected, `at exactly ${daysBefore} days before final, milestoneDaysBefore must be ${expected}`);
+    }
+  }
+
+  // --- milestoneDaysBefore is null once late, completed, or past final --
+  // a milestone is only meaningful for a plan still genuinely on track. ---
+  {
+    const plan = { nextExpectedPaymentAt: epoch(2026, 1, 1), expectedDayOfMonth: 1, finalExpectedPaymentAt: epoch(2026, 11, 1), endedAt: null };
+    const now = plan.finalExpectedPaymentAt - 15 * DAY;
+    assert.equal(evaluatePaymentPlan(plan, [], 1000, now).milestoneDaysBefore, null, "a plan already late must never also report a 15-day milestone");
+    assert.equal(evaluatePaymentPlan(plan, [], 0, now).milestoneDaysBefore, null, "a completed (balance<=0) plan must never report a milestone");
+    const endedPlan = { ...plan, endedAt: now - DAY };
+    assert.equal(evaluatePaymentPlan(endedPlan, [], 1000, now).milestoneDaysBefore, null, "an ended plan must never report a milestone");
+  }
+
+  // --- daysUntilFinal: signed, negative once past. ---
+  {
+    const plan = { nextExpectedPaymentAt: epoch(2026, 9, 18), expectedDayOfMonth: 18, finalExpectedPaymentAt: epoch(2026, 10, 3), endedAt: null };
+    assert.equal(evaluatePaymentPlan(plan, [], 1800, epoch(2026, 9, 28)).daysUntilFinal, 5);
+    assert.equal(evaluatePaymentPlan(plan, [], 1800, epoch(2026, 10, 3)).daysUntilFinal, 0);
+    assert.equal(evaluatePaymentPlan(plan, [], 1800, epoch(2026, 10, 8)).daysUntilFinal, -5, "5 days after the final date must read as -5, not 0 or clamped");
+  }
+
+  // --- isFulfilledAfterFinal: the Baruch Katz SHAPE, but paid in full --
+  // "reached/passed final date" (>=, not strict >) AND balance<=0. This
+  // is the exact regression the task asked for (mirrors the real
+  // donor 68231 plan's fields, with balance zeroed instead of $18). ---
+  {
+    const katzShapedPlan = { nextExpectedPaymentAt: epoch(2026, 9, 3), expectedDayOfMonth: 3, finalExpectedPaymentAt: epoch(2026, 10, 3), endedAt: null };
+    // Baruch Katz's REAL case: balance remains -- must NOT be fulfilled.
+    const stillOwing = evaluatePaymentPlan(katzShapedPlan, [epoch(2026, 9, 7)], 1800, epoch(2026, 10, 8));
+    assert.equal(stillOwing.isFulfilledAfterFinal, false, "a plan with balance remaining must never read as fulfilled, regardless of the final date");
+    assert.equal(stillOwing.isPlanEndedWithBalance, true, "the real Katz case must still be the existing-commitment DO case");
+    // Same shape, fully paid -- must read as fulfilled, not ended-with-balance.
+    const fulfilled = evaluatePaymentPlan(katzShapedPlan, [epoch(2026, 9, 7)], 0, epoch(2026, 10, 8));
+    assert.equal(fulfilled.isFulfilledAfterFinal, true);
+    assert.equal(fulfilled.isPlanEndedWithBalance, false, "isFulfilledAfterFinal and isPlanEndedWithBalance must be mutually exclusive");
+    // Exactly on the final date itself, already paid off -- must already count (>=, not strict >).
+    const fulfilledOnTheDay = evaluatePaymentPlan(katzShapedPlan, [epoch(2026, 9, 7)], 0, epoch(2026, 10, 3));
+    assert.equal(fulfilledOnTheDay.isFulfilledAfterFinal, true, "reaching the final date itself, already paid off, must count immediately -- not one day later");
+    // One day before the final date, already paid off -- NOT yet fulfilled
+    // (the commitment's own term hasn't concluded yet, even if paid early).
+    const paidEarly = evaluatePaymentPlan(katzShapedPlan, [epoch(2026, 9, 7)], 0, epoch(2026, 10, 2));
+    assert.equal(paidEarly.isFulfilledAfterFinal, false, "paying off BEFORE the final date must not yet trigger the next-pledge opportunity -- only reaching the final date does");
+    // isFulfilledAfterFinal must not depend on endedAt at all.
+    const endedAndFulfilled = evaluatePaymentPlan({ ...katzShapedPlan, endedAt: epoch(2026, 10, 5) }, [epoch(2026, 9, 7)], 0, epoch(2026, 10, 8));
+    assert.equal(endedAndFulfilled.isFulfilledAfterFinal, true, "isFulfilledAfterFinal must fire even if the fundraiser already clicked End plan");
+  }
+
+  // --- adjustNewPlanAnchorForPastDate: the "born late" fix. ---
+  {
+    // The exact shape of the real born-late plans found in the
+    // investigation: fundraiser enters Sep 24 while creating the plan on
+    // Oct 7 -- the entered date is already ~13 days in the past.
+    const entered = epoch(2026, 9, 24);
+    const now = epoch(2026, 10, 7);
+    const corrected = adjustNewPlanAnchorForPastDate(entered, now);
+    assert.equal(iso(corrected), "2026-10-24", "a past anchor must advance to the next real calendar-month occurrence of the SAME day-of-month, not an arbitrary date");
+    assert.ok(corrected >= now, "the corrected anchor must never still be in the past");
+
+    // A plan created with a FUTURE anchor must be returned completely
+    // unchanged -- this function must never "fix" something that isn't broken.
+    const future = epoch(2026, 11, 1);
+    assert.equal(adjustNewPlanAnchorForPastDate(future, now), future, "a future anchor must be returned unchanged");
+
+    // Exactly today must also be returned unchanged (not advanced an extra month).
+    assert.equal(adjustNewPlanAnchorForPastDate(now, now), now, "an anchor dated exactly today must not be advanced");
+
+    // The 31st-of-the-month anchor must still respect real month lengths
+    // while catching up -- Aug 31 entered, now is Oct 7 -- the single
+    // intervening month (September) has no 31st, so it must clamp
+    // through Sep 30 and land on Oct 31, never silently becoming the
+    // 30th permanently (the same anti-drift guarantee
+    // advanceOneCalendarMonth already proves elsewhere in this file).
+    const aug31 = epoch(2026, 8, 31);
+    const correctedFromAug31 = adjustNewPlanAnchorForPastDate(aug31, epoch(2026, 10, 7));
+    assert.equal(iso(correctedFromAug31), "2026-10-31", "a 31st-anchored plan catching up through a 30-day September must land back on the 31st, not drift to the 30th");
+
+    // A very old anchor (many months in the past) must still land on the
+    // correct day-of-month, not merely "some date in the future."
+    const veryOld = epoch(2025, 1, 15);
+    const correctedVeryOld = adjustNewPlanAnchorForPastDate(veryOld, epoch(2026, 10, 7));
+    assert.equal(iso(correctedVeryOld), "2026-10-15", "a far-past anchor must still advance to the correct day-of-month in the first future month that works");
+  }
+
+  // --- Route wiring: the create route must actually call the born-late
+  // fix, and must derive expectedDayOfMonth from the ORIGINALLY entered
+  // date, never the corrected one (same convention as
+  // tests/pledge-payment-plan-reviews.test.mjs's route-source checks --
+  // no D1/env test harness exists in this repo for routes). ---
+  {
+    const routeSource = fs.readFileSync(new URL("../app/api/pledge-payment-plans/route.ts", import.meta.url), "utf8");
+    assert.match(routeSource, /adjustNewPlanAnchorForPastDate\(enteredNextExpectedPaymentAt, createdAtForAnchor\)/, "the create route must call adjustNewPlanAnchorForPastDate on the entered date");
+    assert.match(routeSource, /dayOfMonthFromDateOnlyEpoch\(enteredNextExpectedPaymentAt\)/, "expectedDayOfMonth must be derived from the ORIGINALLY entered date, never the corrected one");
+    assert.doesNotMatch(routeSource, /dayOfMonthFromDateOnlyEpoch\(nextExpectedPaymentAt\)/, "expectedDayOfMonth must never be derived from the corrected value (it can be clamped into a shorter month)");
+    const editRouteSource = fs.readFileSync(new URL("../app/api/pledge-payment-plans/[id]/route.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(editRouteSource, /adjustNewPlanAnchorForPastDate/, "the EDIT route must be unaffected -- the born-late fix applies only at creation, never to an explicit edit");
+  }
+
+  // --- pledgePlanLine: the milestone branch, correctly positioned before
+  // the generic "next expected payment" line but after isLate. ---
+  {
+    const base = { balanceCents: 16800, isOnTrack: true, isLate: false, isPlanEndedWithBalance: false, isCompleted: false, nextExpectedLabel: "Oct 22" };
+    assert.equal(pledgePlanLine({ ...base, milestoneDaysBefore: 15 }), "Open pledge: $168 remaining. Being paid monthly; the plan's final expected payment is 15 days away.");
+    assert.equal(pledgePlanLine({ ...base, milestoneDaysBefore: 10 }), "Open pledge: $168 remaining. Being paid monthly; the plan's final expected payment is 10 days away.");
+    assert.equal(pledgePlanLine({ ...base, milestoneDaysBefore: 5 }), "Open pledge: $168 remaining. Being paid monthly; the plan's final expected payment is 5 days away.");
+    // No milestone -- falls through to the existing generic line, unchanged.
+    assert.equal(pledgePlanLine({ ...base, milestoneDaysBefore: null }), "Open pledge: $168 remaining. Being paid monthly; next expected payment Oct 22.");
+    // isLate still wins over a milestone if both were somehow set (defensive -- evaluatePaymentPlan never actually produces both at once).
+    assert.equal(pledgePlanLine({ ...base, isLate: true, milestoneDaysBefore: 5 }), "Open pledge: $168 remaining. Being paid monthly; the expected monthly payment appears overdue.");
+  }
+
+  console.log("Payment-plan intelligence checks passed.");
 }
 
 run();

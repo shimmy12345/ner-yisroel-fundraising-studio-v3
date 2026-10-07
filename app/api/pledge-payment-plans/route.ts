@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { validateInstallmentAmountCents, validatePlanNote } from "../../../lib/capture/pledge-payment-plan";
-import { dayOfMonthFromDateOnlyEpoch } from "../../../lib/relationships/pledge-payment-plan";
+import { dayOfMonthFromDateOnlyEpoch, adjustNewPlanAnchorForPastDate } from "../../../lib/relationships/pledge-payment-plan";
 import { parseFinancialDate } from "../../../lib/financial-date";
 import { logger } from "../../../lib/logger";
 
@@ -42,11 +42,28 @@ export async function POST(request: Request) {
   const noteResult = validatePlanNote(body.note);
   if (!noteResult.ok) return Response.json({ error: "Note is too long" }, { status: 422 });
 
-  const nextExpectedPaymentAt = body.nextExpectedPaymentAt ? parseFinancialDate(body.nextExpectedPaymentAt) : null;
-  if (nextExpectedPaymentAt === null) return Response.json({ error: "A valid next expected payment date is required" }, { status: 422 });
+  const enteredNextExpectedPaymentAt = body.nextExpectedPaymentAt ? parseFinancialDate(body.nextExpectedPaymentAt) : null;
+  if (enteredNextExpectedPaymentAt === null) return Response.json({ error: "A valid next expected payment date is required" }, { status: 422 });
   const finalExpectedPaymentAt = body.finalExpectedPaymentAt ? parseFinancialDate(body.finalExpectedPaymentAt) : null;
   if (finalExpectedPaymentAt === null) return Response.json({ error: "A valid final expected payment date is required" }, { status: 422 });
-  if (finalExpectedPaymentAt < nextExpectedPaymentAt) return Response.json({ error: "Final expected payment date must be on or after the next expected payment date" }, { status: 422 });
+  if (finalExpectedPaymentAt < enteredNextExpectedPaymentAt) return Response.json({ error: "Final expected payment date must be on or after the next expected payment date" }, { status: 422 });
+
+  // "Born late" fix (see docs/AI-HANDOFF.md's payment-plan-intelligence
+  // investigation): a fundraiser creating a plan today naturally enters
+  // the cadence's intended day based on when the donor last paid, which
+  // is often already in the past by the time the plan is actually saved
+  // (e.g. "the 24th of the month," entered on the 7th of the following
+  // month). Without this, the plan would evaluate as immediately overdue
+  // the moment it's created, before the fundraiser has had any chance to
+  // receive a payment against the new schedule. Only ever applied at
+  // CREATION -- never on an edit, where a past date may be intentional.
+  // Preserves the fundraiser's own entered day-of-month as the fixed
+  // calendar anchor; only the stored next_expected_payment_at advances.
+  const createdAtForAnchor = Math.floor(Date.now() / 1000);
+  const nextExpectedPaymentAt = adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt, createdAtForAnchor);
+  if (nextExpectedPaymentAt > finalExpectedPaymentAt) {
+    return Response.json({ error: "After adjusting the next expected payment to the first upcoming occurrence of that day, it would fall after the final expected payment date -- choose a later final expected date." }, { status: 422 });
+  }
 
   const profile = await ensureUserProfile(user);
   const userId = profile.id;
@@ -71,7 +88,13 @@ export async function POST(request: Request) {
     .bind(pledgeActivityId).first<{ id: string }>();
   if (existingActive) return Response.json({ error: "This pledge already has an active payment plan" }, { status: 409 });
 
-  const expectedDayOfMonth = dayOfMonthFromDateOnlyEpoch(nextExpectedPaymentAt);
+  // Derived from the ORIGINALLY entered date, never the corrected one --
+  // adjustNewPlanAnchorForPastDate's own advance can clamp into a
+  // shorter month (e.g. a 31st-anchor catching up through a 30-day
+  // September), and re-deriving the anchor day from that clamped result
+  // would permanently lose the true 31st the same way the design's own
+  // anti-drift guarantee exists to prevent.
+  const expectedDayOfMonth = dayOfMonthFromDateOnlyEpoch(enteredNextExpectedPaymentAt);
   const now = Math.floor(Date.now() / 1000);
   const planId = crypto.randomUUID();
   const afterJson = { installmentAmountCents: installment.amountCents, expectedDayOfMonth, nextExpectedPaymentAt, finalExpectedPaymentAt, note: noteResult.note };

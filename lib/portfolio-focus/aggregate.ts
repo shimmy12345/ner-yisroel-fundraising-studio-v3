@@ -164,6 +164,7 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
     let pledgeAgeDays: number | null = null;
     let pledgeCommitmentAgeDays: number | null = null;
     let pledgePlanOnTrack: boolean | null = null;
+    let pledgePlanMilestoneDaysBefore: 15 | 10 | 5 | null = null;
     if (openPledgeRow) {
       const linkedPaymentDates = (paymentsByPledge.get(openPledgeRow.id) ?? []).map((p) => p.date);
       const plan = paymentPlanByPledge.get(openPledgeRow.id);
@@ -176,7 +177,18 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
       openPledgeForEvidence = { balanceCents: openPledgeRow.balance_cents ?? 0, campaign: null, description: openPledgeRow.description || openPledgeRow.item_type, activityDate, activePaymentPlan };
       if (activePaymentPlan) {
         const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, openPledgeRow.balance_cents ?? 0, now);
-        pledgePlanOnTrack = !evaluation.isLate;
+        // BUG FIX (see docs/AI-HANDOFF.md's payment-plan-intelligence
+        // investigation): this used to be `!evaluation.isLate`, which
+        // reads as "on track" the moment a plan's final expected date has
+        // passed -- evaluatePaymentPlan deliberately forces isLate back
+        // to false once finalDatePassed is true (lateness stops being
+        // evaluated at that point; see isPlanEndedWithBalance instead), so
+        // the old formula silently misclassified an ended-with-balance
+        // plan (e.g. the real donor 68231 case) as healthy. isOnTrack
+        // already accounts for finalDatePassed/isCompleted/isActive
+        // together, so this is the one correct single source of truth.
+        pledgePlanOnTrack = evaluation.isOnTrack;
+        pledgePlanMilestoneDaysBefore = evaluation.milestoneDaysBefore;
       }
     }
 
@@ -251,7 +263,7 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
       openPledgeBalanceCents: openPledgeRow?.balance_cents ?? null,
       openPledgeTotalCents: openPledgeRow ? (openPledgeRow.paid_cents ?? 0) + (openPledgeRow.balance_cents ?? 0) : null,
       openPledgeCategory: (openPledgeRow?.category as "open_pledge" | "partially_paid_pledge" | undefined) ?? null,
-      pledgeAgeDays, pledgeCommitmentAgeDays, pledgePlanOnTrack,
+      pledgeAgeDays, pledgeCommitmentAgeDays, pledgePlanOnTrack, pledgePlanMilestoneDaysBefore,
       askHistoryCount: donorAsks.length,
       hasOpenReminder: !!openReminder,
       openReminderAction: openReminder?.action ?? null,

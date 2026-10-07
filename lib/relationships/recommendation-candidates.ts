@@ -21,7 +21,8 @@ export type RecommendationCandidateKind =
   | "reconnect_contact_gap"
   | "yahrtzeit_outreach"
   | "birthday_outreach"
-  | "anniversary_outreach";
+  | "anniversary_outreach"
+  | "cultivate_next_pledge";
 
 // confirmed: a real interactions/recommendations/giving_activities row.
 // narrative: donors.relationship_summary/institutional_memory -- human-
@@ -183,6 +184,48 @@ function followUpPledgeCandidate(evidence: RecommendationEvidence): Recommendati
     recency: 0.3,
     urgency: clamp01(ageDays / 180),
     supportingDate: pledge.activityDate,
+  };
+}
+
+// "Existing commitment fulfilled, consider the next one" -- a cultivation
+// opportunity, never a collection/follow-up action. Conceptually the
+// opposite of followUpPledgeCandidate's isPlanEndedWithBalance branch,
+// and deliberately structured so the two can never both fire for the
+// same donor at once:
+//   - this only ever reads evidence.giving.fulfilledPledgeCultivationOpportunity,
+//     which is a DIFFERENT, already-fulfilled (balance<=0) pledge --
+//     never the same field followUpPledgeCandidate reads.
+//   - it explicitly bails whenever evidence.giving.openPledge is non-null
+//     (i.e. the donor currently has ANY real open balance) -- per the
+//     product's own semantic rule, an open commitment always takes
+//     priority over suggesting a new one, regardless of which candidate
+//     would otherwise score higher.
+// "Superseded by a newer pledge" is decided once, upstream, in
+// live-data.ts (by never populating fulfilledPledgeCultivationOpportunity
+// in that case) -- never re-derived here, so this function has exactly
+// one job: turn an already-vetted opportunity into wording.
+function cultivateNextPledgeCandidate(evidence: RecommendationEvidence): RecommendationCandidate | null {
+  if (evidence.giving.openPledge !== null) return null;
+  const opportunity = evidence.giving.fulfilledPledgeCultivationOpportunity;
+  if (!opportunity) return null;
+  const daysSinceFinal = Math.max(0, Math.floor((evidence.now - opportunity.finalExpectedPaymentAt) / 86400));
+  const descriptionSuffix = opportunity.description ? ` (${opportunity.description})` : "";
+  return {
+    kind: "cultivate_next_pledge",
+    action: `Contact about their next pledge.`,
+    why: `The ${opportunity.campaign ? `${opportunity.campaign} ` : ""}pledge is fully paid and its payment plan has concluded.`,
+    evidence: [`Previous pledge${opportunity.campaign ? `, ${opportunity.campaign}` : ""}${descriptionSuffix}, paid in full; plan concluded ${dateLabel(opportunity.finalExpectedPaymentAt)}.`],
+    // Deliberately capped at "low"/modest urgency -- this is a soft
+    // cultivation suggestion, never urgent collection intelligence, and
+    // must never outrank a genuine DO item on a different donor merely
+    // by sitting unresolved for a long time.
+    confidence: "low",
+    timing: null,
+    certainty: "confirmed",
+    specificity: 0.5,
+    recency: 0.3,
+    urgency: clamp01(daysSinceFinal / 365),
+    supportingDate: opportunity.finalExpectedPaymentAt,
   };
 }
 
@@ -567,6 +610,7 @@ export function generateCandidates(evidence: RecommendationEvidence): Recommenda
     honorReminderCandidate(evidence),
     acknowledgeGiftCandidate(evidence),
     followUpPledgeCandidate(evidence),
+    cultivateNextPledgeCandidate(evidence),
     openAskCandidate(evidence),
     continueConversationCandidate(evidence),
     relationshipOpportunityCandidate(evidence),

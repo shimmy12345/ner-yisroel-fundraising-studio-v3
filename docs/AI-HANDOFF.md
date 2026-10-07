@@ -23899,3 +23899,242 @@ no change to the Daily Agenda, donor page card, or schema beyond (2).
 
 Nothing was implemented this round. No payment plan, pledge, donor, or
 review decision was created, modified, or ended.
+
+---
+
+2026-10-07T21:50:00Z (approximate, follow-up) -- **Payment-plan
+intelligence: implemented (replaces the Phase 1 report's generic
+30-day-window proposal with the user's own explicit milestone/
+cultivation design).** No schema change, no D1 writes during
+implementation -- verified live, read-only, against the real 45-plan
+population after deploying.
+
+**1-2. Derived lifecycle (`lib/relationships/pledge-payment-plan.ts`).**
+`evaluatePaymentPlan`'s return type gained three pure, derived fields,
+all computed from data already passed in (never stored, never entered):
+`daysUntilFinal` (signed; negative once past), `milestoneDaysBefore`
+(`15 | 10 | 5 | null` -- fires on the EXACT day only, never a window,
+and only while the plan is genuinely `isOnTrack`, so a milestone can
+never coexist with the existing `isLate`/`isPlanEndedWithBalance`
+states for the same plan), and `isFulfilledAfterFinal` (`now >=
+finalExpectedPaymentAt && balanceCents <= 0` -- deliberately `>=` not
+strict `>`, and deliberately independent of `endedAt`, per the explicit
+instruction that this must not fail merely because the fundraiser never
+clicked "End plan"). Paying off BEFORE the final date does NOT yet
+trigger `isFulfilledAfterFinal` -- the commitment's own term must
+actually conclude first, per the task's own semantic rule.
+
+**Mutual exclusivity (the task's §2 rule), enforced structurally, not
+by convention:** `isPlanEndedWithBalance` requires `balanceCents > 0`;
+`isFulfilledAfterFinal` requires `balanceCents <= 0`. They can never both
+be true for the same evaluation. Proven by a direct regression test
+using the real Baruch Katz shape with balance zeroed instead of $18.
+
+**3. Baruch Katz (68231), re-verified against live staging after
+deploy:** `isPlanEndedWithBalance: true`, `isFulfilledAfterFinal: false`,
+`milestoneDaysBefore: null` -- still, correctly, the EXISTING-COMMITMENT
+follow-up case, never a new-pledge solicitation.
+
+**4. "Existing commitment fulfilled, consider the next one" --
+`cultivateNextPledgeCandidate` (`lib/relationships/
+recommendation-candidates.ts`), a new `cultivate_next_pledge` DO
+candidate (low confidence/urgency by design -- a soft cultivation
+suggestion, never urgent collection intelligence).** Reads a NEW,
+separate evidence field, `giving.fulfilledPledgeCultivationOpportunity`
+-- deliberately never a branch of `openPledge` (which is always
+`balanceCents > 0` by construction), so the two fields are mutually
+exclusive by data shape alone, not merely by a runtime check. The
+candidate itself additionally bails whenever `evidence.giving.openPledge
+!== null` (an open commitment always wins), per the explicit semantic
+rule. "Superseded by a newer pledge" is decided once, upstream, in a new
+pure function, `deriveFulfilledCultivationByDonor`
+(`lib/relationships/pledge-payment-plan.ts`, unit-tested with 7 cases):
+a fulfilled pledge (balance<=0, plan's final date reached/passed)
+produces an opportunity UNLESS any other real commitment
+(open_pledge/partially_paid_pledge/completed_gift) for that donor is
+dated AFTER it -- so recording a new pledge naturally makes the old
+opportunity obsolete with nothing to track, dismiss, or expire. No new
+D1 query: reuses the same `giving.results`/`paymentPlanByPledge` data
+`lib/workspace/live-data.ts` already fetches for every other evidence
+field. Verified against live data: 0 cultivation opportunities exist
+today (none of the 45 real active plans are yet both fulfilled and past
+their final date) -- correctly zero false positives.
+
+**5. Narrowest clean integration, verified against the real
+architecture rather than inventing a new surface:**
+- **Today / Coming Up**: milestones are rendered via a NEW event type
+  (`payment_plan_milestone`) added to the EXISTING, already-shared
+  `WorkspaceRelationshipDateEvent`/"Coming Up" mechanism
+  (`lib/workspace/relationship-date-events.ts`'s new
+  `buildPaymentPlanMilestoneEvents`) -- the same KNOW-tier, non-competing
+  list yahrtzeit/birthday/anniversary events already use, deliberately
+  NOT the competitive Suggested Actions ranking. A milestone's `dateEpoch`
+  is set to TODAY (so it always lands in the "today" bucket via the
+  existing `partitionRelationshipDateEventsByToday`), while the
+  prominently-rendered `dateLabel` shows the plan's real final expected
+  date -- the row's display component already renders generically from
+  these fields with zero `event.type` branching, confirmed by an
+  existing test.
+- **Daily Agenda**: required zero Agenda-specific code -- its
+  IMPORTANT DATES/STEWARDSHIP section already includes the full "today"
+  relationship-date bucket unconditionally, so a milestone appears there
+  automatically the moment it exists in Coming Up's data, and
+  `cultivate_next_pledge` flows through the exact same Suggested-section
+  pipeline `follow_up_pledge` already uses.
+- **Fundraising Intelligence** (`lib/fundraising-intelligence/
+  situations.ts`): one new, narrow `payment_plan_milestone` situation
+  (KNOW, `priorityTier: 2`), reading a new `pledgePlanMilestoneDaysBefore`
+  field threaded through `lib/portfolio-focus/aggregate.ts` from the SAME
+  `evaluatePaymentPlan` call that already computes `pledgePlanOnTrack` --
+  never a second evaluation. The cultivation/fulfilled case was
+  deliberately NOT added to Fundraising Intelligence/Portfolio Focus:
+  Portfolio Focus's `openPledgeRow` selection is structurally `balance_cents
+  > 0`-filtered, so a fulfilled pledge can never naturally flow through it
+  -- per the explicit instruction not to add Portfolio Focus behavior
+  unless it naturally consumes the corrected state.
+- **Meeting Brief**: `pledgePlanLine()` gained one new branch (milestone
+  wording, positioned after `isLate`, before the generic "next expected
+  payment" line) -- the cultivation/fulfilled case was deliberately left
+  out of Meeting Brief this round (a genuine "where useful" scope
+  decision, not an oversight -- it would need its own new parameter
+  threaded through `buildMeetingBrief`'s signature for a case that, per
+  live verification, doesn't exist in the real data yet).
+
+**6. Portfolio Focus bug fix (`lib/portfolio-focus/aggregate.ts`).** The
+line was `pledgePlanOnTrack = !evaluation.isLate` -- `isLate` is
+deliberately forced back to `false` once a plan's final date has passed
+(lateness stops being evaluated at that point; see
+`isPlanEndedWithBalance` instead), so this silently misclassified an
+ended-with-balance plan (the real Baruch Katz shape) as "on track."
+Fixed to `pledgePlanOnTrack = evaluation.isOnTrack`, which already
+accounts for `finalDatePassed`/`isCompleted`/`isActive` together -- the
+one correct single source of truth. **Regression added**
+(`tests/portfolio-focus-payment-plan-bugfix.test.mjs`), calling the real
+`aggregatePortfolioFocusInputs` (pure, no D1) with a fixture shaped
+exactly like donor 68231: confirms `pledgePlanOnTrack === false` (not
+`true`) for the ended-with-balance case, and confirms a genuinely
+on-track plan 15 days from its final date still correctly reads
+`pledgePlanOnTrack === true` with `pledgePlanMilestoneDaysBefore === 15`
+(proving the fix doesn't overcorrect).
+
+**7. "Born late" creation fix (`app/api/pledge-payment-plans/route.ts`,
+CREATE only -- the edit route is unaffected).** Investigated and
+**corrected the Phase 1 report's own root-cause claim**: there is no
+automatic pre-fill in the create form at all (`PledgePaymentPlanManagement.tsx`'s
+`PlanForm` starts every field blank for a new plan) -- the real cause is
+simpler: the fundraiser manually enters a "next expected payment" date
+based on the cadence's intended day, which is often already in the past
+by the time the plan is actually saved. **Fix**: a new pure function,
+`adjustNewPlanAnchorForPastDate` (`lib/relationships/
+pledge-payment-plan.ts`), advances a past-dated entered anchor forward
+by real calendar months (preserving the fundraiser's own entered
+day-of-month as the fixed anchor, correctly handling a 31st-anchor
+catching up through a 30-day month) until it is today or later; a date
+already today or in the future is returned completely unchanged. Applied
+only at plan CREATION. `expected_day_of_month` is still derived from the
+ORIGINALLY entered date, never the corrected one -- re-deriving it from
+the corrected value could permanently lose a true 31st-anchor the same
+way the design's own anti-drift guarantee exists to prevent (direct
+regression test included). If the corrected anchor would land after the
+fundraiser's own entered final expected date, the route now rejects with
+a clear error instead of silently creating an inconsistent plan.
+8 unit tests cover this (past/future/today/far-past/31st-anchor anchors,
+plus route-source assertions that the edit route is untouched).
+
+**The 4 existing "born late" plans were NOT mutated, per explicit
+instruction.** Re-verified live after deploy -- unchanged:
+
+| Donor | Code | `next_expected_payment_at` | Days late |
+|---|---|---|---|
+| Avi Dear | 67974 | 2026-09-24 | 6 |
+| Benjy Weil | 78188 | 2026-09-24 | 6 |
+| Mordechai Y Goldman | 68418 | 2026-09-28 | 2 |
+| Mordechai Trestman | 68391 | 2026-09-25 | 5 |
+
+**Recommendation (not implemented): manually correct these 4 via the
+existing "Edit plan" UI** -- re-entering "Next expected payment" as a
+realistic upcoming date will immediately resolve their `isLate` status
+through the exact same route path (unaffected by this round's CREATE-only
+fix). The 5th plan from the same cleanup round (Wisotsky's DIN2026 plan)
+needs no correction -- its anchor happened to be satisfied by a same-day
+payment.
+
+**8. Completed-plan lifecycle -- investigated, NOT implemented.**
+Confirmed (again, via a full grep of every `ended_at` write path) that
+nothing in the import/payment-assignment flow ever ends a plan
+automatically; `ended_at` is set only by the explicit "End plan" action.
+All of this round's new intelligence (`isFulfilledAfterFinal`, the
+cultivation evidence/candidate) reads `balance_cents <= 0` directly and
+is deliberately independent of `ended_at`, so a stale active plan after
+full payment is already harmless for every purpose this round needed.
+**Recommendation on auto-ending**: do not implement it. The existing
+design already rejected auto-ending once (see
+`docs/PLEDGE-PAYMENT-PLAN-DESIGN.md`'s §11 revision) specifically
+because conflating a derived financial fact with an explicit fundraiser
+action was judged the wrong tradeoff; nothing in this round's
+requirements needs it (every consumer already reads the real balance,
+never `ended_at`), and a stale-but-inert row is accepted residual noise,
+not a correctness problem.
+
+**9. Repeat/staleness behavior.** Milestones fire only on their exact
+day because the triggering condition (`daysUntilFinal === 15/10/5`) is
+itself only true on that one day when re-evaluated fresh each time --
+there is nothing to dismiss, snooze, or expire. The cultivation
+opportunity is similarly fully derived (no persisted "currently showing"
+state) and its own urgency (`clamp01(daysSinceFinal / 365)`) is
+deliberately capped low; it naturally disappears the moment
+`deriveFulfilledCultivationByDonor`'s supersession check finds a newer
+real commitment -- proven directly by a unit test recording a newer
+pledge for the same donor and confirming the opportunity count drops to
+zero.
+
+**10. Verified against the real, live 45-plan population after
+deploying** (read-only `wrangler d1 execute` queries, zero writes): the
+real Baruch Katz case still classifies correctly; one real plan (Shlomo
+Kutoff, donor 57932) is currently exactly 10 days from its final date
+and correctly produces a milestone; zero plans currently have
+`isFulfilledAfterFinal` true; zero cultivation opportunities exist today
+(correctly, since no real plan is yet both fulfilled and past-final);
+zero duplicate milestones across all 45 plans; the 4 existing
+"born-late" plans are confirmed unaffected by the creation-only fix (as
+intended, since they were not re-created). The genuinely new scenarios
+required by the task (completed-after-final producing an opportunity;
+that opportunity disappearing once a newer pledge exists) do not occur
+in the current real data, so they are covered by synthetic unit tests
+instead, per the explicit instruction to use synthetic tests for
+mutation-sensitive cases rather than create real data to exercise them.
+
+**Tests.** `tests/pledge-payment-plan.test.mjs` extended (milestone
+exact-day firing across the full -16..0 day range, milestone exclusion
+once late/completed/ended, signed `daysUntilFinal`, `isFulfilledAfterFinal`
+including the early-payoff/ended-but-still-fulfilled/on-the-final-day-
+itself edge cases, `adjustNewPlanAnchorForPastDate` including the 31st-
+anchor and far-past cases, and route-source wiring assertions for both
+the create and edit routes). New `tests/payment-plan-intelligence.test.mjs`
+(`deriveFulfilledCultivationByDonor`'s 7 cases including supersession by
+a newer vs. older row; `cultivateNextPledgeCandidate`'s firing condition
+and its mutual-exclusivity veto against an open pledge; the Fundraising
+Intelligence `payment_plan_milestone` situation). New
+`tests/portfolio-focus-payment-plan-bugfix.test.mjs` (the Baruch-Katz-
+shaped regression, §6 above). `tests/relationship-date-events.test.mjs`
+extended (the milestone event's today-bucket placement and
+real-final-date display, and the "unknown donor silently skipped"
+safety discipline). `tests/pledge-payment-plan.test.mjs`'s
+`pledgePlanLine` milestone-wording cases.
+
+**Gates.** `tsc --noEmit` clean. `eslint` on every changed file: zero
+new errors (one pre-existing warning each in `meeting-brief.ts` and
+`live-data.ts`, unrelated to this round, already present before it).
+Full suite passes except the same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure already confirmed
+present on `HEAD` in prior rounds. `node scripts/build-staging.mjs`
+succeeds. Deployed to Independent Staging, Version ID
+`8a167415-6a86-4435-8a42-27ab624d311b`.
+
+**D1 mutation count: 0.** `pledge_payment_plan_reviews`=22,
+`pledge_payment_plans`=45, `giving_activities`=5459, `donors`=254 --
+identical immediately before and immediately after the entire
+implementation-and-verification round (checked twice). No code
+exercised a write path during verification -- the real route was
+verified by source/test, not by an end-to-end HTTP call (same caveat as
+prior rounds).

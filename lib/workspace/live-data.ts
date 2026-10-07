@@ -9,17 +9,18 @@ import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../r
 import type { SynthesisFact } from "../relationships/fact-synthesis.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import { CONTINUE_CONVERSATION_WINDOW_DAYS, type RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
+import { deriveFulfilledCultivationByDonor } from "../relationships/pledge-payment-plan.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
-import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent } from "./relationship-date-events.ts";
+import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, buildPaymentPlanMilestoneEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent, type PaymentPlanMilestoneRow } from "./relationship-date-events.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { logger } from "../logger";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 type IdentityRow = { display_name: string; primary_first_name: string | null; last_name: string | null; donor_code: string | null; external_id: string | null };
 type PriorityRow = IdentityRow & { recommendation_id: string; donor_id: string; action: string; reason: string; score: number; due_at: number | null; updated_at: number };
-type GivingRow = IdentityRow & { id: string; donor_id: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null; updated_at: number };
+type GivingRow = IdentityRow & { id: string; donor_id: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null; item_type: string | null; category: string; updated_at: number };
 type ContactRow = IdentityRow & { id: string; last_contact: number | null; recent_activity: number | null };
 type DonorRow = IdentityRow & { id: string; updated_at: number; relationship_summary: string | null; institutional_memory: string | null };
 type DonorDateRow = { donor_id: string; value: number | null };
@@ -219,7 +220,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
       ORDER BY CASE WHEN r.due_at IS NULL THEN 1 ELSE 0 END, r.due_at, r.score DESC LIMIT 50`).bind(...(demo ? [] : [userId, userId])).all<PriorityRow>(),
-    env.DB.prepare(`SELECT ga.id, ga.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, ga.paid_cents, ga.balance_cents, ga.activity_date, ga.description, ga.item_type, ga.updated_at
+    env.DB.prepare(`SELECT ga.id, ga.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, ga.paid_cents, ga.balance_cents, ga.activity_date, ga.description, ga.item_type, ga.category, ga.updated_at
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
       WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
@@ -384,6 +385,14 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // (enforced by the create route, not a DB constraint) -- safe to key
   // by pledge_activity_id directly.
   const paymentPlanByPledge = new Map(paymentPlanRows.results.map((item) => [item.pledge_activity_id, item]));
+  // "Existing commitment fulfilled, consider the next one" -- pure
+  // derivation (lib/relationships/pledge-payment-plan.ts's
+  // deriveFulfilledCultivationByDonor, unit-tested there); no new D1
+  // query, reusing giving.results/paymentPlanByPledge already fetched
+  // above. See recommendation-evidence.ts's
+  // fulfilledPledgeCultivationOpportunity doc comment for the full
+  // product reasoning.
+  const fulfilledCultivationByDonor = deriveFulfilledCultivationByDonor(giving.results, paymentPlanByPledge, now);
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
   // per donor is the oldest pending ask, same "one most relevant fact"
   // pattern as openPledgeByDonor above.
@@ -428,7 +437,12 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // for the monotonicity argument this bound relies on.
   const suggestionDonorIds = selectSuggestionDonorIds({
     giftDonorIds: recentGiftByDonor.keys(),
-    pledgeDonorIds: openPledgeByDonor.keys(),
+    // Merged with fulfilledCultivationByDonor -- a donor whose ONLY
+    // signal is "existing commitment fulfilled, consider the next one"
+    // (no other open pledge, gift, ask, etc.) must still be scored, or
+    // cultivateNextPledgeCandidate would never even get the chance to
+    // fire for them.
+    pledgeDonorIds: new Set([...openPledgeByDonor.keys(), ...fulfilledCultivationByDonor.keys()]),
     askDonorIds: openAskByDonor.keys(),
     // Feeds relationship_opportunity/solicit eligibility, which otherwise
     // has no representation in this pool at all -- see
@@ -482,8 +496,8 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // yahrtzeit_outreach/birthday_outreach/anniversary_outreach have no entry
   // here -- they're excluded from this ranked path entirely (see the
   // continue below) and never look this map up.
-  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", open_ask: "Open ask", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
-  const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3 };
+  const suggestionLabelByKind: Partial<Record<RecommendationCandidateKind, string>> = { acknowledge_gift: "Recent gift", follow_up_pledge: "Open commitment", cultivate_next_pledge: "Next pledge opportunity", open_ask: "Open ask", solicit: "Relationship opportunity", relationship_opportunity: "Relationship opportunity", continue_conversation: "Continue the conversation", reconnect_contact_gap: "Contact gap" };
+  const suggestionRankByKind: Partial<Record<RecommendationCandidateKind, number>> = { acknowledge_gift: 2, follow_up_pledge: 3, cultivate_next_pledge: 3 };
   // live-data.ts's own "recent gift" bucket only ever draws from
   // giving_activities (never the legacy gifts table -- see GivingRow),
   // so gift_source is always "giving_activity" here.
@@ -516,6 +530,12 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const __scoringLoopStart = performance.now();
   let donorsScoredCount = 0;
   let recommendationCount = 0;
+  // Collected inside the loop below, directly from each donor's own
+  // already-computed evidence.giving.openPledge.activePaymentPlan --
+  // never a second evaluatePaymentPlan pass, so this can never disagree
+  // with what Suggested Actions/the donor page just computed for the
+  // same plan.
+  const paymentPlanMilestoneRows: PaymentPlanMilestoneRow[] = [];
 
   for (const donorId of suggestionDonorIds) {
     const donorRow = donorById.get(donorId);
@@ -544,6 +564,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
             };
           })()
         : null,
+      fulfilledPledgeCultivationOpportunity: fulfilledCultivationByDonor.get(donorId) ?? null,
       lastCompletedInteraction: lastInteractionRow ? { type: lastInteractionRow.type, summary: lastInteractionRow.summary, occurredAt: lastInteractionRow.occurred_at } : null,
       lastContactAt: contactByDonor.get(donorId) ?? null,
       lastSubstantiveContactAt: substantiveContactByDonor.get(donorId) ?? null,
@@ -557,6 +578,10 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       relationshipFacts: (relationshipFactsByDonor.get(donorId) ?? []).map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
       pendingAskSourceInteractionIds: pendingAskSourceInteractionIdsByDonor.get(donorId) ?? [],
     }, now, timezone);
+    const milestoneDaysBefore = evidence.giving.openPledge?.activePaymentPlan?.milestoneDaysBefore ?? null;
+    if (milestoneDaysBefore !== null && pledge) {
+      paymentPlanMilestoneRows.push({ donorId, pledgeActivityId: pledge.id, balanceCents: pledge.balance_cents ?? 0, finalExpectedPaymentAt: evidence.giving.openPledge!.activePaymentPlan!.finalExpectedPaymentAt, milestoneDaysBefore });
+    }
     const recommendation = buildDonorRecommendation(evidence);
     if (!recommendation) continue;
     // A donor whose open reminder is itself the winning suggestion is
@@ -580,6 +605,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // upcomingRelationshipDates instead.
     const sortAt = recommendation.kind === "acknowledge_gift" ? -(gift?.activity_date ?? 0)
       : recommendation.kind === "follow_up_pledge" ? (pledge?.activity_date ?? 0)
+      : recommendation.kind === "cultivate_next_pledge" ? (evidence.giving.fulfilledPledgeCultivationOpportunity?.finalExpectedPaymentAt ?? 0)
       // reconnect_contact_gap sorts by the same substantive-contact measure
       // its own candidate score is based on (see reconnectContactGapCandidate),
       // so displayed order never disagrees with the "why" text. Every other
@@ -659,6 +685,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       timezone,
       now,
     ),
+    ...buildPaymentPlanMilestoneEvents(paymentPlanMilestoneRows, identityByDonor, timezone, now),
   ].sort((a, b) => a.dateEpoch - b.dateEpoch);
   const { today: todayRelationshipDates, upcoming: upcomingRelationshipDates } = partitionRelationshipDateEventsByToday(relationshipDateEvents, now, timezone);
   const morningBrief: WorkspaceMorningBrief = {

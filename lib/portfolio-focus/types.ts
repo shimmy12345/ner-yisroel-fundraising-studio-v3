@@ -71,6 +71,15 @@ export type PortfolioFocusDonorInput = {
   pledgeAgeDays: number | null; // last-activity recency (tactical basis)
   pledgeCommitmentAgeDays: number | null; // real commitment-date recency, only when known (strategic "is this new" basis)
   pledgePlanOnTrack: boolean | null; // null = no active plan
+  // Exact-day milestone (15/10/5 days before the plan's final expected
+  // date) -- null/absent the rest of the time, including whenever
+  // pledgePlanOnTrack is itself false (see evaluatePaymentPlan's own
+  // milestoneDaysBefore doc comment for why those are mutually exclusive
+  // by construction). Optional, defaulting to "no milestone" (see
+  // detectPaymentPlanMilestone's own falsy check), so every existing
+  // fixture/caller that predates this field keeps behaving exactly as
+  // before.
+  pledgePlanMilestoneDaysBefore?: 15 | 10 | 5 | null;
 
   // Relationship
   askHistoryCount: number;

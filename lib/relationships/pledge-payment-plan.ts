@@ -133,6 +133,29 @@ export type PaymentPlanEvaluation = {
   isPlanEndedWithBalance: boolean;
   isCompleted: boolean;
   balanceRemainingCents: number;
+  // Signed day count to the final expected date (negative = already
+  // past). Exposed so callers building milestone/"ending soon" signals
+  // never recompute this from the raw field themselves.
+  daysUntilFinal: number;
+  // Fires on the EXACT day count only (15, 10, or 5 days before the
+  // final expected date) -- deliberately not "within 15 days," per the
+  // product decision that these are discrete milestones, not a repeating
+  // window. Only meaningful while the plan is still genuinely open
+  // (active, not completed, final date not yet passed) -- null
+  // otherwise, so a caller never has to separately re-check those
+  // conditions. Checked in descending order (15 before 10 before 5) but
+  // the three day counts can never coincide for one plan, so order is
+  // cosmetic.
+  milestoneDaysBefore: 15 | 10 | 5 | null;
+  // The plan's final expected date has been reached or passed AND the
+  // pledge is fully paid (balanceCents <= 0) -- the "existing commitment
+  // fulfilled, consider the next one" signal. Deliberately independent
+  // of `endedAt`/`isActive`: per the product decision, this must not
+  // fail merely because the fundraiser never clicked "End plan" (see
+  // docs/AI-HANDOFF.md's payment-plan-intelligence entries). Mutually
+  // exclusive with isPlanEndedWithBalance by construction -- one
+  // requires balanceCents > 0, the other balanceCents <= 0.
+  isFulfilledAfterFinal: boolean;
 };
 
 // The single entry point every caller (Today, donor page, Meeting Brief)
@@ -166,6 +189,26 @@ export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates:
   const isOnTrack = evaluableForLateness && !isLate;
   const isPlanEndedWithBalance = isActive && finalDatePassed && !isCompleted;
 
+  // Signed -- negative once the final date has passed. Deliberately NOT
+  // daysBetween() (which clamps to >=0): callers need to tell "15 days
+  // before" from "15 days after," and this is the one place that
+  // distinction is computed, so no caller re-derives it independently.
+  const daysUntilFinal = Math.floor((plan.finalExpectedPaymentAt - now) / DAY_SECONDS);
+  // Milestones only fire on the exact day, and only while the plan is
+  // genuinely ON TRACK (not merely "not yet past final") -- a plan that
+  // is already late, completed, ended, or past its final date never also
+  // reports a milestone; a KNOW-tier "ending in 5 days" alongside an
+  // already-overdue DO item would be redundant and confusing. See
+  // isPlanEndedWithBalance/isFulfilledAfterFinal for those other states.
+  const milestoneDaysBefore: 15 | 10 | 5 | null = isOnTrack && (daysUntilFinal === 15 || daysUntilFinal === 10 || daysUntilFinal === 5)
+    ? (daysUntilFinal as 15 | 10 | 5)
+    : null;
+  // "Reached/passed" -- >=, not the strict > finalDatePassed uses -- so a
+  // pledge that's already fully paid by its own final day qualifies
+  // immediately, not one day later. Independent of isActive/endedAt by
+  // design (see the type's own doc comment).
+  const isFulfilledAfterFinal = now >= plan.finalExpectedPaymentAt && isCompleted;
+
   return {
     nextUnsatisfiedExpectedPaymentAt,
     latestActualPaymentAt,
@@ -176,5 +219,82 @@ export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates:
     isPlanEndedWithBalance,
     isCompleted,
     balanceRemainingCents: balanceCents,
+    daysUntilFinal,
+    milestoneDaysBefore,
+    isFulfilledAfterFinal,
   };
+}
+
+// Corrects a newly-entered next-expected-payment anchor that is already
+// in the past relative to `now` -- the "born late" problem: a plan
+// created today with a fundraiser-entered anchor from weeks earlier
+// would otherwise evaluate as immediately overdue the moment it's
+// saved, before the fundraiser has had any chance to receive a payment
+// against the new schedule. Only ever called at CREATION time, never on
+// edit (an explicit edit may legitimately re-anchor into the past -- see
+// docs/AI-HANDOFF.md). Advances by real calendar months, preserving the
+// fundraiser's own entered day-of-month as the fixed anchor (via
+// advanceOneCalendarMonth, never drifting to a clamped day) until the
+// cycle is today or later -- so "the 24th of every month" stays the
+// 24th, it just starts from the first 24th that hasn't happened yet.
+// Never invents a date out of nothing -- if the entered date is already
+// today or in the future, it is returned completely unchanged.
+export function adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt: number, now: number): number {
+  const anchorDay = dayOfMonthFromDateOnlyEpoch(enteredNextExpectedPaymentAt);
+  let cycle = enteredNextExpectedPaymentAt;
+  let iterations = 0;
+  while (cycle < now && iterations < PLEDGE_PAYMENT_CYCLE_ENUMERATION_CAP) {
+    cycle = advanceOneCalendarMonth(cycle, anchorDay);
+    iterations += 1;
+  }
+  return cycle;
+}
+
+export type FulfilledCultivationSourceRow = {
+  id: string;
+  donor_id: string;
+  balance_cents: number | null;
+  activity_date: number | null;
+  description: string | null;
+  item_type: string | null;
+  category: string;
+};
+export type FulfilledCultivationPlanRow = { pledge_activity_id: string; final_expected_payment_at: number };
+export type FulfilledCultivationOpportunity = { pledgeActivityId: string; campaign: string | null; description: string | null; finalExpectedPaymentAt: number };
+
+const REAL_COMMITMENT_CATEGORIES = new Set(["open_pledge", "partially_paid_pledge", "completed_gift"]);
+
+// "Existing commitment fulfilled, consider the next one" -- pure derivation,
+// no D1 access (the caller, lib/workspace/live-data.ts, already has both
+// inputs fetched for other purposes). See
+// recommendation-evidence.ts's fulfilledPledgeCultivationOpportunity doc
+// comment for the full product reasoning. Candidates: a pledge with
+// balance<=0 whose linked plan's final expected date has been
+// reached/passed. One slot per donor (the most recently dated such
+// pledge) -- suppressed entirely if a newer real commitment (any
+// open_pledge/partially_paid_pledge/completed_gift) already exists for
+// that donor, so recording a new pledge naturally makes this opportunity
+// obsolete without anything needing to track or dismiss it.
+export function deriveFulfilledCultivationByDonor(
+  givingRows: FulfilledCultivationSourceRow[],
+  paymentPlanByPledge: Map<string, FulfilledCultivationPlanRow>,
+  now: number,
+): Map<string, FulfilledCultivationOpportunity> {
+  const candidatesByDonor = new Map<string, FulfilledCultivationSourceRow[]>();
+  for (const item of givingRows) {
+    if ((item.balance_cents ?? 0) > 0) continue;
+    const plan = paymentPlanByPledge.get(item.id);
+    if (!plan || plan.final_expected_payment_at > now) continue;
+    if (!candidatesByDonor.has(item.donor_id)) candidatesByDonor.set(item.donor_id, []);
+    candidatesByDonor.get(item.donor_id)!.push(item);
+  }
+  const result = new Map<string, FulfilledCultivationOpportunity>();
+  for (const [donorId, candidates] of candidatesByDonor) {
+    const mostRecent = candidates.sort((a, b) => (b.activity_date ?? 0) - (a.activity_date ?? 0))[0];
+    const supersededByNewerPledge = givingRows.some((item) => item.donor_id === donorId && REAL_COMMITMENT_CATEGORIES.has(item.category) && (item.activity_date ?? 0) > (mostRecent.activity_date ?? 0));
+    if (supersededByNewerPledge) continue;
+    const plan = paymentPlanByPledge.get(mostRecent.id)!;
+    result.set(donorId, { pledgeActivityId: mostRecent.id, campaign: null, description: mostRecent.description || mostRecent.item_type, finalExpectedPaymentAt: plan.final_expected_payment_at });
+  }
+  return result;
 }

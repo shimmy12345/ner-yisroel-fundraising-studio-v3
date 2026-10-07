@@ -326,6 +326,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
         // of UTC -- the same date-only/timezone bug class already fixed
         // once for open-pledge activity dates.
         nextExpectedLabel: activePlan.nextUnsatisfiedExpectedPaymentAt !== null ? financialDateLabel(activePlan.nextUnsatisfiedExpectedPaymentAt) : null,
+        milestoneDaysBefore: activePlan.milestoneDaysBefore,
       }
     : null;
 

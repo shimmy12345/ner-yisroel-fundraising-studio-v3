@@ -55,6 +55,11 @@ export type RecommendationEvidenceInput = {
   // pledge-payment-plan.ts for the pure evaluation logic (evaluatePaymentPlan)
   // this field feeds.
   openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[] }) | null } | null;
+  // See the output type's own doc comment (giving.fulfilledPledgeCultivationOpportunity)
+  // for the full reasoning. Optional/defaults to null so every existing
+  // caller/fixture that predates this field keeps behaving exactly as
+  // before.
+  fulfilledPledgeCultivationOpportunity?: { pledgeActivityId: string; campaign: string | null; description: string | null; finalExpectedPaymentAt: number } | null;
   // The donor's most recent COMPLETED interaction (never a scheduled or
   // cancelled one) -- drives continue_conversation and acknowledgedSinceGift.
   lastCompletedInteraction: { type: string; summary: string; occurredAt: number } | null;
@@ -184,8 +189,25 @@ export type RecommendationEvidence = {
         finalDatePassed: boolean;
         isPlanEndedWithBalance: boolean;
         isCompleted: boolean;
+        daysUntilFinal: number;
+        milestoneDaysBefore: 15 | 10 | 5 | null;
       } | null;
     } | null;
+    // A DIFFERENT, already-fulfilled pledge (balance <= 0) whose payment
+    // plan's final expected date has been reached/passed, with no newer
+    // real commitment recorded for this donor since -- "existing
+    // commitment fulfilled, consider the next one." Deliberately a
+    // SEPARATE field from openPledge, never a branch of it: openPledge is
+    // always balance > 0 by construction (see live-data.ts's
+    // openPledgeByDonor), so a fulfilled pledge can never occupy that
+    // slot -- these two fields are therefore always mutually exclusive by
+    // construction, exactly matching the product rule that a donor is
+    // never simultaneously "follow up on the open balance" and "ask about
+    // the next pledge." Null whenever no such pledge exists, or whenever
+    // one does but a newer real pledge/gift already supersedes it (see
+    // live-data.ts for exactly how "newer" is determined -- never
+    // computed here).
+    fulfilledPledgeCultivationOpportunity: { pledgeActivityId: string; campaign: string | null; description: string | null; finalExpectedPaymentAt: number } | null;
   };
   contact: {
     lastCompletedInteraction: { type: string; summary: string; occurredAt: number; daysAgo: number } | null;
@@ -291,6 +313,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
               : null,
           }
         : null,
+      fulfilledPledgeCultivationOpportunity: input.fulfilledPledgeCultivationOpportunity ?? null,
     },
     contact: {
       lastCompletedInteraction: input.lastCompletedInteraction

@@ -27,7 +27,7 @@ import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendat
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { localDateOnlyEpoch } from "./local-time.ts";
 
-export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary";
+export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone";
 
 // Fields are kept granular (rather than one concatenated "detail" string) so
 // the compact Coming Up row can give each piece of information -- donor,
@@ -198,6 +198,66 @@ export function buildImportantDateRelationshipEvents(
     });
   }
   return events.sort((a, b) => a.dateEpoch - b.dateEpoch);
+}
+
+const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
+
+export type PaymentPlanMilestoneRow = {
+  donorId: string;
+  pledgeActivityId: string;
+  balanceCents: number;
+  finalExpectedPaymentAt: number;
+  milestoneDaysBefore: 15 | 10 | 5;
+};
+
+// Payment-plan milestones -- deliberately NOT built the same way
+// yahrtzeit/important-date events are (a lead-window countdown shown
+// every day it's inside the window). A milestone is a single, discrete
+// day (15/10/5 days before a plan's own final expected date, computed by
+// evaluatePaymentPlan -- never re-derived here), so the event is only
+// ever constructed AT ALL on that exact day; there is no window to
+// filter. `dateEpoch` (used only for today-vs-upcoming bucketing, never
+// rendered directly -- see app/page.tsx's RelationshipDateEventRow) is
+// set to TODAY so the row always lands in Coming Up's "today" bucket via
+// partitionRelationshipDateEventsByToday below, exactly like a same-day
+// yahrtzeit. `dateLabel` (the prominent, actually-RENDERED date column)
+// is instead the plan's real final expected date -- what this row is
+// actually about. This is also why no Agenda post-filter change was
+// needed: lib/agenda/agenda-model.ts's IMPORTANT DATES/STEWARDSHIP
+// section already includes the full "today" bucket unconditionally.
+export function buildPaymentPlanMilestoneEvents(
+  rows: PaymentPlanMilestoneRow[],
+  identityByDonor: Map<string, DonorIdentityForEvent>,
+  timezone: string,
+  now: number,
+): WorkspaceRelationshipDateEvent[] {
+  const todayEpoch = localDateOnlyEpoch(now, timezone);
+  const events: WorkspaceRelationshipDateEvent[] = [];
+  for (const row of rows) {
+    const identity = identityByDonor.get(row.donorId);
+    if (!identity) continue;
+    events.push({
+      id: `payment-plan-milestone:${row.pledgeActivityId}`,
+      type: "payment_plan_milestone",
+      donorId: row.donorId,
+      donorName: identity.donorName,
+      initials: identity.initials,
+      donorCode: identity.donorCode,
+      label: "Payment plan",
+      relationshipPhrase: `Payment plan ending in ${row.milestoneDaysBefore} days`,
+      secondaryDateLabel: `${money(row.balanceCents)} remaining`,
+      provenanceName: null,
+      provenanceNameHebrew: null,
+      // The prominently-rendered date column (app/page.tsx's
+      // RelationshipDateEventRow) -- the plan's real final expected date,
+      // never `dateEpoch` (which is today, for bucketing only -- see the
+      // function's own header comment).
+      dateLabel: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.finalExpectedPaymentAt * 1000)),
+      dateEpoch: todayEpoch,
+      ambiguous: false,
+    });
+  }
+  return events.sort((a, b) => a.donorName.localeCompare(b.donorName));
 }
 
 // Splits a combined, sorted relationship-date-event list (yahrtzeits +
