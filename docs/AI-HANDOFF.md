@@ -23378,3 +23378,22 @@ data-only import against the existing `donor_rebbeim` join table.
 **Scratch artifacts** (local workbook copy, analysis scripts, live-data
 JSON snapshots, generated CSV) all contained real donor PII and were
 deleted at the end of this round; none were ever staged or committed.
+
+---
+
+2026-10-07T00:00:00Z (approximate, follow-up) — **READ-ONLY pledge
+payment-plan cleanup audit.** Zero D1 mutations, zero application code
+changes. Full report: `docs/PLEDGE-PAYMENT-PLAN-CLEANUP-AUDIT.md`.
+
+Found 22 open/partially-paid pledges (20 distinct donors, $59,293.00
+total outstanding) dated within the 2024-10-07 to 2026-10-07 window with
+no active `pledge_payment_plans` row -- all 22 are "NONE" (no plan ever
+existed), 0 are "old plan but balance remains." Classified for cleanup
+review only (11 likely need a plan, 5 review first, 6 possibly
+intentional/not yet due) -- nothing was created or changed. Also
+surfaced: one real, already-live payment plan (donor 68231) already past
+its own final expected date with balance remaining -- exactly the case
+the planned "ending soon" alert needs to catch; and 6 pledges where
+`paid_cents > 0` but no matching `jl_payment_assignment_audits` row
+exists, a real gap worth knowing about before relying on that audit
+trail for those donors' plan-lateness evaluation.
