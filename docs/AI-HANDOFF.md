@@ -23397,3 +23397,91 @@ the planned "ending soon" alert needs to catch; and 6 pledges where
 `paid_cents > 0` but no matching `jl_payment_assignment_audits` row
 exists, a real gap worth knowing about before relying on that audit
 trail for those donors' plan-lateness evaluation.
+
+---
+
+2026-10-07T00:00:00Z (approximate, follow-up) -- **Manual pledge
+payment-plan cleanup review screen.** Added `/pledge-review`, a narrow,
+temporary, read-only review surface for manually triaging the 22
+pledges found by the completed audit -- explicitly NOT a CRM-style
+ongoing pledge-management screen, and deliberately not linked from the
+main nav (reached by direct URL only, same treatment as `/health` and
+`/rebbeim`).
+
+**Re-derivation, not hardcoding.** The page re-runs the exact three
+read-only queries the audit used (open/partially-paid giving_activities
+joined to donors; all `pledge_payment_plans` rows for the user; all
+linked `jl_payment_assignment_audits` rows) against live Independent
+Staging on every load, via a new pure, unit-tested module
+(`lib/relationships/pledge-review.ts`'s `buildPledgeReviewQueue`) --
+never a stored/hardcoded pledge-id list. Re-ran this live, immediately
+before building the UI: **still exactly 22 qualifying pledges, 20
+distinct donors** -- no drift from the audit, so no STOP condition was
+triggered. Donor 68231's separate already-active, past-final-date plan
+was confirmed absent from the 22 (it structurally cannot appear: it has
+an active `pledge_payment_plans` row, which the exact same "no current
+plan" definition from the audit excludes).
+
+**What's shown per pledge**: donor name (linked to `/donors/:id`) and
+code, campaign, "JL Activity Date" (explicitly labeled this, not "Date
+Pledged," with a "(future-dated)" note when `activity_date` is later
+than today -- never presented as the literal origination date),
+original/paid/balance, a Partially paid/Unpaid badge, an "Old/inactive
+plan existed" badge when applicable (0 of the 22 today), last payment
+date+amount from `jl_payment_assignment_audits` when a real linked row
+exists, and an explicit "Payment recorded; detailed payment history
+unavailable" caveat (never a guessed date) for the 6 pledges the audit
+found with `paid_cents > 0` but no matching audit row. Sort order:
+partially-paid pledges first, then unpaid, oldest `activity_date` first
+within each group -- never the audit's prior A/B/C classification, which
+does not exist anywhere in this surface or its underlying module.
+
+**Review choices are NOT persisted to the server.** The three-way choice
+(Needs payment plan / No payment plan needed / Need to investigate) and
+the "Reviewed X of 22" counter are held in the browser's own
+`sessionStorage` only (client-side, this tab, this session) -- there is
+no API route, no D1 write, and selecting "Needs payment plan" does
+nothing beyond recording that local choice; it never creates a
+`pledge_payment_plans` row. This was a deliberate choice, not an
+oversight: reusing `giving_activities.private_note` (an existing,
+already-audited free-text field) was considered and explicitly NOT
+adopted without asking first, since encoding a structured three-state
+review status into a free-text note would itself be "introducing an
+ongoing manually-maintained status model" -- exactly what the task asked
+to STOP and present as an open decision rather than silently build.
+**Open decision for the user**: how (or whether) to persist review
+decisions durably -- options include (a) reuse `private_note` with a
+short convention like `[Pledge review 2026-10-07] Needs payment plan`,
+visible in existing giving-management UI and already audited via
+`giving_activity_management_audits`; (b) a small new
+`pledge_review_decisions` table (schema change); or (c) leave it
+session-only permanently, since this is meant to be worked through once.
+No option has been implemented pending the user's choice.
+
+**Safety**: zero D1 writes anywhere in this round. `donor_rebbeim` /
+`pledge_payment_plans` / `giving_activities` / `donors` row counts are
+unchanged. No application logic outside the new, additive
+`/pledge-review` route and its one new lib module was touched.
+
+**Verification**: `tsc --noEmit` clean; `eslint` on the new files shows
+only two pre-existing-pattern findings already present elsewhere in this
+codebase (`Date.now()` in a server component, matching 24 identical
+instances in `app/donors/[id]/page.tsx`; a plain `<a>` donor link,
+matching `app/rebbeim/page.tsx`'s own identical pattern) -- neither is a
+new regression. Full test suite passes except one pre-existing,
+unrelated failure in `tests/backup-watchdog-scheduled.test.mjs`,
+confirmed present on this same commit *before* this round's changes
+(via `git stash`) -- not touched or caused by this work. New test:
+`tests/pledge-review.test.mjs` (queue building, cutoff math, active-plan
+exclusion, old-plan inclusion, payment-evidence caveats, sort order, and
+multi-pledge-per-donor isolation). `node scripts/build-staging.mjs`
+completed cleanly with `/pledge-review` listed as a new dynamic route.
+Deployed to Independent Staging (Version ID
+`33d55794-c173-416c-b05c-09c9c97071a7`); confirmed via direct HTTP
+request that `/pledge-review` returns a 302 to the real Cloudflare
+Access login with `redirect_url=/pledge-review` embedded (i.e. it is
+live and correctly auth-gated, same as every other protected page) --
+an interactive, signed-in browser walkthrough of the rendered page was
+attempted but blocked by this session's own permission classifier
+(tagged "Production Deploy"); the user has not yet visually confirmed
+the rendered page themselves.
