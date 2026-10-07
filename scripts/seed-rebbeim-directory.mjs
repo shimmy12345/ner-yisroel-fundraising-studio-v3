@@ -1,11 +1,22 @@
-// Idempotent seed for the initial canonical Rebbeim directory (Donor
-// Rebbeim -- see docs/AI-HANDOFF.md). The 41 names below are the user's
-// own explicitly approved master list, verbatim -- never "corrected" or
-// expanded without separate approval. This script only ever INSERTs a
-// name that does not already exist (matched by the same normalized-name
-// comparison the app itself uses, lib/relationships/rebbeim.ts's
-// normalizeRebbiName) -- it never deletes, renames, or recreates an
-// existing row, so it is safe to re-run.
+// Idempotent seed for the canonical Rebbeim directory (Donor Rebbeim --
+// see docs/AI-HANDOFF.md). The names below are the user's own explicitly
+// approved master list, verbatim -- never "corrected" or expanded
+// without separate approval. This script only ever INSERTs a name that
+// does not already exist (matched by the same normalized-name comparison
+// the app itself uses, lib/relationships/rebbeim.ts's normalizeRebbiName)
+// -- it never deletes, renames, or recreates an existing row, so it is
+// safe to re-run.
+//
+// 2026-10-07: expanded from 41 to 43. "Harav Sax" and "Harav Yosef Kalman
+// Neuberger" were found to be legitimate Rebbeim while reviewing the
+// completed donor/Rebbeim assignment workbook, approved by the user as
+// intentional additions to the canonical directory (not a donor
+// assignment import, which remains a separate, later, explicitly-
+// reviewed step). Both normalize to values distinct from all 41 original
+// entries, confirmed before adding -- "Harav Yosef Kalman Neuberger" in
+// particular is NOT the same person as the already-seeded "Harav Yosef
+// Neuberger": the middle name "Kalman" makes their normalized forms
+// different, so this is a genuinely distinct 42nd Rebbi, not a duplicate.
 //
 // This does NOT assign any donor to any Rebbi -- see the separate
 // donor-code/Rebbeim bulk-assignment import for that, a deliberately
@@ -39,6 +50,8 @@ const CANONICAL_REBBEIM = [
   "Harav Zalman Mintz", "Harav Eisgrau", "Harav Melman", "Harav Adler",
   "Harav Shafran", "Harav Salb", "Harav Weiner", "Harav Rosenbaum",
   "Harav Moshe Hillel Glazer", "Harav Lansky", "Harav Hakkakian", "Harav Krakauer",
+  // Added 2026-10-07 -- see the file header comment above.
+  "Harav Sax", "Harav Yosef Kalman Neuberger",
 ];
 
 const wranglerBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "wrangler.CMD" : "wrangler");

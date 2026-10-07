@@ -23095,3 +23095,98 @@ canonical Rebbi was altered, the Donor Rebbeim feature itself was not
 touched, `feature/independent-cloudflare-sandbox` was not merged into
 `main`, and the donor-code/Rebbeim bulk assignment import was not
 started.
+
+---
+
+2026-10-07T00:00:00Z (approximate) — Canonical Rebbeim directory expanded
+41 -> 43 (data/seed update only).
+
+**Context.** The completed donor/Rebbeim assignment workbook was
+reviewed and found two legitimate Rebbeim not in the original 41-name
+canonical directory: **"Harav Sax"** and **"Harav Yosef Kalman
+Neuberger"** -- intentional additions, approved by the user. This round
+adds only the two canonical names; it does NOT import any donor <->
+Rebbi relationship (the workbook's actual assignments remain a separate,
+later, explicitly-reviewed step).
+
+**Investigated before changing anything.** Confirmed both new names
+normalize (`lib/relationships/rebbeim.ts`'s `normalizeRebbiName`) to
+values distinct from all 41 existing canonical entries and from each
+other -- in particular, "Harav Yosef Kalman Neuberger" normalizes to
+"yosef kalman neuberger", genuinely different from the already-seeded
+"Harav Yosef Neuberger"'s "yosef neuberger" (the middle name "Kalman" is
+the only difference, and it is sufficient to keep the existing unique
+constraint, `rebbeim`'s `UNIQUE(user_id, normalized_name)` index, fully
+satisfied with no collision). This confirmed up front that **no schema
+change is needed** -- the existing table/constraint already
+accommodates both names cleanly.
+
+**Implementation.** Used the existing canonical seed mechanism,
+unmodified in behavior: `scripts/seed-rebbeim-directory.mjs`'s
+`CANONICAL_REBBEIM` array gained exactly the two names (appended, with a
+dated comment explaining the addition and the Yosef Neuberger
+distinction), bringing the list to 43. No other file changed except
+`tests/rebbeim-directory.test.mjs`'s hardcoded counts (41 -> 43, and the
+"six Neuberger Rebbeim" likely-match test -> seven, since "Harav Yosef
+Kalman Neuberger" also shares that surname and must be surfaced
+alongside the other six for any future bare "Harav Neuberger" bulk-
+import entry, never silently resolved to one). The seed script's own
+idempotent, dry-run-by-default, never-delete-or-recreate behavior is
+completely unchanged -- only its input data grew.
+
+**Applied to Independent Staging.** Dry run first: 41 already present, 2
+to insert. Applied: both inserted (`Harav Sax` ->
+`b06d3853-cdad-4e5d-ae10-387064af6871`, `Harav Yosef Kalman Neuberger`
+-> `68c41eaa-4ebe-4160-a99e-39f36483410e`). Re-running the seed
+immediately after confirmed full idempotency: 43 already present, 0 to
+insert.
+
+**Verification (live, Independent Staging, no redeploy needed -- this
+was a pure data change, and every Rebbeim surface already queries D1
+fresh on every request).**
+- `rebbeim` row count: 43 (confirmed via direct query).
+- Exactly 1 row each for `Harav Sax` and `Harav Yosef Kalman Neuberger`
+  (confirmed via `GROUP BY display_name`).
+- `donor_rebbeim` row count: 0, unchanged.
+- `/rebbeim`: "43 Rebbeim in the canonical directory", both new names
+  present in the alphabetized list, each showing "0 donors" (correctly
+  unassigned).
+- Donor page "+ Add Rebbi" search (tested on the real Eitan Pfeiffer
+  donor, read-only -- typed into the search box and cancelled without
+  selecting anything): typing "Sax" surfaced exactly "Harav Sax";
+  typing "Kalman" surfaced exactly "Harav Yosef Kalman Neuberger".
+  Pfeiffer's own Rebbeim relationships remained "No Rebbeim recorded for
+  this donor yet." throughout -- untouched.
+- Bulk-import preview (`/onboarding/import/rebbeim`, synthetic test CSV
+  `Donor Code,Rebbeim` / `48637,Harav Sax; Harav Yosef Kalman Neuberger`):
+  "2 ready to add, 0 already connected, 0 unknown donor code, 0
+  duplicate donor code, 0 unrecognized Rebbi" -- both exact names
+  recognized as canonical. The commit button was never clicked; nothing
+  was written.
+
+**Schema/restore status, confirmed explicitly.** No new migration (still
+38 `drizzle/*.sql` files, unchanged from the prior round). No schema
+drift: `node scripts/check-main-restore-sync.mjs` re-run after the seed
+-> still "D1 restore/schema state on main is in sync with the canonical
+schema. No drift detected." **No `main` restore/baseline sync was
+required or performed** -- this was data only, never touching
+`rebbeim`'s or `donor_rebbeim`'s DDL.
+
+**Gates.** `pnpm test`: all green except the same single pre-existing,
+unrelated `backup-watchdog-scheduled.test.mjs` failure this session has
+found on every round; `pnpm exec tsc --noEmit`: clean; `pnpm run
+build:staging-independent`: succeeds (no application code changed by
+this round at all -- the build was run to confirm this, not because
+anything needed rebuilding).
+
+**donor_rebbeim mutation count: 0. Donor mutation count: 0.** The only
+writes this round were the two new `rebbeim` INSERTs themselves.
+
+**Scope discipline.** No donor <-> Rebbi relationship was created. No
+other Rebbi was inferred or added beyond the exact two approved names.
+The bulk importer, the donor-page UI, and recommendation/intelligence
+logic were all read but not modified. `main` was not touched.
+
+**Next step:** a controlled preview of the completed donor/Rebbeim
+assignment workbook (not a commit) -- a separate, later, explicitly-
+reviewed task. This round stops before that.
