@@ -23737,3 +23737,165 @@ expected date (never inferred). Leave the 17 `no_payment_plan_needed`
 pledges untouched. Nothing pending in `need_to_investigate`. No code
 was changed, no payment plan was created or modified, and no pledge,
 donor, or review decision was altered this round.
+
+---
+
+2026-10-07T21:10:00Z (approximate, follow-up) -- **Payment-plan
+intelligence: Phase 1 investigation (READ-ONLY, not implemented).** The
+manual pledge payment-plan cleanup is complete (the user created 5 real
+payment plans via the reviewed `needs_payment_plan` group). This round
+returns to the original product goal that motivated the cleanup:
+proactively surfacing when a payment plan needs attention because it is
+approaching or has passed its expected completion -- without becoming a
+CRM task system. Investigation only; zero D1 writes; nothing
+implemented.
+
+**Key discovery: the "DO" half of this feature already exists.**
+`lib/relationships/pledge-payment-plan.ts`'s `evaluatePaymentPlan`
+already derives `isOnTrack`/`isLate`/`isPlanEndedWithBalance`/
+`isCompleted` purely from `pledge_payment_plans` +
+`jl_payment_assignment_audits` + live balance -- no stored status.
+`recommendation-candidates.ts`'s `followUpPledgeCandidate` already
+branches on `isLate`/`isPlanEndedWithBalance`, producing actionable,
+plan-aware wording that already flows into Today's Suggested Actions and
+the Daily Agenda (which draws from the same candidate pool). The donor
+page's payment-plan card and Meeting Brief's `pledgePlanLine()` already
+show a passive "final expected date has passed with balance still open"
+note. **The real gap is narrower than assumed**: no "ending soon" (KNOW,
+before the final date) signal exists anywhere, and a genuine bug was
+found: `lib/portfolio-focus/aggregate.ts:179` computes
+`pledgePlanOnTrack = !evaluation.isLate` -- since `isLate` is forced
+`false` once the final date has passed (by `evaluatePaymentPlan`'s own
+design), **a plan that is ended-with-balance reads as "on track" in
+Fundraising Intelligence/Portfolio Focus**, which would make
+`detectStewardshipMoment` call a case like Baruch Katz's "actively
+fulfilling commitment on schedule" -- the opposite of reality.
+
+**Current population (live Independent Staging, 45 active payment
+plans: 40 pre-existing + the 5 the user just created).** Zero plans have
+ever been ended (`ended_at IS NOT NULL` count = 0).
+
+Days-until/past-final-expected-date distribution:
+
+| Range | Count |
+|---|---|
+| Past (final date already gone) | 1 |
+| 0-14 days out | 3 |
+| 15-30 days out | 8 |
+| 31-60 days out | 16 |
+| 61-180 days out | 5 |
+| 180+ days out | 12 |
+
+Bucketed per the task's own A-E framing: **A (passed + balance
+remains)** = 1, Baruch Katz only. **B (approaching + balance remains)**
+= 11 plans within 30 days (3 within 14 days: Spetner/2689, Kutoff/57932,
+Weil/78188 -- Weil is also separately already late). **C (passed + $0
+balance)** = 0, no occurrences at all among active plans. **D
+(comfortably in progress / `isOnTrack`)** = 27 of 45. **E (anomalous)**
+= the 4 newly-created plans already `isLate` and the 3 plans with no
+audit-trail payment history, both detailed below, plus the Portfolio
+Focus bug above.
+
+**Baruch Katz (68231), re-checked, unchanged, still valid.** Balance
+$18.00, final expected 2026-10-03 (5 days past at investigation time),
+`ended_at` still `NULL`, last real payment 2026-09-07 (before the final
+date -- not a late-payment case, just an unresolved $18).
+`isPlanEndedWithBalance: true`. Not modified.
+
+**$0-balance lifecycle (investigated, not changed).** Only the explicit
+"End plan" action in `app/api/pledge-payment-plans/[id]/route.ts` ever
+writes `ended_at` -- grepped every write path in the app; nothing in the
+import/payment-assignment flow touches it. A pledge reaching $0 leaves
+its plan active forever unless a fundraiser manually ends it. This is
+already safe: `isCompleted = balanceCents <= 0` is derived independently
+of `ended_at`, so `follow_up_pledge` cannot fire regardless. Conclusion:
+no automatic housekeeping is needed -- a stale active plan after full
+payment is already harmless by construction, confirmed by 0 occurrences
+of an active plan with $0 balance in the live data.
+
+**Where this belongs (verified against the real architecture, not
+forced).** The DO/KNOW split the user proposed already matches how the
+code is built for the passed-final-date case (DO, via Today/Agenda) --
+it only needs the Portfolio Focus bug fixed so Fundraising Intelligence
+agrees. The missing "ending soon" (KNOW) signal belongs in the same
+three places that already carry plan-aware text: Today (a new KNOW-tier
+line, never competing for the DO slot), Meeting Brief's
+`pledgePlanLine()` (one more branch), and Fundraising Intelligence's
+`commitmentProgress`/`stewardshipMoment` situations (once
+`pledgePlanOnTrack` is fixed). No new dashboard is needed or
+recommended.
+
+**Repeat-alert / staleness behavior (investigated).**
+`follow_up_pledge` is a derived candidate, never a persisted row -- it
+has no dismiss/snooze mechanism (that only exists for the separate
+`recommendations` "due reminder" table). This is both the safety net and
+the risk: it will keep showing only while the condition is real and
+disappears the instant balance hits $0 or evidence changes (zero manual
+cleanup), but nothing ever "acknowledges" it -- if `urgency =
+clamp01(daysPastFinal / 180)` ever pushes a case into a visible
+Suggested slot, it reappears identically every day until resolved.
+Today, at only 5 days past, Katz's urgency is ~0.03 -- effectively
+invisible -- so this isn't biting yet, but it will grow. Recommendation:
+do not invent a cooldown; trust the existing urgency curve, which only
+escalates as the case would legitimately become more worth surfacing.
+
+**Edge cases (checked against real data, not assumed):**
+`final_expected_payment_at`/`next_expected_payment_at` NULL: impossible
+(both `NOT NULL` at the schema level). Balance already zero on an active
+plan: 0 occurrences. `ended_at` populated with balance remaining: 0
+occurrences (0 plans ever ended). Multiple plans/pledges per donor: 4
+donors (Goldstein/65904, Ramras/64363, Wisotsky/77118, Singer/69064)
+have 2 active plans each, one per distinct pledge, correctly isolated.
+Payment after final expected date: 0 occurrences. Plan created after the
+pledge was already partially paid: the common case -- 20 of 45 plans
+have a real payment dated before the plan's own `created_at`, handled
+correctly by design. Future-dated `activity_date`: 24 of 45 (confirms
+the original audit's finding -- JL's own due-date convention, not a
+bug). Missing payment-assignment audit history: 3 plans (Luxenburg/4930,
+Goldstein/65904, Dahan/68800) have `paid_cents > 0` with zero linked
+audit rows, so `evaluatePaymentPlan` sees them as never-paid -- inherited
+from the original cleanup audit's §5.2 finding, will inflate their
+derived lateness versus reality. **Newly-created cleanup plans -- the
+exact concern raised in advance, confirmed real**: 4 of the 5 plans the
+user just created (Weil/78188, Dear/67974, Goldman/68418,
+Trestman/68391) already show `isLate: true` (2-6 days) immediately,
+because each one's `next_expected_payment_at` anchor (pre-filled by the
+create-plan form as "last payment + ~1 month") landed in September,
+before the plan was actually saved on 2026-10-07. This is not a
+derivation bug -- it accurately reports "no payment since the last one,
+measured from this anchor" -- but it is a real UX trap: a plan can be
+born already "late." The 5th new plan (Wisotsky's DIN2026 plan) is fine
+-- its anchor happened to be satisfied by a same-day payment.
+
+**D1 mutation count: 0.** Confirmed before/after this entire
+investigation: `pledge_payment_plan_reviews`=22,
+`pledge_payment_plans`=45 (all active), `giving_activities`=5459,
+`donors`=254 -- identical.
+
+**Recommended "ending soon" definition, based on the real distribution
+above:** 30 days until the final expected date -- wide enough to catch
+the real near-term cluster (11 of 45 plans) without flooding, leaving
+everything past it as "comfortably in progress."
+
+**Recommended behavior (not implemented):** ending soon (final date
+within 30 days, still on track, balance > 0) -> KNOW only, never a
+Suggested Action. Final date passed + balance remains -> DO, already
+implemented (`followUpPledgeCandidate`); the only real work is making
+Fundraising Intelligence/Portfolio Focus agree. Final date passed + $0
+balance -> nothing, already correctly invisible everywhere (0
+occurrences today, structurally impossible to misfire since
+`isCompleted` is checked first).
+
+**Narrow proposed implementation plan (awaiting approval, nothing
+started):** (1) fix `lib/portfolio-focus/aggregate.ts`'s
+`pledgePlanOnTrack` to account for `isPlanEndedWithBalance`/
+`isCompleted`, not just `isLate` -- a bug fix, not new intelligence; (2)
+add a pure, derived `isEndingSoon` (30-day) field to
+`evaluatePaymentPlan`'s output, no schema change; (3) thread it into
+Today's evidence (KNOW-tier line only) and Meeting Brief's
+`pledgePlanLine()`; (4) add a `payment_plan_ending_soon` situation type
+to Fundraising Intelligence, gated on the fixed `pledgePlanOnTrack`; (5)
+no change to the Daily Agenda, donor page card, or schema beyond (2).
+
+Nothing was implemented this round. No payment plan, pledge, donor, or
+review decision was created, modified, or ended.
