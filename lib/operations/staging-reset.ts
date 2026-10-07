@@ -38,6 +38,11 @@ export const STAGING_RESET_TABLE_ORDER = [
   // so it's deleted before both of those, further down.
   "pledge_payment_plan_changes",
   "pledge_payment_plans",
+  // pledge_payment_plan_reviews (cleanup-review decisions, unrelated to
+  // pledge_payment_plans above except that both reference a pledge)
+  // references giving_activities.id, so it's deleted before that table,
+  // further down. No dependency on pledge_payment_plans itself.
+  "pledge_payment_plan_reviews",
   // donor_relationship_fact_changes references fact_id (a real FK, same
   // pattern as ask_changes/pledge_payment_plan_changes above), so it's
   // deleted first. donor_relationship_facts references donors.id,

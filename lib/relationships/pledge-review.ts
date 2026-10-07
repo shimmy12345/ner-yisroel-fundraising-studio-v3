@@ -152,9 +152,44 @@ export function buildPledgeReviewQueue(
   return items;
 }
 
-export type PledgeReviewChoice = "needs_plan" | "no_plan_needed" | "investigate";
-export const PLEDGE_REVIEW_CHOICES: { value: PledgeReviewChoice; label: string }[] = [
-  { value: "needs_plan", label: "Needs payment plan" },
-  { value: "no_plan_needed", label: "No payment plan needed" },
-  { value: "investigate", label: "Need to investigate" },
+// Persisted review statuses (pledge_payment_plan_reviews.review_status,
+// migration 0038). "Unreviewed" is never one of these -- it is the
+// absence of a row; see db/schema.ts's pledgePaymentPlanReviews comment.
+export type PersistedPledgeReviewStatus = "needs_payment_plan" | "no_payment_plan_needed" | "need_to_investigate";
+export const PLEDGE_REVIEW_CHOICES: { value: PersistedPledgeReviewStatus; label: string }[] = [
+  { value: "needs_payment_plan", label: "Needs payment plan" },
+  { value: "no_payment_plan_needed", label: "No payment plan needed" },
+  { value: "need_to_investigate", label: "Need to investigate" },
 ];
+const VALID_REVIEW_STATUSES = new Set<string>(PLEDGE_REVIEW_CHOICES.map((c) => c.value));
+export function isValidPledgeReviewStatus(value: unknown): value is PersistedPledgeReviewStatus {
+  return typeof value === "string" && VALID_REVIEW_STATUSES.has(value);
+}
+
+export type PledgeReviewProgress = {
+  totalCount: number;
+  reviewedCount: number;
+  unreviewedCount: number;
+  counts: Record<PersistedPledgeReviewStatus, number>;
+};
+
+/**
+ * Pure "Reviewed X of N" + per-status counts, derived from the current
+ * queue and a map of persisted decisions -- never computed from anything
+ * else (never from sessionStorage, never from the prior A/B/C audit
+ * classification). `statuses` is keyed by pledgeId; a pledge missing from
+ * it (or in `items` but with no entry) counts as unreviewed. A status
+ * present for a pledge that is no longer in `items` (it stopped
+ * qualifying) is correctly ignored here -- this function only ever
+ * iterates `items`, so a nonqualifying pledge's leftover review record
+ * can never re-surface a row that buildPledgeReviewQueue already excluded.
+ */
+export function summarizePledgeReviewProgress(items: PledgeReviewItem[], statuses: Record<string, PersistedPledgeReviewStatus>): PledgeReviewProgress {
+  const counts: Record<PersistedPledgeReviewStatus, number> = { needs_payment_plan: 0, no_payment_plan_needed: 0, need_to_investigate: 0 };
+  let reviewedCount = 0;
+  for (const item of items) {
+    const status = statuses[item.pledgeId];
+    if (status) { reviewedCount++; counts[status]++; }
+  }
+  return { totalCount: items.length, reviewedCount, unreviewedCount: items.length - reviewedCount, counts };
+}

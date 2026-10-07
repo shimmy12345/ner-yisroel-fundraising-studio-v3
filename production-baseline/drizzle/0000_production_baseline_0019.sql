@@ -577,6 +577,18 @@ CREATE TABLE `pledge_payment_plan_changes` (
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `pledge_payment_plan_reviews` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `pledge_activity_id` text NOT NULL,
+  `review_status` text NOT NULL CHECK (`review_status` IN ('needs_payment_plan','no_payment_plan_needed','need_to_investigate')),
+  `reviewed_at` integer NOT NULL,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `pledge_payment_plans` (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` text NOT NULL,
@@ -860,6 +872,8 @@ CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`p
 
 CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_changes` (`plan_id`,`created_at`);
 
+CREATE UNIQUE INDEX `pledge_payment_plan_reviews_user_pledge_uidx` ON `pledge_payment_plan_reviews` (`user_id`,`pledge_activity_id`);
+
 CREATE INDEX `pledge_payment_plans_pledge_idx` ON `pledge_payment_plans` (`pledge_activity_id`);
 
 CREATE UNIQUE INDEX `rebbeim_normalized_name_idx` ON `rebbeim` (`user_id`,`normalized_name`);
@@ -891,5 +905,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','b7d9d6a1b3550304e8c7a9287b0110a1e392725173f47fa42bb21b3cc14e5f63',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','ba2f75a4f944e873a0d26cb4d87507e5a6c925cf4065d16958064c95a4e5ebe6',1785944072);
 PRAGMA optimize;

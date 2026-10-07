@@ -68,6 +68,13 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // Monthly Payment Plan feature -- same reason as asks/ask_changes above.
   "pledge_payment_plans",
   "pledge_payment_plan_changes",
+  // Pledge payment-plan cleanup review -- same reason as asks/
+  // pledge_payment_plans above: a table added after this route was
+  // written, holding a narrow, temporary human-review decision rather
+  // than JL financial data. Deliberately not added to
+  // WORKSPACE_BACKUP_TABLES in this phase. Covered today only by the
+  // nightly whole-database R2 backup.
+  "pledge_payment_plan_reviews",
   // Relationship Intelligence Phase 1 -- same reason as asks/
   // pledge_payment_plans above: real donor-facing durable relationship
   // data added after this route was written. Deliberately not added to

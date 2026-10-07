@@ -23485,3 +23485,177 @@ an interactive, signed-in browser walkthrough of the rendered page was
 attempted but blocked by this session's own permission classifier
 (tagged "Production Deploy"); the user has not yet visually confirmed
 the rendered page themselves.
+
+---
+
+2026-10-07T00:00:00Z (approximate, follow-up) -- **Pledge payment-plan
+review decisions now persist to D1 (migration 0038).** The prior round's
+`/pledge-review` screen held its three-way review choice only in browser
+`sessionStorage`; this round replaces that with real, durable,
+cross-device persistence, per explicit instruction not to invent a
+CRM-style status system.
+
+**Schema.** New table `pledge_payment_plan_reviews`
+(`drizzle/0038_pledge_payment_plan_reviews.sql`): `id`, `user_id` (FK
+`users.id`), `pledge_activity_id` (FK `giving_activities.id`),
+`review_status` (`CHECK` constrained to exactly `needs_payment_plan` /
+`no_payment_plan_needed` / `need_to_investigate`), `reviewed_at`,
+`created_at`, `updated_at`. A `UNIQUE(user_id, pledge_activity_id)` index
+enforces "at most one current decision per pledge" at the database
+level -- every save is an `INSERT ... ON CONFLICT(user_id,
+pledge_activity_id) DO UPDATE`, never a second insert. **"Unreviewed" is
+never a stored value** -- it is the absence of a row; clearing a
+decision `DELETE`s the row rather than writing a sentinel status.
+Deliberately **no** `donor_id` column (every access joins through
+`pledge_activity_id` when a donor is needed), **no** `reviewer_user_id`
+(this app has no multi-reviewer model anywhere else), and **no**
+`pledge_payment_plan_reviews_changes` audit table (a single mutable
+human decision for a temporary cleanup pass doesn't warrant one;
+`updated_at` already answers "when did this last change") -- all three
+considered and explicitly rejected, documented in `db/schema.ts`'s own
+comment on the table.
+
+**API.** New route
+`/api/pledge-payment-plan-reviews/[pledgeActivityId]`: `PUT { reviewStatus
+}` upserts; `DELETE` clears. Both independently re-verify the pledge
+belongs to the authenticated user's own live `giving_activities` rows
+before touching anything (never trusts the URL/body) -- the exact same
+ownership-re-verification pattern as `/api/pledge-payment-plans`. This
+route's own SQL never references `pledge_payment_plans`,
+`recommendations`, or any reminder table -- confirmed by a test that
+greps the real committed route source for exactly this, not merely by
+intent.
+
+**Screen.** `/pledge-review`'s server component now also reads
+`pledge_payment_plan_reviews` for the signed-in user and passes it to
+`PledgeReviewList` as `initialReviews` -- a fresh D1 read on every page
+load (the page is `force-dynamic`/`revalidate: 0`), so a refresh, a
+closed-and-reopened browser, or a different device signed into the same
+workspace all see the same persisted decisions. **sessionStorage was
+removed entirely**, not merely demoted -- React state in
+`PledgeReviewList` is now purely an optimistic mirror of the last
+successful D1 write (via the new `PUT`/`DELETE` calls), with a save-state
+indicator and automatic rollback on a failed save. This sidesteps the
+"stale cached value overwrites a newer persisted decision" risk
+architecturally rather than reconciling it. "Reviewed X of N" and the
+per-status counts are now computed by a new pure, unit-tested function
+(`summarizePledgeReviewProgress` in `lib/relationships/pledge-review.ts`)
+instead of being inlined in the component. A `[Clear]` action returns a
+reviewed pledge to Unreviewed.
+
+**Safety (confirmed, not assumed).** Selecting `needs_payment_plan`
+creates zero `pledge_payment_plans` rows -- proven both by a direct
+test (`pledge_payment_plans` row count identical before/after a save
+against a real in-memory SQLite database built from every real
+migration) and by grepping the route's own source for any write to that
+table (none). `giving_activities` is proven byte-for-byte identical
+before/after a review save in the same test. No reminder/recommendation
+is ever created (also grep-verified against the route source). A
+nonqualifying pledge's leftover review record can never resurrect it in
+the active list -- `buildPledgeReviewQueue` takes no review-table input
+at all, so this is structural, not a rule that could be forgotten;
+proven with a dedicated test using a now-fully-paid pledge. Donor 68231's
+separate already-active, past-final-date plan remains correctly excluded
+from this entire workflow (unchanged from the prior round -- it has an
+active `pledge_payment_plans` row, which the "no current plan" query
+excludes by construction).
+
+**Live qualifying set reconfirmed before touching schema**: still
+exactly 22 pledges / 20 donors, unchanged from both prior rounds -- no
+drift, no STOP condition triggered.
+
+**Tests.** New `tests/pledge-payment-plan-reviews.test.mjs` (16 cases
+against a real in-memory SQLite database built from every real
+`drizzle/*.sql` migration, the same established pattern
+`tests/asks.test.mjs` uses): unreviewed-by-default, save/reload for all
+three statuses, changing a decision updates the one existing row (no
+duplicates), the `UNIQUE` constraint itself rejects a raw duplicate
+insert, the `CHECK` constraint itself rejects an invalid status,
+clearing returns to unreviewed, a pledge from another user is correctly
+rejected by the real ownership query (and the route source is grepped to
+confirm it's actually called), zero `pledge_payment_plans` rows created
+and `giving_activities` unchanged by a review save, progress-count
+derivation, and nonqualifying-pledge isolation. `tests/pledge-
+review.test.mjs` (prior round) still passes unmodified. `tsc --noEmit`
+clean. `eslint` on every new/changed file shows only the same two
+pre-existing-pattern findings as the prior round (`Date.now()` in a
+server component; a plain `<a>` donor link) -- zero new findings. Full
+suite passes except the same pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure already confirmed
+present on `HEAD` before any of this round's changes.
+
+**Restore/backup classification.** `pledge_payment_plan_reviews` added
+to `lib/operations/staging-reset.ts`'s `STAGING_RESET_TABLE_ORDER`
+(positioned after its two real foreign-key targets, `users` and
+`giving_activities`) and to `lib/operations/workspace-backup.ts`'s
+`WORKSPACE_BACKUP_EXCLUDED_TABLES` (same reasoning as `asks`/
+`pledge_payment_plans` -- covered only by the nightly whole-database R2
+backup for now). `production-baseline/schema-manifest.json` regenerated
+(39 migrations); `PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length`
+assertion bumped 38 -> 39 in `lib/data-health/production-baseline.ts`
+and in `tests/production-baseline.test.mjs` (the superseded 0037 test
+converted from `.at(-1)`/length-checking to `.includes()`-style, matching
+how every earlier non-tip migration's test is written; a new 0038 test
+takes over the tip-checking role).
+
+**Narrow `main` restore/baseline sync, following the operating rule
+established after the October restore incident.** `scripts/check-main-
+restore-sync.mjs` detected exactly the expected drift (`pledge_payment_
+plan_reviews` missing from `main`'s restore order/manifest, nothing
+else). Branch `fix/d1-restore-sync-0038-pledge-payment-plan-reviews`
+(off `main` at `5e48837`), commit `114c7bb` -- exactly 4 files, confirmed
+via the GitHub API's own file list after pushing:
+`lib/operations/staging-reset.ts`, `lib/data-health/production-
+baseline.ts`, `production-baseline/schema-manifest.json`,
+`test/d1-restore-order.test.mjs` (two new named regressions: `pledge_
+payment_plan_reviews` positioned after both real FK targets in
+`D1_RESTORE_DATA_ORDER`, and `planD1Restore`/`reorderD1ExportForRestore`
+place it correctly against a real-shaped export). No application UI, API
+route, or seed script was ported to `main`. Gates on the sync branch:
+`npm test` 147/147 (145 prior + 2 new), `npm run build` succeeds.
+Drift guard re-run on the prepared branch before pushing -> **PASS**.
+
+**Pushed to `main`, explicitly authorized by the repository owner for
+this specific, already-reviewed change** (asked directly before
+pushing, per this round's own explicit instruction to request
+authorization for a `main` push rather than assume it). Fast-forward
+merge (`5e48837..114c7bb`). **Resulting `origin/main` SHA:
+`114c7bb030342af77ff52c139203b683864c1607`** -- confirmed independently
+via the GitHub API (`files` list matches exactly the 4 expected paths; 0
+commit statuses and 0 check-runs on the new HEAD -- no unrelated deploy
+fired). Drift guard re-run against the live, fetched `origin/main` ->
+**PASS** a second time. The monthly migration-sync preflight
+(`scripts/check-migration-sync.mjs`, already present on `main`) re-run
+against the updated `main` -> **PASS** ("main's migration count/list (39)
+is current...").
+
+**Live verification on Independent Staging.** Applied migration 0038
+directly (`wrangler d1 execute --remote --file=drizzle/
+0038_pledge_payment_plan_reviews.sql`) -- `pledge_payment_plan_reviews`
+created, 0 rows, confirmed. Deployed the updated app (Version ID
+`9dbbfbaa-0f43-4dd9-9123-9e4af1693e21`). **Controlled persistence test**
+on one of the 22 pledges (donor 78188, $40.00 balance): pre-test counts
+`pledge_payment_plan_reviews`=0, `pledge_payment_plans`=40,
+`giving_activities`=5459, `donors`=254. Saved `needs_payment_plan` (the
+route's exact upsert SQL) -- 1 row inserted, re-read confirms it
+persisted. Changed to `no_payment_plan_needed` -- re-read confirms the
+**same row id** now holds the new status (no duplicate). Cleared (the
+route's exact `DELETE`) -- re-read confirms 0 rows again. Final counts:
+`pledge_payment_plan_reviews`=0, `pledge_payment_plans`=40 (unchanged),
+`giving_activities`=5459 (unchanged), `donors`=254 (unchanged). The
+controlled pledge was returned to Unreviewed, exactly as it started.
+**Caveat**: the Chrome browser extension was unavailable this round (not
+a permission block this time -- "extension not connected"), so this
+verification exercised the real route's exact SQL directly against the
+real staging D1 rather than clicking through the actual rendered
+`/pledge-review` page and HTTP API; the Next.js route handler's own code
+path (auth, JSON parsing, validation branching) was verified by direct
+source reading and the dedicated route-source tests above, not by an
+end-to-end HTTP call. The user has still not visually confirmed the
+rendered page themselves.
+
+**No financial data mutated.** `giving_activities`, `pledge_payment_
+plans`, and `donors` row counts are identical before and after this
+entire round, on both staging and (for restore/baseline tracking only)
+`main`. Zero payment plans were created by any review decision. Zero
+reminders/recommendations were created.

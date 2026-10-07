@@ -881,6 +881,42 @@ export const pledgePaymentPlanChanges = sqliteTable("pledge_payment_plan_changes
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [index("pledge_payment_plan_changes_plan_idx").on(table.planId, table.createdAt)]);
 
+// Pledge payment-plan CLEANUP REVIEW (see docs/PLEDGE-PAYMENT-PLAN-CLEANUP-AUDIT.md
+// and the /pledge-review surface) -- a narrow, temporary human-review
+// decision recorded against one specific pledge: "I manually reviewed
+// this pledge during the cleanup and chose this outcome." This is
+// deliberately NOT the payment-plan feature above (pledgePaymentPlans) --
+// selecting 'needs_payment_plan' here never creates, edits, or implies a
+// real pledgePaymentPlans row; the two tables are unrelated except that
+// both reference the same pledge. No donorId column (unlike
+// pledgePaymentPlans) -- not needed, since every access pattern here
+// joins through pledgeActivityId to giving_activities when a donor is
+// needed, and omitting it keeps this table to the task's own minimal
+// field list. No reviewerUserId -- this app has no multi-reviewer/
+// collaboration model anywhere else (every other table's userId/
+// ownerUserId IS the acting party), so adding one here would be a new
+// concept with no evidenced need. No separate *_changes audit table
+// (unlike pledgePaymentPlanChanges above) -- deliberately: this is a
+// single mutable human decision for a temporary cleanup pass, not a
+// durable relationship fact, and updatedAt already answers "when did
+// this last change." "Unreviewed" is never a stored value -- it is the
+// ABSENCE of a row for that (userId, pledgeActivityId) pair; clearing a
+// decision deletes the row rather than writing a sentinel status.
+export const pledgePaymentPlanReviews = sqliteTable("pledge_payment_plan_reviews", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  pledgeActivityId: text("pledge_activity_id").notNull().references(() => givingActivities.id),
+  reviewStatus: text("review_status", { enum: ["needs_payment_plan", "no_payment_plan_needed", "need_to_investigate"] }).notNull(),
+  reviewedAt: integer("reviewed_at", { mode: "timestamp" }).notNull(),
+  ...timestamps,
+}, (table) => [
+  // Enforces "at most one current review decision per pledge per user" at
+  // the database level -- a save is always an upsert
+  // (ON CONFLICT(user_id, pledge_activity_id) DO UPDATE), never a second
+  // insert, so changing a decision can never produce a duplicate row.
+  uniqueIndex("pledge_payment_plan_reviews_user_pledge_uidx").on(table.userId, table.pledgeActivityId),
+]);
+
 // Relationship Intelligence Phase 1 (see docs/AI-HANDOFF.md's "Relationship
 // Snapshot Synthesis Design" sections, Architecture + Synthesis + Lifecycle
 // Correction) -- durable accepted relationship facts, one row per accepted
