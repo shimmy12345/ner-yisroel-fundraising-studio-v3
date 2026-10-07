@@ -23659,3 +23659,81 @@ plans`, and `donors` row counts are identical before and after this
 entire round, on both staging and (for restore/baseline tracking only)
 `main`. Zero payment plans were created by any review decision. Zero
 reminders/recommendations were created.
+
+---
+
+2026-10-07T20:49:00Z (approximate, follow-up) -- **READ-ONLY
+reconciliation of the user's completed manual pledge-review decisions.**
+Zero D1 writes. No code changed.
+
+**You reviewed all 22 qualifying pledges.** Read `pledge_payment_
+plan_reviews` and re-derived the live qualifying set with the real,
+unmodified `buildPledgeReviewQueue` -- same function `/pledge-review`
+itself calls, not a reimplementation. Result: **22 qualifying pledges,
+20 distinct donors, 22 reviewed, 0 unreviewed** -- unchanged from both
+prior rounds, no drift. 5 reviewed `needs_payment_plan`, 17
+`no_payment_plan_needed`, 0 `need_to_investigate`. Every one of the 22
+persisted review rows still maps to a currently-qualifying pledge (zero
+orphaned/stale review records).
+
+**Needs payment plan (5) -- all still fully eligible, re-verified
+individually, not assumed:**
+
+| Donor | Code | Campaign | JL Activity Date | Original | Paid | Balance | Plan status | Last payment |
+|---|---|---|---|---|---|---|---|---|
+| Avi Dear | 67974 | NDLK | 2025-10-29 | $1,008.00 | $840.00 | $168.00 | none | 2026-08-24 · $84.00 |
+| Benjy Weil | 78188 | CT2025 | 2025-11-20 | $240.00 | $200.00 | $40.00 | none | 2026-08-19 · $20.00 |
+| Mordechai Y Goldman | 68418 | KOLX2025 | 2025-11-26 | $1,200.00 | $1,000.00 | $200.00 | none | 2026-08-25 · $100.00 |
+| Mordechai Trestman | 68391 | NDLK | 2025-12-25 | $600.00 | $450.00 | $150.00 | none | 2026-08-25 · $50.00 |
+| Ezra Wisotsky | 77118 | DIN2026 | 2026-09-16 | $1,000.00 | $0.00 | $1,000.00 | none | none recorded |
+
+For each: balance still `> 0`, still `open_pledge`/`partially_paid_
+pledge`, still no active `pledge_payment_plans` row, and **no payment
+has landed after the review decision** (reviewed between 2026-10-07
+20:41:13Z and 20:42:13Z; every linked `jl_payment_assignment_audits`
+row for these 5 pledges predates August 25, 2026 -- checked against
+every linked payment, not just the most recent one). No eligibility
+changes found.
+
+**No payment plan needed (17) -- persisted correctly, treated as
+closed, nothing altered:** Shimmy Pianko (65769, NDLK, 2024-10-14,
+$1,200.00/$550.00/$650.00), Ovadiah J Bander (61707, DIN2024,
+2024-12-16, $1,800.00/$1,500.00/$300.00), Shmuel Luxenburg (4930,
+DIN2025, 2025-11-24, $5,500.00/$2,000.00/$3,500.00), Yaakov Pollack
+(58183, DIN2025, 2025-12-11, $1,800.00/$500.00/$1,300.00), Ahron
+Schabes (65768, DIN2025, 2025-12-15, $3,000.00/$1,550.00/$1,450.00,
+last payment 2026-09-02 · $1,500.00), Yonason D Musman (61693, DIN2025,
+2025-12-17, $3,600.00/$1,000.00/$2,600.00, last payment 2026-08-11 ·
+$1,000.00), Dovi Kreismann (59139, DIN2024, 2026-06-30,
+$1,500.00/$1,125.00/$375.00), Shlomo Kutoff (57932, DIN2023,
+2026-12-15 future-dated, $5,000.00/$4,790.00/$210.00), Joshua Broide x3
+(48910 -- DIN2025 2025-11-11 $2,500/$0/$2,500; DYSP5786 2026-02-01
+$2,000/$0/$2,000; DIN2026 2026-09-16 $2,500/$0/$2,500), Elie Grinblatt
+(74337, DIN2025, 2025-12-16, $500.00/$0.00/$500.00), Mordy Goldenberg
+(64792, CHSP2026, 2026-05-01, $650.00/$0.00/$650.00), Mordechai
+Schwartz (56283, DIN2026, 2026-06-29, $36,000.00/$0.00/$36,000.00),
+Dovid Weinberger (62148, KOL2026, 2026-08-06, $1,800.00/$0.00/
+$1,800.00), Joseph N Shams (44846, CHSP2013, 2026-09-01, $150.00/
+$0.00/$150.00), Michoel A. Rovinsky (37064, DYSP5786, 2026-11-01
+future-dated, $1,250.00/$0.00/$1,250.00). All `planStatus: none`. Six
+of these (Pianko, Bander, Luxenburg, Pollack, Kreismann, Kutoff) have
+`paid_cents > 0` with no matching `jl_payment_assignment_audits` row --
+the same pre-existing data-model gap the original audit found (§5.2);
+"last payment" is correctly reported as unavailable for these, never
+guessed.
+
+**Need to investigate: 0.** Nothing to surface.
+
+**No-write confirmation.** `pledge_payment_plan_reviews`=22,
+`pledge_payment_plans`=40, `giving_activities`=5459, `donors`=254 --
+identical immediately before and immediately after this entire
+reconciliation (checked twice). Zero D1 writes.
+
+**Recommended next step (not implemented).** Create real payment plans
+only for the 5 `needs_payment_plan` donors (67974, 78188, 68418, 68391,
+77118), one at a time through the existing `/api/pledge-payment-plans`
+flow, each requiring an explicitly fundraiser-entered next/final
+expected date (never inferred). Leave the 17 `no_payment_plan_needed`
+pledges untouched. Nothing pending in `need_to_investigate`. No code
+was changed, no payment plan was created or modified, and no pledge,
+donor, or review decision was altered this round.
