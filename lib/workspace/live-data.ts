@@ -420,19 +420,28 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // fulfilledPledgeCultivationOpportunity doc comment for the full
   // product reasoning.
   const fulfilledCultivationByDonor = deriveFulfilledCultivationByDonor(giving.results, paymentPlanByPledge, now, timezone);
-  // Annual Renewal Reminders (2026-10-08, see docs/AI-HANDOFF.md) -- pure
-  // derivation over annualRenewalPlanRows (pre-filtered to
+  // Annual Renewal Reminders (2026-10-08, extended 2026-10-08 so Coming
+  // Up can show them before their trigger date -- see docs/AI-HANDOFF.md)
+  // -- pure derivation over annualRenewalPlanRows (pre-filtered to
   // original_pledge_date IS NOT NULL above), one evaluateAnnualRenewal
   // call per eligible plan, computed directly over EVERY eligible plan --
   // never funneled through openPledgeByDonor's one-pledge-per-donor
   // evidence object, so a donor with multiple simultaneously active
   // plans (confirmed real: Wisotsky, Goldstein, Singer, Ramras) gets
-  // every one of them evaluated independently.
+  // every one of them evaluated independently. Every eligible plan's
+  // BOTH stage dates (fiveDayReminderDate, anniversaryDate) are passed
+  // through unconditionally -- this function no longer decides which
+  // stage is "active today" (evaluation.isFiveDayReminder/
+  // isAnniversaryReminder, computed but intentionally unused below);
+  // buildAnnualRenewalReminderEvents itself now applies the same
+  // RELATIONSHIP_DATE_LEAD_WINDOW_DAYS upcoming-date window
+  // yahrtzeit/important-date events use, so eligibility/suppression
+  // rules here are unchanged -- only the row's shape (both dates, not a
+  // single pre-decided stage) and where the windowing happens moved.
   const annualRenewalReminderRows: AnnualRenewalReminderRow[] = [];
   for (const plan of annualRenewalPlanRows.results) {
     const evaluation = evaluateAnnualRenewal(plan.original_pledge_date, plan.ended_at, now, timezone);
-    const stage = evaluation.isFiveDayReminder ? "approaching" : evaluation.isAnniversaryReminder ? "anniversary" : null;
-    if (stage === null || evaluation.anniversaryDate === null) continue;
+    if (evaluation.anniversaryDate === null || evaluation.fiveDayReminderDate === null) continue;
     annualRenewalReminderRows.push({
       donorId: plan.donor_id,
       planId: plan.plan_id,
@@ -442,7 +451,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       balanceCents: plan.balance_cents ?? 0,
       campaign: plan.source_campaign,
       anniversaryDate: evaluation.anniversaryDate,
-      stage,
+      fiveDayReminderDate: evaluation.fiveDayReminderDate,
     });
   }
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen

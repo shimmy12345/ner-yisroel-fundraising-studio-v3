@@ -269,20 +269,43 @@ export type AnnualRenewalReminderRow = {
   balanceCents: number;
   campaign: string | null;
   anniversaryDate: number;
-  stage: "approaching" | "anniversary";
+  fiveDayReminderDate: number;
 };
 
-// Annual pledge-renewal reminders (2026-10-08, see docs/AI-HANDOFF.md).
-// Same discrete-single-day shape as buildPaymentPlanMilestoneEvents just
-// above (never a lead-window countdown -- a row is only ever constructed
-// AT ALL on the exact day it fires, computed once by
+// Annual pledge-renewal reminders (2026-10-08, extended 2026-10-08 to
+// appear in Coming Up before their trigger date -- see docs/AI-HANDOFF.md).
+//
+// UNLIKE buildPaymentPlanMilestoneEvents above (which has no lead window
+// at all -- a milestone is only ever constructed on its exact firing
+// day), this builder follows the SAME lead-window pattern
+// buildYahrtzeitRelationshipDateEvents/buildImportantDateRelationshipEvents
+// use: each row carries BOTH of the plan's fixed stage dates
+// (fiveDayReminderDate, anniversaryDate -- both already computed once by
 // lib/relationships/pledge-payment-plan.ts's evaluateAnnualRenewal, never
-// re-derived here), same `dateEpoch = today` / `dateLabel = the real
-// date this row is actually about` convention, for the identical reason:
-// so it lands in Coming Up's "today" bucket via
-// partitionRelationshipDateEventsByToday, and so the Daily Agenda's
-// IMPORTANT DATES/STEWARDSHIP section (which already includes the full
-// "today" bucket unconditionally) needs no further change to show it.
+// re-derived here), and this function independently checks each stage's
+// own date against `daysUntil(...) <= RELATIONSHIP_DATE_LEAD_WINDOW_DAYS`
+// (and not already in the past), emitting 0, 1, or 2 events per row
+// depending on which stage(s) currently fall inside the window. A stage
+// whose date is today gets `dateEpoch` equal to today, so
+// partitionRelationshipDateEventsByToday's exact-equality check correctly
+// routes it to the "today" bucket (Today/Daily Agenda); a stage still
+// days away gets its own real future `dateEpoch`, so it lands in
+// "upcoming" (Coming Up) instead -- never both, since a WorkspaceRelationshipDateEvent
+// can only belong to one of the two partitioned lists its own dateEpoch
+// determines. The two stages' ids (`:approaching`/`:anniversary`) never
+// collide, so both can legitimately appear at once (e.g. "approaching"
+// in Today while "anniversary" is still a few days out in Coming Up) --
+// that is two distinct real events about the same plan, not a duplicate
+// of one event.
+//
+// `dateLabel` is always the anniversary date (the renewal date itself --
+// what the fundraiser is preparing for or acting on), for BOTH stages,
+// matching buildPaymentPlanMilestoneEvents' own precedent of showing the
+// target date being counted down to rather than the reminder's own
+// firing date, with "approaching" vs. "opportunity" distinguished by
+// `relationshipPhrase` alone. `dateEpoch` is the one place the two
+// stages actually differ, since it alone drives windowing/bucketing/sort
+// order, never what's rendered.
 //
 // `relationshipPhrase` carries the exact required title text verbatim
 // ("Annual pledge renewal approaching" / "Annual pledge renewal
@@ -308,24 +331,34 @@ export function buildAnnualRenewalReminderEvents(
     const identity = identityByDonor.get(row.donorId);
     if (!identity) continue;
     const campaignLabel = row.campaign ? ` (${row.campaign})` : "";
-    events.push({
-      id: `annual-pledge-renewal:${row.planId}:${row.stage}`,
-      type: "annual_pledge_renewal",
-      donorId: row.donorId,
-      donorName: identity.donorName,
-      initials: identity.initials,
-      donorCode: identity.donorCode,
-      label: "Annual renewal",
-      relationshipPhrase: row.stage === "approaching" ? "Annual pledge renewal approaching" : "Annual pledge renewal opportunity",
-      secondaryDateLabel: `${money(row.originalPledgeAmountCents)} pledged${campaignLabel} · ${money(row.balanceCents)} balance remaining`,
-      provenanceName: null,
-      provenanceNameHebrew: null,
-      dateLabel: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.anniversaryDate * 1000)),
-      dateEpoch: todayEpoch,
-      ambiguous: false,
-    });
+    const secondaryDateLabel = `${money(row.originalPledgeAmountCents)} pledged${campaignLabel} · ${money(row.balanceCents)} balance remaining`;
+    const anniversaryLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.anniversaryDate * 1000));
+    const stages: Array<{ stage: "approaching" | "anniversary"; date: number; phrase: string }> = [
+      { stage: "approaching", date: row.fiveDayReminderDate, phrase: "Annual pledge renewal approaching" },
+      { stage: "anniversary", date: row.anniversaryDate, phrase: "Annual pledge renewal opportunity" },
+    ];
+    for (const { stage, date, phrase } of stages) {
+      if (date < todayEpoch) continue;
+      if (daysUntil(date, todayEpoch) > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) continue;
+      events.push({
+        id: `annual-pledge-renewal:${row.planId}:${stage}`,
+        type: "annual_pledge_renewal",
+        donorId: row.donorId,
+        donorName: identity.donorName,
+        initials: identity.initials,
+        donorCode: identity.donorCode,
+        label: "Annual renewal",
+        relationshipPhrase: phrase,
+        secondaryDateLabel,
+        provenanceName: null,
+        provenanceNameHebrew: null,
+        dateLabel: anniversaryLabel,
+        dateEpoch: date,
+        ambiguous: false,
+      });
+    }
   }
-  return events.sort((a, b) => a.donorName.localeCompare(b.donorName));
+  return events.sort((a, b) => a.dateEpoch - b.dateEpoch || a.donorName.localeCompare(b.donorName));
 }
 
 // Splits a combined, sorted relationship-date-event list (yahrtzeits +

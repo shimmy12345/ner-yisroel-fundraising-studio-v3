@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { evaluateAnnualRenewal } from "../lib/relationships/pledge-payment-plan.ts";
 import { validateOriginalPledgeDate } from "../lib/capture/pledge-payment-plan.ts";
-import { buildAnnualRenewalReminderEvents } from "../lib/workspace/relationship-date-events.ts";
+import { buildAnnualRenewalReminderEvents, partitionRelationshipDateEventsByToday } from "../lib/workspace/relationship-date-events.ts";
 
 // Annual Renewal Reminders, Parts 1-8 (2026-10-08, see docs/AI-HANDOFF.md's
 // "Annual Renewal Reminders -- Implemented" entry). originalPledgeDate is
@@ -144,46 +144,101 @@ async function run() {
 
   // ============================================================
   // buildAnnualRenewalReminderEvents -- shape, multiple plans per donor,
-  // no duplicate event ids, identity-gated.
+  // no duplicate event ids, identity-gated, and (2026-10-08 Coming Up
+  // fix) the upcoming-date window: a stage's event now appears every day
+  // from RELATIONSHIP_DATE_LEAD_WINDOW_DAYS (14) out through its own
+  // exact date, with dateEpoch equal to that stage's REAL date (not
+  // always "today" as before the fix) -- so partitionRelationshipDateEventsByToday
+  // correctly routes it to "today" only on the exact day and to
+  // "upcoming" (Coming Up) on every earlier day inside the window.
   // ============================================================
   {
     const identityByDonor = new Map([
       ["donor-1", { donorName: "Mr. & Mrs. Test Donor", initials: "TD", donorCode: "12345" }],
     ]);
     const now = et(2026, 11, 1);
+    const todayEpoch = utcMidnight(2026, 11, 1);
 
     // --- 10/4 (part 4 pledge-specific): a donor with TWO active plans on
     // different programs -- both independently eligible, both get their
-    // own event, neither suppresses the other. This is the entire
+    // own event(s), neither suppresses the other. This is the entire
     // resolution of Part 4's "newer pledge to a different program must
     // not suppress" requirement: evaluateAnnualRenewal/
     // buildAnnualRenewalReminderEvents take no "other plans for this
     // donor" input at all, so one plan structurally cannot influence
-    // another's eligibility. ---
+    // another's eligibility. Plan A's anniversary is exactly today (only
+    // its "anniversary" stage qualifies -- its five-day mark, Oct 27, is
+    // already in the past). Plan B's anniversary is 9 days out and its
+    // five-day mark is 4 days out -- BOTH comfortably inside the 14-day
+    // window, so plan B alone demonstrates both stages appearing as
+    // upcoming (Coming Up) at once. ---
     const rows = [
-      { donorId: "donor-1", planId: "plan-a", pledgeActivityId: "pledge-a", originalPledgeDate: utcMidnight(2025, 11, 1), originalPledgeAmountCents: 120000, balanceCents: 10000, campaign: "GENOP2025", anniversaryDate: utcMidnight(2026, 11, 1), stage: "anniversary" },
-      { donorId: "donor-1", planId: "plan-b", pledgeActivityId: "pledge-b", originalPledgeDate: utcMidnight(2026, 5, 1), originalPledgeAmountCents: 500000, balanceCents: 400000, campaign: "CAPITAL2026", anniversaryDate: utcMidnight(2027, 5, 1), stage: "approaching" },
+      { donorId: "donor-1", planId: "plan-a", pledgeActivityId: "pledge-a", originalPledgeDate: utcMidnight(2025, 11, 1), originalPledgeAmountCents: 120000, balanceCents: 10000, campaign: "GENOP2025", anniversaryDate: utcMidnight(2026, 11, 1), fiveDayReminderDate: utcMidnight(2026, 10, 27) },
+      { donorId: "donor-1", planId: "plan-b", pledgeActivityId: "pledge-b", originalPledgeDate: utcMidnight(2025, 11, 10), originalPledgeAmountCents: 500000, balanceCents: 400000, campaign: "CAPITAL2026", anniversaryDate: utcMidnight(2026, 11, 10), fiveDayReminderDate: utcMidnight(2026, 11, 5) },
     ];
     const events = buildAnnualRenewalReminderEvents(rows, identityByDonor, TZ, now);
-    assert.equal(events.length, 2, "both of this donor's independently eligible plans must produce their own event -- genuinely pledge-specific, not donor-wide");
+    assert.equal(events.length, 3, "plan A contributes 1 (its five-day mark already passed) and plan B contributes 2 (both stages inside the window) = 3");
     const ids = events.map((e) => e.id);
-    assert.equal(new Set(ids).size, 2, "event ids must never collide between two different plans for the same donor");
+    assert.equal(new Set(ids).size, 3, "event ids must never collide between two different plans, or between a plan's own two stages");
     assert.ok(events.every((e) => e.type === "annual_pledge_renewal"));
 
+    const onDay = events.find((e) => e.id === "annual-pledge-renewal:plan-a:anniversary");
+    const planBApproaching = events.find((e) => e.id === "annual-pledge-renewal:plan-b:approaching");
+    const planBAnniversary = events.find((e) => e.id === "annual-pledge-renewal:plan-b:anniversary");
+    assert.ok(onDay && planBApproaching && planBAnniversary);
+
     // --- Exact required titles, verbatim. ---
-    const onDay = events.find((e) => e.id.endsWith(":anniversary"));
-    const approaching = events.find((e) => e.id.endsWith(":approaching"));
     assert.equal(onDay.relationshipPhrase, "Annual pledge renewal opportunity");
-    assert.equal(approaching.relationshipPhrase, "Annual pledge renewal approaching");
+    assert.equal(planBApproaching.relationshipPhrase, "Annual pledge renewal approaching");
+    assert.equal(planBAnniversary.relationshipPhrase, "Annual pledge renewal opportunity");
+
+    // --- 3: the correct FUTURE event date is shown, never today's date
+    // -- dateEpoch (bucketing/sort) is the stage's own real date; dateLabel
+    // (what's rendered) is always the anniversary date itself (the thing
+    // being prepared for/acted on), matching buildPaymentPlanMilestoneEvents'
+    // own "target date, not firing date" precedent. ---
+    assert.equal(onDay.dateEpoch, todayEpoch, "plan A's anniversary fires today");
+    assert.equal(onDay.dateLabel, "Nov 1, 2026");
+    assert.equal(planBApproaching.dateEpoch, utcMidnight(2026, 11, 5), "plan B's approaching stage carries ITS OWN real date, not today's");
+    assert.notEqual(planBApproaching.dateEpoch, todayEpoch);
+    assert.equal(planBApproaching.dateLabel, "Nov 10, 2026", "dateLabel always shows the anniversary itself, even for the approaching stage");
+    assert.equal(planBAnniversary.dateEpoch, utcMidnight(2026, 11, 10));
+    assert.equal(planBAnniversary.dateLabel, "Nov 10, 2026");
+
+    // --- 5: no duplicate entries between Today and Coming Up -- every
+    // event lands in exactly one of the two partitioned buckets. ---
+    const { today: todayBucket, upcoming: upcomingBucket } = partitionRelationshipDateEventsByToday(events, now, TZ);
+    assert.deepEqual(todayBucket.map((e) => e.id).sort(), ["annual-pledge-renewal:plan-a:anniversary"]);
+    assert.deepEqual(upcomingBucket.map((e) => e.id).sort(), ["annual-pledge-renewal:plan-b:anniversary", "annual-pledge-renewal:plan-b:approaching"]);
+    assert.equal(todayBucket.length + upcomingBucket.length, events.length, "every event lands in exactly one bucket -- none dropped, none duplicated");
+
+    // --- 8/11: upcoming-window boundary -- exactly 14 days out still
+    // qualifies, 15 days out does not (RELATIONSHIP_DATE_LEAD_WINDOW_DAYS). ---
+    const boundaryRow = { donorId: "donor-1", planId: "plan-c", pledgeActivityId: "pledge-c", originalPledgeDate: utcMidnight(2025, 11, 15), originalPledgeAmountCents: 100000, balanceCents: 0, campaign: null, anniversaryDate: utcMidnight(2026, 11, 15), fiveDayReminderDate: utcMidnight(2026, 11, 10) };
+    const exactly14Out = buildAnnualRenewalReminderEvents([boundaryRow], identityByDonor, TZ, now);
+    assert.equal(exactly14Out.filter((e) => e.id.endsWith(":anniversary")).length, 1, "exactly 14 days out must still appear in the upcoming window");
+    const beyond14 = { ...boundaryRow, planId: "plan-d", anniversaryDate: utcMidnight(2026, 11, 16), fiveDayReminderDate: utcMidnight(2026, 11, 11) };
+    const exactly15Out = buildAnnualRenewalReminderEvents([beyond14], identityByDonor, TZ, now);
+    assert.equal(exactly15Out.filter((e) => e.id.endsWith(":anniversary")).length, 0, "15 days out must NOT appear yet -- beyond the 14-day lead window");
+
+    // --- A date that has already passed (e.g. a plan picked up after its
+    // five-day mark already fired, with no anniversary reminder shown
+    // yet) must never retroactively reappear. ---
+    const alreadyPassed = { ...rows[0], planId: "plan-e", anniversaryDate: utcMidnight(2026, 10, 20), fiveDayReminderDate: utcMidnight(2026, 10, 15) };
+    const pastEvents = buildAnnualRenewalReminderEvents([alreadyPassed], identityByDonor, TZ, now);
+    assert.equal(pastEvents.length, 0, "a stage date before today must never fire retroactively");
+
+    // --- 10/4: multiple plans for one donor remain independently
+    // evaluated with the window fix in place (same guarantee as before,
+    // re-verified after the windowing change). ---
+    assert.ok(new Set(events.map((e) => e.id.split(":")[1])).size >= 2, "events must span more than one plan id for this multi-plan donor");
 
     // --- Required reminder information: donor name, original pledge
-    // amount, campaign, outstanding balance, and the anniversary date
-    // (dateLabel) are all present. ---
+    // amount, campaign, outstanding balance are all present. ---
     assert.match(onDay.secondaryDateLabel, /\$1,200\.00 pledged \(GENOP2025\)/);
     assert.match(onDay.secondaryDateLabel, /\$100\.00 balance remaining/);
     assert.equal(onDay.donorName, "Mr. & Mrs. Test Donor");
     assert.equal(onDay.donorCode, "12345");
-    assert.equal(onDay.dateLabel, "Nov 1, 2026");
 
     // --- 14/15: outstanding balance vs. fully paid -- neither suppresses
     // the event; balance is shown as context either way. ---

@@ -25523,3 +25523,166 @@ written to any real donor):
   annually under a new campaign code, that would need its own
   explicitly-approved renewal-classification mechanism (never invented
   silently per the task's own constraint).
+
+## Annual Renewal Reminders -- Coming Up Fix + Active Payment Plan Account Review List (2026-10-08)
+
+Two deliverables in this round: (1) fix Annual Renewal Reminders so they
+appear in Coming Up before their trigger date, not only on the exact
+day; (2) generate a read-only review list of every active payment plan
+on Independent Staging so the fundraiser can start verifying Original
+Pledge Dates.
+
+### Task 1: Coming Up fix -- IMPLEMENTED, TESTED, DEPLOYED, LIVE-VERIFIED
+
+**The bug:** the original implementation (see the entry directly above)
+deliberately followed `buildPaymentPlanMilestoneEvents`' pattern --
+`dateEpoch` pinned to today, a row only ever constructed at all on the
+exact firing day. That's correct for a true single-day milestone, but
+it meant an annual-renewal row never existed on any day BEFORE its
+trigger date, so Coming Up (which only ever sees rows that already
+exist) could never show it in advance -- only Today/Daily Agenda (which
+only need the row to exist on the day) worked.
+
+**The fix:** `buildAnnualRenewalReminderEvents` (`lib/workspace/
+relationship-date-events.ts`) now follows the SAME lead-window pattern
+`buildYahrtzeitRelationshipDateEvents`/`buildImportantDateRelationshipEvents`
+already use, reusing the same constant
+(`RELATIONSHIP_DATE_LEAD_WINDOW_DAYS`, 14 days) rather than inventing a
+new window. Each row now carries BOTH of the plan's fixed stage dates
+(`fiveDayReminderDate`, `anniversaryDate` -- both already computed once
+by `evaluateAnnualRenewal`, never re-derived), and the builder checks
+each stage's own date independently: skipped if already in the past;
+included, with `dateEpoch` set to that stage's real date, if `daysUntil
+<= 14`. A stage whose date is exactly today gets `dateEpoch === today`,
+so `partitionRelationshipDateEventsByToday`'s existing exact-equality
+check correctly routes it to Today/Daily Agenda; a stage still days
+away gets its own real future `dateEpoch`, so it lands in Coming Up
+instead -- the partition function itself needed no change, since every
+event belongs to exactly one of its two returned lists by construction
+(never both, never neither, for any event that qualified for the
+window). `dateLabel` (what's actually rendered, confirmed via
+`app/page.tsx`'s `RelationshipDateEventRow`) stays the anniversary date
+for BOTH stages, matching `buildPaymentPlanMilestoneEvents`' own
+established precedent of showing the target date being counted down to
+rather than the reminder's own firing date -- "approaching" vs.
+"opportunity" is distinguished by `relationshipPhrase` alone, never by a
+different displayed date. `lib/workspace/live-data.ts`'s row-building
+loop was simplified to match: it no longer pre-decides a single "stage"
+per plan (the old `isFiveDayReminder`/`isAnniversaryReminder` exact-day
+booleans are still computed by `evaluateAnnualRenewal` but intentionally
+unused here now) -- every eligible plan's both dates are passed through
+unconditionally, and the builder alone decides, per call, which stage(s)
+are currently inside the window.
+
+**What stayed unchanged, by design:** eligibility (verified date +
+active plan) and the "never auto-suppress" rule from the 2026-10-08
+implementation entry above -- this round only changed WHEN an already-
+eligible reminder becomes visible, never WHETHER it's eligible. A plan's
+two stages can legitimately both appear at once during their ~10-day
+overlap window (e.g. "approaching" showing in Today while "anniversary"
+is still a few days out in Coming Up) -- that's two distinct real events
+about the same plan (different ids, different phrases), not a duplicate
+of one event; `partitionRelationshipDateEventsByToday`'s own guarantee
+(every event lands in exactly one of its two returned lists) still
+holds, so Today and Coming Up never show the literal same entry twice.
+
+**Tests:** extended `tests/pledge-payment-plan-annual-renewal.test.mjs`
+with: exact anniversary/five-day boundaries re-verified against the new
+row shape; the 14-day window boundary (exactly 14 days out still
+qualifies, 15 does not); a stage date already in the past never
+retroactively fires; a multi-plan donor scenario where one plan's
+anniversary fires today while the other plan's both stages are
+upcoming, explicitly asserting `partitionRelationshipDateEventsByToday`
+puts the right event ids in the right bucket with none dropped and none
+duplicated; `dateEpoch` vs. `dateLabel` asserted independently (the
+future stage date drives bucketing, the anniversary date is always
+what's displayed); pledge-specific event ids continue to never collide
+between a donor's plans or between one plan's two stages.
+
+**Results:** `pnpm run test` -> **164/164 passed** (no new test files;
+the existing dedicated file was extended, not replaced -- no other
+suite's expectations about this builder's shape existed to update).
+`pnpm exec tsc --noEmit` -> clean. `pnpm exec eslint` on both changed
+files -> zero new errors/warnings (only the same 2 pre-existing
+`live-data.ts` unused-var warnings, same as every prior round, just
+shifted line numbers from the added code). `node scripts/
+build-staging.mjs` -> Build complete.
+
+**Deployed** to Independent Staging via `pnpm run deploy:staging-
+independent`. Worker version **`96fe5b30-f150-48e7-ab13-0564ff816ea0`**.
+Live-verified read-only: Today page loads cleanly with Coming Up
+rendering real upcoming yahrtzeits/birthdays correctly (proving the
+shared `partitionRelationshipDateEventsByToday`/sort pipeline annual-
+renewal events now also flow through is intact); `GET /api/agenda/
+preview?format=json` generates cleanly with the existing payment-plan-
+milestone item still rendering correctly; browser console showed zero
+application errors. **No annual-renewal events appeared anywhere on
+staging during this verification** -- expected, since (see Task 2
+below) only 4 of 45 real active plans currently have a verified
+Original Pledge Date, and none of those 4 plans' stage dates currently
+fall inside the 14-day window as of this deploy -- the fix's actual
+windowing behavior is proven by the automated test suite's controlled
+fixtures, consistent with the same "controlled fixtures, never
+fabricated real-donor data" approach the original implementation used.
+
+### Task 2: Active Payment Plan Account Review List -- READ-ONLY, ZERO D1 WRITES
+
+Generated directly from Independent Staging via two read-only `wrangler
+d1 execute --remote` SELECTs (no write statement of any kind executed):
+one joining `pledge_payment_plans` (`WHERE ended_at IS NULL`) to
+`donors` and `giving_activities` for every active plan's donor/pledge
+facts, one pulling every linked real payment
+(`jl_payment_assignment_audits`, `decision_type = 'apply_to_pledge'`,
+`applied_cents > 0`) for status computation. Both scoped to the single
+staging user (`user_sgoldstein@nirc.edu`), matching every other query in
+this app.
+
+Payment-plan status was computed by calling the app's own
+`evaluatePaymentPlan` (`lib/relationships/pledge-payment-plan.ts`)
+directly -- never a new, separately-invented status rule -- so "On
+track"/"Late (Nd)"/"Fully paid"/"Final date passed, balance remains"
+here can never silently disagree with what the live app itself would
+show for the same plan. Original Pledge Date verification status is a
+direct, unmodified read of the column: `Verified` when non-null, `Not
+yet verified` when null -- never inferred, backfilled, or guessed, per
+the task's explicit data rules (no JL Due Date, no first-payment date,
+no campaign year substituted in anywhere in this report).
+
+**Zero D1 writes.** No `original_pledge_date` or any other field was
+entered, updated, or inferred for any donor by this report. The CSV is
+explicitly a review worksheet for the fundraiser's own data entry
+later, not a staging area for a bulk import this session performed or
+intends to perform.
+
+**Results, verified against the live database:**
+- **45 active payment plans** across **41 unique donor accounts**.
+- **41 plans missing** Original Pledge Date, **4 already verified**
+  (Tzuriel Amster/NDLK, Rabbi & Mrs. Aryeh Adler/NDLK, Rabbi & Mrs.
+  Moshe Matz/DIN2025, Rabbi & Mrs. Yosef Bronfeld/DIN2025) -- these 4
+  were NOT entered by this session (this session only ever cancelled
+  one test edit without saving, in the prior implementation round's live
+  verification); they reflect real fundraiser use of the feature
+  between that deploy and this one.
+- **4 donors with 2 simultaneously active plans each** (Ezra Wisotsky,
+  Paul Z. Goldstein, Max Singer, Shimmy Ramras) -- exactly the same 4
+  donors identified in the original Phase 1 investigation, confirming
+  the live data hasn't drifted from that earlier finding.
+- Status distribution: 42 On track, 1 Late (19 days), 1 Fully paid, 1
+  Final date passed with balance remaining.
+
+**Deliverables:**
+- CSV (45 data rows + header, all 14 requested columns, sorted by donor
+  name then campaign) sent directly to the user as a downloadable file.
+- Markdown summary (same data, human-readable table + counts + the
+  multi-plan-donor callout list) generated alongside it.
+- Each donor row links to `https://fundraising-os-staging.sgoldstein
+  .workers.dev/donors/{donorId}` -- the real, existing donor-page route
+  (confirmed via the live agenda-preview output's own `href` values
+  earlier in this session), so the fundraiser can jump straight to each
+  plan's edit form from the list.
+
+**Limitations:** this is a point-in-time snapshot (generated 2026-10-08
+against Independent Staging), not a live view -- if the fundraiser
+wants a refreshable, in-app version of this list (rather than a one-off
+CSV/Markdown export), that would be a separate, explicitly-scoped
+feature request, not something this task's read-only report implies.
