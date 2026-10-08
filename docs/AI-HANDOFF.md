@@ -24412,3 +24412,173 @@ predates this change) -- confirmed benign: this Worker has
 public request query string for either setting to affect in practice.
 No D1 mutation; this round touched only `status-worker/src/index.ts`,
 `package.json`, and the new `scripts/run-tests.mjs`.
+
+## Payment-Plan Reconciliation After Today's JL Donation Upload (2026-10-08) -- READ-ONLY, NO D1 WRITE, NO CODE CHANGE
+
+User confirmed today's JL donation upload complete and asked for a
+read-only reconciliation of all active payment plans against it,
+focused on 4 plans that had previously appeared late (Avi Dear, Benjy
+Weil, Mordechai Y. Goldman, Mordechai Trestman), plus Ezra Wisotsky,
+Baruch Katz, and any other active plan whose status changed. Explicit
+instruction: use real payment-assignment evidence (`jl_payment_
+assignment_audits`, `decision_type='apply_to_pledge'`), never assume
+every imported gift applied to a pledge; make zero D1 writes.
+
+**Method.** Identified "today's upload" as the two `data_imports` rows
+created 2026-10-08T13:55-14:04Z (the only imports since 2026-09-23).
+Pulled every `jl_payment_assignment_audits` row with `created_at` at the
+upload's commit timestamp (1791468237) to see exactly which pledges
+were actually touched -- never inferred from `giving_activities.updated_
+at` alone. For every one of the 45 currently-active `pledge_payment_
+plans`, reconstructed both the pre-upload and post-upload state (pre-
+upload balance = current balance + today's `applied_cents`; pre-upload
+`linkedPaymentDates` = all `apply_to_pledge` payment dates excluding
+today's) and ran the real, unmodified `evaluatePaymentPlan()` 
+(`lib/relationships/pledge-payment-plan.ts`) against both, rather than
+re-deriving lateness by hand. All queries were plain `SELECT`s against
+Independent Staging; row counts for `donors`/`giving_activities`/
+`pledge_payment_plans`/`jl_payment_assignment_audits`/`pledge_payment_
+plan_changes`/`data_imports` were captured before and after and are
+byte-identical (254 / 5463 / 45 / 88 / 48 / 16) -- **D1 mutations: 0**.
+
+### The 4 focus plans
+
+All 4 were reviewed and had their `pledge_payment_plans` row (re)created
+on 2026-10-07 evening (plan `created_at`/`pledge_payment_plan_reviews.
+reviewed_at` cluster within the same ~20-minute window, `review_status
+= 'needs_payment_plan'` for each) -- this was evidently a batch pass the
+user ran the evening before today's upload, not something this task
+needed to redo.
+
+| Donor | Balance now | Next expected | Latest recorded payment | Today's upload | evaluatePaymentPlan | Still late? | Date correction needed? |
+|---|---|---|---|---|---|---|---|
+| Avi Dear (67974) | $84.00 | 2026-10-24 | $84.00 on 2026-09-24 | **Allocated** $84.00 (apply_to_pledge, payment_date 2026-09-24) | isOnTrack=true, milestoneDaysBefore=15 | **No** (was late before upload) | No -- anchor day 24, final 2026-10-24, consistent |
+| Benjy Weil (78188) | $20.00 | 2026-10-24 (natural next cycle) | $20.00 on 2026-09-24 | **Allocated** $20.00 (payment_date 2026-09-24) | isOnTrack=true | **No** (was late before upload) | **Yes** -- see finding below |
+| Mordechai Y. Goldman (68418) | $100.00 | 2026-10-28 (natural next cycle) | $100.00 on 2026-09-28 | **Allocated** $100.00 (payment_date 2026-09-28) | isOnTrack=true | **No** (was late before upload) | **Yes** -- see finding below |
+| Mordechai Trestman (68391) | $100.00 | 2026-10-25 | $100.00 on 2026-09-25 | **Allocated** $100.00 (payment_date 2026-09-25) | isOnTrack=true | **No** (was late before upload) | No -- anchor day 25, final 2026-11-25, consistent |
+
+All 4 were genuinely `isLate=true` in the reconstructed pre-upload
+state and are `isLate=false` after -- the upload's payment-assignment
+evidence, not an assumption, is what resolved each one.
+
+**Finding: Weil and Goldman have an internal final-date inconsistency,
+independent of today's upload.** For both, `evaluatePaymentPlan`'s
+`nextUnsatisfiedExpectedPaymentAt` (the natural next monthly cycle,
+derived from the plan's own fixed `expected_day_of_month`) falls AFTER
+the plan's own stored `final_expected_payment_at`:
+- Weil: anchor day 24 -> natural next cycle 2026-10-24, but
+  `final_expected_payment_at` is stored as 2026-10-20 (4 days earlier).
+- Goldman: anchor day 28 -> natural next cycle 2026-10-28, but
+  `final_expected_payment_at` is stored as 2026-10-25 (3 days earlier).
+
+Both balances ($20 and $100 respectively) match exactly one more
+installment at each plan's own `installment_amount_cents`, so each
+plan's real last-expected-payment date should be its anchor day's next
+occurrence, not the stored final date. This looks like a day-of-month
+entry slip from the 2026-10-07 batch pass (both other plans in that same
+pass, Dear and Trestman, have final dates that DO match their own
+anchor day exactly). Left uncorrected, each plan will reach
+`finalDatePassed=true` (and flip to `isPlanEndedWithBalance`) 3-4 days
+*before* the real final installment is actually due, a false "ended
+with balance" state. **Recommended correction (not applied, read-only
+task): move Weil's `final_expected_payment_at` to 2026-10-24 and
+Goldman's to 2026-10-28**, matching each plan's own anchor day. Trestman
+and Dear need no change.
+
+### Ezra Wisotsky (77118) and Baruch Katz (68231)
+
+**Wisotsky has two active plans**, both untouched by today's upload (no
+audit row at the upload's timestamp for either pledge):
+- OLD pledge (DIN2025, `9b14c690...`): balance $150.00, latest recorded
+  payment $85.00 on 2026-09-09, next expected 2026-10-09, isOnTrack=true,
+  not late. No correction needed.
+- NEW pledge (DIN2026, `c17180a1...`): open pledge, $1,000.00 balance,
+  zero payments yet (by design -- it's brand new), next expected
+  2026-12-10, isOnTrack=true (not yet due). This is itself last round's
+  cultivation opportunity already acted on (see the Payment-Plan
+  Intelligence entry) -- no new finding here.
+
+**Baruch Katz: plan ended with balance, untouched by today's upload.**
+`final_expected_payment_at` (2026-10-03) already passed 5 days ago;
+balance remains $18.00; latest recorded payment was $18.00 on
+2026-09-07 (satisfied the 2026-09-03 cycle, nothing since).
+`evaluatePaymentPlan` correctly reports `isPlanEndedWithBalance=true`,
+`isLate=false` (by design -- a plan past its own final date is no longer
+evaluated for ordinary lateness, see the type's own doc comment), `daysUntilFinal=-6`.
+This is a genuine, currently-relevant finding: the plan has run its
+course with $18 still outstanding and no indication a further payment
+is coming. Needs a fundraiser decision (extend the plan with a new
+final date, or accept the shortfall and end it) -- not something this
+read-only task should decide.
+
+### Other active plans affected by today's upload
+
+24 of the 45 active plans (not 4) had a real `apply_to_pledge` audit row
+at today's upload timestamp. Of those, 19 besides the 4 focus donors:
+
+**19 resolved from late to on-track**, same pattern as the 4 focus
+donors (real payment-assignment evidence, not assumption): Mordy
+Goldenberg, Yaakov Dov Cohen, Ezra Fox, Daniel Stein, Dovid Weinberger,
+Michael Kass, Shmuel Luxenburg, Daniel Saidian, Samuel Goldenhersh, Max
+Singer, Shlomo Dovid Neuberger (all LATE -> ON TRACK); Michie Nudell,
+Paul Z. Goldstein, Perry Lazar, Yisroel Dahan, Tzuriel Amster, Shimmy
+Ramras, Yaakov Zelig Goldman (already on-track, payment simply applied,
+no lateness-state change).
+
+**1 newly fully paid -- cultivation-eligible once its final date
+arrives:** Rabbi & Mrs. Avraham Rosenbaum (69341). Today's $100.00
+payment brought his DIN2025 pledge to a $0.00 balance (`giving_
+activities.category` already auto-updated to `completed_gift`).
+`isCompleted=true`, but `isFulfilledAfterFinal` is correctly still
+`false` -- his plan's `final_expected_payment_at` is 2026-11-05, about 4
+weeks out, and that signal is deliberately gated on the final date being
+reached/passed, not merely on an early payoff (see `evaluatePaymentPlan`'s
+own doc comment). No action needed now; `deriveFulfilledCultivationByDonor`
+will surface him automatically on/after 2026-11-05 if no newer pledge
+exists by then.
+
+**1 plan still late despite a payment applied today -- genuinely
+outstanding, not resolved:** Rabbi & Mrs. Moshe Matz (48612).
+Today's $100.00 payment (dated 2026-09-24) WAS allocated to his pledge,
+but it lands outside the grace window for his actually-due cycle: his
+plan's anchor day is 12, so the 2026-09-12 cycle's grace window is
+2026-09-05 to 2026-09-19 (+/-7 days), and the 2026-09-24 payment falls 5
+days past that cutoff -- it cannot retroactively satisfy that cycle,
+and the following cycle (2026-10-12) isn't due yet. `evaluatePaymentPlan`
+reports `isLate=true`, `daysLate=19`, `nextUnsatisfiedExpectedPaymentAt
+=2026-09-12`, balance $300.00. This is real evidence of a donor who
+IS paying, just not on the plan's exact cadence -- distinct from "no
+payment at all" lateness. Worth a fundraiser's attention, not a data
+bug.
+
+### 15/10/5 milestones -- confirmed firing correctly
+
+Across all 45 active plans, exactly 2 are at an exact 15/10/5-day
+milestone today: Avi Dear (15 days before 2026-10-24) and Shmuel
+Luxenburg (15 days before 2026-10-24) -- both genuinely `isOnTrack`,
+confirming `milestoneDaysBefore` only fires for plans in good standing,
+per its own design (never alongside an already-late or ended state).
+
+### Summary, per the requested categories
+
+- **Payment received, status resolved:** Avi Dear, Benjy Weil,
+  Mordechai Y. Goldman, Mordechai Trestman, and 11 other donors (late ->
+  on track); Avraham Rosenbaum (paid in full, cultivation signal pending
+  its final date).
+- **Payment received, still outstanding:** Moshe Matz (payment applied,
+  but 5 days outside the grace window for the actually-due cycle --
+  still one cycle behind).
+- **No new payment evidence:** Ezra Wisotsky (both pledges), Baruch
+  Katz -- none of today's audit rows touch either donor.
+- **Incorrect expected-payment date requiring manual correction:**
+  Benjy Weil (`final_expected_payment_at` should move from 2026-10-20 to
+  2026-10-24) and Mordechai Y. Goldman (should move from 2026-10-25 to
+  2026-10-28) -- both pre-existing from the 2026-10-07 batch pass, not
+  caused by today's upload. Separately, Baruch Katz's plan has reached
+  its final date with a balance still outstanding and needs a fundraiser
+  decision (extend or close), which is a different kind of attention
+  than a wrong date.
+
+No payment plan, pledge, balance, or review decision was modified.
+Every number above traces to a live `SELECT` against Independent
+Staging, re-verified identical before and after this task.
