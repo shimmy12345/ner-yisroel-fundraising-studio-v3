@@ -24326,3 +24326,89 @@ already part of the known, hand-reviewed 2026-08-21 corpus or the
 newly-flagged 3; no donor outside that scope was read or written.
 Scratch files containing donor PII (`verify-*.json`) deleted before any
 commit, per this session's established convention.
+
+2026-10-08 (approximate, same session, immediately following)
+Claude (Sonnet 5) — User asked about the pre-existing, unrelated
+`tests/backup-watchdog-scheduled.test.mjs` failure flagged above and
+asked to look into and fix it. Found two separate things: a real latent
+bug in the watchdog itself, and a test-runner design flaw that let a
+single failing file silently swallow 9 other test files every run.
+
+**The real bug (`status-worker/src/index.ts`):** `runBackupWatchdog`'s
+immediate pre-dispatch re-check (Section 13 of docs/BACKUP-SCHEDULING-
+RELIABILITY.md -- "a delayed scheduled run may have completed between
+the first read and now") called `evaluateBackupFreshness({ now:
+Date.now(), ... })` -- the REAL wall clock -- instead of reusing the
+function's own injected `now` parameter (used correctly for the FIRST
+evaluation, a few lines above). `tests/backup-watchdog-scheduled.test.mjs`
+freezes time via a fixed `NOW = Date.parse("2026-08-28T12:00:00.000Z")`
+and mocks R2 data relative to it; the test incidentally passed for as
+long as the real wall clock stayed close to that fixed date (i.e., when
+the test was authored), and broke the moment real time drifted far
+enough past it that data "5 minutes old relative to the frozen NOW"
+stopped reading as fresh relative to the REAL `Date.now()` -- causing
+the watchdog to proceed past the re-check and attempt a second dispatch
+it should have aborted. Fixed by reusing the single injected `now` for
+both evaluations: the race this re-check defends against is caught by
+re-reading R2 (a newer `completedAt` appearing), not by the reference
+clock being a few hundred ms fresher, and the freshness thresholds are
+hour/day-granularity, so this has no meaningful production behavior
+difference -- it only removes an un-mockable, non-deterministic
+dependency that made the function's behavior silently depend on how far
+the real clock had drifted from whatever `now` a caller passed in.
+
+**The test-runner design flaw (`package.json`'s `test` script):** every
+one of the 160 test files was chained with `&&` --
+`node tests/a.test.mjs && node tests/b.test.mjs && ...`. A file that
+throws an uncaught exception (rather than failing cleanly) aborts the
+whole chain -- every file listed AFTER it never runs at all, silently,
+with the same exit code and no indication anything was skipped. This
+was actively hiding `pledge-review`, `pledge-payment-plan-reviews`,
+`portfolio-focus-payment-plan-bugfix`, and `payment-plan-intelligence`
+(and 5 backup/alert files) from every `pnpm test` run, for as long as
+the watchdog bug above was live. Separately, in writing the replacement
+runner, found this session's own prior-round addition `tests/
+relationship-facts-lifecycle-reclassify.test.mjs` had never been added
+to the chain either -- so the exact failure mode this task set out to
+fix had already recurred once, silently, within the same session.
+Replaced the chain with `scripts/run-tests.mjs`: runs every file via
+`spawnSync` with inherited stdio (output streams live, exactly as
+before), in the same order as the old chain (preserved deliberately --
+every test file in this codebase is a pure-function/mocked-I-O unit
+test with no cross-file ordering dependency observed, but keeping the
+proven order is strictly lower-risk than switching to directory order),
+continuing through every file regardless of earlier failures, and
+printing a final pass/fail tally that names every failed file. Exits 1
+if any file failed, 0 only if all passed. Also added a self-check (warn,
+not fail) comparing the runner's own file list against a fresh directory
+listing of `tests/*.test.mjs`, so a file added to one but not the other
+is flagged immediately rather than drifting silently the way the old
+hardcoded chain itself did.
+
+**Verification.** Smoke-tested the new runner directly: inserted a
+deliberately failing file mid-chain (same uncaught-exception shape as
+the real bug) -- confirmed the failure is caught and reported, every
+file after it (including a repeated `tests/foundation.test.mjs`) still
+ran, and the process exits 1; removed the deliberate failure and
+confirmed the real, fixed suite exits 0. `tsc --noEmit` clean. `eslint`
+clean on both changed files (one pre-existing, unrelated warning on
+`status-worker/src/index.ts`'s own anonymous default export, outside
+this change's diff). Full `pnpm test`: 161 files run, 161 passed, 0
+failed, 0 drift warnings -- confirmed all 9 previously-hidden files
+(including this session's own earlier pledge/payment-plan rounds) now
+run and pass every time.
+
+**Deployed:** `status-worker` (`fundraising-os-backup-status`), via
+`cd status-worker && wrangler deploy`, after explicit user approval
+(blocked once by the auto-mode classifier as a production deploy --
+correctly so, since this Worker's `wrangler.jsonc` has no staging-
+specific config). Version ID `20dfad5d-eb22-4505-ae47-fe827c61ac5d`. The
+deploy also surfaced a pre-existing, unrelated config drift warning
+(dashboard had `preview_urls: true` / no `redact_query_string` override;
+neither is actually set in `wrangler.jsonc`, so this is wrangler
+reasserting its own defaults over a manual dashboard toggle that
+predates this change) -- confirmed benign: this Worker has
+`workers_dev: false` and no public route, so there is no preview URL or
+public request query string for either setting to affect in practice.
+No D1 mutation; this round touched only `status-worker/src/index.ts`,
+`package.json`, and the new `scripts/run-tests.mjs`.

@@ -152,9 +152,22 @@ export async function runBackupWatchdog(env: Env, now: number, fetchImpl: typeof
     // Immediate re-check (Section 13): a delayed scheduled run may have
     // completed between the first read above and now. Re-reading fresh
     // rather than reusing the earlier result avoids an unnecessary
-    // duplicate dispatch without needing any shared mutable state.
+    // duplicate dispatch without needing any shared mutable state. Uses
+    // the SAME injected `now` as the first evaluation above, not a fresh
+    // `Date.now()` call -- the race this re-check defends against is
+    // caught by re-reading R2 (a newer completedAt appearing), not by
+    // the reference clock being a few hundred ms fresher; keeping one
+    // single `now` for the whole invocation keeps the function
+    // deterministic and makes it correctly testable with a fixed clock
+    // (found 2026-10-08: a fresh `Date.now()` here made this function's
+    // behavior depend on the real wall clock's distance from whatever
+    // fixed `now` a caller/test passed in, so a test built around a
+    // frozen past `now` silently broke every day further the real clock
+    // drifted from it -- it dispatched twice, once past the intended
+    // single-dispatch guarantee, as soon as that drift exceeded the
+    // mocked data's own "5 minutes ago" offset).
     const recheckedStatus = await readBackupStatus(env.STATUS_BUCKET);
-    const recheckedEvaluation = evaluateBackupFreshness({ now: Date.now(), success: recheckedStatus.success, attempt: recheckedStatus.attempt });
+    const recheckedEvaluation = evaluateBackupFreshness({ now, success: recheckedStatus.success, attempt: recheckedStatus.attempt });
     if (recheckedEvaluation.action === "fresh") {
       logWatchdogEvent("recovered_on_recheck", { ageMs: recheckedEvaluation.ageMs });
       return;
