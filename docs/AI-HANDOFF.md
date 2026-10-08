@@ -24206,3 +24206,123 @@ correctly with names correctly associated to their own codes.
 `pledge_payment_plans`=45 -- identical immediately before and
 immediately after this entire round (checked twice). Every verification
 query was a read-only `SELECT`.
+
+2026-10-08 (approximate)
+Claude (Sonnet 5) — User flagged three bad "SUGGESTED" entries in the
+real Daily Fundraising Agenda email: Sonnenblick and Mark Danziger
+("Reach out and reference: called to wish mazel tov on [grand]son's bar
+mitzvah this shabbos" -- stale by months) and Nussbaum ("Reach out and
+reference: sent text to wish happy birthday." -- doesn't make sense as
+outreach bait). Investigated and found two distinct root causes, then
+implemented and live-verified fixes for both, with the user's explicit
+approval at each write.
+
+**Root cause 1 -- completed well-wish facts defaulted to `durable`.**
+Nussbaum (and 2 other real donors) had a real, accepted
+`donor_relationship_facts` row for a completed well-wish touch, but
+`classifyFactLifecycle()`'s step 4 conservative default (see this file's
+own "disclosed limitation" from the original design pass) gave it
+`durable` -- never decaying -- since no relative-time word was present.
+This is exactly the "evidence-gated path to narrowing this later if real
+usage ever shows it matters" that design comment anticipated; this round
+is that evidence.
+
+**Root cause 2 -- 8 legacy donors never migrated off the pre-Phase-1
+narrative path.** Sonnenblick and Mark Danziger have zero
+`donor_relationship_facts` rows, so `relationshipOpportunityCandidate()`
+falls to the legacy `relationship_summary`/`institutional_memory` text
+path, which has NO relevance/decay check at all (by design -- that
+population was meant to be migrated in a later stage). Initially assumed
+"run the existing backfill preview script" would resolve this, but on
+reading `scripts/relationship-facts-historical-corpus-review.mjs` (the
+2026-08-21 hand review of this exact 12-donor corpus), found that ALL 8
+of these donors were already reviewed and explicitly NOT cleared for
+automatic backfill -- corrected this misdiagnosis to the user before
+acting on it, rather than silently building on the wrong premise.
+
+**Fix 1 (`lib/relationships/fact-classification.ts`):** added
+`COMPLETED_WELL_WISH_PATTERN` (`/\bwish(?:ed)?\b.{0,20}\b(?:happy
+birthday|mazel tov)\b/i`), wired into `classifyFactLifecycle()`'s step 3
+so a completed well-wish touch classifies `time_bound` instead of
+`durable`. Measured the real effect before shipping: the 3 live
+misclassified facts are 35-43 days old, and `family_milestone`'s shared
+decay window is 180 days -- fixing lifecycle alone would not stop
+tomorrow's suggestion for ~4-5 more months. Raised this explicitly to
+the user rather than claiming the fix was complete; user chose a
+dedicated, shorter decay window. Added `COMPLETED_WELL_WISH_DECAY_
+WINDOW_DAYS` (= `CATEGORY_DECAY_WINDOW_DAYS.commitment_followup`, reused
+not invented) and `resolveDecayWindowDays(category, factText)`, which
+`lib/relationships/fact-synthesis.ts`'s `scoreFact()` now calls instead
+of indexing `CATEGORY_DECAY_WINDOW_DAYS` directly -- a text-pattern
+override on top of the category default, never changing what `family_
+milestone` means for any other fact.
+
+**Fix 1's existing-data correction:** wrote `scripts/relationship-facts-
+lifecycle-reclassify.mjs` (preview/apply split, same convention as the
+backfill script) to re-run the fixed classifier against every
+`status='current'` fact and correct any row whose stored lifecycle now
+disagrees. Previewed (exactly the 3 expected rows, lifecycle-only diff),
+got explicit user approval for the D1 write (blocked once by the auto-
+mode classifier as a shared-resource modification -- correctly so),
+applied. Live-verified via `findMostActionableFact()` (the real,
+unmodified function) against the live fact text/dates: all 3 now return
+`null` (no longer actionable).
+
+**Fix 2:** for the 4 already-reviewed-as-valueless-or-redundant donors
+(Abdelhak, Horn, Shlionsky -- `INTERACTION_HISTORY_ONLY`; Semmelman --
+`STRUCTURED_DATA_ALREADY_COVERS_IT`, a real `yahrtzeits` row already
+holds it), nulled both `relationship_summary` and `institutional_memory`
+after explicit user approval -- no replacement fact, per the existing
+review's own conclusion that none is warranted. For the 4 genuinely
+`NEEDS_REVIEW` donors (a real donor fact tangled in fundraiser-action
+wording, which that review explicitly declined to auto-paraphrase),
+drafted isolated fact text for each and got the user's explicit sign-off
+on the exact wording before writing anything: Joel Danziger -> "Son had
+a bar mitzvah." (durable); Mark Danziger -> "Grandson had a bar
+mitzvah." (durable); Sonnenblick -> "Son had a bar mitzvah." (durable);
+Weinschneider -> "Interested in a Kollel donation." (time_bound,
+solicitation, 90-day window) -- the follow-up/"after succos" half of
+Weinschneider's original text was deliberately not turned into a
+separate fact (follow_up facts never enter Snapshot scoring; no evidence
+a reminder record was wanted here). All 4 new rows inserted via
+`scripts/relationship-facts-manual-review-resolution.mjs` (preview/apply
+split, same fingerprint-idempotency and INSERT-shape conventions as
+`applyBackfill()`), with category/lifecycle computed by the real,
+imported `classifyRelationshipFact()`, never hand-picked. Legacy
+narrative fields for these 4 were left untouched (harmless once a real
+fact exists -- `hasStructuredFacts` then permanently governs
+recommendation-candidate generation for that donor).
+
+**Tests.** `tests/relationship-fact-classification.test.mjs`: new cases
+for `COMPLETED_WELL_WISH_PATTERN` (including a negative case -- a bare
+"mazel tov simcha" mention with no "wish" verb must not match) and
+`resolveDecayWindowDays()` (dedicated window for the well-wish pattern;
+every other category/text falls through unchanged).
+`tests/relationship-fact-recommendation-actionability.test.mjs`: the
+real Nussbaum shape at 10 days (must still fire) vs. 43 days (must not),
+plus a mixed-facts case proving the shorter window is scoped to the
+well-wish text pattern only, never the whole `family_milestone`
+category. `tests/relationship-facts-lifecycle-reclassify.test.mjs`
+(new): the reclassify script's pure planning logic against synthetic
+rows.
+
+**Gates.** `tsc --noEmit` clean. `eslint` on every changed/new file:
+zero errors, zero warnings. Full suite: every relevant test file passes
+(fact-classification, fact-synthesis, recommendation-actionability,
+snapshot-stage3, portfolio-focus); halts at the same pre-existing,
+unrelated `tests/backup-watchdog-scheduled.test.mjs` failure this file
+has already documented at least once before (JL Codes round, above) --
+worth a dedicated look at some point since the chained `pnpm test`
+invocation never runs anything after it, but out of scope for this
+round. `node scripts/build-staging.mjs` succeeds. Deployed to
+Independent Staging.
+
+**D1 mutations this round (all explicitly user-approved before
+applying):** 3 `donor_relationship_facts.lifecycle` updates
+(durable -> time_bound); 4 `donors` rows with both narrative fields
+nulled; 4 new `donor_relationship_facts` rows inserted (+ 4 matching
+`donor_relationship_fact_changes` audit rows). Every donor touched was
+already part of the known, hand-reviewed 2026-08-21 corpus or the
+newly-flagged 3; no donor outside that scope was read or written.
+Scratch files containing donor PII (`verify-*.json`) deleted before any
+commit, per this session's established convention.

@@ -5,7 +5,9 @@ import {
   classifyRelationshipFact,
   hasSubstantiveContentBesidesCommitment,
   isSingularStateCategory,
+  resolveDecayWindowDays,
   CATEGORY_DECAY_WINDOW_DAYS,
+  COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS,
   DURABLE_BASELINE_SCORE,
   RELEVANCE_FLOOR,
 } from "../lib/relationships/fact-classification.ts";
@@ -118,6 +120,32 @@ async function run() {
   // holiday/season entry's own "this/next/upcoming + word" requirement,
   // not a bare mention).
   assert.equal(classifyFactLifecycle("He always looks forward to Shabbos.", "general"), "durable");
+
+  // --- Regression: COMPLETED_WELL_WISH_PATTERN (2026-10-08, found via
+  // the real Daily Fundraising Agenda flagging stale "Reach out and
+  // reference" suggestions against three real staging donors). A
+  // completed well-wish outreach ACTION must come out time_bound even
+  // with no relative-time word at all -- the touch itself is a
+  // point-in-time event, not a standing fact. ---
+  assert.deepEqual(classifyRelationshipFact("sent text to wish happy birthday."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("texted to wish him a happy birthday."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("called to wish mazel tov on son's engagement."), { category: "family_milestone", lifecycle: "time_bound" });
+  // Sanity: a bare mention of "birthday"/"mazel tov" with no "wish"
+  // outreach-action verb must NOT trigger this pattern -- it is scoped
+  // to the evidenced "wish ... happy birthday / mazel tov" construction,
+  // not any sentence merely naming the occasion.
+  assert.deepEqual(classifyRelationshipFact("His birthday is in March."), { category: "family_milestone", lifecycle: "time_bound" }, "this one still hits RELATIVE_TIME_PATTERN via the month name, not COMPLETED_WELL_WISH_PATTERN");
+  assert.equal(classifyFactLifecycle("Mentioned it was a wonderful mazel tov simcha for the whole family.", "family_milestone"), "durable", "no 'wish' outreach-action verb present -- must not match COMPLETED_WELL_WISH_PATTERN");
+
+  // --- resolveDecayWindowDays: a completed well-wish gets its own,
+  // much shorter window (reused from commitment_followup's 30 days)
+  // regardless of its family_milestone category's normal 180-day
+  // window; every other time_bound fact is unaffected, falling straight
+  // through to its existing category window. ---
+  assert.equal(resolveDecayWindowDays("family_milestone", "sent text to wish happy birthday."), COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS);
+  assert.equal(COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS, 30);
+  assert.equal(resolveDecayWindowDays("family_milestone", "His daughter Danielle is getting married in November."), CATEGORY_DECAY_WINDOW_DAYS.family_milestone);
+  assert.equal(resolveDecayWindowDays("solicitation", "Solicited for a plaque ($5k)"), CATEGORY_DECAY_WINDOW_DAYS.solicitation);
 
   // --- Regression: hasSubstantiveContentBesidesCommitment -- the real
   // Weinschneider case (Kollel donation + a follow-up instruction in one

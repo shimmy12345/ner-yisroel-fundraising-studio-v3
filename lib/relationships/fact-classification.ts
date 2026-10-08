@@ -80,6 +80,30 @@ export const TRANSIENT_HEALTH_STATE_PATTERN = /\b(?:sick|illness|recovering|hosp
 // the free-text fact's own lifecycle.
 export const PERMANENT_LIFE_EVENT_PATTERN = /\bpassed away\b/i;
 
+// A completed, one-time well-wish ACTION ("sent text to wish happy
+// birthday", "called to wish mazel tov on [grand]son's bar mitzvah this
+// shabbos") -- evidenced 2026-10-08 via three real staging donors
+// (Nussbaum, and two further "texted to wish him a happy birthday"
+// donors) whose family_milestone fact defaulted to `durable` via step
+// 4's conservative fallback (no relative-time word for the birthday
+// cases; the bar-mitzvah cases already independently catch `time_bound`
+// via RELATIVE_TIME_PATTERN's "this Shabbos" entry, but this pattern
+// gives the same correct answer even without that date word, e.g. a
+// future donor's "called to wish mazel tov on the engagement" with no
+// day-of-week attached). This is exactly the "evidence-gated path to
+// narrowing this later if real usage ever shows it matters" this
+// module's own step-4 doc comment anticipated for the disclosed
+// conservative-default limitation -- the well-wish ACTION is inherently
+// a point-in-time outreach touch, not a standing biographical fact, so
+// once it is itself in the past it should decay like any other
+// time-bound event rather than resurface indefinitely as "Reach out and
+// reference" guidance for an outreach that already happened. Narrowly
+// scoped to the exact evidenced "wish ... happy birthday / mazel tov"
+// construction -- not a bare "birthday"/"mazel tov" mention (which could
+// legitimately appear in other, non-action-report context) and not a
+// speculative broader vocabulary.
+export const COMPLETED_WELL_WISH_PATTERN = /\bwish(?:ed)?\b.{0,20}\b(?:happy birthday|mazel tov)\b/i;
+
 // Category: WHAT the fact is about -- checked in a fixed priority order
 // against the WHOLE input text (a single specificFacts sentence at
 // accept time in Phase 2+, or, for Phase 1's backfill, a donor's entire
@@ -120,7 +144,10 @@ export function classifyFactCategory(text: string): FactCategory {
 //    time reference, OR a transient-state health verb (excluding "passed
 //    away", handled by step 1), OR matches the EXISTING RELATIONSHIP_
 //    CHANGE_PATTERN (state-change language is inherently a snapshot of a
-//    moment).
+//    moment), OR matches COMPLETED_WELL_WISH_PATTERN (a completed
+//    well-wish outreach ACTION, e.g. "sent text to wish happy birthday"
+//    -- the touch itself is a point-in-time event, not a standing fact
+//    about the donor, so it must decay like any other dated occurrence).
 // 4. Otherwise, the default depends on CATEGORY, not a single global
 //    fallback: the two singular-state categories (`solicitation`,
 //    `health`) default to `time_bound` -- an ask-in-progress or a health
@@ -141,7 +168,7 @@ export function classifyFactCategory(text: string): FactCategory {
 export function classifyFactLifecycle(text: string, category: FactCategory): FactLifecycle {
   if (PERMANENT_LIFE_EVENT_PATTERN.test(text)) return "durable";
   if (COMMITMENT_PATTERN.test(text)) return "follow_up";
-  if (RELATIVE_TIME_PATTERN.test(text) || TRANSIENT_HEALTH_STATE_PATTERN.test(text) || RELATIONSHIP_CHANGE_PATTERN.test(text)) return "time_bound";
+  if (RELATIVE_TIME_PATTERN.test(text) || TRANSIENT_HEALTH_STATE_PATTERN.test(text) || RELATIONSHIP_CHANGE_PATTERN.test(text) || COMPLETED_WELL_WISH_PATTERN.test(text)) return "time_bound";
   return isSingularStateCategory(category) ? "time_bound" : "durable";
 }
 
@@ -212,6 +239,30 @@ export const CATEGORY_DECAY_WINDOW_DAYS: Record<FactCategory, number> = {
   general: 120,
   commitment_followup: 30,
 };
+
+// A completed well-wish outreach ACTION decays much faster than the rest
+// of its shared category's window (2026-10-08, same evidence as
+// COMPLETED_WELL_WISH_PATTERN above). family_milestone's 180-day window
+// is calibrated for genuinely standing-relevance milestones (an upcoming
+// wedding, a recent loss) where staying a plausible conversation topic
+// for months is correct; a well-wish you already sent is a completed,
+// one-time touch whose value as a future "reach out and reference" hook
+// fades fast -- the same reasoning CATEGORY_DECAY_WINDOW_DAYS.
+// commitment_followup already uses, so this reuses that exact value
+// rather than inventing a new number.
+export const COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS = CATEGORY_DECAY_WINDOW_DAYS.commitment_followup;
+
+// The decay window scoreFact() must actually use for a `time_bound` fact:
+// COMPLETED_WELL_WISH_PATTERN's narrower window takes priority over the
+// fact's own category's window when the text matches (checked by text,
+// not category, so a family_milestone fact's WHAT-classification stays
+// unchanged -- only the HOW-LONG window differs for this one evidenced
+// text shape). Every other time_bound fact is unaffected: falls straight
+// through to its existing category window, byte-for-byte as before.
+export function resolveDecayWindowDays(category: FactCategory, factText: string): number {
+  if (COMPLETED_WELL_WISH_PATTERN.test(factText)) return COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS;
+  return CATEGORY_DECAY_WINDOW_DAYS[category];
+}
 
 // Fixed, non-time-decaying relevance score for `durable` facts -- a
 // constant, reasoned not derived, matching this codebase's own

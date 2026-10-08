@@ -1,4 +1,4 @@
-import { CATEGORY_DECAY_WINDOW_DAYS, DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
+import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
 
 // Relationship Intelligence Phase 2 -- deterministic synthesis, exactly
 // as approved in docs/AI-HANDOFF.md's "Relationship Snapshot Synthesis
@@ -49,7 +49,7 @@ function scoreFact(fact: SynthesisFact, now: number, pinnedFresh: PinnedFreshSou
   // synthesizeRelationshipSnapshot below).
   if (fact.category === "solicitation" && fact.sourceInteractionId !== null && pinnedFresh.has(fact.sourceInteractionId)) return 1;
   const daysAgo = Math.max(0, (now - fact.sourceInteractionOccurredAt) / 86400);
-  return recencyScore(daysAgo, CATEGORY_DECAY_WINDOW_DAYS[fact.category]);
+  return recencyScore(daysAgo, resolveDecayWindowDays(fact.category, fact.factText));
 }
 
 // Reuses the exact same sentence-join convention as lib/capture/

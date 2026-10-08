@@ -209,6 +209,49 @@ async function run() {
     }
   }
 
+  // --- Regression: the real Nussbaum shape (2026-10-08, flagged via the
+  // Daily Fundraising Agenda's "SUGGESTED" section). A completed
+  // well-wish touch ("sent text to wish happy birthday.") that is still
+  // genuinely recent (10 days ago) must still generate
+  // relationship_opportunity -- the fix is a SHORTER decay window, not
+  // "never actionable." ---
+  {
+    const f = fact({ factText: "sent text to wish happy birthday.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-wellwish-fresh", sourceInteractionOccurredAt: daysAgo(10) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.ok(opportunity, "a genuinely recent completed well-wish must still be actionable");
+    assert.match(opportunity.action, /happy birthday/);
+  }
+
+  // --- Same fact, but 43 days old (the real Nussbaum age at the time
+  // this was flagged) -- must NOT generate relationship_opportunity
+  // anymore. family_milestone's normal 180-day window would still call
+  // this actionable (score ~0.76); COMPLETED_WELL_WISH_PATTERN's
+  // dedicated 30-day window is what actually resolves the user's
+  // original complaint ("Reach out and reference: sent text to wish
+  // happy birthday" doesn't make sense once the touch is over a month
+  // old). ---
+  {
+    const f = fact({ factText: "sent text to wish happy birthday.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-wellwish-stale", sourceInteractionOccurredAt: daysAgo(43) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.equal(opportunity, undefined, "a well-wish touch over a month old must no longer be actionable (30-day dedicated window, not family_milestone's shared 180-day window)");
+  }
+
+  // --- A genuinely durable family_milestone fact in the SAME donor's
+  // history, alongside an expired well-wish fact, must still surface on
+  // its own merit -- the shorter window is scoped to the well-wish text
+  // pattern only, never to the whole category. ---
+  {
+    const expiredWellWish = fact({ factText: "sent text to wish happy birthday.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-wellwish-stale2", sourceInteractionOccurredAt: daysAgo(43) });
+    const standingFact = fact({ factText: "His daughter is Danielle.", category: "family_milestone", lifecycle: "durable", sourceInteractionId: "int-standing", sourceInteractionOccurredAt: daysAgo(400) });
+    const evidence = evidenceFor({ relationshipFacts: [expiredWellWish, standingFact], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.ok(opportunity, "the unrelated durable fact must still make relationship_opportunity fire");
+    assert.match(opportunity.action, /Danielle/);
+    assert.doesNotMatch(opportunity.action, /happy birthday/, "the expired well-wish fact must never be chosen over the still-durable fact");
+  }
+
   console.log("relationship-fact-recommendation-actionability: ok");
 }
 
