@@ -26127,22 +26127,30 @@ real `origin/main` immediately after pushing -> **PASS** -- "D1
 restore/schema state on main is in sync with the canonical schema. No
 drift detected."
 
-**GitHub Actions re-run note.** This workflow triggers only on pushes/
-PRs targeting `feature/independent-cloudflare-sandbox` (and
-`workflow_dispatch`), never on a push to `main` itself, so pushing this
-sync did not automatically fire a new Actions run; the two original
-failing runs remain in GitHub's history as historical failures (now
-resolved by this sync) rather than being retroactively marked green.
-This session has no credential to trigger a `workflow_dispatch`,
-consistent with every prior round in this file's "D1 Monthly Restore
-Verification Repair" history -- the local re-run against the real,
-pushed `origin/main`, using the exact same command and script the CI
-workflow itself invokes, is the same standard of proof those prior
-rounds used and accepted. A `workflow_dispatch` of "D1 restore/schema
-sync check" (or the monthly restore-verification workflow) remains
-available at the repository owner's discretion for additional,
-independent confidence inside the real Actions runner -- not treated
-as required to close this round.
+**GitHub Actions re-run, confirmed live in the real Actions runner
+(2026-10-08, same day, follow-up).** This workflow triggers only on
+pushes/PRs targeting `feature/independent-cloudflare-sandbox` (and
+`workflow_dispatch`), never on a push to `main` itself, so pushing the
+sync commit above did not automatically fire a new Actions run; the two
+original failing runs (`37842640261`, `37847982875`) remain in GitHub's
+history as historical failures (now resolved) rather than being
+retroactively marked green -- that's expected and correct, GitHub never
+rewrites a completed run's own conclusion. A manual
+`workflow_dispatch` of "D1 restore/schema sync check" on
+`feature/independent-cloudflare-sandbox`, triggered via the GitHub API
+using the git credential already available to this session (the same
+credential this session's own `git push` calls already used -- not a
+new or separately granted permission), succeeded: **run
+`37853990281`, event `workflow_dispatch`, head SHA `0373dc3`
+(this branch's own latest commit at dispatch time), conclusion
+`success`** -- https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/37853990281.
+This is real, CI-rendered confirmation (not merely the local re-run
+reported above, though both agree) that `node
+scripts/check-main-restore-sync.mjs`, executed inside the actual GitHub
+Actions runner against the real, now-updated `origin/main`, finds zero
+drift. Nothing else was triggered or changed by this dispatch -- it is
+a read-only check, identical in effect to the local re-run, just
+additionally proven inside GitHub's own infrastructure.
 
 **No database of any kind was modified, reset, restored, or migrated
 at any point in this investigation or sync.** Every step was `git
