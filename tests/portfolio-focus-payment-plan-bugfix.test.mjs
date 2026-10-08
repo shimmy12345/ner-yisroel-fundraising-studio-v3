@@ -11,8 +11,16 @@ import { aggregatePortfolioFocusInputs } from "../lib/portfolio-focus/aggregate.
 // Katz) case -- active plan, final expected date already passed, balance
 // still open.
 
-const DAY = 86400;
 const epoch = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d) / 1000);
+// A daytime Eastern instant (noon EDT / 11am EST -- either way, safely
+// inside the Eastern calendar date `d`, regardless of DST) -- used instead
+// of a bare UTC-midnight `epoch()` wherever a test needs to pin down
+// EXACTLY which Eastern calendar date `now` falls on. A UTC-midnight `now`
+// is itself ambiguous for this purpose post-fix: it falls in the Eastern
+// EVENING of the PRECEDING calendar date (see the 2026-10-08 timezone fix
+// in docs/AI-HANDOFF.md), so using one here would silently test the wrong
+// day for anything date-boundary-sensitive like an exact 15-day milestone.
+const easternDaytime = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d, 16, 0, 0) / 1000);
 
 function emptyRaw(overrides) {
   return {
@@ -48,7 +56,7 @@ function run() {
   // into always reporting false). ---
   {
     const finalAt = epoch(2026, 10, 23);
-    const nowOnTrack = finalAt - 15 * DAY;
+    const nowOnTrack = easternDaytime(2026, 10, 8); // exactly 15 Eastern calendar days before Oct 23
     const raw = emptyRaw({
       donors: [{ id: "donor-ontrack", display_name: "Test Donor", donor_code: "99999", relationship_summary: null, institutional_memory: null }],
       giving: [{ id: "pledge-ontrack", donor_id: "donor-ontrack", paid_cents: 500, balance_cents: 1000, activity_date: epoch(2026, 8, 3), category: "partially_paid_pledge", item_type: null, description: null }],

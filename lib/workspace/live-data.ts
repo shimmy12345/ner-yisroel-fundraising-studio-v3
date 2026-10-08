@@ -392,7 +392,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // above. See recommendation-evidence.ts's
   // fulfilledPledgeCultivationOpportunity doc comment for the full
   // product reasoning.
-  const fulfilledCultivationByDonor = deriveFulfilledCultivationByDonor(giving.results, paymentPlanByPledge, now);
+  const fulfilledCultivationByDonor = deriveFulfilledCultivationByDonor(giving.results, paymentPlanByPledge, now, timezone);
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
   // per donor is the oldest pending ask, same "one most relevant fact"
   // pattern as openPledgeByDonor above.

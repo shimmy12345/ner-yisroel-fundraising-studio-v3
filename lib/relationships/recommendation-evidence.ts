@@ -308,7 +308,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
               ? {
                   installmentAmountCents: input.openPledge.activePaymentPlan.installmentAmountCents,
                   finalExpectedPaymentAt: input.openPledge.activePaymentPlan.finalExpectedPaymentAt,
-                  ...evaluatePaymentPlan(input.openPledge.activePaymentPlan, input.openPledge.activePaymentPlan.linkedPaymentDates, input.openPledge.balanceCents, now),
+                  ...evaluatePaymentPlan(input.openPledge.activePaymentPlan, input.openPledge.activePaymentPlan.linkedPaymentDates, input.openPledge.balanceCents, now, timezone),
                 }
               : null,
           }

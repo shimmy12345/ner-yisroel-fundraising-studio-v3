@@ -27,7 +27,7 @@ function run() {
       { id: "p1", donor_id: "d1", balance_cents: 0, activity_date: epoch(2026, 6, 1), description: "Dinner", item_type: null, category: "completed_gift" },
     ];
     const plans = new Map([["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 10, 3) }]]);
-    const result = deriveFulfilledCultivationByDonor(giving, plans, NOW);
+    const result = deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC");
     assert.ok(result.has("d1"));
     assert.deepEqual(result.get("d1"), { pledgeActivityId: "p1", campaign: null, description: "Dinner", finalExpectedPaymentAt: epoch(2026, 10, 3) });
   }
@@ -36,20 +36,20 @@ function run() {
   {
     const giving = [{ id: "p1", donor_id: "d1", balance_cents: 1800, activity_date: epoch(2026, 6, 1), description: null, item_type: null, category: "partially_paid_pledge" }];
     const plans = new Map([["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 10, 3) }]]);
-    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW).size, 0, "a pledge with balance remaining must never produce a cultivation opportunity, regardless of the final date");
+    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC").size, 0, "a pledge with balance remaining must never produce a cultivation opportunity, regardless of the final date");
   }
 
   // --- does NOT fire: final date not yet reached, even if balance is already 0 ---
   {
     const giving = [{ id: "p1", donor_id: "d1", balance_cents: 0, activity_date: epoch(2026, 6, 1), description: null, item_type: null, category: "completed_gift" }];
     const plans = new Map([["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 12, 1) }]]);
-    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW).size, 0, "paying off before the final date must not yet surface the next-pledge opportunity");
+    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC").size, 0, "paying off before the final date must not yet surface the next-pledge opportunity");
   }
 
   // --- does NOT fire: no payment plan at all on the fulfilled pledge ---
   {
     const giving = [{ id: "p1", donor_id: "d1", balance_cents: 0, activity_date: epoch(2026, 6, 1), description: null, item_type: null, category: "completed_gift" }];
-    assert.equal(deriveFulfilledCultivationByDonor(giving, new Map(), NOW).size, 0);
+    assert.equal(deriveFulfilledCultivationByDonor(giving, new Map(), NOW, "UTC").size, 0);
   }
 
   // --- SUPERSESSION: a newer real pledge for the same donor suppresses the opportunity entirely ---
@@ -59,7 +59,7 @@ function run() {
       { id: "p2", donor_id: "d1", balance_cents: 50000, activity_date: epoch(2026, 9, 1), description: null, item_type: null, category: "open_pledge" },
     ];
     const plans = new Map([["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 10, 3) }]]);
-    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW).size, 0, "a newer real pledge must naturally supersede the cultivation opportunity -- no manual dismissal needed");
+    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC").size, 0, "a newer real pledge must naturally supersede the cultivation opportunity -- no manual dismissal needed");
   }
 
   // --- An OLDER row does NOT supersede -- only a row dated AFTER the fulfilled pledge counts. ---
@@ -69,7 +69,7 @@ function run() {
       { id: "p0", donor_id: "d1", balance_cents: 0, activity_date: epoch(2025, 1, 1), description: null, item_type: null, category: "completed_gift" },
     ];
     const plans = new Map([["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 10, 3) }]]);
-    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW).size, 1, "an OLDER unrelated row must never suppress the opportunity");
+    assert.equal(deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC").size, 1, "an OLDER unrelated row must never suppress the opportunity");
   }
 
   // --- Multiple donors, isolated from each other. ---
@@ -82,7 +82,7 @@ function run() {
       ["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 10, 3) }],
       ["p2", { pledge_activity_id: "p2", final_expected_payment_at: epoch(2026, 10, 3) }],
     ]);
-    const result = deriveFulfilledCultivationByDonor(giving, plans, NOW);
+    const result = deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC");
     assert.equal(result.size, 1, "d2 still has a balance -- must never appear");
     assert.ok(result.has("d1"));
   }
@@ -132,7 +132,7 @@ function run() {
   {
     const giving = [{ id: "p1", donor_id: "d1", balance_cents: 0, activity_date: epoch(2026, 6, 1), description: null, item_type: null, category: "completed_gift" }];
     const plans = new Map([["p1", { pledge_activity_id: "p1", final_expected_payment_at: epoch(2026, 10, 3) }]]);
-    const cultivation = deriveFulfilledCultivationByDonor(giving, plans, NOW);
+    const cultivation = deriveFulfilledCultivationByDonor(giving, plans, NOW, "UTC");
     const wouldBeOpenPledge = giving.filter((g) => (g.balance_cents ?? 0) > 0);
     assert.equal(wouldBeOpenPledge.length, 0, "a fulfilled pledge (balance<=0) can never simultaneously populate openPledgeByDonor's balance>0 filter");
     assert.equal(cultivation.size, 1);

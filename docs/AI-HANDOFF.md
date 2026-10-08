@@ -24706,3 +24706,225 @@ of this finding -- `isOnTrack=true` for both, and today (2026-10-08) is
 not a milestone day for either -- so nothing about their current
 display is wrong right now. The finding is about which exact future day
 each milestone will fire on, not about today's correctness.
+
+## Payment-Plan Timezone/Off-By-One Fix -- Implemented, Tested, Deployed, Live-Verified (2026-10-08)
+
+Fixes the confirmed bug from the entry directly above: `evaluatePaymentPlan()`
+compared date-only UTC-midnight values against a raw, continuously-advancing
+`now`, so every `daysUntilFinal`/milestone/`finalDatePassed` transition fired
+about one Eastern calendar day too early. Product requirement: payment-plan
+calculations must operate on the fundraiser's Eastern calendar date (America/
+New_York), not clock time -- a reminder 15 days before October 24 must fire
+on October 9, regardless of what hour the fundraiser opens the app.
+
+### Root cause (confirmed, not re-litigated here -- see the entry above for
+the full investigation)
+
+`lib/financial-date.ts`'s own convention stores every date-only field
+(`final_expected_payment_at`, every enumerated monthly cycle) as UTC midnight
+of the intended calendar date. `now` was passed in raw
+(`Math.floor(Date.now() / 1000)`) and compared directly against those
+fields. Since America/New_York trails UTC by 4-5 hours, a UTC-midnight
+date-only value falls in the Eastern EVENING of the PRECEDING calendar day
+-- so for any normal daytime use (including the Daily Agenda's own 9 AM
+Eastern send), every transition landed on the wrong Eastern calendar day.
+This is exactly the anti-pattern `lib/workspace/local-time.ts`'s own
+`localDateOnlyEpoch()` doc comment warns against.
+
+### Implementation
+
+**Normalization strategy (`lib/relationships/pledge-payment-plan.ts`):** a
+single internal helper, `today(now, timezone)`, calls the existing
+`localDateOnlyEpoch()` (imported from `lib/workspace/local-time.ts` --
+already the codebase's own established tool for exactly this, already used
+the same way by `lib/relationships/recommendation-evidence.ts` for other
+date comparisons; reused, not reinvented). Every function in this module
+that compares `now` against a date-only field now takes `timezone: string`
+as an explicit parameter (matching this codebase's existing convention --
+`nextYahrtzeitOccurrence`/`nextGregorianRecurrence`/`buildRecommendationEvidence`/
+`aggregatePortfolioFocusInputs` already all take `timezone` explicitly) and
+normalizes `now` to `today(now, timezone)` ONCE, at the top, before any
+comparison. No new timezone setting, no user input -- every caller already
+had a `timezone` value in scope (the fundraiser's own `profile.timezone`,
+defaulting to `America/New_York`, or `AGENDA_TIMEZONE` for the Daily
+Agenda's scheduled context), just not threading it into these specific
+calculations yet.
+
+Normalizing INSIDE the function (not at each call site) was the deliberate
+choice over the alternative (every caller pre-normalizes before calling):
+this is the only approach that structurally guarantees every caller gets
+the same authoritative evaluation, per the task's own explicit requirement
+("do not create separate date calculations for individual UI surfaces") --
+a future caller cannot forget the normalization step because it isn't a
+separate step from its perspective at all.
+
+**Functions changed, all in `lib/relationships/pledge-payment-plan.ts`:**
+- `evaluatePaymentPlan(plan, linkedPaymentDates, balanceCents, now, timezone)`
+  -- new required `timezone` param. `finalDatePassed`, the cycle-enumeration
+  `throughAt` bound, `firstUnsatisfiedDueIndex`'s `cycle <= now`/
+  `cycle > now` checks, `daysLate`'s `daysBetween(now, ...)`, `daysUntilFinal`,
+  and `isFulfilledAfterFinal`'s `now >= ...` all now compare against the
+  normalized `today(now, timezone)`, never the raw `now`. `matchPaymentsToCycles`'s
+  grace-window math is untouched -- it only ever compared two already-date-only
+  values (payment dates vs. cycle dates), never `now`, so it was never
+  affected by this bug and needed no change.
+- `adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt, now, timezone)`
+  -- same normalization; "today" now means the fundraiser's real Eastern
+  calendar date when correcting a newly-entered past anchor at plan creation.
+- `deriveFulfilledCultivationByDonor(givingRows, paymentPlanByPledge, now, timezone)`
+  -- same normalization for `plan.final_expected_payment_at > now`, so the
+  next-pledge-cultivation signal can never disagree with `evaluatePaymentPlan`'s
+  own `isFulfilledAfterFinal` about the same plan.
+
+**All affected callers updated (every direct call site in the
+application, found by exhaustive grep, not assumed):**
+- `lib/relationships/recommendation-evidence.ts` (`buildRecommendationEvidence`)
+  -- the single entry point for Today, Coming Up, Daily Agenda, Meeting
+  Brief, Assistant, and the donor page's Suggested Action card. Already had
+  `timezone` as its own parameter; now threads it into `evaluatePaymentPlan`.
+- `lib/portfolio-focus/aggregate.ts` (`aggregatePortfolioFocusInputs`) --
+  the single entry point for Portfolio Focus AND Fundraising Intelligence
+  (`lib/fundraising-intelligence/compute.ts` and `index.ts` both call this
+  same function, never their own copy). Already had `timezone` as its own
+  parameter.
+- `lib/workspace/live-data.ts` -- `deriveFulfilledCultivationByDonor`'s one
+  call site, inside `loadWorkspaceBriefUncached` (already had `timezone`
+  in scope).
+- `app/donors/[id]/page.tsx` -- the donor page's own direct
+  `evaluatePaymentPlan` call for the "Open Pledges" plan cards (the one
+  surface that does NOT go through `buildRecommendationEvidence`). Now
+  passes the already-fetched `profile.timezone`.
+- `app/api/pledge-payment-plans/route.ts` -- the plan-creation route's
+  `adjustNewPlanAnchorForPastDate` call (the "born late" fix). Reordered
+  to fetch `profile` before this call (previously fetched after) so
+  `profile.timezone` is available; the exact fetch itself is unchanged,
+  only its position in the function moved.
+
+No other call sites exist -- confirmed by grepping the entire `lib/` and
+`app/` trees for `evaluatePaymentPlan(`, `adjustNewPlanAnchorForPastDate(`,
+and `deriveFulfilledCultivationByDonor(` before considering the inventory
+complete.
+
+### Regression-test coverage
+
+**Existing tests preserved exactly, not rewritten:** `tests/pledge-payment-plan.test.mjs`
+(30 call sites), `tests/payment-plan-intelligence.test.mjs` (8 call sites),
+and `tests/portfolio-focus-payment-plan-bugfix.test.mjs`'s first fixture all
+construct `now`/plan dates via a UTC-midnight `epoch()` helper and pass
+`"UTC"` as the new `timezone` argument -- since `localDateOnlyEpoch(utcMidnight,
+"UTC")` is an identity transform, every existing assertion's expected value
+is byte-for-byte unchanged; these tests exist to prove the calendar-month
+arithmetic itself (Jan 31 -> Feb 28, leap years, multi-cycle matching),
+which this fix does not touch. One structural assertion
+(`evaluatePaymentPlan.length === 4`) updated to `5`, reflecting the real,
+intentional new parameter -- re-confirmed it's still testing "no
+payment-amount parameter," not reverted. `portfolio-focus-payment-plan-bugfix.test.mjs`'s
+second fixture (an EXACT 15-day-boundary test) needed its `now` value
+corrected from a bare UTC-midnight epoch (ambiguous post-fix -- it's
+Eastern evening of the day before) to an explicit Eastern-daytime instant,
+with a new `easternDaytime()` helper and comment explaining why.
+
+**New file, `tests/pledge-payment-plan-timezone.test.mjs`** (added to
+`scripts/run-tests.mjs`'s explicit file list -- learned from the prior
+round's own backup-watchdog incident not to let a new test file go
+unwired), covering every scenario the task specified, all against the
+REAL `evaluatePaymentPlan`/`adjustNewPlanAnchorForPastDate`/
+`deriveFulfilledCultivationByDonor`/`aggregatePortfolioFocusInputs`, never
+reimplemented:
+- Exact Weil (Oct 24 final) and Goldman (Oct 28 final) 15/10/5 dates, each
+  confirmed to fire on exactly one day and null on the days immediately
+  adjacent.
+- Early morning/06:00/9 AM (Daily Agenda send time)/noon/5 PM/23:30 Eastern
+  all agreeing on the same milestone value across one full Eastern day --
+  intra-day stability.
+- An exact UTC-midnight instant (`2026-10-10T00:00:00Z`), confirmed to
+  resolve to Eastern Oct 9 (20:00 EDT the day before), not Oct 10.
+- The 2026 Eastern DST fall-back (verified directly against the real IANA
+  database via `Intl`, not assumed: EDT through Oct 31, EST from Nov 1) --
+  a 15-day milestone landing exactly ON the fall-back day itself, with the
+  days immediately before/after confirmed not to also fire.
+- The same relative-date shape (3 days before final) verified correct in
+  both a pure-EDT window (October) and a pure-EST window (December) --
+  proving the fix uses the real IANA timezone database, not a hardcoded
+  offset that would only work for half the year.
+- The final date itself (`finalDatePassed` must stay false -- strict `>`),
+  the day immediately before, and the day immediately after
+  (`isPlanEndedWithBalance` flips true, `isLate` stays false).
+- The existing 7-day grace window re-confirmed unaffected at its exact
+  +7/+8/-7 day boundaries.
+- `deriveFulfilledCultivationByDonor`'s own final-date `>=` boundary (day
+  before vs. the day of) and that an outstanding balance never surfaces
+  cultivation regardless of date.
+- A full-month sweep proving each of 15/10/5 fires on EXACTLY one day,
+  never duplicated or skipped.
+- Cross-surface consistency: the same plan evaluated directly via
+  `evaluatePaymentPlan` and through `aggregatePortfolioFocusInputs` (the
+  Portfolio Focus/Fundraising Intelligence path) produce byte-identical
+  `isOnTrack`/`milestoneDaysBefore` -- proving one authoritative
+  evaluation, not two.
+- `adjustNewPlanAnchorForPastDate`'s own Eastern-"today" semantics.
+
+### Gates
+
+`node tests/pledge-payment-plan-timezone.test.mjs` (the focused new suite)
+and all 4 directly-affected existing files: all pass. Full `pnpm test`:
+162 files run, 162 passed, 0 failed (161 + this round's 1 new file).
+`tsc --noEmit`: clean, zero output, confirming no other `.ts` call site
+was missed (a missing-argument call would have failed to typecheck).
+`eslint` on every changed/new file: zero errors; 2 pre-existing warnings
+in `lib/workspace/live-data.ts` (unused vars, line 641, nowhere near this
+change) and 24 pre-existing `react-hooks/purity` errors in
+`app/donors/[id]/page.tsx` (bare `Date.now()` calls elsewhere in that huge
+server-component file, lines 386/397/418/422 -- confirmed via `git stash`
+that these exist identically on the file BEFORE this change, completely
+unrelated to the one line this round added). `node scripts/build-staging.mjs`:
+succeeds.
+
+### Deployed
+
+`fundraising-os-staging`, via `pnpm run deploy:staging-independent`.
+Version ID `0c5b4e1a-7a06-4c62-9883-1c3e0714d56a`.
+
+### Live verification (Independent Staging, read-only; D1 mutations: 0,
+confirmed via identical row counts before and after -- `donors`=254,
+`giving_activities`=5463, `pledge_payment_plans`=45,
+`pledge_payment_plan_changes`=50, `jl_payment_assignment_audits`=88)
+
+Fetched all 45 real active payment plans and their real payment-assignment
+history, then ran BOTH the exact pre-fix formula (reconstructed inline for
+comparison only, never reintroduced into the real module) and the real,
+deployed fixed `evaluatePaymentPlan` against every one, same live data,
+same `now`:
+
+**4 of 45 plans changed classification, all of them `milestoneDaysBefore`/
+`daysUntilFinal` only -- `isOnTrack`/`isLate`/`isPlanEndedWithBalance`
+identical for all 45 plans, confirming zero unintended regressions:**
+
+| Donor | Before (buggy) | After (fixed) | Why |
+|---|---|---|---|
+| Avi Dear (67974) | `milestoneDaysBefore=15`, `daysUntilFinal=15` | `milestoneDaysBefore=null`, `daysUntilFinal=16` | False 15-day milestone one day early (final Oct 24 -- real 15-day date is Oct 9, not today Oct 8) -- intended correction |
+| Benjy Weil (78188) | `milestoneDaysBefore=15`, `daysUntilFinal=15` | `milestoneDaysBefore=null`, `daysUntilFinal=16` | Same shape, confirms the exact bug this task set out to fix |
+| Shmuel Luxenburg (4930) | `milestoneDaysBefore=15`, `daysUntilFinal=15` | `milestoneDaysBefore=null`, `daysUntilFinal=16` | Same shape -- a 3rd real donor independently confirms the pattern, not specific to Weil/Goldman's own correction |
+| Rabbi & Mrs. Shlomo Kutoff (57932) | `milestoneDaysBefore=null`, `daysUntilFinal=9` | `milestoneDaysBefore=10`, `daysUntilFinal=10` | The mirror-image bug: his TRUE 10-day milestone was being silently skipped entirely (it would have fired a day early, on Oct 7, under the old code, and shown nothing today) -- the fix doesn't just suppress false positives, it also restores a real reminder that was being silently lost |
+
+Directly confirmed against live data (not inferred from the table above):
+`evaluatePaymentPlan` run against Weil's and Goldman's real stored plan
+fields and real payment history produces `milestoneDaysBefore=15` on
+2026-10-09 and 2026-10-13 respectively (and `null` the day before/after
+each) -- exactly the task's specified dates. Baruch Katz (68231, $18
+balance, final date already passed) and Moshe Matz (48612, $300 balance,
+genuinely one cycle behind) both appear in the live 45-plan dataset and
+neither is among the 4 changed plans -- their `isOnTrack`/`isLate`/
+`isPlanEndedWithBalance`/`milestoneDaysBefore` are byte-identical
+before and after, confirming their legitimate outstanding-payment
+situations are untouched by this fix.
+
+### Remaining limitations
+
+None identified that require further work. The fix is scoped exactly to
+the confirmed bug; no architectural problem or migration was found during
+implementation (the "STOP and report" condition in the task was never
+triggered). `matchPaymentsToCycles`'s 7-day grace window, the "born late"
+anchor-adjustment behavior, and the cultivation-suppression-by-newer-pledge
+rule are all unchanged in their own logic -- only the reference point they
+measure "today" against was corrected.

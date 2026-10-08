@@ -299,6 +299,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       linkedPaymentDates,
       pledge.balance_cents ?? 0,
       Math.floor(Date.now() / 1000),
+      profile.timezone,
     );
     const planState: PledgePlanState = {
       planId: planRow.id,

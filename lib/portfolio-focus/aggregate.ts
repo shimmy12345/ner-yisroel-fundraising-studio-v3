@@ -176,7 +176,7 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
         : null;
       openPledgeForEvidence = { balanceCents: openPledgeRow.balance_cents ?? 0, campaign: null, description: openPledgeRow.description || openPledgeRow.item_type, activityDate, activePaymentPlan };
       if (activePaymentPlan) {
-        const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, openPledgeRow.balance_cents ?? 0, now);
+        const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, openPledgeRow.balance_cents ?? 0, now, timezone);
         // BUG FIX (see docs/AI-HANDOFF.md's payment-plan-intelligence
         // investigation): this used to be `!evaluation.isLate`, which
         // reads as "on track" the moment a plan's final expected date has

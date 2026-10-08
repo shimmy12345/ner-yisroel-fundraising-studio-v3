@@ -18,6 +18,32 @@
 // any given payment, never a choice this code could get wrong.
 
 import { isLeapYear, maxPossibleDaysInMonth } from "../calendar/gregorian-recurring-date.ts";
+import { localDateOnlyEpoch } from "../workspace/local-time.ts";
+
+// Timezone normalization (2026-10-08, see docs/AI-HANDOFF.md's "Verification
+// of User-Applied Final-Date Corrections" entry for the full investigation
+// that found this). Every date this module compares `now` against --
+// `finalExpectedPaymentAt`, every enumerated cycle, a newly-entered plan
+// anchor -- is a DATE-ONLY value, always encoded as UTC midnight of the
+// intended calendar date (lib/financial-date.ts's own convention). `now`
+// itself, when passed in raw (`Math.floor(Date.now() / 1000)`, as every
+// real caller ultimately sources it), is a continuously-advancing instant
+// with a real time-of-day component. Comparing those two directly is
+// exactly the anti-pattern lib/workspace/local-time.ts's own
+// localDateOnlyEpoch() doc comment warns against: because the fundraiser's
+// business timezone (America/New_York) is 4-5 hours behind UTC, a date-only
+// value's UTC-midnight boundary falls in the Eastern EVENING of the
+// PRECEDING calendar day -- so any daysUntilFinal/milestone/lateness
+// transition computed from the raw instant flips about 4-5 hours too early,
+// which for any normal daytime use (including the Daily Agenda's own 9 AM
+// Eastern send) lands the transition on the wrong Eastern calendar day
+// entirely (one day early). Every function below that compares `now`
+// against a date-only field first normalizes it via this one helper --
+// never a second, ad hoc normalization, and never comparing a raw instant
+// to a date-only value directly.
+function today(now: number, timezone: string): number {
+  return localDateOnlyEpoch(now, timezone);
+}
 
 export const MONTHLY_PAYMENT_PLAN_GRACE_DAYS = 7;
 // Defensive bound on how many monthly cycles to enumerate from a plan's
@@ -158,32 +184,38 @@ export type PaymentPlanEvaluation = {
   isFulfilledAfterFinal: boolean;
 };
 
-// The single entry point every caller (Today, donor page, Meeting Brief)
-// should use. Pure -- takes already-fetched facts (the plan's own
-// stored fields, every linked-payment date for THIS pledge, the
-// pledge's real JL balance, and now), returns derived facts. Never
+// The single entry point every caller (Today, donor page, Meeting Brief,
+// Portfolio Focus, Fundraising Intelligence, Daily Agenda) should use.
+// Pure -- takes already-fetched facts (the plan's own stored fields, every
+// linked-payment date for THIS pledge, the pledge's real JL balance, now,
+// and the fundraiser's business timezone), returns derived facts. Never
 // accesses D1, never persists anything -- matches the design's own
-// "prefer deriving over storing computed state" discipline.
-export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates: number[], balanceCents: number, now: number): PaymentPlanEvaluation {
+// "prefer deriving over storing computed state" discipline. `now` is
+// normalized to the fundraiser's own Eastern calendar date exactly once,
+// at the top, via today() -- every comparison below uses that normalized
+// value, never the raw `now` directly (see today()'s own doc comment for
+// why).
+export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates: number[], balanceCents: number, now: number, timezone: string): PaymentPlanEvaluation {
+  const nowDateOnly = today(now, timezone);
   const isActive = plan.endedAt === null;
   // Derived directly from the live JL balance -- never from the plan's
   // own stored state. A fully-paid pledge is "complete" regardless of
   // whether ended_at was ever set (see the paid-off behavior decision:
   // ended_at is only ever an explicit fundraiser action).
   const isCompleted = balanceCents <= 0;
-  const finalDatePassed = now > plan.finalExpectedPaymentAt;
+  const finalDatePassed = nowDateOnly > plan.finalExpectedPaymentAt;
   const latestActualPaymentAt = linkedPaymentDates.length > 0 ? Math.max(...linkedPaymentDates) : null;
 
-  const cycles = enumerateExpectedCycles(plan.nextExpectedPaymentAt, plan.expectedDayOfMonth, Math.max(now, plan.finalExpectedPaymentAt));
+  const cycles = enumerateExpectedCycles(plan.nextExpectedPaymentAt, plan.expectedDayOfMonth, Math.max(nowDateOnly, plan.finalExpectedPaymentAt));
   const satisfied = matchPaymentsToCycles(cycles, linkedPaymentDates);
-  const firstUnsatisfiedDueIndex = cycles.findIndex((cycle, index) => cycle <= now && !satisfied[index]);
+  const firstUnsatisfiedDueIndex = cycles.findIndex((cycle, index) => cycle <= nowDateOnly && !satisfied[index]);
   const nextUnsatisfiedExpectedPaymentAt = firstUnsatisfiedDueIndex !== -1
     ? cycles[firstUnsatisfiedDueIndex]
-    : (cycles.find((cycle) => cycle > now) ?? null);
+    : (cycles.find((cycle) => cycle > nowDateOnly) ?? null);
 
   const evaluableForLateness = isActive && !isCompleted && !finalDatePassed;
   const daysLate = evaluableForLateness && firstUnsatisfiedDueIndex !== -1
-    ? Math.max(0, daysBetween(now, cycles[firstUnsatisfiedDueIndex]) - MONTHLY_PAYMENT_PLAN_GRACE_DAYS)
+    ? Math.max(0, daysBetween(nowDateOnly, cycles[firstUnsatisfiedDueIndex]) - MONTHLY_PAYMENT_PLAN_GRACE_DAYS)
     : 0;
   const isLate = daysLate > 0;
   const isOnTrack = evaluableForLateness && !isLate;
@@ -193,7 +225,11 @@ export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates:
   // daysBetween() (which clamps to >=0): callers need to tell "15 days
   // before" from "15 days after," and this is the one place that
   // distinction is computed, so no caller re-derives it independently.
-  const daysUntilFinal = Math.floor((plan.finalExpectedPaymentAt - now) / DAY_SECONDS);
+  // Both operands are now UTC-midnight date-only values (nowDateOnly and
+  // finalExpectedPaymentAt), so this is always an exact whole-day count --
+  // Math.floor is defensive, not load-bearing, now that there is no
+  // fractional time-of-day component left to round away.
+  const daysUntilFinal = Math.floor((plan.finalExpectedPaymentAt - nowDateOnly) / DAY_SECONDS);
   // Milestones only fire on the exact day, and only while the plan is
   // genuinely ON TRACK (not merely "not yet past final") -- a plan that
   // is already late, completed, ended, or past its final date never also
@@ -207,7 +243,7 @@ export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates:
   // pledge that's already fully paid by its own final day qualifies
   // immediately, not one day later. Independent of isActive/endedAt by
   // design (see the type's own doc comment).
-  const isFulfilledAfterFinal = now >= plan.finalExpectedPaymentAt && isCompleted;
+  const isFulfilledAfterFinal = nowDateOnly >= plan.finalExpectedPaymentAt && isCompleted;
 
   return {
     nextUnsatisfiedExpectedPaymentAt,
@@ -238,12 +274,17 @@ export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates:
 // cycle is today or later -- so "the 24th of every month" stays the
 // 24th, it just starts from the first 24th that hasn't happened yet.
 // Never invents a date out of nothing -- if the entered date is already
-// today or in the future, it is returned completely unchanged.
-export function adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt: number, now: number): number {
+// today or in the future, it is returned completely unchanged. `now` is
+// normalized to the fundraiser's own Eastern calendar date via today()
+// before comparison -- see that function's own doc comment -- so "today"
+// here means the fundraiser's real Eastern calendar date, not a raw UTC
+// instant.
+export function adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt: number, now: number, timezone: string): number {
+  const nowDateOnly = today(now, timezone);
   const anchorDay = dayOfMonthFromDateOnlyEpoch(enteredNextExpectedPaymentAt);
   let cycle = enteredNextExpectedPaymentAt;
   let iterations = 0;
-  while (cycle < now && iterations < PLEDGE_PAYMENT_CYCLE_ENUMERATION_CAP) {
+  while (cycle < nowDateOnly && iterations < PLEDGE_PAYMENT_CYCLE_ENUMERATION_CAP) {
     cycle = advanceOneCalendarMonth(cycle, anchorDay);
     iterations += 1;
   }
@@ -279,12 +320,20 @@ export function deriveFulfilledCultivationByDonor(
   givingRows: FulfilledCultivationSourceRow[],
   paymentPlanByPledge: Map<string, FulfilledCultivationPlanRow>,
   now: number,
+  timezone: string,
 ): Map<string, FulfilledCultivationOpportunity> {
+  // Same normalization as evaluatePaymentPlan's own isFulfilledAfterFinal
+  // (today(), see its doc comment) -- "has the final date arrived" must
+  // mean the fundraiser's Eastern calendar date, not a raw UTC instant,
+  // or this signal would fire about 4-5 hours (in practice, one Eastern
+  // calendar day) earlier than evaluatePaymentPlan's own isFulfilledAfterFinal
+  // agrees it should -- the two must never disagree about the same plan.
+  const nowDateOnly = today(now, timezone);
   const candidatesByDonor = new Map<string, FulfilledCultivationSourceRow[]>();
   for (const item of givingRows) {
     if ((item.balance_cents ?? 0) > 0) continue;
     const plan = paymentPlanByPledge.get(item.id);
-    if (!plan || plan.final_expected_payment_at > now) continue;
+    if (!plan || plan.final_expected_payment_at > nowDateOnly) continue;
     if (!candidatesByDonor.has(item.donor_id)) candidatesByDonor.set(item.donor_id, []);
     candidatesByDonor.get(item.donor_id)!.push(item);
   }

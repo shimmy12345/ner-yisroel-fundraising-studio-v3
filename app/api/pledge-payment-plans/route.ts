@@ -48,6 +48,9 @@ export async function POST(request: Request) {
   if (finalExpectedPaymentAt === null) return Response.json({ error: "A valid final expected payment date is required" }, { status: 422 });
   if (finalExpectedPaymentAt < enteredNextExpectedPaymentAt) return Response.json({ error: "Final expected payment date must be on or after the next expected payment date" }, { status: 422 });
 
+  const profile = await ensureUserProfile(user);
+  const userId = profile.id;
+
   // "Born late" fix (see docs/AI-HANDOFF.md's payment-plan-intelligence
   // investigation): a fundraiser creating a plan today naturally enters
   // the cadence's intended day based on when the donor last paid, which
@@ -59,14 +62,15 @@ export async function POST(request: Request) {
   // CREATION -- never on an edit, where a past date may be intentional.
   // Preserves the fundraiser's own entered day-of-month as the fixed
   // calendar anchor; only the stored next_expected_payment_at advances.
+  // "Today" means the fundraiser's own Eastern calendar date (profile.
+  // timezone), normalized inside adjustNewPlanAnchorForPastDate itself --
+  // never a raw UTC instant (see docs/AI-HANDOFF.md's 2026-10-08 timezone
+  // fix entry).
   const createdAtForAnchor = Math.floor(Date.now() / 1000);
-  const nextExpectedPaymentAt = adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt, createdAtForAnchor);
+  const nextExpectedPaymentAt = adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt, createdAtForAnchor, profile.timezone);
   if (nextExpectedPaymentAt > finalExpectedPaymentAt) {
     return Response.json({ error: "After adjusting the next expected payment to the first upcoming occurrence of that day, it would fall after the final expected payment date -- choose a later final expected date." }, { status: 422 });
   }
-
-  const profile = await ensureUserProfile(user);
-  const userId = profile.id;
 
   // Independently re-verified: this exact pledge must belong to this
   // exact user, on a live (not archived/merged) donor they own, and
