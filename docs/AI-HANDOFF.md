@@ -25898,3 +25898,152 @@ to the app).
   12 months) before this correction.
 - Still only the first renewal is computed, by design -- unchanged from
   the prior round's scope decision.
+
+## Custom Commitment Duration Input -- Validation Fix (2026-10-08) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED, ZERO D1 MUTATION
+
+**The bug:** `PledgePaymentPlanManagement.tsx`'s "Custom…" commitment-
+duration field resolved its raw text input via
+`Number.parseInt(customDuration, 10)` -- `parseInt` parses only a
+leading numeric prefix and silently discards the rest, so `"9.5"`
+became `9` and `"12abc"` became `12` instead of being rejected. A
+fundraiser could type an invalid value, have it silently reinterpreted
+as something else, save it, and generate a renewal reminder on the
+wrong date with no indication anything was wrong.
+
+**The fix:** a new, shared, exported `validateCustomDurationInput(raw:
+string)` in `lib/capture/pledge-payment-plan.ts` (NOT left inline in
+the "use client" component -- lives alongside `validateCommitmentDurationMonths`
+so it is plain, directly-testable TypeScript with no React/JSX
+involved, matching every other validator in this file; the component
+only imports and calls it, the same established pattern already used
+by `CaptureExperience.tsx`/`UnifiedRelationshipTimeline.tsx` importing
+pure `lib/capture/*` validators into client components). It validates
+the ENTIRE trimmed string against `/^\d+$/` -- digits only, no sign, no
+decimal point, no letters, nothing else -- before ever calling `Number()`
+on it; only a string that passes this check is even considered a
+candidate whole number. The resulting integer is then run through the
+EXISTING `validateCommitmentDurationMonths` (the same function the
+server route itself calls), so the `[MIN_COMMITMENT_DURATION_MONTHS,
+MAX_COMMITMENT_DURATION_MONTHS]` = `[1, 120]` bound is never duplicated
+as a second, driftable magic number, and the client can never accept a
+value the server would reject.
+
+Rejects, with a clear inline message each time: fractional values
+(`"9.5"`, `"12.0"`), non-numeric/garbage-suffixed input (`"12abc"`,
+`"twelve"`, `"1e2"`, `"12 months"`), empty input (`""`/whitespace-only
+-- choosing "Custom…" but typing nothing is itself rejected, not
+silently treated as "not set"), zero, negative numbers, and anything
+above 120. Accepts a value with incidental surrounding whitespace or a
+leading zero (`"  9  "`, `"036"`) -- trimmed/normalized, never rejected
+for cosmetic reasons.
+
+`PledgePaymentPlanManagement.tsx`'s `PlanForm` now computes
+`customDurationValidation`/`isCustomDurationInvalid` fresh on every
+render (never a second piece of state to keep in sync) and:
+- Disables "Save payment plan" while `isCustomDurationInvalid`, AND
+  `save()` itself refuses to submit under the same condition
+  (belt-and-suspenders, matching this exact form's own existing
+  `!nextExpected || !finalExpected` convention).
+- Renders the validator's own `reason` text as an inline message
+  (reusing the existing `.giving-action-error` style, no new CSS) the
+  moment the custom field is touched/selected and invalid -- including
+  while it's still empty, so a fundraiser who picks "Custom…" and
+  pauses sees exactly why Save is disabled rather than silent
+  unresponsiveness.
+- `resolvedCommitmentDurationMonths()` now returns the validator's own
+  parsed value on success, or `null` on failure -- the `null` path is a
+  defensive fallback only, since `save()` already refuses to submit
+  while invalid; there is no longer any `Number.parseInt` call left
+  anywhere in this field's path.
+- The custom-duration `<input>` changed from `type="number"` to
+  `type="text" inputMode="numeric" pattern="[0-9]*"` -- a native
+  `type="number"` can mask the bug in some browsers (typed letters are
+  sometimes silently blocked by the widget itself, incidentally hiding
+  cases the task explicitly asks this fix to handle), while `type="text"`
+  guarantees `event.target.value` always reflects exactly what was
+  typed or pasted, so the validator is the actual, reliable guard
+  rather than relying on inconsistent native browser behavior.
+- Preset selections (6/12/18/24 months) and "Not set" are structurally
+  unaffected -- `customDurationValidation` is computed only when
+  `durationChoice === "custom"`; choosing a preset or "Not set" never
+  runs the custom-duration validator at all.
+- Editing an existing plan with a previously-verified NON-preset
+  duration still seeds the custom input with its exact stored value
+  (unchanged seeding logic from the prior round) and validates as `ok`
+  immediately, since it was already a valid, server-accepted value.
+
+### Scope
+
+No schema change, no migration, no change to any existing commitment
+duration, Original Pledge Date, renewal calculation, reminder
+scheduling, payment schedule, pledge balance, or other financial
+record -- this round touched only the custom-duration TEXT INPUT'S OWN
+client-side parsing, plus the shared validator it now calls.
+Server-side validation (`validateCommitmentDurationMonths`, unchanged)
+remains the authoritative safeguard regardless of what the client does
+or fails to do.
+
+### Testing
+
+New file `tests/pledge-payment-plan-custom-duration.test.mjs` (wired
+into `scripts/run-tests.mjs`), covering: a valid custom duration
+resolves to exactly the typed value (including whitespace-trimmed and
+leading-zero forms); fractional input (`"9.5"`, `"12.0"`) rejected, never
+truncated; non-numeric/garbage-suffixed input (`"12abc"`, `"twelve"`,
+`"1e2"`, `"12 months"`) rejected, never truncated to a leading prefix;
+empty/whitespace-only custom input rejected with a clear message; zero
+and negative values rejected; values above 120 rejected; a sweep
+confirming every invalid case carries no numeric value at all in its
+rejection (no accidental partial value to fall back to); and structural
+checks on the component itself -- it imports and calls the shared
+validator (never a local reimplementation), the exact `Number.parseInt(customDuration`
+pattern is asserted ABSENT (the regression this fix exists to prevent
+from silently reappearing), Save is disabled both via the button's
+`disabled` prop and inside `save()` itself while invalid, the inline
+message renders, "Not set" and all four presets are still offered
+unchanged, and an existing non-preset duration's seeding logic for
+editing is unchanged.
+
+**Results:** `pnpm run test` -> **165/165 passed** (164 pre-existing +
+1 new file). `pnpm exec tsc --noEmit` -> clean. `pnpm exec eslint` on
+every changed file -> zero new errors on `lib/capture/pledge-payment-plan.ts`,
+the new test file, and `scripts/run-tests.mjs`;
+`PledgePaymentPlanManagement.tsx` stayed at exactly the same 6
+pre-existing problems (1 `react-hooks/purity` + 5 `react/no-unescaped-entities`
+on the unchanged help-text paragraph) as the prior round, confirmed via
+git-stash comparison -- zero new lint issues. `node scripts/
+build-staging.mjs` -> Build complete.
+
+### Staging deployment + live verification
+
+No migration needed (no schema change). Deployed via `pnpm run
+deploy:staging-independent`. Worker version
+**`71d04936-e749-4d08-bd6d-d9e9d48b996a`**.
+
+Live-verified read-only against the same real donor used in the prior
+round's verification (Tzuriel Amster): opened "Edit plan," selected
+"Custom…" -- the field rendered blank with the inline message "Enter a
+whole number of months (1-120), or choose 'Not set' to leave it
+unverified" and Save already disabled (confirming empty-input rejection
+fires immediately, not only on submit attempt); typed `9.5` into the
+custom field -- the exact typed text stayed visible (never silently
+truncated to `9`), the message switched to "Commitment duration must be
+a whole number of months -- no decimals, letters, or other characters,"
+and Save remained disabled; switched the dropdown to the "12 months"
+preset -- the custom field and error disappeared immediately and Save
+re-enabled, confirming presets are structurally unaffected. Cancelled
+without saving -- **no value was written to this or any real donor's
+record**. Confirmed directly against Independent Staging D1
+(read-only): 45 plans, 0 with `commitment_duration_months` set,
+`changed_db: false` on the verification query itself -- identical to
+the state immediately after the prior round's deploy, confirming zero
+D1 mutation occurred anywhere in this round. Browser console showed
+zero application errors (only the same generic Chrome-extension
+messaging artifact seen in every prior round's verification, unrelated
+to the app).
+
+### Limitations
+
+None identified. This was a narrowly-scoped client-side validation
+correction; the server-side `validateCommitmentDurationMonths` was
+already correct and remains the authoritative safeguard, unchanged.

@@ -85,3 +85,34 @@ export function validateCommitmentDurationMonths(value: number | null | undefine
   if (value < MIN_COMMITMENT_DURATION_MONTHS || value > MAX_COMMITMENT_DURATION_MONTHS) return { ok: false, reason: `Commitment duration must be between ${MIN_COMMITMENT_DURATION_MONTHS} and ${MAX_COMMITMENT_DURATION_MONTHS} months` };
   return { ok: true, commitmentDurationMonths: value };
 }
+
+export type CustomDurationInputValidation = { ok: true; months: number } | { ok: false; reason: string };
+
+// Custom-duration input-field correction (2026-10-08, see docs/AI-HANDOFF.md):
+// PledgePaymentPlanManagement.tsx's "Custom…" duration field previously fed
+// raw user text straight through Number.parseInt, which silently
+// truncates instead of rejecting -- "9.5" became 9, "12abc" became 12,
+// letting a fundraiser accidentally save and generate a renewal reminder
+// on the wrong date. This function validates the ENTIRE raw string, never
+// a partial/truncating parse: only a string of digits only (no sign, no
+// decimal point, no letters, nothing but [0-9] once trimmed) is even
+// considered a candidate whole number -- a fractional, negative, or
+// garbage-suffixed value is rejected outright, never reinterpreted as
+// something else. The actual range check then reuses the SAME
+// validateCommitmentDurationMonths above that the server itself
+// authoritatively enforces, so the client (PledgePaymentPlanManagement.tsx)
+// can never accept a value the server would reject, and
+// [MIN_COMMITMENT_DURATION_MONTHS, MAX_COMMITMENT_DURATION_MONTHS] is
+// never duplicated as a second, driftable bound. Lives here (not in the
+// "use client" component) so it is plain, directly testable TypeScript,
+// matching every other validator in this file -- the component only
+// imports and calls it.
+export function validateCustomDurationInput(raw: string): CustomDurationInputValidation {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, reason: `Enter a whole number of months (${MIN_COMMITMENT_DURATION_MONTHS}-${MAX_COMMITMENT_DURATION_MONTHS}), or choose "Not set" to leave it unverified.` };
+  if (!/^\d+$/.test(trimmed)) return { ok: false, reason: "Commitment duration must be a whole number of months -- no decimals, letters, or other characters." };
+  const parsed = Number(trimmed);
+  const result = validateCommitmentDurationMonths(parsed);
+  if (!result.ok) return { ok: false, reason: result.reason };
+  return { ok: true, months: parsed };
+}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { validateCustomDurationInput, MIN_COMMITMENT_DURATION_MONTHS, MAX_COMMITMENT_DURATION_MONTHS } from "../../../lib/capture/pledge-payment-plan";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 // timeZone: "UTC" is required here -- these are date-only epochs (UTC
@@ -103,17 +104,28 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [message, setMessage] = useState("");
 
+  // Recomputed fresh on every render from customDuration -- never a
+  // second, driftable piece of state to keep in sync. Only meaningful
+  // while durationChoice === "custom"; the presets and "Not set" never
+  // go through this check at all; (requirement: "Preset selections
+  // remain functional").
+  const customDurationValidation = durationChoice === "custom" ? validateCustomDurationInput(customDuration) : null;
+  const isCustomDurationInvalid = customDurationValidation !== null && !customDurationValidation.ok;
+
   function resolvedCommitmentDurationMonths(): number | null {
     if (durationChoice === "") return null;
     if (durationChoice === "custom") {
-      const parsed = Number.parseInt(customDuration, 10);
-      return customDuration.trim() && Number.isFinite(parsed) ? parsed : null;
+      // Never falls back to a truncated/partial parse -- an invalid
+      // custom value resolves to null here ONLY as a defensive fallback;
+      // save() itself refuses to submit at all while isCustomDurationInvalid,
+      // so this path is never actually reached with bad input in practice.
+      return customDurationValidation?.ok ? customDurationValidation.months : null;
     }
     return Number.parseInt(durationChoice, 10);
   }
 
   async function save() {
-    if (status === "saving" || !nextExpected || !finalExpected) return;
+    if (status === "saving" || !nextExpected || !finalExpected || isCustomDurationInvalid) return;
     setStatus("saving"); setMessage("");
     try {
       const body = { installmentAmountCents: parseDollarsToCents(installment), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note.trim(), originalPledgeDate: originalPledgeDate || null, commitmentDurationMonths: resolvedCommitmentDurationMonths() };
@@ -144,13 +156,14 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
             <option value="custom">Custom…</option>
           </select>
         </label>
-        {durationChoice === "custom" && <label>Custom duration (months) <span>whole number</span><input type="number" inputMode="numeric" min={1} step={1} value={customDuration} onChange={(event) => setCustomDuration(event.target.value)} /></label>}
+        {durationChoice === "custom" && <label>Custom duration (months) <span>whole number, {MIN_COMMITMENT_DURATION_MONTHS}-{MAX_COMMITMENT_DURATION_MONTHS}</span><input type="text" inputMode="numeric" pattern="[0-9]*" aria-invalid={isCustomDurationInvalid} value={customDuration} onChange={(event) => setCustomDuration(event.target.value)} /></label>}
         <label>Note <span>optional</span><textarea value={note} maxLength={2000} onChange={(event) => setNote(event.target.value)} /></label>
       </div>
+      {isCustomDurationInvalid && customDurationValidation && !customDurationValidation.ok && <p className="giving-action-error" role="alert">{customDurationValidation.reason}</p>}
       <p className="payment-plan-help">Only set the original pledge date and commitment duration if you've confirmed them -- neither is ever guessed (not from JL's own "Due Date," not from the installment count or collection schedule, which can run longer or shorter than the actual commitment). Leave either blank if you're not sure. A renewal reminder requires BOTH to be set -- 5 days before, and on, the renewal date (original pledge date + commitment duration).</p>
       <div className="payment-plan-actions">
         <button type="button" onClick={onCancel}>Cancel</button>
-        <button type="button" disabled={status === "saving" || !nextExpected || !finalExpected} onClick={() => void save()}>{status === "saving" ? "Saving…" : "Save payment plan"}</button>
+        <button type="button" disabled={status === "saving" || !nextExpected || !finalExpected || isCustomDurationInvalid} onClick={() => void save()}>{status === "saving" ? "Saving…" : "Save payment plan"}</button>
       </div>
       {message && <p className="giving-action-error" role="alert">{message}</p>}
     </section>
