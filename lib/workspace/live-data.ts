@@ -53,7 +53,12 @@ type RelationshipFactRow = { donor_id: string; category: string; lifecycle: stri
 export type WorkspacePriority = { queueId: string; recommendationId?: string; donorId: string; name: string; initials: string; donorCode: string | null; label: string; signal: "warm" | "steady" | "cool"; reason: string; why: string; action: string; href: string; dueAt: number | null; dueLabel: string; bucket: RelationshipQueueBucket; score?: number; giftSource?: GiftSource; giftId?: string };
 export type WorkspaceMeeting = { donorId: string; time: string; period: string; title: string; donorCode: string | null; detail: string };
 export type WorkspaceScheduledActivity = { id: string; donorId: string; type: string; typeLabel: string; time: string; period: string; date: string; donorName: string; donorCode: string | null; initials: string; subject: string; note: string; prepareHref: string | null; openHref: string; editHref: string; logOutcomeHref: string | null; canCancel: boolean };
-export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; donorCode: string | null; amount: string; detail: string };
+// activityDate: the real epoch, additive to the existing pre-formatted
+// `detail` string (never a replacement for it -- BriefExperience.tsx and
+// every other existing display consumer keep reading `detail` unchanged).
+// Exists so a non-UI consumer (e.g. GET /api/morning-brief) can report a
+// real structured date rather than re-parsing it out of display prose.
+export type WorkspaceGift = { id: string; donorId: string; name: string; initials: string; donorCode: string | null; amount: string; detail: string; activityDate: number | null };
 export type WorkspaceDonorLink = { donorId: string; name: string; initials: string; donorCode: string | null; detail: string; href: string };
 export type WorkspaceMorningBrief = { meetingsToday: number; overdueFollowUps: number; recentGifts: number; upcomingReminders: number; suggestedPriority: WorkspacePriority | null };
 export type WorkspaceBrief = { overview: string; recommendation: string; priorities: WorkspacePriority[]; priorityCount: number; relationshipQueue: Record<RelationshipQueueBucket, WorkspacePriority[]>; morningBrief: WorkspaceMorningBrief; recentlyViewed: WorkspaceDonorLink[]; recentlyUpdated: WorkspaceDonorLink[]; todaySchedule: WorkspaceScheduledActivity[]; upcomingActivities: WorkspaceScheduledActivity[]; meetings: WorkspaceMeeting[]; gifts: WorkspaceGift[]; todayRelationshipDates: WorkspaceRelationshipDateEvent[]; upcomingRelationshipDates: WorkspaceRelationshipDateEvent[]; generatedAt: number };
@@ -647,7 +652,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const upcomingActivities = scheduled.filter(({ row }) => scheduleBucket(row.source, row.occurred_at, row.created_at, now, timezone) === "upcoming").slice(0, 10).map(({ activity }) => activity);
   const meetings = scheduled.filter(({ row }) => row.type === "meeting" && row.occurred_at >= now).slice(0, 5).map(({ row, activity }) => ({ donorId: row.donor_id, time: activity.time, period: activity.period, title: activity.donorName, donorCode: activity.donorCode, detail: `${activity.date} · ${activity.subject}` }));
   const recentGiving = giving.results.filter((item) => (item.paid_cents ?? 0) > 0 && isRecentPastEvent(item.activity_date, now, 30));
-  const gifts = recentGiving.slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, ...identity(item), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${financialDateLabel(item.activity_date)}` : ""}` }));
+  const gifts = recentGiving.slice(0, 8).map((item) => ({ id: item.id, donorId: item.donor_id, name: item.display_name, ...identity(item), amount: money(item.paid_cents ?? 0), detail: `${item.description || item.item_type || "Gift"}${item.activity_date ? ` · ${financialDateLabel(item.activity_date)}` : ""}`, activityDate: item.activity_date ?? null }));
   const donorLinks = (rows: DonorLinkRow[], verb: string): WorkspaceDonorLink[] => rows.map((item) => ({ donorId: item.donor_id, name: item.display_name, ...identity(item), detail: `${verb} ${dateLabel(item.event_at, timezone)}`, href: `/donors/${encodeURIComponent(item.donor_id)}` }));
   const recentlyViewed = donorLinks(recentViews.results, "Viewed");
   const recentlyUpdated = donorLinks(recentUpdates.results.filter((item) => item.event_at > 0), "Updated");

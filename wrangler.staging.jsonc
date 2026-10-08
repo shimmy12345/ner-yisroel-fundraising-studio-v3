@@ -43,6 +43,15 @@
     // policy itself and, independently, by this app's own JWT verification
     // (defense in depth).
     "STAGING_OWNER_EMAIL": "sgoldstein@nirc.edu",
+    // Enables Cloudflare Access Service Token auth (e.g. for GET
+    // /api/morning-brief from an automated script) -- see cloudflare-
+    // env.d.ts's own doc comment. Absent/commented out = service-token
+    // auth is not accepted at all, same as before this existed. To
+    // enable: uncomment and set to the Service Token's own Client ID
+    // (Zero Trust -> Access -> Service Auth -- the Client ID, never the
+    // Client Secret, which this Worker never needs to see), then
+    // redeploy.
+    // "MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID": "<your service token's client id>",
     // This Worker's own public URL -- not a secret, just the same
     // *.workers.dev address anyone could look up from the Worker's name.
     // Used to build absolute donor links in the Daily Fundraising Agenda

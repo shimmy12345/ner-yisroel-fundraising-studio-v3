@@ -17,6 +17,7 @@ export const cloudflareAccessAuthProvider: AuthProvider = {
       teamDomain,
       policyAud,
       ownerEmail: env.STAGING_OWNER_EMAIL,
+      allowedServiceTokenClientId: env.MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID,
     });
     if (!identity) return null;
 

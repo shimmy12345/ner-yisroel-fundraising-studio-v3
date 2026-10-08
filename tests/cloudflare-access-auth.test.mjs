@@ -112,3 +112,71 @@ test("token with no email claim is rejected", async () => {
   const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD }, jwks);
   assert.equal(identity, null);
 });
+
+// --- Service Token auth (2026-10-08, see docs/AI-HANDOFF.md's "Morning
+// Brief API" entry). A real Cloudflare Access service-token JWT never
+// carries an `email` claim -- only `common_name` (the token's Client ID)
+// and an empty `sub` (confirmed against Cloudflare's own JWT claims
+// reference, not assumed). These tests sign JWTs shaped exactly that way,
+// never adding an `email` claim, to prove this path is exercised
+// honestly. ---
+
+async function signServiceToken(privateKey, commonName, overrides = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ common_name: commonName, sub: "" })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuedAt(overrides.iat ?? now)
+    .setExpirationTime(overrides.exp ?? now + 3600)
+    .setIssuer(overrides.issuer ?? `https://${TEAM_DOMAIN}`)
+    .setAudience(overrides.audience ?? POLICY_AUD)
+    .sign(privateKey);
+}
+
+test("a service-token JWT matching the allow-listed Client ID authenticates AS the owner email, not a separate identity", async () => {
+  const { publicKey, privateKey } = await keyPair();
+  const jwks = await jwksFor(publicKey);
+  const token = await signServiceToken(privateKey, "service-token-client-id-123");
+  const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD, ownerEmail: "sgoldstein@nirc.edu", allowedServiceTokenClientId: "service-token-client-id-123" }, jwks);
+  assert.deepEqual(identity, { email: "sgoldstein@nirc.edu" }, "a valid service token must resolve to the SAME identity as the owner, never a distinct 'service' identity");
+});
+
+test("a service-token JWT with a DIFFERENT Client ID than the allow-list is rejected", async () => {
+  const { publicKey, privateKey } = await keyPair();
+  const jwks = await jwksFor(publicKey);
+  const token = await signServiceToken(privateKey, "some-other-token-entirely");
+  const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD, ownerEmail: "sgoldstein@nirc.edu", allowedServiceTokenClientId: "service-token-client-id-123" }, jwks);
+  assert.equal(identity, null, "Access letting a request through is never sufficient on its own -- the app must independently verify it is THIS specific token");
+});
+
+test("a service-token JWT is rejected when no allow-list is configured at all (default/current behavior, unchanged)", async () => {
+  const { publicKey, privateKey } = await keyPair();
+  const jwks = await jwksFor(publicKey);
+  const token = await signServiceToken(privateKey, "service-token-client-id-123");
+  const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD, ownerEmail: "sgoldstein@nirc.edu" }, jwks);
+  assert.equal(identity, null, "service-token auth must stay OFF by default -- an app with no MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID configured must behave exactly as it did before this feature existed");
+});
+
+test("a service-token JWT is rejected when the allow-list is set but ownerEmail is not (never resolves to an identity with no owner to impersonate)", async () => {
+  const { publicKey, privateKey } = await keyPair();
+  const jwks = await jwksFor(publicKey);
+  const token = await signServiceToken(privateKey, "service-token-client-id-123");
+  const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD, allowedServiceTokenClientId: "service-token-client-id-123" }, jwks);
+  assert.equal(identity, null, "a service token must never authenticate successfully without a concrete owner identity to resolve to");
+});
+
+test("a service token signed by the wrong key is still rejected -- the allow-list is never a substitute for signature verification", async () => {
+  const signingKeyPair = await keyPair();
+  const unrelatedKeyPair = await keyPair();
+  const jwks = await jwksFor(unrelatedKeyPair.publicKey);
+  const token = await signServiceToken(signingKeyPair.privateKey, "service-token-client-id-123");
+  const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD, ownerEmail: "sgoldstein@nirc.edu", allowedServiceTokenClientId: "service-token-client-id-123" }, jwks);
+  assert.equal(identity, null);
+});
+
+test("a human (email-bearing) token is unaffected by service-token config being present -- the two paths never interfere", async () => {
+  const { publicKey, privateKey } = await keyPair();
+  const jwks = await jwksFor(publicKey);
+  const token = await signToken(privateKey); // real email, no common_name
+  const identity = await verifyAccessToken(token, { teamDomain: TEAM_DOMAIN, policyAud: POLICY_AUD, ownerEmail: "sgoldstein@nirc.edu", allowedServiceTokenClientId: "service-token-client-id-123" }, jwks);
+  assert.deepEqual(identity, { email: "sgoldstein@nirc.edu" });
+});

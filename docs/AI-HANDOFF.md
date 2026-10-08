@@ -24928,3 +24928,177 @@ triggered). `matchPaymentsToCycles`'s 7-day grace window, the "born late"
 anchor-adjustment behavior, and the cultivation-suppression-by-newer-pledge
 rule are all unchanged in their own logic -- only the reference point they
 measure "today" against was corrected.
+
+## Morning Brief API -- GET /api/morning-brief (2026-10-08) -- IMPLEMENTED, TESTED, DEPLOYED, LIVE-VERIFIED
+
+User wants to pull the Today page's "Read full brief" panel content into
+an automated morning-brief script without an interactive browser login.
+They already have a Cloudflare Access Service Token + Service Auth policy
+configured on the existing Access Application protecting this Worker, and
+asked: (1) will a new path under the same Worker automatically inherit
+that policy, (2) what is `/signin-with-chatgpt` for, and could it be
+extended instead of building something parallel.
+
+**Investigation, before any code change.**
+- `/signin-with-chatgpt` (`app/chatgpt-auth.ts`) is not a page -- it is
+  the redirect target `requireChatGPTUser()` (page routes only) sends an
+  unauthenticated browser to for the legacy "ChatGPT Sites gateway"
+  integration. It is NOT wired to the Cloudflare Access fallback at all
+  (confirmed, same finding as the 2026-10-08 "why can't I get on the
+  website" investigation). The real existing scaffolding worth extending
+  is `getChatGPTUser()` itself: tries the ChatGPT Sites header first,
+  falls through to `cloudflareAccessAuthProvider` when absent (true on
+  Independent Staging) -- every existing API route
+  (`app/api/import/jl-codes/route.ts`, `app/api/assistant/route.ts`, etc.)
+  already authenticates this same way. This is the pattern the new route
+  follows, not a new auth system.
+- Whether the existing Access Application's path scope covers a new route
+  under the same hostname is Cloudflare Zero Trust dashboard
+  configuration, entirely outside this repository -- genuinely not
+  determinable from code (same category of "external, dashboard-only"
+  fact as the 2026-08-26 "Authentication Architecture Investigation"
+  entry's login-method question). Told the user this directly rather than
+  guessing; live-verified afterward instead (see below) that the deployed
+  route is in fact already behind the same Access gate as the rest of the
+  app.
+- **Found, via Cloudflare's own JWT claims documentation (fetched
+  directly, not assumed): a Cloudflare Access service-token JWT never
+  carries an `email` claim at all** -- only `common_name` (the token's
+  Client ID) and an empty `sub`. `lib/auth/cloudflare-access.ts`'s
+  `verifyAccessToken()`, as it existed before this change, required a
+  string `email` unconditionally (`if (!email) return null`) -- so a
+  Service-Token-authenticated request would reach the Worker (Access lets
+  it through at the edge) but be rejected by the app's own identity check,
+  the exact same "Access says yes, the app's own independent check says
+  no" pattern this app already applies to a human's wrong-email session.
+  Confirmed with the user before implementing which of two designs to
+  use: allow-list the Service Token's specific Client ID (chosen) vs.
+  trust any service token Access lets through (not chosen -- a real step
+  down from this app's existing defense-in-depth posture).
+
+### Implementation
+
+**`lib/auth/cloudflare-access.ts`:** `AccessVerifyConfig` gains
+`allowedServiceTokenClientId?: string`. `verifyAccessToken()`: when a JWT
+has no `email` claim, checks `common_name` against this allow-listed
+value; only when BOTH that AND `ownerEmail` are configured does it return
+`{ email: ownerEmail }` -- the service token authenticates AS the owner's
+own identity, never a separate "service" identity, so `owner_user_id`
+data scoping behaves exactly as if the owner had signed in themselves.
+Absent config (the default, unchanged) continues to reject every
+service-token request, exactly as before this feature existed.
+
+**`app/auth/cloudflare-access-provider.ts`:** passes
+`env.MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` into that config.
+**`cloudflare-env.d.ts`:** declares the new, optional `vars` entry (a
+Client ID is not sensitive the same way a Client Secret is -- which this
+Worker never sees at all; Access alone checks it at the edge -- so this
+follows the existing `STAGING_OWNER_EMAIL` `vars` precedent, not
+`secrets`). **`wrangler.staging.jsonc`:** the new var is left commented
+out with instructions (the user's own Service Token Client ID was never
+typed into this session -- they fill it in and redeploy when ready);
+confirmed via `wrangler deploy --dry-run` that with it commented out, the
+binding correctly does not appear at all -- service-token auth stays OFF
+until explicitly enabled.
+
+**`app/api/morning-brief/route.ts`** (new): `GET`, no params. Auth:
+`getChatGPTUser()` + a clean `401` JSON response if absent -- same
+pattern as every other API route, not the page-only redirect flow.
+Data: `loadWorkspaceBrief()` -- the exact same function and query path
+Today (`app/page.tsx`) and the Assistant (`app/api/assistant/route.ts`)
+already call, same default priority count (10) as Today's own
+un-expanded view ("the same data currently shown," not a different
+API-specific default) -- never a second, parallel brief computation.
+Reshaping into the requested plain-JSON fields is
+**`lib/workspace/morning-brief-api.ts`**'s `buildMorningBriefResponse()`
+(new, pure, no D1) -- the route itself stays a thin auth-then-call-then-
+respond wrapper, matching this codebase's established "logic lives in
+lib/, routes are thin" convention.
+
+**Field-shape decision, confirmed with the user before implementing:**
+gift amount and "days since" are NOT split into separate structured
+fields on `priorities` -- `WorkspacePriority.reason`/`.why` already embed
+them as the same human-readable prose the UI shows, and not every
+priority kind has a gift to report an amount for at all (a stale-contact
+reminder, for instance). The endpoint returns that prose as-is. **For
+gifts specifically**, a real structured date WAS available cheaply (the
+raw `activity_date` epoch was already being fetched, just not carried
+through to the existing `WorkspaceGift` type's pre-formatted `detail`
+string) -- added `activityDate: number | null` as a new, additive field
+to `WorkspaceGift` (`lib/workspace/live-data.ts`), populated at the
+existing gifts-mapping line. Purely additive: `detail` is untouched, and
+`WorkspaceGift` has no other consumer outside its own definition file
+(confirmed by grep) -- `BriefExperience.tsx` destructures fields
+structurally and needed no change.
+
+**Returned JSON shape:** `generatedAt`, `overview`, `recommendedFocus`,
+`priorities[]` (`donorId`, `donorName`, `donorCode`, `reason`, `why`,
+`recommendedAction`), `todaySchedule[]`/`upcomingActivities[]` (`id`,
+`donorId`, `donorName`, `donorCode`, `type`, `typeLabel`, `date`, `time`,
+`period`, `subject`, `note` -- UI-only navigation fields like
+`openHref`/`canCancel` deliberately omitted, meaningless outside a
+browser), `recentGifts[]` (`donorId`, `donorName`, `donorCode`, `amount`,
+`date` as ISO-8601 or `null`).
+
+### Tests
+
+**`tests/cloudflare-access-auth.test.mjs`** (extended, 6 new cases, all
+against real RS256-signed JWTs via `jose`, same convention as the
+existing 10): a service-token JWT (no `email`, `common_name` set)
+matching the allow-list authenticates as the owner; a mismatched Client
+ID is rejected; absent allow-list config rejects it (proving the default,
+pre-feature behavior is unchanged); allow-list present but no
+`ownerEmail` configured rejects it (never resolves to an identity with no
+owner to impersonate); wrong signing key is still rejected regardless of
+Client ID match (the allow-list is never a substitute for signature
+verification); a normal human email-bearing token is unaffected by
+service-token config merely being present.
+
+**`tests/morning-brief-api.test.mjs`** (new): `buildMorningBriefResponse()`
+unit-tested directly against a synthetic `WorkspaceBrief` fixture --
+full-shape mapping, a gift with no `activityDate` reports `date: null`
+(never throws or invents one), empty brief keeps every array an empty
+array (never omitted/null). Route wiring checked structurally (this
+repo's established "no D1/env test harness for routes" convention):
+authenticates via the shared `getChatGPTUser()`, returns a clean `401`
+(never a redirect) when absent, reuses the one shared `loadWorkspaceBrief`,
+reshapes via the pure `buildMorningBriefResponse` (never an inline field
+mapping in the route), never queries D1 directly.
+
+### Gates
+
+Full `pnpm test`: 163 files run, 163 passed, 0 failed (161 + this round's
+2 new files). `tsc --noEmit`: clean. `eslint` on every changed/new file:
+zero errors (2 pre-existing, unrelated warnings in `lib/workspace/
+live-data.ts`, confirmed nowhere near this change's own edit).
+`node scripts/build-staging.mjs`: succeeds, `/api/morning-brief` appears
+in the route manifest as a dynamic API route. `wrangler deploy --config
+wrangler.staging.jsonc --dry-run`: config parses cleanly; confirmed the
+commented-out `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` does not appear in
+the bindings list, i.e. service-token auth is genuinely off by default.
+
+### Deployed and live-verified
+
+`fundraising-os-staging`, Version ID `90148129-b63b-43e2-a517-a9c84b614de6`.
+`curl https://fundraising-os-staging.sgoldstein.workers.dev/api/morning-brief`
+(no credentials) returns `302` to the Cloudflare Access login page -- the
+identical edge-level behavior the root path already has -- confirming
+the new route sits behind the SAME Access gate as the rest of the app,
+never a newly-opened unauthenticated surface. (The app's own `401` JSON
+response, for a request that reaches the Worker but fails the app-level
+identity check, was not independently exercised live -- doing so needs a
+real Access session that passes Access's own policy but fails this app's
+check, which this session has no way to construct without live
+credentials; it is covered by the unit tests above instead.)
+
+### Remaining work (the user's own steps, outside this repo)
+
+1. Confirm in the Cloudflare Zero Trust dashboard that the existing
+   Access Application's path scope covers `/api/morning-brief` (likely,
+   given the live redirect check above, but this repo cannot confirm it).
+2. Set `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` in `wrangler.staging.jsonc`
+   to the real Service Token's Client ID and redeploy
+   (`pnpm run deploy:staging-independent`) to actually enable service-
+   token auth -- it is intentionally inert until this step.
+3. Point the morning-brief script at `GET /api/morning-brief` with
+   `CF-Access-Client-Id`/`CF-Access-Client-Secret` headers.

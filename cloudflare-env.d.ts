@@ -28,6 +28,16 @@ declare module "cloudflare:workers" {
     TEAM_DOMAIN?: string;
     POLICY_AUD?: string;
     STAGING_OWNER_EMAIL?: string;
+    // The Client ID (never the Client Secret, which Access alone checks
+    // and which this Worker never sees) of the ONE Cloudflare Access
+    // Service Token allowed to authenticate as STAGING_OWNER_EMAIL for
+    // trusted automation (e.g. a morning-brief script) -- see
+    // lib/auth/cloudflare-access.ts's AccessVerifyConfig doc comment.
+    // Absent means service-token auth is simply not accepted at all, the
+    // same as today. A `vars` entry, not a secret -- a Client ID alone
+    // grants no access (the Client Secret does), matching this file's own
+    // STAGING_OWNER_EMAIL precedent just above.
+    MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID?: string;
     // The Worker's own public base URL, used to build absolute donor links
     // in the Daily Fundraising Agenda email (a scheduled handler has no
     // incoming Request to derive an origin from, unlike an HTTP route).

@@ -103,6 +103,7 @@ const TEST_FILES = [
   "tests/import-center-pending-reviews.test.mjs",
   "tests/auth-provider.test.mjs",
   "tests/cloudflare-access-auth.test.mjs",
+  "tests/morning-brief-api.test.mjs",
   "tests/staging-reset.test.mjs",
   "tests/logger.test.mjs",
   "tests/monday-import.test.mjs",
