@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "ba2f75a4f944e873a0d26cb4d87507e5a6c925cf4065d16958064c95a4e5ebe6",
+  "schemaHash": "a7626790f53d0f9c1464c44f3de02f0f49c16704bfbc8bb3d5c47b6acf6c3e5f",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -40,7 +40,8 @@
     "0035_backup_alert_state.sql",
     "0036_donor_source_attributions.sql",
     "0037_donor_rebbeim.sql",
-    "0038_pledge_payment_plan_reviews.sql"
+    "0038_pledge_payment_plan_reviews.sql",
+    "0039_pledge_payment_plans_original_pledge_date.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -5255,6 +5256,13 @@
             "notNull": true,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "original_pledge_date",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6557,7 +6565,7 @@
     {
       "type": "table",
       "name": "pledge_payment_plans",
-      "sql": "CREATE TABLE `pledge_payment_plans` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `cadence` text NOT NULL DEFAULT 'monthly' CHECK (`cadence` IN ('monthly')), `installment_amount_cents` integer, `expected_day_of_month` integer NOT NULL, `next_expected_payment_at` integer NOT NULL, `final_expected_payment_at` integer NOT NULL, `note` text, `ended_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`expected_day_of_month` BETWEEN 1 AND 31) )"
+      "sql": "CREATE TABLE `pledge_payment_plans` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `cadence` text NOT NULL DEFAULT 'monthly' CHECK (`cadence` IN ('monthly')), `installment_amount_cents` integer, `expected_day_of_month` integer NOT NULL, `next_expected_payment_at` integer NOT NULL, `final_expected_payment_at` integer NOT NULL, `note` text, `ended_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `original_pledge_date` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`expected_day_of_month` BETWEEN 1 AND 31) )"
     },
     {
       "type": "table",

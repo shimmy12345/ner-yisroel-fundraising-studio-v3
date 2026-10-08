@@ -25263,3 +25263,263 @@ task explicitly asked not to do.
 
 No option was chosen or implemented -- this is the user's own product
 decision, not a technical one this investigation can resolve.
+
+## Annual Renewal Reminders for Recurring Payment Plans -- Implemented, Tested, Migrated + Deployed to Independent Staging, Live-Verified (2026-10-08)
+
+The user chose Option 1 from the Phase 1 investigation above and
+explicitly authorized it: *"The user has explicitly approved adding one
+Original Pledge Date field because the existing imported JL Due Date is
+not a reliable pledge-origination date."* This directly unblocks the
+Phase 1 STOP -- the anchor-date problem is resolved by a new, optional,
+fundraiser-verified field rather than by inferring a date the data
+cannot support.
+
+### Schema / migration
+
+Migration `drizzle/0039_pledge_payment_plans_original_pledge_date.sql`:
+**APPLIED** to `fundraising-os-staging-db` (Independent Staging) on
+2026-10-08. Single statement, additive, no DEFAULT:
+```sql
+ALTER TABLE `pledge_payment_plans` ADD COLUMN `original_pledge_date` integer;
+```
+Nullable date-only column on `pledge_payment_plans` (same table as
+`next_expected_payment_at`/`final_expected_payment_at` from migration
+0033 -- stewardship metadata about the plan, not a second date on
+`giving_activities`, not a new table). Pre-migration baseline captured
+and verified: 45 rows, 13 columns (`cid` 0-12, no `original_pledge_date`
+yet). Post-migration verification: 45 rows preserved exactly,
+`COUNT(*) WHERE original_pledge_date IS NOT NULL` = 0 (every existing
+row NULL, as intended -- no backfill was run, none was written),
+spot-checked `installment_amount_cents`/`next_expected_payment_at`/
+`final_expected_payment_at`/`ended_at` on 3 rows unchanged. `db/schema.ts`
+updated in parallel (Drizzle TS definition, not runtime-executed --
+convention per migration 0033/0034 etc.). `production-baseline/` regenerated
+via `node scripts/generate-production-baseline.mjs --write` (purely local
+file rewrite, zero D1/network access) so the repo's own rolling schema
+snapshot stays in sync; `lib/data-health/production-baseline.ts`'s
+`PRODUCTION_BASELINE_VERIFIED` sanity check bumped 39→40 migrations.
+**Production was never touched by any step in this round** -- every D1
+command in this round targeted `fundraising-os-staging-db` exclusively
+via `--config wrangler.staging.jsonc`.
+
+### Validation rules
+
+`lib/capture/pledge-payment-plan.ts`'s `validateOriginalPledgeDate(value,
+now, timezone)` is the single entry point used by both the create and
+edit routes:
+- Absent or `null` -> valid, resolves to `null` ("not yet verified" --
+  never defaulted to today or any inferred value).
+- Structurally invalid calendar dates (e.g. `2025-02-30`) -> rejected,
+  via `parseFinancialDate`'s own existing `validUtcDate` check (no new
+  validation rule invented).
+- Strictly future relative to the fundraiser's own Eastern calendar date
+  (via `localDateOnlyEpoch`, the same timezone-normalization helper the
+  2026-10-08 timezone fix established) -> rejected. Exactly today is
+  accepted; only dates after today are rejected.
+- A valid past (or today) date -> accepted, normalized to UTC-midnight
+  epoch seconds via `normalizeFinancialDate`, same date-only storage
+  convention as every other plan date.
+
+Both routes gate on `Object.hasOwn(body, "originalPledgeDate")` to
+distinguish "field absent, leave unchanged" from "field explicitly
+`null`, clear it" -- the same convention already used for every other
+optional edit field on this plan. The create route always records
+`originalPledgeDate` in `changedFields` (a `created` audit row always
+captures complete starting state); the edit route only records it when
+the field was actually provided and changed. Both flow through the
+existing `pledge_payment_plan_changes` append-only audit table
+(`before_json`/`after_json`) -- no new audit mechanism.
+
+UI: `app/donors/[id]/PledgePaymentPlanManagement.tsx`'s `PlanForm` gained
+one new `<input type="date">` field, labeled "Original pledge date --
+optional, verified only", with a `max` of today (client-side belt, the
+server-side check above is the actual enforcement). Blank when absent,
+editable, clearable (submits `null` when emptied). The compact view-mode
+card conditionally shows `Original pledge date: {date} · Renewal
+anniversary: {date}` only when a date is actually set -- live-verified
+against Ezra Wisotsky's 2 real active plans (both still correctly show
+no such line, since neither has a verified date), see Live Verification
+below.
+
+### Anniversary calculation + eligibility (Parts 2/3)
+
+`lib/relationships/pledge-payment-plan.ts`'s `evaluateAnnualRenewal
+(originalPledgeDate, endedAt, now, timezone)`:
+- `originalPledgeDate === null` -> not eligible, every field in the
+  result is `null`/`false`. No reminder without a verified date.
+- `endedAt !== null` (explicitly ended plan) -> not eligible, even with
+  a verified date and even exactly on what would be the anniversary.
+  Fully-paid-but-not-explicitly-ended plans ARE still eligible (Part
+  3's "don't auto-treat a naturally fully-paid plan as ended").
+- Otherwise, computes the FIRST anniversary only (never 2nd/3rd year)
+  by calling the existing, already-tested `advanceOneCalendarMonth`
+  twelve times from `originalPledgeDate` -- the same mechanism
+  `evaluatePaymentPlan`'s own monthly-cadence math already uses and
+  relies on, not new date arithmetic. This is also the **explicit,
+  documented Feb 29 convention**: `advanceOneCalendarMonth` clamps to a
+  fixed anchor day, so a Feb 29 original pledge date automatically and
+  correctly lands on Feb 28 in the (non-leap) anniversary year --
+  verified directly (`2024-02-29` -> anniversary `2025-02-28`).
+  Five-day-before = anniversary date minus 5 real calendar days.
+- `now` is normalized to an Eastern calendar date via the same `today()`
+  helper (wrapping `localDateOnlyEpoch`) the 2026-10-08 timezone fix
+  established, compared once against the anniversary/five-day dates --
+  never a raw UTC comparison. Verified exact-boundary (day before/after
+  each stage never fires), DST transition (EDT five-day reminder ->
+  EST-period anniversary, both correct), and early-morning/late-evening
+  Eastern stability.
+
+Worked example from the task, verified exactly: pledge Nov 1, 2025 ->
+anniversary Nov 1, 2026 -> five-day reminder Oct 27, 2026.
+
+### Suppression (Part 4/5) -- resolved as: never auto-suppress
+
+Investigated and concluded there is no compliant automatic-suppression
+mechanism available under the task's own constraints (must not suppress
+solely on newer-pledge-date, similar amount, campaign-code prefix, same
+donor, or matching cadence; must not add a manual renewal-classification
+field). **Resolution: `evaluateAnnualRenewal` and
+`buildAnnualRenewalReminderEvents` take no "other plans for this donor"
+input at all** -- eligibility is governed purely by that one plan's own
+`originalPledgeDate`/`endedAt`, so a newer pledge (same or different
+program), an outstanding balance, or a fully-paid status structurally
+cannot suppress it. "Relevant newer commitments as context" (Part 6) is
+satisfied by existing page architecture rather than a new UI element:
+the donor page already renders every one of a donor's open pledge plans
+side by side (live-verified against Ezra Wisotsky's real DIN2025 +
+DIN2026 plans, both rendering as independent cards) -- the reminder's
+own donor link lands exactly there.
+
+This also resolves Part 4's "pledge-specific, not donor-wide"
+requirement structurally: the existing `openPledgeByDonor` map (used for
+Suggested-Action evidence) only tracks one "primary" pledge per donor,
+so Annual Renewal Reminders use a dedicated, independent D1 query/
+evaluation loop in `lib/workspace/live-data.ts` (bringing that file's
+D1 call-site count from 19 to 20, both regression tests updated) that
+bypasses that bottleneck -- every eligible plan is evaluated, not just
+one per donor. Real-world relevance confirmed in Phase 1: 4 of 41
+donors (Wisotsky, Paul Z. Goldstein, Max Singer, Shimmy Ramras) have 2+
+simultaneously active plans today.
+
+### Reminder integration (Part 6)
+
+`lib/workspace/relationship-date-events.ts`'s `buildAnnualRenewalReminderEvents`
+adds a new `"annual_pledge_renewal"` event type, built the same way as
+the existing `payment_plan_milestone` events: `dateEpoch = today` (so it
+buckets into Today/Coming Up's existing "today" partition via
+`partitionRelationshipDateEventsByToday`, no new bucketing logic) and
+`dateLabel` = the real anniversary date. Title is exactly
+"Annual pledge renewal approaching" (5-day) / "Annual pledge renewal
+opportunity" (day-of), per spec. One line carries donor name, original
+pledge amount, campaign (when known), and current outstanding balance;
+`dateLabel` carries the anniversary date. Daily Agenda needed no change
+-- its "today" bucket already includes every event type unconditionally.
+Event ids are `annual-pledge-renewal:{planId}:{stage}`, so two plans for
+one donor (or a plan's own two stages) never collide.
+
+### Coexistence with final-payment reminders (Part 7)
+
+No conflict found or created: `evaluateAnnualRenewal` (keyed off
+`originalPledgeDate`) and the existing 15/10/5-day final-payment
+milestone logic (keyed off `finalExpectedPaymentAt`, in
+`evaluatePaymentPlan`) are independent computations over independent
+plan fields, verified to not interfere with each other for the same
+plan on the same day (both can legitimately fire together -- a plan can
+simultaneously be approaching its final payment on one cycle and have
+an unrelated-year anniversary, and both signals are preserved, never
+merged or dropped). No change was made to the existing 15/10/5-day
+final-payment reminder logic.
+
+### Testing (Part 10)
+
+New file `tests/pledge-payment-plan-annual-renewal.test.mjs` (wired into
+`scripts/run-tests.mjs`), covering all 20 scenarios: eligibility with/
+without a verified date, exact anniversary/five-day boundaries (plus the
+day immediately before/after each), Feb 29 leap-year clamping, DST
+transition, early-morning/late-evening Eastern stability, explicitly
+ended plans (no reminder), fully-paid-but-not-ended plans (still
+eligible), create/edit/clear validation (invalid dates, future dates,
+exactly-today boundary), multiple independent plans for one donor (own
+distinct events, no id collision), no-suppression-on-newer-pledge/
+balance/fully-paid (structural -- the function signature itself cannot
+see other plans), coexistence with the existing final-payment milestone
+logic (both fire independently, neither's result changes the other's),
+and route-wiring structural checks (validation call, audit field, SQL
+column) for both the create and edit routes.
+
+4 pre-existing regression tests needed updates as a direct, expected
+consequence of this approved change (not bugs): `tests/production-
+baseline.test.mjs` (new migration 0039 picked up, 39->40 count),
+`tests/workspace-brief-instrumentation.test.mjs` (`live-data.ts` D1
+call-site count 19->20), `tests/pledge-payment-plan-layout.test.mjs`
+(save-body shape gained `originalPledgeDate`), `tests/relationship-
+snapshot-stage3.test.mjs` (same D1 call-site count bump). Each updated
+with a comment explaining the legitimate reason, following this
+codebase's own established pattern for prior counting-test bumps.
+
+**Results:** `pnpm run test` -> **164/164 test files passed** (163
+pre-existing + 1 new). `pnpm exec eslint` on every changed/new file ->
+**zero new errors or warnings** (confirmed via git-stash diff: the
+pre-existing 24 `react-hooks/purity` errors on `app/donors/[id]/page.tsx`
+and 2 pre-existing `no-unused-vars` warnings on `lib/workspace/
+live-data.ts` are both present identically before and after this
+change -- unrelated `Date.now()` calls in a server component and
+pre-existing unused destructured fields, neither touched by this
+round). `pnpm exec tsc --noEmit` -> **clean, zero output**.
+`node scripts/build-staging.mjs` -> **Build complete**.
+
+### Staging deployment + live verification (Part 11)
+
+Deployed via `pnpm run deploy:staging-independent`. Worker version
+**`02d2b6fb-3bf1-4285-a079-af648ce70859`**, Worker `fundraising-os-
+staging`, 7 new/modified assets uploaded (including the new
+`PledgePaymentPlanManagement` bundle), hourly Cron Trigger unchanged
+(`schedule: 0 * * * *`).
+
+Live-verified read-only against real staging data (no fabricated dates
+written to any real donor):
+- `/donors` search -> Ezra Wisotsky, a real donor confirmed in Phase 1
+  to have 2 simultaneously active plans (DIN2025 $150, DIN2026 $1,000)
+  on different campaigns.
+- Both plans render as independent cards under "2 open pledges" --
+  confirms the dedicated multi-plan query path works against real data,
+  not just the test fixtures.
+- Neither card shows an "Original pledge date" line (correct -- both
+  are NULL post-migration).
+- Opened "Edit plan" on the DIN2025 card: the new "Original pledge date
+  -- optional, verified only" field renders correctly, blank
+  (`mm/dd/yyyy` placeholder), positioned between "Next/Final expected
+  payment" and "Note" exactly as built. Cancelled without saving --
+  **no value was written to this or any real donor's record**, per the
+  task's explicit instruction not to populate real donors' dates
+  without an explicit user-provided verified date.
+- `/` (Today) loads cleanly with no application errors (console checked
+  -- the only entries were a generic Chrome-extension messaging
+  artifact unrelated to the app). Expected: no annual-renewal reminders
+  appear anywhere yet, since no plan has a verified
+  `original_pledge_date` on Independent Staging.
+- Deep validation of the actual date math (five-day/anniversary
+  boundaries, Feb 29, DST, invalid/future-date rejection, multi-plan
+  independence, no-suppression) was exercised via the automated test
+  suite's controlled fixtures rather than by writing fabricated dates
+  into real staging donor records, per the task's explicit instruction
+  to use controlled fixtures for anniversary scenarios.
+
+### Limitations / remaining decisions
+
+- No real donor currently has a verified `original_pledge_date` --
+  Annual Renewal Reminders will not actually fire for anyone until a
+  fundraiser enters a real date on a real plan. This is intentional,
+  not a bug.
+- Only the first anniversary is computed, by design (Part 3) -- a
+  second/third-year recurrence policy was explicitly out of scope and
+  needs its own separate approval if wanted later.
+- "Relevant newer commitments" context is shown via the donor page's
+  existing full pledge-plan list, not a dedicated field on the reminder
+  row itself -- if the user wants that context inline on the reminder
+  card/email in the future, that's a new, separately-scoped UI decision.
+- No automatic suppression exists by design; if real-world use reveals
+  this produces too much noise for donors who genuinely re-pledge
+  annually under a new campaign code, that would need its own
+  explicitly-approved renewal-classification mechanism (never invented
+  silently per the task's own constraint).

@@ -1,0 +1,25 @@
+-- Annual Renewal Reminders, Part 1 (see docs/AI-HANDOFF.md's 2026-10-08
+-- "Annual Renewal Reminders -- Phase 1 Investigation" entry for why this
+-- field exists): the only date JL exports for a pledge is its own "Due
+-- Date" column (giving_activities.activity_date), which the investigation
+-- proved is NOT a reliable pledge-origination date (future-dated for 53%
+-- of real active plans, a 243-325 day gap from the first tracked real
+-- payment for most of the rest). The user explicitly approved one new,
+-- OPTIONAL, fundraiser-verified field instead of inferring or backfilling
+-- a date the data cannot actually support.
+--
+-- Nullable, no DEFAULT -- every existing row gets NULL automatically (no
+-- separate UPDATE needed, and none is run here: this migration adds
+-- exactly one column and nothing else). NULL means "not yet verified,"
+-- not "unknown zero" -- never confused with an actual date by any
+-- reader, and annual-renewal eligibility (lib/relationships/pledge-
+-- payment-plan.ts) treats NULL as "not eligible," never as "treat as
+-- today" or any other inferred value.
+--
+-- Deliberately a column on pledge_payment_plans, not a new table and not
+-- a second date anywhere on giving_activities -- this is fundraiser-
+-- declared STEWARDSHIP metadata about a specific payment plan, the exact
+-- same category as next_expected_payment_at/final_expected_payment_at
+-- already on this row (migration 0033's own doc comment), never a
+-- rewrite or duplicate of JL/giving_activities data.
+ALTER TABLE `pledge_payment_plans` ADD COLUMN `original_pledge_date` integer;

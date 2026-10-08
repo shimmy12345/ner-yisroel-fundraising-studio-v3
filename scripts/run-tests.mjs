@@ -150,6 +150,7 @@ const TEST_FILES = [
   "tests/pledge-payment-plan.test.mjs",
   "tests/pledge-payment-plan-timezone.test.mjs",
   "tests/pledge-payment-plan-layout.test.mjs",
+  "tests/pledge-payment-plan-annual-renewal.test.mjs",
   "tests/relationship-snapshot-family-terms.test.mjs",
   "tests/relationship-context-audit.test.mjs",
   "tests/relationship-snapshot-yahrtzeit-zman.test.mjs",

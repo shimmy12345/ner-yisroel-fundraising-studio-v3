@@ -9,11 +9,11 @@ import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../r
 import type { SynthesisFact } from "../relationships/fact-synthesis.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import { CONTINUE_CONVERSATION_WINDOW_DAYS, type RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
-import { deriveFulfilledCultivationByDonor } from "../relationships/pledge-payment-plan.ts";
+import { deriveFulfilledCultivationByDonor, evaluateAnnualRenewal } from "../relationships/pledge-payment-plan.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
-import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, buildPaymentPlanMilestoneEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent, type PaymentPlanMilestoneRow } from "./relationship-date-events.ts";
+import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, buildPaymentPlanMilestoneEvents, buildAnnualRenewalReminderEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent, type PaymentPlanMilestoneRow, type AnnualRenewalReminderRow } from "./relationship-date-events.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { logger } from "../logger";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -35,6 +35,19 @@ type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType;
 type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number; source_interaction_id: string | null };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
+// Annual Renewal Reminders (2026-10-08, see docs/AI-HANDOFF.md) -- a
+// SEPARATE, dedicated query from paymentPlanRows above, deliberately:
+// this one joins directly to giving_activities for the fields the
+// renewal reminder needs (committed_cents, source_campaign) that
+// paymentPlanRows/the Suggested-Action evidence pathway has no reason to
+// carry, and is pre-filtered to `original_pledge_date IS NOT NULL` so it
+// returns zero rows (and costs nothing) until the fundraiser actually
+// verifies a date -- never routed through openPledgeByDonor's one-
+// pledge-per-donor bottleneck, so a donor with multiple simultaneously
+// active plans (confirmed real in Independent Staging: Wisotsky,
+// Goldstein, Singer, Ramras) gets every ELIGIBLE plan's own reminder,
+// genuinely pledge-specific rather than donor-wide.
+type AnnualRenewalPlanRow = { plan_id: string; donor_id: string; pledge_activity_id: string; original_pledge_date: number; ended_at: number | null; committed_cents: number | null; balance_cents: number | null; source_campaign: string | null };
 type RelationshipFactRow = { donor_id: string; category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
 
 // score: the recommendation engine's own real 0-1 score() value for this
@@ -220,7 +233,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const __loaderStart = performance.now();
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows, relationshipFactRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows, annualRenewalPlanRows, relationshipFactRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -313,6 +326,15 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // demo/sample data exists for this new feature, matching the other
     // demo-skipped queries above.
     demo ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at FROM pledge_payment_plans WHERE user_id = ? AND ended_at IS NULL`).bind(userId).all<PaymentPlanRow>(),
+    // Annual Renewal Reminders (2026-10-08, see docs/AI-HANDOFF.md) -- a
+    // separate, dedicated query (see AnnualRenewalPlanRow's own doc
+    // comment for why). Pre-filtered to original_pledge_date IS NOT
+    // NULL: returns zero rows, at zero cost, until the fundraiser
+    // explicitly verifies a date. No demo/sample data exists for this
+    // new feature, matching every other demo-skipped query above.
+    demo ? Promise.resolve({ results: [] as AnnualRenewalPlanRow[] }) : env.DB.prepare(`SELECT p.id AS plan_id, p.donor_id, p.pledge_activity_id, p.original_pledge_date, p.ended_at, g.committed_cents, g.balance_cents, g.source_campaign
+      FROM pledge_payment_plans p JOIN giving_activities g ON g.id = p.pledge_activity_id
+      WHERE p.user_id = ? AND p.ended_at IS NULL AND p.original_pledge_date IS NOT NULL`).bind(userId).all<AnnualRenewalPlanRow>(),
     // Relationship Snapshot Architecture Stage 2 -- every in-scope
     // donor's CURRENT structured Relationship Facts, batched in one query
     // exactly like every other per-donor child table above (never a
@@ -398,6 +420,31 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // fulfilledPledgeCultivationOpportunity doc comment for the full
   // product reasoning.
   const fulfilledCultivationByDonor = deriveFulfilledCultivationByDonor(giving.results, paymentPlanByPledge, now, timezone);
+  // Annual Renewal Reminders (2026-10-08, see docs/AI-HANDOFF.md) -- pure
+  // derivation over annualRenewalPlanRows (pre-filtered to
+  // original_pledge_date IS NOT NULL above), one evaluateAnnualRenewal
+  // call per eligible plan, computed directly over EVERY eligible plan --
+  // never funneled through openPledgeByDonor's one-pledge-per-donor
+  // evidence object, so a donor with multiple simultaneously active
+  // plans (confirmed real: Wisotsky, Goldstein, Singer, Ramras) gets
+  // every one of them evaluated independently.
+  const annualRenewalReminderRows: AnnualRenewalReminderRow[] = [];
+  for (const plan of annualRenewalPlanRows.results) {
+    const evaluation = evaluateAnnualRenewal(plan.original_pledge_date, plan.ended_at, now, timezone);
+    const stage = evaluation.isFiveDayReminder ? "approaching" : evaluation.isAnniversaryReminder ? "anniversary" : null;
+    if (stage === null || evaluation.anniversaryDate === null) continue;
+    annualRenewalReminderRows.push({
+      donorId: plan.donor_id,
+      planId: plan.plan_id,
+      pledgeActivityId: plan.pledge_activity_id,
+      originalPledgeDate: plan.original_pledge_date,
+      originalPledgeAmountCents: plan.committed_cents ?? 0,
+      balanceCents: plan.balance_cents ?? 0,
+      campaign: plan.source_campaign,
+      anniversaryDate: evaluation.anniversaryDate,
+      stage,
+    });
+  }
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
   // per donor is the oldest pending ask, same "one most relevant fact"
   // pattern as openPledgeByDonor above.
@@ -691,6 +738,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       now,
     ),
     ...buildPaymentPlanMilestoneEvents(paymentPlanMilestoneRows, identityByDonor, timezone, now),
+    ...buildAnnualRenewalReminderEvents(annualRenewalReminderRows, identityByDonor, timezone, now),
   ].sort((a, b) => a.dateEpoch - b.dateEpoch);
   const { today: todayRelationshipDates, upcoming: upcomingRelationshipDates } = partitionRelationshipDateEventsByToday(relationshipDateEvents, now, timezone);
   const morningBrief: WorkspaceMorningBrief = {

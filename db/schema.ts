@@ -847,6 +847,16 @@ export const pledgePaymentPlans = sqliteTable("pledge_payment_plans", {
   // suppressing follow-up indefinitely if the fundraiser never revisits
   // it (see the design doc's "user forgets to end plan" risk).
   finalExpectedPaymentAt: integer("final_expected_payment_at", { mode: "timestamp" }).notNull(),
+  // Nullable, fundraiser-verified ONLY -- never inferred or backfilled
+  // from giving_activities.activity_date (JL's own "Due Date," proven
+  // unreliable as a pledge-origination date -- see docs/AI-HANDOFF.md's
+  // 2026-10-08 "Annual Renewal Reminders" entries), first tracked
+  // payment, campaign year, or any other source. Powers the annual
+  // pledge-renewal reminder's first-anniversary calculation
+  // (lib/relationships/pledge-payment-plan.ts) -- a plan with this NULL
+  // is simply not eligible for that reminder, never treated as "today"
+  // or any other inferred value. Migration 0039.
+  originalPledgeDate: integer("original_pledge_date", { mode: "timestamp" }),
   note: text("note"),
   // NULL = active. Only ever set by an explicit fundraiser [End plan]
   // action -- NEVER automatically when the real JL balance reaches

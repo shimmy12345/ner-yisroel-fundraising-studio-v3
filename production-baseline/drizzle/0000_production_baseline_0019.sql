@@ -602,7 +602,7 @@ CREATE TABLE `pledge_payment_plans` (
   `note` text,
   `ended_at` integer,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL,
+  `updated_at` integer NOT NULL, `original_pledge_date` integer,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action,
@@ -905,5 +905,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','ba2f75a4f944e873a0d26cb4d87507e5a6c925cf4065d16958064c95a4e5ebe6',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a7626790f53d0f9c1464c44f3de02f0f49c16704bfbc8bb3d5c47b6acf6c3e5f',1785944072);
 PRAGMA optimize;

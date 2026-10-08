@@ -28,6 +28,16 @@ export type PledgePlanState = {
   isLate: boolean;
   isPlanEndedWithBalance: boolean;
   isCompleted: boolean;
+  // Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
+  // -- optional, fundraiser-VERIFIED only; null until explicitly entered
+  // here, never inferred. anniversaryDate is the DERIVED first-12-month
+  // anniversary (lib/relationships/pledge-payment-plan.ts's
+  // evaluateAnnualRenewal, computed server-side) -- null whenever
+  // originalPledgeDate itself is null, never recomputed in this
+  // component, the same "server derives, card only displays" discipline
+  // isOnTrack/isLate/etc. above already follow.
+  originalPledgeDate: number | null;
+  anniversaryDate: number | null;
 };
 
 function parseDollarsToCents(value: string): number | null {
@@ -46,7 +56,7 @@ function parseDollarsToCents(value: string): number | null {
 // fundraiser enters.
 function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
   pledgeActivityId: string;
-  initial?: { installmentAmountCents: number | null; nextExpectedPaymentAt: number; finalExpectedPaymentAt: number; note: string | null; planId: string };
+  initial?: { installmentAmountCents: number | null; nextExpectedPaymentAt: number; finalExpectedPaymentAt: number; note: string | null; originalPledgeDate: number | null; planId: string };
   onCancel: () => void;
   onSaved: () => void;
 }) {
@@ -54,6 +64,13 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
   const [nextExpected, setNextExpected] = useState(initial ? isoDate(initial.nextExpectedPaymentAt) : "");
   const [finalExpected, setFinalExpected] = useState(initial ? isoDate(initial.finalExpectedPaymentAt) : "");
   const [note, setNote] = useState(initial?.note ?? "");
+  // Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
+  // -- blank when absent (shows "not yet verified," never a guessed
+  // date), same blank-means-unset convention installment/note already
+  // use above. The fundraiser can clear a previously-entered date by
+  // emptying this field -- an empty string is sent through as `null`
+  // (see save() below), not omitted, so clearing genuinely clears it.
+  const [originalPledgeDate, setOriginalPledgeDate] = useState(initial?.originalPledgeDate ? isoDate(initial.originalPledgeDate) : "");
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [message, setMessage] = useState("");
 
@@ -61,7 +78,7 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
     if (status === "saving" || !nextExpected || !finalExpected) return;
     setStatus("saving"); setMessage("");
     try {
-      const body = { installmentAmountCents: parseDollarsToCents(installment), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note.trim() };
+      const body = { installmentAmountCents: parseDollarsToCents(installment), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note.trim(), originalPledgeDate: originalPledgeDate || null };
       const response = initial
         ? await fetch(`/api/pledge-payment-plans/${encodeURIComponent(initial.planId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
         : await fetch("/api/pledge-payment-plans", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pledgeActivityId, ...body }) });
@@ -81,8 +98,10 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
         <label>Installment amount <span>optional</span><input inputMode="decimal" placeholder="$" value={installment} onChange={(event) => setInstallment(event.target.value)} /></label>
         <label>Next expected payment<input type="date" value={nextExpected} onChange={(event) => setNextExpected(event.target.value)} /></label>
         <label>Final expected payment<input type="date" value={finalExpected} onChange={(event) => setFinalExpected(event.target.value)} /></label>
+        <label>Original pledge date <span>optional, verified only</span><input type="date" max={isoDate(Math.floor(Date.now() / 1000))} value={originalPledgeDate} onChange={(event) => setOriginalPledgeDate(event.target.value)} /></label>
         <label>Note <span>optional</span><textarea value={note} maxLength={2000} onChange={(event) => setNote(event.target.value)} /></label>
       </div>
+      <p className="payment-plan-help">Only set the original pledge date if you've confirmed it -- it's never guessed from JL's own "Due Date," which doesn't reliably reflect when a pledge was actually made. Leave it blank if you're not sure. Setting it enables an annual renewal reminder 5 days before, and on, its 12-month anniversary.</p>
       <div className="payment-plan-actions">
         <button type="button" onClick={onCancel}>Cancel</button>
         <button type="button" disabled={status === "saving" || !nextExpected || !finalExpected} onClick={() => void save()}>{status === "saving" ? "Saving…" : "Save payment plan"}</button>
@@ -127,7 +146,7 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
     return <PlanForm pledgeActivityId={pledgeActivityId} onCancel={() => setMode("view")} onSaved={refresh} />;
   }
   if (mode === "edit" && plan) {
-    return <PlanForm pledgeActivityId={pledgeActivityId} initial={{ installmentAmountCents: plan.installmentAmountCents, nextExpectedPaymentAt: plan.nextExpectedPaymentAt ?? plan.finalExpectedPaymentAt, finalExpectedPaymentAt: plan.finalExpectedPaymentAt, note: plan.note, planId: plan.planId }} onCancel={() => setMode("view")} onSaved={refresh} />;
+    return <PlanForm pledgeActivityId={pledgeActivityId} initial={{ installmentAmountCents: plan.installmentAmountCents, nextExpectedPaymentAt: plan.nextExpectedPaymentAt ?? plan.finalExpectedPaymentAt, finalExpectedPaymentAt: plan.finalExpectedPaymentAt, note: plan.note, originalPledgeDate: plan.originalPledgeDate, planId: plan.planId }} onCancel={() => setMode("view")} onSaved={refresh} />;
   }
 
   if (!plan) {
@@ -141,6 +160,10 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
       {plan.nextExpectedPaymentAt !== null && !plan.isCompleted && <p>Next expected: {dateLabel(plan.nextExpectedPaymentAt)}</p>}
       <p>Final expected: {dateLabel(plan.finalExpectedPaymentAt)}</p>
       {plan.installmentAmountCents !== null && <p className="payment-plan-installment">Expected installment: {money(plan.installmentAmountCents)}</p>}
+      {/* Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
+          -- only shown once verified; anniversaryDate is server-derived
+          (evaluateAnnualRenewal), never recomputed here. */}
+      {plan.originalPledgeDate !== null && <p className="payment-plan-original-pledge-date">Original pledge date: {dateLabel(plan.originalPledgeDate)}{plan.anniversaryDate !== null && <> · Renewal anniversary: {dateLabel(plan.anniversaryDate)}</>}</p>}
       {plan.isCompleted && <p className="payment-plan-note-inline">This plan appears complete — paid in full.</p>}
       {plan.isPlanEndedWithBalance && <p className="payment-plan-note-inline">The final expected date has passed with balance still open.</p>}
       <div className="payment-plan-actions">

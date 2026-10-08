@@ -27,7 +27,7 @@ import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendat
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { localDateOnlyEpoch } from "./local-time.ts";
 
-export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone";
+export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone" | "annual_pledge_renewal";
 
 // Fields are kept granular (rather than one concatenated "detail" string) so
 // the compact Coming Up row can give each piece of information -- donor,
@@ -253,6 +253,74 @@ export function buildPaymentPlanMilestoneEvents(
       // never `dateEpoch` (which is today, for bucketing only -- see the
       // function's own header comment).
       dateLabel: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.finalExpectedPaymentAt * 1000)),
+      dateEpoch: todayEpoch,
+      ambiguous: false,
+    });
+  }
+  return events.sort((a, b) => a.donorName.localeCompare(b.donorName));
+}
+
+export type AnnualRenewalReminderRow = {
+  donorId: string;
+  planId: string;
+  pledgeActivityId: string;
+  originalPledgeDate: number;
+  originalPledgeAmountCents: number;
+  balanceCents: number;
+  campaign: string | null;
+  anniversaryDate: number;
+  stage: "approaching" | "anniversary";
+};
+
+// Annual pledge-renewal reminders (2026-10-08, see docs/AI-HANDOFF.md).
+// Same discrete-single-day shape as buildPaymentPlanMilestoneEvents just
+// above (never a lead-window countdown -- a row is only ever constructed
+// AT ALL on the exact day it fires, computed once by
+// lib/relationships/pledge-payment-plan.ts's evaluateAnnualRenewal, never
+// re-derived here), same `dateEpoch = today` / `dateLabel = the real
+// date this row is actually about` convention, for the identical reason:
+// so it lands in Coming Up's "today" bucket via
+// partitionRelationshipDateEventsByToday, and so the Daily Agenda's
+// IMPORTANT DATES/STEWARDSHIP section (which already includes the full
+// "today" bucket unconditionally) needs no further change to show it.
+//
+// `relationshipPhrase` carries the exact required title text verbatim
+// ("Annual pledge renewal approaching" / "Annual pledge renewal
+// opportunity") -- both titles ARE the suggested fundraising action
+// (prepare vs. contact the donor), matching how every other event type
+// in this file folds its action into the phrase rather than a separate
+// field. `secondaryDateLabel` packs the original pledge amount, campaign
+// (when known), and current outstanding balance into one line -- the
+// same compact-row convention buildPaymentPlanMilestoneEvents already
+// uses for balance alone. Relevant newer pledges are deliberately NOT
+// included here -- that context is per-donor and best shown with full
+// giving-history context on the donor page itself (app/donors/[id]/
+// page.tsx), not crammed into this one-line compact row.
+export function buildAnnualRenewalReminderEvents(
+  rows: AnnualRenewalReminderRow[],
+  identityByDonor: Map<string, DonorIdentityForEvent>,
+  timezone: string,
+  now: number,
+): WorkspaceRelationshipDateEvent[] {
+  const todayEpoch = localDateOnlyEpoch(now, timezone);
+  const events: WorkspaceRelationshipDateEvent[] = [];
+  for (const row of rows) {
+    const identity = identityByDonor.get(row.donorId);
+    if (!identity) continue;
+    const campaignLabel = row.campaign ? ` (${row.campaign})` : "";
+    events.push({
+      id: `annual-pledge-renewal:${row.planId}:${row.stage}`,
+      type: "annual_pledge_renewal",
+      donorId: row.donorId,
+      donorName: identity.donorName,
+      initials: identity.initials,
+      donorCode: identity.donorCode,
+      label: "Annual renewal",
+      relationshipPhrase: row.stage === "approaching" ? "Annual pledge renewal approaching" : "Annual pledge renewal opportunity",
+      secondaryDateLabel: `${money(row.originalPledgeAmountCents)} pledged${campaignLabel} · ${money(row.balanceCents)} balance remaining`,
+      provenanceName: null,
+      provenanceNameHebrew: null,
+      dateLabel: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.anniversaryDate * 1000)),
       dateEpoch: todayEpoch,
       ambiguous: false,
     });

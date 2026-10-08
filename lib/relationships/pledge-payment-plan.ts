@@ -291,6 +291,64 @@ export function adjustNewPlanAnchorForPastDate(enteredNextExpectedPaymentAt: num
   return cycle;
 }
 
+export type AnnualRenewalEvaluation = {
+  // The plan's own first 12-month anniversary -- null only when not
+  // eligible at all (see below). Always the FIRST anniversary; this
+  // module deliberately has no concept of a second/third-year
+  // anniversary (no recurrence beyond year one without a separately
+  // approved recurrence policy).
+  anniversaryDate: number | null;
+  fiveDayReminderDate: number | null;
+  isFiveDayReminder: boolean;
+  isAnniversaryReminder: boolean;
+};
+
+// Annual Renewal Reminders (2026-10-08, see docs/AI-HANDOFF.md). Eligible
+// ONLY when BOTH: the plan is active (`endedAt === null` -- an explicitly
+// ended plan generates no new reminders, matching evaluatePaymentPlan's
+// own `isActive` convention) AND has a fundraiser-VERIFIED
+// `originalPledgeDate` (never inferred -- see lib/capture/pledge-payment-
+// plan.ts's validateOriginalPledgeDate and docs/AI-HANDOFF.md's Phase 1
+// investigation for why no other date in this system is reliable enough
+// to anchor this calculation). Deliberately independent of balance/
+// isCompleted/isFulfilledAfterFinal -- a plan that reached its final
+// date naturally, fully paid, is NOT "ended" (ended_at is only ever an
+// explicit fundraiser action) and remains eligible for its first
+// anniversary exactly like any other active plan.
+//
+// Computes ONLY the first anniversary -- 12 calendar-month advances from
+// originalPledgeDate, reusing advanceOneCalendarMonth (the SAME anti-
+// drift/clamp mechanism next_expected_payment_at cycling already uses),
+// which gives this module's explicit, tested February 29 convention for
+// free: a leap-day original pledge date clamps to February 28 in the
+// (non-leap) anniversary year -- not a new rule, the SAME clamp a
+// 31st-anchored monthly cycle already applies in a 30-day month, reused.
+//
+// `now` is normalized via today() exactly like every other comparison in
+// this module -- "five days before" and "on the anniversary" both mean
+// the fundraiser's real Eastern calendar date, matching the 2026-10-08
+// timezone fix. The five-day/anniversary dates themselves are pure
+// date-only subtraction (fiveDayReminderDate = anniversaryDate -
+// 5*86400), never timezone-sensitive on their own -- both operands are
+// already UTC-midnight date-only values, so this is always an exact
+// 5-calendar-day offset regardless of daylight saving.
+export function evaluateAnnualRenewal(originalPledgeDate: number | null, endedAt: number | null, now: number, timezone: string): AnnualRenewalEvaluation {
+  if (originalPledgeDate === null || endedAt !== null) {
+    return { anniversaryDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isAnniversaryReminder: false };
+  }
+  const anchorDay = dayOfMonthFromDateOnlyEpoch(originalPledgeDate);
+  let anniversaryDate = originalPledgeDate;
+  for (let i = 0; i < 12; i++) anniversaryDate = advanceOneCalendarMonth(anniversaryDate, anchorDay);
+  const fiveDayReminderDate = anniversaryDate - 5 * DAY_SECONDS;
+  const nowDateOnly = today(now, timezone);
+  return {
+    anniversaryDate,
+    fiveDayReminderDate,
+    isFiveDayReminder: nowDateOnly === fiveDayReminderDate,
+    isAnniversaryReminder: nowDateOnly === anniversaryDate,
+  };
+}
+
 export type FulfilledCultivationSourceRow = {
   id: string;
   donor_id: string;

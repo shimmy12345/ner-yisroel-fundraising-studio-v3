@@ -271,8 +271,19 @@ test("baseline picks up the schema-changing 0038 pledge payment-plan reviews mig
   // 0038_pledge_payment_plan_reviews.sql adds the pledge payment-plan
   // cleanup review table (one new table, not a rebuild), so the schema
   // hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0038_pledge_payment_plan_reviews.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 39);
+  assert.ok(manifest.sourceMigrations.includes("0038_pledge_payment_plan_reviews.sql"));
+});
+
+test("baseline picks up the schema-changing 0039 original pledge date migration", () => {
+  // 0039_pledge_payment_plans_original_pledge_date.sql adds one nullable
+  // column (original_pledge_date) to the existing pledge_payment_plans
+  // table (Annual Renewal Reminders, Part 1; see docs/AI-HANDOFF.md) --
+  // an additive column, not a rebuild, so the schema hash must change
+  // again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0039_pledge_payment_plans_original_pledge_date.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 40);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const planTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "pledge_payment_plans");
+  assert.match(planTable.sql, /original_pledge_date/);
 });

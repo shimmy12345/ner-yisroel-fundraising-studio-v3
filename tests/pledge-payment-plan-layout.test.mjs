@@ -95,10 +95,18 @@ async function run() {
   );
 
   // ---- 6/7: payment-plan request/body semantics and business logic unchanged ----
+  // The exact field LIST below intentionally grew by one (originalPledgeDate)
+  // with Annual Renewal Reminders, Part 1 (2026-10-08, see
+  // docs/AI-HANDOFF.md) -- a real, approved field addition, not a
+  // regression of this test's own original "presentation-only fix must
+  // not touch business logic" guarantee. What that guarantee still
+  // protects here: every field already present (installmentAmountCents/
+  // nextExpectedPaymentAt/finalExpectedPaymentAt/note) is unchanged, in
+  // the same order, with the same expressions.
   assert.match(
     component,
-    /const body = \{ installmentAmountCents: parseDollarsToCents\(installment\), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note\.trim\(\) \};/,
-    "the save request body shape must be unchanged by a presentation-only fix",
+    /const body = \{ installmentAmountCents: parseDollarsToCents\(installment\), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note\.trim\(\), originalPledgeDate: originalPledgeDate \|\| null \};/,
+    "the save request body shape must match exactly -- unchanged pre-existing fields plus the one new, approved originalPledgeDate field",
   );
   assert.match(
     component,
