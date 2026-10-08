@@ -25102,3 +25102,164 @@ credentials; it is covered by the unit tests above instead.)
    token auth -- it is intentionally inert until this step.
 3. Point the morning-brief script at `GET /api/morning-brief` with
    `CF-Access-Client-Id`/`CF-Access-Client-Secret` headers.
+
+## Annual Renewal Reminders for Recurring Payment Plans -- Phase 1 Investigation (2026-10-08) -- STOPPED PER EXPLICIT TASK INSTRUCTION, NO CODE/SCHEMA/D1/DEPLOY CHANGE
+
+Requested: a two-stage reminder (5 days before, and on, the 12-month
+anniversary of a recurring payment plan's "original pledge date"),
+pledge-specific (never donor-wide), with conservative, evidence-based
+renewal detection suppressing the anniversary only when a newer pledge
+reliably renews the same commitment. Explicit instruction: if the data
+cannot reliably establish the original pledge date or eligibility, STOP
+and report findings/options rather than inventing a classification rule.
+**Stopped at Phase 1C/1D/1E -- the data cannot reliably establish an
+"original pledge date," which the whole feature is anchored on.**
+
+### What was investigated (read-only, D1 mutations: 0)
+
+Fetched all 45 active `pledge_payment_plans` rows with their linked
+`giving_activities` pledge row (`activity_date`, `committed_cents`,
+`source_campaign`, `description`, `item_type`, `category`) and every
+linked payment (`jl_payment_assignment_audits`, `decision_type=
+'apply_to_pledge'`), plus full multi-year giving history for 3
+representative donors (Baruch Katz, Avi Dear, Ezra Wisotsky) to see real
+cross-year campaign patterns, not just a single snapshot.
+
+### 1C: Is there a reliable "original pledge date"? No.
+
+`giving_activities.activity_date` is the only date stored on a pledge
+row. Traced its provenance directly: `lib/import/jl-donations.ts` sets it
+from the JL export's own `row["Due Date"] || row.Date` column, and
+`source_snapshot` (the raw JL row, preserved verbatim) confirms the
+column is literally labeled **"Due Date"** in the source system -- there
+is no separate "date pledged"/"date committed" column anywhere in the JL
+export this app imports. Concretely verified across all 45 active plans
+(script output, not a sample): **`activity_date` is in the FUTURE
+relative to today for 24 of 45 (53%)** -- a pledge cannot have been
+"made" in the future, so for over half the real data this field is
+unambiguously a forward-looking final-payment target, not an origination
+date (example: Dr. & Mrs. Avi Stein's PL2026 pledge has `activity_date`
+= 2029-04-21; `source_snapshot` shows this exact date was already
+flagged `fundraisingOsAcceptSuspiciousDate: true` by the import
+pipeline's own suspicious-date review and manually accepted anyway).
+
+**The remaining 21 of 45 (47%) are in the past, but are not reliably
+origination dates either.** Compared each to that pledge's own earliest
+linked real payment date (`jl_payment_assignment_audits`, genuine
+transaction data): the gap between `activity_date` and the first real
+payment is **243 to 325 days** for most of them (e.g. Avi Dear's NDLK
+pledge: `activity_date` 2025-10-29, first tracked payment 2026-08-24, a
+299-day gap). If `activity_date` were the real pledge date, a monthly
+payment plan's first payment landing 8-10 months later would be unusual
+-- more consistent with `activity_date` being some other administrative
+date (or, per the file-wide pattern that most of these
+`pledge_payment_plans` rows were themselves created in a single 2026-08-20
+batch stewardship pass over already-existing JL pledges, simply
+whatever "Due Date" happened to be on file in JL at that time, unrelated
+to when the donor actually committed).
+
+**The "first linked payment date" alternative is also not reliable, for
+a different reason:** this app's own `jl_payment_assignment_audits`
+tracking only goes back to whenever JL payment-assignment imports began
+for each donor (visibly clustered around August-October 2026 across
+nearly every plan in the dataset) -- it cannot see payments that
+predate this app's own tracking, so "first payment this app has a
+record of" is not the same claim as "first payment ever," especially
+for pledges that were already open before this app existed.
+
+**Net finding: there is no field in the current data model, imported or
+derived, that reliably answers "when was this commitment originally
+made."** This directly blocks anchoring a 12-month-anniversary reminder
+-- a wrong anchor date doesn't just miss the reminder, it fires a
+confident, wrong "Annual pledge renewal opportunity" possibly months
+away from the real anniversary, which is worse than not having the
+feature (the task's own stated product philosophy is to derive
+*actionable* opportunities from *reliable* data).
+
+### 1D/2: Renewal detection via campaign code -- also not reliably automatable
+
+Hoped campaign codes with an embedded year (`DIN2025`, `KOLX2026`,
+`CT2025`) would let a newer same-prefix pledge serve as clear renewal
+evidence. Two real counterexamples found, not hypothetical:
+- **Ezra Wisotsky**: `DIN2026`'s own `activity_date` (2026-09-16)
+  predates `DIN2025`'s (2027-02-28) -- the campaign year label and the
+  stored date disagree about which pledge came first. A rule that
+  trusts either the campaign-year suffix OR the date would get this
+  donor's renewal chain backwards.
+- **Avi Dear**: a prior year's recurring commitment was filed under
+  `CT2025` (10 monthly $84 payments, Jan-Oct 2025, each recorded as its
+  own `completed_gift` row), and the CURRENT recurring commitment under
+  `NDLK` -- a completely different campaign code, not a year-incremented
+  version of the same prefix. The same real donor, same approximate
+  amount, same monthly cadence, continuous in time -- but no shared
+  campaign-code prefix at all to detect the relationship from.
+
+**Net finding: campaign-code-prefix matching would both miss real
+renewals (Dear's case) and could misorder real ones if combined with the
+equally-unreliable date field (Wisotsky's case).** Description/
+item_type fields were also checked and are empty (`""`) on every active
+plan's pledge row -- no additional signal available there either.
+
+### 1E: How many plans would qualify, and how many donors have multiple active plans
+
+Every one of the 45 active plans has an ambiguous-at-best anchor date by
+the finding above, so no eligibility count is meaningful without first
+resolving 1C. Separately confirmed the "pledge-specific, not donor-wide"
+requirement is not a hypothetical edge case: **4 of 41 donors with any
+active plan (10%) currently have 2+ simultaneously active plans on
+different campaigns** (Wisotsky: DIN2025+DIN2026; Paul Z. Goldstein:
+DIN2025+DIN2022; Max Singer: DIN2025+DYSP5786; Shimmy Ramras:
+DIN2025+KOLX2026) -- any eventual implementation must genuinely evaluate
+each plan independently, not just in theory.
+
+### Why this STOPs per the task's own explicit instruction
+
+The task's Phase 1 instruction: *"If the data cannot reliably distinguish
+renewable annual commitments from other recurring payment plans, STOP
+and report the findings and recommended options. Do not invent a
+classification rule"* and, on eligibility specifically: *"If reliable
+eligibility cannot be established without a new manual classification
+field, STOP and present the options before implementing."* Both
+conditions are met: the anchor date itself (not merely eligibility
+classification on top of it) is unreliable for the majority of real
+data, and the one zero-new-field heuristic investigated (campaign-code
+matching) has real, concrete counterexamples in the live dataset.
+Implementing against this data as-is would mean fabricating confident
+anniversary dates the data cannot actually support -- exactly what the
+task explicitly asked not to do.
+
+### Options for the user to choose from (none implemented)
+
+1. **Add an explicit, minimal "pledge date" field at payment-plan
+   creation time** -- the fundraiser enters the real commitment date once
+   when setting up (or editing) a recurring plan, the same one-time,
+   low-friction data entry this session's existing payment-plan UI
+   already asks for `next_expected_payment_at`/`final_expected_payment_at`.
+   Reliable, but is the "new manual classification field" the task asked
+   to flag before adding.
+2. **Use "first linked payment date" as a documented, disclosed
+   approximation** of the pledge date, accepting it understates true
+   tenure for pledges that predate this app's own payment tracking --
+   would need its own conservative eligibility gate (e.g. only pledges
+   with a first-ever-tracked-payment at least ~11 months old, so an
+   anniversary is plausible rather than presumed) and clear UI
+   disclosure that the date is "earliest known payment," not "pledge
+   date."
+3. **Defer the feature** until JL exports (or this app's own import
+   pipeline) can capture a genuine pledge/commitment date distinct from
+   "Due Date" -- the real fix for the root cause, but outside this
+   session's control (JL is the institution's external system of
+   record).
+4. **Narrower pilot**: only surface the opportunity as a KNOW-tier
+   relationship-intelligence note (never a DO-tier reminder with a
+   specific anniversary date) on a payment plan whose final expected
+   date has just passed and whose pledge has been fully paid --
+   deliberately reusing the ALREADY-RELIABLE `isFulfilledAfterFinal`/
+   `deriveFulfilledCultivationByDonor` signal from the 2026-10-08
+   timezone-fix round instead of a new, unreliable anniversary
+   computation. This changes the feature's shape (no 5-day/day-of
+   two-stage reminder, no fixed anniversary date) but needs zero new
+   fields and zero speculative date math.
+
+No option was chosen or implemented -- this is the user's own product
+decision, not a technical one this investigation can resolve.
