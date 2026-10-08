@@ -26047,3 +26047,114 @@ to the app).
 None identified. This was a narrowly-scoped client-side validation
 correction; the server-side `validateCommitmentDurationMonths` was
 already correct and remains the authoritative safeguard, unchanged.
+
+## D1 Restore/Schema Sync Check Failures -- Migrations 0039+0040 -- INVESTIGATED, SYNCED TO MAIN, CHECK PASSING (2026-10-08)
+
+**Trigger.** GitHub Actions "D1 restore/schema sync check"
+(`.github/workflows/d1-restore-sync-check.yml`) failed twice: run
+`37842640261` (commit `d6345a2`, adding migration 0039) and run
+`37847982875` (commit `e15d038`, adding migration 0040) -- both on this
+branch. This is the exact drift class the workflow exists to catch (see
+its own header comment, and this file's "D1 Monthly Restore Verification
+Repair" entries): migrations 0039/0040 correctly updated THIS branch's
+own `production-baseline/schema-manifest.json`/`lib/data-health/
+production-baseline.ts` (each migration's own round did this as part of
+its own migration-safety steps), but neither round touched `main` --
+correctly, since neither was scoped to -- leaving `main`'s separately
+committed restore/baseline tracking two migrations behind.
+
+**Investigation (read-only throughout -- zero D1 access, zero database
+of any kind touched).** GitHub's raw-log API required admin auth this
+session doesn't hold (`403: Must have admin rights`), so the exact
+drift was reproduced directly by re-running this branch's own
+`node scripts/check-main-restore-sync.mjs` against the real
+`origin/main` (the identical command the CI workflow itself runs):
+confirmed the ONLY drift was `0039_pledge_payment_plans_original_pledge_date.sql`
+and `0040_pledge_payment_plans_commitment_duration_months.sql` missing
+from main's manifest, and one resulting schema difference
+(`pledge_payment_plans` table definition). Checked beyond the schema-
+drift assumption per explicit instruction: confirmed via the GitHub API
+that each failing commit triggered exactly one workflow run (no other
+check fired or failed), the commits' combined status API showed zero
+other statuses, `main`'s own nightly backup workflow ran successfully
+on every day spanning these failures, and the most recent commit
+(`912d2c1`, UI-only, no schema paths touched) triggered zero workflow
+runs at all -- confirming the path-filtered trigger works correctly and
+schema-manifest drift was the sole cause, nothing else.
+
+**No restore-order drift existed.** Both migrations only add nullable
+columns to the already-present `pledge_payment_plans` table (migration
+0033) -- no new table, so `lib/operations/staging-reset.ts` and
+`lib/operations/d1-restore-order.ts` needed zero changes, confirmed
+structurally by the drift report's own zero-issue findings in those
+categories (`missingFromMainOrder`/`staleInMainOrder`/
+`restoreOrderIssues` all empty) and by a grep confirming no other
+hardcoded migration-count/hash assertion existed anywhere else in
+main's test suite.
+
+**Patch prepared and validated locally before pushing (never pushed
+until explicit approval was given).** Built and committed in an
+isolated worktree/branch off `origin/main`
+(`fix/d1-restore-sync-0039-0040-preview`), touching exactly 2 files:
+`production-baseline/schema-manifest.json` (replaced verbatim with
+this branch's current manifest -- the same generator-based sync
+mechanism as every prior round, no hand-editing) and `lib/data-health/
+production-baseline.ts` (migration-count assertion `39` -> `41`,
+updated doc comment). Verified the manifest diff programmatically
+before proposing it: exactly 2 migrations added (0039, 0040), zero
+removed; exactly one DDL object changed (`table:pledge_payment_plans`,
+gaining exactly `original_pledge_date integer` and
+`commitment_duration_months integer`, nothing else altered); no table
+added or removed; `baselineLevel` unchanged (`"0019"`).
+`MAIN_REF=fix/d1-restore-sync-0039-0040-preview node scripts/
+check-main-restore-sync.mjs` -> **PASS**; main's own `npm test` (with
+the patch applied) -> **147/147 passed**; main's own `npm run build`
+-> succeeds. A stray build-generated `public/runtime-config.js` change
+(a side effect of running `npm run build` in the worktree, not part of
+the intended patch) was discarded before committing, so the final
+patch touches exactly the 2 intended files.
+
+**Pushed to `main`, explicitly authorized by the repository owner for
+this specific, already-reviewed change, after re-confirming
+immediately beforehand that `origin/main` had not moved since the
+investigation (`114c7bb`, unchanged) and that the patch still touched
+only the 2 reviewed files.** Fast-forward push (`114c7bb..ec7869c`).
+**Resulting `origin/main` SHA: `ec7869cf78281632e4759ca76da480e4b932a97f`**
+-- confirmed independently via the GitHub API (`GET .../commits/main`
+returning exactly the 2 expected files). Re-ran `node
+scripts/check-main-restore-sync.mjs` against the freshly fetched,
+real `origin/main` immediately after pushing -> **PASS** -- "D1
+restore/schema state on main is in sync with the canonical schema. No
+drift detected."
+
+**GitHub Actions re-run note.** This workflow triggers only on pushes/
+PRs targeting `feature/independent-cloudflare-sandbox` (and
+`workflow_dispatch`), never on a push to `main` itself, so pushing this
+sync did not automatically fire a new Actions run; the two original
+failing runs remain in GitHub's history as historical failures (now
+resolved by this sync) rather than being retroactively marked green.
+This session has no credential to trigger a `workflow_dispatch`,
+consistent with every prior round in this file's "D1 Monthly Restore
+Verification Repair" history -- the local re-run against the real,
+pushed `origin/main`, using the exact same command and script the CI
+workflow itself invokes, is the same standard of proof those prior
+rounds used and accepted. A `workflow_dispatch` of "D1 restore/schema
+sync check" (or the monthly restore-verification workflow) remains
+available at the repository owner's discretion for additional,
+independent confidence inside the real Actions runner -- not treated
+as required to close this round.
+
+**No database of any kind was modified, reset, restored, or migrated
+at any point in this investigation or sync.** Every step was `git
+show`/`git fetch`/local file reads/a local worktree/local `npm test`/
+`npm run build` -- zero D1 connections opened. No donor, pledge,
+payment, allocation, or financial record was touched. No application
+code was merged into `main` -- the push contains only the 2 restore-
+tracking files. No deploy to Production occurred. The workflow itself
+was never disabled, bypassed, or weakened -- it was left completely
+unmodified throughout.
+
+**This branch's own state is completely unaffected** -- no file on
+`feature/independent-cloudflare-sandbox` was touched by this sync
+(confirmed: `git status` clean throughout); its own `pnpm test`/
+`tsc`/build status is unchanged from the prior round's entry.
