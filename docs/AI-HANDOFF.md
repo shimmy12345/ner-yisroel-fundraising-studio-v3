@@ -24582,3 +24582,127 @@ per its own design (never alongside an already-late or ended state).
 No payment plan, pledge, balance, or review decision was modified.
 Every number above traces to a live `SELECT` against Independent
 Staging, re-verified identical before and after this task.
+
+## Verification of User-Applied Final-Date Corrections -- Weil & Goldman (2026-10-08) -- READ-ONLY, NO D1 WRITE, NO CODE CHANGE; ONE REAL TIMEZONE BUG FOUND, NOT FIXED
+
+User manually corrected the two final-date mismatches flagged above
+(via the app's own payment-plan edit UI) and asked for a read-only
+verification: Benjy Weil -> 2026-10-24, Mordechai Y. Goldman ->
+2026-10-28. Explicit instruction: do not modify either plan, do not
+touch Katz or Matz, report any calculation bug found but do not fix it.
+
+**D1 mutations: 0.** `donors`/`giving_activities`/`pledge_payment_plans`/
+`jl_payment_assignment_audits` row counts identical before and after
+(254 / 5463 / 45 / 88). `pledge_payment_plan_changes` is 50, up from 48
+at the end of the prior round's reconciliation -- exactly the 2 audit
+rows the user's own 2 edits produced; not touched by this task, which
+made zero writes of its own.
+
+### 1-5: Confirmed correct
+
+| | Weil (78188) | Goldman (68418) |
+|---|---|---|
+| Saved `final_expected_payment_at` | 2026-10-24 (confirmed via live `SELECT`) | 2026-10-28 (confirmed) |
+| `next_expected_payment_at` | Also updated to 2026-10-24 (now equals final -- the UI's edit also corrected this field, not just final) | Also updated to 2026-10-28 |
+| Current balance | $20.00 (unchanged from before) | $100.00 (unchanged from before) |
+| `evaluatePaymentPlan()` (real function, live data) | `isOnTrack=true`, `isLate=false`, `isPlanEndedWithBalance=false`, `isCompleted=false` | same: `isOnTrack=true`, `isLate=false`, `isPlanEndedWithBalance=false` |
+| `nextUnsatisfiedExpectedPaymentAt` | 2026-10-24 -- now matches `final_expected_payment_at` exactly (the mismatch from the prior round is gone) | 2026-10-28 -- matches exactly |
+
+Neither plan is misclassified as late or ended-with-balance. The
+anchor/final-date mismatch flagged in the prior reconciliation is fully
+resolved for both.
+
+### 6: Confirmed wired through Today, Coming Up, and Daily Agenda
+
+Traced the real code path end to end, not assumed: `lib/workspace/
+live-data.ts` reads `evidence.giving.openPledge.activePaymentPlan.
+milestoneDaysBefore` (the exact `evaluatePaymentPlan()` output, same
+call every other surface uses -- never a second evaluation) and, when
+non-null, pushes a `PaymentPlanMilestoneRow` that `buildPaymentPlan
+MilestoneEvents()` (`lib/workspace/relationship-date-events.ts`) turns
+into a `type: "payment_plan_milestone"` `WorkspaceRelationshipDateEvent`
+merged into the same combined, sorted relationship-date-event list as
+yahrtzeits/birthdays/anniversaries, then split into today/upcoming
+buckets. `lib/agenda/agenda-model.ts`'s Important Dates/Stewardship
+section already includes the full "today" bucket unconditionally (no
+Agenda-specific filter needed, confirmed from that function's own doc
+comment) -- so a milestone that fires on a given day genuinely appears
+in all three surfaces (donor-page/Today card state, Coming Up, and the
+9am Daily Agenda email) from the same single source of truth, with no
+separate/divergent logic anywhere in the chain.
+
+### 7: Off-by-one found -- a real, pre-existing timezone bug in `evaluatePaymentPlan()`, NOT fixed per instruction
+
+**The bug:** `evaluatePaymentPlan()` (`lib/relationships/pledge-payment-
+plan.ts`) computes `daysUntilFinal = Math.floor((plan.finalExpectedPaymentAt
+- now) / DAY_SECONDS)` and `finalDatePassed = now > plan.
+finalExpectedPaymentAt`, using the raw `now` passed all the way down
+from `Math.floor(Date.now() / 1000)` (see `lib/agenda/send-agenda.ts`,
+and every other caller) -- a continuously-advancing real-time instant,
+never normalized to a calendar day. `finalExpectedPaymentAt` (and every
+cycle date `enumerateExpectedCycles()` produces) is a date-only value,
+always anchored to UTC midnight, per this codebase's own established
+convention (`lib/financial-date.ts`). Comparing a continuous instant
+directly against a UTC-midnight anchor is exactly the anti-pattern this
+codebase's OWN `localDateOnlyEpoch()` helper (`lib/workspace/local-
+time.ts`) was built to prevent -- its doc comment warns verbatim against
+"re-apply[ing] the timezone offset" to "a value that is already 'UTC
+midnight of the intended local date.'" `evaluatePaymentPlan()` never
+calls it; the fundraiser's timezone (America/New_York, `AGENDA_TIMEZONE`)
+never enters its calculation at all.
+
+**Concrete, measured effect** (not theoretical -- computed directly from
+the two real, just-corrected dates): because America/New_York is 4-5
+hours behind UTC, "2026-10-24 00:00 UTC" is "2026-10-23, 8:00 PM EDT" --
+the UTC-midnight boundary that is supposed to represent the Eastern
+calendar date "October 24" actually falls 4 hours into the Eastern
+EVENING of October 23. Every `daysUntilFinal`/milestone/lateness
+transition this code computes therefore flips about 4-5 hours too
+early relative to the Eastern calendar date a fundraiser reading
+"Final: October 24" would expect -- which, since normal business hours
+(including the Daily Agenda's own 9 AM Eastern send) fall well before
+8 PM Eastern, manifests in practice as every transition landing exactly
+ONE Eastern calendar day earlier than literal "final date minus N
+days" subtraction would suggest:
+
+| Donor | Final date shown | Milestone | Fires on (actual, at 9am ET) | Naively expected (final - N days) |
+|---|---|---|---|---|
+| Weil | Oct 24 | 15 | **Oct 8** | Oct 9 |
+| Weil | Oct 24 | 10 | **Oct 13** | Oct 14 |
+| Weil | Oct 24 | 5 | **Oct 18** | Oct 19 |
+| Goldman | Oct 28 | 15 | **Oct 12** | Oct 13 |
+| Goldman | Oct 28 | 10 | **Oct 17** | Oct 18 |
+| Goldman | Oct 28 | 5 | **Oct 22** | Oct 23 |
+
+Verified this is stable (no intra-day flicker) for any normal viewing
+or send time -- the flip only happens at 8 PM Eastern the day before,
+well outside business hours, so Today/Coming Up/the 9 AM Agenda email
+all agree with each other on any given day; the mismatch is which
+DAY the whole app agrees on, not instability within one day. The same
+root cause also shifts `finalDatePassed`/`isPlanEndedWithBalance`
+(Baruch Katz's plan, flagged in the prior round as having passed its
+final date 5 days ago, actually "passed" about 4-5 hours earlier in
+Eastern-wall-clock terms than its UTC-midnight final date suggests --
+immaterial at a 5-day scale, but the same mechanism) and the `cycle <=
+now` due-check inside `matchPaymentsToCycles()`'s caller -- this is
+systemic to `evaluatePaymentPlan()`'s whole date model, not isolated to
+the milestone field, and applies to every one of the 45 active plans,
+not just these two.
+
+**Not fixed, per explicit instruction.** The likely correct fix (for a
+future, separately-approved task) is for every caller currently passing
+raw `Date.now()`-derived `now` into `evaluatePaymentPlan()` to instead
+pass `localDateOnlyEpoch(now, timezone)` -- normalizing to the SAME
+UTC-midnight-of-the-Eastern-date convention the stored fields already
+use, which would make every comparison a clean whole-day diff with zero
+timezone sensitivity, consistent with how every other date-vs-"today"
+comparison in this codebase already works. Flagged here for a future,
+separately-approved task -- Katz and Matz were read for this
+investigation (to confirm the same mechanism explains their numbers)
+but neither was modified, per instruction.
+
+Both Weil's and Goldman's plans are correctly healthy today regardless
+of this finding -- `isOnTrack=true` for both, and today (2026-10-08) is
+not a milestone day for either -- so nothing about their current
+display is wrong right now. The finding is about which exact future day
+each milestone will fire on, not about today's correctness.
