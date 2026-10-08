@@ -188,11 +188,13 @@ async function run() {
     assert.equal((assistantRoute.match(/env\.DB\.prepare\(/g) ?? []).length, 4, "Stage 3 must add zero new queries to the Assistant route -- it reuses Meeting Brief's already-resolved Snapshot instead of a second lookup");
     // 20, not 19: live-data.ts's count has since grown by one query for a
     // reason entirely unrelated to Stage 3 (same pattern as the donor-page
-    // count's own comment above) -- Annual Renewal Reminders (2026-10-08,
+    // count's own comment above) -- Pledge Renewal Reminders (2026-10-08,
     // see docs/AI-HANDOFF.md) added one dedicated query for active plans
-    // with a verified original_pledge_date. Stage 3's own "adds zero
-    // queries relative to Stage 2" claim is still true; this assertion's
-    // baseline simply moved with it, same as before.
+    // with a verified original_pledge_date (the commitment-duration
+    // correction, also 2026-10-08, added a column to this SAME query, not
+    // a new one, so the count itself didn't move again). Stage 3's own
+    // "adds zero queries relative to Stage 2" claim is still true; this
+    // assertion's baseline simply moved with it, same as before.
     assert.equal((liveData.match(/env\.DB\.prepare\(/g) ?? []).length, 20, "live-data.ts must be completely untouched by Stage 3");
   }
 

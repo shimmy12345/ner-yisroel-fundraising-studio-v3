@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
-import { validateInstallmentAmountCents, validatePlanNote, validateOriginalPledgeDate } from "../../../lib/capture/pledge-payment-plan";
+import { validateInstallmentAmountCents, validatePlanNote, validateOriginalPledgeDate, validateCommitmentDurationMonths } from "../../../lib/capture/pledge-payment-plan";
 import { dayOfMonthFromDateOnlyEpoch, adjustNewPlanAnchorForPastDate } from "../../../lib/relationships/pledge-payment-plan";
 import { parseFinancialDate } from "../../../lib/financial-date";
 import { logger } from "../../../lib/logger";
@@ -21,11 +21,18 @@ type RequestBody = {
   nextExpectedPaymentAt?: string;
   finalExpectedPaymentAt?: string;
   note?: string;
-  // Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
+  // Pledge Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
   // -- optional, fundraiser-VERIFIED only. Absent/null means "not yet
   // verified," never inferred from giving_activities.activity_date (JL's
   // own "Due Date," proven unreliable) or any other source.
   originalPledgeDate?: string | null;
+  // Pledge Renewal Reminders, commitment-duration correction (2026-10-08,
+  // see docs/AI-HANDOFF.md) -- optional, fundraiser-VERIFIED only. The
+  // length of the donor's COMMITMENT, never the collection schedule --
+  // never inferred from installment count/frequency, finalExpectedPaymentAt,
+  // campaign code, or balance. Required alongside originalPledgeDate for
+  // renewal-reminder eligibility, but optional for saving the plan itself.
+  commitmentDurationMonths?: number | null;
 };
 
 type PledgeRow = { id: string; donor_id: string; balance_cents: number | null };
@@ -57,12 +64,14 @@ export async function POST(request: Request) {
   const userId = profile.id;
 
   // Shared "now" for every date computed below -- the born-late anchor
-  // correction and the Annual Renewal Reminders, Part 1 (2026-10-08, see
+  // correction and the Pledge Renewal Reminders, Part 1 (2026-10-08, see
   // docs/AI-HANDOFF.md) "not in the future" check both need it, and both
   // must agree on the same instant.
   const createdAtForAnchor = Math.floor(Date.now() / 1000);
   const originalPledgeDateResult = validateOriginalPledgeDate(body.originalPledgeDate, createdAtForAnchor, profile.timezone);
   if (!originalPledgeDateResult.ok) return Response.json({ error: originalPledgeDateResult.reason }, { status: 422 });
+  const commitmentDurationResult = validateCommitmentDurationMonths(body.commitmentDurationMonths);
+  if (!commitmentDurationResult.ok) return Response.json({ error: commitmentDurationResult.reason }, { status: 422 });
 
   // "Born late" fix (see docs/AI-HANDOFF.md's payment-plan-intelligence
   // investigation): a fundraiser creating a plan today naturally enters
@@ -113,19 +122,19 @@ export async function POST(request: Request) {
   const expectedDayOfMonth = dayOfMonthFromDateOnlyEpoch(enteredNextExpectedPaymentAt);
   const now = Math.floor(Date.now() / 1000);
   const planId = crypto.randomUUID();
-  const afterJson = { installmentAmountCents: installment.amountCents, expectedDayOfMonth, nextExpectedPaymentAt, finalExpectedPaymentAt, note: noteResult.note, originalPledgeDate: originalPledgeDateResult.originalPledgeDate };
-  // "originalPledgeDate" is always recorded as a changed field, even when
-  // null -- an explicit "not yet verified" at creation is itself part of
-  // the audit trail, the same as every other field above (all five are
-  // always present in afterJson/changedFields on creation, never
-  // conditional -- 'created' always records the plan's complete starting
-  // state).
-  const changedFields = ["installmentAmountCents", "expectedDayOfMonth", "nextExpectedPaymentAt", "finalExpectedPaymentAt", "note", "originalPledgeDate"];
+  const afterJson = { installmentAmountCents: installment.amountCents, expectedDayOfMonth, nextExpectedPaymentAt, finalExpectedPaymentAt, note: noteResult.note, originalPledgeDate: originalPledgeDateResult.originalPledgeDate, commitmentDurationMonths: commitmentDurationResult.commitmentDurationMonths };
+  // "originalPledgeDate"/"commitmentDurationMonths" are always recorded as
+  // changed fields, even when null -- an explicit "not yet verified" at
+  // creation is itself part of the audit trail, the same as every other
+  // field above (all six are always present in afterJson/changedFields on
+  // creation, never conditional -- 'created' always records the plan's
+  // complete starting state).
+  const changedFields = ["installmentAmountCents", "expectedDayOfMonth", "nextExpectedPaymentAt", "finalExpectedPaymentAt", "note", "originalPledgeDate", "commitmentDurationMonths"];
 
   const statements = [
-    env.DB.prepare(`INSERT INTO pledge_payment_plans (id, user_id, donor_id, pledge_activity_id, cadence, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note, original_pledge_date, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'monthly', ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(planId, userId, pledge.donor_id, pledgeActivityId, installment.amountCents, expectedDayOfMonth, nextExpectedPaymentAt, finalExpectedPaymentAt, noteResult.note, originalPledgeDateResult.originalPledgeDate, now, now),
+    env.DB.prepare(`INSERT INTO pledge_payment_plans (id, user_id, donor_id, pledge_activity_id, cadence, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note, original_pledge_date, commitment_duration_months, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'monthly', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(planId, userId, pledge.donor_id, pledgeActivityId, installment.amountCents, expectedDayOfMonth, nextExpectedPaymentAt, finalExpectedPaymentAt, noteResult.note, originalPledgeDateResult.originalPledgeDate, commitmentDurationResult.commitmentDurationMonths, now, now),
     env.DB.prepare(`INSERT INTO pledge_payment_plan_changes (id, plan_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
       VALUES (?, ?, ?, ?, 'created', ?, NULL, ?, ?)`)
       .bind(crypto.randomUUID(), planId, userId, pledge.donor_id, JSON.stringify(changedFields), JSON.stringify(afterJson), now),
@@ -139,5 +148,5 @@ export async function POST(request: Request) {
   }
 
   logger.info("pledge_payment_plan_created", { planId, donorId: pledge.donor_id, pledgeActivityId, userId });
-  return Response.json({ planId, donorId: pledge.donor_id, pledgeActivityId, installmentAmountCents: installment.amountCents, nextExpectedPaymentAt, finalExpectedPaymentAt, note: noteResult.note, originalPledgeDate: originalPledgeDateResult.originalPledgeDate }, { status: 201 });
+  return Response.json({ planId, donorId: pledge.donor_id, pledgeActivityId, installmentAmountCents: installment.amountCents, nextExpectedPaymentAt, finalExpectedPaymentAt, note: noteResult.note, originalPledgeDate: originalPledgeDateResult.originalPledgeDate, commitmentDurationMonths: commitmentDurationResult.commitmentDurationMonths }, { status: 201 });
 }

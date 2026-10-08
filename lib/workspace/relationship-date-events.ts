@@ -27,7 +27,7 @@ import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendat
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { localDateOnlyEpoch } from "./local-time.ts";
 
-export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone" | "annual_pledge_renewal";
+export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone" | "pledge_renewal";
 
 // Fields are kept granular (rather than one concatenated "detail" string) so
 // the compact Coming Up row can give each piece of information -- donor,
@@ -260,28 +260,34 @@ export function buildPaymentPlanMilestoneEvents(
   return events.sort((a, b) => a.donorName.localeCompare(b.donorName));
 }
 
-export type AnnualRenewalReminderRow = {
+export type PledgeRenewalReminderRow = {
   donorId: string;
   planId: string;
   pledgeActivityId: string;
   originalPledgeDate: number;
+  commitmentDurationMonths: number;
   originalPledgeAmountCents: number;
   balanceCents: number;
   campaign: string | null;
-  anniversaryDate: number;
+  renewalDate: number;
   fiveDayReminderDate: number;
 };
 
-// Annual pledge-renewal reminders (2026-10-08, extended 2026-10-08 to
-// appear in Coming Up before their trigger date -- see docs/AI-HANDOFF.md).
+// Pledge renewal reminders (2026-10-08, extended 2026-10-08 to appear in
+// Coming Up before their trigger date; corrected 2026-10-08 to require a
+// verified COMMITMENT DURATION rather than assuming every commitment
+// lasts 12 months -- see docs/AI-HANDOFF.md). "Annual" was dropped from
+// every name/label here (type, id prefix, phrase text) once duration
+// became a real, variable, fundraiser-verified fact -- a 6-month or
+// 18-month commitment is never "annual."
 //
 // UNLIKE buildPaymentPlanMilestoneEvents above (which has no lead window
 // at all -- a milestone is only ever constructed on its exact firing
 // day), this builder follows the SAME lead-window pattern
 // buildYahrtzeitRelationshipDateEvents/buildImportantDateRelationshipEvents
 // use: each row carries BOTH of the plan's fixed stage dates
-// (fiveDayReminderDate, anniversaryDate -- both already computed once by
-// lib/relationships/pledge-payment-plan.ts's evaluateAnnualRenewal, never
+// (fiveDayReminderDate, renewalDate -- both already computed once by
+// lib/relationships/pledge-payment-plan.ts's evaluatePledgeRenewal, never
 // re-derived here), and this function independently checks each stage's
 // own date against `daysUntil(...) <= RELATIONSHIP_DATE_LEAD_WINDOW_DAYS`
 // (and not already in the past), emitting 0, 1, or 2 events per row
@@ -292,35 +298,36 @@ export type AnnualRenewalReminderRow = {
 // days away gets its own real future `dateEpoch`, so it lands in
 // "upcoming" (Coming Up) instead -- never both, since a WorkspaceRelationshipDateEvent
 // can only belong to one of the two partitioned lists its own dateEpoch
-// determines. The two stages' ids (`:approaching`/`:anniversary`) never
+// determines. The two stages' ids (`:approaching`/`:renewal`) never
 // collide, so both can legitimately appear at once (e.g. "approaching"
-// in Today while "anniversary" is still a few days out in Coming Up) --
-// that is two distinct real events about the same plan, not a duplicate
-// of one event.
+// in Today while "renewal" is still a few days out in Coming Up) -- that
+// is two distinct real events about the same plan, not a duplicate of
+// one event.
 //
-// `dateLabel` is always the anniversary date (the renewal date itself --
-// what the fundraiser is preparing for or acting on), for BOTH stages,
-// matching buildPaymentPlanMilestoneEvents' own precedent of showing the
-// target date being counted down to rather than the reminder's own
-// firing date, with "approaching" vs. "opportunity" distinguished by
+// `dateLabel` is always the renewal date itself -- what the fundraiser
+// is preparing for or acting on -- for BOTH stages, matching
+// buildPaymentPlanMilestoneEvents' own precedent of showing the target
+// date being counted down to rather than the reminder's own firing date,
+// with "approaching" vs. "opportunity" distinguished by
 // `relationshipPhrase` alone. `dateEpoch` is the one place the two
 // stages actually differ, since it alone drives windowing/bucketing/sort
 // order, never what's rendered.
 //
 // `relationshipPhrase` carries the exact required title text verbatim
-// ("Annual pledge renewal approaching" / "Annual pledge renewal
-// opportunity") -- both titles ARE the suggested fundraising action
-// (prepare vs. contact the donor), matching how every other event type
-// in this file folds its action into the phrase rather than a separate
-// field. `secondaryDateLabel` packs the original pledge amount, campaign
-// (when known), and current outstanding balance into one line -- the
-// same compact-row convention buildPaymentPlanMilestoneEvents already
-// uses for balance alone. Relevant newer pledges are deliberately NOT
-// included here -- that context is per-donor and best shown with full
-// giving-history context on the donor page itself (app/donors/[id]/
-// page.tsx), not crammed into this one-line compact row.
-export function buildAnnualRenewalReminderEvents(
-  rows: AnnualRenewalReminderRow[],
+// ("Pledge renewal approaching" / "Pledge renewal opportunity") -- both
+// titles ARE the suggested fundraising action (prepare vs. contact the
+// donor), matching how every other event type in this file folds its
+// action into the phrase rather than a separate field.
+// `secondaryDateLabel` packs the original pledge amount, campaign (when
+// known), verified commitment duration, and current outstanding balance
+// into one line -- the same compact-row convention
+// buildPaymentPlanMilestoneEvents already uses for balance alone.
+// Relevant newer pledges are deliberately NOT included here -- that
+// context is per-donor and best shown with full giving-history context
+// on the donor page itself (app/donors/[id]/page.tsx), not crammed into
+// this one-line compact row.
+export function buildPledgeRenewalReminderEvents(
+  rows: PledgeRenewalReminderRow[],
   identityByDonor: Map<string, DonorIdentityForEvent>,
   timezone: string,
   now: number,
@@ -331,28 +338,28 @@ export function buildAnnualRenewalReminderEvents(
     const identity = identityByDonor.get(row.donorId);
     if (!identity) continue;
     const campaignLabel = row.campaign ? ` (${row.campaign})` : "";
-    const secondaryDateLabel = `${money(row.originalPledgeAmountCents)} pledged${campaignLabel} · ${money(row.balanceCents)} balance remaining`;
-    const anniversaryLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.anniversaryDate * 1000));
-    const stages: Array<{ stage: "approaching" | "anniversary"; date: number; phrase: string }> = [
-      { stage: "approaching", date: row.fiveDayReminderDate, phrase: "Annual pledge renewal approaching" },
-      { stage: "anniversary", date: row.anniversaryDate, phrase: "Annual pledge renewal opportunity" },
+    const secondaryDateLabel = `${money(row.originalPledgeAmountCents)} pledged${campaignLabel} · ${row.commitmentDurationMonths}-month commitment · ${money(row.balanceCents)} balance remaining`;
+    const renewalLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.renewalDate * 1000));
+    const stages: Array<{ stage: "approaching" | "renewal"; date: number; phrase: string }> = [
+      { stage: "approaching", date: row.fiveDayReminderDate, phrase: "Pledge renewal approaching" },
+      { stage: "renewal", date: row.renewalDate, phrase: "Pledge renewal opportunity" },
     ];
     for (const { stage, date, phrase } of stages) {
       if (date < todayEpoch) continue;
       if (daysUntil(date, todayEpoch) > RELATIONSHIP_DATE_LEAD_WINDOW_DAYS) continue;
       events.push({
-        id: `annual-pledge-renewal:${row.planId}:${stage}`,
-        type: "annual_pledge_renewal",
+        id: `pledge-renewal:${row.planId}:${stage}`,
+        type: "pledge_renewal",
         donorId: row.donorId,
         donorName: identity.donorName,
         initials: identity.initials,
         donorCode: identity.donorCode,
-        label: "Annual renewal",
+        label: "Pledge renewal",
         relationshipPhrase: phrase,
         secondaryDateLabel,
         provenanceName: null,
         provenanceNameHebrew: null,
-        dateLabel: anniversaryLabel,
+        dateLabel: renewalLabel,
         dateEpoch: date,
         ambiguous: false,
       });

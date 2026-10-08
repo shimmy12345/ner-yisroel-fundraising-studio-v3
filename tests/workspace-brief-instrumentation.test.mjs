@@ -83,16 +83,18 @@ for (const start of phaseCallStarts) {
 // current donor_relationship_facts rows, batched in one query exactly
 // like every other per-donor child table here, feeding fact-level
 // recommendation actionability), plus one more legitimate new query added
-// by Annual Renewal Reminders (2026-10-08 -- active plans WITH a
-// fundraiser-verified original_pledge_date, feeding
-// evaluateAnnualRenewal; a deliberately separate query from the payment-
+// by Pledge Renewal Reminders (2026-10-08, corrected 2026-10-08 to also
+// require a fundraiser-verified commitment_duration_months -- active
+// plans WITH BOTH a fundraiser-verified original_pledge_date AND a
+// fundraiser-verified commitment_duration_months, feeding
+// evaluatePledgeRenewal; a deliberately separate query from the payment-
 // plans one above, never routed through it, so a donor with multiple
 // simultaneously active plans gets every eligible one evaluated, not just
 // their one "primary" pledge -- see docs/AI-HANDOFF.md), mirroring
 // donor_page_render's own "21 before, 24 after the Ask, Payment Plan, and
 // Stage 2 features' three real new queries" comment in tests/today.test.mjs.
 const d1CallSites = (liveData.match(/env\.DB\.prepare\(/g) ?? []).length;
-assert.equal(d1CallSites, 20, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query, the one legitimate payment-plans query, the one legitimate relationship-facts query, and the one legitimate annual-renewal query -- instrumentation itself must never add a query");
+assert.equal(d1CallSites, 20, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query, the one legitimate payment-plans query, the one legitimate relationship-facts query, and the one legitimate pledge-renewal query -- instrumentation itself must never add a query");
 
 // 8. Candidate-set sizes are derived from existing in-memory results, not
 // freshly computed/queried: the logged fields must reference the same Map

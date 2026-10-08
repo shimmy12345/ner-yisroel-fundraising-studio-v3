@@ -52,3 +52,36 @@ export function validateOriginalPledgeDate(value: string | null | undefined, now
   if (parsed > localDateOnlyEpoch(now, timezone)) return { ok: false, reason: "Original pledge date cannot be in the future" };
   return { ok: true, originalPledgeDate: parsed };
 }
+
+export type CommitmentDurationValidation = { ok: true; commitmentDurationMonths: number | null } | { ok: false; reason: string };
+
+// Minimum 1 month (zero/negative is never a real commitment length);
+// maximum 120 months (10 years) -- a documented, generous upper bound
+// chosen only to catch fat-finger entry errors (e.g. "1200" typed for
+// "12"), never a real product constraint on how long a commitment can
+// run. Exported so the UI's own client-side bound (if any) and tests
+// both reference the SAME single source, never a duplicated magic number.
+export const MIN_COMMITMENT_DURATION_MONTHS = 1;
+export const MAX_COMMITMENT_DURATION_MONTHS = 120;
+
+// Pledge Renewal Reminders, commitment-duration correction (2026-10-08,
+// see docs/AI-HANDOFF.md). Same `undefined`/`null` = "not yet verified"
+// convention as validateOriginalPledgeDate above, same create/edit
+// caller contract (edit route gates on Object.hasOwn(body,
+// "commitmentDurationMonths") first). Accepts a plain whole number of
+// months ONLY -- never a string to parse, never a derived value -- the
+// UI's duration selector (6/12/18/24/Custom) always sends a number. Must
+// be a strictly positive integer (no fractional months -- "18.5 months"
+// is not a real commitment length and would make the calendar-month
+// renewal-date arithmetic ambiguous) within
+// [MIN_COMMITMENT_DURATION_MONTHS, MAX_COMMITMENT_DURATION_MONTHS].
+// Never inferred from installment count, payment frequency, final
+// expected payment date, campaign code, or balance -- this field is
+// populated ONLY from an explicit fundraiser entry, by product decision,
+// exactly like originalPledgeDate.
+export function validateCommitmentDurationMonths(value: number | null | undefined): CommitmentDurationValidation {
+  if (value === undefined || value === null) return { ok: true, commitmentDurationMonths: null };
+  if (typeof value !== "number" || !Number.isInteger(value)) return { ok: false, reason: "Commitment duration must be a whole number of months" };
+  if (value < MIN_COMMITMENT_DURATION_MONTHS || value > MAX_COMMITMENT_DURATION_MONTHS) return { ok: false, reason: `Commitment duration must be between ${MIN_COMMITMENT_DURATION_MONTHS} and ${MAX_COMMITMENT_DURATION_MONTHS} months` };
+  return { ok: true, commitmentDurationMonths: value };
+}

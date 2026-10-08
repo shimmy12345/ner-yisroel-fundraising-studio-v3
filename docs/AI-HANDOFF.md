@@ -25686,3 +25686,215 @@ against Independent Staging), not a live view -- if the fundraiser
 wants a refreshable, in-app version of this list (rather than a one-off
 CSV/Markdown export), that would be a separate, explicitly-scoped
 feature request, not something this task's read-only report implies.
+
+## Pledge Renewal Reminders -- Commitment Duration Correction (2026-10-08) -- IMPLEMENTED, TESTED, MIGRATED + DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED
+
+**The problem:** every prior round of this feature (see the "Annual
+Renewal Reminders" entries above) silently assumed every commitment
+lasts exactly 12 months -- the renewal date was always `originalPledgeDate
++ 12 calendar months`, with no way to represent a real 6-month or
+18-month or 24-month commitment. The user flagged this directly and gave
+an explicit product decision: a renewal reminder now requires BOTH a
+verified Original Pledge Date AND a verified Commitment Duration; if
+either is missing, no reminder fires -- never a default, never an
+inference from installment count, payment frequency, final expected
+payment date, campaign code, or balance.
+
+**Terminology renamed throughout** ("Annual" dropped everywhere it
+implied a fixed 12-month length, since a 6- or 18-month commitment is
+never "annual"): `evaluateAnnualRenewal` -> `evaluatePledgeRenewal`,
+`AnnualRenewalEvaluation` -> `PledgeRenewalEvaluation` (`anniversaryDate`
+-> `renewalDate`, `isAnniversaryReminder` -> `isRenewalDateReminder`),
+`buildAnnualRenewalReminderEvents` -> `buildPledgeRenewalReminderEvents`,
+`AnnualRenewalReminderRow`/`AnnualRenewalPlanRow` ->
+`PledgeRenewalReminderRow`/`PledgeRenewalPlanRow`, event type
+`"annual_pledge_renewal"` -> `"pledge_renewal"`, event id prefix
+`annual-pledge-renewal:` -> `pledge-renewal:`, stage suffix `:anniversary`
+-> `:renewal`, titles "Annual pledge renewal approaching"/"opportunity"
+-> "Pledge renewal approaching"/"opportunity" (exact required text).
+Purely a rename/signature change -- no behavior outside the duration
+correction itself changed.
+
+### Schema / migration
+
+Migration `drizzle/0040_pledge_payment_plans_commitment_duration_months.sql`:
+**APPLIED** to `fundraising-os-staging-db` (Independent Staging) on
+2026-10-08. Single statement, additive, no DEFAULT:
+```sql
+ALTER TABLE `pledge_payment_plans` ADD COLUMN `commitment_duration_months` integer;
+```
+Nullable integer column on `pledge_payment_plans`, alongside
+`original_pledge_date` (migration 0039) -- same category of fundraiser-
+declared stewardship metadata, never derived from this row's own
+collection-schedule fields. Pre-migration baseline captured and
+verified: 45 rows; 8 rows already had a fundraiser-verified
+`original_pledge_date` (real usage since the prior round's deploy -- not
+populated by this session). Post-migration verification: 45 rows
+preserved exactly, `COUNT(*) WHERE commitment_duration_months IS NOT
+NULL` = 0 (every row NULL, as intended), and all 8 existing
+`original_pledge_date` rows' values (`original_pledge_date`,
+`installment_amount_cents`, `next_expected_payment_at`,
+`final_expected_payment_at`, `donor_id`) verified byte-identical before
+vs. after via a direct programmatic diff of the two snapshots. `db/
+schema.ts` updated in parallel. `production-baseline/` regenerated via
+`node scripts/generate-production-baseline.mjs --write` (purely local,
+zero D1/network access); `PRODUCTION_BASELINE_VERIFIED` sanity check
+bumped 40->41 migrations. **Production was never touched** -- every D1
+command in this round targeted `fundraising-os-staging-db` exclusively.
+
+Because renewal eligibility now requires BOTH fields, **every existing
+renewal reminder (including the 8 plans with a verified
+`original_pledge_date` from the prior round) is now inactive** until a
+fundraiser also verifies a commitment duration for that specific plan --
+this is the intended, product-approved behavior, not a bug. No real
+plan on Independent Staging currently has both fields verified, so no
+pledge-renewal reminder fires anywhere on staging as of this deploy.
+
+### Validation rules
+
+`lib/capture/pledge-payment-plan.ts`'s new `validateCommitmentDurationMonths(value)`:
+- Absent/`null` -> valid, resolves to `null` ("not yet verified").
+- Must be a strictly positive whole number (no fractional months --
+  `Number.isInteger` check) within `[MIN_COMMITMENT_DURATION_MONTHS,
+  MAX_COMMITMENT_DURATION_MONTHS]` = `[1, 120]` (documented, generous
+  10-year upper bound, chosen only to catch fat-finger entry like
+  "1200" for "12" -- never a real product constraint).
+- A string or any other non-number type is rejected -- the UI's
+  duration selector always sends a number, never a string to parse.
+
+Both routes gate on `Object.hasOwn(body, "commitmentDurationMonths")`,
+same present-sets/present-null-clears/absent-unchanged contract as
+`originalPledgeDate`. The create route always records it in
+`changedFields` (complete starting state); the edit route only records
+it when provided and changed. Both flow through the existing
+`pledge_payment_plan_changes` audit table.
+
+### UI
+
+`PledgePaymentPlanManagement.tsx`'s `PlanForm` gained a "Commitment
+duration -- optional, verified only" field: a `<select>` with "Not set"
++ the four presets (6/12/18/24 months) + "Custom…"; choosing "Custom…"
+reveals a `<input type="number" min={1} step={1}>` for any other
+verified whole-month length. Editing an existing plan whose stored
+duration isn't one of the four presets (e.g. a previously-entered custom
+9-month value) opens directly into the custom input showing that exact
+value, rather than silently snapping to the nearest preset. Clearable
+(select "Not set" to clear). The view-mode summary card now shows
+Original pledge date, Commitment (N months), and Renewal date --
+independently: a plan can have either field verified without the other,
+and the renewal date line only appears once BOTH are verified (server-
+derived via `evaluatePledgeRenewal`, never recomputed client-side). Help
+text updated to state the BOTH-fields requirement and explicitly warns
+that duration is not the collection schedule.
+
+### Renewal date calculation
+
+`evaluatePledgeRenewal(originalPledgeDate, commitmentDurationMonths,
+endedAt, now, timezone)` in `lib/relationships/pledge-payment-plan.ts`:
+eligible only when ALL THREE hold -- active plan, verified
+`originalPledgeDate`, verified `commitmentDurationMonths`. Computes the
+renewal date by calling the existing, already-tested
+`advanceOneCalendarMonth` exactly `commitmentDurationMonths` times
+(previously hardcoded to 12) -- same anti-drift/clamp mechanism as
+before, so the Feb 29/month-end-clamping convention is preserved
+unchanged for any duration. Verified against all four worked examples
+from the task (Nov 1, 2025 + 6/12/18/24 months -> May 1 2026 / Nov 1
+2026 / May 1 2027 / Nov 1 2027, all exact), a custom 9-month duration,
+Feb 29 leap-year clamping, Oct 31 + 6 months clamping to Apr 30 (not
+drifting into May), and DST boundaries. **Critical property, verified
+directly:** the renewal date depends ONLY on `originalPledgeDate +
+commitmentDurationMonths` -- `evaluatePledgeRenewal` never reads
+`installmentAmountCents`, `expectedDayOfMonth`, `nextExpectedPaymentAt`,
+or `finalExpectedPaymentAt` at all, so a 12-month commitment paid over
+18 months of installments still renews at 12 months, confirmed by a
+test asserting the renewal date never coincides with a deliberately
+different final expected payment date on the same fixture.
+
+### Reminders / Coming Up / eligibility / suppression -- all unchanged in substance
+
+The two-stage reminder shape (five-day-before "approaching" / day-of
+"opportunity"), the 14-day Coming Up lead window (from the prior Coming
+Up fix), the never-auto-suppress rule (newer pledge, different program,
+outstanding balance, fully-paid status all shown as context, never
+suppressing), the explicitly-ended-plan exclusion, the fully-paid-but-
+not-ended eligibility, the first-renewal-only (no perpetual recurrence)
+rule, and pledge-specific (not donor-wide) independence via the
+dedicated query bypassing `openPledgeByDonor` -- every one of these
+carries over unchanged, only now gated on the additional verified-
+duration requirement. `lib/workspace/live-data.ts`'s dedicated query
+WHERE clause changed from `original_pledge_date IS NOT NULL` to
+`original_pledge_date IS NOT NULL AND commitment_duration_months IS NOT
+NULL` (both required); the D1 call-site count stays at 20 (same query,
+one more selected column). `secondaryDateLabel` now also shows the
+verified duration ("$1,200.00 pledged (DIN2025) · 12-month commitment ·
+$300.00 balance remaining").
+
+### Testing
+
+Renamed `tests/pledge-payment-plan-annual-renewal.test.mjs` ->
+`tests/pledge-payment-plan-renewal.test.mjs` (via `git mv`, wired into
+`scripts/run-tests.mjs` under the new name) and rewrote it for the
+duration-aware logic, covering: missing original date / missing
+duration / both missing (all three not-eligible), explicitly ended plan,
+all four worked-example durations plus a custom duration, five-day/
+renewal-day boundaries re-verified, Feb 29 leap-year clamping, Oct 31 +
+6-month month-end clamping, DST transition, every
+`validateCommitmentDurationMonths` case (absent/null, each preset, a
+custom value, fractional rejection, zero/negative/over-max rejection,
+non-numeric rejection), multiple plans per donor with DIFFERENT
+durations (pledge-specific, independently evaluated), the 14-day Coming
+Up window boundary (14 days qualifies, 15 does not), no-retroactive-
+firing, Today/Coming-Up bucketing with zero duplicates, outstanding
+balance/fully-paid non-suppression, coexistence with the existing final-
+payment milestone logic, the commitment-vs-collection-schedule
+independence property, and route-wiring structural checks for both
+routes. 4 existing regression tests updated for the rename/new-migration
+consequences (`tests/production-baseline.test.mjs` -- new 0040 entry,
+41 migrations; `tests/workspace-brief-instrumentation.test.mjs` and
+`tests/relationship-snapshot-stage3.test.mjs` -- comment text only, D1
+call-site count unchanged at 20; `tests/pledge-payment-plan-layout.test.mjs`
+-- save-body regex grew by one field).
+
+**Results:** `pnpm run test` -> **164/164 passed**. `pnpm exec tsc
+--noEmit` -> clean. `pnpm exec eslint` on every changed file -> zero new
+errors on all pure-logic/route/test files; `PledgePaymentPlanManagement.tsx`
+went from 8 pre-existing `react/no-unescaped-entities` errors (old help
+text) to 6 (1 pre-existing-class `react-hooks/purity` + 5 on the
+rewritten help text) -- fewer total problems than baseline, confirmed
+via git-stash comparison, not a new regression; `app/donors/[id]/page.tsx`
+stayed at exactly 24 pre-existing `react-hooks/purity` errors, identical
+before and after (confirmed via git-stash diff). `node scripts/
+build-staging.mjs` -> Build complete.
+
+### Staging deployment + live verification
+
+Deployed via `pnpm run deploy:staging-independent`. Worker version
+**`e9431d32-48df-4d38-bc05-724b78603d81`**.
+
+Live-verified read-only against a real donor (Tzuriel Amster, one of
+the 8 plans with an existing verified Original Pledge Date): the compact
+view-mode card correctly shows "Original pledge date: May 6, 2026" with
+NO commitment/renewal line (since duration is still unverified);
+opening "Edit plan" shows the new "Commitment duration" selector with
+all 6 expected options (Not set, 6/12/18/24 months, Custom…) and the
+existing Original pledge date value intact; cancelled without saving --
+**no value was written to this or any real donor's record**. Today and
+the homepage both load cleanly post-deploy with real content and zero
+application console errors (only the same generic Chrome-extension
+messaging artifact seen in every prior round's verification, unrelated
+to the app).
+
+### Limitations / remaining decisions
+
+- No real plan currently has both a verified Original Pledge Date and a
+  verified Commitment Duration, so Pledge Renewal Reminders will not
+  actually fire for anyone until a fundraiser completes both fields on
+  a real plan. Intentional, not a bug -- this is the entire point of
+  the correction.
+- The 8 plans with a pre-existing verified Original Pledge Date now
+  need their Commitment Duration entered before they become eligible
+  again -- worth flagging to the fundraiser directly, since their
+  renewal reminders were silently active (and silently wrong, assuming
+  12 months) before this correction.
+- Still only the first renewal is computed, by design -- unchanged from
+  the prior round's scope decision.

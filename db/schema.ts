@@ -851,12 +851,24 @@ export const pledgePaymentPlans = sqliteTable("pledge_payment_plans", {
   // from giving_activities.activity_date (JL's own "Due Date," proven
   // unreliable as a pledge-origination date -- see docs/AI-HANDOFF.md's
   // 2026-10-08 "Annual Renewal Reminders" entries), first tracked
-  // payment, campaign year, or any other source. Powers the annual
-  // pledge-renewal reminder's first-anniversary calculation
-  // (lib/relationships/pledge-payment-plan.ts) -- a plan with this NULL
-  // is simply not eligible for that reminder, never treated as "today"
-  // or any other inferred value. Migration 0039.
+  // payment, campaign year, or any other source. Powers the pledge-
+  // renewal reminder's renewal-date calculation (lib/relationships/
+  // pledge-payment-plan.ts) together with commitmentDurationMonths below
+  // -- a plan with either NULL is simply not eligible for that reminder,
+  // never treated as "today"/12 months or any other inferred value.
+  // Migration 0039.
   originalPledgeDate: integer("original_pledge_date", { mode: "timestamp" }),
+  // Nullable, fundraiser-verified ONLY -- never inferred from installment
+  // count, payment frequency, finalExpectedPaymentAt, campaign code, or
+  // balance (see docs/AI-HANDOFF.md's 2026-10-08 "commitment duration"
+  // correction entry: the collection schedule and the commitment length
+  // are independent facts -- a 12-month commitment can be paid over 18
+  // months of installments). A whole number of months, validated by
+  // lib/capture/pledge-payment-plan.ts's validateCommitmentDurationMonths
+  // (range documented there). Required, together with originalPledgeDate
+  // above, for pledge-renewal reminder eligibility -- NEVER defaults to
+  // 12 months or any other value when NULL. Migration 0040.
+  commitmentDurationMonths: integer("commitment_duration_months"),
   note: text("note"),
   // NULL = active. Only ever set by an explicit fundraiser [End plan]
   // action -- NEVER automatically when the real JL balance reaches

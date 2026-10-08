@@ -14,6 +14,13 @@ const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "curren
 const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(epoch * 1000));
 const isoDate = (epoch: number) => new Date(epoch * 1000).toISOString().slice(0, 10);
 
+// Offered as convenient one-click choices in the duration selector below
+// -- never a restriction on what can be stored. "Custom" covers any other
+// verified whole-month length (validated server-side, see lib/capture/
+// pledge-payment-plan.ts's validateCommitmentDurationMonths for the
+// actual accepted range).
+const COMMITMENT_DURATION_PRESETS = [6, 12, 18, 24] as const;
+
 export type PledgePlanState = {
   planId: string;
   installmentAmountCents: number | null;
@@ -28,16 +35,23 @@ export type PledgePlanState = {
   isLate: boolean;
   isPlanEndedWithBalance: boolean;
   isCompleted: boolean;
-  // Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
+  // Pledge Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
   // -- optional, fundraiser-VERIFIED only; null until explicitly entered
-  // here, never inferred. anniversaryDate is the DERIVED first-12-month
-  // anniversary (lib/relationships/pledge-payment-plan.ts's
-  // evaluateAnnualRenewal, computed server-side) -- null whenever
-  // originalPledgeDate itself is null, never recomputed in this
+  // here, never inferred. commitmentDurationMonths (correction,
+  // 2026-10-08) is the length of the donor's COMMITMENT, never the
+  // payment-plan's own collection schedule -- also optional,
+  // fundraiser-VERIFIED only, never inferred from installment count/
+  // frequency or finalExpectedPaymentAt. BOTH are required (together)
+  // for renewal-reminder eligibility, but each is independently optional
+  // for simply saving the plan. renewalDate is the DERIVED renewal date
+  // (lib/relationships/pledge-payment-plan.ts's evaluatePledgeRenewal,
+  // computed server-side) -- null whenever EITHER originalPledgeDate or
+  // commitmentDurationMonths is null, never recomputed in this
   // component, the same "server derives, card only displays" discipline
   // isOnTrack/isLate/etc. above already follow.
   originalPledgeDate: number | null;
-  anniversaryDate: number | null;
+  commitmentDurationMonths: number | null;
+  renewalDate: number | null;
 };
 
 function parseDollarsToCents(value: string): number | null {
@@ -56,7 +70,7 @@ function parseDollarsToCents(value: string): number | null {
 // fundraiser enters.
 function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
   pledgeActivityId: string;
-  initial?: { installmentAmountCents: number | null; nextExpectedPaymentAt: number; finalExpectedPaymentAt: number; note: string | null; originalPledgeDate: number | null; planId: string };
+  initial?: { installmentAmountCents: number | null; nextExpectedPaymentAt: number; finalExpectedPaymentAt: number; note: string | null; originalPledgeDate: number | null; commitmentDurationMonths: number | null; planId: string };
   onCancel: () => void;
   onSaved: () => void;
 }) {
@@ -64,21 +78,45 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
   const [nextExpected, setNextExpected] = useState(initial ? isoDate(initial.nextExpectedPaymentAt) : "");
   const [finalExpected, setFinalExpected] = useState(initial ? isoDate(initial.finalExpectedPaymentAt) : "");
   const [note, setNote] = useState(initial?.note ?? "");
-  // Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
+  // Pledge Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
   // -- blank when absent (shows "not yet verified," never a guessed
   // date), same blank-means-unset convention installment/note already
   // use above. The fundraiser can clear a previously-entered date by
   // emptying this field -- an empty string is sent through as `null`
   // (see save() below), not omitted, so clearing genuinely clears it.
   const [originalPledgeDate, setOriginalPledgeDate] = useState(initial?.originalPledgeDate ? isoDate(initial.originalPledgeDate) : "");
+  // Commitment-duration correction (2026-10-08, see docs/AI-HANDOFF.md).
+  // `durationChoice` is "" (not set), a preset's own string value, or
+  // "custom"; `customDuration` only matters while durationChoice ===
+  // "custom". An initial value that isn't one of the presets (any
+  // fundraiser-verified custom length, including one entered as
+  // "custom" previously) opens directly into the custom text input
+  // rather than silently snapping to the nearest preset -- the stored
+  // value must never be reinterpreted.
+  const initialDurationIsPreset = initial?.commitmentDurationMonths != null && (COMMITMENT_DURATION_PRESETS as readonly number[]).includes(initial.commitmentDurationMonths);
+  const [durationChoice, setDurationChoice] = useState<string>(
+    initial?.commitmentDurationMonths == null ? "" : initialDurationIsPreset ? String(initial.commitmentDurationMonths) : "custom",
+  );
+  const [customDuration, setCustomDuration] = useState<string>(
+    initial?.commitmentDurationMonths != null && !initialDurationIsPreset ? String(initial.commitmentDurationMonths) : "",
+  );
   const [status, setStatus] = useState<"idle" | "saving" | "error">("idle");
   const [message, setMessage] = useState("");
+
+  function resolvedCommitmentDurationMonths(): number | null {
+    if (durationChoice === "") return null;
+    if (durationChoice === "custom") {
+      const parsed = Number.parseInt(customDuration, 10);
+      return customDuration.trim() && Number.isFinite(parsed) ? parsed : null;
+    }
+    return Number.parseInt(durationChoice, 10);
+  }
 
   async function save() {
     if (status === "saving" || !nextExpected || !finalExpected) return;
     setStatus("saving"); setMessage("");
     try {
-      const body = { installmentAmountCents: parseDollarsToCents(installment), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note.trim(), originalPledgeDate: originalPledgeDate || null };
+      const body = { installmentAmountCents: parseDollarsToCents(installment), nextExpectedPaymentAt: nextExpected, finalExpectedPaymentAt: finalExpected, note: note.trim(), originalPledgeDate: originalPledgeDate || null, commitmentDurationMonths: resolvedCommitmentDurationMonths() };
       const response = initial
         ? await fetch(`/api/pledge-payment-plans/${encodeURIComponent(initial.planId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
         : await fetch("/api/pledge-payment-plans", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pledgeActivityId, ...body }) });
@@ -99,9 +137,17 @@ function PlanForm({ pledgeActivityId, initial, onCancel, onSaved }: {
         <label>Next expected payment<input type="date" value={nextExpected} onChange={(event) => setNextExpected(event.target.value)} /></label>
         <label>Final expected payment<input type="date" value={finalExpected} onChange={(event) => setFinalExpected(event.target.value)} /></label>
         <label>Original pledge date <span>optional, verified only</span><input type="date" max={isoDate(Math.floor(Date.now() / 1000))} value={originalPledgeDate} onChange={(event) => setOriginalPledgeDate(event.target.value)} /></label>
+        <label>Commitment duration <span>optional, verified only</span>
+          <select value={durationChoice} onChange={(event) => setDurationChoice(event.target.value)}>
+            <option value="">Not set</option>
+            {COMMITMENT_DURATION_PRESETS.map((months) => <option key={months} value={String(months)}>{months} months</option>)}
+            <option value="custom">Custom…</option>
+          </select>
+        </label>
+        {durationChoice === "custom" && <label>Custom duration (months) <span>whole number</span><input type="number" inputMode="numeric" min={1} step={1} value={customDuration} onChange={(event) => setCustomDuration(event.target.value)} /></label>}
         <label>Note <span>optional</span><textarea value={note} maxLength={2000} onChange={(event) => setNote(event.target.value)} /></label>
       </div>
-      <p className="payment-plan-help">Only set the original pledge date if you've confirmed it -- it's never guessed from JL's own "Due Date," which doesn't reliably reflect when a pledge was actually made. Leave it blank if you're not sure. Setting it enables an annual renewal reminder 5 days before, and on, its 12-month anniversary.</p>
+      <p className="payment-plan-help">Only set the original pledge date and commitment duration if you've confirmed them -- neither is ever guessed (not from JL's own "Due Date," not from the installment count or collection schedule, which can run longer or shorter than the actual commitment). Leave either blank if you're not sure. A renewal reminder requires BOTH to be set -- 5 days before, and on, the renewal date (original pledge date + commitment duration).</p>
       <div className="payment-plan-actions">
         <button type="button" onClick={onCancel}>Cancel</button>
         <button type="button" disabled={status === "saving" || !nextExpected || !finalExpected} onClick={() => void save()}>{status === "saving" ? "Saving…" : "Save payment plan"}</button>
@@ -146,7 +192,7 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
     return <PlanForm pledgeActivityId={pledgeActivityId} onCancel={() => setMode("view")} onSaved={refresh} />;
   }
   if (mode === "edit" && plan) {
-    return <PlanForm pledgeActivityId={pledgeActivityId} initial={{ installmentAmountCents: plan.installmentAmountCents, nextExpectedPaymentAt: plan.nextExpectedPaymentAt ?? plan.finalExpectedPaymentAt, finalExpectedPaymentAt: plan.finalExpectedPaymentAt, note: plan.note, originalPledgeDate: plan.originalPledgeDate, planId: plan.planId }} onCancel={() => setMode("view")} onSaved={refresh} />;
+    return <PlanForm pledgeActivityId={pledgeActivityId} initial={{ installmentAmountCents: plan.installmentAmountCents, nextExpectedPaymentAt: plan.nextExpectedPaymentAt ?? plan.finalExpectedPaymentAt, finalExpectedPaymentAt: plan.finalExpectedPaymentAt, note: plan.note, originalPledgeDate: plan.originalPledgeDate, commitmentDurationMonths: plan.commitmentDurationMonths, planId: plan.planId }} onCancel={() => setMode("view")} onSaved={refresh} />;
   }
 
   if (!plan) {
@@ -160,10 +206,18 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
       {plan.nextExpectedPaymentAt !== null && !plan.isCompleted && <p>Next expected: {dateLabel(plan.nextExpectedPaymentAt)}</p>}
       <p>Final expected: {dateLabel(plan.finalExpectedPaymentAt)}</p>
       {plan.installmentAmountCents !== null && <p className="payment-plan-installment">Expected installment: {money(plan.installmentAmountCents)}</p>}
-      {/* Annual Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md)
-          -- only shown once verified; anniversaryDate is server-derived
-          (evaluateAnnualRenewal), never recomputed here. */}
-      {plan.originalPledgeDate !== null && <p className="payment-plan-original-pledge-date">Original pledge date: {dateLabel(plan.originalPledgeDate)}{plan.anniversaryDate !== null && <> · Renewal anniversary: {dateLabel(plan.anniversaryDate)}</>}</p>}
+      {/* Pledge Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md;
+          commitment-duration correction 2026-10-08) -- each shown once
+          verified, independently (a plan can have one verified without
+          the other); renewalDate is server-derived
+          (evaluatePledgeRenewal), never recomputed here, and only ever
+          non-null once BOTH fields are verified. */}
+      {(plan.originalPledgeDate !== null || plan.commitmentDurationMonths !== null) && <p className="payment-plan-original-pledge-date">
+        {plan.originalPledgeDate !== null && <>Original pledge date: {dateLabel(plan.originalPledgeDate)}</>}
+        {plan.originalPledgeDate !== null && plan.commitmentDurationMonths !== null && " · "}
+        {plan.commitmentDurationMonths !== null && <>Commitment: {plan.commitmentDurationMonths} months</>}
+        {plan.renewalDate !== null && <> · Renewal date: {dateLabel(plan.renewalDate)}</>}
+      </p>}
       {plan.isCompleted && <p className="payment-plan-note-inline">This plan appears complete — paid in full.</p>}
       {plan.isPlanEndedWithBalance && <p className="payment-plan-note-inline">The final expected date has passed with balance still open.</p>}
       <div className="payment-plan-actions">

@@ -1,0 +1,29 @@
+-- Pledge Renewal Reminders, commitment-duration correction (see
+-- docs/AI-HANDOFF.md's 2026-10-08 "commitment duration" entry): renewal
+-- eligibility previously assumed every commitment lasts exactly 12
+-- months. That assumption is wrong -- a donor's COMMITMENT length
+-- (e.g. 6/12/18/24 months) is an independent fact from their COLLECTION
+-- SCHEDULE (installment count/frequency/final expected payment date),
+-- which this app already stores separately. This migration adds the
+-- missing fact rather than continuing to assume it.
+--
+-- Nullable, no DEFAULT -- every existing row (including the handful that
+-- already have a verified original_pledge_date from migration 0039) gets
+-- NULL automatically. Because pledge-renewal eligibility now requires
+-- BOTH original_pledge_date AND commitment_duration_months to be
+-- non-null, every existing renewal reminder (including any that would
+-- otherwise have fired under the old 12-months-assumed logic) becomes
+-- inactive immediately upon this migration, until a fundraiser
+-- explicitly verifies a duration for that specific plan. This is the
+-- intended, product-approved behavior -- not a bug to work around.
+--
+-- Deliberately a column on pledge_payment_plans, alongside
+-- original_pledge_date and next_expected_payment_at/
+-- final_expected_payment_at -- the same category of fundraiser-declared
+-- stewardship metadata already on this row (migration 0033/0039's own
+-- doc comments), never a rewrite or duplicate of JL/giving_activities
+-- data, and never derived from this row's own collection-schedule
+-- fields (installment_amount_cents, expected_day_of_month,
+-- next_expected_payment_at, final_expected_payment_at), which this
+-- migration does not read, touch, or depend on in any way.
+ALTER TABLE `pledge_payment_plans` ADD COLUMN `commitment_duration_months` integer;
