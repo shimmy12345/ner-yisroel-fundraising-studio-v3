@@ -226,6 +226,61 @@ test('planD1Restore accepts a real INSERT for pledge_payment_plan_reviews, order
   assert.ok(usersAt < reviewsAt && givingActivitiesAt < reviewsAt, 'users and giving_activities must both precede pledge_payment_plan_reviews in the reordered output');
 });
 
+// Manual Pledge Balance Corrections (migration 0042 on feature/
+// independent-cloudflare-sandbox, ported here 2026-10-09 as part of the
+// "Production Readiness" round) -- a controlled, auditable exception
+// mechanism recording a manually-corrected pledge balance alongside the
+// original imported figure, never overwriting giving_activities.
+// balance_cents itself. `pledge_balance_corrections` references `users`,
+// `donors`, AND `giving_activities` -- all three real foreign keys,
+// confirmed directly from migration 0042's own CREATE TABLE statement,
+// not inferred from names. Another direct, named regression for the
+// exact drift class the generic restore/schema drift guard
+// (scripts/check-main-restore-sync.mjs) was built to catch -- this sync
+// could not be handled by the automated prepare-sync job (it refuses any
+// migration introducing a new table) and was prepared by hand, following
+// the same narrow pattern as the pledge_payment_plan_reviews sync
+// immediately above.
+test('pledge_balance_corrections is present in D1_RESTORE_DATA_ORDER, positioned after "users", "donors", AND "giving_activities" (all three real foreign key targets)', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const donorsIndex = D1_RESTORE_DATA_ORDER.indexOf('donors');
+  const givingActivitiesIndex = D1_RESTORE_DATA_ORDER.indexOf('giving_activities');
+  const correctionsIndex = D1_RESTORE_DATA_ORDER.indexOf('pledge_balance_corrections');
+  assert.ok(correctionsIndex >= 0, 'pledge_balance_corrections must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(usersIndex >= 0 && correctionsIndex > usersIndex, 'pledge_balance_corrections must be inserted after users (its user_id references users.id)');
+  assert.ok(donorsIndex >= 0 && correctionsIndex > donorsIndex, 'pledge_balance_corrections must be inserted after donors (its donor_id references donors.id)');
+  assert.ok(givingActivitiesIndex >= 0 && correctionsIndex > givingActivitiesIndex, 'pledge_balance_corrections must be inserted after giving_activities (its pledge_activity_id references giving_activities.id)');
+});
+
+test('planD1Restore accepts a real INSERT for pledge_balance_corrections, ordering it after all three of its real foreign key targets', () => {
+  const exported = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE `pledge_balance_corrections` (`id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `corrected_balance_cents` integer NOT NULL);',
+    'CREATE TABLE `giving_activities` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL);',
+    'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL);',
+    'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);',
+    // Deliberately exported in the "wrong" (pre-dependency-order)
+    // sequence, matching how `wrangler d1 export` actually orders real
+    // tables (by sqlite_master position, not by FK dependency).
+    'INSERT INTO "pledge_balance_corrections" ("id","user_id","donor_id","pledge_activity_id","corrected_balance_cents") VALUES(\'correction-1\',\'user-1\',\'donor-1\',\'pledge-1\',0);',
+    'INSERT INTO "giving_activities" ("id","owner_user_id") VALUES(\'pledge-1\',\'user-1\');',
+    'INSERT INTO "donors" ("id") VALUES(\'donor-1\');',
+    'INSERT INTO "users" ("id") VALUES(\'user-1\');',
+  ].join('\n') + '\n';
+  assert.doesNotThrow(() => planD1Restore(exported), 'planD1Restore must accept an INSERT for pledge_balance_corrections, not reject it as an unrecognized table');
+  const plan = planD1Restore(exported);
+  const tableOrder = plan.steps.map((step) => step.table);
+  assert.ok(tableOrder.indexOf('users') < tableOrder.indexOf('pledge_balance_corrections'), 'users must be restored before pledge_balance_corrections');
+  assert.ok(tableOrder.indexOf('donors') < tableOrder.indexOf('pledge_balance_corrections'), 'donors must be restored before pledge_balance_corrections');
+  assert.ok(tableOrder.indexOf('giving_activities') < tableOrder.indexOf('pledge_balance_corrections'), 'giving_activities must be restored before pledge_balance_corrections');
+  const reordered = reorderD1ExportForRestore(exported);
+  const usersAt = reordered.indexOf('INSERT INTO "users"');
+  const donorsAt = reordered.indexOf('INSERT INTO "donors"');
+  const givingActivitiesAt = reordered.indexOf('INSERT INTO "giving_activities"');
+  const correctionsAt = reordered.indexOf('INSERT INTO "pledge_balance_corrections"');
+  assert.ok(usersAt < correctionsAt && donorsAt < correctionsAt && givingActivitiesAt < correctionsAt, 'users, donors, and giving_activities must all precede pledge_balance_corrections in the reordered output');
+});
+
 // Bidirectional coverage, mirroring
 // feature/independent-cloudflare-sandbox's own tests/staging-reset.test.mjs
 // ("the reset table order covers every fundraising-data table and nothing
