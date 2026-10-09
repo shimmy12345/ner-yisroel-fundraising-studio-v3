@@ -27794,7 +27794,9 @@ was never touched.
 - Pledge activity id: **`b16a6e94-b643-4046-a176-31a7fb03ab44`**.
 - Committed: **$5,000.00**. Paid: **$4,790.00**. Currently displayed outstanding balance: **$210.00**. Category `partially_paid_pledge`, campaign `DIN2023`.
 - **No payment plan exists** for this pledge (confirmed directly: `SELECT ... FROM pledge_payment_plans WHERE pledge_activity_id = '...'` returns zero rows) -- so there is no `evaluatePaymentPlan`-driven warning to clear beyond the raw balance display itself.
-- A second, unrelated real pledge of his (`DIN2025`, $300,000/$275,000 paid/$25,000 balance, confirmed separately) exists and must stay (and in the isolated test, did stay) completely untouched by correcting only the DIN2023 one.
+- A second, unrelated real pledge of his (`DIN2025`, **$3,000.00/$2,750.00 paid/$250.00 balance** [^din2025-correction], WITH an active payment plan, confirmed separately) exists and must stay (and in the isolated test, did stay) completely untouched by correcting only the DIN2023 one.
+
+[^din2025-correction]: **CORRECTED 2026-10-09** (independent review): this entry originally stated "$300,000/$275,000 paid/$25,000 balance" -- a documentation-only arithmetic error (cents divided by 10, not 100) in this prose alone. The stored cents values (300000/275000/25000) and every test's own assertions were always correct; FOS always correctly displayed $250.00. See the "DIN2025 Discrepancy Investigation" entry below for the full re-verification.
 - Consumer surfaces for his balance: the donor page (query #1), Today/Daily Agenda/recommendation evidence (query #2, though he has no open-pledge-driven recommendation currently active), the pledge cleanup-review queue (query #6, though his pledge is below that queue's own age/category thresholds in practice), and Portfolio Focus (query #4).
 
 **The real correction was NOT applied** -- `pledge_balance_corrections` remains at 0 rows in Independent Staging as of this report. A live, read-only verification confirmed the "Correct Balance" button renders correctly on his real DIN2023 card, pre-filled with the correct real figures ($5,000 / $210 / $210), and was closed via Cancel without submitting -- re-confirmed via a direct D1 query (0 rows) immediately after.
@@ -27831,3 +27833,123 @@ rebuilt, redeployed, and re-verified live as clean.
 
 No Production deployment occurred at any point in this round. Stopping
 here for independent review.
+
+## DIN2025 Discrepancy Investigation + Independent Review of Manual Pledge Balance Corrections (2026-10-09) -- INVESTIGATION + TEST-ONLY, NO APPLICATION CODE CHANGED, NO DEPLOYMENT
+
+Confirmed before starting: `docs/AI-HANDOFF.md` and
+`docs/FUNDRAISING_OS_PRINCIPLES.md` re-read; commit `ae86956` (Manual
+Pledge Balance Corrections) reviewed. The user independently reviewed
+the feature and flagged that the prior entry's DIN2025 figures
+("$300,000/$275,000 paid/$25,000 balance") did not match what FOS
+actually displays ($250 outstanding).
+
+### Task 1 -- DIN2025 discrepancy, root-caused
+
+Fresh, read-only re-query against Independent Staging:
+```sql
+SELECT id, donor_id, committed_cents, paid_cents, balance_cents, category, source_campaign, activity_date
+FROM giving_activities WHERE donor_id = '843cf7e9-a559-4bd4-82b5-4e2057255583' AND source_campaign IN ('DIN2023','DIN2025');
+```
+- **DIN2025 pledge activity id: `11bc5aef-d327-47cc-9726-1649a4ea015e`.**
+- **Imported `committed_cents`: 300000 ($3,000.00). Imported `paid_cents`: 275000 ($2,750.00). Imported `balance_cents`: 25000 ($250.00).**
+- **Effective balance (via the same `COALESCE(pbc.corrected_balance_cents, balance_cents)` query every consumer uses): $250.00** -- identical to the imported value, since zero correction rows exist for this pledge (confirmed: `pledge_balance_corrections` has 0 rows total in Independent Staging, for ANY pledge).
+- **Payment plan: active**, id `ae64934c-d280-4a1d-afbb-cba2be7bc48d`, `ended_at` NULL, `installment_amount_cents` 25000 ($250/month), `original_pledge_date` set, `commitment_duration_months` 12, no renewal acknowledgment. Confirms the user's stated fact directly.
+- A targeted search (`source_campaign LIKE '%2025%'` for this donor) confirms **exactly one** DIN2025 row exists -- ruling out a duplicate/alternate pledge record as the cause.
+
+**Root cause: a documentation-only arithmetic error in the PRIOR round's
+own AI-HANDOFF.md prose (and, consequently, that round's final chat
+summary) -- `25000` cents was written out as `$25,000` instead of
+`$250.00` (effectively dividing by 10 instead of 100), in exactly one
+sentence, for all three figures it quoted (committed/paid/balance).**
+This was **never** a stored-data problem, a stale-data problem, a
+different-pledge-record problem, or an application code/display defect:
+
+- The real stored cents values were always correct (300000/275000/25000).
+- Every consumer query's own `money()`-style formatting (`cents / 100`,
+  confirmed in the donor page, `PledgeBalanceCorrection.tsx`, and every
+  other display site touched by last round's work) was always correct.
+- The automated test fixtures written last round (`tests/pledge-
+  balance-correction-e2e.test.mjs`'s own Part 6 test) already used the
+  CORRECT cents values (300000/275000/25000) and asserted the CORRECT
+  $250 figure throughout -- the tests, and the application, were never
+  wrong. Only the prose describing them was.
+
+Fixed in place above (the "Shlomo Kutoff (57932) / DIN2023" entry now
+carries a footnote correction rather than silently rewriting history).
+
+### Task 2 -- DIN2023 correction feature, independently re-verified
+
+Every requirement the user listed was already covered by last round's
+own test suite and/or is a direct, structural consequence of the
+architecture (see the "Manual Pledge Balance Corrections" entry above
+for the full design); re-confirmed here against the EXACT real
+two-pledge shape (DIN2023 $210/no plan, DIN2025 $250/active plan) via a
+new dedicated test (Task 3):
+
+- Scoped to the exact pledge activity id only (`pledge_activity_id`,
+  never a donor-wide write) -- structural, enforced by every write
+  statement's own `WHERE`.
+- Never modifies DIN2025's row, nor its payment plan (byte-for-byte
+  `deepEqual` before/after in the new test).
+- Never creates a `jl_payment_assignment_audits` row (no fictitious
+  payment) -- re-confirmed.
+- Never changes `committed_cents`/`paid_cents` on EITHER pledge (no
+  inflated fundraising revenue) -- re-confirmed.
+- Preserves the original imported JL values (`giving_activities.
+  balance_cents` itself is never written to by this feature).
+- Updates every effective-balance consumer consistently (same COALESCE
+  rule at all 7 sites, from last round's architecture).
+- Full audit history (append-only `pledge_balance_corrections` rows)
+  and reversibility (re-confirmed).
+- Survives a later JL re-import (re-confirmed last round, unaffected by
+  this round's findings).
+
+### Task 3 -- new controlled test
+
+New test in `tests/pledge-balance-correction-e2e.test.mjs`:
+**"independent-review verification: correcting DIN2023 to $0 leaves
+DIN2025's $250 balance AND its payment plan completely untouched, and
+donor-level combined totals reflect exactly the expected change"** --
+seeds the exact real shape (DIN2023 $210 imported/no plan; DIN2025
+$250 imported/active plan, mirroring the real plan's own id), corrects
+DIN2023 to $0, then asserts:
+- DIN2025's effective balance is still exactly $250.00.
+- DIN2025's payment plan row is `deepEqual` before/after (not merely
+  "still exists" -- every field, including `ended_at`, is identical).
+- DIN2025's own real `evaluatePaymentPlan` result is identical whether
+  computed before or after the DIN2023 correction.
+- A donor-level combined outstanding-balance total (mirroring the donor
+  page's own `SUM(MAX(effective_balance, 0))` KPI calculation) goes
+  from $210 + $250 = **$460** before the correction to $0 + $250 =
+  **$250** after -- a drop of exactly $210, never more or less.
+- Zero correction rows ever exist against DIN2025.
+
+Also re-confirmed directly: `25000` cents reads out as `$250.00` in
+this same test (the exact sanity check that would have caught the
+prior round's documentation typo, had it been a code value instead of
+prose).
+
+### Test results
+
+**173/173 test files pass** (`pnpm test`, including the one new test
+above -- the balance-correction e2e file is now 24 tests). `pnpm exec
+tsc --noEmit`: clean. `pnpm run build`: succeeded.
+
+### Code changes / deployment
+
+**No application code was changed this round** -- the investigation
+found no code defect, only a prose error in prior documentation. Only
+`tests/pledge-balance-correction-e2e.test.mjs` (one new test, plus a
+corrected header comment) and this `docs/AI-HANDOFF.md` entry (plus the
+footnote correction above) changed. **No Independent Staging deployment
+was performed** -- none was needed, since no application code changed.
+
+### Real data status (unchanged)
+
+`pledge_balance_corrections` remains at 0 rows in Independent Staging.
+Neither Kutoff's DIN2023 nor DIN2025 pledge, nor DIN2025's payment
+plan, was modified at any point in this round -- every query this round
+issued was a plain `SELECT`.
+
+No Production deployment occurred. Stopping here for independent
+review before any actual financial correction is applied.

@@ -25,6 +25,20 @@ import { evaluatePaymentPlan, evaluatePledgeRenewal } from "../lib/relationships
 // id b16a6e94-b643-4046-a176-31a7fb03ab44, no payment plan) as the
 // fixture data for THIS isolated database only -- never a write to the
 // real D1 row, which this file never connects to at all.
+//
+// CORRECTION (2026-10-09, independent review of this entry): an earlier
+// AI-HANDOFF.md write-up stated Kutoff's second, unrelated real pledge
+// (DIN2025) as "$300,000/$275,000 paid/$25,000 balance" -- that was a
+// PROSE/DOCUMENTATION error only (cents divided by 10, not 100); this
+// file's own fixture values (300000/275000/25000 CENTS = $3,000.00/
+// $2,750.00/$250.00) were always correct, re-confirmed read-only against
+// Independent Staging on 2026-10-09: pledge activity id
+// 11bc5aef-d327-47cc-9726-1649a4ea015e, committed $3,000.00, paid
+// $2,750.00, balance $250.00, WITH an active payment plan (id
+// ae64934c-d280-4a1d-afbb-cba2be7bc48d). See the dedicated
+// "independent-review verification" test below for the exact two-pledge
+// scenario (DIN2023 corrected to $0 with no plan; DIN2025 untouched at
+// $250 with its plan intact) this correction prompted.
 
 const root = path.resolve(import.meta.dirname, "..");
 const migrationDirectory = path.join(root, "drizzle");
@@ -577,4 +591,89 @@ test("Part 6: Shlomo Kutoff / DIN2023 -- correcting the effective balance to $0 
   const reversal = attemptReverse(db, { correctionId: result.id, reversalReason: "Verification test -- reverted" });
   assert.ok(reversal.reversedAt);
   assert.equal(queryEffectiveBalance(db, "kutoff-din2023").balance_cents, 21000, "reversing must restore the exact original displayed balance");
+});
+
+// ================================================================
+// Independent-review verification (2026-10-09, see docs/AI-HANDOFF.md):
+// the exact real two-pledge scenario -- DIN2023 ($210 imported, no
+// payment plan, corrected to $0) and DIN2025 ($250 imported, WITH an
+// active payment plan, correct as-is and must remain unchanged).
+// Confirms the earlier "$25,000" figure was a documentation-only typo
+// (cents/10 instead of cents/100), never a stored-data or application
+// bug -- re-verified here against the real, correctly-stored cents
+// value (25000 cents = $250.00).
+// ================================================================
+
+test("independent-review verification: correcting DIN2023 to $0 leaves DIN2025's $250 balance AND its payment plan completely untouched, and donor-level combined totals reflect exactly the expected change", () => {
+  const db = freshDatabase();
+  seedUser(db, "u1");
+  seedDonor(db, { id: "kutoff-donor-2", displayName: "Rabbi & Mrs. Shlomo Kutoff", donorCode: "57932" });
+
+  // DIN2023: real confirmed figures, no payment plan.
+  seedPledge(db, { id: "kutoff2-din2023", donorId: "kutoff-donor-2", committedCents: 500000, paidCents: 479000, balanceCents: 21000, category: "partially_paid_pledge", sourceCampaign: "DIN2023" });
+
+  // DIN2025: real confirmed figures (committed $3,000.00, paid
+  // $2,750.00, balance $250.00 -- i.e. 25000 CENTS, not $25,000), WITH
+  // an active payment plan, exactly matching the real Independent
+  // Staging row (pledge id 11bc5aef-d327-47cc-9726-1649a4ea015e, plan id
+  // ae64934c-d280-4a1d-afbb-cba2be7bc48d) confirmed read-only this round.
+  seedPledge(db, { id: "kutoff2-din2025", donorId: "kutoff-donor-2", committedCents: 300000, paidCents: 275000, balanceCents: 25000, category: "partially_paid_pledge", sourceCampaign: "DIN2025" });
+  seedPlan(db, { id: "kutoff2-din2025-plan", donorId: "kutoff-donor-2", pledgeActivityId: "kutoff2-din2025", originalPledgeDate: utcMidnight(2025, 11, 18), commitmentDurationMonths: 12 });
+
+  // Sanity check: DIN2025's balance, read directly, is $250.00 -- never
+  // $25,000.00. This is the exact figure an independent reviewer sees
+  // live in FOS.
+  assert.equal(queryEffectiveBalance(db, "kutoff2-din2025").balance_cents, 25000, "25000 cents is $250.00, not $25,000 -- confirms the earlier figure was a documentation-only error");
+
+  const planBefore = db.prepare("SELECT * FROM pledge_payment_plans WHERE id = 'kutoff2-din2025-plan'").get();
+  const totalBefore = db.prepare(`SELECT SUM(MAX(COALESCE(pbc.corrected_balance_cents, ga.balance_cents), 0)) AS total
+    FROM giving_activities ga LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
+    WHERE ga.donor_id = 'kutoff-donor-2'`).get().total;
+  assert.equal(totalBefore, 21000 + 25000, "donor-level combined outstanding total before correction: $210 + $250 = $460");
+
+  const result = attemptCorrect(db, { pledgeActivityId: "kutoff2-din2023", correctedBalanceCents: 0, reason: "Donor paid DIN2023 pledge in full; JL correction never reached the imported spreadsheet." });
+  assert.ok(result.id);
+
+  // The exact pledge id only.
+  assert.equal(queryEffectiveBalance(db, "kutoff2-din2023").balance_cents, 0);
+
+  // DIN2025's displayed balance is completely unaffected.
+  assert.equal(queryEffectiveBalance(db, "kutoff2-din2025").balance_cents, 25000, "DIN2025 must remain exactly $250.00 after correcting the unrelated DIN2023 pledge");
+  assert.equal(getCorrectionHistory(db, "kutoff2-din2025").length, 0, "no correction of any kind may ever exist against DIN2025");
+
+  // DIN2025's own payment plan row is byte-for-byte unchanged -- not
+  // ended, not edited, not touched in any field.
+  const planAfter = db.prepare("SELECT * FROM pledge_payment_plans WHERE id = 'kutoff2-din2025-plan'").get();
+  assert.deepEqual(planAfter, planBefore, "DIN2025's payment plan must be completely unmodified by a correction to a different pledge");
+  assert.equal(planAfter.ended_at, null, "DIN2025's plan must not be auto-ended");
+
+  // DIN2025's own raw imported figures (committed/paid/balance) are
+  // completely unchanged -- confirms no cross-pledge contamination at
+  // the storage level either.
+  const din2025Raw = getPledge(db, "kutoff2-din2025");
+  assert.equal(din2025Raw.committed_cents, 300000);
+  assert.equal(din2025Raw.paid_cents, 275000);
+  assert.equal(din2025Raw.balance_cents, 25000);
+
+  // The real evaluatePaymentPlan result for DIN2025's plan is identical
+  // before and after -- proving evaluation-level independence, not just
+  // storage-level independence.
+  const evaluateDin2025 = (balanceCents) => evaluatePaymentPlan(
+    { nextExpectedPaymentAt: planAfter.next_expected_payment_at, expectedDayOfMonth: planAfter.expected_day_of_month, finalExpectedPaymentAt: planAfter.final_expected_payment_at, endedAt: planAfter.ended_at },
+    [],
+    balanceCents,
+    NOW,
+    TZ,
+  );
+  assert.deepEqual(evaluateDin2025(queryEffectiveBalance(db, "kutoff2-din2025").balance_cents), evaluateDin2025(25000));
+
+  // Donor-level combined outstanding total now reflects exactly the
+  // expected change: $0 (DIN2023, corrected) + $250 (DIN2025,
+  // untouched) = $250 -- never silently dropping or inflating DIN2025's
+  // own contribution.
+  const totalAfter = db.prepare(`SELECT SUM(MAX(COALESCE(pbc.corrected_balance_cents, ga.balance_cents), 0)) AS total
+    FROM giving_activities ga LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
+    WHERE ga.donor_id = 'kutoff-donor-2'`).get().total;
+  assert.equal(totalAfter, 0 + 25000, "donor-level combined outstanding total after correction: $0 + $250 = $250");
+  assert.equal(totalBefore - totalAfter, 21000, "the combined total must drop by EXACTLY the corrected pledge's own imported balance ($210), never more or less");
 });
