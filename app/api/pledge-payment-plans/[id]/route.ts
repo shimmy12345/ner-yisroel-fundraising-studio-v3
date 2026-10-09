@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { validateInstallmentAmountCents, validatePlanNote, validateOriginalPledgeDate, validateCommitmentDurationMonths } from "../../../../lib/capture/pledge-payment-plan";
-import { dayOfMonthFromDateOnlyEpoch } from "../../../../lib/relationships/pledge-payment-plan";
+import { dayOfMonthFromDateOnlyEpoch, evaluatePledgeRenewal } from "../../../../lib/relationships/pledge-payment-plan";
 import { parseFinancialDate } from "../../../../lib/financial-date";
 import { logger } from "../../../../lib/logger";
 
@@ -91,7 +91,32 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (plan.original_pledge_date === null || plan.commitment_duration_months === null) {
       return Response.json({ error: "This plan has no verified renewal date to acknowledge." }, { status: 422 });
     }
-    const before = { renewalAcknowledgedAt: plan.renewal_acknowledged_at };
+    // Duplicate-safety (2026-10-09, reviewed per independent-review
+    // feedback on commit 3ff780c): a repeated/retried/double-clicked
+    // request against an ALREADY-acknowledged plan is a safe,
+    // idempotent no-op -- it returns the existing acknowledgment
+    // unchanged rather than writing a second `pledge_payment_plan_changes`
+    // row, which would otherwise read as two separate, misleading
+    // acknowledgment events in the audit trail for what was really one
+    // fundraiser action.
+    if (plan.renewal_acknowledged_at !== null) {
+      return Response.json({ planId: id, renewalAcknowledgedAt: plan.renewal_acknowledged_at, alreadyAcknowledged: true });
+    }
+    // SAFEGUARD (2026-10-09, independent-review requirement on commit
+    // 3ff780c): never trust the client/UI alone that this plan
+    // currently has an outstanding renewal follow-up -- the donor-page
+    // button's own visibility is a convenience, never the authority.
+    // Independently re-derive eligibility here, server-side, from this
+    // plan's own current stored fields, using the EXACT SAME
+    // evaluatePledgeRenewal the donor page/Today/Daily Agenda already
+    // use -- so a request sent after the button should have
+    // disappeared (date not yet reached, or the plan was edited/ended
+    // out from under it) is rejected, never silently accepted.
+    const evaluation = evaluatePledgeRenewal(plan.original_pledge_date, plan.commitment_duration_months, plan.ended_at, plan.renewal_acknowledged_at, now, profile.timezone);
+    if (!evaluation.isRenewalFollowUpNeeded) {
+      return Response.json({ error: "This plan does not currently have an outstanding renewal follow-up to acknowledge." }, { status: 422 });
+    }
+    const before = { renewalAcknowledgedAt: null };
     const after = { renewalAcknowledgedAt: now };
     const statements = [
       env.DB.prepare("UPDATE pledge_payment_plans SET renewal_acknowledged_at = ?, updated_at = ? WHERE id = ? AND user_id = ?")
@@ -156,18 +181,33 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (nextNote !== plan.note) changedFields.push("note");
   if (nextNextExpectedPaymentAt !== plan.next_expected_payment_at) { changedFields.push("nextExpectedPaymentAt"); changedFields.push("expectedDayOfMonth"); }
   if (nextFinalExpectedPaymentAt !== plan.final_expected_payment_at) changedFields.push("finalExpectedPaymentAt");
+  const renewalDateInputsChanged = nextOriginalPledgeDate !== plan.original_pledge_date || nextCommitmentDurationMonths !== plan.commitment_duration_months;
   if (nextOriginalPledgeDate !== plan.original_pledge_date) changedFields.push("originalPledgeDate");
   if (nextCommitmentDurationMonths !== plan.commitment_duration_months) changedFields.push("commitmentDurationMonths");
+  // SAFEGUARD (2026-10-09, independent-review requirement on commit
+  // 3ff780c): editing EITHER field the renewal date is actually
+  // computed from invalidates any existing acknowledgment -- the
+  // acknowledgment was made against the OLD renewal date; silently
+  // carrying it forward onto a materially recalculated date (which
+  // could land anywhere: earlier, later, or not yet reached at all)
+  // would risk permanently suppressing a genuinely different future
+  // follow-up the fundraiser never actually addressed. Clearing it here
+  // is the safe default -- the fundraiser simply re-acknowledges if the
+  // new date still turns out not to need one. Never triggered by
+  // editing any OTHER field (installment amount, note, the schedule
+  // dates) -- none of those feed evaluatePledgeRenewal at all.
+  const nextRenewalAcknowledgedAt = renewalDateInputsChanged ? null : plan.renewal_acknowledged_at;
+  if (nextRenewalAcknowledgedAt !== plan.renewal_acknowledged_at) changedFields.push("renewalAcknowledgedAt");
   if (changedFields.length === 0) {
-    return Response.json({ planId: id, donorId: plan.donor_id, installmentAmountCents: plan.installment_amount_cents, nextExpectedPaymentAt: plan.next_expected_payment_at, finalExpectedPaymentAt: plan.final_expected_payment_at, note: plan.note, originalPledgeDate: plan.original_pledge_date, commitmentDurationMonths: plan.commitment_duration_months, message: "No changes were needed." });
+    return Response.json({ planId: id, donorId: plan.donor_id, installmentAmountCents: plan.installment_amount_cents, nextExpectedPaymentAt: plan.next_expected_payment_at, finalExpectedPaymentAt: plan.final_expected_payment_at, note: plan.note, originalPledgeDate: plan.original_pledge_date, commitmentDurationMonths: plan.commitment_duration_months, renewalAcknowledgedAt: plan.renewal_acknowledged_at, message: "No changes were needed." });
   }
 
-  const before = { installmentAmountCents: plan.installment_amount_cents, expectedDayOfMonth: plan.expected_day_of_month, nextExpectedPaymentAt: plan.next_expected_payment_at, finalExpectedPaymentAt: plan.final_expected_payment_at, note: plan.note, originalPledgeDate: plan.original_pledge_date, commitmentDurationMonths: plan.commitment_duration_months };
-  const after = { installmentAmountCents: nextInstallmentAmountCents, expectedDayOfMonth: nextExpectedDayOfMonth, nextExpectedPaymentAt: nextNextExpectedPaymentAt, finalExpectedPaymentAt: nextFinalExpectedPaymentAt, note: nextNote, originalPledgeDate: nextOriginalPledgeDate, commitmentDurationMonths: nextCommitmentDurationMonths };
+  const before = { installmentAmountCents: plan.installment_amount_cents, expectedDayOfMonth: plan.expected_day_of_month, nextExpectedPaymentAt: plan.next_expected_payment_at, finalExpectedPaymentAt: plan.final_expected_payment_at, note: plan.note, originalPledgeDate: plan.original_pledge_date, commitmentDurationMonths: plan.commitment_duration_months, renewalAcknowledgedAt: plan.renewal_acknowledged_at };
+  const after = { installmentAmountCents: nextInstallmentAmountCents, expectedDayOfMonth: nextExpectedDayOfMonth, nextExpectedPaymentAt: nextNextExpectedPaymentAt, finalExpectedPaymentAt: nextFinalExpectedPaymentAt, note: nextNote, originalPledgeDate: nextOriginalPledgeDate, commitmentDurationMonths: nextCommitmentDurationMonths, renewalAcknowledgedAt: nextRenewalAcknowledgedAt };
 
   const statements = [
-    env.DB.prepare(`UPDATE pledge_payment_plans SET installment_amount_cents = ?, expected_day_of_month = ?, next_expected_payment_at = ?, final_expected_payment_at = ?, note = ?, original_pledge_date = ?, commitment_duration_months = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
-      .bind(nextInstallmentAmountCents, nextExpectedDayOfMonth, nextNextExpectedPaymentAt, nextFinalExpectedPaymentAt, nextNote, nextOriginalPledgeDate, nextCommitmentDurationMonths, now, id, userId),
+    env.DB.prepare(`UPDATE pledge_payment_plans SET installment_amount_cents = ?, expected_day_of_month = ?, next_expected_payment_at = ?, final_expected_payment_at = ?, note = ?, original_pledge_date = ?, commitment_duration_months = ?, renewal_acknowledged_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
+      .bind(nextInstallmentAmountCents, nextExpectedDayOfMonth, nextNextExpectedPaymentAt, nextFinalExpectedPaymentAt, nextNote, nextOriginalPledgeDate, nextCommitmentDurationMonths, nextRenewalAcknowledgedAt, now, id, userId),
     env.DB.prepare(`INSERT INTO pledge_payment_plan_changes (id, plan_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
       VALUES (?, ?, ?, ?, 'updated', ?, ?, ?, ?)`)
       .bind(crypto.randomUUID(), id, userId, plan.donor_id, JSON.stringify(changedFields), JSON.stringify(before), JSON.stringify(after), now),
@@ -177,5 +217,5 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   catch (error) { logger.error("pledge_payment_plan_update_failed", error, { planId: id, userId }); return Response.json({ error: "Payment plan could not be updated" }, { status: 500 }); }
 
   logger.info("pledge_payment_plan_updated", { planId: id, donorId: plan.donor_id, userId, changedFieldCount: changedFields.length });
-  return Response.json({ planId: id, donorId: plan.donor_id, installmentAmountCents: nextInstallmentAmountCents, nextExpectedPaymentAt: nextNextExpectedPaymentAt, finalExpectedPaymentAt: nextFinalExpectedPaymentAt, note: nextNote, originalPledgeDate: nextOriginalPledgeDate, commitmentDurationMonths: nextCommitmentDurationMonths, changedFields });
+  return Response.json({ planId: id, donorId: plan.donor_id, installmentAmountCents: nextInstallmentAmountCents, nextExpectedPaymentAt: nextNextExpectedPaymentAt, finalExpectedPaymentAt: nextFinalExpectedPaymentAt, note: nextNote, originalPledgeDate: nextOriginalPledgeDate, commitmentDurationMonths: nextCommitmentDurationMonths, renewalAcknowledgedAt: nextRenewalAcknowledgedAt, changedFields });
 }

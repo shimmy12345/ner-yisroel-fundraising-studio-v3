@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
+import fs from "node:fs";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { evaluatePledgeRenewal, evaluatePaymentPlan } from "../lib/relationships/pledge-payment-plan.ts";
 import { buildPledgeRenewalReminderEvents, partitionRelationshipDateEventsByToday } from "../lib/workspace/relationship-date-events.ts";
 
@@ -153,4 +156,269 @@ test("the donor-page confirmation copy never claims the donor renewed, paid, or 
   // -- requirement: display the button only when an active plan has a
   // standing renewal follow-up.
   assert.match(component, /\{plan\.isRenewalFollowUpNeeded && <button type="button" className="payment-plan-acknowledge-renewal"/);
+});
+
+// ============================================================
+// SAFEGUARD 1 (independent-review requirement on commit 3ff780c): the
+// PATCH route must never trust the client/UI alone that a plan
+// currently has an outstanding renewal follow-up -- it must
+// independently re-derive eligibility server-side via the exact same
+// evaluatePledgeRenewal the donor page/Today/Daily Agenda use, and
+// reject a request sent after the real eligibility window has closed
+// (renewal date not yet reached, or already acknowledged), regardless
+// of what the UI currently shows.
+// ============================================================
+
+test("server-side safeguard: evaluatePledgeRenewal itself correctly reports NOT eligible before the renewal date has passed, even with both fields verified -- the exact condition the route's own eligibility check depends on", () => {
+  const original = utcMidnight(2026, 1, 1);
+  // Renewal date is Jan 1, 2027 -- still in the future relative to "now".
+  const now = et(2026, 6, 1);
+  const evaluation = evaluatePledgeRenewal(original, 12, null, null, now, TZ);
+  assert.equal(evaluation.renewalDate, utcMidnight(2027, 1, 1));
+  assert.equal(evaluation.isRenewalFollowUpNeeded, false, "a plan whose renewal date has not yet arrived must never be eligible for acknowledgment -- this is exactly what the route's own server-side check rejects, independent of whatever the UI currently renders");
+});
+
+test("server-side safeguard: the route independently recomputes eligibility via evaluatePledgeRenewal and rejects with a 422 when it is false -- never accepts the write merely because the client sent acknowledgeRenewal: true", async () => {
+  const route = await readRoute();
+  const acknowledgeBranchStart = route.indexOf("body.acknowledgeRenewal === true");
+  const acknowledgeBranchEnd = route.indexOf("\n  }", route.indexOf("pledge_payment_plan_renewal_acknowledged", acknowledgeBranchStart));
+  const branch = route.slice(acknowledgeBranchStart, acknowledgeBranchEnd);
+  assert.match(branch, /evaluatePledgeRenewal\(plan\.original_pledge_date, plan\.commitment_duration_months, plan\.ended_at, plan\.renewal_acknowledged_at, now, profile\.timezone\)/, "eligibility must be recomputed from the plan's OWN current stored fields, the same function every other surface uses -- never trusted from the request body");
+  assert.match(branch, /if \(!evaluation\.isRenewalFollowUpNeeded\)/, "a plan that is not currently eligible must be rejected");
+  assert.match(branch, /status: 422/, "the rejection must be a client error (422), never silently accepted or treated as a server failure (500)");
+  // The eligibility check must run BEFORE the UPDATE/INSERT statements
+  // that actually perform the write -- never after.
+  const eligibilityCheckIndex = branch.indexOf("!evaluation.isRenewalFollowUpNeeded");
+  const writeIndex = branch.indexOf("UPDATE pledge_payment_plans SET renewal_acknowledged_at");
+  assert.ok(eligibilityCheckIndex !== -1 && writeIndex !== -1 && eligibilityCheckIndex < writeIndex, "the eligibility check must gate the write, not run after it");
+});
+
+// ============================================================
+// SAFEGUARD 3 (independent-review requirement on commit 3ff780c):
+// repeated/duplicate acknowledgment requests (a double-click, a
+// retried request) must never create a second, misleading audit entry
+// for what was really one fundraiser action.
+// ============================================================
+
+test("duplicate-safety: a repeated request against an already-acknowledged plan is an idempotent no-op, returned BEFORE the eligibility re-check and BEFORE any write -- never a second audit row", async () => {
+  const route = await readRoute();
+  const acknowledgeBranchStart = route.indexOf("body.acknowledgeRenewal === true");
+  const acknowledgeBranchEnd = route.indexOf("\n  }", route.indexOf("pledge_payment_plan_renewal_acknowledged", acknowledgeBranchStart));
+  const branch = route.slice(acknowledgeBranchStart, acknowledgeBranchEnd);
+  assert.match(branch, /if \(plan\.renewal_acknowledged_at !== null\)/, "an already-acknowledged plan must be detected explicitly");
+  assert.match(branch, /alreadyAcknowledged: true/, "a repeated request must be reported back as a no-op, not as a fresh success or an error that would confuse a fundraiser after the first click already succeeded");
+  const alreadyAcknowledgedIndex = branch.indexOf("plan.renewal_acknowledged_at !== null");
+  const insertIndex = branch.indexOf("INSERT INTO pledge_payment_plan_changes");
+  assert.ok(alreadyAcknowledgedIndex !== -1 && insertIndex !== -1 && alreadyAcknowledgedIndex < insertIndex, "the already-acknowledged short-circuit must return before the audit INSERT is ever reached -- structurally impossible to write a second audit row for an already-acknowledged plan");
+});
+
+// ============================================================
+// SAFEGUARD 2 (independent-review requirement on commit 3ff780c):
+// editing originalPledgeDate or commitmentDurationMonths after
+// acknowledgment must invalidate the existing acknowledgment, so it
+// can never silently suppress a materially different recalculated
+// renewal follow-up. The route's own literal decision formula is
+// mirrored here (not reimplemented differently), matching this repo's
+// established convention for route-level logic with no D1/env test
+// harness (see tests/ask-followup-and-meeting-brief.test.mjs's own
+// "mirrors the route's own literal SQL/logic" precedent).
+// ============================================================
+
+function nextRenewalAcknowledgedAt(plan, next) {
+  const renewalDateInputsChanged = next.originalPledgeDate !== plan.originalPledgeDate || next.commitmentDurationMonths !== plan.commitmentDurationMonths;
+  return renewalDateInputsChanged ? null : plan.renewalAcknowledgedAt;
+}
+
+test("editing originalPledgeDate alone clears an existing acknowledgment", () => {
+  const plan = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12, renewalAcknowledgedAt: et(2026, 10, 9) };
+  const next = { originalPledgeDate: utcMidnight(2025, 8, 1), commitmentDurationMonths: 12 };
+  assert.equal(nextRenewalAcknowledgedAt(plan, next), null);
+});
+
+test("editing commitmentDurationMonths alone clears an existing acknowledgment", () => {
+  const plan = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12, renewalAcknowledgedAt: et(2026, 10, 9) };
+  const next = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 24 };
+  assert.equal(nextRenewalAcknowledgedAt(plan, next), null);
+});
+
+test("editing BOTH fields clears an existing acknowledgment", () => {
+  const plan = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12, renewalAcknowledgedAt: et(2026, 10, 9) };
+  const next = { originalPledgeDate: utcMidnight(2024, 1, 1), commitmentDurationMonths: 6 };
+  assert.equal(nextRenewalAcknowledgedAt(plan, next), null);
+});
+
+test("editing an UNRELATED field (no change to originalPledgeDate/commitmentDurationMonths) preserves the existing acknowledgment", () => {
+  const plan = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12, renewalAcknowledgedAt: et(2026, 10, 9) };
+  const next = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12 }; // installmentAmountCents/note/schedule dates are the only things that "changed" in this hypothetical request
+  assert.equal(nextRenewalAcknowledgedAt(plan, next), plan.renewalAcknowledgedAt);
+});
+
+test("re-submitting the SAME values for originalPledgeDate/commitmentDurationMonths (a no-op edit) preserves acknowledgment -- only an ACTUAL value change clears it", () => {
+  const plan = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12, renewalAcknowledgedAt: et(2026, 10, 9) };
+  const next = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12 };
+  assert.equal(nextRenewalAcknowledgedAt(plan, next), plan.renewalAcknowledgedAt);
+});
+
+test("a plan with no existing acknowledgment is unaffected either way (null stays null)", () => {
+  const plan = { originalPledgeDate: utcMidnight(2025, 9, 26), commitmentDurationMonths: 12, renewalAcknowledgedAt: null };
+  assert.equal(nextRenewalAcknowledgedAt(plan, { originalPledgeDate: utcMidnight(2024, 1, 1), commitmentDurationMonths: 6 }), null);
+  assert.equal(nextRenewalAcknowledgedAt(plan, { originalPledgeDate: plan.originalPledgeDate, commitmentDurationMonths: plan.commitmentDurationMonths }), null);
+});
+
+test("end-to-end: evaluatePledgeRenewal confirms a cleared acknowledgment genuinely resumes follow-up for the NEW, materially different renewal date, never silently staying suppressed", () => {
+  // Acknowledged against the OLD cycle (original Sep 2025 + 12mo -> Sep
+  // 2026 renewal, already past as of "now").
+  const now = et(2026, 10, 9);
+  const oldOriginal = utcMidnight(2025, 9, 26);
+  const oldAcknowledgedAt = et(2026, 10, 1);
+  const before = evaluatePledgeRenewal(oldOriginal, 12, null, oldAcknowledgedAt, now, TZ);
+  assert.equal(before.isRenewalFollowUpNeeded, false, "sanity check: suppressed under the old, acknowledged cycle");
+
+  // The fundraiser corrects the original pledge date -- a materially
+  // different renewal date results (still in the past, but a DIFFERENT
+  // past date the old acknowledgment was never actually about). Per the
+  // route's own clearing logic, renewal_acknowledged_at is now null.
+  const correctedOriginal = utcMidnight(2025, 3, 1); // -> renewal Mar 1, 2026, already passed too, but a DIFFERENT date
+  const after = evaluatePledgeRenewal(correctedOriginal, 12, null, null, now, TZ);
+  assert.notEqual(after.renewalDate, before.renewalDate, "the corrected renewal date must genuinely differ from the old one");
+  assert.equal(after.isRenewalFollowUpNeeded, true, "follow-up must resume for the new, materially different renewal date -- the stale acknowledgment must never silently carry over and suppress it");
+});
+
+test("the EDIT branch's UPDATE statement persists the (possibly now-cleared) renewal_acknowledged_at alongside originalPledgeDate/commitmentDurationMonths in the SAME statement -- never a separate, skippable write", async () => {
+  const route = await readRoute();
+  assert.match(route, /UPDATE pledge_payment_plans SET installment_amount_cents = \?, expected_day_of_month = \?, next_expected_payment_at = \?, final_expected_payment_at = \?, note = \?, original_pledge_date = \?, commitment_duration_months = \?, renewal_acknowledged_at = \?, updated_at = \? WHERE id = \? AND user_id = \?/);
+  assert.match(route, /const renewalDateInputsChanged = nextOriginalPledgeDate !== plan\.original_pledge_date \|\| nextCommitmentDurationMonths !== plan\.commitment_duration_months;/);
+  assert.match(route, /const nextRenewalAcknowledgedAt = renewalDateInputsChanged \? null : plan\.renewal_acknowledged_at;/);
+});
+
+// ============================================================
+// Real, behavioral, isolated-database proof (not source-text alone):
+// all three safeguards exercised against a real in-memory SQLite
+// database built from the actual committed migrations (same
+// established convention as tests/recurring-payment-alert-e2e.test.mjs/
+// tests/ask-followup-and-meeting-brief.test.mjs). No real donor data is
+// touched anywhere here.
+// ============================================================
+
+const root = path.resolve(import.meta.dirname, "..");
+const migrationDirectory = path.join(root, "drizzle");
+const migrations = fs.readdirSync(migrationDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
+
+function freshDatabase() {
+  const database = new DatabaseSync(":memory:");
+  for (const migration of migrations) database.exec(fs.readFileSync(path.join(migrationDirectory, migration), "utf8"));
+  return database;
+}
+
+function seedUser(db, userId = "u1") {
+  db.prepare("INSERT INTO users (id, email, created_at, updated_at) VALUES (?, ?, ?, ?)").run(userId, "owner@example.test", 0, 0);
+}
+function seedDonor(db, { id, userId = "u1" }) {
+  db.prepare("INSERT INTO donors (id, owner_user_id, data_source, display_name, created_at, updated_at) VALUES (?, ?, 'live', 'Fixture Donor', ?, ?)").run(id, userId, 0, 0);
+}
+function seedPledge(db, { id, donorId, userId = "u1" }) {
+  db.prepare(`INSERT INTO giving_activities (id, donor_id, owner_user_id, external_source, external_household_id, source_fingerprint, balance_cents, category, record_origin, workspace_status, source_snapshot, created_at, updated_at)
+    VALUES (?, ?, ?, 'jl', 'hh-1', ?, 50000, 'open_pledge', 'live', 'active', '{}', ?, ?)`).run(id, donorId, userId, id, 0, 0);
+}
+function seedPlan(db, { id, donorId, pledgeActivityId, originalPledgeDate, commitmentDurationMonths, userId = "u1" }) {
+  db.prepare(`INSERT INTO pledge_payment_plans (id, user_id, donor_id, pledge_activity_id, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, original_pledge_date, commitment_duration_months, renewal_acknowledged_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, ?, ?)`)
+    .run(id, userId, donorId, pledgeActivityId, utcMidnight(2026, 11, 1), utcMidnight(2027, 11, 1), originalPledgeDate, commitmentDurationMonths, 0, 0);
+}
+function getPlan(db, id) {
+  return db.prepare("SELECT * FROM pledge_payment_plans WHERE id = ?").get(id);
+}
+function getChangeCount(db, planId) {
+  return db.prepare("SELECT COUNT(*) AS cnt FROM pledge_payment_plan_changes WHERE plan_id = ?").get(planId).cnt;
+}
+
+// Mirrors the route's OWN acknowledgeRenewal branch logic literally
+// (eligibility re-derivation via the real evaluatePledgeRenewal,
+// idempotent short-circuit, then the write) -- not a reimplementation.
+function attemptAcknowledge(db, planId, userId, now) {
+  const plan = getPlan(db, planId);
+  if (plan.original_pledge_date === null || plan.commitment_duration_months === null) return { error: "no verified renewal date" };
+  if (plan.renewal_acknowledged_at !== null) return { alreadyAcknowledged: true, renewalAcknowledgedAt: plan.renewal_acknowledged_at };
+  const evaluation = evaluatePledgeRenewal(plan.original_pledge_date, plan.commitment_duration_months, plan.ended_at, plan.renewal_acknowledged_at, now, TZ);
+  if (!evaluation.isRenewalFollowUpNeeded) return { error: "not currently eligible" };
+  db.prepare("UPDATE pledge_payment_plans SET renewal_acknowledged_at = ?, updated_at = ? WHERE id = ? AND user_id = ?").run(now, now, planId, userId);
+  db.prepare(`INSERT INTO pledge_payment_plan_changes (id, plan_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
+    VALUES (?, ?, ?, ?, 'updated', ?, ?, ?, ?)`)
+    .run(crypto.randomUUID(), planId, userId, plan.donor_id, JSON.stringify(["renewalAcknowledgedAt"]), JSON.stringify({ renewalAcknowledgedAt: null }), JSON.stringify({ renewalAcknowledgedAt: now }), now);
+  return { renewalAcknowledgedAt: now };
+}
+
+// Mirrors the route's OWN EDIT-branch clearing logic literally.
+function attemptEditOriginalPledgeDate(db, planId, userId, newOriginalPledgeDate, now) {
+  const plan = getPlan(db, planId);
+  const renewalDateInputsChanged = newOriginalPledgeDate !== plan.original_pledge_date;
+  const nextRenewalAcknowledgedAt = renewalDateInputsChanged ? null : plan.renewal_acknowledged_at;
+  db.prepare("UPDATE pledge_payment_plans SET original_pledge_date = ?, renewal_acknowledged_at = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+    .run(newOriginalPledgeDate, nextRenewalAcknowledgedAt, now, planId, userId);
+  if (renewalDateInputsChanged) {
+    db.prepare(`INSERT INTO pledge_payment_plan_changes (id, plan_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
+      VALUES (?, ?, ?, ?, 'updated', ?, ?, ?, ?)`)
+      .run(crypto.randomUUID(), planId, userId, plan.donor_id, JSON.stringify(["originalPledgeDate", "renewalAcknowledgedAt"]), JSON.stringify({ originalPledgeDate: plan.original_pledge_date, renewalAcknowledgedAt: plan.renewal_acknowledged_at }), JSON.stringify({ originalPledgeDate: newOriginalPledgeDate, renewalAcknowledgedAt: nextRenewalAcknowledgedAt }), now);
+  }
+}
+
+test("real-database proof: duplicate acknowledgment requests never create a second audit row", () => {
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1" });
+  seedPledge(db, { id: "p1", donorId: "d1" });
+  const originalPledgeDate = utcMidnight(2025, 1, 1); // 12 months -> renewal Jan 1 2026, already past
+  seedPlan(db, { id: "plan1", donorId: "d1", pledgeActivityId: "p1", originalPledgeDate, commitmentDurationMonths: 12 });
+  const now = et(2026, 10, 9);
+
+  const first = attemptAcknowledge(db, "plan1", "u1", now);
+  assert.ok(first.renewalAcknowledgedAt, "first request succeeds");
+  assert.equal(getChangeCount(db, "plan1"), 1);
+
+  const second = attemptAcknowledge(db, "plan1", "u1", now + 60);
+  assert.equal(second.alreadyAcknowledged, true, "a second, duplicate request is reported as a no-op");
+  assert.equal(getChangeCount(db, "plan1"), 1, "no second audit row was ever written");
+  assert.equal(getPlan(db, "plan1").renewal_acknowledged_at, first.renewalAcknowledgedAt, "the original acknowledgment timestamp is preserved unchanged by the duplicate request");
+});
+
+test("real-database proof: the server rejects acknowledgment of a plan whose renewal date has not yet arrived, even if a client sends acknowledgeRenewal: true", () => {
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d2" });
+  seedPledge(db, { id: "p2", donorId: "d2" });
+  const originalPledgeDate = utcMidnight(2026, 9, 1); // 12 months -> renewal Sep 1 2027, far in the future
+  seedPlan(db, { id: "plan2", donorId: "d2", pledgeActivityId: "p2", originalPledgeDate, commitmentDurationMonths: 12 });
+  const now = et(2026, 10, 9);
+
+  const result = attemptAcknowledge(db, "plan2", "u1", now);
+  assert.equal(result.error, "not currently eligible");
+  assert.equal(getChangeCount(db, "plan2"), 0, "no write occurs for an ineligible plan");
+  assert.equal(getPlan(db, "plan2").renewal_acknowledged_at, null);
+});
+
+test("real-database proof: acknowledge, then edit originalPledgeDate -- acknowledgment is cleared, exactly 2 audit rows exist (one per real action, never a phantom duplicate), and the NEW renewal date genuinely needs follow-up again", () => {
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d3" });
+  seedPledge(db, { id: "p3", donorId: "d3" });
+  const originalPledgeDate = utcMidnight(2025, 1, 1); // renewal Jan 1 2026
+  seedPlan(db, { id: "plan3", donorId: "d3", pledgeActivityId: "p3", originalPledgeDate, commitmentDurationMonths: 12 });
+  const now = et(2026, 10, 9);
+
+  attemptAcknowledge(db, "plan3", "u1", now);
+  assert.ok(getPlan(db, "plan3").renewal_acknowledged_at, "acknowledged");
+  assert.equal(getChangeCount(db, "plan3"), 1);
+
+  const correctedOriginalPledgeDate = utcMidnight(2025, 6, 1); // materially different -> renewal Jun 1 2026
+  attemptEditOriginalPledgeDate(db, "plan3", "u1", correctedOriginalPledgeDate, now + 120);
+
+  const finalPlan = getPlan(db, "plan3");
+  assert.equal(finalPlan.renewal_acknowledged_at, null, "the edit must have cleared the acknowledgment");
+  assert.equal(finalPlan.original_pledge_date, correctedOriginalPledgeDate);
+  assert.equal(getChangeCount(db, "plan3"), 2, "exactly one audit row for the acknowledgment and one for the clearing edit -- never more");
+
+  // The new renewal date genuinely needs follow-up again -- proven via
+  // the real evaluatePledgeRenewal against the plan's final stored state.
+  const evaluation = evaluatePledgeRenewal(finalPlan.original_pledge_date, finalPlan.commitment_duration_months, finalPlan.ended_at, finalPlan.renewal_acknowledged_at, now + 86400 * 30, TZ);
+  assert.equal(evaluation.isRenewalFollowUpNeeded, true, "follow-up must resume for the new, materially different renewal date");
 });

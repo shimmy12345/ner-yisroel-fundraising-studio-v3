@@ -27393,3 +27393,139 @@ staging script used here.
 No Production deployment occurred at any point in this round. Stopping
 here for independent review before any Production deployment is
 considered.
+
+## Mark Renewal Addressed -- Independent-Review Safeguards (2026-10-09) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED (READ-ONLY); NO MIGRATION NEEDED
+
+Independent review of commit `3ff780c` approved the renewal-
+acknowledgment feature subject to two safeguards on the write route,
+plus a review of duplicate-request safety. No schema change was
+needed -- this round is route-logic only.
+
+### Safeguard 1 -- server-side eligibility re-derivation
+
+**The gap:** the PATCH route accepted `{acknowledgeRenewal: true}` the
+moment a plan had a verified `original_pledge_date`/
+`commitment_duration_months`, without independently confirming the
+plan actually had a CURRENT, outstanding renewal follow-up -- it
+implicitly trusted that the donor-page button's own visibility
+(`plan.isRenewalFollowUpNeeded`) was the only path a request could ever
+come from. A request sent after the real eligibility window had closed
+(the renewal date not yet reached, or the plan since ended) would have
+been silently accepted.
+
+**The fix:** the route now calls the exact same `evaluatePledgeRenewal`
+every other surface uses, server-side, against the plan's OWN current
+stored fields (`original_pledge_date`, `commitment_duration_months`,
+`ended_at`, `renewal_acknowledged_at`), and rejects with a 422 ("This
+plan does not currently have an outstanding renewal follow-up to
+acknowledge.") whenever `isRenewalFollowUpNeeded` is false. The UI
+button's visibility remains a convenience; it is never the authority.
+
+### Safeguard 2 -- acknowledgment invalidated by a materially different recalculated renewal date
+
+**The risk:** `original_pledge_date`/`commitment_duration_months` can
+be edited after a plan is acknowledged (e.g. a fundraiser later
+corrects a data-entry mistake). Before this round, the acknowledgment
+timestamp was tied only to the PLAN, never to a specific renewal date
+-- an edit that moved the computed renewal date anywhere (earlier,
+later, or not-yet-reached) would have left the OLD acknowledgment in
+place, silently suppressing the NEW date's own follow-up once it
+eventually arrived.
+
+**Smallest safe solution implemented (no new column, no migration):**
+the EDIT branch of the same route now clears
+`renewal_acknowledged_at` back to `null` whenever EITHER
+`original_pledge_date` OR `commitment_duration_months` actually
+changes value (never on an edit to any other field -- installment
+amount, note, the collection-schedule dates -- none of which feed
+`evaluatePledgeRenewal` at all, and never on a no-op edit that
+resubmits the same value). The clearing is written in the SAME
+`UPDATE` statement as the rest of the edit (never a second, skippable
+write) and is recorded in the audit trail
+(`pledge_payment_plan_changes`, `changedFields` includes
+`"renewalAcknowledgedAt"`, `before`/`after` show the transition from
+the old timestamp to `null`). The fundraiser simply re-acknowledges if
+the recalculated date still turns out not to need a follow-up --
+over-surfacing is the safe default, never silent suppression.
+
+### Duplicate-request safety (reviewed, confirmed needed a fix)
+
+A second `{acknowledgeRenewal: true}` request against an already-
+acknowledged plan (a double-click, a retried request after a slow
+response) previously would have written a SECOND
+`pledge_payment_plan_changes` row, reading as two separate
+acknowledgment events for one real fundraiser action. The route now
+short-circuits immediately once `plan.renewal_acknowledged_at !== null`
+-- before the eligibility re-check, before any write -- and returns the
+EXISTING acknowledgment unchanged (`{alreadyAcknowledged: true,
+renewalAcknowledgedAt: <original timestamp>}`), structurally incapable
+of producing a second audit row.
+
+### Tests
+
+13 new tests added to `tests/pledge-renewal-acknowledgment.test.mjs`
+(now 24 total in that file):
+- Server-side eligibility: `evaluatePledgeRenewal` confirmed to
+  correctly report ineligible before the renewal date arrives; the
+  route's own control flow confirmed to recompute eligibility from the
+  plan's stored fields (never the request body) and gate the write on
+  it.
+- Duplicate-safety: the already-acknowledged short-circuit confirmed to
+  run before the audit `INSERT`, both via route-source assertions and a
+  real in-memory SQLite database proof (a mirrored
+  `attemptAcknowledge()` called twice: first succeeds, second returns
+  `alreadyAcknowledged`, exactly one audit row exists afterward).
+- Acknowledgment-invalidation: 6 pure-logic tests covering
+  originalPledgeDate-alone / commitmentDurationMonths-alone / both /
+  an unrelated field / a no-op resubmission / an already-null
+  acknowledgment, plus a real-database proof (acknowledge -> edit
+  `originalPledgeDate` -> `renewal_acknowledged_at` is `NULL`, exactly 2
+  audit rows total, and the real `evaluatePledgeRenewal` confirms
+  follow-up genuinely resumes for the new, materially different
+  renewal date).
+- A real-database proof that an ineligible (not-yet-due) plan is
+  rejected with zero writes and zero audit rows, even though the
+  request itself claims `acknowledgeRenewal: true`.
+
+All new database-backed tests use the same isolated, in-memory SQLite
+convention established in the prior two rounds (`node:sqlite`, built
+from the real committed migrations) -- no real donor data was read or
+written anywhere in this verification.
+
+### Tests, typecheck, build
+
+**171/171 test files pass** (`pnpm test`). `pnpm exec tsc --noEmit`:
+clean. `pnpm run build`: succeeded.
+
+### Deployment
+
+No migration was required (route-logic only). Deployed to Independent
+Staging via `npm run deploy:staging-independent`
+(`wrangler deploy --config wrangler.staging.jsonc`), binding `env.DB`
+confirmed as `fundraising-os-staging-db`. **Version ID:
+`752ed0ca-caf1-4251-a9b7-3b9263adf291`.** Production was never touched.
+
+### Live verification (read-only)
+
+Spetner's (2689) donor page re-confirmed live, post-deploy: the card
+still renders correctly, "Renewal follow-up needed." and the "Mark
+renewal addressed" button are both still present, and his plan remains
+unacknowledged (`renewal_acknowledged_at` still `NULL` -- no write was
+made). **No PATCH request was sent to the live API for this
+verification** -- exercising the route against a real donor's plan
+would itself perform a real write, which this round's safeguards (and
+the standing "preserve payment plans, installments, JL financial data"
+instruction) require avoiding; the full behavioral correctness of all
+three safeguards is instead proven by the 13 new tests above, including
+3 real-database behavioral proofs, not merely source-text assertions.
+
+### Remaining limitations / unresolved issues
+
+Unchanged from the prior round's entry -- `main`'s restore/baseline
+sync (if applicable to a future migration), the recurring-payment-
+alert mechanism's lack of a live positive example, and
+`last_donation_refresh_at`'s global granularity. Nothing new introduced
+by this round.
+
+No Production deployment occurred. Stopping here for independent
+review.
