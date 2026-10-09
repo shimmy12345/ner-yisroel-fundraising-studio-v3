@@ -28137,3 +28137,286 @@ new commits of its own beyond this handoff entry.
 
 No Production deployment, no merge to `main`, and no donor financial
 data was modified. Stopping here for independent review.
+
+## Production Readiness: Migration/Restore/Backup Compatibility for 0041+0042 (2026-10-09) -- INVESTIGATION + TESTS + MAIN-BRANCH SYNC PREPARED, NO APPLICATION CODE CHANGED, NO DEPLOYMENT
+
+A dedicated production-readiness round, explicitly NOT authorization to
+deploy Production: resolve outstanding migration/restore/backup
+compatibility gaps for migrations 0041 (`pledge_payment_plans.
+renewal_acknowledged_at`) and 0042 (`pledge_balance_corrections`)
+before any future real Production deployment is considered.
+
+### Priority 1 -- migration and restore compatibility
+
+**Fresh database**: confirmed empirically -- all 43 migrations
+(0000-0042) apply cleanly in order to an empty SQLite database (both an
+ad hoc smoke test and the new formal regression below). `pledge_balance_
+corrections` and `pledge_payment_plans.renewal_acknowledged_at` both
+exist with the exact expected shape afterward.
+
+**Existing-database upgrade**: confirmed empirically -- applying
+0041+0042 on top of a database that already has real-shaped rows under
+the pre-0041 schema (migrations 0000-0040 only) leaves every
+pre-existing row byte-for-byte unchanged (new regression test, snapshot
+comparison using the exact pre-0041 column list for pledge_payment_plans
+so the new column's own appearance isn't mistaken for a data change). A
+second test proves the Kutoff-shaped two-pledge scenario (DIN2023
+corrected to $0/no plan, DIN2025 $250/active plan) behaves identically
+whether the database was created fresh or upgraded in place. Also
+true in practice: Independent Staging itself has already been running
+with both migrations applied (the real DIN2023 correction row exists
+there) since the prior two rounds -- this is a second, live confirmation
+beyond the isolated tests.
+
+**Canonical branch's own restore order**: `lib/operations/
+d1-restore-order.ts`'s `D1_RESTORE_DATA_ORDER` is DERIVED from
+`STAGING_RESET_TABLE_ORDER` (reversed) -- `pledge_balance_corrections`
+was already correctly added there in the Manual Pledge Balance
+Corrections round, positioned before its own FK targets (donors,
+giving_activities) in the delete-order list, which means it is
+correctly positioned AFTER them once reversed for restore. Confirmed by
+code inspection and by two new named regressions (mirroring the
+existing `donor_source_attributions` precedent) in the new
+`tests/workspace-backup-restore-corrections.test.mjs`.
+
+**Schema drift**: none found beyond the known main-branch gap below --
+`node scripts/generate-production-baseline.mjs --write` on the canonical
+branch produced a byte-identical manifest to what was already committed
+(already current).
+
+**Older backups**: an export entirely missing the `pledge_balance_
+corrections` table (i.e. taken before migration 0042) restores cleanly
+-- `planD1Restore`/`reorderD1ExportForRestore` only reject a table that
+appears in the export's own INSERT statements but is absent from the
+dependency order; a table the export never mentions at all produces zero
+restore steps, not an error (new backward-compatibility regression).
+One pre-existing, unrelated-to-this-round characteristic worth
+surfacing: `scripts/verify-remote-restore.mjs` (the monthly real-restore
+verification script) asserts the restored schema matches TODAY's
+packaged manifest unconditionally -- if that script were ever run
+against a deliberately OLD backup (predating 0042), it would correctly
+report a schema mismatch, since an old backup's own schema legitimately
+lacks the new table. This is by design for verifying the latest nightly
+backup's health (the only thing the real monthly workflow actually
+does) and is not a regression introduced by 0041/0042 -- see that
+script's own `production_schema_baseline` fidelity check for the
+existing precedent of how an intentionally-historical comparison is
+handled instead, if a true old-backup-restore verification mode is ever
+wanted. Not changed this round -- flagged for awareness only.
+
+**Main-branch sync (the one real, actionable gap)**: `node
+scripts/check-main-restore-sync.mjs` confirmed `main` was two migrations
+behind (missing 0041 and 0042). `node scripts/prepare-main-restore-sync-
+patch.mjs` confirmed the automated `prepare-sync` CI job cannot handle
+this one -- it returned `safe:false`, reason: "New table(s) introduced:
+pledge_balance_corrections... deliberately not automated." This matches
+`docs/D1-MIGRATION-SYNC-PROCESS.md`'s documented scope exactly (a new
+table always requires manual preparation). Prepared by hand, following
+the identical pattern as the 0038 (`pledge_payment_plan_reviews`) sync:
+
+- New worktree/branch from `origin/main`:
+  `fix/d1-restore-sync-0041-0042-pledge-balance-corrections`.
+- `lib/operations/staging-reset.ts` (main's own copy): added
+  `pledge_balance_corrections` to `STAGING_RESET_TABLE_ORDER`, identical
+  placement/comment to the canonical branch's own copy.
+- `lib/data-health/production-baseline.ts`: migration-count assertion
+  41 -> 43, doc comment explaining both migrations and why this one
+  needed manual preparation.
+- `production-baseline/schema-manifest.json`: replaced verbatim with
+  the canonical branch's current, verified manifest.
+- `test/d1-restore-order.test.mjs` (main's own copy): two new named
+  regressions, mirroring the `pledge_payment_plan_reviews` precedent,
+  proving `pledge_balance_corrections` is positioned after all three of
+  its real foreign key targets (users, donors, giving_activities).
+- Validated in that worktree before committing: `npm install` (fresh
+  worktree), main's own full test suite (**149/149 passing**, including
+  the 2 new regressions), main's own `npm run build` (succeeded), and --
+  critically -- a re-run of the UNMODIFIED `check-main-restore-sync.mjs`
+  from the canonical branch, pointed at the candidate commit via
+  `MAIN_REF=fix/d1-restore-sync-0041-0042-pledge-balance-corrections`:
+  **"D1 restore/schema state on main is in sync with the canonical
+  schema. No drift detected."**
+- Committed (`6a2d8f2`) and **pushed the branch only** -- never merged,
+  never pushed directly to `main`. A PR can be opened from
+  `https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-sync-0041-0042-pledge-balance-corrections`
+  whenever a human wants to review and merge it; this round did not open
+  or merge that PR, per the explicit "do not merge to main" instruction.
+
+**Anomaly observed, not acted on**: `origin/main`'s current tip commit
+(`ec7869c`) is titled "[PREVIEW/LOCAL ONLY - do not push] Sync
+restore/baseline tracking for migrations 0039+0040" -- its own message
+indicates it was intended to stay a local preview, yet it is the real,
+live tip of `origin/main` today. Content-wise it is a correct, narrow
+0039+0040 sync (confirmed by diffing it against the known-good 0038
+sync commit), so there is no evidence of corruption or a bad sync
+landing on `main` -- only an unusual commit message, worth a human's
+awareness. Not rewritten or amended here: rewriting `main` history is
+exactly the kind of destructive main-branch operation this round's
+safety restrictions forbid, and the content itself is not wrong.
+
+### Priority 2 -- manual balance corrections in backups
+
+Two genuinely different backup paths exist, and both were examined, not
+just the table-classification list:
+
+1. **Per-workspace JSON export** (`/api/import/backup`,
+   `WORKSPACE_BACKUP_TABLES`/`WORKSPACE_BACKUP_EXCLUDED_TABLES` in
+   `lib/operations/workspace-backup.ts`): `pledge_balance_corrections`
+   was already correctly classified in the EXCLUDED list (from the
+   Manual Pledge Balance Corrections round), with the same documented
+   reasoning as its real siblings (`pledge_payment_plans`,
+   `pledge_payment_plan_reviews`, `asks`) -- this is a secondary,
+   human-readable snapshot used only for the pre-rollback safety check,
+   never the authoritative backup, and was never meant to carry every
+   table. Confirmed (not assumed) this classification is still correct
+   and complete via a new regression running the exact
+   `verifyWorkspaceBackupCoverage` check CI runs.
+2. **Nightly whole-database `wrangler d1 export` -> R2 pipeline**
+   (`lib/operations/d1-restore-order.ts`): this is the actual
+   authoritative path "must survive backup and restore" is evaluated
+   against, since it captures every table byte-for-byte. All of the
+   following were proven with real round-trip tests (export a seeded
+   database as literal SQL text matching `wrangler d1 export`'s own
+   scrambled, children-before-parents ordering, reorder it via the real
+   `planD1Restore`, replay the reordered statements into a brand-new
+   migrated database, then assert on the result):
+   - An ACTIVE correction (Kutoff-shaped: DIN2023 corrected to $0/no
+     plan, DIN2025 $250/active plan) survives with
+     `pledge_activity_id`, `donor_id`, `user_id`, and the original
+     imported-balance snapshot exactly intact, and remains active
+     (`reversed_at IS NULL`).
+   - A REVERSED correction's full two-row audit history (first
+     correction superseded, second correction also reversed) survives
+     exactly as it was -- neither row is dropped or reactivated.
+   - A pledge with NO correction restores unaffected and never
+     inherits one from a sibling pledge in the same export.
+   - Multiple pledges for the same donor restore independently --
+     correcting one never contaminates another, even through the
+     restore path specifically (not just the original write path,
+     already covered by the Manual Pledge Balance Corrections round's
+     own tests).
+   - DIN2025's payment plan survives the restore completely unchanged
+     (`ended_at` still NULL, installment amount unchanged).
+   - The original imported `giving_activities` columns
+     (`committed_cents`/`paid_cents`/`balance_cents`) are untouched by
+     the restore -- the correction's own effect lives entirely in the
+     separate table, never overwrites the raw import.
+   - No `jl_payment_assignment_audits` row is ever created by a
+     restore -- no fictitious payment, no revenue change.
+   - The partial unique index (`pledge_balance_corrections_active_
+     uidx`) is schema, not data -- it survives the restore automatically
+     and was directly proven to still block a second simultaneously-
+     active correction for the same pledge even if a malformed/corrupted
+     export somehow carried two.
+
+**Genuinely new finding this round** (not previously tested): import
+rollback (`app/api/import/rollback`) `DELETE`s newly-inserted
+`giving_activities` rows outright when undoing a JL donation import.
+Confirmed empirically against real Independent Staging
+(`PRAGMA foreign_keys;` -> `foreign_keys=1`) that foreign key
+enforcement IS active there. A new regression test (with the in-memory
+test database's own `PRAGMA foreign_keys=ON`, matching the real
+binding -- the pre-existing test files in this repo had not been
+setting this pragma, so this is also the first test in this codebase to
+exercise that real constraint for this table) proves: deleting a
+`giving_activities` row that has an ACTIVE correction FAILS the foreign
+key constraint rather than silently succeeding. This means an import
+rollback can never silently orphan an active correction -- it fails
+closed (the whole `env.DB.batch()` transaction rolls back, the route
+returns its existing generic 500 "Rollback failed... no partial
+rollback was kept" response). This is safe behavior, not a bug, but it
+does mean: if a fundraiser corrects a brand-new pledge's balance and
+then tries to undo the very import that created it, the rollback will
+fail until they first reverse the correction. The error message shown
+today is the route's existing generic failure text, not a specific
+explanation of why -- noted under "needs additional work" below as a
+minor UX polish opportunity, not a data-integrity risk.
+
+### Priority 3 -- regression tests (all isolated fixtures, no real data)
+
+Two new test files, both registered in `scripts/run-tests.mjs`:
+
+- **`tests/migration-upgrade-0041-0042.test.mjs`** (3 tests): fresh-
+  database migration; upgrade-path data preservation; the Kutoff-shaped
+  scenario specifically on an upgraded (not fresh) database.
+- **`tests/workspace-backup-restore-corrections.test.mjs`** (10 tests):
+  per-workspace backup classification; restore-order dependency
+  placement (2 tests, matching the `donor_source_attributions`
+  precedent); backward compatibility with a pre-0042 export; the five
+  round-trip scenarios above (active, reversed, none, multiple pledges,
+  duplicate-prevention); the import-rollback foreign-key safety finding.
+
+Every numbered item the task listed is covered: fresh migration (1),
+upgrade from the previous baseline (2), backup/restore with active (3),
+reversed (4), and no (5) corrections, backward compatibility with older
+backup shapes (6), multiple pledges for one donor (7, both in the
+migration-upgrade file and the restore file), payment-plan preservation
+(8), duplicate-active-correction prevention (9), and preservation of
+imported financial data plus audit history (10) -- plus the exact
+Kutoff-shaped controlled scenario in both the fresh/upgrade file and the
+restore round-trip file.
+
+### Priority 4 -- validation
+
+- **`pnpm test`: 176/176 test files pass** (173 previously + the 2 new
+  files this round).
+- **`pnpm exec tsc --noEmit`: clean.**
+- **`pnpm run build` (production-equivalent): succeeded.**
+- **`pnpm run build:staging-independent`: succeeded.**
+- **`pnpm run build:production`: succeeded.**
+- Backup/restore verification was performed with disposable/isolated
+  fixtures only (in-memory SQLite databases built from the real
+  migration files, never Independent Staging or Production D1) -- no
+  destructive restore was performed against any real database. The only
+  commands issued against real Independent Staging this round were
+  read-only (`PRAGMA foreign_keys;`).
+- No Independent Staging deployment was needed or performed this round
+  -- no application code changed; only test files, the test runner
+  registration, and (on the separate, unmerged `main`-targeted branch)
+  restore-tracking metadata.
+
+### Priority 5 -- production readiness assessment
+
+| Area | Status | Notes |
+|---|---|---|
+| Migration compatibility (0041+0042) | **Verified safe** | Fresh DB and upgrade path both proven; canonical branch's restore order already correct; main-branch sync prepared and validated (branch pushed, not merged). |
+| Backup/restore completeness | **Verified safe** (authoritative whole-DB path) | Per-workspace JSON export deliberately and correctly excludes this table, by design, consistent with siblings. Round-trip tested for active/reversed/none/multiple-pledge scenarios. |
+| Financial-data integrity | **Verified safe** | Raw imported balance never overwritten (fresh, upgrade, and restore paths all proven); no fictitious payments; no revenue-total changes; FK enforcement blocks silent orphaning. |
+| Authentication and authorization | **Not re-evaluated this round** | Out of this round's scope -- no new auth surface was introduced. Pre-existing coverage (correction routes require auth) was not re-run as part of this specific investigation beyond what the full suite already re-confirms. |
+| Data ownership boundaries | **Verified safe** (for this table) | owner_user_id/donor_id scoping confirmed intact through restore via the multi-pledge and multi-donor tests; not a full re-audit of every table's ownership model. |
+| Rollback readiness | **Verified safe, minor polish opportunity** | Correction reversal is robust and tested. Import rollback vs. an active correction fails closed (safe) but with a generic error message rather than a specific explanation -- **needs additional work** if a clearer message is wanted; not a blocker. |
+| Existing payment plans | **Verified safe** | DIN2025's plan proven byte-for-byte unchanged across correction application AND restore round-trip. |
+| Outstanding balance calculations | **Verified safe** | The same `COALESCE` effective-balance rule proven consistent across all 7 consumer sites (pre-existing) and now also proven to survive backup/restore. |
+| `main` branch sync merge | **Requires user approval** | Branch `fix/d1-restore-sync-0041-0042-pledge-balance-corrections` is pushed and fully validated; merging it is a separate, explicit decision this round deliberately did not make. |
+| `main`'s anomalous tip commit message | **Requires user awareness** | Not a correctness problem (content verified correct); flagged for human visibility only, not touched. |
+
+### Files changed (canonical branch, `feature/independent-cloudflare-sandbox`)
+
+- `tests/migration-upgrade-0041-0042.test.mjs` (new)
+- `tests/workspace-backup-restore-corrections.test.mjs` (new)
+- `scripts/run-tests.mjs` (registered both new files)
+- `docs/AI-HANDOFF.md` (this entry)
+
+### Files changed (separate branch, NOT merged)
+
+- `fix/d1-restore-sync-0041-0042-pledge-balance-corrections` (commit
+  `6a2d8f2`, based on `origin/main`): `lib/operations/staging-reset.ts`,
+  `lib/data-health/production-baseline.ts`,
+  `production-baseline/schema-manifest.json`,
+  `test/d1-restore-order.test.mjs`.
+
+No Production deployment, no merge to `main`, no Production D1 access
+of any kind, no destructive database operation, and no change to any
+real donor financial record (Kutoff's correction and payment plan
+included -- confirmed untouched by every command this round, all of
+which were either read-only or ran against isolated in-memory fixtures).
+
+**GO / NO-GO for Production: NO-GO**, pending explicit user approval
+for exactly two remaining items, both already prepared and validated:
+(1) merging `fix/d1-restore-sync-0041-0042-pledge-balance-corrections`
+into `main`, and (2) a separate, explicit decision to actually deploy
+Production, which this round was never authorized to make regardless of
+technical readiness. Everything within this round's own scope (migration
+and backup/restore compatibility specifically) is verified safe; no
+other blocker was found or introduced. Stopping here for independent
+review before any Production action.

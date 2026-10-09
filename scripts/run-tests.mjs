@@ -207,6 +207,8 @@ const TEST_FILES = [
   "tests/pledge-balance-correction.test.mjs",
   "tests/pledge-balance-correction-e2e.test.mjs",
   "tests/unified-timeline-balance-correction.test.mjs",
+  "tests/migration-upgrade-0041-0042.test.mjs",
+  "tests/workspace-backup-restore-corrections.test.mjs",
 ];
 
 function runOne(file) {
