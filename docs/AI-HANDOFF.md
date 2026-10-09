@@ -28731,3 +28731,50 @@ separate, much larger, not-yet-started decision, distinct from this
 sync being resolved. "The sync check is green" and "Production
 deployment is authorized" remain two different questions; this round
 answers only the former.
+
+## Accelerated Production Launch Assessment (2026-10-09) -- INVESTIGATION, PLANNING, AND DOCUMENTATION ONLY, NO DEPLOYMENT
+
+Full assessment: **`docs/ACCELERATED-PRODUCTION-LAUNCH.md`**. Summary:
+
+The owner wants to begin daily use as soon as safely possible. Four
+independent, parallel code/test/data audits (donor & financial core;
+relationship & workflow core; security & authentication; live
+Independent Staging data, all read-only) plus direct architecture/backup
+research found **zero P0 (launch-blocking) and zero P1
+(daily-reliance-blocking) defects** anywhere in the application. Two P2
+findings only: a defense-in-depth auth hardening opportunity (the
+ChatGPT-Sites header auth path isn't provably excluded on non-staging
+Cloudflare environments, though Cloudflare Access already gates the
+route first in practice), and Workspace Health not surfacing backup
+freshness in its own UI.
+
+Independent Staging's real dataset (254 donors, 5,463 giving
+activities, 88 real outstanding pledges, 45 active payment plans, 1
+active manual correction, 17/17 completed imports) was independently
+re-audited: zero duplicates, zero orphaned FKs, zero unexpected nulls,
+zero financial inconsistencies, zero residual sample/test data. The
+Kutoff regression case (57932) was re-verified exactly against its
+known-correct values. Staging is judged sufficiently trustworthy to
+become the initial Production dataset, pending the owner's own explicit
+approval.
+
+No independent Production Worker/D1/R2 exists yet -- that is the real
+remaining work, not application bugs. The proposed architecture and
+migration mechanism reuse Staging's own already-proven pattern and
+tooling exactly (no new engineering): a new isolated Worker/D1/R2 set,
+and the existing backup/restore pipeline (already round-trip-tested
+this session) as the data-copy mechanism. One concrete, actionable
+recommendation: the real monthly restore-verification workflow's most
+recent success (2026-10-01) predates migrations 0041/0042 landing on
+main -- the next run (scheduled or manually dispatched, with approval)
+would be the first proof against the current schema.
+
+Estimated remaining work: roughly 2-3 focused days (infrastructure
+provisioning + one cutover session), gated entirely by the owner's
+availability for manual Cloudflare dashboard steps and explicit
+approvals, not by outstanding engineering. No specific calendar date
+is proposed.
+
+No Production deployment, no infrastructure creation, no data copy, no
+application code change, and no donor data modification occurred this
+round -- investigation and documentation only.
