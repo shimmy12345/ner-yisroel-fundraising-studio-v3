@@ -303,6 +303,25 @@ export type PledgeRenewalEvaluation = {
   fiveDayReminderDate: number | null;
   isFiveDayReminder: boolean;
   isRenewalDateReminder: boolean;
+  // Renewal Follow-Up (2026-10-09, see docs/AI-HANDOFF.md's Spetner
+  // (2689) investigation) -- true on every day STRICTLY AFTER
+  // renewalDate (never on the renewal date itself, which already has
+  // its own one-day isRenewalDateReminder/"Pledge renewal opportunity"
+  // signal -- the two are mutually exclusive by construction, never
+  // both true on the same day for the same plan). Persists indefinitely
+  // once true: this app currently has NO mechanism that can mark a
+  // renewal "resolved" (see docs/AI-HANDOFF.md's investigation -- no
+  // existing field reliably establishes that without also carrying
+  // unwanted side effects, e.g. `endedAt` would also stop legitimate
+  // ongoing installment tracking), so by design this stays true every
+  // day forever until either the fundraiser formally ends the plan
+  // (endedAt, which short-circuits the function above before this is
+  // ever reached) or a future, separately-approved acknowledgment
+  // mechanism is added. Never derived from, or suppressed by, any OTHER
+  // pledge this donor may have -- this function has no concept of "a
+  // newer pledge" at all, so it can never incorrectly suppress a
+  // follow-up merely because the donor gave to an unrelated program.
+  isRenewalFollowUpNeeded: boolean;
 };
 
 // Pledge Renewal Reminders (2026-10-08, corrected 2026-10-08 to depend on
@@ -348,7 +367,7 @@ export type PledgeRenewalEvaluation = {
 // day offset regardless of daylight saving.
 export function evaluatePledgeRenewal(originalPledgeDate: number | null, commitmentDurationMonths: number | null, endedAt: number | null, now: number, timezone: string): PledgeRenewalEvaluation {
   if (originalPledgeDate === null || commitmentDurationMonths === null || endedAt !== null) {
-    return { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false };
+    return { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false };
   }
   const anchorDay = dayOfMonthFromDateOnlyEpoch(originalPledgeDate);
   let renewalDate = originalPledgeDate;
@@ -360,6 +379,77 @@ export function evaluatePledgeRenewal(originalPledgeDate: number | null, commitm
     fiveDayReminderDate,
     isFiveDayReminder: nowDateOnly === fiveDayReminderDate,
     isRenewalDateReminder: nowDateOnly === renewalDate,
+    isRenewalFollowUpNeeded: nowDateOnly > renewalDate,
+  };
+}
+
+// Completed-Plan Visibility fix (2026-10-09, see docs/AI-HANDOFF.md's
+// Rosenbaum (69341) / Katz (68231) investigation) -- a payment plan must
+// stay reachable (its own Edit/End-plan controls, its renewal-field
+// form) for as long as it is active, REGARDLESS of the pledge's own
+// balance. Before this, the donor-page card was gated on
+// `balanceCents > 0` alone, which made a plan that pays off early
+// permanently un-endable and un-editable through the app -- the only
+// "End plan" control lived inside the very card that balance-only
+// gating hid. `hasActivePlan` is true whenever a `pledge_payment_plans`
+// row with `ended_at IS NULL` exists for this pledge -- callers already
+// have that from their own `ended_at IS NULL`-filtered query, never
+// recomputed here. Deliberately NOT based on `isCompleted`/evaluatePaymentPlan
+// at all -- this is a pure visibility rule, not a financial evaluation.
+export function shouldShowPaymentPlanCard(balanceCents: number | null, hasActivePlan: boolean): boolean {
+  return (balanceCents ?? 0) > 0 || hasActivePlan;
+}
+
+export type RecurringPaymentAlertStatus = "verify_import" | "follow_up_needed";
+
+export type RecurringPaymentAlertEvaluation = {
+  status: RecurringPaymentAlertStatus | null;
+  expectedPaymentAt: number | null;
+  daysBehind: number;
+};
+
+// Recurring Payments Behind Schedule (2026-10-09, see docs/AI-HANDOFF.md).
+// Pure derivation over evaluatePaymentPlan's OWN output -- deliberately
+// NOT a second/separate overdue calculation. `evaluation.isLate` already
+// encodes everything that disqualifies an alert: the plan must be
+// active, not completed (balanceCents > 0), and not past its own final
+// expected date (evaluableForLateness in evaluatePaymentPlan) -- so a
+// financially fulfilled or formally ended plan is excluded here for
+// free, with zero duplicated logic, simply by reusing this one gate.
+//
+// The ONE new axis this function adds is import freshness.
+// `lastDonationRefreshAt` is jl_refresh_state.last_donation_refresh_at
+// -- the one real, already-existing JL-import timestamp this app
+// records (see lib/data-health/model.ts's own use of the same field).
+// If the fundraiser's last JL donation refresh happened BEFORE the
+// unsatisfied installment's own due date, a payment made on or before
+// that due date could simply not have been pulled in yet -- that is
+// "stale/incomplete data," not a confirmed missed payment, so this
+// reports "verify_import" rather than "follow_up_needed". Only once a
+// refresh is recorded ON OR AFTER the due date, and the installment is
+// STILL unsatisfied, does this report "follow_up_needed" -- a genuine
+// need based on CURRENT data. `null` (no refresh ever recorded) is
+// treated the same as stale, never as "confirmed current" by omission.
+//
+// "declined" is deliberately NOT a value this function can ever
+// produce: as of this investigation, no JL import this app reads
+// carries any transaction-decline/credit-card-failure signal at all
+// (confirmed by inspecting db/schema.ts -- jl_payment_assignment_audits
+// and every other import-derived table record only amounts/dates/
+// balances, never a decline status). Inferring "declined" from an
+// overdue installment alone is explicitly prohibited by this feature's
+// own requirements; the moment real decline evidence exists in an
+// import, this function's status union (and the caller's rendering)
+// should be extended to surface it -- never guessed before then.
+export function evaluateRecurringPaymentAlert(evaluation: PaymentPlanEvaluation, lastDonationRefreshAt: number | null): RecurringPaymentAlertEvaluation {
+  if (!evaluation.isLate || evaluation.nextUnsatisfiedExpectedPaymentAt === null) {
+    return { status: null, expectedPaymentAt: null, daysBehind: 0 };
+  }
+  const importCoversThisDueDate = lastDonationRefreshAt !== null && lastDonationRefreshAt >= evaluation.nextUnsatisfiedExpectedPaymentAt;
+  return {
+    status: importCoversThisDueDate ? "follow_up_needed" : "verify_import",
+    expectedPaymentAt: evaluation.nextUnsatisfiedExpectedPaymentAt,
+    daysBehind: evaluation.daysLate,
   };
 }
 

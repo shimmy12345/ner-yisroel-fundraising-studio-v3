@@ -72,7 +72,7 @@ for (const start of phaseCallStarts) {
   }
 }
 
-// 7. Instrumentation itself does not add D1 queries -- 20 call sites: the
+// 7. Instrumentation itself does not add D1 queries -- 21 call sites: the
 // original 16 this test pinned for the instrumentation task, plus one
 // legitimate new query added by the open-pledge payment-recency fix
 // (jl_payment_assignment_audits, feeding resolveOpenPledgeActivityDate --
@@ -90,11 +90,16 @@ for (const start of phaseCallStarts) {
 // evaluatePledgeRenewal; a deliberately separate query from the payment-
 // plans one above, never routed through it, so a donor with multiple
 // simultaneously active plans gets every eligible one evaluated, not just
-// their one "primary" pledge -- see docs/AI-HANDOFF.md), mirroring
-// donor_page_render's own "21 before, 24 after the Ask, Payment Plan, and
-// Stage 2 features' three real new queries" comment in tests/today.test.mjs.
+// their one "primary" pledge -- see docs/AI-HANDOFF.md), plus one more
+// legitimate new query added by Recurring Payments Behind Schedule
+// (2026-10-09, see docs/AI-HANDOFF.md) -- a single-row-per-user read of
+// jl_refresh_state.last_donation_refresh_at, the one real JL-import-
+// freshness timestamp this app records, feeding evaluateRecurringPaymentAlert
+// -- mirroring donor_page_render's own "21 before, 24 after the Ask,
+// Payment Plan, and Stage 2 features' three real new queries" comment in
+// tests/today.test.mjs.
 const d1CallSites = (liveData.match(/env\.DB\.prepare\(/g) ?? []).length;
-assert.equal(d1CallSites, 20, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query, the one legitimate payment-plans query, the one legitimate relationship-facts query, and the one legitimate pledge-renewal query -- instrumentation itself must never add a query");
+assert.equal(d1CallSites, 21, "loadWorkspaceBrief must issue exactly 16 pre-existing query call sites plus the one legitimate pledge-payment-recency query, the one legitimate payment-plans query, the one legitimate relationship-facts query, the one legitimate pledge-renewal query, and the one legitimate jl_refresh_state (import-freshness) query -- instrumentation itself must never add a query");
 
 // 8. Candidate-set sizes are derived from existing in-memory results, not
 // freshly computed/queried: the logged fields must reference the same Map

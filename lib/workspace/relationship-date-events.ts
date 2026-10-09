@@ -27,7 +27,7 @@ import { RELATIONSHIP_DATE_LEAD_WINDOW_DAYS } from "../relationships/recommendat
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { localDateOnlyEpoch } from "./local-time.ts";
 
-export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone" | "pledge_renewal";
+export type RelationshipDateEventType = "yahrtzeit" | "birthday" | "anniversary" | "payment_plan_milestone" | "pledge_renewal" | "recurring_payment_behind";
 
 // Fields are kept granular (rather than one concatenated "detail" string) so
 // the compact Coming Up row can give each piece of information -- donor,
@@ -271,6 +271,9 @@ export type PledgeRenewalReminderRow = {
   campaign: string | null;
   renewalDate: number;
   fiveDayReminderDate: number;
+  // Renewal Follow-Up (2026-10-09, see docs/AI-HANDOFF.md) -- already
+  // computed once by evaluatePledgeRenewal, never re-derived here.
+  isRenewalFollowUpNeeded: boolean;
 };
 
 // Pledge renewal reminders (2026-10-08, extended 2026-10-08 to appear in
@@ -364,8 +367,107 @@ export function buildPledgeRenewalReminderEvents(
         ambiguous: false,
       });
     }
+    // Renewal Follow-Up (2026-10-09, see docs/AI-HANDOFF.md's Spetner
+    // (2689) investigation) -- deliberately NOT part of the `stages`
+    // loop above: unlike "approaching"/"renewal" (each a one-day pulse,
+    // bounded by RELATIONSHIP_DATE_LEAD_WINDOW_DAYS, dateEpoch = its own
+    // fixed trigger date), this is a STANDING need with no upper bound
+    // and no fixed trigger date of its own -- dateEpoch is deliberately
+    // set to `todayEpoch` (not row.renewalDate, which is now in the
+    // past) so partitionRelationshipDateEventsByToday's exact-equality
+    // check always routes it to the "today" bucket, every single day it
+    // remains true, rather than "upcoming" (where a past date would
+    // never belong) or nowhere at all. Mutually exclusive with the
+    // "renewal" stage above by construction (isRenewalFollowUpNeeded is
+    // only ever true the day AFTER renewalDate, never on it), so this
+    // never duplicates that one-day event.
+    if (row.isRenewalFollowUpNeeded) {
+      events.push({
+        id: `pledge-renewal:${row.planId}:follow_up`,
+        type: "pledge_renewal",
+        donorId: row.donorId,
+        donorName: identity.donorName,
+        initials: identity.initials,
+        donorCode: identity.donorCode,
+        label: "Pledge renewal",
+        relationshipPhrase: "Renewal follow-up needed",
+        secondaryDateLabel,
+        provenanceName: null,
+        provenanceNameHebrew: null,
+        dateLabel: renewalLabel,
+        dateEpoch: todayEpoch,
+        ambiguous: false,
+      });
+    }
   }
   return events.sort((a, b) => a.dateEpoch - b.dateEpoch || a.donorName.localeCompare(b.donorName));
+}
+
+export type RecurringPaymentAlertStatus = "verify_import" | "follow_up_needed";
+
+const RECURRING_PAYMENT_ALERT_PHRASES: Record<RecurringPaymentAlertStatus, string> = {
+  verify_import: "Verify latest payment import",
+  follow_up_needed: "Payment follow-up needed",
+};
+
+export type RecurringPaymentAlertRow = {
+  donorId: string;
+  planId: string;
+  status: RecurringPaymentAlertStatus;
+  expectedPaymentAt: number;
+  expectedAmountCents: number | null;
+  daysBehind: number;
+};
+
+// Recurring Payments Behind Schedule (2026-10-09, see docs/AI-HANDOFF.md).
+// Built the SAME way as buildPaymentPlanMilestoneEvents above -- a
+// standing condition, not a lead-window countdown, so `dateEpoch` is
+// pinned to TODAY (always lands in the "today" bucket via
+// partitionRelationshipDateEventsByToday below, every day it remains
+// true -- no upper bound, since this is the status quo until the
+// underlying payment is recorded/reconciled, not a date to count down
+// to) while `dateLabel` shows the plan's own real expected-payment date
+// for context. One row per plan (rows are already pre-filtered to "this
+// plan currently needs an alert" by the caller, via
+// evaluateRecurringPaymentAlert -- never recomputed here), so `id` is
+// keyed on `planId` alone and can structurally never duplicate.
+//
+// Deliberately only two statuses are ever rendered here
+// ("verify_import"/"follow_up_needed") -- "Payment declined -- contact
+// donor" is reserved for the day a real, imported decline signal exists
+// (see evaluateRecurringPaymentAlert's own doc comment: no such signal
+// exists in this app's data today), and nothing in this function invents
+// one.
+export function buildRecurringPaymentAlertEvents(
+  rows: RecurringPaymentAlertRow[],
+  identityByDonor: Map<string, DonorIdentityForEvent>,
+  timezone: string,
+  now: number,
+): WorkspaceRelationshipDateEvent[] {
+  const todayEpoch = localDateOnlyEpoch(now, timezone);
+  const events: WorkspaceRelationshipDateEvent[] = [];
+  for (const row of rows) {
+    const identity = identityByDonor.get(row.donorId);
+    if (!identity) continue;
+    const amountLabel = row.expectedAmountCents !== null ? `${money(row.expectedAmountCents)} expected` : "Amount not set";
+    events.push({
+      id: `recurring-payment:${row.planId}`,
+      type: "recurring_payment_behind",
+      donorId: row.donorId,
+      donorName: identity.donorName,
+      initials: identity.initials,
+      donorCode: identity.donorCode,
+      label: "Recurring payment",
+      relationshipPhrase: RECURRING_PAYMENT_ALERT_PHRASES[row.status],
+      secondaryDateLabel: `${amountLabel} · ${row.daysBehind} day${row.daysBehind === 1 ? "" : "s"} behind`,
+      provenanceName: null,
+      provenanceNameHebrew: null,
+      dateLabel: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(row.expectedPaymentAt * 1000)),
+      dateEpoch: todayEpoch,
+      ambiguous: false,
+    });
+  }
+  return events.sort((a, b) => a.donorName.localeCompare(b.donorName));
 }
 
 // Splits a combined, sorted relationship-date-event list (yahrtzeits +

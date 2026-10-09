@@ -23,7 +23,7 @@ import { donorInitials, numericDonorCode } from "../../../lib/relationships/dono
 import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
 import { resolveRelationshipSnapshot, type SynthesisFact } from "../../../lib/relationships/fact-synthesis";
-import { evaluatePaymentPlan, evaluatePledgeRenewal } from "../../../lib/relationships/pledge-payment-plan";
+import { evaluatePaymentPlan, evaluatePledgeRenewal, shouldShowPaymentPlanCard } from "../../../lib/relationships/pledge-payment-plan";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
 import { GiftAcknowledgmentActions } from "./GivingManagement";
@@ -284,13 +284,24 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // just scopes it to payments linked specifically to THIS open pledge.
   const openPledgePaymentDates = openPledgeSource ? paymentEvents.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.payment_date) : [];
   const openPledgePlan = openPledgeSource ? paymentPlans.find((item) => item.pledge_activity_id === openPledgeSource.id) : undefined;
-  // Every open pledge this donor has, each with its own independent
-  // payment-plan state (never donor-wide) -- unlike openPledgeForEvidence
-  // below, which only ever carries ONE pledge into Suggested Action/
-  // Meeting Brief/Assistant (the single most relevant fact). A donor with
-  // two open pledges where only one is on a plan gets two cards here, one
-  // "Set payment plan" button and one populated plan card.
-  const openPledgesWithPlans = countedActivities.filter((item) => (item.balance_cents ?? 0) > 0).map((pledge) => {
+  // Every pledge this donor has that still needs a visible payment-plan
+  // card, each with its own independent payment-plan state (never
+  // donor-wide) -- unlike openPledgeForEvidence below, which only ever
+  // carries ONE pledge into Suggested Action/Meeting Brief/Assistant
+  // (the single most relevant fact). A donor with two open pledges
+  // where only one is on a plan gets two cards here, one "Set payment
+  // plan" button and one populated plan card.
+  //
+  // Completed-Plan Visibility fix (2026-10-09, see docs/AI-HANDOFF.md) --
+  // deliberately NOT `(item.balance_cents ?? 0) > 0` alone anymore: a
+  // pledge that pays off in full keeps its card (via
+  // shouldShowPaymentPlanCard) for as long as its plan stays active
+  // (`ended_at IS NULL`, the exact condition `paymentPlans` is already
+  // queried with above), so the plan's own Edit/End-plan controls and
+  // renewal-field form never become permanently unreachable the moment
+  // balance hits zero. A pledge with NO plan and a zero balance is still
+  // correctly excluded (nothing to show, same as before).
+  const openPledgesWithPlans = countedActivities.filter((item) => shouldShowPaymentPlanCard(item.balance_cents, paymentPlans.some((p) => p.pledge_activity_id === item.id))).map((pledge) => {
     const planRow = paymentPlans.find((item) => item.pledge_activity_id === pledge.id);
     if (!planRow) return { pledge, planState: null as PledgePlanState | null };
     const linkedPaymentDates = paymentEvents.filter((event) => event.pledge_activity_id === pledge.id).map((event) => event.payment_date);
@@ -419,11 +430,18 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
         financial-system-of-record data). Live mode only, matching every
         other write-capable donor-page feature (no demo/sample asks data). */}
     {mode === "live" && <section className="asks-section"><div className="card-heading"><div><p className="eyebrow">ASKS</p><h2>{openAsks.length > 0 ? `${openAsks.length} open ask${openAsks.length === 1 ? "" : "s"}` : "No open ask"}</h2></div><LogAskForm donorId={id} minCustomDate={new Date().toISOString().slice(0, 10)} /></div>{openAsks.length > 0 && <div className="open-ask-list">{openAsks.map((ask) => <OpenAskCard key={ask.id} ask={{ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }} followUp={openFollowUpByAskId.get(ask.id) ?? null} timezone={profile.timezone} minCustomDate={new Date().toISOString().slice(0, 10)} />)}</div>}<AskHistory asks={historicalAsks.map((ask) => ({ id: ask.id, amountCents: ask.amount_cents, purpose: ask.purpose, status: ask.status, askedAt: ask.asked_at, note: ask.note }))} /></section>}
-    {/* One card per open pledge, each with its own independent payment
-        plan -- never a shared donor-wide plan, never a separate
-        pledge-management screen. Live mode only, same as Asks above (no
-        write-capable feature offers demo/sample data). */}
-    {mode === "live" && openPledgesWithPlans.length > 0 && <section className="pledge-plans-section"><div className="card-heading"><div><p className="eyebrow">OPEN PLEDGES</p><h2>{openPledgesWithPlans.length} open pledge{openPledgesWithPlans.length === 1 ? "" : "s"}</h2></div></div><div className="open-pledge-plan-list">{openPledgesWithPlans.map(({ pledge, planState }) => <article key={pledge.id} className="open-pledge-plan-row"><div className="open-pledge-summary"><strong>{money(pledge.balance_cents ?? 0)}</strong><span>{pledge.source_campaign || pledge.description || pledge.item_type || "Open pledge"}</span></div><OpenPledgePlanCard pledgeActivityId={pledge.id} plan={planState} /></article>)}</div></section>}
+    {/* One card per pledge that still needs a payment-plan card, each
+        with its own independent payment plan -- never a shared
+        donor-wide plan, never a separate pledge-management screen. Live
+        mode only, same as Asks above (no write-capable feature offers
+        demo/sample data). Completed-Plan Visibility fix (2026-10-09, see
+        docs/AI-HANDOFF.md): the section label/heading is deliberately
+        neutral ("PLEDGES", a plain count) rather than "OPEN PLEDGES",
+        since shouldShowPaymentPlanCard above can now include a
+        fully-paid pledge whose plan is still active -- and each row
+        shows "Paid in full" rather than a $0 balance for that case
+        (requirement: never present a completed pledge as unpaid). */}
+    {mode === "live" && openPledgesWithPlans.length > 0 && <section className="pledge-plans-section"><div className="card-heading"><div><p className="eyebrow">PLEDGES</p><h2>{openPledgesWithPlans.length} pledge{openPledgesWithPlans.length === 1 ? "" : "s"}</h2></div></div><div className="open-pledge-plan-list">{openPledgesWithPlans.map(({ pledge, planState }) => <article key={pledge.id} className="open-pledge-plan-row"><div className="open-pledge-summary"><strong>{(pledge.balance_cents ?? 0) > 0 ? money(pledge.balance_cents ?? 0) : "Paid in full"}</strong><span>{pledge.source_campaign || pledge.description || pledge.item_type || "Pledge"}</span></div><OpenPledgePlanCard pledgeActivityId={pledge.id} plan={planState} /></article>)}</div></section>}
     <div className="relationship-grid"><main className="relationship-main">
       <section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP SNAPSHOT</p><h2>{relationshipContext.summary ? "Prepare for the next interaction" : "No relationship snapshot yet"}</h2></div></div><p className="summary">{relationshipContext.summary || "Log a completed interaction to begin a practical snapshot from this household’s actual activity."}</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">SUGGESTED ACTION</p><h3>{recommendation?.action || "No suggested action available"}</h3><p>{recommendation?.why || "Add a reminder, or log an interaction, to generate a suggested next step."}</p>{recommendation && <p className="recommendation-evidence">{recommendation.evidence.join(" ")}</p>}{recommendation?.timing && <p className="recommendation-meta">{recommendation.timing}</p>}{recommendation?.kind === "reconnect_contact_gap" && completedInteractions[0] && completedInteractions[0].occurred_at > Math.floor(Date.now() / 1000) - 90 * 86400 && <p className="recommendation-clarifier">Last Contact reflects every touch, including broadcast texts/emails sent to many donors at once. This suggestion looks at substantive, one-to-one contact only.</p>}{mode === "live" && recommendation?.kind === "acknowledge_gift" && recommendation.giftSource && recommendation.giftId && <GiftAcknowledgmentActions giftSource={recommendation.giftSource} giftId={recommendation.giftId} initialStatus={null} compact />}</div></div>{mode === "live" && historicalContextRows.length > 0 && <details className="historical-context-disclosure"><summary>Imported context ({historicalContextRows.length})</summary><p className="historical-context-lede">Notes imported from external sources. Not logged interactions — never counted as contact, and never assumed to have actually happened.</p><div className="historical-context-list">{historicalContextRows.map((row) => <article key={row.id} className="historical-context-entry"><p className="historical-context-text">“{row.text}”</p><p className="historical-context-provenance">{row.source === "import-monday" ? "Monday.com" : row.source}{row.source_date ? ` · ${date(row.source_date, profile.timezone)}` : ""} · Completion was never confirmed.</p></article>)}</div></details>}</section>
       <section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>{relationshipContext.memory ? "Recorded relationship context" : "No institutional memory recorded"}</h2></div></div>{relationshipContext.memory && <p className="summary">{relationshipContext.memory}</p>}</section>

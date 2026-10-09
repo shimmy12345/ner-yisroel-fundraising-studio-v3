@@ -26875,3 +26875,281 @@ upcoming or whose plan has already been ended.
 
 No application code, schema, D1 data, or deployment was touched by this
 investigation. This entry is documentation-only.
+
+## Payment-Plan Improvements -- Completed-Plan Visibility, Renewal Follow-Up, Recurring Payments Behind Schedule (2026-10-09) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED; PART 2's ACKNOWLEDGMENT MECHANISM PROPOSED, NOT IMPLEMENTED -- AWAITING APPROVAL
+
+Three approved improvements from the Completed-Plan Visibility + Lapsed-
+Renewal investigation above, implemented following DERIVED OVER ENTERED
+(`docs/FUNDRAISING_OS_PRINCIPLES.md` / `docs/FUNDRAISING-INTELLIGENCE-
+BRIEF-DESIGN.md` §19.1): nothing here introduces a field the fundraiser
+must manually maintain. No donor payment, pledge, or plan row was
+created, edited, deleted, or reassigned; no migration; Production was
+never touched.
+
+### Part 1 -- Completed Payment Plans (Rosenbaum 69341, Katz 68231)
+
+**Root cause (restated from the investigation above):** the donor-page
+"OPEN PLEDGES" card -- and its only Edit/End-plan controls, its only
+renewal-field form -- was gated on `balance_cents > 0` alone, so a plan
+that reaches a zero balance before being manually ended became
+permanently unreachable through the app.
+
+**Fix:** a new pure function, `shouldShowPaymentPlanCard(balanceCents,
+hasActivePlan)` (`lib/relationships/pledge-payment-plan.ts`), returns
+true when the pledge has an open balance OR an active
+(`ended_at IS NULL`) plan. `app/donors/[id]/page.tsx`'s
+`openPledgesWithPlans` filter now calls this instead of checking balance
+alone. The section's eyebrow/heading changed from "OPEN PLEDGES" to the
+neutral "PLEDGES" (since the list can now include a fully-paid pledge),
+and each row shows "Paid in full" instead of a literal `$0` once balance
+reaches zero -- the card body itself already had the correct "This plan
+appears complete -- paid in full" copy and already suppressed "Next
+expected" for a completed plan; only the container's gating/labeling
+needed to change. No auto-ending logic exists or was added anywhere --
+confirmed by re-reading `app/api/pledge-payment-plans/[id]/route.ts`:
+`ended_at` is written in exactly one place, inside the explicit
+`{ended: true}` branch, and the route never reads `balance_cents` at
+all.
+
+**Scope check performed before implementing:** a live query for
+`ended_at IS NULL AND balance_cents <= 0` found exactly 2 affected
+plans today (Rosenbaum, Katz) -- the fix is general (applies to any
+future plan in this state), but its current blast radius is confirmed
+small and exactly matches the two real cases reported.
+
+### Part 2 -- Renewal Follow-Up After the Renewal Date (Spetner 2689)
+
+**Investigated first (requirement 7):** can existing data reliably
+establish that a renewal was addressed? The real campaign-code data was
+inspected live (`SELECT DISTINCT source_campaign ...`): the overwhelming
+majority (>99%, e.g. `CF1987`...`CF2024`, `AD1983`...`AD1997`) follow a
+strict `<PROGRAM-PREFIX><YEAR>` pattern, with exactly 2 real exceptions
+(`NDLK`, `ONE`, evergreen funds with no year suffix) -- suggesting a
+"new pledge to the same program" heuristic is *plausible* but not
+universally reliable, and more importantly: a plan that still has
+outstanding installments (Spetner's real case, requirement 2) cannot
+safely reuse `ended_at` as "renewal resolved" either, since ending the
+plan would also stop its legitimate, still-needed installment tracking
+-- the two concepts (plan lifecycle vs. renewal resolution) are
+genuinely orthogonal, not just awkwardly overlapping. **Conclusion:
+existing data cannot reliably establish renewal resolution without
+also carrying an unwanted side effect or relying on an unproven
+heuristic.**
+
+**Implemented now (derivable, zero new schema):**
+- `evaluatePledgeRenewal` (`lib/relationships/pledge-payment-plan.ts`)
+  gained one new output field, `isRenewalFollowUpNeeded`: true on every
+  day strictly after `renewalDate` (mutually exclusive with the
+  existing exact-day `isRenewalDateReminder`), computed purely from
+  `originalPledgeDate`/`commitmentDurationMonths`/`endedAt` -- the exact
+  same three inputs this function already took, no new input, no
+  suppression based on any OTHER pledge this donor may have (so
+  requirement 6, "do not suppress merely because of a new pledge to a
+  different program," holds by construction -- there is no cross-pledge
+  suppression logic to get wrong, since none was built).
+- `buildPledgeRenewalReminderEvents`
+  (`lib/workspace/relationship-date-events.ts`) gained a third,
+  unbounded stage (distinct from the existing lead-window-bounded
+  "approaching"/"renewal" stages): when `isRenewalFollowUpNeeded`, a
+  `"Renewal follow-up needed"` event is emitted every day, pinned to
+  TODAY (`dateEpoch = todayEpoch`, not the lapsed renewal date), so it
+  always lands in Today/Daily Agenda's "today" bucket, never Coming Up,
+  and never duplicates (re-derived fresh each run, nothing persisted;
+  id is `pledge-renewal:<planId>:follow_up`, one per plan by
+  construction).
+- `lib/workspace/live-data.ts` threads `isRenewalFollowUpNeeded` through
+  unchanged otherwise -- no new query (reuses the existing
+  `pledgeRenewalPlanRows` query).
+- Requirement 4 (outstanding balance never classified as an overdue
+  renewal) and requirement 1/2 (original pledge date/duration unchanged;
+  installments tracked independently) were already true of the existing
+  architecture and are now covered by regression tests, not just
+  asserted.
+
+**By design, this currently persists indefinitely once triggered** --
+there is no way yet to mark a follow-up resolved. That is the
+intentional, safe default (never silently drop a real follow-up need)
+until the mechanism below is approved.
+
+**Part 2 item 8 -- proposed design, NOT implemented, awaiting approval:**
+add one new nullable column to `pledge_payment_plans`:
+`renewal_acknowledged_at` (epoch, nullable). On the (now permanently
+reachable, per Part 1) payment-plan card, show one small button, "Mark
+renewal addressed," ONLY while `isRenewalFollowUpNeeded` is true; it
+sets `renewal_acknowledged_at = now`. `evaluatePledgeRenewal` would then
+suppress `isRenewalFollowUpNeeded` once `renewal_acknowledged_at` is
+non-null (a plan has exactly one renewal date for its lifetime, so this
+never needs to "reset"). This is the smallest schema change that avoids
+both failure modes identified above: it never conflates "renewal
+resolved" with "plan ended" (installments keep tracking normally), and
+it never relies on an unproven cross-pledge heuristic. **Not built in
+this round** -- requires a migration and a new write path, both outside
+this round's explicit authorization.
+
+### Part 3 -- Recurring Payments Behind Schedule
+
+**Data inspected before implementing (per the mandatory safeguard):**
+`db/schema.ts` was read in full for any transaction-level decline/
+credit-card-failure signal -- none exists anywhere in this app's
+imported data (`jl_payment_assignment_audits` and every other
+import-derived table record only amounts/dates/balances). **"Payment
+declined -- contact donor" is therefore structurally unreachable by
+design** -- the status type only ever produces `"verify_import"` or
+`"follow_up_needed"`; nothing here infers a decline from an overdue
+installment, satisfying requirement 5 by construction, not by
+convention. `jl_refresh_state.last_donation_refresh_at` (confirmed live:
+a single real, already-populated timestamp per user, last updated
+2026-10-09T14:03:03Z -- the exact same moment as the Matz/Katz payment
+batch from the prior verification round) is the one real import-
+freshness signal that exists, and is what this feature uses.
+
+**Implementation:**
+- `evaluateRecurringPaymentAlert(evaluation, lastDonationRefreshAt)`
+  (`lib/relationships/pledge-payment-plan.ts`) is a pure function over
+  `evaluatePaymentPlan`'s OWN output -- never a second overdue
+  calculation (requirement 2). `evaluation.isLate` already encodes
+  "active, not completed, not past final date, genuinely unsatisfied
+  past the grace window," so completed/ended/past-final plans are
+  excluded for free (requirement 9), with zero duplicated logic. The
+  one new axis: if the last JL donation refresh happened BEFORE the
+  unsatisfied installment's own due date, status is `"verify_import"`
+  (data may simply not have caught up yet); only once a refresh is
+  recorded ON OR AFTER that due date, and the installment is STILL
+  unsatisfied, is it `"follow_up_needed"`.
+- `buildRecurringPaymentAlertEvents`
+  (`lib/workspace/relationship-date-events.ts`, new
+  `recurring_payment_behind` event type) renders donor name/code
+  (via the existing identity map -> existing donor-profile link,
+  requirement 6), the plan's real expected payment date (`dateLabel`),
+  expected amount and days-behind (`secondaryDateLabel`), pinned to
+  today (`dateEpoch = todayEpoch`) exactly like the existing payment-
+  plan-milestone precedent -- a standing condition, not a countdown, so
+  it reappears every day unchanged until the underlying evaluation
+  changes (requirement 10: automatically disappears once the payment is
+  recorded/reconciled, since nothing is persisted -- re-derived fresh on
+  every read) and never duplicates (id = `recurring-payment:<planId>`,
+  one row per plan by construction, requirement 11).
+- `lib/workspace/live-data.ts`: one new query (`RecurringPaymentPlanRow`
+  -- the SAME existing `pledge_payment_plans` query, with `id`/
+  `donor_id` added as two extra columns, never a duplicate query) plus
+  one new single-row query for `jl_refresh_state.last_donation_refresh_at`.
+  The evaluation loop runs over EVERY active plan directly (never
+  funneled through `openPledgeByDonor`'s one-pledge-per-donor
+  bottleneck -- the same reasoning Pledge Renewal Reminders already
+  established), using `giving.results`/`paymentDatesByPledge` already
+  fetched for other purposes -- satisfying requirement 1 (evaluate
+  against real schedules and real recorded payments) and the "Multiple
+  payment plans for one donor" test requirement directly. Respects each
+  plan's own real schedule unchanged (requirement 8 -- `evaluatePaymentPlan`
+  was already schedule-generic, never monthly-only by assumption).
+  Wired into both Today and Daily Agenda through the SAME existing
+  `WorkspaceRelationshipDateEvent`/`partitionRelationshipDateEventsByToday`
+  pipeline every other relationship-date signal already uses --
+  `agenda-model.ts` and `app/page.tsx` needed ZERO changes, since both
+  already render that type generically (requirement 12: no separate
+  task-management system).
+
+### Tests
+
+15 new tests in `tests/recurring-payment-alert.test.mjs` (stale import,
+genuinely overdue, payments becoming current, completed plans, ended
+plans, a plan past its final date, never-reachable "declined", event
+rendering/pinning/dedup, multiple plans per donor, missing identity) and
+7 new tests in `tests/pledge-payment-plan-completed-visibility.test.mjs`
+(the visibility function itself, the donor-page filter/labeling via
+source assertions matching this repo's established convention for
+JSX-level regression coverage -- see
+`tests/pledge-payment-plan-layout.test.mjs` -- and the PATCH route's
+no-auto-end guarantee). `tests/pledge-payment-plan-renewal.test.mjs`
+gained coverage for `isRenewalFollowUpNeeded`'s exact-boundary/
+persists-indefinitely/mutually-exclusive-with-the-exact-day-reminder
+behavior and the new standing Today-bucket event. Two pre-existing
+query-count tripwire tests (`tests/workspace-brief-instrumentation.test.mjs`,
+`tests/relationship-snapshot-stage3.test.mjs`) were updated from 20 to
+21 `env.DB.prepare(` call sites in `lib/workspace/live-data.ts`, with
+their own comments extended to name the one legitimate new query
+(`jl_refresh_state`) -- both tests' actual purpose (no UNEXPECTED query
+growth) is preserved; their pinned baseline simply moved with the one
+real, accounted-for new query, exactly as every prior feature's queries
+already did in these same two files.
+
+**Full suite: 169/169 test files passed** (`pnpm test`, via
+`scripts/run-tests.mjs`, both new files registered in `TEST_FILES`).
+`pnpm exec tsc --noEmit`: clean. `pnpm run build`: succeeded, all
+existing routes still classified correctly.
+
+### Deployment
+
+Deployed to Independent Staging only (`npm run
+deploy:staging-independent`, `wrangler deploy --config
+wrangler.staging.jsonc`), binding `env.DB` confirmed as
+`fundraising-os-staging-db`. **Version ID: `fd58306a-902f-4b06-838a-f9cc0c8ebeaa`.**
+Production was never touched -- no production deploy command exists in
+this repo's `package.json` beyond the one staging script used here, and
+nothing in this round read or modified any production binding, secret,
+or D1 database.
+
+### Live verification (real Independent Staging data, not a local mock)
+
+- **Rosenbaum (69341), donor page:** "PLEDGES" section now shows 2
+  pledges; the DIN2025 one renders "Paid in full" (not "$0"), its
+  Payment Plan panel shows "This plan appears complete -- paid in
+  full," and both "Edit plan" and "End plan" buttons are present and
+  clickable -- confirming the previously-unreachable controls are
+  reachable again.
+- **Katz (68231), donor page:** identical confirmation -- "Paid in
+  full · DIN2025," full Payment Plan panel including "Original pledge
+  date: Dec 30, 2025 · Commitment: 10 months · Renewal date: Oct 30,
+  2026" and both Edit/End-plan buttons present. (His renewal date is
+  still 21 days out, so no follow-up fires for him yet -- correct.)
+- **Spetner (2689), Today workspace:** real, live "Renewal follow-up
+  needed" item present under Today's Agenda, reading "Sep 26, 2026 ·
+  Mr. & Mrs. Jonathan Spetner · 2689 · Pledge renewal · Renewal
+  follow-up needed · $12,000.00 pledged (CT2025) · 12-month commitment
+  · $1,000.00 balance remaining" -- exact real values, confirming Part
+  2 end to end on real data.
+- **Daily Agenda email preview** (`/api/agenda/preview`): the identical
+  Spetner renewal follow-up item renders under IMPORTANT DATES /
+  STEWARDSHIP ("Mr. & Mrs. Jonathan Spetner -- Renewal follow-up needed
+  today"), confirming the email surface agrees exactly with Today --
+  no divergence between the two consumers of the same event.
+- **Recurring-payment-behind alerts:** zero appeared on either surface
+  today. Investigated rather than assumed: a live query of every active
+  plan's own `next_expected_payment_at` found the earliest one (Bander,
+  61707 and Y.Y. Klein, 67103) is Oct 3, 2026 -- only 6 days before
+  today, still inside the existing 7-day grace window
+  (`MONTHLY_PAYMENT_PLAN_GRACE_DAYS`) -- so **every currently active
+  plan with an open balance is still genuinely within grace as of
+  2026-10-09**, not silently suppressed. This is a real, current,
+  healthy data state (consistent with the prior round's own finding of
+  heavy recent fundraiser data-entry activity), not evidence of a bug;
+  confirmed by 9 passing unit tests exercising the stale/overdue/
+  current/completed/ended paths directly, since no real live example of
+  a genuinely-behind plan exists in today's actual data to demonstrate
+  on.
+- **Matz (48612) / Katz (68231) recheck:** both remain correctly
+  warning-free on live Today/Agenda (no recurring-payment alert, no
+  false renewal follow-up), consistent with the prior round's
+  reconciliation.
+
+### Remaining limitations / decisions awaiting approval
+
+1. **Part 2's acknowledgment mechanism** (the proposed
+   `renewal_acknowledged_at` column + "Mark renewal addressed" button)
+   is designed but not built -- needs explicit approval before the next
+   round implements it, per this task's own instruction.
+2. **"Payment declined -- contact donor" remains permanently unreachable**
+   until a real transaction-decline signal exists in some future JL
+   import -- documented, not a gap introduced by this round, and
+   deliberately never worked around with an inference.
+3. **No live positive example** of a "Verify latest payment import" or
+   "Payment follow-up needed" alert currently exists in real Independent
+   Staging data (every open-balance plan is within grace today) -- the
+   mechanism is proven correct via 9 targeted unit tests instead; it
+   will be visible live the first time a real installment both (a)
+   passes its grace window and (b) the fundraiser's next JL refresh
+   still shows it unsatisfied.
+
+No application code was committed with migrations attached (none
+needed); no Production deployment occurred; no donor payment or pledge
+record was ever written to.

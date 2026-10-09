@@ -200,6 +200,8 @@ const TEST_FILES = [
   "tests/portfolio-focus-payment-plan-bugfix.test.mjs",
   "tests/payment-plan-intelligence.test.mjs",
   "tests/relationship-facts-lifecycle-reclassify.test.mjs",
+  "tests/pledge-payment-plan-completed-visibility.test.mjs",
+  "tests/recurring-payment-alert.test.mjs",
 ];
 
 function runOne(file) {

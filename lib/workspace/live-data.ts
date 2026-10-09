@@ -9,11 +9,11 @@ import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../r
 import type { SynthesisFact } from "../relationships/fact-synthesis.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import { CONTINUE_CONVERSATION_WINDOW_DAYS, type RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
-import { deriveFulfilledCultivationByDonor, evaluatePledgeRenewal } from "../relationships/pledge-payment-plan.ts";
+import { deriveFulfilledCultivationByDonor, evaluatePledgeRenewal, evaluatePaymentPlan, evaluateRecurringPaymentAlert } from "../relationships/pledge-payment-plan.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
-import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, buildPaymentPlanMilestoneEvents, buildPledgeRenewalReminderEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent, type PaymentPlanMilestoneRow, type PledgeRenewalReminderRow } from "./relationship-date-events.ts";
+import { buildYahrtzeitRelationshipDateEvents, buildImportantDateRelationshipEvents, buildPaymentPlanMilestoneEvents, buildPledgeRenewalReminderEvents, buildRecurringPaymentAlertEvents, partitionRelationshipDateEventsByToday, type WorkspaceRelationshipDateEvent, type PaymentPlanMilestoneRow, type PledgeRenewalReminderRow, type RecurringPaymentAlertRow } from "./relationship-date-events.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
 import { logger } from "../logger";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -35,6 +35,17 @@ type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType;
 type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number; source_interaction_id: string | null };
 type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
+// Recurring Payments Behind Schedule (2026-10-09, see docs/AI-HANDOFF.md)
+// -- `id`/`donor_id` added to the SAME existing paymentPlanRows query
+// below (never a second, duplicate query) so this feature can evaluate
+// EVERY active plan directly, the same reasoning pledgeRenewalPlanRows
+// already established: never funneled through openPledgeByDonor's
+// one-pledge-per-donor bottleneck.
+type RecurringPaymentPlanRow = PaymentPlanRow & { id: string; donor_id: string };
+// jl_refresh_state's one real, already-existing import-freshness
+// timestamp (see lib/data-health/model.ts's own use of the same field)
+// -- a single row per user, never per-donor.
+type JlRefreshRow = { last_donation_refresh_at: number | null };
 // Pledge Renewal Reminders (2026-10-08, corrected 2026-10-08 to require
 // a verified commitment duration -- see docs/AI-HANDOFF.md) -- a
 // SEPARATE, dedicated query from paymentPlanRows above, deliberately:
@@ -235,7 +246,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   const __loaderStart = performance.now();
   const demo = mode === "demo";
   const donorScope = demo ? "d.data_source = 'sample'" : "d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL";
-  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows, pledgeRenewalPlanRows, relationshipFactRows] = await Promise.all([
+  const [reminders, giving, donors, lastContacts, substantiveContacts, lastActivities, scheduledActivities, dismissals, recentViews, recentUpdates, latestInteractions, historicalContextRows, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, pledgePaymentRows, paymentPlanRows, jlRefreshRows, pledgeRenewalPlanRows, relationshipFactRows] = await Promise.all([
     env.DB.prepare(`SELECT r.id AS recommendation_id, r.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, r.action, r.reason, r.score, r.due_at, r.updated_at
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
@@ -327,7 +338,11 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // plus pledgePaymentRows above -- nothing is precomputed here. No
     // demo/sample data exists for this new feature, matching the other
     // demo-skipped queries above.
-    demo ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at FROM pledge_payment_plans WHERE user_id = ? AND ended_at IS NULL`).bind(userId).all<PaymentPlanRow>(),
+    demo ? Promise.resolve({ results: [] as RecurringPaymentPlanRow[] }) : env.DB.prepare(`SELECT id, donor_id, pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at FROM pledge_payment_plans WHERE user_id = ? AND ended_at IS NULL`).bind(userId).all<RecurringPaymentPlanRow>(),
+    // Recurring Payments Behind Schedule (2026-10-09, see docs/AI-HANDOFF.md)
+    // -- the one real JL-import-freshness timestamp this app records, a
+    // single row (or zero, for a brand-new workspace) per user.
+    demo ? Promise.resolve({ results: [] as JlRefreshRow[] }) : env.DB.prepare(`SELECT last_donation_refresh_at FROM jl_refresh_state WHERE user_id = ?`).bind(userId).all<JlRefreshRow>(),
     // Pledge Renewal Reminders (2026-10-08, corrected 2026-10-08 to
     // require a verified commitment duration -- see docs/AI-HANDOFF.md)
     // -- a separate, dedicated query (see PledgeRenewalPlanRow's own doc
@@ -460,6 +475,41 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       campaign: plan.source_campaign,
       renewalDate: evaluation.renewalDate,
       fiveDayReminderDate: evaluation.fiveDayReminderDate,
+      isRenewalFollowUpNeeded: evaluation.isRenewalFollowUpNeeded,
+    });
+  }
+  // Recurring Payments Behind Schedule (2026-10-09, see docs/AI-HANDOFF.md)
+  // -- pure derivation over EVERY active plan (paymentPlanRows.results,
+  // never funneled through openPledgeByDonor's one-pledge-per-donor
+  // bottleneck -- same reasoning as pledgeRenewalReminderRows above), its
+  // own pledge's real JL balance (givingById, not openPledgeByDonor,
+  // which only ever keeps one pledge per donor) and its own linked
+  // payment dates (paymentDatesByPledge, already fetched above for the
+  // Suggested-Action pathway). One evaluatePaymentPlan call per plan,
+  // reused unchanged -- never a second overdue calculation.
+  const givingById = new Map(giving.results.map((item) => [item.id, item]));
+  const lastDonationRefreshAt = jlRefreshRows.results[0]?.last_donation_refresh_at ?? null;
+  const recurringPaymentAlertRows: RecurringPaymentAlertRow[] = [];
+  for (const planRow of paymentPlanRows.results) {
+    const pledge = givingById.get(planRow.pledge_activity_id);
+    if (!pledge) continue;
+    const linkedPaymentDates = paymentDatesByPledge.get(planRow.pledge_activity_id) ?? [];
+    const evaluation = evaluatePaymentPlan(
+      { nextExpectedPaymentAt: planRow.next_expected_payment_at, expectedDayOfMonth: planRow.expected_day_of_month, finalExpectedPaymentAt: planRow.final_expected_payment_at, endedAt: null },
+      linkedPaymentDates,
+      pledge.balance_cents ?? 0,
+      now,
+      timezone,
+    );
+    const alert = evaluateRecurringPaymentAlert(evaluation, lastDonationRefreshAt);
+    if (alert.status === null) continue;
+    recurringPaymentAlertRows.push({
+      donorId: planRow.donor_id,
+      planId: planRow.id,
+      status: alert.status,
+      expectedPaymentAt: alert.expectedPaymentAt!,
+      expectedAmountCents: planRow.installment_amount_cents,
+      daysBehind: alert.daysBehind,
     });
   }
   // openAskRows is already ordered donor_id, asked_at ASC -- first row seen
@@ -756,6 +806,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     ),
     ...buildPaymentPlanMilestoneEvents(paymentPlanMilestoneRows, identityByDonor, timezone, now),
     ...buildPledgeRenewalReminderEvents(pledgeRenewalReminderRows, identityByDonor, timezone, now),
+    ...buildRecurringPaymentAlertEvents(recurringPaymentAlertRows, identityByDonor, timezone, now),
   ].sort((a, b) => a.dateEpoch - b.dateEpoch);
   const { today: todayRelationshipDates, upcoming: upcomingRelationshipDates } = partitionRelationshipDateEventsByToday(relationshipDateEvents, now, timezone);
   const morningBrief: WorkspaceMorningBrief = {

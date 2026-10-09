@@ -30,7 +30,7 @@ async function run() {
   // --- Missing original date (duration present) -- not eligible. ---
   {
     const result = evaluatePledgeRenewal(null, 12, null, et(2026, 11, 1), TZ);
-    assert.deepEqual(result, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false });
+    assert.deepEqual(result, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false });
   }
 
   // --- Missing duration (original date present) -- not eligible. This
@@ -39,7 +39,7 @@ async function run() {
   // months" default is exactly what was wrong. ---
   {
     const result = evaluatePledgeRenewal(utcMidnight(2025, 11, 1), null, null, et(2026, 11, 1), TZ);
-    assert.deepEqual(result, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false });
+    assert.deepEqual(result, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false });
   }
 
   // --- Both fields missing -- not eligible. ---
@@ -135,6 +135,32 @@ async function run() {
     const lateEvening = Math.floor(Date.UTC(2026, 10, 2, 3, 30, 0) / 1000);
     assert.equal(evaluatePledgeRenewal(original, 12, null, earlyMorning, TZ).isRenewalDateReminder, true, "early morning Eastern on the renewal date must still fire");
     assert.equal(evaluatePledgeRenewal(original, 12, null, lateEvening, TZ).isRenewalDateReminder, true, "late evening Eastern on the renewal date must still fire");
+  }
+
+  // ============================================================
+  // Renewal Follow-Up (2026-10-09, see docs/AI-HANDOFF.md's Spetner
+  // (2689) investigation) -- isRenewalFollowUpNeeded persists every day
+  // after the renewal date, with no upper bound, unlike
+  // isFiveDayReminder/isRenewalDateReminder which only ever fire on
+  // their own exact single day.
+  // ============================================================
+  {
+    const original = utcMidnight(2025, 9, 26); // Spetner's real original pledge date
+    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 9, 25), TZ).isRenewalFollowUpNeeded, false, "the day before the renewal date must not need follow-up");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 9, 26), TZ).isRenewalFollowUpNeeded, false, "the renewal date itself is its own one-day reminder, never also the follow-up state");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 9, 27), TZ).isRenewalFollowUpNeeded, true, "the day immediately after the renewal date must need follow-up");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 10, 9), TZ).isRenewalFollowUpNeeded, true, "13 days after (Spetner's real case) must still need follow-up -- this never expires on its own");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2028, 1, 1), TZ).isRenewalFollowUpNeeded, true, "even over a year later, with no resolution mechanism in this app yet, it must still need follow-up -- the safe default is to keep surfacing, never to silently expire");
+    // Never true at all once the plan is formally ended, no matter how
+    // far past the renewal date -- matches evaluatePledgeRenewal's own
+    // existing endedAt short-circuit.
+    assert.equal(evaluatePledgeRenewal(original, 12, utcMidnight(2026, 10, 1), et(2026, 11, 1), TZ).isRenewalFollowUpNeeded, false, "an ended plan must never need follow-up");
+    // Mutually exclusive with isRenewalDateReminder for every day across
+    // a wide range -- never both true at once for the same plan.
+    for (let offset = -10; offset <= 20; offset++) {
+      const r = evaluatePledgeRenewal(original, 12, null, et(2026, 9, 26) + offset * 86400, TZ);
+      assert.ok(!(r.isRenewalDateReminder && r.isRenewalFollowUpNeeded), `offset ${offset}: must never report both the exact-day reminder and the follow-up state at once`);
+    }
   }
 
   // ============================================================
@@ -244,10 +270,42 @@ async function run() {
     assert.equal(exactly15Out.filter((e) => e.id.endsWith(":renewal")).length, 0, "15 days out must NOT appear yet -- beyond the 14-day lead window");
 
     // --- A date that has already passed must never retroactively
-    // reappear. ---
+    // reappear via the bounded approaching/renewal stages specifically
+    // (isRenewalFollowUpNeeded absent/false on this fixture). ---
     const alreadyPassed = { ...rows[0], planId: "plan-e", renewalDate: utcMidnight(2026, 10, 20), fiveDayReminderDate: utcMidnight(2026, 10, 15) };
     const pastEvents = buildPledgeRenewalReminderEvents([alreadyPassed], identityByDonor, TZ, now);
-    assert.equal(pastEvents.length, 0, "a stage date before today must never fire retroactively");
+    assert.equal(pastEvents.length, 0, "a stage date before today must never fire retroactively via the approaching/renewal stages");
+
+    // --- Renewal Follow-Up (2026-10-09, see docs/AI-HANDOFF.md): once
+    // isRenewalFollowUpNeeded is true, a standing event appears in Today
+    // every day, however far in the past the renewal date is -- well
+    // beyond the 14-day lead window that bounds the other two stages. ---
+    const followUpRow = { ...rows[0], planId: "plan-f", renewalDate: utcMidnight(2026, 8, 1), fiveDayReminderDate: utcMidnight(2026, 7, 27), isRenewalFollowUpNeeded: true };
+    const followUpEvents = buildPledgeRenewalReminderEvents([followUpRow], identityByDonor, TZ, now);
+    assert.equal(followUpEvents.length, 1, "exactly one follow-up event, no approaching/renewal stages (both long past)");
+    const followUp = followUpEvents[0];
+    assert.equal(followUp.id, "pledge-renewal:plan-f:follow_up");
+    assert.equal(followUp.relationshipPhrase, "Renewal follow-up needed");
+    assert.equal(followUp.dateEpoch, todayEpoch, "the follow-up event is pinned to TODAY, not the long-past renewal date, so it always lands in the Today bucket");
+    assert.equal(followUp.dateLabel, "Aug 1, 2026", "dateLabel still shows the plan's own real (lapsed) renewal date for context, even while dateEpoch is pinned to today");
+    const { today: followUpToday, upcoming: followUpUpcoming } = partitionRelationshipDateEventsByToday(followUpEvents, now, TZ);
+    assert.deepEqual(followUpToday.map((e) => e.id), ["pledge-renewal:plan-f:follow_up"], "a lapsed renewal follow-up belongs in Today, never Coming Up");
+    assert.equal(followUpUpcoming.length, 0);
+
+    // --- isRenewalFollowUpNeeded: false (or absent) never produces the
+    // follow-up event, even when the renewal date is in the past -- only
+    // the explicit flag controls it, matching plan-e's fixture above. ---
+    const notNeededRow = { ...followUpRow, planId: "plan-g", isRenewalFollowUpNeeded: false };
+    assert.equal(buildPledgeRenewalReminderEvents([notNeededRow], identityByDonor, TZ, now).length, 0);
+
+    // --- Calling the builder again on a later "day" never produces a
+    // second, duplicate follow-up event for the same plan -- it is
+    // always re-derived fresh, never accumulated/stored. ---
+    const laterNow = et(2026, 11, 5);
+    const laterToday = utcMidnight(2026, 11, 5);
+    const laterEvents = buildPledgeRenewalReminderEvents([followUpRow], identityByDonor, TZ, laterNow);
+    assert.equal(laterEvents.length, 1, "still exactly one follow-up event on a later day, never accumulating");
+    assert.equal(laterEvents[0].dateEpoch, laterToday, "its dateEpoch tracks whichever day it's computed on, so it keeps landing in Today rather than stacking");
 
     // --- Outstanding balance vs. fully paid -- neither suppresses the
     // event; balance and the verified duration are both shown as
