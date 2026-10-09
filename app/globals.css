@@ -781,7 +781,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
    existing .event-type/.event-campaign inline badges on that same row,
    with a native title= tooltip (no new UI chrome) carrying the original
    imported figure. */
-.timeline-corrected-badge { padding:3px 7px; border-radius:10px; background:#fbeee0; color:#8a5a1f; font-size:7px; font-weight:700; letter-spacing:.03em; cursor:help; }
+.timeline-corrected-badge { padding:3px 7px; border-radius:10px; background:#fbeee0; color:#8a5a1f; font-size:11px; font-weight:700; letter-spacing:.03em; cursor:help; }
 .balance-correction-form { padding-top: 10px; border-top: 1px dashed #e4dcc4; max-width: 100%; }
 .balance-correction-form > label { display: grid; gap: 6px; margin-top: 10px; color: #52625a; font-size: 13px; font-weight: 700; min-width: 0; }
 .balance-correction-form > label > span { color: var(--muted); font-weight: 500; }
