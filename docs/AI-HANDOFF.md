@@ -26411,3 +26411,157 @@ in each trigger's `paths:` list.
   deliberately more mechanical/templated than the richer hand-written
   prose every manual sync round used -- an accepted trade-off for
   automation, not a defect.
+
+## D1 Migration Sync Automation -- Controlled End-to-End Verification (2026-10-09) -- REAL PR CREATED AND CLEANLY CLOSED, ONE REAL BUG FOUND AND FIXED, ZERO D1/PRODUCTION/MERGE IMPACT
+
+**Purpose.** Everything in the entry above was verified against real
+historical data and real (dry-run) API calls, but the one genuinely
+untested piece was the live `git push` + GitHub `POST /pulls` call
+itself. This round closed that gap with an explicit, pre-approved,
+fully-controlled test using a synthetic migration -- never a real one.
+
+### Pre-flight safeguards (confirmed before touching anything)
+
+- `git ls-remote --exit-code --heads origin automated/d1-restore-sync` ->
+  exit code 2 (does not exist).
+- `GET /pulls?head=...automated/d1-restore-sync&state=all` -> `[]` (no
+  PR, any state).
+- Both re-confirmed immediately before the live `--apply` run too (after
+  an unrelated bug fix added a delay -- see below), still clean.
+
+### The synthetic test migration
+
+A single file, `drizzle/9999_test_d1_sync_automation_dummy_column.sql`,
+existing ONLY in a local, never-pushed worktree (branch
+`__synthetic-additive-column-test`, built off this branch's real tip):
+`ALTER TABLE data_health_repair_audits ADD COLUMN
+__d1_sync_automation_test_marker integer;` -- an obviously-fake
+migration number, an obviously-fake column name, targeting a low-stakes
+operational audit table (never donor/financial data), with a header
+comment stating plainly it is a disposable test artifact. Never applied
+to any real database (the entire exercise only ever replays it inside
+`generateBaseline()`'s own in-memory, ephemeral SQLite instance, exactly
+like any other migration's schema-hash computation -- see `scripts/
+generate-production-baseline.mjs`). Never committed to, or pushed on,
+`feature/independent-cloudflare-sandbox` or `main`.
+
+### A real bug found and fixed mid-verification
+
+The first live `--apply` attempt correctly refused (`"outcome":
+"refused"`, exit 1 -- no push, no PR, nothing unsafe happened) with
+reason `"main's own npm test/build failed against the candidate patch:
+spawnSync npm ENOENT"`. Diagnosed precisely: `execFileSync("npm", ...)`
+cannot spawn Windows's `npm.cmd` shim without shell interpretation (a
+documented Node/Windows limitation, confirmed by also testing the
+explicit `"npm.cmd"` form, which fails differently, with `EINVAL`) --
+specific to this session's local Windows verification environment, not
+to the real GitHub Actions runner (`ubuntu-latest`, where plain `"npm"`
+already resolves correctly, unaffected either way). Fixed in `scripts/
+open-or-update-sync-pr.mjs`: `shell: true` used ONLY on `win32`, only
+for these three invocations, each with entirely static/hardcoded
+arguments (never attacker- or caller-controlled, so the usual shell-
+injection concern the `shell: true` option carries does not apply
+here). Full gates re-run before committing this fix: `pnpm run test`
+167/167, `tsc --noEmit` clean, `eslint` clean. Committed
+(`6aa3ef78ba360fab22d9ba861f76feac01d28173`) and pushed to this branch
+-- this is a real, permanent correctness fix, kept regardless of this
+verification round's own outcome. The real CI run it triggered
+(`37878896077`) succeeded, both jobs, confirming the fix didn't disturb
+the genuinely-synchronized real state.
+
+### The live test, with the fix in place
+
+Re-confirmed pre-flight safeguards still clean (see above), copied the
+fixed script into the synthetic worktree, then ran `node scripts/
+open-or-update-sync-pr.mjs --apply` for real, with the real
+`GITHUB_TOKEN`/`GITHUB_REPOSITORY`:
+
+- Validation (main's own real `npm install`/`npm test`/`npm run build`,
+  plus a fresh re-run of the unmodified `check-main-restore-sync.mjs`
+  against the candidate) -- **passed**.
+- A real branch, `automated/d1-restore-sync`, was pushed to the real
+  repository (confirmed by git's own "new branch" output).
+- **A real pull request, #13**, was opened against `main` -- confirmed
+  independently via `GET /pulls?head=...`: title "D1 restore/schema
+  sync: 9999_test_d1_sync_automation_dummy_column.sql", `state: open`,
+  `head: automated/d1-restore-sync`, `base: main`, body text matching
+  the script's own template exactly (migrations synced, the "only
+  touches these two files" statement, the "never merged automatically"
+  statement, the docs link). This alone proves GitHub's real API and
+  the repository's real permissions allow both the branch push and the
+  PR creation with this workflow's own scoped token -- requirements 4
+  and 6 of this round's instructions.
+- **`GET /pulls/13/files`** -> exactly 2 files: `lib/data-health/
+  production-baseline.ts` (+11/-18) and `production-baseline/
+  schema-manifest.json` (+11/-3). No application code, no unrelated
+  file, no third file of any kind -- requirement 2.
+- A fresh, independent re-run of the unmodified `check-main-restore-
+  sync.mjs` (separate from the one the orchestration script ran
+  internally) against the real `origin/main` with the synthetic
+  migration present -> **FAILED** (exit 1), naming the exact synthetic
+  migration and the exact table difference -- requirement 3, and this
+  round's own requirement 6.
+
+### Cleanup, verified independently through GitHub (not merely trusted from the request's own response codes)
+
+- `PATCH /pulls/13` with `{"state":"closed"}` -- then independently
+  re-fetched via a SEPARATE `GET /pulls/13` call: `state: "closed"`,
+  `merged: false`, `merged_at: null`. **Never merged.**
+- `DELETE /git/refs/heads/automated/d1-restore-sync` -> `204` -- then
+  independently re-checked via `git ls-remote --exit-code --heads
+  origin automated/d1-restore-sync` -> exit code 2 (branch confirmed
+  gone).
+- Local cleanup: the throwaway worktree and its local branch
+  (`__synthetic-additive-column-test`) were removed
+  (`git worktree remove --force` + `git branch -D`); `git worktree
+  list` and `git status` on the real feature-branch checkout confirmed
+  clean afterward.
+- No other PR, branch, issue, or repository setting was touched. The
+  12 pre-existing PRs on this repository (all from the prior, unrelated
+  "old CRM" era -- see `docs/FUNDRAISING_OS_PRINCIPLES.md`'s "Do not
+  modify public `main`" note) were independently confirmed unchanged
+  throughout.
+
+### What this round did NOT do (by design, per explicit instruction)
+
+No real migration was added to `feature/independent-cloudflare-sandbox`
+or `main`. No D1 database (Independent Staging or Production) was ever
+connected to, read from, or written to -- confirmed: no `wrangler`
+command, no D1 binding, no database credential appears anywhere in any
+script this round touched or ran. Nothing was merged into `main` at any
+point -- PR #13 was closed, never merged, independently confirmed
+above. No Production deployment occurred. No repository security
+setting (branch protection, default workflow permissions, allowed
+Actions) was read, requested, or changed beyond what the prior round
+already verified read-only.
+
+### Verified vs. still untested, stated plainly
+
+**Now verified, for real, for the first time:** the live `git push` to
+a new branch; real GitHub API `POST /pulls` (PR creation) with the
+workflow's own scoped token; the generated PR's exact file content and
+body text; the live `PATCH`/`DELETE` cleanup calls and their
+independently-confirmed results.
+
+**Still not verified for real (and cannot be, without fabricating
+genuine drift or waiting for a real one):** the `update_existing`
+action (appending a commit to an ALREADY-existing automation branch)
+and the `create_new`-due-to-human-activity action (opening a
+second, fresh branch/PR because the first was already reviewed) --
+both are fully covered by the pure unit tests in `tests/
+restore-sync-branch-policy.test.mjs`, and the underlying git operations
+(fetch, worktree, commit, push) are identical in kind to the ones just
+proven live above, but the SPECIFIC branching logic that chooses
+between them has only been exercised in the "first run, branch doesn't
+exist yet" case so far, since that was the only state this verification
+could safely reach without a second, pre-existing synchronization
+incident to react to. This will be naturally exercised the first time
+two migrations land before a sync PR is reviewed, or the first time a
+human comments on one before it's merged.
+
+### Gates (this branch)
+
+`pnpm run test`: 167/167 passed (unchanged by this round -- no new test
+file; the one code change was the npm-spawn portability fix, covered by
+the existing suite's own pass/fail, not a new test). `pnpm exec tsc
+--noEmit`: clean. `pnpm exec eslint` on the one changed file: clean.
