@@ -28954,3 +28954,161 @@ GitHub Actions itself created and deleted.
 No merge to `main`. Stopping here, per this round's explicit
 instruction, for independent review before any further restore-pipeline
 action or Production infrastructure work.
+
+## Complete Backup Verification Before Production (2026-10-09) -- FRESH BACKUP CREATED, RESTORE VERIFIED CURRENT-SCHEMA, SUCCESS
+
+Follow-up round closing out the one open item from the previous round
+(current-schema restore verification had failed because the only
+available backup predated migrations 0041/0042 reaching live
+Independent Staging). This round created a fresh backup and verified it
+restores correctly, end to end, with real evidence at every step.
+
+### Step 1 -- current state
+
+`feature/independent-cloudflare-sandbox` confirmed at `f1137eb` (the
+authentication hardening commit), working tree clean, matching
+`origin` exactly. Auth hardening re-confirmed present and wired
+(`lib/auth/provider-selection.ts` exists; `app/chatgpt-auth.ts` calls
+`selectAuthProviders` with `env.TEAM_DOMAIN`/`env.POLICY_AUD`). Current
+live Independent Staging schema re-confirmed read-only: both
+`pledge_balance_corrections` and `pledge_payment_plans` tables exist,
+and `pledge_payment_plans` has the `renewal_acknowledged_at` column
+(migration 0041).
+
+### Step 2 -- workflow safety re-review (both `.github/workflows/
+d1-backup-nightly.yml` and `d1-restore-verify-monthly.yml`, re-read in
+full; neither has changed since the prior round's thorough review)
+
+Confirmed, specifically because this round would be the first time
+*this session* dispatched the backup-WRITING workflow (prior rounds
+only ever dispatched the read-only sync-check and restore-verify
+workflows): reads only `fundraising-os-staging-db` (hardcoded
+`DATABASE_NAME`); `wrangler d1 export` is read-only against D1 --
+nothing in the workflow ever writes to D1; uses the existing,
+already-configured `R2_BACKUP_BUCKET`; no Production reference
+anywhere; same established gzip+GPG-AES256 encryption, passphrase
+shredded immediately after use; the dated `daily/...` key is always a
+fresh, uniquely-timestamped object (never overwrites an existing one),
+and `latest/`'s own intentional overwrite is the documented, by-design
+mutable-pointer behavior, not a collision; retention is lifecycle-rule
+based (this workflow never deletes anything), so a failure at any step
+leaves every previously-existing backup completely untouched. All
+checks passed -- dispatched.
+
+### Step 3 -- fresh backup created
+
+Dispatched `D1 nightly backup` via `workflow_dispatch` on `ref: main`.
+
+**Run**: <https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/37985603331>
+(#60). **Conclusion: success**, all 9 steps green.
+
+Verified from the actual job log, not assumed:
+- `wrangler d1 export "fundraising-os-staging-db" --remote` -- confirms
+  the source database.
+- Export verified structurally sane: 14,181 lines, 8,112,668 bytes.
+- Encrypted and uploaded: **`daily/fundraising-os-staging-db-
+  20261009T201429Z.sql.gz.gpg`** (backup timestamp **2026-10-09T20:14:29Z**).
+- `latest/fundraising-os-staging-db.sql.gz.gpg` updated in the same
+  `PutObject` call, carrying `dated-backup-key` metadata pointing at
+  this exact new object (per the workflow's own atomic-promotion
+  design).
+- Schema content (0041/0042 presence) was **not** claimed as verified
+  from this step alone -- the export/upload process doesn't inspect
+  schema content; that confirmation came from Step 4.
+
+### Step 4 -- restore verification, against the NEW backup
+
+Dispatched `D1 monthly restore verification` via `workflow_dispatch` on
+`ref: main`.
+
+**Run**: <https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/37985793189>
+(#16). **Conclusion: success.**
+
+Verified from the actual job log, every underlying check, not just the
+run conclusion:
+- Preflight (`scripts/check-migration-sync.mjs`): "main's migration
+  count/list (43) is current with feature/independent-cloudflare-
+  sandbox's drizzle/ directory (43). Proceeding."
+- Tested backup identity confirmed: `IDENTITY_KEY: daily/fundraising-
+  os-staging-db-20261009T201429Z.sql.gz.gpg` -- **the exact new backup
+  from Step 3**, not the previous stale one.
+- Scratch database `fundraising-os-restore-verify-
+  20261009t201601z-kky6ai` created; every table in the backup restored
+  without error, **including** `Restoring data for
+  "pledge_balance_corrections" (404 bytes)...` and `Restoring data for
+  "pledge_payment_plans" (25487 bytes)...`.
+- `PRAGMA quick_check`: **passed**.
+- `PRAGMA foreign_key_check`: **passed** (zero violations).
+- Schema comparison against the current (0041/0042-inclusive) packaged
+  manifest: **passed** -- the exact check that failed last round now
+  succeeds, because this backup postdates both migrations landing on
+  live staging.
+- `production_schema_baseline` backup-fidelity check: **passed**
+  ("OK" -- the stamped marker is a legitimately stale 0019-era hash
+  relative to today's packaged hash, explicitly documented as expected
+  and non-blocking, not a defect).
+- Row-count reconciliation: **passed**, full table-by-table counts
+  logged, including `"pledge_balance_corrections":1` and
+  `"pledge_payment_plans":45` -- and, as an independent cross-check,
+  `"donors":254`, `"giving_activities":5463`, `"interactions":203`,
+  `"asks":6` all match exactly the live counts confirmed read-only in
+  an earlier round's staging-data audit.
+- Scratch database cleanup confirmed: "Deleting scratch database
+  fundraising-os-restore-verify-20261009t201601z-kky6ai..." then
+  "Scratch database deleted." -- no orphaned resource.
+
+**Donor-level content (e.g. the Kutoff scenario) is not checked by this
+workflow** -- it verifies row counts only, not specific row content.
+Stated explicitly rather than overclaimed.
+
+### Step 5 -- financial data safety (Kutoff regression, live, read-only)
+
+Since the restore workflow doesn't check donor-level content, verified
+directly against the real live `fundraising-os-staging-db` (donor code
+57932), read-only:
+
+| Pledge | Committed | Paid | Raw balance | Correction | Plan |
+|---|---|---|---|---|---|
+| DIN2023 | $5,000.00 | $4,790.00 | $210.00 | Active, corrected to $0 | -- |
+| DIN2025 | $3,000.00 | $2,750.00 | $250.00 | None | Active, $250.00/month, `ended_at` NULL |
+
+Every value matches the stated expected values exactly. Zero donor
+records changed -- every command this round was either a plain `SELECT`
+against live staging or executed entirely inside the throwaway scratch
+D1 that GitHub Actions itself created and deleted.
+
+### Step 6 -- production readiness reassessment
+
+- Authentication hardening: implemented and tested (`f1137eb`,
+  re-confirmed present this round).
+- Current Staging schema: verified (0041/0042 present, both via direct
+  query and via the successful restore-verification run).
+- Fresh backup: completed (`daily/fundraising-os-staging-db-
+  20261009T201429Z.sql.gz.gpg`).
+- Fresh backup restore: succeeded, all integrity/schema/fidelity/
+  row-count checks passed.
+- Database integrity (`PRAGMA quick_check`) and foreign keys (`PRAGMA
+  foreign_key_check`): both verified.
+- Financial correction architecture: preserved (table present, 1 row,
+  matches live; Kutoff case independently confirmed live).
+- No existing donor data modified.
+
+**No new P0/P1 blockers identified.** The one open item from the prior
+round (no backup existed containing the current schema) is now closed.
+Remaining work before Production infrastructure provisioning is exactly
+what `docs/ACCELERATED-PRODUCTION-LAUNCH.md` already identified:
+explicit owner approvals for Stage B (infrastructure creation) and
+Stage C (dataset sign-off) -- no new engineering task is introduced by
+this round's findings.
+
+### Validation
+
+`pnpm test`: **177/177** (no code changed this round; re-run to
+confirm nothing regressed). This round's only Cloudflare operations
+were the two authorized workflow dispatches above plus read-only `SELECT`
+queries -- no code, workflow file, or secret was modified.
+
+No Production deployment, no Production infrastructure created, no
+permanent database created, no donor record changed, no merge to
+`main`. Stopping here for independent review before Production
+infrastructure setup.
