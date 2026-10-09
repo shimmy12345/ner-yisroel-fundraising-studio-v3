@@ -192,9 +192,23 @@ async function main() {
     git(["-c", `user.name=${BOT_NAME}`, "-c", `user.email=${BOT_EMAIL}`, "commit", "-m", commitMessage], { cwd: workDir });
 
     try {
-      execFileSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: workDir, stdio: "pipe" });
-      execFileSync("npm", ["test"], { cwd: workDir, stdio: "pipe" });
-      execFileSync("npm", ["run", "build"], { cwd: workDir, stdio: "pipe" });
+      // On Windows, npm is a `.cmd` shim that Node's child_process
+      // cannot spawn directly (neither "npm" nor the explicit "npm.cmd"
+      // -- both fail, with ENOENT and EINVAL respectively) without shell
+      // interpretation; this is a documented Node/Windows limitation,
+      // not specific to this script. `shell: true` is used ONLY on
+      // win32, and only here, where every argument is a static,
+      // hardcoded literal (never attacker- or caller-controlled), so the
+      // usual shell-injection/escaping concern that option carries does
+      // not apply. The GitHub Actions runner itself is Linux
+      // (ubuntu-latest), where plain "npm" (no shell) always resolves
+      // correctly -- this branch exists purely for local Windows
+      // development/verification and never changes the real CI job's
+      // own behavior.
+      const npmOptions = { cwd: workDir, stdio: "pipe", shell: process.platform === "win32" };
+      execFileSync("npm", ["install", "--no-audit", "--no-fund"], npmOptions);
+      execFileSync("npm", ["test"], npmOptions);
+      execFileSync("npm", ["run", "build"], npmOptions);
     } catch (error) {
       validationError = `main's own npm test/build failed against the candidate patch: ${error.message}`;
     }
