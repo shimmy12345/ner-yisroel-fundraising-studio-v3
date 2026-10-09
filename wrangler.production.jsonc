@@ -1,0 +1,86 @@
+{
+  // ============================================================
+  // Independent Cloudflare Production Worker configuration.
+  // Infrastructure prepared 2026-10-09 (see docs/PRODUCTION-
+  // INFRASTRUCTURE-SETUP.md) -- NOT YET DEPLOYED.
+  // ============================================================
+  //
+  // Populated from wrangler.production.example.jsonc's template -- see
+  // that file's own header for why a separate, wrangler-managed
+  // production Worker is a NEW thing, distinct from the legacy ChatGPT
+  // Sites production platform.
+  //
+  // TEAM_DOMAIN and POLICY_AUD below are DELIBERATELY still placeholders.
+  // Cloudflare Access application/policy creation could not be automated
+  // this round (requires Zero Trust dashboard access this session's
+  // Cloudflare credentials do not have API scope for -- see
+  // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md's "Manual setup remaining"
+  // section for exact steps). Per this round's own security pre-flight
+  // requirement: a Production environment missing either of these two
+  // values must never be considered secure or ready, and
+  // lib/auth/provider-selection.ts's hardening (commit f1137eb) only
+  // excludes the legacy, unverified ChatGPT Sites header when BOTH are
+  // genuinely present -- so `wrangler deploy --config
+  // wrangler.production.jsonc` must never be run until both placeholders
+  // below are replaced with the real values from Cloudflare Access
+  // Application setup.
+  "name": "fundraising-os-production",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client",
+    "binding": "ASSETS"
+  },
+  // Cloudflare Images (IMAGES binding) is optional — see wrangler.staging.jsonc.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fundraising-os-production-db",
+      // Created 2026-10-09 via `wrangler d1 create fundraising-os-production-db`.
+      // New, empty (zero application tables -- only D1's own internal
+      // _cf_KV system table), isolated from fundraising-os-staging-db
+      // (6c18396c-0a8f-4f2c-ba83-ea809ec10289). No donor data has been
+      // copied into it.
+      "database_id": "a51c6571-ae16-4614-aa9a-08f8e6be3ecd"
+    }
+  ],
+  // Worker-to-Worker binding only -- NOT an R2 binding, mirroring
+  // wrangler.staging.jsonc's own comment and guardrail exactly. Points at
+  // the (not yet deployed) Production status-worker -- see
+  // status-worker/wrangler.production.jsonc. Deploying THIS Worker before
+  // that one exists will leave this binding unresolved; deploy the
+  // status-worker first.
+  "services": [
+    {
+      "binding": "STATUS_WORKER",
+      "service": "fundraising-os-production-backup-status"
+    }
+  ],
+  "vars": {
+    // DELIBERATE PLACEHOLDERS -- see this file's own header comment.
+    // Replace only after creating the Production Cloudflare Access
+    // Application + policy (Zero Trust dashboard; manual, see
+    // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md).
+    "TEAM_DOMAIN": "REPLACE_WITH_REAL_TEAM_DOMAIN_AFTER_ACCESS_SETUP",
+    "POLICY_AUD": "REPLACE_WITH_REAL_POLICY_AUD_AFTER_ACCESS_SETUP",
+    // The sole email allowed to authenticate -- set to the real,
+    // explicitly authorized owner per this round's own instruction. This
+    // value is independent of Access setup (it's this app's own
+    // defense-in-depth re-check of the JWT's email claim, not the Access
+    // policy's own allow-list, which is configured separately in the
+    // Access policy itself).
+    "STAGING_OWNER_EMAIL": "sgoldstein@nirc.edu",
+    // Predicted default workers.dev URL for this Worker name (matching
+    // wrangler.staging.jsonc's own fundraising-os-staging.sgoldstein.workers.dev
+    // pattern exactly) -- confirm and correct after the first real deploy
+    // if Cloudflare assigns anything different.
+    "APP_BASE_URL": "https://fundraising-os-production.sgoldstein.workers.dev"
+  },
+  // Daily Fundraising Agenda email cron DELIBERATELY NOT included here.
+  // Enabling it is a separate "activate Production for daily use"
+  // decision this round's authorization explicitly excludes -- add
+  // `"triggers": { "crons": ["0 * * * *"] }` (matching wrangler.staging.jsonc
+  // exactly) only as part of that later, separately-approved step.
+  "observability": { "enabled": true }
+}

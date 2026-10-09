@@ -1,0 +1,43 @@
+{
+  // Production counterpart of wrangler.jsonc (Independent Staging's
+  // status-worker config) -- prepared 2026-10-09, see
+  // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md. NOT YET DEPLOYED.
+  //
+  // Identical architecture to the Staging instance -- same "no public
+  // URL, read-only R2 binding, reachable only via Worker-to-Worker
+  // service binding" design (see wrangler.jsonc's own header comment for
+  // the full rationale) -- pointed at Production's own, separate
+  // resources only. Because this Worker has no public route of any kind
+  // even once deployed, deploying it carries none of the "operational
+  // Production URL" exposure concern this round's restrictions are
+  // about -- but it was left undeployed this round anyway, to deploy
+  // together with the main Production Worker once Cloudflare Access is
+  // configured, rather than partially standing up the chain.
+  "name": "fundraising-os-production-backup-status",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-06",
+  "workers_dev": false,
+  "r2_buckets": [
+    {
+      "binding": "STATUS_BUCKET",
+      // Created 2026-10-09 via `wrangler r2 bucket create
+      // fundraising-os-production-backup-status`. Separate from Staging's
+      // fundraising-os-backup-status bucket -- no shared status objects
+      // between the two environments.
+      "bucket_name": "fundraising-os-production-backup-status"
+    }
+  ],
+  // Backup-freshness watchdog -- same architecture as wrangler.jsonc's
+  // own, offset by a further few minutes purely to avoid synchronized
+  // platform load with Staging's own watchdog tick (17 * * * *). NOT
+  // enabled as an active production safeguard until the nightly backup
+  // workflow itself is enabled (see .github/workflows/
+  // d1-backup-nightly-production.yml's own header) -- deploying this
+  // Worker with this trigger present is harmless on its own (it only
+  // ever reads status objects and, when stale, asks GitHub to dispatch
+  // the nightly backup workflow -- which do not exist as scheduled,
+  // active jobs yet either), but is called out explicitly rather than
+  // silently inherited.
+  "triggers": { "crons": ["23 * * * *"] },
+  "observability": { "enabled": true }
+}

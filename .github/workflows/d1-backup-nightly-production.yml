@@ -1,0 +1,157 @@
+# Production counterpart of d1-backup-nightly.yml (Independent Staging's
+# nightly backup) -- prepared 2026-10-09, see
+# docs/PRODUCTION-INFRASTRUCTURE-SETUP.md. Identical mechanism and safety
+# design to that file (see its own header comment for the full step-by-step
+# rationale: raw `wrangler d1 export`, gzip+GPG-AES256 encryption with the
+# plaintext shredded immediately after, upload to a dedicated R2 bucket via
+# a write-only-scoped credential, atomic `latest/` promotion carrying its
+# own dated-object provenance, and an additive best-effort status publish
+# that can never turn a real success into a reported failure or vice
+# versa) -- pointed at Production's own, completely separate resources
+# only: fundraising-os-production-db, the fundraising-os-production-backups
+# R2 bucket, and Production-scoped secrets (every one named with a
+# _PRODUCTION suffix below, distinct from Staging's own secrets of the
+# same shape -- see "Manual setup remaining" in
+# docs/PRODUCTION-INFRASTRUCTURE-SETUP.md for exactly which ones must be
+# created before this workflow can run).
+#
+# DELIBERATELY NOT ON A SCHEDULE. Unlike d1-backup-nightly.yml, this file
+# has no `schedule:` trigger -- workflow_dispatch only. This is the
+# explicit "prepared but disabled/gated" requirement: this workflow must
+# never fire automatically until the Production database has real data
+# worth protecting AND the Production-scoped secrets below actually exist
+# AND launch readiness has been separately confirmed. Add a `schedule:`
+# block (copy d1-backup-nightly.yml's own exact cron, offset by a few
+# minutes to avoid competing with Staging's own run) only as part of that
+# later, separately-approved step -- never earlier.
+name: D1 nightly backup (Production)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-nightly-backup-production
+  cancel-in-progress: false
+
+env:
+  DATABASE_NAME: fundraising-os-production-db
+  WRANGLER_VERSION: "4.92.0"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Export D1 database (full, raw SQL)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@${WRANGLER_VERSION} d1 export "${DATABASE_NAME}" --remote -y --output=export.sql
+
+      - name: Verify the export before trusting it
+        run: |
+          set -euo pipefail
+          test -s export.sql
+          head -c 64 export.sql | grep -q 'PRAGMA defer_foreign_keys=TRUE;' \
+            || { echo "::error::Export does not start with the expected PRAGMA line -- refusing to back up a possibly-corrupt export."; exit 1; }
+          echo "Export looks structurally sane: $(wc -l < export.sql) lines, $(wc -c < export.sql) bytes."
+
+      - name: Compress and encrypt (plaintext never leaves this step)
+        env:
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          gzip -c export.sql > export.sql.gz
+          PASSFILE="$(mktemp)"
+          printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase-file "${PASSFILE}" \
+            --output export.sql.gz.gpg export.sql.gz
+          shred -u "${PASSFILE}" export.sql export.sql.gz
+          test -s export.sql.gz.gpg
+
+      - name: Compute timestamp
+        id: stamp
+        run: echo "value=$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dated backup to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_WRITE_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_WRITE_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          KEY="daily/${DATABASE_NAME}-${{ steps.stamp.outputs.value }}.sql.gz.gpg"
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" \
+            --bucket "${BUCKET}" \
+            --key "${KEY}" \
+            --body export.sql.gz.gpg \
+            --content-type application/octet-stream
+          echo "Uploaded ${KEY}"
+
+      - name: Update the 'latest' pointer (never expires, always overwritten)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_WRITE_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_WRITE_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          DATED_KEY="daily/${DATABASE_NAME}-${{ steps.stamp.outputs.value }}.sql.gz.gpg"
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" \
+            --bucket "${BUCKET}" \
+            --key "latest/${DATABASE_NAME}.sql.gz.gpg" \
+            --body export.sql.gz.gpg \
+            --content-type application/octet-stream \
+            --metadata "dated-backup-key=${DATED_KEY}"
+
+      - name: Clean up local plaintext/ciphertext
+        if: always()
+        run: rm -f export.sql export.sql.gz export.sql.gz.gpg
+
+      # Additive, best-effort status reporting -- see d1-backup-nightly.yml's
+      # own comment for why continue-on-error here is load-bearing.
+      - name: Publish backup status (best-effort; must never fail this job)
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATUS_WRITE_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATUS_WRITE_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET_PRODUCTION }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BACKUP_OBJECT_KEY="daily/${DATABASE_NAME}-${{ steps.stamp.outputs.value }}.sql.gz.gpg"
+          jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg status "${JOB_STATUS}" \
+                --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+            '{schemaVersion: 1, databaseName: $db, attemptAt: $at, attemptStatus: $status, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+            > attempt.json
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+            --key "backup-latest-attempt.json" --body attempt.json --content-type application/json \
+            || echo "::warning::Failed to publish backup-latest-attempt.json -- the backup itself is unaffected."
+          if [ "${JOB_STATUS}" = "success" ]; then
+            jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg key "${BACKUP_OBJECT_KEY}" \
+                  --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+              '{schemaVersion: 1, databaseName: $db, completedAt: $at, backupObjectKey: $key, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+              > success.json
+            aws s3api put-object \
+              --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+              --key "backup-latest-success.json" --body success.json --content-type application/json \
+              || echo "::warning::Failed to publish backup-latest-success.json -- the backup itself succeeded and is unaffected."
+          fi
+          rm -f attempt.json success.json

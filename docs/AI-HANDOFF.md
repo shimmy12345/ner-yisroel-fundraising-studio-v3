@@ -29112,3 +29112,72 @@ No Production deployment, no Production infrastructure created, no
 permanent database created, no donor record changed, no merge to
 `main`. Stopping here for independent review before Production
 infrastructure setup.
+
+## Production Infrastructure Setup (2026-10-09) -- PROVISIONING ONLY, NOT DEPLOYED, NOT LAUNCHED
+
+Full record: **`docs/PRODUCTION-INFRASTRUCTURE-SETUP.md`**. Summary:
+
+Owner explicitly authorized infrastructure creation only (not migration,
+not cutover). Checked actual Cloudflare credential scope before assuming
+anything (`wrangler whoami`): Workers/D1/R2 write access via OAuth, but
+**no Zero Trust/Access API scope** -- confirmed empirically (R2 list/create
+worked; there is no `wrangler access` equivalent and this session has no
+separately-scoped Access API token). This determined exactly what could
+be automated vs. what genuinely requires the owner's own dashboard
+action.
+
+**Created**: a new, empty Production D1 database
+(`fundraising-os-production-db`, id `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`
+-- confirmed empty: only D1's own internal `_cf_KV` table, zero
+application schema, zero data); two new R2 buckets
+(`fundraising-os-production-backups` with the same 90-day retention rule
+Staging uses, and `fundraising-os-production-backup-status`); two
+non-secret GitHub Actions variables (`R2_BACKUP_BUCKET_PRODUCTION`,
+`R2_STATUS_BUCKET_PRODUCTION`).
+
+**Prepared, not deployed**: `wrangler.production.jsonc` (real new D1
+binding; `TEAM_DOMAIN`/`POLICY_AUD` deliberately left as explicit
+placeholder strings -- Access isn't configured yet, and this round's own
+security requirement is that a Production config missing either value
+must never be considered ready); `status-worker/wrangler.production.jsonc`;
+two new, deliberately gated GitHub Actions workflows
+(`d1-backup-nightly-production.yml`, `d1-restore-verify-monthly-
+production.yml` -- `workflow_dispatch` only, no `schedule:` trigger, so
+neither can fire automatically until a human adds one later).
+
+**Not created -- genuinely requires manual action**: the Production
+Cloudflare Access Application/policy (Zero Trust dashboard); 3 new R2 API
+tokens (backup write/read, status write) scoped to the two new buckets;
+a new, separate `BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION`; the 7
+resulting GitHub secrets. `CLOUDFLARE_D1_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`
+are reused as-is (already account-wide; Cloudflare offers no
+database-scoped D1 permission, so a second token would carry identical
+privilege, not less).
+
+**Genuinely new finding this round**: there is no dedicated build script
+that would give an independent Production Worker its own
+`FUNDRAISING_OS_ENVIRONMENT` value distinct from legacy production's own
+`"production"` (`scripts/build-production.mjs` is documented as feeding
+only the legacy ChatGPT Sites platform). The auth-hardening fix (commit
+`f1137eb`) is unaffected by this (it never depended on that axis, by
+design), but `authorizeStagingReset()`'s own `deploymentEnvironment !==
+"staging-independent"` guard means this is a pure build/deploy-process
+discipline question, not a code defect -- flagged as an open decision to
+resolve before the first real Production Worker deploy, not glossed
+over.
+
+**Isolation verified, non-destructively, with evidence**: Staging D1
+re-queried read-only after all provisioning -- `donors=254,
+giving_activities=5463, pledge_balance_corrections=1`, identical to
+every prior round's count; Staging's two R2 buckets' creation timestamps
+unchanged in the post-provisioning listing. No Worker was deployed. No
+secret value was ever requested, printed, or committed.
+
+**Validation**: `pnpm test` 177/177 (unaffected -- new workflow files are
+referenced by explicit filename in existing tests, never glob-matched,
+so nothing broke; confirmed by re-running). `pnpm exec tsc --noEmit`:
+clean (no application code touched this round).
+
+No Production deployment, no donor data copied, no Staging modification,
+no merge to `main`. Stopping here for independent review before any data
+migration or cutover work.

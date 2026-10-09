@@ -109,6 +109,8 @@ Every value matches exactly. The already-proven backup/restore architecture (rou
 
 ## 7. Production architecture
 
+**2026-10-09 update #3 (Production Infrastructure Setup round)** — most of this section is now done, not merely planned. See `docs/PRODUCTION-INFRASTRUCTURE-SETUP.md` for the complete, authoritative record: a new, empty, isolated Production D1 database and two new Production R2 buckets now exist; the Production Worker/status-worker configs and two gated (manual-dispatch-only) backup/restore-verify workflows are prepared but not deployed/activated; Cloudflare Access (the one piece this session's credentials cannot create) and the resulting secrets remain the explicit, documented manual next step. Staging was independently re-confirmed completely unchanged throughout. The items below are left as originally planned, for the historical record — §8 of the new document is the current source of truth for exactly what remains.
+
 Reuses the existing, proven Independent Staging pattern exactly — no new architecture, no new services. What must be **created** (none of this was done this round):
 
 1. **Production D1 database** — `wrangler d1 create`, new and empty, separate `database_id` from staging.
