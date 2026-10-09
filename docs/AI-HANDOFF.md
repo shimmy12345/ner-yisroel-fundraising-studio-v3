@@ -28631,3 +28631,103 @@ modification occurred at any point in this round.
 NO-GO** -- not merely pending approval, but structurally premature: no
 independent Production environment exists for this application yet.
 Stopping here for independent review.
+
+## PR #14 Merge Verification + D1 Restore/Schema Sync Check Re-Run (2026-10-09) -- VERIFICATION ONLY, NO MERGE, NO APPLICATION CHANGES
+
+Verification-only round confirming PR #14's merge actually resolved the
+D1 restore/schema sync drift, not merely that the PR was merged.
+
+### Task 1 -- merge verification
+
+Fetched fresh. `origin/main` tip: **`c8a11dab2b68106f310a3e5367a6f159d143e981`**
+-- a genuine 2-parent merge commit (`ec7869c` + `6a2d8f2`), exactly
+matching the SHA given. `git diff ec7869c c8a11da --stat` matches PR
+#14's own reviewed diff exactly (same 4 files, same line counts: 250
+insertions/17 deletions). `production-baseline/schema-manifest.json` at
+main's new tip is byte-identical to the canonical branch's own current
+manifest. The canonical branch (`feature/independent-cloudflare-sandbox`)
+is untouched by this merge, still at its own tip. No unrelated changes.
+
+### Task 2 -- why no new CI run had appeared, and triggering one
+
+`.github/workflows/d1-restore-sync-check.yml` has two independent
+causes for why merging PR #14 into `main` could never by itself produce
+a new run:
+
+1. Its `push`/`pull_request` triggers are scoped to
+   `branches: [feature/independent-cloudflare-sandbox]` only -- a push
+   to `main` (the merge) never matches either trigger.
+2. The workflow file **does not exist on `main` at all** -- confirmed
+   via `git ls-tree origin/main -- .github/workflows/`: main has only
+   `d1-backup-nightly.yml` and `d1-restore-verify-monthly.yml`. This is
+   architecturally consistent -- the canonical branch owns the real
+   schema and `scripts/check-main-restore-sync.mjs` and the `drizzle/`
+   migrations directory it depends on don't exist on `main` either.
+
+It does support `workflow_dispatch` (`workflow_dispatch: {}`, no
+required inputs) -- the existing, intended manual-trigger mechanism, no
+code or workflow change needed. Dispatched it via the GitHub REST API
+(`POST .../actions/workflows/372454517/dispatches`) using the same
+credential `git push`/PR creation already used this session (verified
+scoped to the repo owner before use, never printed), with
+`ref: feature/independent-cloudflare-sandbox` -- the only ref where the
+workflow file and its script dependencies exist, and the architecturally
+correct semantics (this workflow always asks "is `main` in sync with
+*this* branch's current state").
+
+### Task 3 -- result, verified from actual logs, not assumed
+
+New run: **#11**,
+<https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/37978101989>
+-- `workflow_dispatch`, completed **2026-10-09T19:07:54Z**.
+
+- **`check` job: success.** Actual log text (fetched via the Actions API,
+  not just the job conclusion):
+  > `Comparing this branch's current schema/restore state against origin/main (c8a11dab2b68)...`
+  > `D1 restore/schema state on main is in sync with the canonical schema. No drift detected.`
+  > `main's restore/baseline tracking is current. No sync needed.`
+- **`prepare-sync` job: success.** Actual log output:
+  `{ "outcome": "already_synced" }` -- the automation independently
+  agrees there is nothing left to do.
+- Cross-confirmed **locally** immediately after, from the canonical
+  branch: `node scripts/check-main-restore-sync.mjs` -- identical
+  result, comparing against the same `c8a11dab2b68` commit.
+- Directly inspected `origin/main`'s live files: `pledge_balance_corrections`
+  present in `lib/operations/staging-reset.ts`'s `STAGING_RESET_TABLE_ORDER`;
+  `production-baseline/schema-manifest.json`'s `sourceMigrations` ends
+  `...0040, 0041_pledge_payment_plans_renewal_acknowledged_at.sql,
+  0042_pledge_balance_corrections.sql` (43 total); `lib/data-health/
+  production-baseline.ts`'s `PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 43`
+  assertion matches.
+
+No CI failure occurred -- Task 4 (failure investigation) was not
+applicable this round.
+
+### Commit
+
+This entry is the only change this round -- verification only, no test
+files, no application code, no sync-branch changes (none were needed).
+
+No Production deployment, no merge to `main`, no Production D1 access,
+no destructive operation, and no donor financial-data change occurred
+at any point. The only write action this round was the `workflow_dispatch`
+API call itself (triggering an existing, read-only CI check) -- never a
+commit, push, or merge.
+
+### Final assessment
+
+The D1 restore/schema synchronization drift for migrations 0041/0042 is
+**fully resolved**, confirmed independently by both live GitHub Actions
+CI (run #11, both jobs green, actual log text inspected) and a fresh
+local re-run of the same unmodified checker. `main`'s restore/baseline
+tracking is current with the canonical branch. No remaining errors or
+warnings.
+
+**Recommended next step**: none required for this specific drift -- it
+is closed. More broadly, per the prior round's Production-readiness
+entry: building and approving an actual independent Production
+environment (currently nonexistent, per `docs/DEPLOYMENT.md`) remains a
+separate, much larger, not-yet-started decision, distinct from this
+sync being resolved. "The sync check is green" and "Production
+deployment is authorized" remain two different questions; this round
+answers only the former.
