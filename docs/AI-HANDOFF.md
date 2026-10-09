@@ -28063,3 +28063,77 @@ Staging at any point in this round.
 No Production deployment occurred, no merge to `main`, and no
 additional financial correction was made. Stopping here for
 independent review.
+
+## Donation History "Corrected" Badge Readability Fix (2026-10-09) -- REVIEWED EXTERNAL COMMIT, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED
+
+A second contributor (ChatGPT, operating with repo write access) pushed
+commit `48e46c7` directly to `feature/independent-cloudflare-sandbox`,
+on top of `ede9c27` above, titled "Increase Donation History Corrected
+badge font size to 11px". Before building on it, its content was
+verified rather than assumed: `git show --stat`/`git show` confirmed a
+single-line change to `app/globals.css`, raising
+`.timeline-corrected-badge`'s `font-size` from `7px` (too small --
+genuinely an oversight in the prior round) to `11px`, matching the
+sibling `.event-type`/`.event-campaign`/`.timeline-status` badges on
+the same timeline row. No other rule, selector, or file was touched.
+Fast-forward-merged locally (`ede9c27..48e46c7`, no conflicts).
+
+### Verification performed
+
+- **Tests/build**: full suite re-run after the fast-forward --
+  **174/174 test files pass** (`pnpm test`), `pnpm exec tsc --noEmit`
+  clean, `pnpm run build` succeeded. No test changes were needed (the
+  change is a pure CSS value, not covered by the prior round's
+  source-text assertions, which don't pin the specific font-size).
+- **Deploy**: `pnpm run deploy:staging-independent` --
+  **Version ID `a3e104f2-d77a-4dc7-87e0-b2b1d3bcb940`**.
+- **Live UI, Kutoff's real donor page** (read-only DOM inspection,
+  `https://fundraising-os-staging.sgoldstein.workers.dev/donors/843cf7e9-a559-4bd4-82b5-4e2057255583`):
+  - DIN2023 timeline row: "$5,000 committed · $4,790 paid · $0
+    outstanding", with a "Corrected" badge whose computed
+    `font-size` is now `11px` (confirmed via `getComputedStyle`) and
+    whose tooltip (`title` attribute) reads "Originally $210
+    outstanding per the imported JL record; manually corrected to
+    $0." -- exactly matching the active correction's stored values.
+  - DIN2025 timeline row: "$3,000 committed · $2,750 paid · $250
+    open", no "Corrected" badge -- unaffected.
+  - DIN2025's payment plan (`ae64934c-...`) confirmed active
+    (`ended_at` NULL) both via DOM and a direct D1 re-query.
+  - Mobile/responsive consistency: the deployed browser window in
+    this environment could not be resized below desktop width (tool
+    limitation, noted honestly rather than faked), so this was
+    verified by source inspection instead of a live mobile
+    screenshot: the existing mobile media query in `app/globals.css`
+    (`@media (max-width:700px) { ... .unified-timeline-item
+    .timeline-content > div { align-items:flex-start; } ... }`,
+    present since before this round) targets the exact `<div>` that
+    `.timeline-corrected-badge` renders inside, alongside the
+    pre-existing `.event-type`/`.event-campaign`/`.timeline-status`
+    badges it was explicitly sized to match -- so it inherits the
+    same wrapping behavior those badges already rely on at narrow
+    widths, with no additional CSS required.
+- **Database (read-only, before and after deploy)**:
+  - DIN2023 (`b16a6e94-...`): raw imported `balance_cents` still
+    21000 ($210, untouched), active correction row still present
+    (`corrected_balance_cents` 0, `reversed_at` NULL, reason "JL
+    mistake").
+  - DIN2025 (`11bc5aef-...`): raw `balance_cents` still 25000 ($250),
+    zero correction rows.
+  - Every OTHER giving-activity row for this donor (24 additional
+    pledges, campaigns CHSP2013 through DIN2020) re-confirmed
+    untouched (all fully paid, zero balance, zero corrections).
+  - `pledge_balance_corrections` table-wide count: **exactly 1 row**
+    in all of Independent Staging -- confirms no additional financial
+    correction exists anywhere, not just for this donor.
+  - Every query issued returned `"changes": 0, "rows_written": 0` in
+    its D1 metadata, confirming the deployment process itself made no
+    writes.
+
+### Commit
+
+`48e46c7` (external, reviewed and verified above) is now the deployed
+HEAD of `feature/independent-cloudflare-sandbox`. This round added no
+new commits of its own beyond this handoff entry.
+
+No Production deployment, no merge to `main`, and no donor financial
+data was modified. Stopping here for independent review.
