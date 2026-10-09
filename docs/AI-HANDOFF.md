@@ -27953,3 +27953,113 @@ issued was a plain `SELECT`.
 
 No Production deployment occurred. Stopping here for independent
 review before any actual financial correction is applied.
+
+## Donation History "Corrected" Indicator Gap (2026-10-09) -- IMPLEMENTED, TESTED, DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED (READ-ONLY)
+
+Since the prior round's "0 rows" note above, the user applied the real
+Kutoff DIN2023 correction directly through FOS's own UI (the "Correct
+Balance" control on the Pledges-section card, from the Manual Pledge
+Balance Corrections round): `pledge_balance_corrections` row id
+`ac60d5d8-b688-40e2-9300-afc6703f0215`, pledge
+`b16a6e94-b643-4046-a176-31a7fb03ab44` (DIN2023), reason "JL mistake",
+`corrected_balance_cents` 0, `reversed_at` NULL. Re-confirmed via a
+fresh read-only query this round.
+
+**Reported issue:** on the donor profile, the "Donation History"
+section at the bottom of the page (the Unified Relationship Timeline)
+should show the corrected $0 for DIN2023 too -- the user should never
+see $0 in one section and $210 outstanding in another.
+
+### Root cause
+
+`UnifiedRelationshipTimeline` renders from the SAME `giving` rows the
+Pledges section reads, via `DONOR_GIVING_SQL`
+(`lib/relationships/giving.ts`), which already applies the effective-
+balance `LEFT JOIN pledge_balance_corrections ... COALESCE(...)` fix
+from the Manual Pledge Balance Corrections round. So DIN2023's
+`balance_cents` reaching the timeline was already `0`, not `21000` --
+live DOM inspection of the real page
+(`document.getElementById('pledge-b16a6e94-...').innerText`) confirmed
+the row read "$5,000 committed · $4,790 paid", with the "· $X open"
+suffix silently omitted (since the component only appends it when
+`balance_cents > 0`). **There was never a stale/wrong $210 anywhere on
+the page.** The actual gap was exactly requirement 4: a corrected-to-$0
+pledge was visually indistinguishable in Donation History from an
+ordinarily, naturally fully-paid pledge -- unlike the Pledges section,
+which explicitly shows a "Manually corrected" badge. Confirmed via a
+direct query that zero `jl_payment_assignment_audits` rows exist for
+this pledge, ruling out a stale payment-timeline snapshot as an
+alternate source of a visible $210.
+
+### Fix
+
+- `app/donors/[id]/page.tsx`: added `activeCorrectionsByPledgeId`, a
+  `pledgeActivityId -> {correctedBalanceCents,
+  importedBalanceCentsAtCorrection}` map built from the existing
+  `correctionsByPledge` history (keeping only each pledge's
+  unreversed row), passed to `<UnifiedRelationshipTimeline>` as a new
+  `corrections` prop.
+- `app/donors/[id]/UnifiedRelationshipTimeline.tsx`: accepts the new
+  `corrections` prop (default `{}`, purely additive). For a giving
+  item with an active correction: renders a "Corrected" badge (native
+  `title=` tooltip naming both the original imported figure and the
+  corrected figure -- no new UI chrome) next to the existing
+  event-type/campaign badges, and explicitly renders "· $X outstanding"
+  using `activity.balance_cents` (the already-effective value, read
+  directly, never recomputed) even when that amount is $0 -- instead of
+  silently omitting it the way a naturally fully-paid pledge does.
+- `app/globals.css`: `.timeline-corrected-badge`, same amber token as
+  the Pledges-section `.balance-correction-badge`, sized to match the
+  existing inline timeline badges.
+
+No SQL, schema, or write-path change. `giving_activities.balance_cents`
+and every financial total are untouched; this is a display-only fix
+built entirely on data the effective-balance architecture already
+computed correctly.
+
+### Tests
+
+New `tests/unified-timeline-balance-correction.test.mjs` (5 tests):
+- `buildUnifiedTimeline` passes `balance_cents` through unchanged for
+  both a corrected ($0) and an uncorrected row.
+- Source-text assertions on `UnifiedRelationshipTimeline.tsx` confirm
+  the correction lookup is keyed on the exact pledge id, the badge
+  carries the tooltip with both figures, the outstanding amount is
+  rendered explicitly when corrected, and the displayed balance is
+  never read from the correction row itself (only from
+  `activity.balance_cents`).
+- Source-text assertions on `page.tsx` confirm only the active
+  (unreversed) correction is ever included in the map, and that the
+  map is actually passed to the timeline component.
+- Real in-memory-SQLite end-to-end test seeding the exact Kutoff shape
+  (DIN2023 corrected to $0/no plan, DIN2025 $250/active plan): proves
+  `DONOR_GIVING_SQL` (mirrored verbatim) reports $0 for DIN2023 and
+  $250 for DIN2025, the active-corrections map contains DIN2023 only,
+  DIN2025's payment plan row is unchanged, no
+  `jl_payment_assignment_audits` row exists, and DIN2023's raw imported
+  columns (`committed_cents`/`paid_cents`/`balance_cents`) are
+  untouched.
+- Real in-memory-SQLite reversal test: confirms reversing the
+  correction restores the $210 in the same query and removes the entry
+  from the active-corrections map, while the historical row itself is
+  preserved (not deleted).
+
+Registered in `scripts/run-tests.mjs` (was previously present but not
+wired into `pnpm test`'s file list -- fixed as part of this change).
+
+**174/174 test files pass** (`pnpm test`). `pnpm exec tsc --noEmit`:
+clean. `pnpm run build`: succeeded.
+
+### Staging verification (read-only)
+
+Fresh query against Independent Staging confirmed, before and after
+deployment: DIN2023 (`b16a6e94-...`) raw `balance_cents` 21000 ($210),
+active correction `corrected_balance_cents` 0, `reversed_at` NULL.
+DIN2025 (`11bc5aef-...`) raw `balance_cents` 25000 ($250), zero
+correction rows. DIN2025's payment plan (`ae64934c-...`) `ended_at`
+NULL -- unchanged. No write query was issued against Independent
+Staging at any point in this round.
+
+No Production deployment occurred, no merge to `main`, and no
+additional financial correction was made. Stopping here for
+independent review.

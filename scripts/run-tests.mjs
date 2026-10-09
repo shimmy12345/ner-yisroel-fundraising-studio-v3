@@ -206,6 +206,7 @@ const TEST_FILES = [
   "tests/recurring-payment-alert-e2e.test.mjs",
   "tests/pledge-balance-correction.test.mjs",
   "tests/pledge-balance-correction-e2e.test.mjs",
+  "tests/unified-timeline-balance-correction.test.mjs",
 ];
 
 function runOne(file) {

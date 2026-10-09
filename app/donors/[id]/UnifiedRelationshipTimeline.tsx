@@ -30,7 +30,7 @@ const STATUS_LABELS: Record<TimelineStatus, string> = { scheduled: "Scheduled", 
 // the initial view once more than RECENT_LIMIT are showing.
 const RECENT_LIMIT = 10;
 
-export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now, acknowledgments = {}, donorId }: {
+export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, interactions, reminders, donors, timezone, live, now, acknowledgments = {}, corrections = {}, donorId }: {
   donorId: string;
   giving: TimelineGiving[];
   legacyGifts: TimelineLegacyGift[];
@@ -45,6 +45,14 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
   // status per paid gift, so the timeline's "Mark thank-you sent" control
   // reflects what's already been marked instead of always starting blank.
   acknowledgments?: Record<string, GiftAcknowledgmentStatus>;
+  // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- keyed
+  // by giving_activities.id (the SAME id `giving` rows already carry).
+  // `giving[].balance_cents` is already the EFFECTIVE balance (the
+  // server query's own COALESCE already applied it -- never recomputed
+  // here); this map exists ONLY to show the "Corrected" indicator and
+  // the original imported figure for a tooltip, never to adjust the
+  // displayed balance itself.
+  corrections?: Record<string, { correctedBalanceCents: number; importedBalanceCentsAtCorrection: number }>;
 }) {
   const [filter, setFilter] = useState<TimelineFilter>("all");
   const [visibleCount, setVisibleCount] = useState(RECENT_LIMIT);
@@ -89,7 +97,21 @@ export function UnifiedRelationshipTimeline({ giving, legacyGifts, payments, int
         // "Gift"/"Pledge" label exactly as before, with no empty
         // placeholder.
         const title = activity.description || activity.item_type || activity.source_campaign || (item.filter === "pledges" ? "Pledge" : "Gift");
-        return <article id={`pledge-${activity.id}`} className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{activity.activity_date ? financialDateLabel(item.eventAt) : "Date not recorded"}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{title}</h3><span className="event-type">{item.filter === "pledges" ? "Pledge" : "Gift"}</span>{activity.source_campaign && <span className="event-campaign">{activity.source_campaign}</span>}<span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span></div><p>{money(amount)} committed{(activity.paid_cents ?? 0) > 0 ? ` · ${money(activity.paid_cents ?? 0)} paid` : ""}{(activity.balance_cents ?? 0) > 0 ? ` · ${money(activity.balance_cents ?? 0)} open` : ""}</p>{live && (activity.paid_cents ?? 0) > 0 && <GiftAcknowledgmentActions giftSource="giving_activity" giftId={activity.id} initialStatus={acknowledgments[`giving_activity:${activity.id}`] ?? null} compact />}{live && <GivingRecordActions activity={{ id: activity.id, donorId: activity.donor_id, externalSource: activity.external_source, workspaceStatus: activity.workspace_status, privateNote: activity.private_note, updatedAt: activity.updated_at }} donors={donors} />}</div></article>;
+        // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) --
+        // `activity.balance_cents` is ALREADY the effective balance
+        // (the server query's own COALESCE), so a corrected pledge
+        // already displays its true $0 (or whatever corrected amount)
+        // here with zero extra logic. The ONLY thing this lookup adds
+        // is an explicit "Corrected" indicator (with a tooltip showing
+        // the original imported figure) -- without it, a corrected
+        // pledge whose effective balance is $0 would read identically
+        // to an ordinarily, naturally fully-paid pledge, which is the
+        // exact "one section says $0, nothing explains why it differs
+        // from the imported $210" gap this closes. `correction` is only
+        // ever read for display -- it is never substituted into the
+        // balance calculation itself.
+        const correction = corrections[activity.id];
+        return <article id={`pledge-${activity.id}`} className={`timeline-item unified-timeline-item ${item.status}`} key={item.key}><time><strong>{activity.activity_date ? financialDateLabel(item.eventAt) : "Date not recorded"}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{title}</h3><span className="event-type">{item.filter === "pledges" ? "Pledge" : "Gift"}</span>{activity.source_campaign && <span className="event-campaign">{activity.source_campaign}</span>}<span className={`timeline-status ${item.status}`}>{STATUS_LABELS[item.status]}</span>{correction && <span className="timeline-corrected-badge" title={`Originally ${money(correction.importedBalanceCentsAtCorrection)} outstanding per the imported JL record; manually corrected to ${money(correction.correctedBalanceCents)}.`}>Corrected</span>}</div><p>{money(amount)} committed{(activity.paid_cents ?? 0) > 0 ? ` · ${money(activity.paid_cents ?? 0)} paid` : ""}{correction ? ` · ${money(activity.balance_cents ?? 0)} outstanding` : ((activity.balance_cents ?? 0) > 0 ? ` · ${money(activity.balance_cents ?? 0)} open` : "")}</p>{live && (activity.paid_cents ?? 0) > 0 && <GiftAcknowledgmentActions giftSource="giving_activity" giftId={activity.id} initialStatus={acknowledgments[`giving_activity:${activity.id}`] ?? null} compact />}{live && <GivingRecordActions activity={{ id: activity.id, donorId: activity.donor_id, externalSource: activity.external_source, workspaceStatus: activity.workspace_status, privateNote: activity.private_note, updatedAt: activity.updated_at }} donors={donors} />}</div></article>;
       }
       if (item.kind === "legacy-gift") return <article className="timeline-item unified-timeline-item completed" key={item.key}><time><strong>{financialDateLabel(item.eventAt)}</strong></time><span className="timeline-dot gift">$</span><div className="timeline-content"><div><h3>{item.gift.fund || "Gift"}</h3><span className="event-type">Gift</span><span className="timeline-status completed">Completed</span></div><p>{money(item.gift.amount_cents)} paid</p>{live && <GiftAcknowledgmentActions giftSource="gift" giftId={item.gift.id} initialStatus={acknowledgments[`gift:${item.gift.id}`] ?? null} compact />}</div></article>;
       if (item.kind === "payment") {
