@@ -26565,3 +26565,102 @@ human comments on one before it's merged.
 file; the one code change was the npm-spawn portability fix, covered by
 the existing suite's own pass/fail, not a new test). `pnpm exec tsc
 --noEmit`: clean. `pnpm exec eslint` on the one changed file: clean.
+
+## Pledge Renewal Reminders + Payment Accuracy -- Independent Staging Verification (2026-10-09) -- READ-ONLY, NO D1 WRITE, NO CODE CHANGE, NO DEPLOY
+
+Full read-only audit of active recurring payment plans against the real
+`fundraising-os-staging-db`, run against today's real data (2026-10-09),
+using the deployed app's own `evaluatePledgeRenewal`/`evaluatePaymentPlan`
+(`lib/relationships/pledge-payment-plan.ts`) via direct `require()` rather
+than any reimplementation. No payment, pledge, or plan row was created,
+edited, deleted, or reassigned; neither D1 database was touched.
+
+### Part 1 -- Pledge date / duration coverage
+
+45 active plans (`ended_at IS NULL`), 41 unique donors. 44 of 45 plans now
+have BOTH a verified `original_pledge_date` and `commitment_duration_months`
+(renewal-eligible) -- a large improvement since this feature's own prior
+verification round (`lib/relationships/pledge-payment-plan.ts`'s original
+live-test, docs/AI-HANDOFF.md's "Pledge Renewal Reminders" entries above),
+which found only 8 verified dates / 0 verified durations. Real fundraiser
+data entry, not a bulk/suspicious backfill: durations show genuine variation
+(36/12/10/6 months), all within the valid [1,120] range, no future-dated
+pledge dates.
+
+**Missing:** 1 plan (donor 69341, Avraham Rosenbaum) has NEITHER field set
+-- cleanly missing both, not partially set. No inferred value was created
+for it, per instruction.
+
+**Zero renewal reminders are due today, and zero fall inside the 14-day
+Coming Up window**, computed directly from `evaluatePledgeRenewal` against
+all 44 eligible plans.
+
+**One real operational gap, not a bug:** donor 2689 (Jonathan Spetner)'s
+renewal date (2026-09-26) and five-day mark (2026-09-21) have already
+passed -- his pledge/duration fields were verified by the fundraiser too
+late for either reminder to ever have fired, since the system correctly
+never fires a reminder retroactively. Worth a human follow-up; not a code
+defect.
+
+Multi-plan donors (4 confirmed: Wisotsky, Paul Z. Goldstein, Max Singer,
+Shimmy Ramras) each have genuinely independent, separately-computed
+renewal dates per plan, confirming Part 1 requirement 7.
+
+### Part 2 -- Payment accuracy for two fundraiser-corrected donors
+
+Reconciled using real `jl_payment_assignment_audits` rows and the real
+`evaluatePaymentPlan` function -- actual recorded payments only, never
+conflated with scheduled/expected installments.
+
+- **Moshe Matz (48612):** 3 real recorded payments, all cleanly linked to
+  his one active pledge, no stray/ambiguous records. `evaluatePaymentPlan`
+  returns `isOnTrack: true`, not late, next unsatisfied installment due in
+  the future, balance remaining and not yet due. **Genuinely current as of
+  2026-10-09; no overdue warning should display, and none does.**
+- **Baruch Katz (68231):** 2 real recorded payments, both cleanly linked,
+  no stray/ambiguous records. Balance is $0 per JL and the final expected
+  date has passed; `evaluatePaymentPlan` returns `isFulfilledAfterFinal:
+  true`, `isLate: false` (lateness is never evaluated once a plan is
+  completed). **Fully paid; correctly shown as fulfilled, not late.**
+
+Neither donor's pledge has an open entry in `pledge_payment_plan_reviews`
+(checked directly against both pledges' real `pledge_activity_id` --
+zero rows for either).
+
+Traced (not reimplemented) how Today/Portfolio Focus/Daily Agenda derive
+their own payment-plan signal: `lib/portfolio-focus/aggregate.ts` sets
+`pledgePlanOnTrack` directly from this same `evaluatePaymentPlan.isOnTrack`,
+and `lib/fundraising-intelligence/situations.ts`'s `detectPledgeFollowUp`
+short-circuits to "no warning" the instant `openPledgeBalanceCents <= 0`
+(Katz's case) or `pledgePlanOnTrack !== false` (Matz's case) -- there is no
+second, independent staleness calculation anywhere in that path that could
+disagree with the reconciliation above. Notably, `aggregate.ts`'s own
+in-code comment already cites donor 68231 (Katz) by number as the
+canonical real-world case that motivated treating a fulfilled-after-final
+plan as healthy, corroborating this finding independently of this
+session's own query results.
+
+### Part 3 -- Summary
+
+A) 45 active plans, 41 unique donors. B) 44 with complete pledge
+date + duration. C) 1 with both fields missing (69341); none found
+invalid or partially set. D) 0 plans currently eligible for a renewal
+reminder today or within the 14-day Coming Up window (one, 2689, has an
+already-passed, never-fired reminder window -- a data-entry-timing gap,
+not a system defect). E) Matz (48612): on track, current, no false
+warning. F) Katz (68231): fully paid past final date, correctly shown
+fulfilled rather than late. G) No incorrect warnings found for either
+donor, and no open review-queue entries exist for either pledge. H) Yes
+-- for every plan and both specifically-named donors checked, Fundraising
+OS's real computed state matches the real underlying D1 data.
+
+**Limitation stated plainly:** `jl_payment_assignment_audits` only
+captures payment-assignment decisions this app's own JL-import pipeline
+has processed; it is not guaranteed to be a donor's full lifetime payment
+history if real-world payments predate this app's own tracking for that
+donor. This does not affect the Matz/Katz conclusions above, which rely on
+JL's own `balance_cents` (the authoritative financial figure) rather than
+on this table's row count.
+
+No application code, schema, or data was changed; nothing was deployed.
+This entry is documentation-only.
