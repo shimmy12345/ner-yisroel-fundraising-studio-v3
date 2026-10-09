@@ -28420,3 +28420,214 @@ technical readiness. Everything within this round's own scope (migration
 and backup/restore compatibility specifically) is verified safe; no
 other blocker was found or introduced. Stopping here for independent
 review before any Production action.
+
+## Final Review + PR Preparation for the 0041/0042 Restore Sync (2026-10-09) -- INDEPENDENT RE-REVIEW, PR OPENED (NOT MERGED), NO APPLICATION CHANGES
+
+Final review/preparation round before any Production deployment,
+explicitly scoped to review and preparation only -- not deployment
+authorization. Re-did every verification from scratch rather than
+trusting the prior round's own conclusions, per this round's explicit
+instruction.
+
+### Task 1 -- re-review of the prepared sync branch
+
+Fetched all remote branches fresh. Confirmed HEADs: canonical branch
+`feature/independent-cloudflare-sandbox` at `9453c93`; sync branch
+`fix/d1-restore-sync-0041-0042-pledge-balance-corrections` at `6a2d8f2`
+(one commit ahead of `origin/main`'s `ec7869c`).
+
+Full `git diff origin/main origin/fix/d1-restore-sync-0041-0042-pledge-
+balance-corrections` reviewed line by line, not just trusted from the
+prior round's own commit message:
+
+- **Exactly 4 files changed**: `lib/data-health/production-baseline.ts`,
+  `lib/operations/staging-reset.ts`,
+  `production-baseline/schema-manifest.json`,
+  `test/d1-restore-order.test.mjs`. Zero application code, zero donor
+  data, zero unrelated files.
+- `production-baseline.ts`: only the doc comment and the migration-count
+  assertion (`41 -> 43`) changed.
+- `staging-reset.ts`: a pure 7-line insertion adding
+  `pledge_balance_corrections` to `STAGING_RESET_TABLE_ORDER`; confirmed
+  by direct line-number check that it sits BEFORE `giving_activities`
+  and `donors` in this delete-order list (so AFTER them once reversed
+  for restore) -- correct.
+- `schema-manifest.json`: confirmed **byte-identical** (`diff`, zero
+  output) to the canonical branch's own current manifest -- not merely
+  "looks similar." The only existing table whose `sql` definition
+  changed is `pledge_payment_plans` (exactly the expected
+  `renewal_acknowledged_at` column, matching migration 0041's own `ALTER
+  TABLE` verbatim). The only new objects added are the
+  `pledge_balance_corrections` table and its two indexes
+  (`pledge_balance_corrections_active_uidx`,
+  `pledge_balance_corrections_pledge_idx`), matching migration 0042's
+  own `CREATE TABLE`/`CREATE INDEX` statements verbatim.
+- `test/d1-restore-order.test.mjs`: a pure addition (55 lines), zero
+  edits to any existing test.
+
+**Conclusion: the sync branch is correctly and narrowly scoped.** No
+defect found; the branch was not altered.
+
+### Task 2 -- Production backup readiness (read-only)
+
+**Central finding, confirmed from `docs/DEPLOYMENT.md` and
+`wrangler.production.example.jsonc`'s own header comment: there is
+currently no independent Cloudflare Production D1 database or Worker
+for this application.** `wrangler.production.example.jsonc` is an
+explicitly non-functional template ("THIS FILE DEPLOYS NOTHING"); the
+real production environment today is the separate legacy ChatGPT Sites
+platform, deployed through an entirely different private repository and
+pipeline, out of scope for this app's D1 backup/restore tooling (see
+`docs/DEPLOYMENT.md`'s own "Legacy ChatGPT Sites disaster recovery is
+out of scope" note). **"Production D1 backup health" is therefore not a
+question with an answer yet -- there is no Production D1 to back up.**
+Marking this explicitly rather than assuming health, per this round's
+own instruction.
+
+What DOES exist and WAS verified (Independent Staging's real backup
+pipeline -- the system that would become the basis for any future
+production environment):
+
+- **Scheduled whole-D1 backups**: configured and enabled.
+  `.github/workflows/d1-backup-nightly.yml`, cron `0 8 * * *` (daily),
+  workflow state `active` (confirmed via GitHub's public REST API --
+  this repository is public, so run history was checked read-only with
+  no credentials and without downloading any backup content).
+- **Recent backup jobs**: **all succeeded.** Last 10 nightly-backup runs
+  (2026-09-30 through 2026-10-09) every one `completed`/`success`. Most
+  recent run (#59) completed **2026-10-09T14:47:56Z** -- same day as
+  this review.
+- **Latest backup timestamp/location**: verifiable by design (R2
+  `daily/fundraising-os-staging-db-<timestamp>.sql.gz.gpg`, promoted
+  atomically to `latest/fundraising-os-staging-db.sql.gz.gpg` with its
+  own dated-key provenance metadata in the same `PutObject` call -- see
+  the workflow file's own header comment). Actual R2 object content was
+  never accessed this round (no AWS/R2 credentials used, none needed for
+  this check) -- freshness is evidenced by the GitHub Actions run
+  timestamp/conclusion above, which is sufficient to confirm the pipeline
+  ran and reported success without touching backup content.
+- **Monthly restore-verification workflow**: configured and
+  **functioning**. `.github/workflows/d1-restore-verify-monthly.yml`,
+  cron `0 9 1 * *`, state `active`. Most recent completed run
+  (2026-10-01) **succeeded**. Next scheduled run: 2026-11-01 -- no run
+  is overdue; "monthly" and today (2026-10-09) being within the current
+  cycle is expected, not a gap.
+- **Outstanding failures/warnings**: the nightly backup workflow itself
+  has zero recent failures. The SEPARATE `D1 restore/schema sync check`
+  workflow (`check-main-restore-sync.mjs` in CI) IS currently failing --
+  both its `check` and `prepare-sync` jobs failed on the two most recent
+  runs (2026-10-09, triggered by this round's own pushes to the
+  canonical branch). This is **the exact, already-understood drift this
+  round's PR (below) exists to fix**, not a new or unrelated problem --
+  confirmed by the job-level breakdown
+  (`check`: failure, `prepare-sync`: failure, matching
+  `docs/D1-MIGRATION-SYNC-PROCESS.md`'s documented "drift exists and
+  could not be safely automated" row exactly). It is expected to return
+  to green once the PR below is merged.
+- **New restore risks from the prepared sync**: none found -- confirmed
+  structurally via the Task 1 diff review (pure, scoped addition,
+  correct FK ordering, nothing removed/renamed) and via Task 3's
+  re-validation below.
+
+One pre-existing, unrelated item observed on Independent Staging's own
+`/health` dashboard (owner-only, read-only view): a "Live schema
+version 0022 / 0019" mismatch card. Traced to `lib/data-health/
+model.ts`'s `LATEST_MIGRATION_LEVEL`/`EXPECTED_MIGRATION_LEVEL` --- an
+older, separate schema-signature-detection numbering scheme that
+predates and is unrelated to the drizzle migration files (0000-0042)
+this round's work concerns; it does not know about migrations 0041/0042
+at all. Not touched, not in scope, not a blocker for this round's task.
+
+### Task 3 -- revalidation (fresh, not reused from the prior round)
+
+Re-fetched every remote branch; confirmed the local worktree for the
+sync branch matched `origin/fix/d1-restore-sync-0041-0042-pledge-
+balance-corrections` exactly (clean, no local drift) before re-running
+anything.
+
+- `npm test` on the sync branch: **149/149 passing** (fresh run).
+- `node --test test/d1-restore-order.test.mjs` on the sync branch (the
+  file this sync touches directly): **35/35 passing**, including the 2
+  new named regressions.
+- `npm run build` on the sync branch: succeeded.
+- `node scripts/check-main-restore-sync.mjs` run from the canonical
+  branch, pointed at the actual pushed remote ref (`MAIN_REF=origin/
+  fix/d1-restore-sync-0041-0042-pledge-balance-corrections`, not the
+  local worktree): **"D1 restore/schema state on main is in sync with
+  the canonical schema. No drift detected."**
+- Canonical branch itself re-verified fresh after a clean `git fetch`:
+  working tree matched `origin/feature/independent-cloudflare-sandbox`
+  exactly; `npm test` **176/176 passing**; `tsc --noEmit` clean.
+
+No failures encountered; nothing required investigation.
+
+### Task 4 -- pull request opened
+
+**PR #14: <https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/14>**
+("Sync D1 Restore Baseline for Migrations 0041–0042"), base `main`,
+head `fix/d1-restore-sync-0041-0042-pledge-balance-corrections` at
+`6a2d8f2`. Opened via the GitHub REST API using the same credential
+`git push` already uses for this repository this session (confirmed
+scoped to the repository owner's own account before use; never printed
+or logged). The PR description covers, as required: why the sync is
+necessary (with direct links to the two live failing CI runs as
+evidence), exactly what migrations 0041 and 0042 each change, exactly
+what this PR itself changes, how backup/restore compatibility was
+verified (summarizing Tasks 1-3 above), test results, remaining risks,
+and an explicit statement that the PR does not authorize a Production
+deployment. **Not merged** -- state remains `open`.
+
+### Task 5 -- final production readiness assessment
+
+1. **Migration compatibility**: Verified safe. Fresh-DB and upgrade-path
+   behavior both proven (prior round); this round's diff re-review found
+   no defect in how 0041/0042 are represented in the sync.
+2. **Restore-order correctness**: Verified safe. FK ordering confirmed
+   correct by direct inspection and by passing regression tests, both on
+   the canonical branch and (freshly, this round) on the sync branch.
+3. **Backup availability and freshness**: Verified safe for Independent
+   Staging (real, live evidence: last 10 nightly runs all succeeded,
+   most recent today). **Not applicable / nothing to verify for
+   Production** -- no independent Production D1 exists yet.
+4. **Recovery verification status**: Verified functioning for
+   Independent Staging (monthly workflow active, most recent run
+   succeeded 2026-10-01). Not applicable to Production for the same
+   reason as above.
+5. **Financial-data preservation**: Verified safe (prior round's
+   round-trip tests; no real data touched by any command this round --
+   every D1-adjacent action this round was either read-only against
+   Independent Staging, read-only against GitHub's public API, or
+   against isolated/local fixtures).
+6. **Remaining blockers**: (a) PR #14 awaits human review and an
+   explicit merge decision -- not made here. (b) The live `D1
+   restore/schema sync check` CI job stays red until that merge happens.
+   (c) No independent Production environment exists yet for this
+   application at all -- building and approving one is a separate,
+   much larger decision this round neither made nor was asked to make.
+7. **Is the PR ready for independent review**: **Yes.** Fully
+   re-validated fresh this round (tests, build, drift check), diff
+   independently re-reviewed line by line, description complete per
+   every item this round's task required.
+8. **Outstanding Production deployment prerequisites**: merging PR #14
+   is necessary but nowhere near sufficient -- there is no independent
+   Production Worker/D1 to deploy to yet (see Task 2). "Code/sync ready"
+   and "Production deployment authorized" are explicitly different
+   questions; this round answers only the former, for exactly the
+   narrow scope it was asked to cover.
+
+### Commit
+
+This entry is the only change on the canonical branch this round --
+no test files, no application code. The sync branch itself was
+re-validated but intentionally NOT altered (no defect was found to
+justify a change).
+
+No Production deployment, no merge to `main`, no Production D1 access
+of any kind, no destructive restore, and no donor financial-data
+modification occurred at any point in this round.
+
+**GO/NO-GO for merging PR #14: GO**, pending independent human review
+(never self-approved here). **GO/NO-GO for Production deployment:
+NO-GO** -- not merely pending approval, but structurally premature: no
+independent Production environment exists for this application yet.
+Stopping here for independent review.
