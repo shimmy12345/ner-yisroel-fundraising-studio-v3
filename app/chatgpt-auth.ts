@@ -1,6 +1,8 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { env } from "cloudflare:workers";
 import { resolveIdentity, type AuthProvider } from "../lib/auth/provider";
+import { selectAuthProviders } from "../lib/auth/provider-selection";
 import { cloudflareAccessAuthProvider } from "./auth/cloudflare-access-provider";
 
 export type ChatGPTUser = {
@@ -42,11 +44,17 @@ const chatGPTHeaderProvider: AuthProvider = {
   },
 };
 
-// Checks the ChatGPT Sites header first (unchanged precedence), then falls
-// back to Cloudflare Access only when that header is absent — e.g. on an
-// independent staging Worker with no ChatGPT Sites gateway in front of it.
+// Authentication Hardening (see lib/auth/provider-selection.ts for the
+// full rationale, and docs/AI-HANDOFF.md). On any Worker with real
+// Cloudflare Access bindings configured (TEAM_DOMAIN + POLICY_AUD --
+// Independent Staging today, an independent Production Worker once one
+// exists), the legacy, unverified ChatGPT Sites header is excluded
+// entirely -- only a real, signature-verified Access JWT can authenticate.
+// On legacy ChatGPT Sites (no such bindings), behavior is unchanged: the
+// header is checked first, then Cloudflare Access as a no-op fallback.
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
-  return resolveIdentity([chatGPTHeaderProvider, cloudflareAccessAuthProvider]);
+  const hasCloudflareAccessConfigured = Boolean(env.TEAM_DOMAIN && env.POLICY_AUD);
+  return resolveIdentity(selectAuthProviders(hasCloudflareAccessConfigured, chatGPTHeaderProvider, cloudflareAccessAuthProvider));
 }
 
 export async function requireChatGPTUser(

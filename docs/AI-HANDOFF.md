@@ -28778,3 +28778,179 @@ is proposed.
 No Production deployment, no infrastructure creation, no data copy, no
 application code change, and no donor data modification occurred this
 round -- investigation and documentation only.
+
+## Pre-Launch Safety Verification: Authentication Hardening + Current-Schema Restore Verification (2026-10-09)
+
+Two targeted safety tasks ahead of Production infrastructure setup.
+
+### Task 1 -- Authentication hardening (IMPLEMENTED, TESTED)
+
+**Root cause investigated, not assumed.** `app/chatgpt-auth.ts`'s
+`getChatGPTUser()` checked the legacy, unverified ChatGPT Sites header
+(`oai-authenticated-user-email`, trusted with zero signature check) before
+Cloudflare Access's real JWT verification, unconditionally, on every
+deployment. The accelerated-launch assessment's finding was accurate.
+
+**The naive, suggested fix would have been wrong.** Gating on
+`deploymentEnvironment !== "staging"` (or inventing a new environment
+name like `"production-independent"` and matching it) was rejected after
+inspecting the real values: `lib/environment.ts`'s `deploymentEnvironment`
+is `"staging" | "production" | "staging-independent"`, where `"staging"`
+and `"production"` mean the LEGACY ChatGPT Sites platform (confirmed via
+`cloudflare-env.d.ts`'s own comment and `docs/DEPLOYMENT.md`'s
+environment table) -- NOT independent staging. Worse: `scripts/
+build-production.mjs` (the only "production" build script that exists
+today) sets `FUNDRAISING_OS_ENVIRONMENT=production` -- the SAME value
+legacy production uses -- and is explicitly documented as feeding the
+legacy Sites platform only. If an independent Production Worker were
+ever built by naively reusing this script, it would be completely
+indistinguishable from legacy production by this value alone, and the
+legacy header path would remain fully trusted there. Any fix keyed on
+matching an environment NAME (existing or newly invented) depends on
+someone remembering to configure it correctly every time -- exactly the
+"guessed name" failure mode flagged in this round's instructions.
+
+**The actual fix**: gate on an independent, structural fact instead --
+whether this Worker has real Cloudflare Access bindings (`TEAM_DOMAIN` +
+`POLICY_AUD`) configured at all. `cloudflare-env.d.ts` already documents
+these as "only present on the independent staging Worker... absent on
+legacy ChatGPT Sites staging/production" -- the exact same signal
+`cloudflareAccessAuthProvider` itself already requires before attempting
+verification. These are RUNTIME `env` bindings (wrangler config), a
+completely separate mechanism from the BUILD-TIME environment-name
+constant, so a mistake in one can never silently compromise the other.
+
+- New `lib/auth/provider-selection.ts`: pure `selectAuthProviders(
+  hasCloudflareAccessConfigured, chatGPTHeaderProvider,
+  cloudflareAccessAuthProvider)` -- when Access is configured, returns
+  ONLY the Access provider (the legacy header is excluded entirely, not
+  merely deprioritized, so a missing/invalid/expired JWT can never fall
+  back to it); when not configured, returns both in the original order
+  (legacy ChatGPT Sites behavior completely unchanged).
+- `app/chatgpt-auth.ts`: `getChatGPTUser()` now reads `env.TEAM_DOMAIN`/
+  `env.POLICY_AUD` and calls `selectAuthProviders` before
+  `resolveIdentity`. Minimal diff; no change to `chatGPTHeaderProvider`,
+  `cloudflareAccessAuthProvider`, or `verifyAccessToken` themselves.
+- No Cloudflare Access policy or secret was touched -- this is
+  application code only.
+
+**Tests**: new `tests/auth-provider-selection.test.mjs` (14 tests,
+covering all 10 required scenarios, using real signed JWTs built the
+same way `tests/cloudflare-access-auth.test.mjs` already proves
+`verifyAccessToken` itself is sound -- this file proves the
+PRECEDENCE/EXCLUSION behavior layered on top, not a re-test of that
+file): valid JWT; missing JWT; invalid signature; wrong audience;
+expired JWT; forged legacy header alone (proven two ways -- the forged
+identity never leaks through, AND a throwing stand-in provider proves
+the header provider is never even invoked); forged header + missing
+JWT; forged header + invalid JWT; Independent Staging correct behavior
+(provider list structurally excludes the header, end to end with a
+valid JWT); legacy ChatGPT Sites behavior fully preserved (both the
+provider-list shape and an end-to-end successful legacy-header
+authentication).
+
+**Validation**: `pnpm test` **177/177** (176 + 1 new file, registered in
+`scripts/run-tests.mjs`). `pnpm exec tsc --noEmit`: clean. `pnpm run
+build` (production-equivalent) and `pnpm run build:staging-independent`:
+both succeeded. No deployment to Independent Staging was performed or
+needed -- verification was build/test-only, per this round's
+restrictions.
+
+### Task 2/3 -- Current-schema restore verification (DISPATCHED, FAILED -- root-caused, not a defect, no repair attempted)
+
+**Workflow safety review** (`.github/workflows/d1-restore-verify-
+monthly.yml` + `scripts/verify-remote-restore.mjs`, re-read in full
+before any dispatch): confirmed it uses an existing encrypted backup,
+creates only a uniquely-named scratch D1 (`fundraising-os-restore-
+verify-<timestamp>-<random>`, never `fundraising-os-staging-db`),
+never references any Production resource, validates `PRAGMA
+quick_check` (the documented substitute for `integrity_check`, which
+D1's query API hard-rejects in this restore path -- not a weakening)
+and `PRAGMA foreign_key_check`, compares the restored schema against
+the packaged manifest, reconciles row counts, and -- critically --
+deletes the scratch database in a `finally` block using only the exact
+generated name, so cleanup is guaranteed even on failure and a
+non-scratch database can never be targeted. All requirements met;
+dispatched via its existing `workflow_dispatch` support, on `ref: main`
+(the only ref this workflow and its independently-maintained script
+dependencies have ever run from/with; confirmed main carries its own
+consistent copy of every file it needs).
+
+**Run**: <https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/37983465332>
+(#15, `workflow_dispatch`, started 2026-10-09T19:55:01Z). **Conclusion:
+failure.**
+
+**What actually happened, verified from the real job logs, not
+assumed**:
+- Backup identified and downloaded: `daily/fundraising-os-staging-db-
+  20261009T144819Z.sql.gz.gpg` (today's most recent nightly backup --
+  confirmed no newer `daily/` object exists; run #59, the real nightly
+  workflow, fired at 14:47:56Z, itself ~6h47m after its 08:00 UTC
+  schedule -- consistent with GitHub Actions' already-documented
+  best-effort scheduling delay, the same class of issue `docs/
+  BACKUP-SCHEDULING-RELIABILITY.md` describes, not a new problem).
+- Decrypted successfully. Scratch database `fundraising-os-restore-
+  verify-20261009t195511z-ybwkyr` created. Every table present in the
+  backup's own schema restored without error.
+- `PRAGMA quick_check`: **passed** ("ok").
+- `PRAGMA foreign_key_check`: **passed** (zero violations).
+- Schema verification against the current (0041/0042-inclusive)
+  packaged manifest: **FAILED** -- `Missing table:
+  pledge_balance_corrections. Table definition differs:
+  pledge_payment_plans (columns or constraints). Missing index:
+  pledge_balance_corrections_active_uidx. Missing index:
+  pledge_balance_corrections_pledge_idx.`
+- Row-count reconciliation and the `production_schema_baseline` backup-
+  fidelity check **never ran** -- the script exits on the first failed
+  assertion, and the schema check failed before either of those later
+  steps. **Not claiming these passed; they were never reached.**
+- The Shlomo Kutoff two-pledge regression scenario was **not
+  independently verified** -- the workflow itself does not perform
+  donor-level content checks (only row counts, which it never reached
+  here), and no separate connection to the scratch database was made
+  (it no longer exists -- cleaned up before this was even noticed, and
+  doing so would have exceeded this round's authorization anyway).
+- **Scratch database cleanup confirmed**: "Deleting scratch database
+  fundraising-os-restore-verify-20261009t195511z-ybwkyr..." followed by
+  "Scratch database deleted." in the actual log, even though the
+  schema-comparison assertion failed immediately after -- the `finally`
+  block ran exactly as designed. No orphaned Cloudflare resource
+  remains.
+
+**Root cause**: the most recent nightly backup (14:48:19Z today)
+predates migrations 0041/0042 being applied to the LIVE
+`fundraising-os-staging-db` later the same day. Confirmed directly,
+read-only, against the real live database: `pledge_balance_corrections`
+exists there right now. Confirmed via GitHub's Actions API: no nightly
+backup newer than 14:48:19Z exists yet (checked ~5 hours later). This
+is **not** a backup-pipeline defect, **not** related to PR #14 or the
+restore-tracking sync (main's manifest is correctly current -- the
+script detected and reported the real mismatch exactly as it is
+designed to), and **not** something this round is authorized to repair
+-- it is a timing gap: no backup containing the current schema exists
+yet. Per this round's explicit instruction, reported and stopped here;
+no further workflow dispatch or repair was attempted.
+
+**Updated Production-readiness implication**: `docs/
+ACCELERATED-PRODUCTION-LAUNCH.md`'s Stage D (migration rehearsal) and
+Stage E (real cutover) both plan to use "the most recent real nightly
+R2 backup" as the data source -- that plan must wait for a backup taken
+AFTER migrations 0041/0042 (i.e., tonight's scheduled run, or an
+explicitly approved manual dispatch of the nightly backup workflow
+followed by a re-run of this verification) before being used for real.
+This does not block Stage B (infrastructure provisioning) or Stage C
+(data approval), which do not depend on backup content.
+
+### Validation summary (both tasks)
+
+`pnpm test`: **177/177**. `pnpm exec tsc --noEmit`: clean. `pnpm run
+build` + `pnpm run build:staging-independent`: both succeeded. No
+Independent Staging deployment. No Production action of any kind. No
+donor data modified -- every live-database command this round was
+read-only (the one table-existence check against `fundraising-os-
+staging-db`) or executed entirely inside a throwaway scratch D1 that
+GitHub Actions itself created and deleted.
+
+No merge to `main`. Stopping here, per this round's explicit
+instruction, for independent review before any further restore-pipeline
+action or Production infrastructure work.
