@@ -3,7 +3,9 @@
 **Date:** 2026-10-09
 **Status:** Infrastructure provisioning only. No application deployed. No donor data copied or migrated. No Production URL is live or operational. This is not Production launch — see `docs/ACCELERATED-PRODUCTION-LAUNCH.md` for the full launch plan and `docs/AI-HANDOFF.md` for this round's verification record.
 
-This document is the authoritative inventory of the independent Cloudflare Production environment created this round: exactly what exists, what doesn't yet, and the precise manual steps remaining.
+This document is the authoritative inventory of the independent Cloudflare Production environment: exactly what exists, what doesn't yet, and the precise manual steps remaining.
+
+**2026-10-09 update (Configuration + Build Resolution round)**: the owner created the Production Cloudflare Access Application + policy (the one piece this session's own credentials could not automate) and supplied the real `TEAM_DOMAIN`/`POLICY_AUD`. `wrangler.production.jsonc` has been updated with the real values — confirmed correct by a new regression test, not just by eye. The build-script gap (§8's prior caveat) is also resolved: `scripts/build-production-independent.mjs` / `pnpm run build:production-independent` now exist, giving the independent Production Worker its own `FUNDRAISING_OS_ENVIRONMENT` value (`"production-independent"`), distinct from legacy production's `"production"`. **Still not deployed** — see the revised §9 for exactly what remains.
 
 ---
 
@@ -14,15 +16,16 @@ This document is the authoritative inventory of the independent Cloudflare Produ
 | Production D1 database | **Created**, empty |
 | Production R2 backup bucket | **Created**, retention rule applied |
 | Production R2 backup-status bucket | **Created** |
-| Production Worker config (`wrangler.production.jsonc`) | **Prepared**, not deployed |
+| Production Cloudflare Access application/policy | **Created** (owner, Zero Trust dashboard, 2026-10-09) |
+| Production Worker config (`wrangler.production.jsonc`) | **Prepared with real TEAM_DOMAIN/POLICY_AUD**, not deployed |
 | Production status-worker config | **Prepared**, not deployed |
+| Production-specific build script (`build:production-independent`) | **Created** — resolves the environment-value ambiguity flagged in the prior round |
 | Production nightly-backup workflow | **Prepared**, gated (`workflow_dispatch` only, no schedule) |
 | Production monthly-restore-verify workflow | **Prepared**, gated (`workflow_dispatch` only, no schedule) |
 | Production GitHub Actions variables (bucket names) | **Created** (non-secret) |
-| Production Cloudflare Access application/policy | **Not created** — requires manual Zero Trust dashboard access this session's Cloudflare credentials do not have API scope for |
 | Production-scoped R2 API tokens (write/read/status) | **Not created** — dashboard-only, same established pattern as Staging's own setup |
 | Production backup encryption passphrase | **Not created** — must be a new, separate secret from Staging's |
-| Production Worker/status-worker deployment | **Not done** — deliberately deferred until Access is configured, so nothing is ever exposed even briefly without it |
+| Production Worker/status-worker deployment | **Not done** — deliberately deferred until the remaining secrets (R2 tokens, passphrase) exist, so the backup pipeline can be verified before anything is reachable |
 
 ## 2. Resource identifiers (non-secret)
 
@@ -43,7 +46,7 @@ No secret value of any kind is recorded anywhere in this document, any commit, o
 - `name`: `fundraising-os-production`.
 - `d1_databases`: bound to the real new database above (`binding: "DB"`).
 - `services`: `STATUS_WORKER` bound to `fundraising-os-production-backup-status` (the not-yet-deployed status-worker — this binding will not resolve until that Worker is deployed; deploy it first).
-- `vars.TEAM_DOMAIN` / `vars.POLICY_AUD`: **deliberate placeholder strings** (`REPLACE_WITH_REAL_TEAM_DOMAIN_AFTER_ACCESS_SETUP` / `REPLACE_WITH_REAL_POLICY_AUD_AFTER_ACCESS_SETUP`), per this round's explicit security requirement that a Production environment missing either value must never be considered secure or ready. **`wrangler deploy --config wrangler.production.jsonc` must not be run until both are replaced with real values from §4 below.**
+- `vars.TEAM_DOMAIN` / `vars.POLICY_AUD`: **real values**, set by the owner's own Production Access Application (§4) — `fundraising-os.cloudflareaccess.com` / `7cfff2279260cb67e19af8c129b2ba6cdd137ba855ddb638ff316493f8ef14e1`. Neither is secret (Cloudflare treats both as public-ish identifiers, same as Staging's own `vars.POLICY_AUD` already committed in `wrangler.staging.jsonc`) — a forged JWT still cannot pass real signature verification merely by knowing them. Confirmed, as a regression test (`tests/production-wrangler-config.test.mjs`), that these specific values are present, are not the old placeholder strings, and correctly drive `selectAuthProviders()` to exclude the legacy header path.
 - `vars.STAGING_OWNER_EMAIL`: set to the real, explicitly authorized value `sgoldstein@nirc.edu` (this app's own defense-in-depth re-check of the JWT's email claim — independent of, and in addition to, the Access policy's own allow-list configured separately in §4).
 - `vars.APP_BASE_URL`: predicted default `workers.dev` URL; confirm after first real deploy.
 - **No `triggers.crons` block** — the Daily Fundraising Agenda email is deliberately not enabled for Production; that is a separate "activate for daily use" decision, out of this round's scope.
@@ -53,19 +56,18 @@ No secret value of any kind is recorded anywhere in this document, any commit, o
 
 ## 4. Cloudflare Access configuration
 
-**Not created this round.** This session's Cloudflare credentials are an OAuth session scoped to Workers/D1/R2/Pages (confirmed via `wrangler whoami`) with no Zero Trust/Access API scope — Access applications and policies are not manageable through `wrangler` at all, only through the Cloudflare Zero Trust dashboard or a separately-scoped API token this session does not have. This is exactly the "cannot be safely automated" case this round's instructions anticipated.
+**Created by the owner, 2026-10-09**, via the Zero Trust dashboard (this session's Cloudflare credentials still have no Access API scope — confirmed again this round, unchanged from before — so this step was necessarily manual, exactly as anticipated).
 
-**Exact manual steps required** (mirrors the one-time setup already completed once for Staging, per `docs/DEPLOYMENT.md`):
+- **Production hostname**: `fundraising-os-production.sgoldstein.workers.dev` (matches this document's own §2 prediction exactly).
+- **Authorized email**: `sgoldstein@nirc.edu` — the sole identity the policy allows, per the owner's own confirmation.
+- **Team Domain**: `fundraising-os.cloudflareaccess.com` — the same Zero Trust organization Staging already uses (a separate Application within it, not a separate organization).
+- **Application Audience (AUD) tag**: `7cfff2279260cb67e19af8c129b2ba6cdd137ba855ddb638ff316493f8ef14e1` (64-character hex, same shape as Staging's own `POLICY_AUD`).
 
-1. Cloudflare dashboard → Zero Trust → Access → Applications → **Add an application** → **Self-hosted**.
-2. Application name: e.g. "Fundraising OS Production". Application domain: the Production Worker's `workers.dev` subdomain (`fundraising-os-production.sgoldstein.workers.dev`, once deployed — or the application can be created first and the Worker deployed after, in either order).
-3. Add a policy restricting access to exactly: **`sgoldstein@nirc.edu`** (Include rule: Emails → `sgoldstein@nirc.edu`). Do not add any broader rule.
-4. Save. Record the **Application Audience (AUD) tag** shown after creation — this is the real `POLICY_AUD` value.
-5. The **Team Domain** is the same Zero Trust organization already in use for Staging (`fundraising-os.cloudflareaccess.com`, per `wrangler.staging.jsonc`) — Production can reuse the same Zero Trust organization's team domain; only the Application/policy itself needs to be new and separate. Confirm this is still correct in the dashboard before using it.
-6. Replace `wrangler.production.jsonc`'s two placeholder values with the real Team Domain and AUD tag from steps 4–5.
-7. **Do not alter the existing Staging Access application or policy** at any point in this process — they are a completely separate Application in the same dashboard.
+Both values are now written into `wrangler.production.jsonc` (§3) and independently confirmed correct by `tests/production-wrangler-config.test.mjs` (present, not a placeholder, correct shape, and correctly drives the auth-provider-selection gate).
 
-Until this is done, `wrangler.production.jsonc` deploys nothing usable (the placeholder `TEAM_DOMAIN` causes every JWT verification attempt to fail closed — no one, including the real owner, can authenticate — never an open/bypassed state; see §7 below for why this is safe rather than merely "broken").
+**The existing Staging Access application/policy was not touched** — this session's only Cloudflare Access-related action was reading the owner-supplied values into the repo; no Access API call of any kind was made (none was available, and none was needed).
+
+**Not yet independently verified**: a real request against the real Production hostname, since nothing is deployed there yet (§9).
 
 ## 5. Backup architecture
 
@@ -84,7 +86,7 @@ Two new workflow files, committed this round, both **deliberately gated**: `work
 - **`.github/workflows/d1-backup-nightly-production.yml`** — structurally identical to `d1-backup-nightly.yml`, pointed at `fundraising-os-production-db` and the Production bucket/secrets.
 - **`.github/workflows/d1-restore-verify-monthly-production.yml`** — structurally identical to `d1-restore-verify-monthly.yml`, including every safety property already proven this session against Staging (unique scratch-database naming, `finally`-block cleanup that runs even on failure, never targets `fundraising-os-production-db` or `fundraising-os-staging-db` for restore, read-only R2 credential only).
 
-**New GitHub Actions secrets required before either workflow can succeed** (none created this round — all require Cloudflare dashboard credential creation first, see §8):
+**New GitHub Actions secrets required before either workflow can succeed** (none created this round — all require Cloudflare dashboard credential creation first, see §9):
 
 | Secret | Purpose | Reused from Staging? |
 |---|---|---|
@@ -97,7 +99,26 @@ Two new workflow files, committed this round, both **deliberately gated**: `work
 
 **GitHub Actions variables already created this round** (non-secret, done by this session directly — no dashboard step needed): `R2_BACKUP_BUCKET_PRODUCTION`, `R2_STATUS_BUCKET_PRODUCTION`.
 
-## 7. Security and isolation verification
+## 7. Production build configuration (resolved)
+
+**The problem**: before this round, there was no build pipeline that gave an independent Cloudflare Production Worker a `FUNDRAISING_OS_ENVIRONMENT` value distinct from legacy production's own `"production"`. `scripts/build-production.mjs` — the only "production" build script that existed — is documented (`docs/DEPLOYMENT.md`) as feeding exclusively the legacy ChatGPT Sites platform. Reusing it for this independent Worker would have made the two deployments indistinguishable by `lib/environment.ts`'s own `deploymentEnvironment` value, which `authorizeStagingReset()` and other environment-gated logic rely on.
+
+**The fix**:
+- `cloudflare-env.d.ts`: `__FUNDRAISING_OS_ENVIRONMENT__`'s type widened to a 4th value, `"production-independent"`.
+- `lib/environment.ts`: `deploymentEnvironment`'s type and ternary widened to recognize it.
+- `vite.config.ts`: the matching build-time `define` branch added, so `FUNDRAISING_OS_ENVIRONMENT=production-independent` actually produces this value in a real build.
+- `lib/data-health/model.ts`: its two independently-duplicated copies of the same union type widened for type correctness (their own `=== "production"` / `=== "staging-independent"` branches are unchanged — "production-independent" currently falls through to the same path legacy "staging" takes there; a Workspace Health *display* refinement to consider later, not a correctness or security issue, called out explicitly in that file's own new comment).
+- New `scripts/build-production-independent.mjs` (mirrors `scripts/build-staging.mjs`'s shape exactly) and new `package.json` scripts `build:production-independent` / `deploy:production-independent`.
+- `wrangler.production.jsonc`'s own header comment now names the correct build script explicitly, and warns against `build:production` by name.
+
+**Verified, not just written**:
+- `pnpm exec tsc --noEmit`: clean across the whole widened type.
+- `pnpm test`: 178/178 (176 prior + 2 new files this round: `tests/production-wrangler-config.test.mjs`, 7 cases).
+- `pnpm run build:production-independent` was actually run; the resulting `dist/server/index.js` was grepped and confirmed to contain the literal string `"production-independent"`, proving the build-time constant substitution genuinely took effect, not just that the build exited 0.
+- `pnpm run build:staging-independent` and `pnpm run build:production` (the legacy one) were both re-run afterward and still succeed unchanged — this was purely additive.
+- `authorizeStagingReset()` itself was not modified — it already allowlists exactly `"staging-independent"`, so it was already correctly unreachable under `"production-independent"` without needing a code change there; this round's fix makes that value actually obtainable by a real, correct build, closing the process gap that made the allowlist's safety depend on nobody ever using the wrong build script.
+
+## 8. Security and isolation verification
 
 Performed this round, non-destructively, with evidence:
 
@@ -112,32 +133,37 @@ Performed this round, non-destructively, with evidence:
 | Production secrets not exposed | ✅ | No secret value was ever requested, printed, or committed — only non-secret bucket-name variables were set, and only via the GitHub API's variables endpoint (distinct from its secrets endpoint, which never returns values) |
 | No donor records copied | ✅ | Every write this round targeted only the brand-new, empty Production D1 (which received no data-bearing writes of any kind — only the `d1 create` operation itself) or GitHub's own config (workflow files, non-secret variables) |
 | No Production application launch | ✅ | No `wrangler deploy` was run against `wrangler.production.jsonc` or `status-worker/wrangler.production.jsonc` this round — confirmed by this round's own command history; no Production URL is reachable |
-| Production Access configured independently | **Not yet performed** | Requires the manual dashboard steps in §4 — cannot be verified until those are complete |
-| Hardened authentication active in Production once deployed | **Verified by code, not yet by a live request** | `lib/auth/provider-selection.ts` (commit `f1137eb`) gates on `env.TEAM_DOMAIN`/`env.POLICY_AUD` presence, not on any environment name — this is unconditionally the same code path Production will run once deployed; its 14 regression tests (all passing) already exercise this exact logic with real signed JWTs. Cannot be verified against a live Production request until the Worker is actually deployed with real Access values, which has not happened. |
-| Cannot invoke Staging reset against Production | **Verified by code, with one documented process caveat** | `authorizeStagingReset()` (`lib/operations/staging-reset.ts`) checks `deploymentEnvironment !== "staging-independent"` → 404, an allowlist of exactly one value, not a denylist — so it is unreachable under any `deploymentEnvironment` value Production could plausibly resolve to. **Caveat**: there is currently no dedicated build script that sets `FUNDRAISING_OS_ENVIRONMENT` to a Production-specific value distinct from legacy production's own `"production"` value (`scripts/build-production.mjs` is documented as feeding only the legacy ChatGPT Sites platform) — at actual deploy time (Stage E), the build script used must be deliberately chosen to match `wrangler.production.jsonc`'s bindings; using the wrong build script (e.g. accidentally reusing `build:staging-independent`) together with the Production wrangler config would be a process error that could make this endpoint reachable against Production's real `env.DB` binding. This is a process-discipline risk for deploy time, not a code defect — flagged explicitly rather than glossed over. |
+| Production Access configured independently | ✅ | Owner-created Application/policy, separate from Staging's, confirmed via the real `TEAM_DOMAIN`/`POLICY_AUD` now in `wrangler.production.jsonc` (§4) — not yet exercised against a live deployed request (nothing is deployed yet) |
+| Real TEAM_DOMAIN/POLICY_AUD present and not placeholders | ✅ | `tests/production-wrangler-config.test.mjs`: both values present, neither matches the old placeholder pattern, `POLICY_AUD` matches the real 64-hex-character Access AUD shape |
+| Hardened authentication correctly engages with the real configured values | ✅ | Same test file: feeding the real parsed `TEAM_DOMAIN`+`POLICY_AUD` into the actual `selectAuthProviders()` function (not a reimplementation) confirms the legacy header provider is excluded — this is exactly the computation `app/chatgpt-auth.ts`'s `getChatGPTUser()` will perform once deployed. Still not verified against a live HTTP request (nothing is deployed). |
+| Cannot invoke Staging reset against Production | ✅ **Caveat resolved** | `authorizeStagingReset()` still checks `deploymentEnvironment !== "staging-independent"` → 404 (unchanged, an allowlist of one value). The prior round's caveat — no dedicated build script existed to give Production its own distinguishable `deploymentEnvironment` value — is now resolved: `scripts/build-production-independent.mjs` sets `FUNDRAISING_OS_ENVIRONMENT=production-independent`, a 4th value added to `lib/environment.ts`/`cloudflare-env.d.ts`/`vite.config.ts` this round (confirmed via `tsc --noEmit` clean, full suite 178/178, and a real `pnpm run build:production-independent` run whose output bundle was grepped to confirm the constant was actually baked in). Using `build:production-independent` (not `build:production`) for this Worker is now the documented, correct, named choice — see `wrangler.production.jsonc`'s own header comment. |
 
-## 8. Manual setup remaining (in order)
+## 9. Manual setup remaining (in order)
 
-1. **Create the Production Cloudflare Access Application + policy** (§4) — dashboard only, ~10–15 minutes, the owner has done this exact process once already for Staging.
-2. **Create a Cloudflare API token reuse decision**: none needed — `CLOUDFLARE_D1_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` are reused as-is (§6).
-3. **Create two R2 API tokens scoped to `fundraising-os-production-backups`** (dashboard → R2 → Manage API Tokens): one Object Read & Write (→ `R2_BACKUP_WRITE_ACCESS_KEY_ID_PRODUCTION`/`..._SECRET_ACCESS_KEY_PRODUCTION`), one Object Read only (→ `R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`/`..._SECRET_ACCESS_KEY_PRODUCTION`).
-4. **Create one R2 API token scoped to `fundraising-os-production-backup-status`**, Object Read & Write (→ `R2_STATUS_WRITE_ACCESS_KEY_ID_PRODUCTION`/`..._SECRET_ACCESS_KEY_PRODUCTION`).
-5. **Generate a new, separate backup encryption passphrase** (e.g. `openssl rand -base64 48`) → `BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION`, and store a second durable copy outside GitHub (same requirement as Staging's own passphrase).
-6. **Add all 7 secrets above to GitHub** (Settings → Secrets and variables → Actions → Secrets).
-7. **Replace `wrangler.production.jsonc`'s two placeholders** with the real `TEAM_DOMAIN`/`POLICY_AUD` from step 1.
-8. **Deploy the Production status-worker first**, then the main Production Worker (`cd status-worker && wrangler deploy --config wrangler.production.jsonc`, then `pnpm run build:production-independent` [does not exist yet — see the open decision below] `&& wrangler deploy --config wrangler.production.jsonc`) — **not done this round, and not recommended until step 1 is complete**, so the Worker is never reachable even briefly without real Access protection.
-9. **Open decision, not yet resolved**: there is no dedicated build script producing a Production-specific `FUNDRAISING_OS_ENVIRONMENT` value distinct from legacy production's own `"production"` (see §7's caveat). Before step 8's Worker deploy, decide and document which build script to use — reusing `scripts/build-production.mjs` as-is, or adding a new one — this is an application-code-adjacent decision explicitly deferred past this infrastructure-only round.
-10. **Manually dispatch each new workflow once** and confirm success, mirroring the exact verification this round already performed against Staging (`docs/AI-HANDOFF.md`'s "Complete Backup Verification" entry) — before ever adding a `schedule:` trigger to either file.
+Steps 1 (Access Application) and 7 (build-script decision) from the prior version of this list are **done** — see §4 and §7. What remains:
 
-## 9. Estimated operating costs
+1. **Create two R2 API tokens scoped to `fundraising-os-production-backups`** (dashboard → R2 → Manage API Tokens): one Object Read & Write (→ `R2_BACKUP_WRITE_ACCESS_KEY_ID_PRODUCTION`/`..._SECRET_ACCESS_KEY_PRODUCTION`), one Object Read only (→ `R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`/`..._SECRET_ACCESS_KEY_PRODUCTION`).
+2. **Create one R2 API token scoped to `fundraising-os-production-backup-status`**, Object Read & Write (→ `R2_STATUS_WRITE_ACCESS_KEY_ID_PRODUCTION`/`..._SECRET_ACCESS_KEY_PRODUCTION`).
+3. **Generate a new, separate backup encryption passphrase** (e.g. `openssl rand -base64 48`) → `BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION`, and store a second durable copy outside GitHub (same requirement as Staging's own passphrase).
+4. **Add all 7 secrets to GitHub** (Settings → Secrets and variables → Actions → Secrets) — `CLOUDFLARE_D1_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` are already reused as-is (§6); the other 5 are new, from steps 1–3 above.
+5. **Deploy the Production status-worker first**, then the main Production Worker:
+   ```
+   cd status-worker && wrangler deploy --config wrangler.production.jsonc
+   cd ..
+   pnpm run build:production-independent && pnpm run deploy:production-independent
+   ```
+   **Not done this round.** Access is now configured (§4), so this is no longer blocked on that — it remains blocked on steps 1–4 above (the Worker would deploy, but its own backup/status plumbing would have no working credentials yet), and is otherwise ready whenever the owner wants to proceed.
+6. **Manually dispatch each new workflow once** and confirm success, mirroring the exact verification already performed against Staging (`docs/AI-HANDOFF.md`'s "Complete Backup Verification" entry) — before ever adding a `schedule:` trigger to either file.
 
-Not independently verifiable this round — this session's Cloudflare credentials have no billing/account-limits API access, and billing specifics are account-plan-dependent. Structurally: one additional D1 database, two additional R2 buckets (currently empty, so effectively zero storage cost today), and (once deployed) two additional Workers — all the same kind and rough scale of resource Staging already runs successfully. Recommend the owner do a brief Cloudflare dashboard billing check before enabling scheduled backups (step 10 above), rather than relying on an estimate this investigation cannot verify.
+## 10. Estimated operating costs
 
-## 10. Steps required before donor-data migration
+Not independently verifiable this round — this session's Cloudflare credentials have no billing/account-limits API access, and billing specifics are account-plan-dependent. Structurally: one additional D1 database, two additional R2 buckets (currently empty, so effectively zero storage cost today), and (once deployed) two additional Workers — all the same kind and rough scale of resource Staging already runs successfully. Recommend the owner do a brief Cloudflare dashboard billing check before ever adding a schedule to either workflow (§9 step 6), rather than relying on an estimate this investigation cannot verify.
+
+## 11. Steps required before donor-data migration
 
 Per `docs/ACCELERATED-PRODUCTION-LAUNCH.md`'s own Stage C/D — unchanged by this round, and explicitly **not** performed here: fresh re-audit of the Staging dataset at the time of migration, owner's explicit approval of the exact dataset, a rehearsed restore (into a throwaway scratch database first, never directly into this new Production D1), then the real, approved copy into this Production database using the already-proven backup/restore pipeline. None of this infrastructure round changes that plan; it only makes the destination (this Production D1) exist.
 
-## 11. Rollback or cleanup procedure
+## 12. Rollback or cleanup procedure
 
 Everything created this round is empty, inert, and cheap to remove if needed:
 
@@ -147,11 +173,12 @@ Everything created this round is empty, inert, and cheap to remove if needed:
 - **Config/workflow files**: revert the 4 new files in this round's commit; no other file was changed.
 - None of the above affects Staging in any way — every Staging resource (D1, both buckets, both workflows, both secrets sets) is referenced by none of this round's new files.
 
-## 12. Outstanding risks
+## 13. Outstanding risks
 
-- **Cloudflare Access is not configured yet** — the single largest remaining gap; until §4 is complete, Production cannot be deployed at all without failing closed (safe, but non-functional).
-- **No build-script decision made yet** (§7's caveat, §8 step 9) — resolve before the first real Worker deploy, not after.
-- **Backup/restore pipeline for Production is entirely unexercised** — the workflows are prepared and gated but have never actually run (correctly so — they'd fail cleanly today since the required secrets don't exist yet). Once §8's secrets are in place, dispatch both once manually and verify, exactly as this session already did for Staging, before ever adding a schedule.
-- **Operating cost is not independently confirmed** (§9) — low risk given the resource shapes involved, but not verified.
+- **Cloudflare Access configuration has not been exercised against a live request** — real values are in place and unit-tested (§3/§4/§8), but nothing has actually been deployed yet, so no real JWT has ever been verified end to end against this specific Access Application. First real confirmation happens at deploy time (§9 step 5).
+- **R2 credentials and the encryption passphrase do not exist yet** (§9 steps 1–4) — the backup/restore-verify workflows will fail cleanly (not dangerously) if dispatched before these exist.
+- **Backup/restore pipeline for Production is entirely unexercised** — the workflows are prepared and gated but have never actually run. Once §9's secrets are in place, dispatch both once manually and verify, exactly as this session already did for Staging, before ever adding a schedule.
+- **Operating cost is not independently confirmed** (§10) — low risk given the resource shapes involved, but not verified.
+- **The build-script resolution itself has not been exercised via a real deploy** — `build:production-independent` was run and its output bundle confirmed to contain the right constant, but the resulting bundle has not yet been deployed and probed live.
 
 No Production deployment, no Production infrastructure beyond what's listed above, no donor data copied, no Staging modification, and no merge to `main` occurred this round. Stopping here for independent review.

@@ -51,7 +51,9 @@ export default defineConfig(async () => {
           ? "production"
           : process.env.FUNDRAISING_OS_ENVIRONMENT === "staging-independent"
             ? "staging-independent"
-            : "staging",
+            : process.env.FUNDRAISING_OS_ENVIRONMENT === "production-independent"
+              ? "production-independent"
+              : "staging",
       ),
     },
     server: isCodexSeatbeltSandbox

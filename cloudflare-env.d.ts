@@ -15,10 +15,20 @@ interface D1Database {
 }
 
 declare const __FUNDRAISING_OS_COMMIT__: string | null;
-// "staging" here is the legacy ChatGPT Sites staging database. The
-// independent Cloudflare staging Worker/D1 is the distinct "staging-independent"
-// value — it is not a relabeling of the legacy environment.
-declare const __FUNDRAISING_OS_ENVIRONMENT__: "staging" | "production" | "staging-independent";
+// "staging" and "production" here are the legacy ChatGPT Sites
+// staging/production databases. The independent Cloudflare staging
+// Worker/D1 is the distinct "staging-independent" value, and the
+// independent Cloudflare production Worker/D1 (infrastructure
+// provisioned 2026-10-09, see docs/PRODUCTION-INFRASTRUCTURE-SETUP.md)
+// is the distinct "production-independent" value — NEITHER is a
+// relabeling of its same-named legacy environment. This distinction is
+// load-bearing: scripts/build-production.mjs (legacy only) and
+// scripts/build-production-independent.mjs (this app's own independent
+// Cloudflare Production Worker) are two different, non-interchangeable
+// build targets that must never be confused with each other at deploy
+// time — see lib/auth/provider-selection.ts's own doc comment for why
+// this ambiguity specifically mattered for authentication hardening.
+declare const __FUNDRAISING_OS_ENVIRONMENT__: "staging" | "production" | "staging-independent" | "production-independent";
 
 declare module "cloudflare:workers" {
   export const env: {

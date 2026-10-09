@@ -10,20 +10,31 @@
   // production Worker is a NEW thing, distinct from the legacy ChatGPT
   // Sites production platform.
   //
-  // TEAM_DOMAIN and POLICY_AUD below are DELIBERATELY still placeholders.
-  // Cloudflare Access application/policy creation could not be automated
-  // this round (requires Zero Trust dashboard access this session's
-  // Cloudflare credentials do not have API scope for -- see
-  // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md's "Manual setup remaining"
-  // section for exact steps). Per this round's own security pre-flight
-  // requirement: a Production environment missing either of these two
-  // values must never be considered secure or ready, and
-  // lib/auth/provider-selection.ts's hardening (commit f1137eb) only
-  // excludes the legacy, unverified ChatGPT Sites header when BOTH are
-  // genuinely present -- so `wrangler deploy --config
-  // wrangler.production.jsonc` must never be run until both placeholders
-  // below are replaced with the real values from Cloudflare Access
-  // Application setup.
+  // TEAM_DOMAIN and POLICY_AUD below are the REAL values -- the owner
+  // created the Production Cloudflare Access Application (Zero Trust
+  // dashboard; this session's Cloudflare credentials have no API scope
+  // for that step, so it was necessarily manual) on 2026-10-09 and
+  // supplied them directly. Per this round's own security pre-flight
+  // requirement, a Production environment missing either value must
+  // never be considered secure or ready; lib/auth/provider-selection.ts's
+  // hardening (commit f1137eb) only excludes the legacy, unverified
+  // ChatGPT Sites header when BOTH are genuinely present -- now true
+  // here. This file is still NOT deployed (no `wrangler deploy` has been
+  // run against it) -- see docs/PRODUCTION-INFRASTRUCTURE-SETUP.md for
+  // exactly what remains before that.
+  //
+  // Build with `pnpm run build:production-independent` (scripts/
+  // build-production-independent.mjs) before deploying this config --
+  // NEVER `pnpm run build:production` (scripts/build-production.mjs),
+  // which remains legacy-ChatGPT-Sites-only and sets
+  // FUNDRAISING_OS_ENVIRONMENT to the SAME "production" value legacy
+  // production itself uses. Using the wrong one here would make
+  // lib/operations/staging-reset.ts's own environment check the only
+  // thing standing between this Worker and that endpoint (it would still
+  // correctly return 404, since deploymentEnvironment would resolve to
+  // "production", never "staging-independent" -- but there is no reason
+  // to rely on that instead of simply using the correct, dedicated build
+  // script every time).
   "name": "fundraising-os-production",
   "main": "dist/server/index.js",
   "compatibility_date": "2026-08-06",
@@ -58,12 +69,13 @@
     }
   ],
   "vars": {
-    // DELIBERATE PLACEHOLDERS -- see this file's own header comment.
-    // Replace only after creating the Production Cloudflare Access
-    // Application + policy (Zero Trust dashboard; manual, see
-    // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md).
-    "TEAM_DOMAIN": "REPLACE_WITH_REAL_TEAM_DOMAIN_AFTER_ACCESS_SETUP",
-    "POLICY_AUD": "REPLACE_WITH_REAL_POLICY_AUD_AFTER_ACCESS_SETUP",
+    // Real values from the Production Cloudflare Access Application the
+    // owner created 2026-10-09 -- see this file's own header comment.
+    // Same Zero Trust organization Staging uses; a separate Application
+    // and AUD within it, restricted to the one authorized owner email
+    // below (confirmed in the Access policy itself, not just here).
+    "TEAM_DOMAIN": "fundraising-os.cloudflareaccess.com",
+    "POLICY_AUD": "7cfff2279260cb67e19af8c129b2ba6cdd137ba855ddb638ff316493f8ef14e1",
     // The sole email allowed to authenticate -- set to the real,
     // explicitly authorized owner per this round's own instruction. This
     // value is independent of Access setup (it's this app's own

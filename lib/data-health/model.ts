@@ -51,7 +51,16 @@ export type RestoreSuccessStatus = { schemaVersion: number; databaseName: string
 export type RestoreAttemptStatus = BackupAttemptStatus;
 
 export type DataHealthFacts = {
-  deploymentEnvironment: "staging" | "production" | "staging-independent";
+  // "production-independent" (lib/environment.ts, added 2026-10-09) is
+  // accepted here for type correctness, but none of this file's own
+  // `=== "production"` / `=== "staging-independent"` branches below
+  // match it yet -- it currently falls through to the same path legacy
+  // "staging" takes. That is a deliberate, conservative default (no
+  // branch silently misfires), not a considered design for how
+  // Workspace Health should present an independent Production
+  // environment -- revisit before anyone actually deploys and views
+  // this page against fundraising-os-production-db.
+  deploymentEnvironment: "staging" | "production" | "staging-independent" | "production-independent";
   databaseConnected: boolean;
   schemaReady: boolean;
   currentMigrationLevel: string | null;
@@ -144,7 +153,7 @@ export type DataHealthReport = {
   summary: string;
   checks: HealthCheck[];
   platform: {
-    deploymentEnvironment: "staging" | "production" | "staging-independent";
+    deploymentEnvironment: "staging" | "production" | "staging-independent" | "production-independent";
     businessDataRows: number | null;
     migrationLevel: string;
     journalMigrationLevel: string;

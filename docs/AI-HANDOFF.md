@@ -29181,3 +29181,54 @@ clean (no application code touched this round).
 No Production deployment, no donor data copied, no Staging modification,
 no merge to `main`. Stopping here for independent review before any data
 migration or cutover work.
+
+## Production Configuration + Build Resolution (2026-10-09) -- CONFIGURED, NOT DEPLOYED
+
+Full record: **`docs/PRODUCTION-INFRASTRUCTURE-SETUP.md`**. Summary:
+
+The owner created the real Production Cloudflare Access Application
+(Zero Trust dashboard -- this session's credentials still have no API
+scope for that step) and supplied: hostname
+`fundraising-os-production.sgoldstein.workers.dev`, authorized email
+`sgoldstein@nirc.edu`, team domain
+`fundraising-os.cloudflareaccess.com`, and the Application AUD tag.
+`wrangler.production.jsonc` was updated with these real values,
+replacing the deliberate placeholders from the prior round.
+
+Also resolved the build-configuration gap that round flagged: there was
+no build pipeline giving an independent Cloudflare Production Worker a
+`FUNDRAISING_OS_ENVIRONMENT` value distinct from legacy production's
+own `"production"`. Added a 4th environment value,
+`"production-independent"` (`cloudflare-env.d.ts`, `lib/environment.ts`,
+`vite.config.ts`, plus widening two duplicated type declarations in
+`lib/data-health/model.ts` for correctness), and a new, dedicated
+`scripts/build-production-independent.mjs` / `pnpm run
+build:production-independent` (and a matching `deploy:
+production-independent` script, not run). `authorizeStagingReset()`
+itself needed no change -- it already allowlists exactly
+`"staging-independent"` -- this closes the process gap that made its
+safety depend on nobody ever reusing the wrong build script.
+
+**Verified, not just written**: a new regression file,
+`tests/production-wrangler-config.test.mjs` (7 tests), confirms the
+real `TEAM_DOMAIN`/`POLICY_AUD` are present, are not the old placeholder
+strings, have the correct shape, and -- feeding them into the real
+`selectAuthProviders()` function -- correctly exclude the legacy
+ChatGPT Sites header path, exactly the computation `app/chatgpt-auth.ts`
+performs at runtime. `pnpm run build:production-independent` was
+actually executed and its output bundle grepped to confirm
+`"production-independent"` was genuinely baked in by the build-time
+`define`, not just that the build exited 0. `tsc --noEmit` clean across
+the widened type; **178/178** tests pass; the legacy `build:production`
+and existing `build:staging-independent` builds were re-run afterward
+and still succeed, confirming this was purely additive.
+
+**Still not done, correctly deferred**: the Production Worker and
+status-worker have not been deployed (R2 API tokens and the backup
+encryption passphrase for Production still don't exist -- dashboard-only
+creation, see `docs/PRODUCTION-INFRASTRUCTURE-SETUP.md` §9). No request
+has been made against the real Production hostname. Staging re-confirmed
+unaffected by every step.
+
+No Production deployment, no donor data copied or migrated, no Staging
+modification, no merge to `main`. Stopping here for independent review.
