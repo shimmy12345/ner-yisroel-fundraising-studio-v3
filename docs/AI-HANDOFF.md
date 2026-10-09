@@ -26664,3 +26664,214 @@ on this table's row count.
 
 No application code, schema, or data was changed; nothing was deployed.
 This entry is documentation-only.
+
+## Completed-Plan Visibility + Lapsed-Renewal Investigation -- Rosenbaum (69341) and Spetner (2689) (2026-10-09) -- INVESTIGATION ONLY, NO CODE/SCHEMA/D1/DEPLOY CHANGE
+
+Two real-donor reports investigated read-only against Independent
+Staging, using the deployed app's own `evaluatePledgeRenewal`/
+`evaluatePaymentPlan` plus direct inspection of
+`app/donors/[id]/page.tsx`, `PledgePaymentPlanManagement.tsx`,
+`lib/portfolio-focus/aggregate.ts`, `lib/fundraising-intelligence/
+situations.ts`, and `lib/workspace/relationship-date-events.ts`. No
+payment, pledge, plan, or code file was changed.
+
+### Case 1 -- Avraham Rosenbaum (69341): real bug, root-caused
+
+**Facts:** his one pledge (`giving_activities` row) is now
+`paid_cents == committed_cents` ($1,200), `balance_cents: 0`. His
+`pledge_payment_plans` row still has `ended_at IS NULL` (nobody has
+ever clicked "End plan" on it) and both `original_pledge_date` and
+`commitment_duration_months` are null -- never set in the first place,
+not cleared. `evaluatePaymentPlan` confirms `isCompleted: true`;
+`finalDatePassed: false` (his plan's own final expected date, 2026-11-05,
+hasn't arrived yet -- he paid off early, ahead of schedule).
+
+**1. Why did the plan disappear from the interface?** By design, not a
+data problem: `app/donors/[id]/page.tsx`'s `openPledgesWithPlans` (the
+array that drives the entire "OPEN PLEDGES" section, including the one
+and only "End plan" button and the one and only Original Pledge
+Date/Commitment Duration input form) is filtered with
+`countedActivities.filter((item) => (item.balance_cents ?? 0) > 0)`.
+The moment a pledge's balance reaches $0, its card -- and every control
+on it -- vanishes from the donor page, regardless of `ended_at`.
+
+**2. Is the plan financially fulfilled?** Yes -- `balance_cents: 0`,
+confirmed against JL's own authoritative figure, independently confirmed
+by `evaluatePaymentPlan.isCompleted: true`.
+
+**3. Does the active-plan query incorrectly include completed plans?**
+No -- `ended_at IS NULL` is the correct, intentional definition of an
+"active plan row" everywhere in this codebase (same definition
+`lib/relationships/pledge-review.ts`'s `hasActivePlan` check uses). The
+real bug is upstream: nothing in the current UI can ever set `ended_at`
+on this plan, because the only control that does so (`endPlan()` in
+`PledgePaymentPlanManagement.tsx`) lives inside the card that answer #1
+just showed is unreachable once balance hits $0. **This plan, and any
+plan like it, can never be formally ended through the app -- it will
+stay `ended_at IS NULL` forever**, which is why the 2026-10-09 query
+correctly (per the schema's own definition) counted it among 45 "active"
+plans.
+
+**4. Could renewal reminders/Coming Up/Today/Daily Agenda incorrectly
+include this completed plan?** No, confirmed two ways: (a) his renewal
+fields are both null, so `evaluatePledgeRenewal` returns `renewalDate:
+null` -- nothing to fire regardless; (b)
+`lib/portfolio-focus/aggregate.ts` independently gates its OWN
+`openPledgeRow` on `balance_cents > 0` before it will even look at a
+payment plan, so `pledgePlanOnTrack`/`pledgePlanMilestoneDaysBefore`
+are `null` for him there too, and `detectPledgeFollowUp`'s own
+`openPledgeBalanceCents <= 0` early-return independently blocks a false
+"stale pledge" warning. The `balance_cents > 0` gate is applied
+consistently in every consuming surface except the one place it should
+not be: the donor-page card's own visibility.
+
+**5. Should completed plans be excluded from the "needs pledge date/
+duration" list?** **No** -- per this round's own stated business rule
+("financial completion and commitment renewal are separate concepts"),
+a donor who pays off early can still have a live annual commitment due
+for renewal; excluding completed plans from that list would hide a
+legitimate future renewal candidate, not just a stale one. The real
+fix is not to stop counting this plan -- it is to restore the
+fundraiser's ability to act on it (verify its renewal fields, or
+explicitly end it) regardless of its balance.
+
+**Not a one-off:** the same live query that found Rosenbaum (`ended_at
+IS NULL AND balance_cents <= 0`) also returned exactly one other plan in
+this identical state: **Baruch Katz (68231)**, the donor already
+reconciled in the prior round's Part 2 (confirmed `isFulfilledAfterFinal:
+true`, no incorrect warning). His card is equally unreachable on his
+donor page for the same reason, confirming this is a real, already-
+recurring defect pattern affecting 2 of 45 current active plans, not a
+hypothetical edge case.
+
+### Case 2 -- Jonathan Spetner (2689): confirms existing finding, sharpens the gap
+
+**Facts (re-confirmed against live D1):** `original_pledge_date:
+2025-09-26`, `commitment_duration_months: 12` -- both verified, neither
+null. Installment schedule: $1,000/month, `balance_cents: 100000`
+($1,000 of $12,000 remaining), `final_expected_payment_at: 2026-10-17`
+(8 days from today, not yet passed) -- later than the 12-month
+commitment window because, per the fundraiser's own account, he began
+paying after his original pledge date, so his actual payment cadence
+runs behind his commitment calendar.
+
+**1-2. Pledge date/duration/balance/schedule:** as above -- all
+confirmed directly from `pledge_payment_plans`/`giving_activities`, none
+inferred.
+
+**3. Does the plan continue tracking outstanding installments
+correctly?** Yes -- `evaluatePaymentPlan` returns `isOnTrack: true`,
+`isLate: false`, `nextUnsatisfiedExpectedPaymentAt: 2026-10-17`
+(correctly not yet due), `isCompleted: false`. His outstanding $1,000 is
+not treated as overdue.
+
+**4. Is the renewal calculation based on the original commitment date,
+not the final payment date?** Confirmed correct by reading
+`evaluatePledgeRenewal`'s own signature and body
+(`lib/relationships/pledge-payment-plan.ts:349-364`): it takes only
+`originalPledgeDate`/`commitmentDurationMonths`/`endedAt` -- it never
+reads `finalExpectedPaymentAt` or any payment-schedule field at all.
+His renewal date (`2025-09-26` + 12 months = **2026-09-26**, five-day
+mark **2026-09-21**) is computed purely from his commitment, unaffected
+by his delayed/extended payment schedule, exactly as the stated business
+rule requires.
+
+**5. Does FOS surface an appropriate renewal opportunity after the
+renewal date has passed?** **No -- confirmed real gap.** Both his
+renewal date and five-day mark are already in the past (13 and 18 days
+ago). `buildPledgeRenewalReminderEvents`
+(`lib/workspace/relationship-date-events.ts:347-348`) unconditionally
+skips any stage whose date is before today (`if (date < todayEpoch)
+continue`) with no catch-up/overdue state -- once missed, by design,
+neither stage ever surfaces again, for the plan's entire remaining
+life, unless and until it is manually ended and replaced. This restates
+and sharpens the prior round's "Spetner edge case" finding: it is not
+only a one-time timing miss, it is a **permanent** loss of renewal
+signal for any plan whose window passes unacted-on.
+
+**6. Does the system incorrectly treat his balance as overdue, or
+incorrectly suppress renewal intelligence because of it?** No to both,
+confirmed by code: lateness math (`isLate`/`isOnTrack`) and renewal math
+(`evaluatePledgeRenewal`) are fully independent functions reading
+disjoint inputs -- his outstanding balance never enters the renewal
+calculation, and his unmet commitment-duration never enters the
+lateness calculation. The gap in #5 is purely in the one-shot
+date-window surfacing logic, not in either evaluation function.
+
+### B. Bugs vs. correct existing behavior
+
+**Genuine bug (Case 1):** the donor-page payment-plan card -- and its
+only "End plan" control and only renewal-field input form -- is gated
+on `balance_cents > 0`, so a plan that completes financially before it
+is manually ended becomes permanently unreachable and un-endable through
+the app. Confirmed affecting 2 of 45 current active plans (Rosenbaum,
+Katz).
+
+**Genuine gap (Case 2), smaller and arguably by-design-needs-revisiting
+rather than a strict defect:** a missed renewal-reminder window is
+never recovered -- no overdue/standing renewal signal exists anywhere in
+the app once the two trigger dates pass.
+
+**Correct, not bugs:** `ended_at IS NULL` as the definition of "active
+plan"; `evaluatePaymentPlan`'s balance-independent renewal math and
+renewal-independent lateness math; the consistent `balance_cents > 0`
+gating in every Today/Coming Up/situations consumer (just not on the
+donor-page card itself); Spetner's `isOnTrack: true`/not-late status.
+
+### C. Smallest safe corrections (not implemented -- awaiting review)
+
+1. Change the donor-page gate from "has an open balance" to "has an
+   open balance OR has an active (`ended_at IS NULL`) payment plan," so
+   the card (End plan button, renewal-field form) stays reachable until
+   a human explicitly ends it, independent of balance. One condition
+   change in `app/donors/[id]/page.tsx`'s `openPledgesWithPlans`
+   filter plus wherever `countedActivities`/`openPledgeSource` make the
+   same assumption nearby.
+2. Case 2's fix is a product decision, not just an engineering one --
+   flagged here for explicit review rather than unilaterally resolved:
+   whether a lapsed renewal window should (a) persist as a standing
+   "renewal overdue" signal until the plan is ended/renewed, (b) persist
+   for a bounded grace period, or (c) stay exactly as it is today
+   (one-time, lead-window-only). No change proposed until this is
+   decided.
+
+### D. Effect on other plans
+
+Fix #1 generalizes to every plan that reaches `balance_cents <= 0`
+before being manually ended -- today that is exactly 2 of 45 plans
+(Rosenbaum, Katz); it has zero effect on any plan still carrying an open
+balance, which is already shown exactly as today. Risk to check before
+implementing: whether any further historical plans sit in this same
+`ended_at IS NULL AND balance_cents <= 0` state that a fundraiser may
+already consider "done" and not expect to see resurface -- the live
+query above shows only Rosenbaum and Katz currently, but this should be
+re-checked at implementation time, not assumed static.
+
+Fix #2 (whichever option is chosen) only affects plans whose renewal
+window has already fully lapsed without being ended -- today that is
+only Spetner; it has zero effect on any plan whose renewal date is still
+upcoming or whose plan has already been ended.
+
+### E. Tests needed before implementing either fix
+
+1. The donor-page open-pledge filter: a pledge with `balance_cents: 0`
+   and an active plan (`ended_at: null`) is still included; a pledge
+   with `balance_cents: 0` and NO plan at all is still correctly
+   excluded (no regression to the plain "no plan" empty state).
+2. A regression guard on `lib/portfolio-focus/aggregate.ts`/
+   `detectPledgeFollowUp`: making the plan visible again on the donor
+   page must not reintroduce a false "stale pledge"/overdue warning for
+   a balance-zero plan -- assert the `balance_cents <= 0` early-return
+   there is untouched and still fires.
+3. Whichever Case 2 option is chosen: a test that a renewal date more
+   than N days in the past with `ended_at: null` behaves as decided
+   (persists, or expires after a grace period), AND a test that a
+   plan's renewal signal never surfaces once `ended_at` is actually set,
+   regardless of how far past the renewal date that occurs.
+4. A D1 audit query test/report that names `ended_at IS NULL AND
+   balance_cents <= 0` as its own explicit category, distinct from
+   "missing pledge info," so this class is never silently recounted as
+   a data-entry gap in a future audit.
+
+No application code, schema, D1 data, or deployment was touched by this
+investigation. This entry is documentation-only.
