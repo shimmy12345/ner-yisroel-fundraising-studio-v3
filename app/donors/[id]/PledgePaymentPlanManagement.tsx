@@ -53,6 +53,14 @@ export type PledgePlanState = {
   originalPledgeDate: number | null;
   commitmentDurationMonths: number | null;
   renewalDate: number | null;
+  // Mark Renewal Addressed (2026-10-09, see docs/AI-HANDOFF.md) -- both
+  // server-derived from evaluatePledgeRenewal/the plan's own stored
+  // renewal_acknowledged_at, never recomputed here. isRenewalFollowUpNeeded
+  // is what actually gates the button below (it is already false once
+  // acknowledged, ended, or simply not yet due); renewalAcknowledgedAt
+  // is kept only to show a quiet confirmation once set.
+  isRenewalFollowUpNeeded: boolean;
+  renewalAcknowledgedAt: number | null;
 };
 
 function parseDollarsToCents(value: string): number | null {
@@ -182,6 +190,13 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
   const [mode, setMode] = useState<"view" | "create" | "edit">("view");
   const [endStatus, setEndStatus] = useState<"idle" | "saving" | "error">("idle");
   const [endMessage, setEndMessage] = useState("");
+  // Mark Renewal Addressed (2026-10-09, see docs/AI-HANDOFF.md) -- its
+  // own independent saving/error state, deliberately separate from
+  // endStatus/endMessage above: acknowledging a renewal and ending a
+  // plan are two different actions a fundraiser can take from the same
+  // card, never combined into one request.
+  const [acknowledgeStatus, setAcknowledgeStatus] = useState<"idle" | "saving" | "error">("idle");
+  const [acknowledgeMessage, setAcknowledgeMessage] = useState("");
 
   function refresh() {
     window.setTimeout(() => window.location.reload(), 350);
@@ -198,6 +213,25 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
     } catch (error) {
       setEndStatus("error");
       setEndMessage(error instanceof Error ? error.message : "The payment plan could not be ended.");
+    }
+  }
+
+  // Mark Renewal Addressed -- records that the fundraiser has handled
+  // this plan's standing renewal follow-up. Never means the donor
+  // renewed/paid/made a new commitment; never touches endedAt, the
+  // payment plan's own schedule, originalPledgeDate, commitmentDurationMonths,
+  // or any financial record -- see the API route for the actual write.
+  async function acknowledgeRenewal() {
+    if (!plan || acknowledgeStatus === "saving") return;
+    setAcknowledgeStatus("saving"); setAcknowledgeMessage("");
+    try {
+      const response = await fetch(`/api/pledge-payment-plans/${encodeURIComponent(plan.planId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ acknowledgeRenewal: true }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "The renewal follow-up could not be acknowledged.");
+      refresh();
+    } catch (error) {
+      setAcknowledgeStatus("error");
+      setAcknowledgeMessage(error instanceof Error ? error.message : "The renewal follow-up could not be acknowledged.");
     }
   }
 
@@ -233,10 +267,21 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
       </p>}
       {plan.isCompleted && <p className="payment-plan-note-inline">This plan appears complete — paid in full.</p>}
       {plan.isPlanEndedWithBalance && <p className="payment-plan-note-inline">The final expected date has passed with balance still open.</p>}
+      {/* Mark Renewal Addressed (2026-10-09, see docs/AI-HANDOFF.md) --
+          shown ONLY while this plan currently has a standing renewal
+          follow-up (requirement: display the button only when an
+          active plan has a standing renewal follow-up). Acknowledging
+          means "I've addressed this," never "the donor renewed" -- the
+          confirmation copy says so explicitly so it is never mistaken
+          for a renewal/new-commitment record. */}
+      {plan.isRenewalFollowUpNeeded && <p className="payment-plan-note-inline">Renewal follow-up needed.</p>}
+      {!plan.isRenewalFollowUpNeeded && plan.renewalAcknowledgedAt !== null && <p className="payment-plan-note-inline">Renewal follow-up addressed {dateLabel(plan.renewalAcknowledgedAt)} — this does not mean the donor has renewed or made a new commitment.</p>}
       <div className="payment-plan-actions">
         <button type="button" onClick={() => setMode("edit")}>Edit plan</button>
         <button type="button" className="payment-plan-end" disabled={endStatus === "saving"} onClick={() => void endPlan()}>{endStatus === "saving" ? "Ending…" : "End plan"}</button>
+        {plan.isRenewalFollowUpNeeded && <button type="button" className="payment-plan-acknowledge-renewal" disabled={acknowledgeStatus === "saving"} onClick={() => void acknowledgeRenewal()}>{acknowledgeStatus === "saving" ? "Saving…" : "Mark renewal addressed"}</button>}
       </div>
+      {acknowledgeMessage && <p className="giving-action-error" role="alert">{acknowledgeMessage}</p>}
       {endMessage && <p className="giving-action-error" role="alert">{endMessage}</p>}
     </div>
   );

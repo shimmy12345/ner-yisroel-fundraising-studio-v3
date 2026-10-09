@@ -60,7 +60,7 @@ type JlRefreshRow = { last_donation_refresh_at: number | null };
 // multiple simultaneously active plans (confirmed real in Independent
 // Staging: Wisotsky, Goldstein, Singer, Ramras) gets every ELIGIBLE
 // plan's own reminder, genuinely pledge-specific rather than donor-wide.
-type PledgeRenewalPlanRow = { plan_id: string; donor_id: string; pledge_activity_id: string; original_pledge_date: number; commitment_duration_months: number; ended_at: number | null; committed_cents: number | null; balance_cents: number | null; source_campaign: string | null };
+type PledgeRenewalPlanRow = { plan_id: string; donor_id: string; pledge_activity_id: string; original_pledge_date: number; commitment_duration_months: number; ended_at: number | null; renewal_acknowledged_at: number | null; committed_cents: number | null; balance_cents: number | null; source_campaign: string | null };
 type RelationshipFactRow = { donor_id: string; category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
 
 // score: the recommendation engine's own real 0-1 score() value for this
@@ -351,7 +351,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // returns zero rows, at zero cost, until the fundraiser explicitly
     // verifies both facts. No demo/sample data exists for this feature,
     // matching every other demo-skipped query above.
-    demo ? Promise.resolve({ results: [] as PledgeRenewalPlanRow[] }) : env.DB.prepare(`SELECT p.id AS plan_id, p.donor_id, p.pledge_activity_id, p.original_pledge_date, p.commitment_duration_months, p.ended_at, g.committed_cents, g.balance_cents, g.source_campaign
+    demo ? Promise.resolve({ results: [] as PledgeRenewalPlanRow[] }) : env.DB.prepare(`SELECT p.id AS plan_id, p.donor_id, p.pledge_activity_id, p.original_pledge_date, p.commitment_duration_months, p.ended_at, p.renewal_acknowledged_at, g.committed_cents, g.balance_cents, g.source_campaign
       FROM pledge_payment_plans p JOIN giving_activities g ON g.id = p.pledge_activity_id
       WHERE p.user_id = ? AND p.ended_at IS NULL AND p.original_pledge_date IS NOT NULL AND p.commitment_duration_months IS NOT NULL`).bind(userId).all<PledgeRenewalPlanRow>(),
     // Relationship Snapshot Architecture Stage 2 -- every in-scope
@@ -462,7 +462,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // windowing happens moved.
   const pledgeRenewalReminderRows: PledgeRenewalReminderRow[] = [];
   for (const plan of pledgeRenewalPlanRows.results) {
-    const evaluation = evaluatePledgeRenewal(plan.original_pledge_date, plan.commitment_duration_months, plan.ended_at, now, timezone);
+    const evaluation = evaluatePledgeRenewal(plan.original_pledge_date, plan.commitment_duration_months, plan.ended_at, plan.renewal_acknowledged_at, now, timezone);
     if (evaluation.renewalDate === null || evaluation.fiveDayReminderDate === null) continue;
     pledgeRenewalReminderRows.push({
       donorId: plan.donor_id,

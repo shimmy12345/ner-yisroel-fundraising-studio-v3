@@ -27153,3 +27153,243 @@ or D1 database.
 No application code was committed with migrations attached (none
 needed); no Production deployment occurred; no donor payment or pledge
 record was ever written to.
+
+## Mark Renewal Addressed + Recurring-Payment Alert Verification (2026-10-09) -- IMPLEMENTED, TESTED, MIGRATED + DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED
+
+Two objectives this round, both following DERIVED OVER ENTERED: Part 1
+implements the renewal-acknowledgment mechanism proposed (but not
+built) in the prior round; Part 2 is a controlled, isolated end-to-end
+verification of the recurring-payment-alert logic shipped in that same
+prior round, since no real Independent Staging data happened to be
+genuinely behind schedule at the time. No donor payment, balance,
+installment schedule, or import timestamp was ever modified; Production
+was never touched.
+
+### Part 1 -- Mark Renewal Addressed
+
+**Migration `drizzle/0041_pledge_payment_plans_renewal_acknowledged_at.sql`,
+APPLIED to `fundraising-os-staging-db` (Independent Staging):**
+```sql
+ALTER TABLE `pledge_payment_plans` ADD COLUMN `renewal_acknowledged_at` integer;
+```
+Nullable, no DEFAULT, same convention as `ended_at`/`original_pledge_date`/
+`commitment_duration_months` on this same table. Pre-migration baseline:
+45 rows. Post-migration verification: `SELECT COUNT(*) AS total,
+COUNT(renewal_acknowledged_at) AS non_null FROM pledge_payment_plans`
+-> `{total: 45, non_null: 0}` -- every row preserved, **nothing
+auto-acknowledged, Spetner (2689) included**, exactly as required.
+`db/schema.ts` updated in parallel (`renewalAcknowledgedAt` on
+`pledgePaymentPlans`). `production-baseline/` regenerated (`node
+scripts/generate-production-baseline.mjs --write`);
+`lib/data-health/production-baseline.ts`'s `PRODUCTION_BASELINE_VERIFIED`
+sanity check bumped 41->42 migrations. `node
+scripts/check-main-restore-sync.mjs` confirms (expected) drift against
+`origin/main` -- the automated `prepare-sync` CI job
+(`.github/workflows/d1-restore-sync-check.yml`, see
+`docs/D1-MIGRATION-SYNC-PROCESS.md`) is expected to prepare `main`'s
+sync PR automatically once this push lands; no manual `main` sync was
+performed in this round.
+
+**Why `ended_at` was never reused (requirement 5), restated concretely:**
+Spetner's own case proves the two concepts are genuinely orthogonal --
+his commitment period ended 2026-09-26 but he still owes $1,000 across
+real, ongoing installments. Setting `ended_at` to acknowledge the
+renewal would have stopped `evaluatePaymentPlan` from tracking that
+outstanding installment at all (via its own `isActive` gate), silently
+breaking requirement 4's "preserve all outstanding installments." The
+new, separate column avoids this entirely.
+
+**Implementation:**
+- `evaluatePledgeRenewal` (`lib/relationships/pledge-payment-plan.ts`)
+  gained a new `renewalAcknowledgedAt: number | null` parameter
+  (inserted between `endedAt` and `now`, so every existing call site
+  needed updating -- done programmatically, verified by re-running the
+  full existing test suite unchanged in behavior). It suppresses
+  `isRenewalFollowUpNeeded` ONLY -- `isFiveDayReminder`/
+  `isRenewalDateReminder`/`renewalDate`/`fiveDayReminderDate` are
+  computed identically regardless (requirement 10, re-verified by
+  explicit tests: acknowledgment never changes the renewal date itself,
+  and the two one-day reminders still fire on their own exact days
+  structurally unchanged).
+- `app/api/pledge-payment-plans/[id]/route.ts` gained a third
+  independent PATCH action, `{ acknowledgeRenewal: true }`, alongside
+  the existing `{ ended: true }` and plain-edit actions -- never
+  combined with either. Reuses the EXACT SAME `getChatGPTUser()`
+  401 check, `ownedActivePlan(id, userId)` ownership lookup, and
+  already-ended-plan 409 guard every other action in this route already
+  goes through (requirement 12 and 7: scoped to `WHERE id = ? AND
+  user_id = ?`, never the donor as a whole). Rejects with a clear 422
+  ("This plan has no verified renewal date to acknowledge.") if the
+  plan has no verified `original_pledge_date`/`commitment_duration_months`.
+  Writes `renewal_acknowledged_at` and an audit row
+  (`pledge_payment_plan_changes`, `action: 'updated'`,
+  `changedFields: ["renewalAcknowledgedAt"]`) in one batch -- never
+  touches `ended_at`, the schedule fields, or any `giving_activities`/
+  `jl_payment_assignment_audits` row.
+- `app/donors/[id]/PledgePaymentPlanManagement.tsx`: a new "Mark
+  renewal addressed" button, shown ONLY while
+  `plan.isRenewalFollowUpNeeded` is true (requirement 3), with its own
+  independent saving/error state (never combined with the "End plan"
+  button's own state). A confirmation line ("Renewal follow-up
+  addressed `<date>` -- this does not mean the donor has renewed or
+  made a new commitment") appears once acknowledged, so the distinction
+  the task called out explicitly can never be misread from the UI
+  itself.
+- `app/donors/[id]/page.tsx`/`lib/workspace/live-data.ts`: both now
+  select/thread `renewal_acknowledged_at` through to
+  `evaluatePledgeRenewal`, so the donor page card and the Today/Daily
+  Agenda event builder can never disagree about whether a given plan's
+  renewal is still outstanding.
+
+**Tests:** `tests/pledge-payment-plan-renewal.test.mjs` gained a
+dedicated block covering unacknowledged/acknowledged/ended-and-
+acknowledged/renewal-date-unchanged/five-day-and-renewal-day-unchanged.
+A new `tests/pledge-renewal-acknowledgment.test.mjs` (11 tests) covers
+Today suppression, Daily Agenda suppression (proven to share the exact
+same `buildPledgeRenewalReminderEvents` output Today reads -- one test
+covers both surfaces, since there is no second, divergent code path
+either could read instead), multiple-plans-per-donor independence,
+payment-plan continuity (`evaluatePaymentPlan.length === 5`, a
+structural guarantee it was never given a 6th acknowledgment
+parameter), and three route-source tests proving the write is gated by
+the same auth/ownership/already-ended guards as every other action.
+
+### Part 2 -- Controlled Recurring-Payment Alert Verification
+
+**Isolated environment used (requirement 2):** a fresh, in-memory
+SQLite database per test (`node:sqlite`'s `DatabaseSync`, built from
+every real committed `drizzle/*.sql` migration including this round's
+0041 -- the same established convention
+`tests/ask-followup-and-meeting-brief.test.mjs`/
+`tests/relationship-facts-schema.test.mjs` already use). Zero real
+Independent Staging rows were read or written for this verification.
+
+**New file `tests/recurring-payment-alert-e2e.test.mjs` (4 tests),
+genuinely end to end:** the two real queries
+`lib/workspace/live-data.ts` added for this feature
+(`pledge_payment_plans`/`jl_refresh_state`) are mirrored VERBATIM against
+the real synthetic schema (never reimplemented), fed through the REAL,
+actually-imported `evaluatePaymentPlan`/`evaluateRecurringPaymentAlert`/
+`buildRecurringPaymentAlertEvents`/`partitionRelationshipDateEventsByToday`,
+and the resulting events are fed into the REAL `buildAgenda()`
+(`lib/agenda/agenda-model.ts`, a pure function with no Cloudflare
+binding dependency, so it can run directly in a Node test) to produce a
+real rendered Agenda item -- the closest a Node unit test can get to
+the production code path, since `live-data.ts`/the route files
+themselves import `cloudflare:workers` and cannot run outside a Worker.
+
+- **A. "Verify latest payment import":** a synthetic plan with its due
+  date (Sep 1, 2026) BEFORE the seeded `last_donation_refresh_at`
+  (Aug 15, 2026) produces exactly that phrase end to end, including a
+  real rendered Agenda item with the correct donor name/code
+  ("Mr. & Mrs. Stale Import Donor" / "90001"), date ("Sep 1, 2026"),
+  amount ("$1,000.00 expected"), days-behind, and a real donor-profile
+  href. Asserted directly: the phrase never contains "overdue,"
+  "missed," "delinquent," or "declined" (requirement 5).
+- **B. "Payment follow-up needed" + independence + no duplicates:** a
+  donor with 4 plans (behind/not-yet-due/completed/formally ended)
+  sharing ONE refresh timestamp (Oct 5, 2026, after the behind plan's
+  due date) produces exactly ONE alert, for the behind plan only; the
+  ended plan is confirmed excluded at the SQL level itself (`WHERE
+  ended_at IS NULL` -- never even reaches evaluation); re-running the
+  identical query/evaluation twice produces the identical single row
+  (requirement 9); the real Agenda item renders with the correct donor
+  name/code/href.
+- **C. Payment recorded after the alert:** inserting a real
+  `jl_payment_assignment_audits` row (with its own required
+  `data_imports` parent row) that satisfies the behind cycle, plus
+  updating the pledge's own balance to 0, makes the alert disappear on
+  the very next evaluation -- nothing persisted, nothing to manually
+  dismiss (requirement 6).
+- **Documented limitation (requirement 12):** a fourth test
+  demonstrates directly that `jl_refresh_state.last_donation_refresh_at`
+  is ONE GLOBAL timestamp per user, not a per-pledge or per-import-row
+  signal -- two unrelated plans sharing the same refresh timestamp both
+  receive the identical freshness verdict, even though that one
+  timestamp cannot actually confirm either specific pledge's row was
+  present/complete in that export. Reviewed and concluded: the existing
+  wording ("Payment follow-up needed," never "confirmed," "missed," or
+  "declined") already does not overstate the certainty this coarse
+  signal can provide, so no wording change was made; the limitation
+  itself is now documented in code
+  (`lib/relationships/pledge-payment-plan.ts`'s
+  `evaluateRecurringPaymentAlert` doc comment) and here, so a future
+  change to this logic cannot silently assume per-pledge freshness
+  where none exists.
+- **Today/Daily Agenda consistency (requirement 10):** demonstrated
+  directly in every scenario above, not merely asserted -- both surfaces
+  are fed the identical `events` array derived from the identical
+  `buildRecurringPaymentAlertEvents` call.
+- **No decline inference (requirement 11):** re-confirmed -- the phrase
+  "declined" never appears anywhere in any real rendered output across
+  all 4 scenarios, matching the prior round's structural guarantee that
+  `evaluateRecurringPaymentAlert` has no code path that can produce it.
+
+### Tests, typecheck, build (both parts combined)
+
+**171/171 test files pass** (`pnpm test`), including:
+`tests/pledge-payment-plan-renewal.test.mjs` (extended, still fully
+green), `tests/pledge-renewal-acknowledgment.test.mjs` (new, 11
+tests), `tests/recurring-payment-alert-e2e.test.mjs` (new, 4 tests),
+and `tests/production-baseline.test.mjs` (extended with the 0041
+migration's own baseline-pickup test, matching the established pattern
+for every prior schema-changing migration in this file). `pnpm exec tsc
+--noEmit`: clean. `pnpm run build`: succeeded, all existing routes
+still classified correctly.
+
+### Deployment
+
+Migration 0041 applied to `fundraising-os-staging-db` first (verified:
+45/45 rows preserved, 0 auto-acknowledged), then the application code
+deployed via `npm run deploy:staging-independent`
+(`wrangler deploy --config wrangler.staging.jsonc`), binding `env.DB`
+confirmed as `fundraising-os-staging-db`. **Version ID:
+`bf13c624-21b8-45f5-b493-31bb5a6525f1`.** Production was never touched
+-- no production deploy command exists in this repo beyond the one
+staging script used here.
+
+### Live verification (real Independent Staging data)
+
+- **Spetner (2689), donor page:** the "Mark renewal addressed" button
+  is live, correctly labeled, and correctly gated -- it renders only
+  because his plan currently has a standing renewal follow-up
+  ("Renewal follow-up needed." text visible directly above it, matching
+  the earlier-verified Today/Agenda state). **The button was
+  deliberately NOT clicked** -- per this round's explicit instruction
+  ("Do not automatically acknowledge any existing donor, including
+  Spetner"), no live write was made to any real donor's
+  `renewal_acknowledged_at`. The full acknowledge-and-suppress flow is
+  instead proven correct end to end by the automated tests above
+  (pure-function suppression logic, the route's own real source/control
+  flow, and the real `buildPledgeRenewalReminderEvents`/`buildAgenda`
+  rendering chain against a synthetic acknowledged plan) -- the only
+  step not exercised against live data is the literal button click
+  itself, which is pure, already-tested UI wiring (a `fetch(...,
+  {acknowledgeRenewal: true})` call to the same route Part 1's own
+  tests already verify).
+- Post-migration row count (45/45, 0 acknowledged) independently
+  confirms no existing donor -- Spetner included -- was altered by this
+  round's migration or deployment.
+
+### Remaining limitations / unresolved issues
+
+1. `main`'s restore/baseline tracking is now out of sync with this
+   migration (confirmed via `check-main-restore-sync.mjs`) -- expected
+   to be handled automatically by the `prepare-sync` CI job on push;
+   not manually resolved in this round (see `docs/D1-MIGRATION-SYNC-
+   PROCESS.md`).
+2. The recurring-payment-alert mechanism (Part 2's subject) still has
+   no LIVE positive example in real Independent Staging data as of this
+   verification -- the controlled, isolated test suite is now the
+   authoritative proof of correctness; it will become directly visible
+   live the first time a real installment both passes its grace window
+   and the fundraiser's next JL refresh still shows it unsatisfied.
+3. `last_donation_refresh_at`'s global (not per-pledge) granularity
+   remains a real, documented limitation of the underlying JL data this
+   app has access to -- not something this round's code can fix, only
+   accurately reflect in its wording (confirmed already appropriately
+   hedged).
+
+No Production deployment occurred at any point in this round. Stopping
+here for independent review before any Production deployment is
+considered.

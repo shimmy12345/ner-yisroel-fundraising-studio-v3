@@ -1,0 +1,24 @@
+-- Renewal Follow-Up acknowledgment (see docs/AI-HANDOFF.md's
+-- "Payment-Plan Improvements" 2026-10-09 entry and this round's "Mark
+-- Renewal Addressed" entry): the standing "Renewal follow-up needed"
+-- signal (lib/relationships/pledge-payment-plan.ts's
+-- evaluatePledgeRenewal -- isRenewalFollowUpNeeded) currently persists
+-- indefinitely once a verified renewal date passes, with no way to
+-- record that the fundraiser has actually addressed it. This migration
+-- adds that one missing fact rather than reusing `ended_at` (which
+-- would also incorrectly stop this plan's still-legitimate outstanding-
+-- installment tracking -- see the investigation entry for why plan
+-- lifecycle and renewal resolution are genuinely orthogonal concepts).
+--
+-- Nullable, no DEFAULT -- every existing row gets NULL automatically,
+-- so nothing is acknowledged by this migration itself; acknowledgment
+-- is only ever an explicit fundraiser action (same "NULL = not yet
+-- acted on" convention as `ended_at`, `original_pledge_date`, and
+-- `commitment_duration_months` above it on this same table).
+--
+-- Deliberately scoped to the specific plan row, not the donor -- a
+-- donor with multiple simultaneously active plans (confirmed real:
+-- Wisotsky, Goldstein, Singer, Ramras) can have one plan's renewal
+-- acknowledged without affecting any other plan's own independent
+-- renewal state.
+ALTER TABLE `pledge_payment_plans` ADD COLUMN `renewal_acknowledged_at` integer;

@@ -869,6 +869,17 @@ export const pledgePaymentPlans = sqliteTable("pledge_payment_plans", {
   // above, for pledge-renewal reminder eligibility -- NEVER defaults to
   // 12 months or any other value when NULL. Migration 0040.
   commitmentDurationMonths: integer("commitment_duration_months"),
+  // Renewal Follow-Up acknowledgment -- nullable, fundraiser-action ONLY
+  // (same NULL-means-not-yet-acted-on convention as endedAt below).
+  // Means "the fundraiser has addressed this plan's standing renewal
+  // follow-up" -- NEVER "the donor renewed/paid/made a new commitment,"
+  // and NEVER inferred from any other event (a new pledge, a payment,
+  // the passage of time). Scoped to this exact plan row, never the
+  // donor. Suppresses isRenewalFollowUpNeeded (lib/relationships/
+  // pledge-payment-plan.ts's evaluatePledgeRenewal) once set; never
+  // touches originalPledgeDate/commitmentDurationMonths/endedAt or any
+  // financial data. Migration 0041.
+  renewalAcknowledgedAt: integer("renewal_acknowledged_at", { mode: "timestamp" }),
   note: text("note"),
   // NULL = active. Only ever set by an explicit fundraiser [End plan]
   // action -- NEVER automatically when the real JL balance reaches

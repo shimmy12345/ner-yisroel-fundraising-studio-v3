@@ -29,7 +29,7 @@ async function run() {
 
   // --- Missing original date (duration present) -- not eligible. ---
   {
-    const result = evaluatePledgeRenewal(null, 12, null, et(2026, 11, 1), TZ);
+    const result = evaluatePledgeRenewal(null, 12, null, null, et(2026, 11, 1), TZ);
     assert.deepEqual(result, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false });
   }
 
@@ -38,13 +38,13 @@ async function run() {
   // never produce a reminder, since the old code's implicit "assume 12
   // months" default is exactly what was wrong. ---
   {
-    const result = evaluatePledgeRenewal(utcMidnight(2025, 11, 1), null, null, et(2026, 11, 1), TZ);
+    const result = evaluatePledgeRenewal(utcMidnight(2025, 11, 1), null, null, null, et(2026, 11, 1), TZ);
     assert.deepEqual(result, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false });
   }
 
   // --- Both fields missing -- not eligible. ---
   {
-    const result = evaluatePledgeRenewal(null, null, null, et(2026, 11, 1), TZ);
+    const result = evaluatePledgeRenewal(null, null, null, null, et(2026, 11, 1), TZ);
     assert.equal(result.renewalDate, null);
   }
 
@@ -53,7 +53,7 @@ async function run() {
   // date. ---
   {
     const original = utcMidnight(2025, 11, 1);
-    const result = evaluatePledgeRenewal(original, 12, utcMidnight(2026, 6, 1), et(2026, 11, 1), TZ);
+    const result = evaluatePledgeRenewal(original, 12, utcMidnight(2026, 6, 1), null, et(2026, 11, 1), TZ);
     assert.equal(result.renewalDate, null, "an explicitly ended plan must never report a renewal date at all");
   }
 
@@ -61,10 +61,10 @@ async function run() {
   // same original pledge date: Nov 1, 2025. ---
   {
     const original = utcMidnight(2025, 11, 1);
-    assert.equal(evaluatePledgeRenewal(original, 6, null, et(2026, 5, 1), TZ).renewalDate, utcMidnight(2026, 5, 1), "6 months: Nov 1 2025 -> May 1 2026");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 11, 1), TZ).renewalDate, utcMidnight(2026, 11, 1), "12 months: Nov 1 2025 -> Nov 1 2026");
-    assert.equal(evaluatePledgeRenewal(original, 18, null, et(2027, 5, 1), TZ).renewalDate, utcMidnight(2027, 5, 1), "18 months: Nov 1 2025 -> May 1 2027");
-    assert.equal(evaluatePledgeRenewal(original, 24, null, et(2027, 11, 1), TZ).renewalDate, utcMidnight(2027, 11, 1), "24 months: Nov 1 2025 -> Nov 1 2027");
+    assert.equal(evaluatePledgeRenewal(original, 6, null, null, et(2026, 5, 1), TZ).renewalDate, utcMidnight(2026, 5, 1), "6 months: Nov 1 2025 -> May 1 2026");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 11, 1), TZ).renewalDate, utcMidnight(2026, 11, 1), "12 months: Nov 1 2025 -> Nov 1 2026");
+    assert.equal(evaluatePledgeRenewal(original, 18, null, null, et(2027, 5, 1), TZ).renewalDate, utcMidnight(2027, 5, 1), "18 months: Nov 1 2025 -> May 1 2027");
+    assert.equal(evaluatePledgeRenewal(original, 24, null, null, et(2027, 11, 1), TZ).renewalDate, utcMidnight(2027, 11, 1), "24 months: Nov 1 2025 -> Nov 1 2027");
   }
 
   // --- A custom duration (not one of the UI presets) works identically
@@ -73,7 +73,7 @@ async function run() {
   // only). ---
   {
     const original = utcMidnight(2025, 11, 1);
-    const result = evaluatePledgeRenewal(original, 9, null, et(2026, 8, 1), TZ);
+    const result = evaluatePledgeRenewal(original, 9, null, null, et(2026, 8, 1), TZ);
     assert.equal(result.renewalDate, utcMidnight(2026, 8, 1), "9 months: Nov 1 2025 -> Aug 1 2026 (a custom, non-preset duration)");
   }
 
@@ -82,17 +82,17 @@ async function run() {
   // 12-month example as the original implementation's worked example. ---
   {
     const original = utcMidnight(2025, 11, 1);
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 10, 27), TZ).isFiveDayReminder, true);
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 10, 26), TZ).isFiveDayReminder, false, "the day immediately before the five-day reminder must not also fire it");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 10, 28), TZ).isFiveDayReminder, false, "the day immediately after the five-day reminder must not also fire it");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 11, 1), TZ).isRenewalDateReminder, true);
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 10, 31), TZ).isRenewalDateReminder, false, "the day immediately before the renewal date must not also fire it");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 11, 2), TZ).isRenewalDateReminder, false, "the day immediately after the renewal date must not also fire it");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 27), TZ).isFiveDayReminder, true);
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 26), TZ).isFiveDayReminder, false, "the day immediately before the five-day reminder must not also fire it");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 28), TZ).isFiveDayReminder, false, "the day immediately after the five-day reminder must not also fire it");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 11, 1), TZ).isRenewalDateReminder, true);
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 31), TZ).isRenewalDateReminder, false, "the day immediately before the renewal date must not also fire it");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 11, 2), TZ).isRenewalDateReminder, false, "the day immediately after the renewal date must not also fire it");
     // No duplicate events -- five-day and renewal-day can never both be
     // true on the same day for the same plan (they are 5 real calendar
     // days apart by construction, for any duration).
     for (const [m, d] of [[10, 27], [11, 1]]) {
-      const r = evaluatePledgeRenewal(original, 12, null, et(2026, m, d), TZ);
+      const r = evaluatePledgeRenewal(original, 12, null, null, et(2026, m, d), TZ);
       assert.ok(!(r.isFiveDayReminder && r.isRenewalDateReminder), `${m}/${d} must never fire both stages at once`);
     }
   }
@@ -104,7 +104,7 @@ async function run() {
   // cycle in a 30-day month, regardless of duration. ---
   {
     const feb29 = utcMidnight(2024, 2, 29); // 2024 is a leap year
-    const result = evaluatePledgeRenewal(feb29, 12, null, et(2025, 2, 28), TZ);
+    const result = evaluatePledgeRenewal(feb29, 12, null, null, et(2025, 2, 28), TZ);
     assert.equal(result.renewalDate, utcMidnight(2025, 2, 28), "a Feb 29 original pledge date must clamp its 12-month renewal to Feb 28 in the non-leap following year");
     assert.equal(result.isRenewalDateReminder, true);
     assert.equal(result.fiveDayReminderDate, utcMidnight(2025, 2, 23));
@@ -116,7 +116,7 @@ async function run() {
   // overflow into May. ---
   {
     const oct31 = utcMidnight(2025, 10, 31);
-    const result = evaluatePledgeRenewal(oct31, 6, null, et(2026, 4, 30), TZ);
+    const result = evaluatePledgeRenewal(oct31, 6, null, null, et(2026, 4, 30), TZ);
     assert.equal(result.renewalDate, utcMidnight(2026, 4, 30), "Oct 31 2025 + 6 months must clamp to Apr 30 2026 (April has only 30 days), never drift into May");
   }
 
@@ -125,16 +125,16 @@ async function run() {
   // tests/pledge-payment-plan-timezone.test.mjs. ---
   {
     const original = utcMidnight(2025, 11, 1); // renewal Nov 1, 2026 -- EST by then
-    const dayOfOnEst = evaluatePledgeRenewal(original, 12, null, et(2026, 11, 1), TZ);
+    const dayOfOnEst = evaluatePledgeRenewal(original, 12, null, null, et(2026, 11, 1), TZ);
     assert.equal(dayOfOnEst.isRenewalDateReminder, true, "a renewal date landing in the EST period must still fire correctly");
-    const fiveDayStillEdt = evaluatePledgeRenewal(original, 12, null, et(2026, 10, 27), TZ); // still EDT
+    const fiveDayStillEdt = evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 27), TZ); // still EDT
     assert.equal(fiveDayStillEdt.isFiveDayReminder, true, "the five-day reminder, 5 days earlier (still EDT), must also fire correctly");
     // Early morning / late evening Eastern -- stable across the whole
     // Eastern calendar day.
     const earlyMorning = Math.floor(Date.UTC(2026, 10, 1, 5, 30, 0) / 1000);
     const lateEvening = Math.floor(Date.UTC(2026, 10, 2, 3, 30, 0) / 1000);
-    assert.equal(evaluatePledgeRenewal(original, 12, null, earlyMorning, TZ).isRenewalDateReminder, true, "early morning Eastern on the renewal date must still fire");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, lateEvening, TZ).isRenewalDateReminder, true, "late evening Eastern on the renewal date must still fire");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, earlyMorning, TZ).isRenewalDateReminder, true, "early morning Eastern on the renewal date must still fire");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, lateEvening, TZ).isRenewalDateReminder, true, "late evening Eastern on the renewal date must still fire");
   }
 
   // ============================================================
@@ -146,21 +146,79 @@ async function run() {
   // ============================================================
   {
     const original = utcMidnight(2025, 9, 26); // Spetner's real original pledge date
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 9, 25), TZ).isRenewalFollowUpNeeded, false, "the day before the renewal date must not need follow-up");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 9, 26), TZ).isRenewalFollowUpNeeded, false, "the renewal date itself is its own one-day reminder, never also the follow-up state");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 9, 27), TZ).isRenewalFollowUpNeeded, true, "the day immediately after the renewal date must need follow-up");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2026, 10, 9), TZ).isRenewalFollowUpNeeded, true, "13 days after (Spetner's real case) must still need follow-up -- this never expires on its own");
-    assert.equal(evaluatePledgeRenewal(original, 12, null, et(2028, 1, 1), TZ).isRenewalFollowUpNeeded, true, "even over a year later, with no resolution mechanism in this app yet, it must still need follow-up -- the safe default is to keep surfacing, never to silently expire");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 9, 25), TZ).isRenewalFollowUpNeeded, false, "the day before the renewal date must not need follow-up");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 9, 26), TZ).isRenewalFollowUpNeeded, false, "the renewal date itself is its own one-day reminder, never also the follow-up state");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 9, 27), TZ).isRenewalFollowUpNeeded, true, "the day immediately after the renewal date must need follow-up");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 9), TZ).isRenewalFollowUpNeeded, true, "13 days after (Spetner's real case) must still need follow-up -- this never expires on its own");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, null, et(2028, 1, 1), TZ).isRenewalFollowUpNeeded, true, "even over a year later, with no resolution mechanism in this app yet, it must still need follow-up -- the safe default is to keep surfacing, never to silently expire");
     // Never true at all once the plan is formally ended, no matter how
     // far past the renewal date -- matches evaluatePledgeRenewal's own
     // existing endedAt short-circuit.
-    assert.equal(evaluatePledgeRenewal(original, 12, utcMidnight(2026, 10, 1), et(2026, 11, 1), TZ).isRenewalFollowUpNeeded, false, "an ended plan must never need follow-up");
+    assert.equal(evaluatePledgeRenewal(original, 12, utcMidnight(2026, 10, 1), null, et(2026, 11, 1), TZ).isRenewalFollowUpNeeded, false, "an ended plan must never need follow-up");
     // Mutually exclusive with isRenewalDateReminder for every day across
     // a wide range -- never both true at once for the same plan.
     for (let offset = -10; offset <= 20; offset++) {
-      const r = evaluatePledgeRenewal(original, 12, null, et(2026, 9, 26) + offset * 86400, TZ);
+      const r = evaluatePledgeRenewal(original, 12, null, null, et(2026, 9, 26) + offset * 86400, TZ);
       assert.ok(!(r.isRenewalDateReminder && r.isRenewalFollowUpNeeded), `offset ${offset}: must never report both the exact-day reminder and the follow-up state at once`);
     }
+  }
+
+  // ============================================================
+  // Mark Renewal Addressed (2026-10-09, see docs/AI-HANDOFF.md) --
+  // renewalAcknowledgedAt suppresses ONLY isRenewalFollowUpNeeded, never
+  // isFiveDayReminder/isRenewalDateReminder (requirement: preserve the
+  // existing five-day/renewal-date reminder behavior), never
+  // originalPledgeDate/commitmentDurationMonths/renewalDate itself
+  // (requirement: preserve the original pledge date and commitment
+  // duration -- re-verified here as "the renewal date is still
+  // computed and reported, unchanged").
+  // ============================================================
+  {
+    const original = utcMidnight(2025, 9, 26); // Spetner's real original pledge date
+    const acknowledgedAt = et(2026, 10, 9); // the moment the fundraiser clicked the button
+
+    // --- Unacknowledged renewal: follow-up is needed, exactly as
+    // before (the existing coverage above re-verified with an explicit
+    // null). ---
+    const unacknowledged = evaluatePledgeRenewal(original, 12, null, null, et(2026, 10, 9), TZ);
+    assert.equal(unacknowledged.isRenewalFollowUpNeeded, true);
+
+    // --- Successfully acknowledged renewal: follow-up stops, even on
+    // the exact same day it would otherwise have been true, and even
+    // far beyond it -- acknowledgment never "wears off." ---
+    for (const now of [et(2026, 10, 9), et(2026, 11, 1), et(2028, 1, 1)]) {
+      const acknowledged = evaluatePledgeRenewal(original, 12, null, acknowledgedAt, now, TZ);
+      assert.equal(acknowledged.isRenewalFollowUpNeeded, false, `follow-up must stay suppressed once acknowledged, checked at ${now}`);
+    }
+
+    // --- The renewal date/five-day date are STILL computed and
+    // reported, unchanged by acknowledgment -- only the standing
+    // follow-up signal is suppressed. ---
+    const acknowledged = evaluatePledgeRenewal(original, 12, null, acknowledgedAt, et(2026, 10, 9), TZ);
+    assert.equal(acknowledged.renewalDate, unacknowledged.renewalDate, "the original pledge date + commitment duration (and therefore the renewal date) must be unaffected by acknowledgment");
+    assert.equal(acknowledged.fiveDayReminderDate, unacknowledged.fiveDayReminderDate);
+
+    // --- Acknowledgment never retroactively suppresses the existing
+    // five-day/renewal-date one-day reminders -- they still fire on
+    // their own exact days exactly as an unacknowledged plan would,
+    // since acknowledgment is only ever realistic AFTER the renewal
+    // date has already passed (nothing in this function prevents
+    // testing the hypothetical anyway, to prove the independence is
+    // structural, not merely coincidental). ---
+    assert.equal(evaluatePledgeRenewal(original, 12, null, acknowledgedAt, et(2026, 9, 26), TZ).isRenewalDateReminder, true, "the exact-day renewal reminder must still fire even on a plan that happens to already carry an (earlier) acknowledgment");
+    assert.equal(evaluatePledgeRenewal(original, 12, null, acknowledgedAt, et(2026, 9, 21), TZ).isFiveDayReminder, true, "the five-day reminder must still fire unchanged too");
+
+    // --- ended_at is never used to acknowledge a renewal, and
+    // acknowledging never substitutes for ending -- the two remain
+    // fully independent axes (requirement 5 + 6's own spirit: not
+    // "do not auto-create," but structurally, acknowledgment carries no
+    // plan-lifecycle meaning at all). An ended, unacknowledged plan is
+    // already correctly suppressed via endedAt alone (see the test
+    // above); an ended, ALSO-acknowledged plan reports the exact same
+    // ineligible shape -- acknowledgment adds nothing once already
+    // ended. ---
+    const endedAndAcknowledged = evaluatePledgeRenewal(original, 12, utcMidnight(2026, 10, 1), acknowledgedAt, et(2026, 11, 1), TZ);
+    assert.deepEqual(endedAndAcknowledged, { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false });
   }
 
   // ============================================================
@@ -340,7 +398,7 @@ async function run() {
     const { evaluatePaymentPlan } = await import("../lib/relationships/pledge-payment-plan.ts");
     const milestoneResult = evaluatePaymentPlan(plan, [utcMidnight(2026, 8, 19), utcMidnight(2026, 9, 24)], 2000, et(2026, 10, 9), TZ);
     assert.equal(milestoneResult.milestoneDaysBefore, 15, "the existing final-payment milestone must still fire normally");
-    const renewalResult = evaluatePledgeRenewal(utcMidnight(2025, 10, 9), 12, plan.endedAt, et(2026, 10, 9), TZ);
+    const renewalResult = evaluatePledgeRenewal(utcMidnight(2025, 10, 9), 12, plan.endedAt, null, et(2026, 10, 9), TZ);
     assert.equal(renewalResult.isRenewalDateReminder, true, "the pledge renewal can independently fire for the same plan on the same day");
     const milestoneResultAgain = evaluatePaymentPlan(plan, [utcMidnight(2026, 8, 19), utcMidnight(2026, 9, 24)], 2000, et(2026, 10, 9), TZ);
     assert.deepEqual(milestoneResultAgain, milestoneResult, "evaluating pledge renewal must never change the final-payment milestone's own result for the same plan");
@@ -356,7 +414,7 @@ async function run() {
     const original = utcMidnight(2025, 11, 1);
     const commitmentDurationMonths = 12; // the donor committed to 12 months...
     const finalExpectedPaymentAt = utcMidnight(2027, 5, 1); // ...but is paying it off over 18 months of installments
-    const result = evaluatePledgeRenewal(original, commitmentDurationMonths, null, et(2026, 11, 1), TZ);
+    const result = evaluatePledgeRenewal(original, commitmentDurationMonths, null, null, et(2026, 11, 1), TZ);
     assert.equal(result.renewalDate, utcMidnight(2026, 11, 1), "the renewal date must follow the 12-month COMMITMENT, completely ignoring the 18-month collection schedule");
     assert.notEqual(result.renewalDate, finalExpectedPaymentAt, "the renewal date must never coincide with or be derived from the payment plan's own final expected payment date");
   }

@@ -37,7 +37,7 @@ export const dynamic = "force-dynamic";
 type Donor = { id: string; display_name: string; donor_code: string | null; last_name: string | null; email: string | null; phone: string | null; home_phone: string | null; address_line_1: string | null; city: string | null; state: string | null; postal_code: string | null; country: string | null; primary_first_name: string | null; spouse: string | null; spouse_first_name: string | null; primary_title: string | null; spouse_title: string | null; external_id: string | null; external_source: string | null; contact_note: string | null; relationship_summary: string | null; institutional_memory: string | null; archived_at: number | null; merged_into_donor_id: string | null };
 type Activity = { id: string; donor_id: string; external_source: string; activity_date: number | null; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; item_type: string | null; description: string | null; source_campaign: string | null; category: string; workspace_status: string; private_note: string | null; confirmed_by_activity_id: string | null; updated_at: number };
 type PaymentEvent = { id: string; payment_date: number; applied_cents: number; remaining_balance_cents: number | null; pledge_activity_id: string; pledge_description: string | null; pledge_campaign: string | null };
-type PaymentPlanRow = { id: string; pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number; note: string | null; original_pledge_date: number | null; commitment_duration_months: number | null };
+type PaymentPlanRow = { id: string; pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number; note: string | null; original_pledge_date: number | null; commitment_duration_months: number | null; renewal_acknowledged_at: number | null };
 type Gift = { id: string; received_at: number; amount_cents: number; fund: string };
 type Interaction = { id: string; type: string; occurred_at: number; occurred_at_date_only: number; summary: string; source: string; created_at: number; status_changed_at: number | null; shared_activity_id: string | null; role: string | null; shared_activity_recipient_count: number | null; shared_activity_summary: string | null };
 type Recommendation = { id: string; action: string; reason: string; status: string; due_at: number | null; due_at_date_only: number; created_at: number; updated_at: number };
@@ -131,7 +131,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     // This donor's ACTIVE (ended_at IS NULL) payment plans, if any --
     // local fundraiser-declared stewardship metadata for a specific open
     // pledge, never a JL fact. Feeds openPledge.activePaymentPlan.
-    timedAll(marks, "paymentPlans", mode === "demo" ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare("SELECT id, pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note, original_pledge_date, commitment_duration_months FROM pledge_payment_plans WHERE donor_id=? AND user_id=? AND ended_at IS NULL").bind(id, profile.id).all<PaymentPlanRow>()),
+    timedAll(marks, "paymentPlans", mode === "demo" ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare("SELECT id, pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note, original_pledge_date, commitment_duration_months, renewal_acknowledged_at FROM pledge_payment_plans WHERE donor_id=? AND user_id=? AND ended_at IS NULL").bind(id, profile.id).all<PaymentPlanRow>()),
     // Relationship Snapshot Architecture Stage 2 -- every CURRENT
     // structured Relationship Fact for this donor, feeding fact-level
     // recommendation actionability below. No demo/sample data for this
@@ -318,7 +318,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     // evaluatePledgeRenewal() Coming Up/Daily Agenda use (lib/workspace/
     // live-data.ts), so this card can never disagree with those surfaces
     // about the same plan's renewal date.
-    const pledgeRenewal = evaluatePledgeRenewal(planRow.original_pledge_date, planRow.commitment_duration_months, null, nowForPlanEvaluation, profile.timezone);
+    const pledgeRenewal = evaluatePledgeRenewal(planRow.original_pledge_date, planRow.commitment_duration_months, null, planRow.renewal_acknowledged_at, nowForPlanEvaluation, profile.timezone);
     const planState: PledgePlanState = {
       planId: planRow.id,
       installmentAmountCents: planRow.installment_amount_cents,
@@ -332,6 +332,8 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       originalPledgeDate: planRow.original_pledge_date,
       commitmentDurationMonths: planRow.commitment_duration_months,
       renewalDate: pledgeRenewal.renewalDate,
+      isRenewalFollowUpNeeded: pledgeRenewal.isRenewalFollowUpNeeded,
+      renewalAcknowledgedAt: planRow.renewal_acknowledged_at,
     };
     return { pledge, planState };
   });

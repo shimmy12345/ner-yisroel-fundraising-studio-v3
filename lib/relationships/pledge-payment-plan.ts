@@ -308,19 +308,19 @@ export type PledgeRenewalEvaluation = {
   // renewalDate (never on the renewal date itself, which already has
   // its own one-day isRenewalDateReminder/"Pledge renewal opportunity"
   // signal -- the two are mutually exclusive by construction, never
-  // both true on the same day for the same plan). Persists indefinitely
-  // once true: this app currently has NO mechanism that can mark a
-  // renewal "resolved" (see docs/AI-HANDOFF.md's investigation -- no
-  // existing field reliably establishes that without also carrying
-  // unwanted side effects, e.g. `endedAt` would also stop legitimate
-  // ongoing installment tracking), so by design this stays true every
-  // day forever until either the fundraiser formally ends the plan
-  // (endedAt, which short-circuits the function above before this is
-  // ever reached) or a future, separately-approved acknowledgment
-  // mechanism is added. Never derived from, or suppressed by, any OTHER
-  // pledge this donor may have -- this function has no concept of "a
-  // newer pledge" at all, so it can never incorrectly suppress a
-  // follow-up merely because the donor gave to an unrelated program.
+  // both true on the same day for the same plan) AND the plan has not
+  // been explicitly acknowledged (renewalAcknowledgedAt below). Persists
+  // until either the fundraiser formally ends the plan (endedAt, which
+  // short-circuits the function below before this is ever reached) or
+  // explicitly acknowledges this plan's renewal follow-up (Mark Renewal
+  // Addressed, 2026-10-09, see docs/AI-HANDOFF.md) -- acknowledgment is
+  // NEVER inferred from a new pledge, a payment, or any other donor
+  // activity, only ever an explicit fundraiser action on THIS plan.
+  // Never derived from, or suppressed by, any OTHER pledge this donor
+  // may have -- this function has no concept of "a newer pledge" at
+  // all, so it can never incorrectly suppress a follow-up merely
+  // because the donor gave to an unrelated program, and acknowledging
+  // one plan never touches any other plan's own independent evaluation.
   isRenewalFollowUpNeeded: boolean;
 };
 
@@ -365,7 +365,17 @@ export type PledgeRenewalEvaluation = {
 // timezone-sensitive on their own -- both operands are already
 // UTC-midnight date-only values, so this is always an exact 5-calendar-
 // day offset regardless of daylight saving.
-export function evaluatePledgeRenewal(originalPledgeDate: number | null, commitmentDurationMonths: number | null, endedAt: number | null, now: number, timezone: string): PledgeRenewalEvaluation {
+// `renewalAcknowledgedAt` (Mark Renewal Addressed, 2026-10-09, see
+// docs/AI-HANDOFF.md): ONLY ever suppresses isRenewalFollowUpNeeded --
+// never isFiveDayReminder/isRenewalDateReminder, which fire purely on
+// their own exact calendar day and are computed identically regardless
+// of acknowledgment (requirement: preserve the existing five-day/
+// renewal-date reminder behavior unchanged). Deliberately NOT a third
+// early-return condition alongside endedAt above: an acknowledged plan
+// still has a real renewalDate/fiveDayReminderDate (so the donor page
+// card keeps showing them), it simply never needs the STANDING
+// follow-up once addressed.
+export function evaluatePledgeRenewal(originalPledgeDate: number | null, commitmentDurationMonths: number | null, endedAt: number | null, renewalAcknowledgedAt: number | null, now: number, timezone: string): PledgeRenewalEvaluation {
   if (originalPledgeDate === null || commitmentDurationMonths === null || endedAt !== null) {
     return { renewalDate: null, fiveDayReminderDate: null, isFiveDayReminder: false, isRenewalDateReminder: false, isRenewalFollowUpNeeded: false };
   }
@@ -379,7 +389,7 @@ export function evaluatePledgeRenewal(originalPledgeDate: number | null, commitm
     fiveDayReminderDate,
     isFiveDayReminder: nowDateOnly === fiveDayReminderDate,
     isRenewalDateReminder: nowDateOnly === renewalDate,
-    isRenewalFollowUpNeeded: nowDateOnly > renewalDate,
+    isRenewalFollowUpNeeded: renewalAcknowledgedAt === null && nowDateOnly > renewalDate,
   };
 }
 
@@ -430,6 +440,20 @@ export type RecurringPaymentAlertEvaluation = {
 // STILL unsatisfied, does this report "follow_up_needed" -- a genuine
 // need based on CURRENT data. `null` (no refresh ever recorded) is
 // treated the same as stale, never as "confirmed current" by omission.
+//
+// RELIABILITY LIMITATION, reviewed and documented 2026-10-09 (see
+// docs/AI-HANDOFF.md's "Verify Recurring-Payment Alerts" entry):
+// `lastDonationRefreshAt` is ONE GLOBAL timestamp per user (jl_refresh_
+// state's primary key is user_id, not a per-pledge or per-import-row
+// signal) -- a successful refresh after an installment's due date means
+// a JL donation sync RAN after that date, never that this SPECIFIC
+// pledge's row was actually present/complete in that particular export
+// (a partial export, a filtered/paginated sync, or a row JL itself
+// omitted would all still advance this one timestamp). This is why
+// "follow_up_needed" is deliberately phrased as a prompt to check
+// ("Payment follow-up needed"), never a confirmed-delinquency or
+// declined-payment claim -- the wording must never overstate the
+// certainty this one coarse signal can actually provide.
 //
 // "declined" is deliberately NOT a value this function can ever
 // produce: as of this investigation, no JL import this app reads

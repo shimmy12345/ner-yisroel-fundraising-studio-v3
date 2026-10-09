@@ -202,6 +202,8 @@ const TEST_FILES = [
   "tests/relationship-facts-lifecycle-reclassify.test.mjs",
   "tests/pledge-payment-plan-completed-visibility.test.mjs",
   "tests/recurring-payment-alert.test.mjs",
+  "tests/pledge-renewal-acknowledgment.test.mjs",
+  "tests/recurring-payment-alert-e2e.test.mjs",
 ];
 
 function runOne(file) {

@@ -10,9 +10,15 @@ import { logger } from "../../../../lib/logger";
 // giving_activities/gifts/jl_payment_assignment_audits or any other JL
 // financial data -- ending a plan means only "the fundraiser no longer
 // expects this schedule," never "the pledge is closed/paid/cancelled".
-type PlanRow = { id: string; donor_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number; note: string | null; original_pledge_date: number | null; commitment_duration_months: number | null; ended_at: number | null };
+type PlanRow = { id: string; donor_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number; note: string | null; original_pledge_date: number | null; commitment_duration_months: number | null; ended_at: number | null; renewal_acknowledged_at: number | null };
 type RequestBody = {
   ended?: boolean;
+  // Mark Renewal Addressed (2026-10-09, see docs/AI-HANDOFF.md) -- a
+  // third, independent action alongside `ended`/the plain edit below,
+  // never combined with either in the same request. Means "the
+  // fundraiser has addressed this plan's standing renewal follow-up,"
+  // never "the donor renewed" -- see the handler's own doc comment.
+  acknowledgeRenewal?: boolean;
   installmentAmountCents?: number | null;
   nextExpectedPaymentAt?: string;
   finalExpectedPaymentAt?: string;
@@ -29,7 +35,7 @@ type RequestBody = {
 };
 
 async function ownedActivePlan(id: string, userId: string) {
-  return env.DB.prepare(`SELECT p.id, p.donor_id, p.installment_amount_cents, p.expected_day_of_month, p.next_expected_payment_at, p.final_expected_payment_at, p.note, p.original_pledge_date, p.commitment_duration_months, p.ended_at
+  return env.DB.prepare(`SELECT p.id, p.donor_id, p.installment_amount_cents, p.expected_day_of_month, p.next_expected_payment_at, p.final_expected_payment_at, p.note, p.original_pledge_date, p.commitment_duration_months, p.ended_at, p.renewal_acknowledged_at
     FROM pledge_payment_plans p
     WHERE p.id = ? AND p.user_id = ? LIMIT 1`)
     .bind(id, userId).first<PlanRow>();
@@ -71,6 +77,33 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     catch (error) { logger.error("pledge_payment_plan_end_failed", error, { planId: id, userId }); return Response.json({ error: "Payment plan could not be ended" }, { status: 500 }); }
     logger.info("pledge_payment_plan_ended", { planId: id, donorId: plan.donor_id, userId });
     return Response.json({ planId: id, endedAt: now });
+  }
+
+  // MARK RENEWAL ADDRESSED (2026-10-09, see docs/AI-HANDOFF.md). Sets
+  // renewal_acknowledged_at ONLY -- never ended_at, never
+  // originalPledgeDate/commitmentDurationMonths/the schedule fields,
+  // never any giving_activities/gifts/jl_payment_assignment_audits row.
+  // Scoped to this exact plan row (WHERE id = ? AND user_id = ?) --
+  // acknowledging one plan can never affect a donor's other plans. Not
+  // combined with `ended`/a plain edit in the same request, matching
+  // the END branch's own convention above.
+  if (body.acknowledgeRenewal === true) {
+    if (plan.original_pledge_date === null || plan.commitment_duration_months === null) {
+      return Response.json({ error: "This plan has no verified renewal date to acknowledge." }, { status: 422 });
+    }
+    const before = { renewalAcknowledgedAt: plan.renewal_acknowledged_at };
+    const after = { renewalAcknowledgedAt: now };
+    const statements = [
+      env.DB.prepare("UPDATE pledge_payment_plans SET renewal_acknowledged_at = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+        .bind(now, now, id, userId),
+      env.DB.prepare(`INSERT INTO pledge_payment_plan_changes (id, plan_id, user_id, donor_id, action, changed_fields, before_json, after_json, created_at)
+        VALUES (?, ?, ?, ?, 'updated', ?, ?, ?, ?)`)
+        .bind(crypto.randomUUID(), id, userId, plan.donor_id, JSON.stringify(["renewalAcknowledgedAt"]), JSON.stringify(before), JSON.stringify(after), now),
+    ];
+    try { await env.DB.batch(statements); }
+    catch (error) { logger.error("pledge_payment_plan_renewal_acknowledge_failed", error, { planId: id, userId }); return Response.json({ error: "The renewal follow-up could not be acknowledged" }, { status: 500 }); }
+    logger.info("pledge_payment_plan_renewal_acknowledged", { planId: id, donorId: plan.donor_id, userId });
+    return Response.json({ planId: id, renewalAcknowledgedAt: now });
   }
 
   // EDIT: partial update. Recomputes expected_day_of_month from a newly

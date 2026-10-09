@@ -291,10 +291,21 @@ test("baseline picks up the schema-changing 0040 commitment duration months migr
   // pledge_payment_plans table (Pledge Renewal Reminders,
   // commitment-duration correction; see docs/AI-HANDOFF.md) -- an
   // additive column, not a rebuild, so the schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0040_pledge_payment_plans_commitment_duration_months.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 41);
+  assert.ok(manifest.sourceMigrations.includes("0040_pledge_payment_plans_commitment_duration_months.sql"));
+  const planTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "pledge_payment_plans");
+  assert.match(planTable.sql, /commitment_duration_months/);
+});
+
+test("baseline picks up the schema-changing 0041 renewal acknowledged at migration", () => {
+  // 0041_pledge_payment_plans_renewal_acknowledged_at.sql adds one
+  // nullable column (renewal_acknowledged_at) to the existing
+  // pledge_payment_plans table (Mark Renewal Addressed; see
+  // docs/AI-HANDOFF.md) -- an additive column, not a rebuild, so the
+  // schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0041_pledge_payment_plans_renewal_acknowledged_at.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 42);
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
   const planTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "pledge_payment_plans");
-  assert.match(planTable.sql, /commitment_duration_months/);
+  assert.match(planTable.sql, /renewal_acknowledged_at/);
 });
