@@ -26166,3 +26166,248 @@ unmodified throughout.
 `feature/independent-cloudflare-sandbox` was touched by this sync
 (confirmed: `git status` clean throughout); its own `pnpm test`/
 `tsc`/build status is unchanged from the prior round's entry.
+
+## D1 Migration Sync Automation -- IMPLEMENTED, TESTED -- CI-ONLY CHANGE, NO INDEPENDENT STAGING DEPLOY APPLICABLE, ZERO D1/PRODUCTION TOUCHED
+
+**The recurring problem.** Six separate times (migrations 0029,
+0030-0035, 0036, 0037, 0038, and 0039+0040 -- see every "D1 Monthly
+Restore Verification Repair" entry above), a migration landed on this
+branch and `main`'s separately-committed restore/baseline tracking was
+only discovered to be stale when a check (or, originally, the real
+monthly restore-verification run) failed. Detection worked; nothing
+*prepared* the fix. This round builds exactly that -- proactively, the
+moment a migration is pushed, never waiting to be discovered.
+
+### Design, approved across three review rounds (see prior turns' own
+investigation/design-approval entries for the full back-and-forth) --
+summarized here as implemented:
+
+**Two independent jobs, two independent signals -- never blended.**
+`.github/workflows/d1-restore-sync-check.yml`'s existing `check` job
+(`scripts/check-main-restore-sync.mjs`, read-only) is **completely
+unmodified** -- real drift against `main` always fails it, with zero
+exception, including when an automated PR already covers that exact
+drift. A new, independent `prepare-sync` job (`needs: check`, `if:
+always()`, so it runs regardless of `check`'s own conclusion) attempts
+to generate, validate, and open/update a synchronization PR; its own
+success/failure is a SEPARATE signal ("a fix is ready" vs. "this
+couldn't be automated, do it by hand"). Reading both together gives
+three distinguishable states (fully synchronized / PR prepared and
+awaiting review / preparation failed or unsafe) -- see docs/
+D1-MIGRATION-SYNC-PROCESS.md's own table.
+
+**Conservative, self-verifying generator.** `lib/operations/
+restore-sync-generator.ts`'s `planRestoreSyncPatch` only ever proposes a
+patch for a pure addition (a new column/index on an EXISTING table,
+nothing removed/retyped/reordered, and explicitly **never a new table**
+-- restore-order placement for a new table needs human judgment about
+its real FK dependencies, deliberately left out of scope). It refuses
+immediately on: any DROP/RENAME keyword in the new migration's own raw
+SQL text; any table/index present on `main` but missing from the
+canonical branch; any table whose field list isn't a pure, order-
+preserving superset of main's (an exact-text subsequence check, so a
+retyped or reordered column can never slip through as a false
+"addition"). Beyond those specific checks, every proposed patch is
+independently **self-verified** by building the candidate patched
+`main` state and re-running the EXACT SAME `compareCrossBranchRestoreState`
+the authoritative `check` job uses -- a patch is only ever returned
+`safe: true` if that independent re-run also reports `inSync: true`.
+Proven to be a genuine backstop, not just a restatement of the checks
+above it, by a unit test (`tests/restore-sync-generator.test.mjs`,
+scenario 9) constructing a new-FK-on-an-existing-table case none of the
+earlier checks specifically covers, which only the self-verify step
+catches.
+
+**Trusted contexts only.** `prepare-sync` runs `if: github.event_name ==
+'push' || github.event_name == 'workflow_dispatch'` -- never for a
+`pull_request` event, so write-privileged automation can never execute
+against untrusted PR-sourced code, from a fork or otherwise. `check`
+itself is unaffected (still read-only, still runs for every trigger
+including `pull_request`, exactly as before this round).
+
+**Validated against main's own real gates before ever pushing.** Beyond
+the generator's own self-verification, `scripts/open-or-update-sync-pr.mjs`
+applies the candidate patch to a scratch worktree built from `main`'s
+real current tip and runs `main`'s own real `npm test`, `main`'s own
+real `npm run build`, AND a fresh re-run of the unmodified
+`check-main-restore-sync.mjs` pointed at that candidate branch -- any of
+the three failing is treated exactly like a generator-level refusal;
+nothing is ever pushed on a failed validation.
+
+**Never force-pushes; never touches a reviewed branch.**
+`lib/operations/restore-sync-branch-policy.ts`'s `decideSyncBranchAction`
+is the one, pure, fully-unit-tested decision point: if the existing
+automated branch/PR (`automated/d1-restore-sync`) has ANY human
+activity -- a review, a comment, or a commit not authored by the
+automation's own dedicated git identity (`D1 Restore Sync Bot
+<d1-restore-sync-bot@users.noreply.github.com>`) -- it is never touched
+again; a freshly-named branch/PR is opened instead, linking back to the
+one it supersedes. Otherwise, a new commit is appended (never amended,
+never force-pushed) on top of the branch's current tip. A concurrent
+push race (two runs updating the same branch) is resolved by re-fetching
+and comparing content on rejection, not by retrying with `--force`.
+
+**Never merges, never touches D1, never deploys.** The automation's only
+write operations are a plain `git push` to a non-`main` branch and a
+GitHub API `POST`/`PATCH` against `/pulls`. No merge call exists
+anywhere in this code. No `wrangler`/D1 command exists anywhere in this
+code. No deployment step exists anywhere in this code.
+
+**No security setting weakened.** Verified directly via the GitHub API
+before implementing (read-only): the repository's `default_workflow_permissions`
+is `"read"` and `main` currently has **no branch protection at all**
+(`404: Branch not protected`) -- neither was touched. `prepare-sync`
+requests `contents: write, pull-requests: write` scoped to that one job
+only, via the standard per-job `permissions:` escalation GitHub Actions
+itself provides -- additive to, never a change of, the repository-wide
+default. (Noted as a separate, optional observation, not implemented or
+requested: since `main` has no branch protection today, the "PR-only"
+guarantee for the bot's own work is currently a workflow-level
+convention -- the bot is simply never given a direct-push code path to
+`main` -- not yet a GitHub-enforced rule for every actor. Enabling
+branch protection on `main` would make that platform-enforced; left
+entirely to the repository owner's own discretion.)
+
+### Files changed
+
+- `lib/operations/restore-sync-generator.ts` (new) -- the pure,
+  conservative patch-planning decision, plus `renderProductionBaselineTsPatch`
+  (text-patches only the specific assertion/comment block in `lib/
+  data-health/production-baseline.ts`, byte-identical everywhere else).
+- `lib/operations/restore-sync-branch-policy.ts` (new) -- the pure
+  branch/PR-safety decision (`decideSyncBranchAction`).
+- `scripts/prepare-main-restore-sync-patch.mjs` (new) -- read-only CLI:
+  loads both branches' state (the identical loading pattern
+  `scripts/check-main-restore-sync.mjs` already uses, intentionally
+  duplicated rather than importing from that script, since that script
+  must stay completely unmodified), calls the generator, optionally
+  writes the safe patch to `--out-dir`. Zero side effects; usable
+  standalone for the documented manual preflight.
+- `scripts/open-or-update-sync-pr.mjs` (new) -- the branch/PR
+  orchestration: safe-by-default (dry-run without `--apply`), performs
+  the real git/GitHub-API writes only with `--apply` (as `prepare-sync`
+  passes).
+- `.github/workflows/d1-restore-sync-check.yml` -- `check` job's own
+  steps are byte-for-byte unchanged; added the new `prepare-sync` job
+  and extended both trigger `paths:` lists with the new automation
+  files (so a change to the automation itself re-runs the check, the
+  same convention already applied to `scripts/check-main-restore-sync.mjs`
+  and `lib/operations/restore-drift-guard.ts`).
+- `docs/FUNDRAISING_OS_PRINCIPLES.md` -- added the mandatory migration
+  preflight rule (run the drift check before pushing a migration; if it
+  reports drift, prepare or confirm the automated sync as part of the
+  same task).
+- `docs/D1-MIGRATION-SYNC-PROCESS.md` (new) -- the full operating
+  reference: the two-signal table, the mandatory preflight steps, the
+  generator's exact safe/unsafe boundary, branch/PR safety rules, and
+  the local command reference.
+- `tests/restore-sync-generator.test.mjs`, `tests/restore-sync-branch-policy.test.mjs`
+  (new), wired into `scripts/run-tests.mjs`.
+
+### Testing
+
+**Unit tests (synthetic, table-name-agnostic, matching `tests/
+restore-drift-guard.test.mjs`'s own established style):**
+`restore-sync-generator.test.mjs` covers `tableFieldsFromSql`
+(paren-depth-aware comma splitting), `isSubsequence`, `scanForDestructiveKeywords`,
+and 9 `planRestoreSyncPatch` scenarios -- already synchronized; pure
+additive column; pure additive index; a brand-new table (refused); a
+removed table (refused); a column removed without a DROP keyword
+present (refused via the subsequence check, proving that path is a real
+independent guard, not just the keyword scan); a retyped column
+(refused); `main` ahead of/diverged from the canonical branch (refused,
+never attempted); and the self-verification backstop scenario described
+above. `restore-sync-branch-policy.test.mjs` covers first-run creation,
+a stale branch safely extended, a concurrent-run race resolving as a
+no-op, human review activity forcing a fresh branch (with the
+idempotency-wins-when-nothing-changed nuance explicitly tested and
+explained), and a fresh branch itself correctly following the same
+rules on its own next run.
+
+**Real-data validation (read-only against the real repo/git history;
+zero D1 access anywhere in this round):**
+- Ran the generator against the REAL current (in-sync) `origin/main` --
+  correctly reported `alreadySynced: true`.
+- Ran the generator with `MAIN_REF` pointed at the REAL historical
+  pre-sync commit (`114c7bb`, main's actual state before the 0039/0040
+  sync) -- correctly reproduced the exact real incident: both
+  migrations identified, patch generated, migration count 41.
+- Applied that generated patch to a scratch worktree built from the
+  real `114c7bb`, committed it, and re-ran the REAL, unmodified
+  `check-main-restore-sync.mjs` with `MAIN_REF` pointed at that local
+  candidate branch -- **PASS** ("No drift detected"), proving the
+  generator's real output genuinely resolves the real historical drift,
+  not merely self-consistently.
+- In a separate scratch worktree with the same real generated patch
+  applied: ran `main`'s own real `npm install`/`npm test` (**147/147
+  passed**) and `npm run build` (succeeded) -- the exact validation
+  sequence `open-or-update-sync-pr.mjs --apply` performs internally,
+  proven to work against the real historical incident.
+- Ran `scripts/open-or-update-sync-pr.mjs` in dry-run mode (no
+  `--apply`) against the real repo, with real (read-only) GitHub API
+  access: against the current in-sync state -> `already_synced`
+  (zero API calls made, by design); against the historical pre-sync
+  `MAIN_REF` -> correctly looked up the real `automated/d1-restore-sync`
+  branch (confirmed absent), decided `create_new`, and stopped there
+  (`apply: false`) without pushing or creating anything.
+- All 3 new scratch worktrees/branches created for the above were
+  local-only, never pushed, and removed immediately after use
+  (`git worktree remove --force` + `git branch -D`).
+
+**Honest limitation, stated plainly:** the actual `git push` +
+GitHub-API PR-creation/update code path inside `open-or-update-sync-pr.mjs`
+was **not** exercised for real in this round, since doing so would
+require either genuine current drift (none exists -- `main` is fully
+synchronized as of the prior round) or creating a real PR without
+genuine drift, both of which the task explicitly forbids. That specific
+code path is implemented, type-checked, linted clean, and reviewed, and
+every OTHER piece it depends on (the generator's real output, the
+worktree/commit/validate sequence, the real read-only API lookups) has
+been independently proven against real data above -- but the live
+push+PR-write call itself remains unexercised until the next real
+schema-changing migration lands.
+
+**Gates (this branch, `feature/independent-cloudflare-sandbox`):**
+`pnpm run test` -> **167/167 passed** (164 prior + 3 new: the two new
+test files plus no change to any existing file's own test count).
+`pnpm exec tsc --noEmit` -> clean. `pnpm exec eslint` on every new/changed
+file -> zero errors or warnings. `node scripts/build-staging.mjs` ->
+succeeds. The new workflow YAML was parsed and structurally verified
+with `js-yaml` (installed temporarily, outside this repo's own
+`node_modules`, removed immediately after) -- correct job graph
+(`check`, `prepare-sync`), correct `needs`/`if`/`permissions`, 13 paths
+in each trigger's `paths:` list.
+
+### Security safeguards, confirmed
+
+- Repository `default_workflow_permissions` (`"read"`) -- unchanged.
+- `main` branch protection -- unchanged (still none; not enabled, not
+  requested as part of this task).
+- `allowed_actions`/`sha_pinning_required` -- unchanged; this
+  implementation adds no third-party Action dependency at all (plain
+  `git` CLI calls plus the native `fetch` API against GitHub's REST
+  API), so there is nothing to pin.
+- No new secret was created; `prepare-sync` uses only the workflow's own
+  automatically-provisioned, job-scoped `GITHUB_TOKEN`.
+- No D1/`wrangler` credential is referenced anywhere in any new file.
+
+### Remaining manual setup / limitations
+
+- **New-table migrations remain fully manual**, by deliberate design --
+  the existing narrow-branch process (see every prior "D1 Monthly
+  Restore Verification Repair" entry) is unchanged and still required
+  for any migration that adds a table.
+- The live push/PR-creation code path (see "Honest limitation" above)
+  will get its first real exercise the next time a genuinely safe,
+  column/index-only migration lands on this branch while `main` is
+  behind -- worth watching the resulting PR closely the first time.
+- `main` has no branch protection today; the repository owner may wish
+  to enable it (require PR + 1 approval) so "a human must approve
+  before `main` changes" becomes platform-enforced for every actor, not
+  only a convention this automation itself follows. Not implemented,
+  not requested as part of this task -- a separate decision entirely at
+  the repository owner's discretion.
+- The generated `lib/data-health/production-baseline.ts` doc comment is
+  deliberately more mechanical/templated than the richer hand-written
+  prose every manual sync round used -- an accepted trade-off for
+  automation, not a defect.

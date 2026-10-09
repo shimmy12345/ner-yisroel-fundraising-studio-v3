@@ -99,6 +99,22 @@ changes to Fundraising OS. It does not describe how the code currently works
   identify the remote before pushing.
 - Do not change production data, bindings, migrations, or access policies
   without explicit approval.
+- **Mandatory migration preflight.** The moment a `drizzle/*.sql`
+  migration is added on the canonical branch
+  (`feature/independent-cloudflare-sandbox`), run
+  `node scripts/check-main-restore-sync.mjs` before pushing. If it
+  reports drift, the task is not finished merely because the migration
+  itself works on Independent Staging -- prepare the `main`-branch
+  restore/baseline synchronization as part of the same task (or confirm
+  the automated `prepare-sync` CI job will do so, and say so in the
+  report), rather than leaving it to be discovered later by a failed
+  check or a failed monthly restore-verification run. See
+  `docs/D1-MIGRATION-SYNC-PROCESS.md` for the exact mechanics. This is a
+  narrow, explicitly-scoped exception to "do not modify `main`" above --
+  it only ever touches the two restore-tracking files, never application
+  code, and a push to `main` itself still always requires separate,
+  explicit approval, whether proposed by a human or by the automation's
+  own pull request.
 - Never weaken data-integrity, authentication, backup, or launch safeguards.
 - If a fact cannot be verified, say so instead of guessing.
 - Run tests, type check, and production build before declaring
