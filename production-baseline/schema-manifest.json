@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "409c475c4a1ef6238dc85534d4b0de2e417f54e6860a705787890fe5de8963d0",
+  "schemaHash": "589c640aa1fa4206b2d9092eb82124baff107fcff65558f52fce8d0c593a7338",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -42,7 +42,8 @@
     "0037_donor_rebbeim.sql",
     "0038_pledge_payment_plan_reviews.sql",
     "0039_pledge_payment_plans_original_pledge_date.sql",
-    "0040_pledge_payment_plans_commitment_duration_months.sql"
+    "0040_pledge_payment_plans_commitment_duration_months.sql",
+    "9999_test_d1_sync_automation_dummy_column.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -577,6 +578,13 @@
             "name": "created_at",
             "type": "INTEGER",
             "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "__d1_sync_automation_test_marker",
+            "type": "INTEGER",
+            "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
           }
@@ -6388,7 +6396,7 @@
     {
       "type": "table",
       "name": "data_health_repair_audits",
-      "sql": "CREATE TABLE `data_health_repair_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `record_type` text NOT NULL CHECK (`record_type` IN ('interaction','reminder')), `record_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('reattach','move_to_survivor','archive','dismiss_false_positive')), `previous_donor_id` text, `next_donor_id` text, `previous_state_json` text NOT NULL, `next_state_json` text NOT NULL, `reason` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `data_health_repair_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `record_type` text NOT NULL CHECK (`record_type` IN ('interaction','reminder')), `record_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('reattach','move_to_survivor','archive','dismiss_false_positive')), `previous_donor_id` text, `next_donor_id` text, `previous_state_json` text NOT NULL, `next_state_json` text NOT NULL, `reason` text NOT NULL, `created_at` integer NOT NULL, `__d1_sync_automation_test_marker` integer, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
