@@ -67,11 +67,16 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   if (!donor) return null;
 
   const [giving, legacyGifts, interactions, reminders, historicalContextRows, historicalContextCount, acknowledgments, yahrtzeitRows, importantDateRows, openAskRows, openAskReminderRows, pledgePaymentRows, paymentPlanRows, relationshipFactRows] = await Promise.all([
-    env.DB.prepare(`SELECT id, activity_date, paid_cents, balance_cents, description, item_type, source_campaign
-      FROM giving_activities
-      WHERE donor_id = ? AND owner_user_id = ? AND record_origin = 'live'
-        AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
-      ORDER BY activity_date DESC LIMIT 1000`).bind(donorId, userId).all<GivingRow>(),
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- same
+    // effective-balance JOIN every other live giving_activities query in
+    // this app uses, so Meeting Brief's own open-pledge evidence can
+    // never disagree with the donor page/Today about the same pledge.
+    env.DB.prepare(`SELECT ga.id, ga.activity_date, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents, ga.description, ga.item_type, ga.source_campaign
+      FROM giving_activities ga
+      LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
+      WHERE ga.donor_id = ? AND ga.owner_user_id = ? AND ga.record_origin = 'live'
+        AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
+      ORDER BY ga.activity_date DESC LIMIT 1000`).bind(donorId, userId).all<GivingRow>(),
     env.DB.prepare(`SELECT g.id, g.received_at, g.amount_cents, g.fund
       FROM gifts g JOIN donors d ON d.id = g.donor_id
       WHERE g.donor_id = ? AND d.owner_user_id = ? AND d.data_source = 'live'

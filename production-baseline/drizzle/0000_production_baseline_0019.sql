@@ -562,6 +562,23 @@ CREATE TABLE `onboarding_preferences` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `pledge_balance_corrections` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `pledge_activity_id` text NOT NULL,
+  `imported_balance_cents_at_correction` integer NOT NULL,
+  `corrected_balance_cents` integer NOT NULL,
+  `reason` text NOT NULL,
+  `created_at` integer NOT NULL,
+  `reversed_at` integer,
+  `reversal_reason` text,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+  FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action,
+  CHECK (`corrected_balance_cents` >= 0)
+);
+
 CREATE TABLE `pledge_payment_plan_changes` (
   `id` text PRIMARY KEY NOT NULL,
   `plan_id` text NOT NULL,
@@ -870,6 +887,10 @@ CREATE INDEX `jl_payment_assignment_audits_user_date_idx` ON `jl_payment_assignm
 
 CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`);
 
+CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL;
+
+CREATE INDEX `pledge_balance_corrections_pledge_idx` ON `pledge_balance_corrections` (`pledge_activity_id`,`created_at`);
+
 CREATE INDEX `pledge_payment_plan_changes_plan_idx` ON `pledge_payment_plan_changes` (`plan_id`,`created_at`);
 
 CREATE UNIQUE INDEX `pledge_payment_plan_reviews_user_pledge_uidx` ON `pledge_payment_plan_reviews` (`user_id`,`pledge_activity_id`);
@@ -905,5 +926,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','8cac811e005bfc3227c9ccaa8b1920204eab91a3cd60affd13531540d8c8bb99',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','913299652ad37c0073e82aeccb30511dc1f13c784eebb5e4e7ecd3e237dea566',1785944072);
 PRAGMA optimize;

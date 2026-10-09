@@ -9,13 +9,13 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 42 as of 0041_pledge_payment_plans_renewal_acknowledged_at.sql — adds
-// one nullable column to the existing pledge_payment_plans table (Mark
-// Renewal Addressed; see docs/AI-HANDOFF.md), not a rebuild of anything
-// existing, so PRODUCTION_BASELINE_HASH changed again
-// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
-// single bootstrap file's origin, not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 42;
+// 43 as of 0042_pledge_balance_corrections.sql — adds one new table
+// (pledge_balance_corrections, Manual Pledge Balance Corrections; see
+// docs/AI-HANDOFF.md), not a rebuild of anything existing, so
+// PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL
+// stays "0019": that label identifies the single bootstrap file's
+// origin, not its current contents).
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 43;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

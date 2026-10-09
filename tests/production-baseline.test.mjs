@@ -302,10 +302,25 @@ test("baseline picks up the schema-changing 0041 renewal acknowledged at migrati
   // pledge_payment_plans table (Mark Renewal Addressed; see
   // docs/AI-HANDOFF.md) -- an additive column, not a rebuild, so the
   // schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0041_pledge_payment_plans_renewal_acknowledged_at.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 42);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  assert.ok(manifest.sourceMigrations.includes("0041_pledge_payment_plans_renewal_acknowledged_at.sql"));
   const planTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "pledge_payment_plans");
   assert.match(planTable.sql, /renewal_acknowledged_at/);
+});
+
+test("baseline picks up the schema-adding 0042 pledge balance corrections migration", () => {
+  // 0042_pledge_balance_corrections.sql adds one new table
+  // (pledge_balance_corrections, Manual Pledge Balance Corrections; see
+  // docs/AI-HANDOFF.md) -- including its partial unique index enforcing
+  // at most one active correction per pledge -- so the schema hash must
+  // change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0042_pledge_balance_corrections.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 43);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const correctionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "pledge_balance_corrections");
+  assert.ok(correctionsTable, "pledge_balance_corrections must be a real table in the baseline topology");
+  assert.match(correctionsTable.sql, /corrected_balance_cents/);
+  assert.match(correctionsTable.sql, /imported_balance_cents_at_correction/);
+  const activeIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "pledge_balance_corrections_active_uidx");
+  assert.ok(activeIndex, "the partial unique index enforcing at most one active correction per pledge must be captured in the baseline");
 });

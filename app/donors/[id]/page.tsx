@@ -13,6 +13,7 @@ import { PendingGiftForm } from "./GivingManagement";
 import { OpenAskCard, AskHistory, LogAskForm } from "./AskManagement";
 import { matchAskFollowUps } from "../../../lib/relationships/meeting-brief-model";
 import { OpenPledgePlanCard, type PledgePlanState } from "./PledgePaymentPlanManagement";
+import { PledgeBalanceCorrectionControl, type PledgeBalanceCorrectionState } from "./PledgeBalanceCorrection";
 import { countsInGivingTotals } from "../../../lib/giving/management";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import { UnifiedRelationshipTimeline } from "./UnifiedRelationshipTimeline";
@@ -38,6 +39,7 @@ type Donor = { id: string; display_name: string; donor_code: string | null; last
 type Activity = { id: string; donor_id: string; external_source: string; activity_date: number | null; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; item_type: string | null; description: string | null; source_campaign: string | null; category: string; workspace_status: string; private_note: string | null; confirmed_by_activity_id: string | null; updated_at: number };
 type PaymentEvent = { id: string; payment_date: number; applied_cents: number; remaining_balance_cents: number | null; pledge_activity_id: string; pledge_description: string | null; pledge_campaign: string | null };
 type PaymentPlanRow = { id: string; pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number; note: string | null; original_pledge_date: number | null; commitment_duration_months: number | null; renewal_acknowledged_at: number | null };
+type BalanceCorrectionRow = { id: string; pledge_activity_id: string; imported_balance_cents_at_correction: number; corrected_balance_cents: number; reason: string; created_at: number; reversed_at: number | null; reversal_reason: string | null };
 type Gift = { id: string; received_at: number; amount_cents: number; fund: string };
 type Interaction = { id: string; type: string; occurred_at: number; occurred_at_date_only: number; summary: string; source: string; created_at: number; status_changed_at: number | null; shared_activity_id: string | null; role: string | null; shared_activity_recipient_count: number | null; shared_activity_summary: string | null };
 type Recommendation = { id: string; action: string; reason: string; status: string; due_at: number | null; due_at_date_only: number; created_at: number; updated_at: number };
@@ -101,7 +103,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     marks.donorViewsMs = Date.now() - donorViewsStart;
     d1Calls += 1;
   }
-  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult, paymentPlanResult, relationshipFactResult] = await Promise.all([
+  const [activityResult, giftResult, interactionResult, recommendationResult, paymentEventResult, contactAuditResult, donorDirectoryResult, acknowledgmentResult, askResult, paymentPlanResult, balanceCorrectionResult, relationshipFactResult] = await Promise.all([
     timedAll(marks, "giving", (mode === "demo" ? env.DB.prepare("SELECT id, donor_id, external_source, activity_date, committed_cents, paid_cents, balance_cents, item_type, description, source_campaign, category, workspace_status, private_note, confirmed_by_activity_id, updated_at FROM giving_activities WHERE donor_id = ? AND record_origin = 'sample' ORDER BY activity_date DESC LIMIT 500").bind(id) : env.DB.prepare(DONOR_GIVING_SQL).bind(id, profile.id)).all<Activity>()),
     timedAll(marks, "gifts", env.DB.prepare("SELECT id, received_at, amount_cents, fund FROM gifts WHERE donor_id = ? ORDER BY received_at DESC LIMIT 500").bind(id).all<Gift>()),
     timedAll(marks, "interactions", env.DB.prepare(`SELECT interactions.id, interactions.type, interactions.occurred_at, interactions.occurred_at_date_only, interactions.summary, interactions.source, interactions.created_at, interactions.shared_activity_id, interactions.role, shared_activities.recipient_count AS shared_activity_recipient_count, shared_activities.summary AS shared_activity_summary, ${mode === "demo" ? "NULL" : "(SELECT created_at FROM activity_status_audits WHERE interaction_id=interactions.id AND user_id=? AND undone_at IS NULL ORDER BY created_at DESC LIMIT 1)"} AS status_changed_at
@@ -132,18 +134,37 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     // local fundraiser-declared stewardship metadata for a specific open
     // pledge, never a JL fact. Feeds openPledge.activePaymentPlan.
     timedAll(marks, "paymentPlans", mode === "demo" ? Promise.resolve({ results: [] as PaymentPlanRow[] }) : env.DB.prepare("SELECT id, pledge_activity_id, installment_amount_cents, expected_day_of_month, next_expected_payment_at, final_expected_payment_at, note, original_pledge_date, commitment_duration_months, renewal_acknowledged_at FROM pledge_payment_plans WHERE donor_id=? AND user_id=? AND ended_at IS NULL").bind(id, profile.id).all<PaymentPlanRow>()),
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) --
+    // this donor's FULL correction history (active + reversed), newest
+    // first, scoped by donor_id -- the "Correct Balance" UI needs the
+    // whole history for its own history view, never just the active row.
+    // No demo/sample data exists for this write-capable feature,
+    // matching every other such feature on this page (Asks, Payment
+    // Plans).
+    timedAll(marks, "balanceCorrections", mode === "demo" ? Promise.resolve({ results: [] as BalanceCorrectionRow[] }) : env.DB.prepare("SELECT id, pledge_activity_id, imported_balance_cents_at_correction, corrected_balance_cents, reason, created_at, reversed_at, reversal_reason FROM pledge_balance_corrections WHERE donor_id=? AND user_id=? ORDER BY pledge_activity_id, created_at DESC").bind(id, profile.id).all<BalanceCorrectionRow>()),
     // Relationship Snapshot Architecture Stage 2 -- every CURRENT
     // structured Relationship Fact for this donor, feeding fact-level
     // recommendation actionability below. No demo/sample data for this
     // table, matching acknowledgmentResult/askResult's demo handling.
     timedAll(marks, "relationshipFacts", mode === "demo" ? Promise.resolve({ results: [] as RelationshipFactRow[] }) : env.DB.prepare("SELECT category, lifecycle, status, fact_text, source_interaction_id, source_interaction_occurred_at FROM donor_relationship_facts WHERE donor_id=? AND user_id=? AND status='current'").bind(id, profile.id).all<RelationshipFactRow>()),
   ]);
-  d1Calls += 4 + (mode === "live" ? 7 : 0);
+  d1Calls += 4 + (mode === "live" ? 8 : 0);
   const activities = activityResult.results;
   const asks = askResult.results;
   const countedActivities = activities.filter(countsInGivingTotals);
   const paymentEvents = paymentEventResult.results;
   const paymentPlans = paymentPlanResult.results;
+  const balanceCorrections = balanceCorrectionResult.results;
+  // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) --
+  // grouped by pledge, each group already ordered newest-first (the
+  // query's own ORDER BY), so the first entry per pledge is always the
+  // most recent row -- the active one, if any (reversedAt === null),
+  // otherwise the most recently reversed one.
+  const correctionsByPledge = new Map<string, BalanceCorrectionRow[]>();
+  for (const row of balanceCorrections) {
+    const list = correctionsByPledge.get(row.pledge_activity_id);
+    if (list) list.push(row); else correctionsByPledge.set(row.pledge_activity_id, [row]);
+  }
   const legacyGifts = giftResult.results;
   const paid = countedActivities.reduce((sum, item) => sum + (item.paid_cents ?? 0), 0) + legacyGifts.reduce((sum, item) => sum + item.amount_cents, 0);
   const open = countedActivities.reduce((sum, item) => sum + Math.max(0, item.balance_cents ?? 0), 0);
@@ -301,9 +322,27 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // renewal-field form never become permanently unreachable the moment
   // balance hits zero. A pledge with NO plan and a zero balance is still
   // correctly excluded (nothing to show, same as before).
-  const openPledgesWithPlans = countedActivities.filter((item) => shouldShowPaymentPlanCard(item.balance_cents, paymentPlans.some((p) => p.pledge_activity_id === item.id))).map((pledge) => {
+  const openPledgesWithPlans = countedActivities.filter((item) => shouldShowPaymentPlanCard(item.balance_cents, paymentPlans.some((p) => p.pledge_activity_id === item.id), (correctionsByPledge.get(item.id) ?? []).some((c) => c.reversed_at === null))).map((pledge) => {
     const planRow = paymentPlans.find((item) => item.pledge_activity_id === pledge.id);
-    if (!planRow) return { pledge, planState: null as PledgePlanState | null };
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- full
+    // history for this pledge (newest first), independent of whether
+    // this pledge also has a payment plan. The RAW imported balance
+    // (never the effective one) is read back from whichever row is
+    // most recent: the active correction's own frozen snapshot if one
+    // exists, otherwise the pledge's own current balance_cents is
+    // already the raw/imported value (no correction has ever touched
+    // it).
+    const correctionHistory = correctionsByPledge.get(pledge.id) ?? [];
+    const activeCorrectionRow = correctionHistory.find((c) => c.reversed_at === null) ?? null;
+    const importedBalanceCents = activeCorrectionRow ? activeCorrectionRow.imported_balance_cents_at_correction : (pledge.balance_cents ?? 0);
+    const correctionState: PledgeBalanceCorrectionState = {
+      pledgeActivityId: pledge.id,
+      importedBalanceCents,
+      effectiveBalanceCents: pledge.balance_cents ?? 0,
+      active: activeCorrectionRow ? { id: activeCorrectionRow.id, correctedBalanceCents: activeCorrectionRow.corrected_balance_cents, reason: activeCorrectionRow.reason, createdAt: activeCorrectionRow.created_at } : null,
+      history: correctionHistory.map((c) => ({ id: c.id, importedBalanceCentsAtCorrection: c.imported_balance_cents_at_correction, correctedBalanceCents: c.corrected_balance_cents, reason: c.reason, createdAt: c.created_at, reversedAt: c.reversed_at, reversalReason: c.reversal_reason })),
+    };
+    if (!planRow) return { pledge, planState: null as PledgePlanState | null, correctionState };
     const linkedPaymentDates = paymentEvents.filter((event) => event.pledge_activity_id === pledge.id).map((event) => event.payment_date);
     const nowForPlanEvaluation = Math.floor(Date.now() / 1000);
     const evaluation = evaluatePaymentPlan(
@@ -335,7 +374,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       isRenewalFollowUpNeeded: pledgeRenewal.isRenewalFollowUpNeeded,
       renewalAcknowledgedAt: planRow.renewal_acknowledged_at,
     };
-    return { pledge, planState };
+    return { pledge, planState, correctionState };
   });
   const openPledgeForEvidence = openPledgeSource
     ? {
@@ -443,7 +482,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
         fully-paid pledge whose plan is still active -- and each row
         shows "Paid in full" rather than a $0 balance for that case
         (requirement: never present a completed pledge as unpaid). */}
-    {mode === "live" && openPledgesWithPlans.length > 0 && <section className="pledge-plans-section"><div className="card-heading"><div><p className="eyebrow">PLEDGES</p><h2>{openPledgesWithPlans.length} pledge{openPledgesWithPlans.length === 1 ? "" : "s"}</h2></div></div><div className="open-pledge-plan-list">{openPledgesWithPlans.map(({ pledge, planState }) => <article key={pledge.id} className="open-pledge-plan-row"><div className="open-pledge-summary"><strong>{(pledge.balance_cents ?? 0) > 0 ? money(pledge.balance_cents ?? 0) : "Paid in full"}</strong><span>{pledge.source_campaign || pledge.description || pledge.item_type || "Pledge"}</span></div><OpenPledgePlanCard pledgeActivityId={pledge.id} plan={planState} /></article>)}</div></section>}
+    {mode === "live" && openPledgesWithPlans.length > 0 && <section className="pledge-plans-section"><div className="card-heading"><div><p className="eyebrow">PLEDGES</p><h2>{openPledgesWithPlans.length} pledge{openPledgesWithPlans.length === 1 ? "" : "s"}</h2></div></div><div className="open-pledge-plan-list">{openPledgesWithPlans.map(({ pledge, planState, correctionState }) => <article key={pledge.id} className="open-pledge-plan-row"><div className="open-pledge-summary"><strong>{(pledge.balance_cents ?? 0) > 0 ? money(pledge.balance_cents ?? 0) : "Paid in full"}</strong><span>{pledge.source_campaign || pledge.description || pledge.item_type || "Pledge"}</span></div><OpenPledgePlanCard pledgeActivityId={pledge.id} plan={planState} />{mode === "live" && <PledgeBalanceCorrectionControl donorName={donor.display_name} donorCode={donorCode} campaign={pledge.source_campaign || pledge.description || pledge.item_type} originalPledgeCents={pledge.committed_cents ?? 0} state={correctionState} />}</article>)}</div></section>}
     <div className="relationship-grid"><main className="relationship-main">
       <section className="story-card ai-summary-card"><div className="card-heading"><div><p className="eyebrow">RELATIONSHIP SNAPSHOT</p><h2>{relationshipContext.summary ? "Prepare for the next interaction" : "No relationship snapshot yet"}</h2></div></div><p className="summary">{relationshipContext.summary || "Log a completed interaction to begin a practical snapshot from this household’s actual activity."}</p><div className="next-action"><div className="next-action-icon">→</div><div><p className="eyebrow">SUGGESTED ACTION</p><h3>{recommendation?.action || "No suggested action available"}</h3><p>{recommendation?.why || "Add a reminder, or log an interaction, to generate a suggested next step."}</p>{recommendation && <p className="recommendation-evidence">{recommendation.evidence.join(" ")}</p>}{recommendation?.timing && <p className="recommendation-meta">{recommendation.timing}</p>}{recommendation?.kind === "reconnect_contact_gap" && completedInteractions[0] && completedInteractions[0].occurred_at > Math.floor(Date.now() / 1000) - 90 * 86400 && <p className="recommendation-clarifier">Last Contact reflects every touch, including broadcast texts/emails sent to many donors at once. This suggestion looks at substantive, one-to-one contact only.</p>}{mode === "live" && recommendation?.kind === "acknowledge_gift" && recommendation.giftSource && recommendation.giftId && <GiftAcknowledgmentActions giftSource={recommendation.giftSource} giftId={recommendation.giftId} initialStatus={null} compact />}</div></div>{mode === "live" && historicalContextRows.length > 0 && <details className="historical-context-disclosure"><summary>Imported context ({historicalContextRows.length})</summary><p className="historical-context-lede">Notes imported from external sources. Not logged interactions — never counted as contact, and never assumed to have actually happened.</p><div className="historical-context-list">{historicalContextRows.map((row) => <article key={row.id} className="historical-context-entry"><p className="historical-context-text">“{row.text}”</p><p className="historical-context-provenance">{row.source === "import-monday" ? "Monday.com" : row.source}{row.source_date ? ` · ${date(row.source_date, profile.timezone)}` : ""} · Completion was never confirmed.</p></article>)}</div></details>}</section>
       <section className="story-card memory-card"><div className="card-heading"><div><p className="eyebrow">INSTITUTIONAL MEMORY</p><h2>{relationshipContext.memory ? "Recorded relationship context" : "No institutional memory recorded"}</h2></div></div>{relationshipContext.memory && <p className="summary">{relationshipContext.memory}</p>}</section>

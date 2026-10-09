@@ -178,9 +178,12 @@ assert.match(donorPage, /headers\(\)\)\.get\("cf-ray"\)/, "the donor page must r
 // canonical Rebbeim directory for the "Add Rebbi" search, run together in
 // one Promise.all and timed as a single phase via a direct
 // marks.rebbeimMs/marks.rebbeimRows assignment -- see docs/AI-HANDOFF.md's
-// "Donor Rebbeim" entry) -- all real, intentional additions, not an
+// "Donor Rebbeim" entry) plus one more legitimate new query added by
+// Manual Pledge Balance Corrections (this donor's full correction
+// history, timed via timedAll(marks, "balanceCorrections", ...) -- see
+// docs/AI-HANDOFF.md) -- all real, intentional additions, not an
 // instrumentation leak.
-assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 26, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query, the one new payment-plans query, the one new relationship-facts query, and the two new Donor Rebbeim queries");
+assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 27, "the donor page must have exactly the pre-instrumentation D1 query count plus the one new asks query, the one new payment-plans query, the one new relationship-facts query, the two new Donor Rebbeim queries, and the one new balance-corrections query");
 
 assert.match(appShell, /active === "import"/);
 assert.match(appShell, /href="\/onboarding\/import"/);

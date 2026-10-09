@@ -251,8 +251,18 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       FROM recommendations r JOIN donors d ON d.id = r.donor_id
       WHERE ${demo ? "" : "r.user_id = ? AND"} r.status = 'open' AND ${donorScope}
       ORDER BY CASE WHEN r.due_at IS NULL THEN 1 ELSE 0 END, r.due_at, r.score DESC LIMIT 50`).bind(...(demo ? [] : [userId, userId])).all<PriorityRow>(),
-    env.DB.prepare(`SELECT ga.id, ga.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, ga.paid_cents, ga.balance_cents, ga.activity_date, ga.description, ga.item_type, ga.category, ga.updated_at
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- the
+    // LEFT JOIN + COALESCE is the SQL-level realization of the one
+    // effective-balance rule (lib/relationships/pledge-balance-correction.ts's
+    // effectiveBalanceCents is the same rule's canonical, unit-tested
+    // statement). `balance_cents` keeps its exact same column name, so
+    // every consumer of `giving.results` below (recommendation
+    // evidence, Today/Daily Agenda, recurring-payment alerts, the
+    // fulfilled-cultivation signal) needs ZERO changes -- harmless even
+    // in demo mode, since no sample donor ever has a real correction row.
+    env.DB.prepare(`SELECT ga.id, ga.donor_id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents, ga.activity_date, ga.description, ga.item_type, ga.category, ga.updated_at
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
+      LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
       WHERE ${demo ? "ga.record_origin = 'sample' AND" : "ga.owner_user_id = ? AND ga.record_origin = 'live' AND"} ${donorScope} AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
       ORDER BY ga.activity_date DESC LIMIT 300`).bind(...(demo ? [] : [userId, userId])).all<GivingRow>(),
     env.DB.prepare(`SELECT d.id, d.display_name, d.primary_first_name, d.last_name, d.donor_code, d.external_id, d.updated_at, d.relationship_summary, d.institutional_memory FROM donors d WHERE ${donorScope} ORDER BY d.display_name LIMIT 500`).bind(...(demo ? [] : [userId])).all<DonorRow>(),
@@ -351,8 +361,17 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // returns zero rows, at zero cost, until the fundraiser explicitly
     // verifies both facts. No demo/sample data exists for this feature,
     // matching every other demo-skipped query above.
-    demo ? Promise.resolve({ results: [] as PledgeRenewalPlanRow[] }) : env.DB.prepare(`SELECT p.id AS plan_id, p.donor_id, p.pledge_activity_id, p.original_pledge_date, p.commitment_duration_months, p.ended_at, p.renewal_acknowledged_at, g.committed_cents, g.balance_cents, g.source_campaign
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) --
+    // same effective-balance JOIN as the main giving query above, so a
+    // renewal-reminder row's own "$X balance remaining" display line
+    // can never disagree with a correction shown elsewhere. Never
+    // affects renewal-reminder ELIGIBILITY itself -- evaluatePledgeRenewal
+    // has no balance input at all, by design (see its own doc comment),
+    // so a corrected-to-$0 pledge's legitimate renewal opportunity is
+    // never suppressed by this join.
+    demo ? Promise.resolve({ results: [] as PledgeRenewalPlanRow[] }) : env.DB.prepare(`SELECT p.id AS plan_id, p.donor_id, p.pledge_activity_id, p.original_pledge_date, p.commitment_duration_months, p.ended_at, p.renewal_acknowledged_at, g.committed_cents, COALESCE(pbc.corrected_balance_cents, g.balance_cents) AS balance_cents, g.source_campaign
       FROM pledge_payment_plans p JOIN giving_activities g ON g.id = p.pledge_activity_id
+      LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = g.id AND pbc.reversed_at IS NULL
       WHERE p.user_id = ? AND p.ended_at IS NULL AND p.original_pledge_date IS NOT NULL AND p.commitment_duration_months IS NOT NULL`).bind(userId).all<PledgeRenewalPlanRow>(),
     // Relationship Snapshot Architecture Stage 2 -- every in-scope
     // donor's CURRENT structured Relationship Facts, batched in one query

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "8cac811e005bfc3227c9ccaa8b1920204eab91a3cd60affd13531540d8c8bb99",
+  "schemaHash": "913299652ad37c0073e82aeccb30511dc1f13c784eebb5e4e7ecd3e237dea566",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -43,7 +43,8 @@
     "0038_pledge_payment_plan_reviews.sql",
     "0039_pledge_payment_plans_original_pledge_date.sql",
     "0040_pledge_payment_plans_commitment_duration_months.sql",
-    "0041_pledge_payment_plans_renewal_acknowledged_at.sql"
+    "0041_pledge_payment_plans_renewal_acknowledged_at.sql",
+    "0042_pledge_balance_corrections.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -4953,6 +4954,140 @@
         "checks": []
       },
       {
+        "name": "pledge_balance_corrections",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "pledge_activity_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "imported_balance_cents_at_correction",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "corrected_balance_cents",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reason",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reversed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reversal_reason",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "pledge_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "pledge_balance_corrections_active_uidx",
+            "columns": [
+              "pledge_activity_id"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL"
+          },
+          {
+            "name": "pledge_balance_corrections_pledge_idx",
+            "columns": [
+              "pledge_activity_id",
+              "created_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `pledge_balance_corrections_pledge_idx` ON `pledge_balance_corrections` (`pledge_activity_id`,`created_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`corrected_balance_cents` >= 0)"
+        ]
+      },
+      {
         "name": "pledge_payment_plan_changes",
         "columns": [
           {
@@ -6570,6 +6705,11 @@
     },
     {
       "type": "table",
+      "name": "pledge_balance_corrections",
+      "sql": "CREATE TABLE `pledge_balance_corrections` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `pledge_activity_id` text NOT NULL, `imported_balance_cents_at_correction` integer NOT NULL, `corrected_balance_cents` integer NOT NULL, `reason` text NOT NULL, `created_at` integer NOT NULL, `reversed_at` integer, `reversal_reason` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`pledge_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action, CHECK (`corrected_balance_cents` >= 0) )"
+    },
+    {
+      "type": "table",
       "name": "pledge_payment_plan_changes",
       "sql": "CREATE TABLE `pledge_payment_plan_changes` ( `id` text PRIMARY KEY NOT NULL, `plan_id` text NOT NULL, `user_id` text NOT NULL, `donor_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('created','updated','ended')), `changed_fields` text NOT NULL, `before_json` text, `after_json` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`plan_id`) REFERENCES `pledge_payment_plans`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -6957,6 +7097,16 @@
       "type": "index",
       "name": "jl_payment_assignments_pledge_idx",
       "sql": "CREATE INDEX `jl_payment_assignments_pledge_idx` ON `jl_payment_assignments` (`pledge_activity_id`)"
+    },
+    {
+      "type": "index",
+      "name": "pledge_balance_corrections_active_uidx",
+      "sql": "CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx` ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "pledge_balance_corrections_pledge_idx",
+      "sql": "CREATE INDEX `pledge_balance_corrections_pledge_idx` ON `pledge_balance_corrections` (`pledge_activity_id`,`created_at`)"
     },
     {
       "type": "index",

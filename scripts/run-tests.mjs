@@ -204,6 +204,8 @@ const TEST_FILES = [
   "tests/recurring-payment-alert.test.mjs",
   "tests/pledge-renewal-acknowledgment.test.mjs",
   "tests/recurring-payment-alert-e2e.test.mjs",
+  "tests/pledge-balance-correction.test.mjs",
+  "tests/pledge-balance-correction-e2e.test.mjs",
 ];
 
 function runOne(file) {

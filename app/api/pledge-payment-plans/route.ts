@@ -97,9 +97,15 @@ export async function POST(request: Request) {
   // exact user, on a live (not archived/merged) donor they own, and
   // still be genuinely open (balance > 0). donor_id is read from THIS
   // row, never trusted from the request body -- so a plan can never end
-  // up attached to the wrong donor.
-  const pledge = await env.DB.prepare(`SELECT ga.id, ga.donor_id, ga.balance_cents
+  // up attached to the wrong donor. Manual Pledge Balance Corrections
+  // (see docs/AI-HANDOFF.md): balance_cents here is the EFFECTIVE
+  // balance (same LEFT JOIN + COALESCE every other live giving_activities
+  // query in this app uses), so a pledge corrected to $0 is correctly
+  // treated as already fulfilled -- no new plan can be created against
+  // it, exactly as if its real imported balance were $0.
+  const pledge = await env.DB.prepare(`SELECT ga.id, ga.donor_id, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents
     FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
+    LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
     WHERE ga.id = ? AND ga.owner_user_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active'
       AND d.owner_user_id = ? AND d.data_source = 'live' AND d.archived_at IS NULL`)
     .bind(pledgeActivityId, userId, userId).first<PledgeRow>();

@@ -43,6 +43,13 @@ export const STAGING_RESET_TABLE_ORDER = [
   // references giving_activities.id, so it's deleted before that table,
   // further down. No dependency on pledge_payment_plans itself.
   "pledge_payment_plan_reviews",
+  // pledge_balance_corrections (Manual Pledge Balance Corrections; see
+  // docs/AI-HANDOFF.md) references users.id, donors.id, and
+  // giving_activities.id directly -- same "references a pledge, no
+  // dependency on pledge_payment_plans itself" pattern as
+  // pledge_payment_plan_reviews immediately above -- so it's deleted
+  // before those three tables, further down.
+  "pledge_balance_corrections",
   // donor_relationship_fact_changes references fact_id (a real FK, same
   // pattern as ask_changes/pledge_payment_plan_changes above), so it's
   // deleted first. donor_relationship_facts references donors.id,

@@ -406,8 +406,19 @@ export function evaluatePledgeRenewal(originalPledgeDate: number | null, commitm
 // have that from their own `ended_at IS NULL`-filtered query, never
 // recomputed here. Deliberately NOT based on `isCompleted`/evaluatePaymentPlan
 // at all -- this is a pure visibility rule, not a financial evaluation.
-export function shouldShowPaymentPlanCard(balanceCents: number | null, hasActivePlan: boolean): boolean {
-  return (balanceCents ?? 0) > 0 || hasActivePlan;
+//
+// Manual Pledge Balance Corrections (2026-10-09, see docs/AI-HANDOFF.md
+// -- the real Shlomo Kutoff/DIN2023 case) widened this the same way:
+// `hasActiveCorrection` is true whenever an active (unreversed)
+// `pledge_balance_corrections` row exists for this pledge. Without this,
+// a pledge with no payment plan that gets corrected to $0 (balanceCents,
+// already the EFFECTIVE balance by the time this is called, becomes 0)
+// would drop out of view entirely -- taking its own "Manually
+// corrected" badge, history, and "Remove correction" control with it,
+// making an active correction just as unreachable as the original
+// completed-plan bug this function already exists to prevent.
+export function shouldShowPaymentPlanCard(balanceCents: number | null, hasActivePlan: boolean, hasActiveCorrection: boolean = false): boolean {
+  return (balanceCents ?? 0) > 0 || hasActivePlan || hasActiveCorrection;
 }
 
 export type RecurringPaymentAlertStatus = "verify_import" | "follow_up_needed";

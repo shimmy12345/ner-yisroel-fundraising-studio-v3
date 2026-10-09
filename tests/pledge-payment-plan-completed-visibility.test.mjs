@@ -28,10 +28,15 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 test("donor page: the pledge-card filter uses shouldShowPaymentPlanCard, not balance alone", async () => {
   const page = await read("app/donors/[id]/page.tsx");
+  // Manual Pledge Balance Corrections (2026-10-09, see docs/AI-HANDOFF.md)
+  // widened this filter with a third argument (hasActiveCorrection), so
+  // a pledge with no payment plan that gets corrected to $0 still keeps
+  // its card (and the correction's own badge/history/remove control)
+  // reachable -- never a second, divergent visibility rule.
   assert.match(
     page,
-    /countedActivities\.filter\(\(item\) => shouldShowPaymentPlanCard\(item\.balance_cents, paymentPlans\.some\(\(p\) => p\.pledge_activity_id === item\.id\)\)\)/,
-    "openPledgesWithPlans must be filtered through shouldShowPaymentPlanCard(balance, hasActivePlan), never `balance_cents > 0` alone",
+    /countedActivities\.filter\(\(item\) => shouldShowPaymentPlanCard\(item\.balance_cents, paymentPlans\.some\(\(p\) => p\.pledge_activity_id === item\.id\), \(correctionsByPledge\.get\(item\.id\) \?\? \[\]\)\.some\(\(c\) => c\.reversed_at === null\)\)\)/,
+    "openPledgesWithPlans must be filtered through shouldShowPaymentPlanCard(balance, hasActivePlan, hasActiveCorrection), never `balance_cents > 0` alone",
   );
 });
 

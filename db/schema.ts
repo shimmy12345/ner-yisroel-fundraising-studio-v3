@@ -914,6 +914,46 @@ export const pledgePaymentPlanChanges = sqliteTable("pledge_payment_plan_changes
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [index("pledge_payment_plan_changes_plan_idx").on(table.planId, table.createdAt)]);
 
+// Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- a
+// controlled, auditable exception mechanism for the rare case where a
+// real-world JL error has already been corrected but the correction
+// never reached the spreadsheet FOS imports from (the real Shlomo
+// Kutoff / DIN2023 case). Never a new payment, never a replacement for
+// the JL import process -- giving_activities.balance_cents (the real
+// imported figure) is NEVER overwritten here, only read as input and
+// preserved alongside the correction. One row per correction EVENT
+// (create / supersede / reverse), append-only -- the currently ACTIVE
+// correction for a pledge is whichever row has reversedAt === null; a
+// partial unique index (migration 0042) enforces at most one active row
+// per pledgeActivityId at the database level, so concurrent or repeated
+// correction attempts can never silently race each other. Scoped
+// strictly to pledgeActivityId (giving_activities.id, the one stable
+// identifier a JL re-import never changes for an existing pledge) --
+// never donorId-wide, never matched by donor name or campaign text.
+export const pledgeBalanceCorrections = sqliteTable("pledge_balance_corrections", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  donorId: text("donor_id").notNull().references(() => donors.id),
+  pledgeActivityId: text("pledge_activity_id").notNull().references(() => givingActivities.id),
+  // The real giving_activities.balance_cents at the moment this
+  // correction was made -- a frozen snapshot for display/audit, never
+  // re-read live from giving_activities after the fact (the real
+  // imported balance may itself change on a later JL import; this
+  // snapshot answers "what did FOS show before this correction," not
+  // "what does JL show right now").
+  importedBalanceCentsAtCorrection: integer("imported_balance_cents_at_correction").notNull(),
+  correctedBalanceCents: integer("corrected_balance_cents").notNull(),
+  reason: text("reason").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  // NULL = this row is the active correction. Non-null = historical
+  // (either reversed outright, or superseded by a newer active row).
+  reversedAt: integer("reversed_at", { mode: "timestamp" }),
+  reversalReason: text("reversal_reason"),
+}, (table) => [
+  uniqueIndex("pledge_balance_corrections_active_uidx").on(table.pledgeActivityId).where(sql`reversed_at IS NULL`),
+  index("pledge_balance_corrections_pledge_idx").on(table.pledgeActivityId, table.createdAt),
+]);
+
 // Pledge payment-plan CLEANUP REVIEW (see docs/PLEDGE-PAYMENT-PLAN-CLEANUP-AUDIT.md
 // and the /pledge-review surface) -- a narrow, temporary human-review
 // decision recorded against one specific pledge: "I manually reviewed

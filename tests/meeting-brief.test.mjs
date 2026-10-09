@@ -60,7 +60,12 @@ const today = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8"
 const capturePage = await readFile(new URL("../app/capture/page.tsx", import.meta.url), "utf8");
 
 assert.match(loader, /WHERE id = \? AND owner_user_id = \? AND data_source = 'live'/);
-assert.match(loader, /donor_id = \? AND owner_user_id = \? AND record_origin = 'live'/);
+// Manual Pledge Balance Corrections (2026-10-09, see docs/AI-HANDOFF.md)
+// aliased giving_activities as `ga` and added a LEFT JOIN to apply the
+// effective-balance rule -- the donor/owner scoping itself is unchanged.
+assert.match(loader, /ga\.donor_id = \? AND ga\.owner_user_id = \? AND ga\.record_origin = 'live'/);
+assert.match(loader, /LEFT JOIN pledge_balance_corrections pbc ON pbc\.pledge_activity_id = ga\.id AND pbc\.reversed_at IS NULL/);
+assert.match(loader, /COALESCE\(pbc\.corrected_balance_cents, ga\.balance_cents\) AS balance_cents/);
 assert.match(loader, /i\.donor_id = \? AND i\.user_id = \? AND d\.owner_user_id = \?/);
 assert.match(loader, /r\.donor_id = \? AND r\.user_id = \? AND d\.owner_user_id = \?/);
 assert.doesNotMatch(loader, /data_source = 'sample'/);

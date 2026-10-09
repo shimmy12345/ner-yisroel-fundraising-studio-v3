@@ -22,7 +22,16 @@ import type {
 export async function loadPortfolioFocusRawData(userId: string): Promise<PortfolioFocusRawData> {
   const [donors, giving, asks, interactions, reminders, yahrtzeits, importantDates, pledgePayments, paymentPlans, relationshipFacts, acknowledgments, historicalContext] = await Promise.all([
     env.DB.prepare(`SELECT id, display_name, donor_code, relationship_summary, institutional_memory FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL`).bind(userId).all<RawDonorRow>(),
-    env.DB.prepare(`SELECT id, donor_id, paid_cents, balance_cents, activity_date, category, item_type, description FROM giving_activities WHERE owner_user_id = ? AND record_origin = 'live' AND workspace_status = 'active' AND category NOT IN ('needs_review','nonfinancial_entry','pending_gift')`).bind(userId).all<RawGivingRow>(),
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- same
+    // effective-balance JOIN every other live giving_activities query in
+    // this app uses (lib/relationships/pledge-balance-correction.ts's
+    // effectiveBalanceCents is the one canonical rule this realizes in
+    // SQL), so Portfolio Focus's own commitment totals/scoring can
+    // never disagree with Today/the donor page about the same pledge.
+    env.DB.prepare(`SELECT ga.id, ga.donor_id, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents, ga.activity_date, ga.category, ga.item_type, ga.description
+      FROM giving_activities ga
+      LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
+      WHERE ga.owner_user_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')`).bind(userId).all<RawGivingRow>(),
     env.DB.prepare(`SELECT id, donor_id, amount_cents, purpose, status, asked_at, source_interaction_id FROM asks WHERE user_id = ?`).bind(userId).all<RawAskRow>(),
     env.DB.prepare(`SELECT donor_id, type, occurred_at, role FROM interactions WHERE user_id = ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%' AND (source LIKE 'capture-completed:%' OR (source NOT LIKE 'capture-scheduled:%' AND occurred_at <= created_at))`).bind(userId).all<RawInteractionRow>(),
     env.DB.prepare(`SELECT id AS recommendation_id, donor_id, action, reason, due_at FROM recommendations WHERE user_id = ? AND status = 'open'`).bind(userId).all<RawReminderRow>(),

@@ -26,10 +26,17 @@ export default async function PledgeReviewPage() {
   const now = Math.floor(Date.now() / 1000);
 
   const [pledgesResult, plansResult, paymentsResult, reviewsResult] = await Promise.all([
+    // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- same
+    // effective-balance JOIN every other live giving_activities query in
+    // this app uses, so a pledge corrected to $0 (e.g. Kutoff/DIN2023)
+    // correctly drops out of this cleanup-review queue via its own
+    // existing `balance <= 0` filter (lib/relationships/pledge-review.ts),
+    // never a second/duplicated balance check here.
     env.DB.prepare(`
-      SELECT ga.id, ga.donor_id, ga.activity_date, ga.committed_cents, ga.paid_cents, ga.balance_cents,
+      SELECT ga.id, ga.donor_id, ga.activity_date, ga.committed_cents, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents,
              ga.description, ga.source_campaign, ga.category, d.donor_code, d.display_name
       FROM giving_activities ga JOIN donors d ON d.id = ga.donor_id
+      LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
       WHERE ga.workspace_status = 'active' AND ga.record_origin = 'live' AND ga.owner_user_id = ?
         AND ga.category IN ('open_pledge','partially_paid_pledge')
     `).bind(profile.id).all<PledgeReviewSourceRow>(),

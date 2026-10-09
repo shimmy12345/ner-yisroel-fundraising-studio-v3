@@ -85,7 +85,7 @@ async function run() {
   const donorPage = await read("app/donors/[id]/page.tsx");
   assert.match(
     donorPage,
-    /openPledgesWithPlans\.map\(\(\{ pledge, planState \}\) => <article key=\{pledge\.id\} className="open-pledge-plan-row">/,
+    /openPledgesWithPlans\.map\(\(\{ pledge, planState, correctionState \}\) => <article key=\{pledge\.id\} className="open-pledge-plan-row">/,
     "each open pledge must still render its own independent open-pledge-plan-row -- the layout fix must not collapse multiple pledges into one shared card",
   );
   assert.match(

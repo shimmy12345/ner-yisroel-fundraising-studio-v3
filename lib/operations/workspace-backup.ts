@@ -75,6 +75,15 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // WORKSPACE_BACKUP_TABLES in this phase. Covered today only by the
   // nightly whole-database R2 backup.
   "pledge_payment_plan_reviews",
+  // Manual Pledge Balance Corrections (see docs/AI-HANDOFF.md) -- same
+  // reason as pledge_payment_plan_reviews immediately above: a table
+  // added after this route was written, holding a narrow, auditable
+  // exception record rather than JL financial data itself (the real
+  // imported balance in giving_activities is already covered by
+  // FUNDRAISING_DATA_TABLES above and never touched by this table).
+  // Deliberately not added to WORKSPACE_BACKUP_TABLES in this phase.
+  // Covered today only by the nightly whole-database R2 backup.
+  "pledge_balance_corrections",
   // Relationship Intelligence Phase 1 -- same reason as asks/
   // pledge_payment_plans above: real donor-facing durable relationship
   // data added after this route was written. Deliberately not added to

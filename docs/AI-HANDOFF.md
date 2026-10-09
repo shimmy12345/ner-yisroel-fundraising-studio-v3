@@ -27529,3 +27529,305 @@ by this round.
 
 No Production deployment occurred. Stopping here for independent
 review.
+
+## Manual Pledge Balance Corrections -- Shlomo Kutoff / DIN2023 (2026-10-09) -- IMPLEMENTED, TESTED, MIGRATED + DEPLOYED TO INDEPENDENT STAGING, LIVE-VERIFIED (READ-ONLY)
+
+Confirmed before starting: `tests/pledge-renewal-acknowledgment.test.mjs`
+and the prior round's safeguards are in place and green (commit
+`7af7de5`). This round implements a controlled, auditable exception
+mechanism for the real Shlomo Kutoff (donor code 57932) / DIN2023 case
+-- a JL error was already corrected in JL, but the correction never
+reached the spreadsheet FOS imports from, so FOS still shows an
+outstanding balance that no longer exists in reality.
+
+### Part 1 -- architectural investigation (read-only, no code written yet)
+
+A dedicated investigation (full report in-session, summarized here)
+mapped every place `giving_activities.balance_cents` is read for
+display/evaluation: **exactly 9 distinct SQL query sites across 6
+files** (well under the "major redesign" threshold), each one a plain
+pass-through of the stored column with no independent balance
+computation of its own:
+
+1. `lib/relationships/giving.ts` (`DONOR_GIVING_SQL`, the donor page)
+2. `lib/workspace/live-data.ts`'s main `giving` query (Today, Daily
+   Agenda, recommendation evidence, the recurring-payment-alert feature
+   -- all via the same already-fetched `giving.results`)
+3. `lib/workspace/live-data.ts`'s `pledgeRenewalPlanRows` query (the
+   renewal-reminder event's own balance display line)
+4. `lib/portfolio-focus/data.ts` (Portfolio Focus's own independent
+   query)
+5. `lib/relationships/meeting-brief.ts`
+6. `app/pledge-review/page.tsx` (the pledge cleanup-review queue)
+7. `app/api/pledge-payment-plans/route.ts` (the plan-creation
+   eligibility check)
+
+Two sites were identified as **deliberately excluded by design, never
+touched**:
+- `lib/data-health/queries.ts` -- workspace-integrity checks must see
+  the RAW imported balance to catch a genuine import defect; joining a
+  correction here would mask the exact class of problem this check
+  exists to find.
+- `lib/import/jl-payment-assignment.ts` -- the real JL payment-
+  application engine must always reconcile an incoming payment against
+  the RAW/authoritative balance; reading a corrected value here could
+  misallocate a real payment or fabricate a false "overpayment" --
+  directly the "no fictitious payment" requirement.
+
+Import-identity investigation (`lib/import/jl-donations.ts`'s
+`canonicalFingerprint()`): a re-import normally UPDATEs the existing
+`giving_activities` row in place (same `id`), but a fingerprint-
+affecting field change (not just the balance) makes a later import
+create a brand-new row with a DIFFERENT id instead, leaving the old row
+in place but no longer matched. This is the concrete scenario Part 4's
+"changed or missing source pledge" handling is built around.
+
+**Conclusion: a centralized SQL-level fix is both sufficient and the
+smallest safe change** -- no major financial architecture redesign
+triggered, no second ledger created, no parallel financial system.
+
+### Schema (migration `drizzle/0042_pledge_balance_corrections.sql`)
+
+New table `pledge_balance_corrections`, directly modeled on the
+existing `pledge_payment_plans` pattern:
+```sql
+CREATE TABLE `pledge_balance_corrections` (
+  `id` text PRIMARY KEY NOT NULL,
+  `user_id` text NOT NULL,
+  `donor_id` text NOT NULL,
+  `pledge_activity_id` text NOT NULL,
+  `imported_balance_cents_at_correction` integer NOT NULL,
+  `corrected_balance_cents` integer NOT NULL,
+  `reason` text NOT NULL,
+  `created_at` integer NOT NULL,
+  `reversed_at` integer,
+  `reversal_reason` text,
+  FOREIGN KEY (...) REFERENCES users/donors/giving_activities(...),
+  CHECK (`corrected_balance_cents` >= 0)
+);
+CREATE UNIQUE INDEX `pledge_balance_corrections_active_uidx`
+  ON `pledge_balance_corrections` (`pledge_activity_id`) WHERE `reversed_at` IS NULL;
+CREATE INDEX `pledge_balance_corrections_pledge_idx`
+  ON `pledge_balance_corrections` (`pledge_activity_id`,`created_at`);
+```
+One row per correction EVENT (create, supersede, or reverse) --
+append-only, never edited in place, so the full history of every value
+ever set is preserved exactly as entered. The partial unique index is
+the database-level guarantee that at most one ACTIVE correction can
+ever exist per pledge at a time -- this is what makes concurrent/
+repeated correction attempts structurally safe (requirement 15),
+verified both via a raw constraint test and via the real write route's
+own logic in `tests/pledge-balance-correction-e2e.test.mjs`.
+`giving_activities.balance_cents` itself is NEVER written to by this
+feature anywhere.
+
+`db/schema.ts` updated in parallel (`pledgeBalanceCorrections` table).
+`production-baseline/` regenerated;
+`lib/data-health/production-baseline.ts`'s `PRODUCTION_BASELINE_VERIFIED`
+bumped 42->43 migrations. `lib/operations/staging-reset.ts` (and its
+derived `d1-restore-order.ts`) and `lib/operations/workspace-backup.ts`
+both updated to place the new table correctly (same category as
+`pledge_payment_plan_reviews`: references a pledge, no dependency on
+`pledge_payment_plans`, not yet added to the per-workspace backup
+route, covered by the nightly whole-database R2 backup).
+
+**`node scripts/check-main-restore-sync.mjs` confirms (expected) drift
+-- this migration adds a NEW TABLE, which `docs/D1-MIGRATION-SYNC-
+PROCESS.md` explicitly places outside the automated `prepare-sync`
+job's safe scope** (it refuses to guess a new table's correct position
+in the restore order). `main`'s restore/baseline sync for both this
+migration and the still-pending 0041 must be prepared manually by a
+human in a future round -- not attempted in this one, which stayed
+scoped to Independent Staging only, per instruction.
+
+### Effective-balance precedence (Part 3)
+
+Single canonical rule, `effectiveBalanceCents(importedBalanceCents,
+activeCorrectedBalanceCents)` in the new
+`lib/relationships/pledge-balance-correction.ts`:
+```
+effective = active correction's corrected_balance_cents, if one exists;
+            otherwise the normal imported giving_activities.balance_cents.
+```
+Realized in SQL identically at all 7 consumer sites via
+```sql
+LEFT JOIN pledge_balance_corrections pbc
+  ON pbc.pledge_activity_id = <pledge>.id AND pbc.reversed_at IS NULL
+...
+COALESCE(pbc.corrected_balance_cents, <pledge>.balance_cents) AS balance_cents
+```
+-- aliased back to the UNCHANGED `balance_cents` column name, so every
+downstream TypeScript consumer (`evaluatePaymentPlan`,
+`evaluateRecurringPaymentAlert`, `shouldShowPaymentPlanCard`, the
+"Lifetime Paid"/"Open Commitments" KPI tiles, Portfolio Focus's
+commitment totals, the pledge cleanup-review queue, the plan-creation
+eligibility check) needed **zero code changes** to automatically
+reflect a correction. This is also why Today and Daily Agenda can never
+disagree about the same pledge's balance -- both are fed from the exact
+same query result (`lib/workspace/live-data.ts`'s one `giving` query),
+not two independently-computed values.
+
+Confirmed explicitly, by requirement:
+- A pledge corrected to $0 IS treated as financially fulfilled for
+  outstanding-balance purposes (`evaluatePaymentPlan.isCompleted`
+  becomes true) -- **without** auto-ending its plan, erasing payment
+  history, or changing its original pledge date/commitment duration
+  (none of those fields are ever touched by this feature).
+- Renewal opportunities are **never** suppressed by a correction --
+  `evaluatePledgeRenewal` has no balance input at all, by design (see
+  its own doc comment); re-verified with a dedicated test.
+- `committed_cents`/`paid_cents` (Lifetime Paid, original pledge amount,
+  fundraising totals) are **never** touched -- a correction is never
+  counted as new revenue or a newly received payment, and never creates
+  a `jl_payment_assignment_audits` row (no fictitious payment).
+
+### UI (Part 5)
+
+New `app/donors/[id]/PledgeBalanceCorrection.tsx` (client component),
+reusing the existing pledge card's own visual language (no new design
+system). A "Correct Balance" button appears on every pledge card
+(`shouldShowPaymentPlanCard` widened with a third `hasActiveCorrection`
+parameter, default `false`, so a pledge with no payment plan that gets
+corrected to $0 doesn't drop out of view and take its own badge/
+history/remove control with it). The form shows donor name/code,
+campaign, original pledge amount, current imported balance, current
+effective balance, a required corrected-balance input, and a required
+reason textarea; a second click is required to actually submit
+("Confirm correction"); on success, "Balance corrected" displays
+briefly before the page refreshes. An active correction shows a
+"Manually corrected" badge and an inline note it does NOT mean the
+donor renewed/paid/made a new commitment; "View history" and "Remove
+correction" are both available. `app/globals.css` gained matching,
+minimal styling reusing the same tokens/classes the payment-plan form
+already uses.
+
+### Write routes (Part 2, requirements 12/14/15/16/17)
+
+- `POST /api/pledge-balance-corrections` -- validates (amount: whole,
+  non-negative; reason: required, trimmed, length-capped), re-verifies
+  the pledge belongs to this exact authenticated user's own live donor
+  (never trusted from the request body -- same pattern as every other
+  write route in this app), reads the RAW balance to snapshot it, and
+  either inserts a fresh active correction or (if one is already
+  active) reverses it first and inserts the new one in the same
+  request -- both preserved in history, never an in-place edit.
+  Concurrent requests racing the same pledge are rejected with a clear
+  409 via the partial unique index, never silently overwritten.
+- `PATCH /api/pledge-balance-corrections/[id]` -- reverses the active
+  correction (`{reverse: true}`), scoped to the authenticated user's own
+  correction row; a repeated/duplicate reversal request is a safe,
+  idempotent no-op (same pattern established for Mark Renewal Addressed
+  last round), never a second write.
+- Both reuse `getChatGPTUser()`/`ensureUserProfile()` -- the exact same
+  authentication/authorization pattern every other write route in this
+  app already uses (requirement 14).
+
+### Import behavior (Part 4)
+
+- A later JL re-import that UPDATEs the pledge's own `balance_cents` in
+  place never silently erases an active correction -- the correction
+  lives in its own table, keyed by the pledge's stable `id`, completely
+  independent of whatever the raw column currently says. Verified with
+  a dedicated test that re-imports a new raw balance and confirms the
+  correction still wins.
+- If a later import instead creates a brand-new row (the fingerprint-
+  change scenario from Part 1's investigation) and the old row becomes
+  non-`active` (`workspace_status`), the old correction becomes INERT --
+  it simply stops appearing through any of the 7 consumer queries
+  (which all already filter `workspace_status = 'active'`) -- never
+  erroring, and critically never silently reattaching to the new row
+  merely because it shares the same donor/campaign text (every query
+  and write is keyed on the exact `pledge_activity_id`, never a text
+  match). Verified with a dedicated test.
+- Removing a correction (requirement: "allow the fundraiser to remove
+  the correction when it is no longer needed") is the reversal action
+  above -- always available, never automatic.
+
+### Tests
+
+**40 new tests** across two new files:
+- `tests/pledge-balance-correction.test.mjs` (17) -- pure-function
+  coverage (`effectiveBalanceCents`, `activeCorrection`,
+  `validateBalanceCorrection`) plus source-level checks that all 7
+  consumer sites realize the identical COALESCE rule and that the two
+  deliberately-excluded sites never reference the corrections table at
+  all.
+- `tests/pledge-balance-correction-e2e.test.mjs` (23) -- a real,
+  isolated in-memory SQLite database (`node:sqlite`, built from every
+  real committed migration including 0042 -- the same established
+  convention as the prior two rounds), with write helpers that mirror
+  the real API routes' own literal logic. Covers all 18 items from the
+  task's test list explicitly, including a dedicated real-database
+  concurrency proof (two simultaneous active-row inserts for the same
+  pledge; the second structurally fails the partial unique index) and
+  the full **Part 6 Shlomo Kutoff verification**, using his real
+  identifying facts and real confirmed Independent Staging figures as
+  the fixture for that isolated database only.
+
+**173/173 test files pass** (`pnpm test`). `pnpm exec tsc --noEmit`:
+clean. `pnpm run build`: succeeded; `/api/pledge-balance-corrections`
+and `/api/pledge-balance-corrections/:id` both appear correctly in the
+route listing.
+
+### Migration verification
+
+Pre-migration baseline: 5,463 `giving_activities` rows. Applied
+`drizzle/0042_pledge_balance_corrections.sql` to
+`fundraising-os-staging-db` (3 statements: 1 table + 2 indexes).
+Post-migration: 5,463 `giving_activities` rows preserved exactly, new
+table confirmed present with the correct partial unique index, **0
+rows in `pledge_balance_corrections`** -- confirming no correction was
+auto-applied to Kutoff or anyone else.
+
+### Deployment
+
+`npm run deploy:staging-independent`. **Version ID:
+`46acce52-c876-471a-990c-919030777ac6`** (an intermediate version,
+`bf43a218-bddd-443f-87c2-01198cd30c60`, shipped a CSS-only fix for a
+label/input layout issue found during live verification -- see below).
+Binding `env.DB` confirmed as `fundraising-os-staging-db`. Production
+was never touched.
+
+### Shlomo Kutoff (57932) / DIN2023 -- pledge identification (read-only, Independent Staging)
+
+- Donor: `Rabbi & Mrs. Shlomo Kutoff`, id `843cf7e9-a559-4bd4-82b5-4e2057255583`, donor code **57932**.
+- Pledge activity id: **`b16a6e94-b643-4046-a176-31a7fb03ab44`**.
+- Committed: **$5,000.00**. Paid: **$4,790.00**. Currently displayed outstanding balance: **$210.00**. Category `partially_paid_pledge`, campaign `DIN2023`.
+- **No payment plan exists** for this pledge (confirmed directly: `SELECT ... FROM pledge_payment_plans WHERE pledge_activity_id = '...'` returns zero rows) -- so there is no `evaluatePaymentPlan`-driven warning to clear beyond the raw balance display itself.
+- A second, unrelated real pledge of his (`DIN2025`, $300,000/$275,000 paid/$25,000 balance, confirmed separately) exists and must stay (and in the isolated test, did stay) completely untouched by correcting only the DIN2023 one.
+- Consumer surfaces for his balance: the donor page (query #1), Today/Daily Agenda/recommendation evidence (query #2, though he has no open-pledge-driven recommendation currently active), the pledge cleanup-review queue (query #6, though his pledge is below that queue's own age/category thresholds in practice), and Portfolio Focus (query #4).
+
+**The real correction was NOT applied** -- `pledge_balance_corrections` remains at 0 rows in Independent Staging as of this report. A live, read-only verification confirmed the "Correct Balance" button renders correctly on his real DIN2023 card, pre-filled with the correct real figures ($5,000 / $210 / $210), and was closed via Cancel without submitting -- re-confirmed via a direct D1 query (0 rows) immediately after.
+
+### Live-verification note (a real bug found and fixed in this round)
+
+The first live check found the new button/control server-rendered but
+**missing after client hydration** on a stale page load -- investigated
+live via the real DOM/console/network, root-caused as a transient
+asset-propagation state (NOT a code defect: a fresh navigation
+immediately after confirmed the control renders correctly, with the
+right real data, every time thereafter). Separately, a genuine CSS gap
+was found (the new form's labels/inputs had no dedicated layout rules,
+so they rendered visually overlapping) -- fixed with the
+`.balance-correction-*` rules added to `app/globals.css` above,
+rebuilt, redeployed, and re-verified live as clean.
+
+### Remaining limitations / unresolved issues
+
+1. `main`'s restore/baseline sync is now out of date for TWO migrations
+   (0041, 0042) -- 0042 adds a new table, explicitly outside the
+   `prepare-sync` automation's safe scope, so this requires a human to
+   prepare it manually in a future round (see
+   `docs/D1-MIGRATION-SYNC-PROCESS.md`).
+2. This feature is not yet added to `WORKSPACE_BACKUP_TABLES` (the
+   per-workspace, in-app backup route) -- deliberately, matching the
+   exact precedent `pledge_payment_plan_reviews` already set; it is
+   covered today only by the nightly whole-database R2 backup, same as
+   that table.
+3. Kutoff's real DIN2023 correction has intentionally NOT been applied.
+   The fundraiser can now apply it through the live interface
+   (`https://fundraising-os-staging.sgoldstein.workers.dev/donors/843cf7e9-a559-4bd4-82b5-4e2057255583`,
+   DIN2023 card, "Correct Balance") after this report's review.
+
+No Production deployment occurred at any point in this round. Stopping
+here for independent review.
