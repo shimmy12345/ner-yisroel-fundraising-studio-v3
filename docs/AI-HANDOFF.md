@@ -30922,3 +30922,74 @@ GO/NO-GO statement (Section 10).
 
 Nothing was deployed, migrated, or modified this round. Stopping here per
 explicit instruction.
+
+---
+
+## Production First Deployment Preflight (2026-10-11) -- independent, read-only; GO for empty-Worker deployment
+
+Full report: `docs/PRODUCTION-FIRST-DEPLOYMENT-PREFLIGHT.md`.
+
+### What this round did differently from the prior readiness assessment
+
+Every finding was re-verified live and fresh this round -- fresh `wrangler
+whoami`/`d1 list`/`r2 bucket list`/`deployments list`/`secret list` calls,
+fresh GitHub API checks (main HEAD, secrets, recent runs -- all unchanged
+since the prior round), a fresh `pnpm exec tsc --noEmit` (clean), a fresh
+`pnpm test` (178/178), and a fresh `pnpm run build:production-independent`
+with the output bundle re-grepped to confirm the `production-independent`
+constant is actually baked in. Most importantly: this round did a complete,
+line-by-line execution trace of `status-worker/src/github-dispatch.ts`'s
+hardcoded `WORKFLOW_FILE` constant through `index.ts`'s `scheduled()`
+handler, rather than describing the bug only in the abstract.
+
+### Key finding: the WORKFLOW_FILE bug is confirmed NON-BLOCKING for deployment itself
+
+Full trace in the report's Section 3. The short version: `dispatchBackupWorkflow`
+and `checkActiveBackupRun` (the only two functions that reference the
+hardcoded `d1-backup-nightly.yml` filename) are only ever called from inside
+an `if (env.GITHUB_BACKUP_DISPATCH_TOKEN)` branch. A Cloudflare Worker
+secret cannot exist for a Worker script that has never been deployed --
+confirmed this round by directly attempting `wrangler secret list
+--config wrangler.production.jsonc` against the (undeployed) Production
+status-worker, which failed with `Worker "fundraising-os-production-backup-status"
+not found`. Therefore deploying the Production status-worker today, with
+its hourly cron trigger active, cannot reach the buggy code path at all --
+it will only ever read Production's own status bucket and log `fresh` or
+`recovery_needed_detection_only`. The bug remains real and must be fixed
+before `GITHUB_BACKUP_DISPATCH_TOKEN` is ever added to Production's
+status-worker (a separate, future, already-gated action) -- it is not a
+reason to withhold today's deployment.
+
+### Other findings
+
+- All Production config/secrets/isolation re-confirmed unchanged and
+  correct (D1, both R2 buckets + retention, Access real values, all 7
+  GitHub secrets, no shared identifiers with Staging anywhere).
+- Confirmed by code read: deploying the main Worker before the
+  status-worker would not crash anything -- `fetchBackupStatus()` in
+  `lib/data-health/read.ts` already wraps the service-binding call in
+  try/catch and degrades to "unreachable" rather than throwing; it
+  self-heals once the status-worker exists, with no main-Worker redeploy
+  needed. The documented order (status-worker first) should still be
+  followed as the safe default, not skipped on the strength of this.
+- Checked all 63 `app/api/**/route.ts` files this round (not a sample):
+  every one references `requireChatGPTUser`/`getChatGPTUser` -- zero
+  unauthenticated API routes found.
+- Confirmed by code read: a non-owner-email Access JWT is rejected by the
+  app's own independent check (`lib/auth/cloudflare-access.ts:58-59`),
+  defense-in-depth on top of the Access policy itself.
+- Build/test evidence re-confirmed fresh, not reused from 2026-10-09:
+  `tsc --noEmit` clean, 178/178 tests, build succeeds, output bundle
+  contains the correct `production-independent` constant.
+
+### Recommendation
+
+GO for deploying the empty Production status-worker, then the main
+Production Worker, in that order, followed immediately by the live
+Access-verification checklist in the full report's Section 5.3/8.
+NO-GO, unchanged, for enabling the Stage 2 watchdog (until the
+WORKFLOW_FILE fix lands), enabling scheduling on either workflow, or any
+donor-data migration.
+
+Nothing was deployed, migrated, or modified this round. Stopping here per
+explicit instruction.
