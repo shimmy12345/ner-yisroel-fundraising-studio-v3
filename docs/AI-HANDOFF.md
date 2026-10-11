@@ -29723,3 +29723,162 @@ baseline.mjs`) that touches no real database.
 
 Stopping here. Awaiting ChatGPT's independent review of these findings
 before any further Production launch step is authorized.
+
+## Production Schema Initialization -- SCHEMA 0019 APPLIED (2026-10-10) -- SUCCEEDED
+
+Following ChatGPT's approval of the readiness findings in commit
+`a753607`, the exact, narrowly-scoped action that review identified as
+the one remaining precondition was performed this round: initializing
+the schema of the empty Production D1 database. **Nothing else was
+touched.**
+
+**Exact database and schema file**: `fundraising-os-production-db`
+(`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`), Cloudflare account
+`2f34086b78ac8643498a1a600b846757` (`sgoldstein@nirc.edu`'s account).
+Schema file: `production-baseline/drizzle/0000_production_baseline_0019.sql`.
+
+**Phase 1 preflight -- all 7 checks passed before any write was
+attempted**:
+1. Account + exact database ID confirmed via `wrangler d1 list`:
+   `fundraising-os-production-db` = `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`
+   -- exact match to the approved target.
+2. Direct query of the target database's complete `sqlite_master`
+   (every object type, not just tables) returned exactly one row:
+   `_cf_KV` (D1's own internal table). Zero application tables, zero
+   donor records, zero business data.
+3. Schema file confirmed unmodified: clean `git status`, unchanged
+   since its last commit (`ae86956`, a historical commit, not from
+   this session) -- same content reviewed in the prior round.
+4. Re-ran `node scripts/rehearse-production-baseline.mjs`
+   (in-memory-only, no real database touched): **"Production baseline
+   0019 verified: 53 tables, integrity ok, no business rows, replay
+   blocked"** -- identical result to the prior round.
+5. Direct inspection: exactly one `INSERT` statement in the entire
+   file (the `production_schema_baseline` lineage stamp, not donor
+   data); zero matches anywhere for `DROP`/`DELETE`/`UPDATE`/
+   `TRUNCATE`/`ALTER`. Statement histogram: 54 `CREATE TABLE`, 63
+   `CREATE INDEX`, 19 `CREATE UNIQUE INDEX`, 1 `INSERT INTO`, 2
+   `PRAGMA`.
+6. `wrangler d1 list` confirmed Staging's database id
+   (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`) is completely distinct from
+   Production's (`a51c6571-...`) -- cannot be affected by any operation
+   scoped to the Production id.
+7. Confirmed not already initialized -- same evidence as check 2
+   (zero application tables, no `production_schema_baseline` row).
+
+All 7 passed cleanly; proceeded to Phase 2.
+
+**Phase 2 -- schema applied**: `wrangler d1 execute
+fundraising-os-production-db --remote --file production-baseline/
+drizzle/0000_production_baseline_0019.sql --yes`. Result: **139
+queries executed, 246 rows written, database size 12,288 -> 856,064
+bytes.** No other migration or file was applied; no donor record was
+created; no Worker was deployed; no backup/restore workflow was
+triggered.
+
+**Phase 3 post-initialization verification**:
+1. **53 application tables confirmed** -- direct query:
+   `total_tables: 56` (53 application tables +
+   `production_schema_baseline` + D1's own `_cf_KV` +
+   SQLite's own `sqlite_stat1`, auto-created by the file's trailing
+   `PRAGMA optimize;`), `application_tables: 53` -- exact match.
+2. **`production_schema_baseline` record confirmed**: `id: "0019"`,
+   `schema_hash:
+   "913299652ad37c0073e82aeccb30511dc1f13c784eebb5e4e7ecd3e237dea566"`,
+   `created_at: 1785944072` -- byte-for-byte match to the literal
+   values in the source file's own `INSERT` statement.
+3. **All 53 application tables confirmed to contain zero rows**:
+   generated and ran one `SELECT COUNT(*)` per table (53 separate
+   statements in one `--command` call, to avoid D1's compound-SELECT
+   term limit encountered when first attempting a single `UNION ALL`
+   across all 53 -- noted below as an unexpected, benign tooling
+   limitation). Every one of the 53 results returned `c: 0`; zero
+   statements failed; zero statements reported `changed_db: true`.
+4. **Integrity checks**: `PRAGMA foreign_key_check;` returned an empty
+   `results` array -- **zero foreign-key violations** across the
+   entire newly-created schema. `PRAGMA quick_check;` returned `"ok"`.
+   `PRAGMA integrity_check;` itself could not be run this way -- see
+   "unexpected behavior" below.
+5. **Replay protection confirmed structurally, not by attempting an
+   actual second apply against the real database** (a live replay
+   attempt would itself be an unauthorized, out-of-scope additional
+   Production action): confirmed zero `CREATE TABLE IF NOT EXISTS`
+   clauses anywhere in the file, so every `CREATE TABLE` statement
+   will deterministically throw "table already exists" if the file is
+   ever run again against this now-initialized database -- exactly the
+   behavior the in-memory rehearsal already proved
+   (`assert.throws(..., /already exists/)`), and not something that
+   can differ between SQLite-in-memory and D1's real SQLite backend.
+6. **Staging confirmed unaffected**: re-queried read-only immediately
+   after the Production apply --
+   `donors=254, giving_activities=5463, pledge_balance_corrections=1,
+   pledge_payment_plans=45`, database size still exactly `9,453,568`
+   bytes, `changed_db: false` -- byte-for-byte identical to every
+   prior round's baseline.
+7. **Unexpected behavior encountered (documented per this round's own
+   instruction to record it, not glossed over)**: `PRAGMA
+   integrity_check;`, run directly via `wrangler d1 execute --remote
+   --command`, failed with `not authorized: SQLITE_AUTH` (Cloudflare
+   API error code 7500) against the newly-initialized Production
+   database. To determine whether this indicated a problem with
+   tonight's change specifically, the identical command was run
+   against the long-standing, actively-used Staging database --
+   **it failed with the exact same `SQLITE_AUTH` error**, proving this
+   is a pre-existing restriction on this PRAGMA via D1's remote
+   query API/this token's scope, universal across both databases, and
+   unrelated to tonight's schema initialization. `PRAGMA quick_check;`
+   (SQLite's lighter-weight structural-integrity equivalent) was not
+   subject to this restriction and returned `"ok"`, and `PRAGMA
+   foreign_key_check;` (zero violations) independently corroborates
+   structural soundness. No data-integrity concern is implied by this
+   finding -- it is a verification-tooling limitation, not a defect in
+   what was created.
+
+**Confirmation no donor data was imported**: structurally guaranteed
+and directly verified -- the schema file contains exactly one `INSERT`
+(the baseline lineage stamp), and all 53 application tables, including
+`donors`, `gifts`, `giving_activities`, and `users`, were directly
+confirmed to contain zero rows after the apply.
+
+**Confirmation Staging was unaffected**: directly re-verified
+immediately after the Production apply (see Phase 3 Step 6 above) --
+unchanged.
+
+**Warnings / outstanding risks** (unchanged from the prior round's
+readiness review, not introduced by tonight's action): (1)
+`status-worker/src/github-dispatch.ts`'s hardcoded Staging workflow
+filename, still to be fixed before the Production status-worker is
+ever deployed with Stage 2 active; (2) GitHub's `ubuntu-latest` ->
+Ubuntu 26 runner migration on 2026-10-19; (3) the pre-existing
+inability to independently verify the live Cloudflare Access policy
+via API. New this round: (4) `PRAGMA integrity_check;` cannot be run
+directly via `wrangler d1 execute --remote --command` against either
+Production or Staging (see above) -- worth noting for anyone relying
+on that specific command interactively; `scripts/verify-remote-
+restore.mjs`'s own use of this same PRAGMA during real backup/restore-
+verify workflow runs has not been observed to hit this same error in
+this session's history, so it may be specific to this interactive
+invocation path/token rather than the workflow's own execution
+context -- flagged for awareness, not re-investigated further this
+round per scope.
+
+**Recommended next step**: Production's database now has a real,
+empty, fully-initialized schema matching baseline 0019, with zero
+donor data. Per the prior round's own conclusion, this is now the
+correct state to run the first backup-and-restore-verification cycle
+(a manual `workflow_dispatch` of `d1-backup-nightly-production.yml`
+followed by `d1-restore-verify-monthly-production.yml`), which should
+now pass its own integrity assertions (the schema-manifest comparison
+and the `production_schema_baseline` row check both have real data to
+verify against for the first time). This requires separate, explicit
+authorization and was not performed this round.
+
+**What was NOT done this round, stated explicitly**: no other
+migration was applied; no donor record was created or imported; no
+Production Worker was deployed; no backup or restore workflow was
+triggered; no GitHub secret or variable was changed; no automatic
+schedule was enabled; Staging was not modified (only read, twice, for
+verification).
+
+Stopping here. Awaiting ChatGPT's independent review before any
+further Production launch step is authorized.
