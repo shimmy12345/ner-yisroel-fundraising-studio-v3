@@ -29522,3 +29522,204 @@ read, once, for this round's own non-destructive verification).
 
 Stopping here per this round's explicit instruction -- awaiting
 separate authorization before any further Production launch step.
+
+## Comprehensive Production Readiness Review (2026-10-10) -- READ-ONLY -- DETERMINATION: BLOCKED (schema initialization precondition)
+
+**Purpose**: a full, read-only readiness check across GitHub Actions,
+Cloudflare infrastructure, and backup/restore safety, requested before
+any further Production launch step is authorized. No corrections were
+made during this review -- findings only.
+
+**Current Production infrastructure status** (unchanged from the prior
+two rounds, re-verified live rather than assumed): Production D1
+(`fundraising-os-production-db`, `a51c6571-...`) confirmed empty --
+only the internal `_cf_KV` table, zero application tables, size still
+exactly 12,288 bytes. Both Production R2 buckets exist and are
+correctly configured. **Neither Production Worker exists on the
+Cloudflare account at all** -- confirmed via a direct API query
+against each Worker name, not just an HTTP probe: both returned
+Cloudflare error code `10007`, "This Worker does not exist on your
+account." No migration has been run; no donor data has been imported
+(there is nothing to import into).
+
+**GitHub Actions findings**:
+- Both workflow files confirmed present on `main`'s working tree and
+  both registered (`state: active`) under GitHub's workflow API --
+  dispatchable for the first time since the prior round's merge.
+- Both remain `workflow_dispatch`-only; zero matches anywhere for
+  `schedule`, `push`, or `pull_request`.
+- All 7 required `_PRODUCTION` secrets, the 2 reused account-wide
+  secrets, and the 2 `_PRODUCTION` variables confirmed present by name
+  via the GitHub API (no values read). Cross-checked every single
+  `secrets.*`/`vars.*` reference actually written in both workflow
+  files against this list -- **every reference matches exactly**, no
+  typos or missing names.
+- Both correctly reference only `fundraising-os-production-db` and the
+  Production R2 buckets/credentials; `permissions: contents: read`
+  only in both (minimal, no excess scope).
+- **Warning (dormant, not currently exploitable)**: `status-worker/
+  wrangler.production.jsonc` already ships an active hourly
+  `triggers.crons` block for its backup-freshness watchdog. By design
+  (mirrors Staging's own Stage 1/Stage 2 split), the watchdog only
+  detects staleness and logs -- it never calls GitHub's dispatch API
+  unless a `GITHUB_BACKUP_DISPATCH_TOKEN` secret is explicitly set on
+  that Worker, which does not exist today (the Worker itself isn't
+  deployed). However, a genuine code gap was found: `status-worker/src/
+  github-dispatch.ts`'s `WORKFLOW_FILE` constant is **hardcoded to
+  `"d1-backup-nightly.yml"`** (Staging's own workflow filename), not
+  parameterized per environment -- confirmed by an existing regression
+  test (`tests/backup-watchdog-github-dispatch.test.mjs`) that asserts
+  exactly this URL. If the Production status-worker is ever deployed
+  with Stage 2 activated using this unmodified code, its watchdog would
+  incorrectly dispatch **Staging's** backup workflow, not Production's
+  own. Must be fixed before that Worker is ever deployed with Stage 2
+  active; harmless today since the Worker doesn't exist.
+- **Warning (time-sensitive)**: GitHub's `ubuntu-latest` runner label
+  migrates to Ubuntu 26 beginning **2026-10-19** (9 days from this
+  review) -- surfaced directly in a recent Staging workflow run's own
+  annotations. Both new Production workflows (and their Staging
+  counterparts) pin the unversioned `ubuntu-latest` label, so their
+  first real run after that date executes on an untested OS image.
+  Not a defect, but worth re-confirming after the migration date.
+
+**Cloudflare infrastructure findings**:
+- Production D1: confirmed empty as above.
+- R2: `fundraising-os-production-backups` (created 2026-10-09T20:30:10Z)
+  carries the correct `daily-expiry` (90-day) lifecycle rule on the
+  `daily/` prefix plus the default 7-day multipart-abort rule, matching
+  documentation exactly; confirmed currently empty (no `daily/` objects
+  -- consistent with "no backup has ever run").
+  `fundraising-os-production-backup-status` (created
+  2026-10-09T20:30:13Z) correctly has no expiry rule (status objects
+  are meant to persist/be overwritten, not expire).
+- Production/Staging isolation: 4 distinct-named D1/R2 resources exist
+  account-wide, zero shared names; the one "staging" string match
+  inside the restore-verify workflow file is a safety-assertion
+  comment, not a functional reference.
+- Production Cloudflare Access config (`wrangler.production.jsonc`):
+  `TEAM_DOMAIN`/`POLICY_AUD`/`STAGING_OWNER_EMAIL` unchanged from the
+  prior round's documented values; all 7 of its own regression tests
+  pass (7/7). **Known, pre-existing limitation, not new**: this
+  session's Cloudflare credentials have no Zero Trust Access API
+  scope, so the live Access policy itself cannot be independently
+  queried -- verification relies on the config file plus the owner's
+  manual confirmation plus the passing regression test, not a live
+  cross-check against the Access API.
+- Neither Production Worker deployed (confirmed above, directly via
+  the Cloudflare API, not just an HTTP probe).
+- No migrations run, no donor data imported -- both structurally true
+  since zero application tables exist.
+
+**Backup and restore safety review**:
+- Backup workflow: plaintext (`export.sql`, `export.sql.gz`) and the
+  passphrase file are `shred -u`'d immediately after encryption; GPG
+  AES256 symmetric encryption; the export is verified non-empty and
+  structurally sane (starts with the expected PRAGMA line) *before*
+  encrypting; upload uses a write-only-scoped R2 credential distinct
+  from the read credential; status publishing is `continue-on-error:
+  true` + `if: always()`, so it can never fail the backup job or mask
+  a real success/failure.
+- Restore-verify workflow + `scripts/verify-remote-restore.mjs`:
+  creates one freshly, uniquely-named scratch D1 database per run
+  (timestamp + random suffix) via `wrangler d1 create`; the script
+  takes only a decrypted file path as its argument and has **no code
+  path that can resolve to any real database name** -- it is
+  structurally incapable of touching `fundraising-os-production-db` or
+  `fundraising-os-staging-db`. Deletion happens in a `finally` block
+  (runs even when integrity assertions throw), `allowFailure: true`,
+  with an explicit `::warning::` and manual-cleanup command if deletion
+  itself ever fails -- best-effort, never silent.
+- Donor data cannot be accidentally overwritten or modified: this is a
+  structural guarantee of the restore path, not a configuration choice
+  that could be misconfigured.
+
+**Risk identified -- running the first backup against an empty
+Production database, and the before/after-schema-initialization
+question (explicitly investigated this round)**: the backup workflow
+alone would mechanically succeed today (it would just export the
+near-empty `_cf_KV`-only database) -- low risk, simply not meaningful.
+However, direct inspection of `scripts/verify-remote-restore.mjs`
+found that **the restore-verification workflow's own built-in
+integrity checks require the real application schema to already
+exist**: (1) a full schema comparison against
+`production-baseline/schema-manifest.json` (53 expected tables vs. 0
+present today); (2) a hard assertion that the backup's own SQL dump
+contains a `production_schema_baseline` row with id `'0019'` (absent
+today -- the script throws immediately: "Source backup has no
+production_schema_baseline row... cannot verify backup fidelity");
+(3) a per-table `SELECT COUNT(*)` check against every table in
+`FUNDRAISING_DATA_TABLES` (would error with "no such table" against
+today's database). **Running the restore-verify workflow today,
+against a backup of the current empty database, would fail** -- not
+because of any defect in the backup/restore mechanism, but because the
+verification script assumes an already-initialized schema.
+
+Separately, and safely (an in-memory-only rehearsal, no real database
+touched), ran `node scripts/rehearse-production-baseline.mjs` this
+round to independently confirm `production-baseline/drizzle/
+0000_production_baseline_0019.sql` -- the one-shot schema file
+explicitly commented "Apply only to a brand-new empty D1 database.
+Never apply to staging" -- is internally correct: **"Production
+baseline 0019 verified: 53 tables, integrity ok, no business rows,
+replay blocked."** This file creates every application table plus the
+one `production_schema_baseline` stamp row, with zero donor/business
+data, and fails closed if ever replayed against a non-empty database.
+
+**Conclusion**: the first backup-and-restore-verification cycle should
+happen **after** Production schema initialization (applying the 0019
+baseline) but still **before** any donor-data import. Running it
+before schema initialization risks nothing destructively, but the
+restore-verify half would fail on its own correctness assertions,
+producing a false "the pipeline is broken" signal when nothing is
+actually wrong. Running it after schema initialization (all 53 tables
+present, every one empty) lets every integrity check pass meaningfully
+while zero donor data is yet at risk, and produces the first real,
+`production_schema_baseline`-stamped backup that later, data-bearing
+backups' own fidelity checks will build on.
+
+**All 7 required `_PRODUCTION` GitHub secrets confirmed configured**
+(names only, no values read) -- unchanged, see GitHub Actions findings
+above. **Production Workers remain undeployed and no donor data has
+been migrated** -- both directly re-confirmed this round via the
+Cloudflare API and a live D1 query, not assumed.
+
+**READINESS DETERMINATION: BLOCKED** -- not due to any defect, but on
+one specific, resolvable precondition:
+
+- **Blocker**: Production D1 has no schema initialized yet. Running
+  the restore-verification workflow before that happens will fail (see
+  above). Resolution: apply `production-baseline/drizzle/
+  0000_production_baseline_0019.sql` to the real Production database
+  (schema-only, zero donor rows) before running the first backup +
+  restore-verify cycle -- this is itself a Production-migration action
+  explicitly outside this round's read-only authorization.
+- **Warnings** (non-blocking for a bare backup run, but must be
+  tracked): (1) the status-worker's hardcoded Staging workflow
+  filename, to be fixed before that Worker is ever deployed with Stage
+  2 active; (2) the `ubuntu-latest` → Ubuntu 26 runner migration on
+  2026-10-19; (3) the pre-existing inability to independently verify
+  the live Cloudflare Access policy via API.
+
+**Recommended next step**: seek separate authorization for the one
+specific, narrowly-scoped action this review identifies as the actual
+precondition -- applying the 0019 production-baseline schema file to
+the real, empty Production D1 database (schema only, zero donor data,
+explicitly designed and tested for exactly this purpose). Only after
+that should a first manual `workflow_dispatch` of
+`d1-backup-nightly-production.yml` followed by
+`d1-restore-verify-monthly-production.yml` be attempted.
+
+**What was NOT executed or changed this round**: no workflow was
+dispatched; neither Production Worker was deployed; no migration or
+schema initialization was run against the real Production database;
+no donor data was copied, imported, or modified; no GitHub secret or
+variable was created, changed, or displayed; no Cloudflare resource or
+Access setting was changed; Staging was not modified (only read once,
+confirming its own baseline counts, for context already established in
+prior rounds -- not repeated this round); no automatic schedule was
+enabled anywhere. The only local-only action taken was a safe,
+in-memory-only schema rehearsal script run (`rehearse-production-
+baseline.mjs`) that touches no real database.
+
+Stopping here. Awaiting ChatGPT's independent review of these findings
+before any further Production launch step is authorized.
