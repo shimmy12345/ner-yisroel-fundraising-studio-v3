@@ -30478,3 +30478,81 @@ Staging.
 
 Stopping here. Awaiting review and approval of this proposed procedure
 before creating, committing, or running anything.
+
+## PR #16 Opened: R2 Production Read-Credential Check Workflow (2026-10-11) -- NOT MERGED, NOT RUN
+
+Following ChatGPT's approval of the proposed procedure above, the
+diagnostic workflow was created and a pull request opened against
+`main`, exactly as proposed -- **nothing was merged or executed.**
+
+**Pull request**: **#16**,
+<https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/16>,
+source branch `feature/r2-production-read-credential-check` (branched
+from `main` at `aa101ee`, single commit `d1192b1`), target branch
+`main`. **Open, not merged.**
+
+**Exact file added** (one file only, matching the approved scope):
+`.github/workflows/r2-production-read-credential-check.yml`.
+
+**New safety feature added beyond the original proposal**: before
+writing the file, independently re-verified the existing backup
+object's size and SHA-256 **this round**, via `wrangler r2 object get`
+(Cloudflare's own native API -- a different code path entirely from
+the AWS-CLI/S3-compatible credential under test): **5,746 bytes**,
+`6f6fe826f3b371a5f0f86a9fb3aee434a91f6659e3e1c0bbc1d26e45d3f3d145`.
+Confirmed identical to this same object's two earlier independent
+downloads from a prior round. These values are embedded in the new
+workflow as `EXPECTED_SIZE_BYTES`/`EXPECTED_SHA256` constants (not
+secret -- a checksum of ciphertext reveals nothing about donor content)
+and compared against what the credential-under-test actually
+retrieves, satisfying this round's "compare the full-file checksum if
+available" requirement with a genuinely independent reference value,
+not merely re-deriving it from the same download being tested.
+
+**Validation results**:
+- YAML parsed with zero errors.
+- Trigger confirmed `workflow_dispatch: {}` only -- zero matches for
+  `schedule`/`push`/`pull_request`.
+- Permissions confirmed `contents: read` only.
+- `secrets.*` references confirmed to be exactly three:
+  `CLOUDFLARE_ACCOUNT_ID` (non-R2-specific, reused account-wide, needed
+  only for endpoint construction, same as every other workflow in this
+  repo), `R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`,
+  `R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION`. **Zero** write-scoped
+  R2 credentials (`R2_BACKUP_WRITE_*`, `R2_STATUS_WRITE_*`) and
+  **zero** `CLOUDFLARE_D1_API_TOKEN` references anywhere.
+  `vars.*` references: exactly `R2_BACKUP_BUCKET_PRODUCTION`.
+- Confirmed via direct grep that the only matches for
+  `put-object`/`delete-object`/`copy-object`,
+  `wrangler`/`CLOUDFLARE_D1_API_TOKEN`/`d1 execute`, and
+  `gpg`/`decrypt` anywhere in the file are this file's own
+  safety-documentation comments -- **zero actual invocations** of any
+  of those in the real steps.
+- Confirmed zero Worker-deploy commands and zero functional Staging
+  references (the one "Staging" match is a safety-assertion comment).
+
+**Confirmation nothing was merged or executed**: PR #16's `merged`
+field is `false`; the workflow has never been dispatched (it is not
+even registered/dispatchable yet, since it does not exist on `main` --
+the same structural registration gap documented in earlier rounds);
+no real Production backup or restore-verification workflow was
+touched; no GitHub secret, Cloudflare resource, or Staging data was
+changed this round.
+
+**Remaining risks / limitations** (unchanged from the proposal): this
+check, even once run, only proves the credential can authenticate and
+that the retrieved object is byte-identical to the known-good backup
+-- it does not exercise decryption or the real restore-verify script's
+schema/baseline assertions; actually running it still requires this
+PR to be reviewed and merged first (per GitHub's own
+`workflow_dispatch`-registration requirement), and a separate,
+explicit authorization to dispatch it after that.
+
+**Recommended next step**: independent review of PR #16's diff (one
+file, as described above). If approved for merge, that merge itself
+still requires separate, explicit authorization -- and dispatching the
+workflow afterward requires a further, separate authorization again,
+exactly as this round's instructions specify.
+
+Stopping here. Awaiting independent review and explicit approval
+before merging PR #16 or running anything.
