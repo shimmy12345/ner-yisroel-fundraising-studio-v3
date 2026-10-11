@@ -30836,3 +30836,89 @@ a real Production backup.
 
 Stopping here per explicit instruction. Awaiting separate authorization
 before any further Production action.
+
+---
+
+## Production Launch Readiness Assessment (2026-10-11) -- assessment and planning only, nothing deployed/migrated
+
+Full report: `docs/PRODUCTION-LAUNCH-READINESS-ASSESSMENT.md`.
+
+### Methodology
+
+Every claim was independently re-verified this round against live state, not
+copied from prior reports: `wrangler deployments list`/`d1 list`/`r2 bucket
+list`/`r2 bucket lifecycle list` (all read-only), GitHub Actions
+secrets/variables/workflows/runs via the API, a fresh `pnpm test` run
+(178/178), `git log --since=2026-10-09 -- app/ lib/ worker/
+status-worker/src/` to confirm no application code drifted since the last
+security audit, and direct inspection of
+`lib/auth/provider-selection.ts`, `status-worker/src/github-dispatch.ts`,
+`wrangler.production.jsonc`, and `status-worker/wrangler.production.jsonc`.
+
+### Major findings
+
+- **Zero new P0/P1 application blockers.** App/lib code unchanged since the
+  2026-10-09 audit except the two already-documented hardening/config
+  commits (`f1137eb`, `b81ca3f`).
+- **First-ever real Production backup + restore-verification, both
+  succeeded** (runs `38109341883`, `38139854757`) -- see the two preceding
+  handoff entries. This proves the Production backup *pipeline* end to end.
+  It does **not** prove a Staging-donor-data migration into Production has
+  been rehearsed -- that is still a separate, not-yet-started step, since
+  Production's own database (confirmed live this round: `donors=0`,
+  `gifts=0`) is what was backed up and restored, not a copy of Staging's
+  data.
+- **The Production Worker and Production status-worker have never been
+  deployed.** Confirmed live: `wrangler deployments list` for both returns
+  `This Worker does not exist on your account [code: 10007]`. Every other
+  piece of infrastructure around them (D1, both R2 buckets with the 90-day
+  `daily-expiry` lifecycle rule confirmed live, Access application/policy,
+  all 7 required GitHub secrets, confirmed present with timestamps between
+  02:20-04:26 UTC today) is provisioned and working.
+- **New finding, not previously written down as a launch item:**
+  `status-worker/src/github-dispatch.ts:18` hardcodes
+  `const WORKFLOW_FILE = "d1-backup-nightly.yml"` -- Staging's filename,
+  never parameterized per environment. Currently harmless (Production's
+  status-worker isn't deployed and has no `GITHUB_BACKUP_DISPATCH_TOKEN`),
+  but if Production's own watchdog (Stage 1/2) is ever enabled without
+  fixing this first, it would silently dispatch **Staging's** backup
+  workflow instead of Production's.
+- Auth hardening (P2-1 from the 2026-10-09 assessment) confirmed fixed by
+  direct code read: `lib/auth/provider-selection.ts`'s `selectAuthProviders()`
+  excludes the legacy ChatGPT-Sites header provider whenever Cloudflare
+  Access is configured, not based on a guessed environment name.
+- Migration file count (43) matches the packaged baseline manifest's
+  `sourceMigrations.length` assertion -- no drift between canonical-branch
+  migrations and the baseline artifact.
+
+### Unresolved decisions (owner approval required, per the full report's Section 8)
+
+1. Deploying the Production status-worker + main Worker (empty database,
+   Access-gated, low risk, but first time anything Production-facing goes
+   live).
+2. The exact donor dataset to launch with, after a fresh re-audit (Staging
+   keeps changing -- the 2026-10-09 audit numbers are two days stale).
+3. Creating/deleting a throwaway scratch database for a Production-targeted
+   migration rehearsal, and any further restore-verification dispatch.
+4. The final cutover moment itself -- explicitly not decided or authorized
+   by this assessment.
+5. Whether to fix the `WORKFLOW_FILE` bug and enable Production's watchdog/
+   scheduling before or after the real cutover (either order is safe; the
+   report recommends fixing it in Phase 2, well before Phase 6 enables any
+   watchdog).
+6. A brief owner Cloudflare billing/limits check before two more Workers and
+   two more scheduled workflows run continuously.
+7. Whether a custom domain is wanted (recommended: no, default `workers.dev`).
+
+### Recommended next step
+
+Per the full report's Section 9: Phase 1 (deploy the empty Production
+Worker + status-worker) and Phase 3 (fresh Staging data audit +
+migration rehearsal into a throwaway scratch database) can both start in
+parallel, pending the owner's approval on items 1 and 3 above. Phase 5
+(the real cutover) remains NO-GO until Phases 1-4 are complete and every
+§8 approval has been given by the owner, per the full report's explicit
+GO/NO-GO statement (Section 10).
+
+Nothing was deployed, migrated, or modified this round. Stopping here per
+explicit instruction.
