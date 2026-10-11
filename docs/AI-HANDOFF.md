@@ -30612,3 +30612,92 @@ own separate, later authorization.
 
 Stopping here. Awaiting explicit authorization before dispatching
 this workflow or taking any further Production action.
+
+## R2 Read-Credential Check -- EXECUTED ONCE, SUCCEEDED (2026-10-11) -- Production R2 read credential CONFIRMED WORKING
+
+With explicit, narrowly-scoped authorization, the
+`r2-production-read-credential-check.yml` workflow was dispatched
+exactly once against `main`. **It succeeded completely.**
+
+**Pre-execution checks (all passed)**:
+1. `main`'s tip confirmed at `316f005` (the PR #16 merge commit);
+   the workflow file's blob hash re-confirmed as exactly
+   `3d06e4d349109dbd5873d2d1e43eb8873e44c20f` -- unchanged since
+   merge.
+2. Re-confirmed trigger (`workflow_dispatch` only), permissions
+   (`contents: read`), and secret references (exactly
+   `CLOUDFLARE_ACCOUNT_ID`, `R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`,
+   `R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION`) -- no write-scoped
+   credential, no D1 token, no actual write/delete/decrypt
+   invocation anywhere (only this file's own safety comments mention
+   those terms).
+3. Workflow id `381017089` confirmed registered, `state: active`;
+   queried its run history directly -- **0 runs existed** before this
+   round, so there was no risk of this being a duplicate execution.
+
+**Dispatched once** (`ref: main`). **Run id `38112327531`**:
+<https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38112327531>.
+Completed in well under a minute. Every step succeeded: "HeadObject
+against the existing backup's latest/ pointer," "GetObject --
+download the ciphertext only, never decrypt," "Verify size, checksum,
+and that the content still looks encrypted," "Clean up."
+
+**Verified results, read directly from the job log**:
+- **`HeadObject` succeeded** -- returned `ContentLength: 5746`,
+  `LastModified: 2026-10-11T03:44:39+00:00` (matching the original
+  backup run's own timestamp exactly).
+- **`GetObject` succeeded** -- also returned `ContentLength: 5746`.
+- **Downloaded size matched**: log printed `Downloaded 5746 bytes.`
+  -- exactly the expected `5,746` bytes.
+- **SHA-256 matched**: the workflow's own comparison against the
+  independently-verified `6f6fe826f3b371a5f0f86a9fb3aee434a91f6659e3e1c0bbc1d26e45d3f3d145`
+  passed -- confirmed by the printed success line ("Size and SHA-256
+  both match the independently-verified backup object. Read
+  credential confirmed working against the correct object.") and by
+  the absence of either of the file's own `::error::` lines (size
+  mismatch / SHA-256 mismatch), neither of which fired.
+- **First two bytes**: `8c0d` -- matching the OpenPGP binary packet
+  header already observed in this session's earlier direct
+  inspection of this exact object, confirming it is still genuine
+  ciphertext, not corrupted or plaintext.
+- **Temporary file cleanup completed**: the "Clean up" step
+  (`rm -f check.sql.gz.gpg`, `if: always()`) ran and succeeded.
+- **Overall workflow result: success.**
+- **Credential-exposure scan of the full job log**: 6 GitHub-redacted
+  `***` markers present exactly where the two READ credentials and
+  the account id are referenced; zero unmasked AWS-key-shaped
+  strings anywhere.
+
+**Conclusion**: the new, correctly-scoped R2 API token (and the two
+updated GitHub secrets) is **confirmed working** -- it can
+authenticate against R2 and retrieve the exact, byte-identical,
+already-verified backup object. The root cause diagnosed earlier this
+session (an invalid/mismatched `R2_BACKUP_READ_*_PRODUCTION`
+credential pair) is resolved.
+
+**What this does and does not prove**: this confirms R2 authentication
+and object integrity only. It does **not** exercise decryption or the
+real restore-verify script's schema/`production_schema_baseline`
+assertions -- only an actual run of
+`d1-restore-verify-monthly-production.yml` can prove those, and that
+remains a separate, later, explicitly-authorized step, not performed
+this round.
+
+**Recommended next step**: with separate, explicit authorization,
+re-attempt `d1-restore-verify-monthly-production.yml` (manual
+`workflow_dispatch` against `main`) -- the credential blocker that
+caused its only prior failure (run `38109498404`) is now resolved and
+independently confirmed. No code or configuration change is needed
+for that re-attempt; the existing verified backup object can be
+reused as-is.
+
+**What was NOT done this round**: the diagnostic workflow was
+dispatched exactly once, not retried; the real Production backup and
+restore-verification workflows were not touched; no Worker was
+deployed; no database was modified; no GitHub secret, Cloudflare
+token, or R2 object was changed; no application or workflow code was
+changed; Staging was not modified.
+
+Stopping here. Awaiting separate, explicit authorization before
+re-attempting the real restore-verification workflow or taking any
+further Production action.
