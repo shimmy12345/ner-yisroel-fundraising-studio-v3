@@ -30701,3 +30701,138 @@ changed; Staging was not modified.
 Stopping here. Awaiting separate, explicit authorization before
 re-attempting the real restore-verification workflow or taking any
 further Production action.
+
+---
+
+## Production Restore-Verification -- RE-ATTEMPTED, SUCCEEDED (2026-10-11) -- full restore+integrity verification passed against a scratch database
+
+Explicit, narrowly-scoped authorization was given to re-attempt the real
+Production restore-verification workflow exactly once, now that the R2
+read credential had been confirmed working (see the immediately
+preceding section, run `38112327531`).
+
+### Preflight (all passed, before dispatching)
+
+- R2 read-credential run `38112327531`: confirmed `success` (re-checked).
+- `.github/workflows/d1-restore-verify-monthly-production.yml` on `main`:
+  confirmed unchanged since it was added -- its only touching commit is
+  `d1e9577c` (the original PR #15 merge that *added* the file,
+  `status: "added"`), blob sha `cb49f8a09769bffc5727e865afa079d1b66318fe`,
+  identical to what was reviewed. No later modification exists.
+- `scripts/verify-remote-restore.mjs` on `main`: last touched
+  `2026-08-17T01:24:51Z` (commit `a9685bac`) -- untouched by anything in
+  this round, confirmed unmodified.
+- Trigger: confirmed `workflow_dispatch: {}` only, no `schedule`.
+- Scratch-database-only restore target: confirmed by reading the current
+  script on `main` -- generates a uniquely-named scratch database
+  (`fundraising-os-restore-verify-<timestamp>-<random>`) every run, never
+  `fundraising-os-production-db` or `fundraising-os-staging-db`.
+- Cleanup mechanism: confirmed intact -- `try/finally` block unconditionally
+  runs `wrangler d1 delete <scratch-db> -y` (`allowFailure: true`, with an
+  explicit `::warning::` + manual-deletion instructions printed if deletion
+  itself ever fails).
+- Conflicting activity: confirmed only one prior run of this workflow exists
+  (`38109498404`, the earlier documented credential failure) and zero
+  in-progress/queued runs exist anywhere in the repository at dispatch time.
+
+No unexpected change, conflicting run, or uncertainty was found, so the
+dispatch proceeded.
+
+### Execution
+
+Dispatched `d1-restore-verify-monthly-production.yml` (workflow id
+`380979304`) against `main` exactly once, at `2026-10-11T12:35:37Z`.
+Produced run **[`38139854757`](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38139854757)**.
+Not retried.
+
+### Result: overall conclusion `success`. Every job step succeeded:
+
+1. **Backup download and identity** -- the `latest/` pointer's
+   `dated-backup-key` metadata resolved to
+   `daily/fundraising-os-production-db-20261011T034435Z.sql.gz.gpg` (this
+   morning's successful backup, run `38109341883`). That specific dated
+   object was downloaded successfully (`known=true`); non-empty.
+2. **Decryption and decompression** -- succeeded: `gpg` reported
+   `AES256.CFB encrypted data`, `encrypted with 1 passphrase`, no errors;
+   `gunzip` succeeded; the decrypted file started with the expected
+   `PRAGMA defer_foreign_keys=TRUE;` line (the corruption guard did not
+   fire).
+3. **Scratch database creation** -- a new, uniquely-named scratch database
+   was created: `fundraising-os-restore-verify-20261011t123551z-2dsuo6`
+   (id `96fd3bfa-020c-479b-a458-ea0932c757d8`). Never the real Production
+   or Staging database.
+4. **Restoration into that scratch database** -- schema and all table data
+   (including the single-row `production_schema_baseline` table, 169
+   bytes) were restored successfully; query-planner statistics restored
+   on a best-effort basis as designed.
+5. **Schema and baseline verification** -- the restored schema validated
+   against the current packaged manifest with no structural-integrity
+   errors. `production_schema_baseline` backup-fidelity check passed:
+   restored `schema_hash` is `913299652ad37c0073e82aeccb30511dc1f13c784eebb5e4e7ecd3e237dea566`,
+   matching both the source backup's own marker and today's packaged hash.
+6. **`PRAGMA quick_check` and foreign-key checks** -- both ran with no
+   assertion failures (the script would have thrown and failed the step
+   otherwise); same clean result as every other integrity check run
+   against this database this round.
+7. **Fundraising table row-count validation** -- the script's own log
+   line reads `Restore verification passed.` followed by a row-count map
+   covering all 53 fundraising tables (`donors`, `gifts`, `pledges`,
+   `interactions`, etc.) -- every table present and queryable, every
+   count `0`. This is the expected state: the Production schema was
+   initialized earlier this project but no donor data has been imported
+   into Production yet.
+8. **Scratch database deletion** -- succeeded: log shows
+   `Deleting scratch database fundraising-os-restore-verify-20261011t123551z-2dsuo6...`
+   immediately followed by `Scratch database deleted.` No
+   `::warning::Could not delete...` line appeared.
+9. **Verification-status publication** -- the best-effort
+   `restore-latest-attempt.json` / `restore-latest-success.json` publish
+   step completed with no `::warning::Failed to publish...` lines, i.e.
+   both status objects were written successfully.
+10. **Overall workflow conclusion** -- `success`.
+
+### Credential-exposure scan of the full log
+
+Every `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`BACKUP_ENCRYPTION_PASSPHRASE`, `CLOUDFLARE_API_TOKEN`, and
+`CLOUDFLARE_ACCOUNT_ID` reference that represents an actual secret value
+is rendered as `***` (15 redaction markers total). The one non-masked
+match for `PASSPHRASE` is the literal shell-template text
+`printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"` as GitHub
+echoes the command source, not a value -- the actual runtime value for
+that step is masked (`***`) in its own `env:` block directly above. Zero
+AWS-access-key-shaped (`AKIA...`) strings anywhere in the log.
+
+### What this proves, now resolved end-to-end
+
+This was the exact failure point from the first attempt
+(run `38109498404`: `403 Forbidden` on `HeadObject`, `SignatureDoesNotMatch`
+on `GetObject`). With the corrected R2 read credential, the full chain now
+works: download -> decrypt -> decompress -> scratch-restore -> schema/
+baseline/integrity checks -> row-count validation -> scratch-database
+cleanup -> status publication. The Production backup-and-restore safety
+mechanism is now verified working end-to-end, for the first time, against
+a real Production backup.
+
+### What was NOT done this round
+
+- No second dispatch of this workflow or of the backup workflow.
+- No Production Worker deployment, no Production database migration, no
+  donor-data import.
+- No GitHub secret, Cloudflare token, or R2 object changed.
+- No Staging resource touched.
+- No application or workflow code changed.
+
+### Next recommended action (not started -- requires separate authorization)
+
+- Consider enabling scheduled (automatic) runs for both Production
+  workflows now that a real end-to-end restore-verification pass has
+  succeeded -- this was explicitly deferred as a separate, later,
+  approved step in both workflow files' own header comments and in PR
+  #15's description.
+- Continue toward the broader Production launch readiness checklist
+  (donor-data import planning, etc.), each still requiring its own
+  explicit authorization.
+
+Stopping here per explicit instruction. Awaiting separate authorization
+before any further Production action.
