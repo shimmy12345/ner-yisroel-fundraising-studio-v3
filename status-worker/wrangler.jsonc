@@ -27,11 +27,18 @@
   // Plain (non-secret) environment identity consumed by
   // resolveBackupWorkflowFile() (status-worker/src/github-dispatch.ts) to
   // select the one GitHub Actions backup workflow this Worker is allowed
-  // to dispatch -- see docs/PRODUCTION-BACKUP-WATCHDOG-CORRECTION.md. This
-  // value only takes effect on the next `wrangler deploy` of this config;
-  // it has no effect on the currently deployed Worker, which already has
-  // no GITHUB_BACKUP_DISPATCH_TOKEN secret and therefore never reaches the
-  // dispatch path regardless.
+  // to dispatch -- see docs/PRODUCTION-BACKUP-WATCHDOG-CORRECTION.md.
+  // Correction (2026-10-11, backup watchdog deployment round): this
+  // comment previously claimed the deployed Worker "already has no
+  // GITHUB_BACKUP_DISPATCH_TOKEN secret." That was never true -- live
+  // inspection (`wrangler secret list`) confirms this Worker has held a
+  // real `GITHUB_BACKUP_DISPATCH_TOKEN` secret all along, i.e. it is
+  // Stage 2 (dispatch-capable), not detection-only. This `vars` entry has
+  // now been deployed (version `805f1f0d-b8ee-45d2-bb56-10b3d1382523`,
+  // 2026-10-11T16:27:27Z) alongside the rest of this round's fail-closed
+  // workflow-selection correction -- resolving to the same
+  // `d1-backup-nightly.yml` this Worker already dispatched before, so its
+  // existing Stage 2 behavior is unchanged, not newly enabled.
   "vars": { "BACKUP_WORKFLOW_ENVIRONMENT": "staging-independent" },
   // Backup-freshness watchdog (docs/BACKUP-SCHEDULING-RELIABILITY.md) --
   // hourly, deliberately offset from :00 (GitHub's own documented

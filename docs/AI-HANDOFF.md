@@ -31406,3 +31406,76 @@ Nothing was deployed, migrated, or modified live this round. No GitHub
 Actions workflow was triggered. No secret was created, rotated, or
 configured. Stopping here per explicit instruction, awaiting independent
 review and separate deployment authorization.
+
+---
+
+## Production Backup Watchdog Deployment (2026-10-11, ~16:27-16:29 UTC) -- DEPLOYED to both status-workers, SUCCESS
+
+Full report: `docs/PRODUCTION-BACKUP-WATCHDOG-DEPLOYMENT-VERIFICATION.md`.
+
+### What was done
+
+Deployed the previously implemented and reviewed workflow-selection
+correction (commit `a6d6dba`) to **both** status-workers, Staging first
+then Production, each independently verified before proceeding. Neither
+main application Worker was touched.
+
+- **Staging** (`fundraising-os-backup-status`): `20dfad5d-...` ->
+  **`805f1f0d-b8ee-45d2-bb56-10b3d1382523`**. Cron (`17 * * * *`), R2
+  binding, and the existing live `GITHUB_BACKUP_DISPATCH_TOKEN` secret all
+  confirmed unchanged post-deploy. New `BACKUP_WORKFLOW_ENVIRONMENT =
+  "staging-independent"` resolves to the same `d1-backup-nightly.yml`
+  Staging already dispatched before -- its existing Stage 2 (dispatch-
+  capable) behavior is preserved, not newly enabled.
+- **Production** (`fundraising-os-production-backup-status`): `932a70e2-...`
+  -> **`a4310e3f-8658-4da5-a1e0-1c033dd26f28`**. Cron (`23 * * * *`), R2
+  binding confirmed unchanged; secret list reconfirmed **empty** --
+  still Stage 1/detection-only. New `BACKUP_WORKFLOW_ENVIRONMENT =
+  "production-independent"` now guarantees it can only ever resolve
+  `d1-backup-nightly-production.yml`, never Staging's.
+
+Also corrected, in `status-worker/wrangler.jsonc`, a stale comment (from
+the prior round) that incorrectly claimed Staging's deployed Worker had
+no dispatch token -- it has held one all along. Comment-only, made after
+the Staging deploy above, so it was **not** part of that deployed bundle;
+it will be picked up, with zero behavioral effect, on Staging's next
+redeploy for any reason.
+
+### Preflight and validation
+
+Live pre-deployment state matched every expected invariant: Staging's
+backup watchdog was fresh (last success ~1h54m old, not recovering), no
+conflicting GitHub Actions run was active, Production/Staging databases
+and R2 buckets remained isolated and unchanged (Production donors/gifts/
+giving_activities still 0/0/0, Staging donors still 254). Fresh
+`tsc`/`test` (179/179)/`build:production-independent`, plus a dry-run
+build of both status-worker configs, all passed before any deploy.
+
+### Post-deployment verification
+
+Every invariant in the task's own checklists held for both Workers:
+correct version live, correct `BACKUP_WORKFLOW_ENVIRONMENT`, correct
+secret presence/absence, correct R2 binding, unchanged cron, no public
+route (`404` on both), no unexpected GitHub Actions run, main Production
+app still Access-protected (`302`). Workflow-selection resolution itself
+(`resolveBackupWorkflowFile`) was verified **only** via source/tests and
+the deployed `vars` binding value -- **not** via live invocation, since
+manually triggering either scheduled handler or a real dispatch was
+explicitly prohibited this round.
+
+### Failures
+
+None. No rollback needed or performed for either Worker.
+
+### Remaining launch blockers
+
+Unchanged from before this round: owner-interactive dashboard
+verification (health-reporting round) still pending; donor-data migration
+rehearsal not advanced; `GITHUB_BACKUP_DISPATCH_TOKEN` for Production still
+deliberately absent (Production remains detection-only). Each status-
+worker's own next natural Cron tick (not manually triggered) is the first
+opportunity to observe the new resolver run live -- not checked this
+round, noted as pending live-runtime verification.
+
+Stopping here per explicit instruction. Awaiting independent review and
+separate authorization before any further Production work.
