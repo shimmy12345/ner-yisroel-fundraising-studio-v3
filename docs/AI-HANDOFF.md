@@ -30556,3 +30556,59 @@ exactly as this round's instructions specify.
 
 Stopping here. Awaiting independent review and explicit approval
 before merging PR #16 or running anything.
+
+## PR #16 Merged Into `main` (2026-10-11) -- WORKFLOW REGISTERED, STILL NOT RUN
+
+Following ChatGPT's approval of PR #16, and explicit authorization
+limited to merging it, PR #16 was merged. **The new workflow has not
+been dispatched -- it is only now registered/dispatchable for the
+first time, with zero runs.**
+
+**Pre-merge verification (all re-confirmed immediately before
+merging, not assumed from the earlier review)**: PR #16 re-fetched
+live -- `state: open`, `merged: false`, `mergeable: true`,
+`mergeable_state: clean`, still exactly 1 commit (`d1192b1`), 1 file
+changed (102 additions, 0 deletions), combined status `success`.
+`main`'s tip was still `aa101ee`, unchanged since the PR was opened.
+The workflow file's blob hash (`3d06e4d3...`) and its trigger/
+permissions/secret-reference content were re-verified identical to
+what was reviewed -- no drift.
+
+**Merge performed**: `PUT /pulls/16/merge`, `merge_method: "merge"`
+(matching PR #14/#15's own precedent), with an explicit `sha` guard
+pinned to the exact reviewed head commit. Result: **merged, merge
+commit `316f005`**
+(`Merge pull request #16 from shimmy12345/feature/r2-production-read-credential-check`),
+parents `aa101ee` (prior `main` tip) + `d1192b1` (PR head) -- a true
+two-parent merge commit.
+
+**Post-merge verification**:
+- `main`'s tip is now `316f005`; the workflow file is present with
+  the **exact same blob hash** (`3d06e4d3...`) as reviewed --
+  byte-for-byte unchanged through the merge.
+- The workflow is now registered in GitHub's workflow list (id
+  `381017089`, `state: active`) -- dispatchable for the first time,
+  since it previously only existed on a feature branch.
+- **Confirmed it has not been run**: queried its run history directly
+  by id -- **0 total runs**.
+
+**Current Production verification status**: unchanged in substance --
+the R2 read-credential correction (new token, updated secrets) remains
+unverified by any actual test. The only thing this round changed is
+that the verification mechanism now exists on `main` and could be
+dispatched, pending separate authorization. No Production backup or
+restore-verification workflow was touched; no Worker was deployed; no
+secret, Cloudflare resource, or Staging data was changed.
+
+**Recommended next step**: with separate, explicit authorization, a
+single manual `workflow_dispatch` of
+`r2-production-read-credential-check.yml` against `main` -- expected
+to either confirm the new credential works (matching size/SHA-256
+against the independently-verified values already embedded in the
+workflow) or surface a new, more specific error if it does not. Only
+after that passes and is reviewed should the real
+`d1-restore-verify-monthly-production.yml` be re-attempted, as its
+own separate, later authorization.
+
+Stopping here. Awaiting explicit authorization before dispatching
+this workflow or taking any further Production action.
