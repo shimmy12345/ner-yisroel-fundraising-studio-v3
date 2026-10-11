@@ -29232,3 +29232,169 @@ unaffected by every step.
 
 No Production deployment, no donor data copied or migrated, no Staging
 modification, no merge to `main`. Stopping here for independent review.
+
+## Production Backup/Restore Workflows -- PR #15 Opened Against `main` (2026-10-10) -- NOT MERGED, NO DEPLOYMENT
+
+**Production readiness status**: infrastructure configuration remains
+exactly where the prior two rounds left it -- Production D1
+(`fundraising-os-production-db`, empty), R2 buckets, and Cloudflare
+Access are all provisioned but **no Production Worker has ever been
+deployed**, and no donor data has ever been copied into Production.
+This round's only change is making the two prepared Production backup/
+restore GitHub Actions workflows reachable from `main` (see "Git
+history issue" below for why they weren't reachable before); it does
+not advance deployment readiness beyond that.
+
+**All 7 required `_PRODUCTION` GitHub secrets confirmed present**
+(values never read or displayed, only existence/name confirmed, same
+standard as every prior round):
+`R2_BACKUP_WRITE_ACCESS_KEY_ID_PRODUCTION`,
+`R2_BACKUP_WRITE_SECRET_ACCESS_KEY_PRODUCTION`,
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`,
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION`,
+`R2_STATUS_WRITE_ACCESS_KEY_ID_PRODUCTION`,
+`R2_STATUS_WRITE_SECRET_ACCESS_KEY_PRODUCTION`,
+`BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION` -- plus the two reused
+account-wide secrets (`CLOUDFLARE_D1_API_TOKEN`,
+`CLOUDFLARE_ACCOUNT_ID`) and two non-secret variables
+(`R2_BACKUP_BUCKET_PRODUCTION`, `R2_STATUS_BUCKET_PRODUCTION`), all
+already in place from the prior infrastructure-setup round.
+
+**Git history issue and its implications**: `main` and
+`feature/independent-cloudflare-sandbox` are two genuinely independent
+git histories with **no common ancestor** (`git merge-base
+origin/main origin/feature/independent-cloudflare-sandbox` returns
+nothing, confirmed directly, not assumed) -- `main`'s root commit is
+`2b8f94c` ("Initial commit", the legacy ChatGPT Sites CRM), this
+branch's root is `fdd6783` ("feat: establish Fundraising OS application
+foundation"). A normal merge between them is not possible and was not
+attempted. This has a concrete, previously-undocumented operational
+consequence discovered this round: **a `workflow_dispatch`-only GitHub
+Actions workflow is not registered/dispatchable by GitHub at all unless
+it exists on the repository's default branch** (`main`) -- confirmed
+empirically (`GET /repos/.../actions/workflows/d1-backup-nightly-production.yml`
+→ 404; the workflow list endpoint omits both new Production workflow
+files entirely, even though both were valid and committed on
+`feature/independent-cloudflare-sandbox`). This is why the two files
+prepared in the prior "Production Configuration + Build Resolution"
+round were structurally inert -- not just undocumented-as-pending, but
+literally un-runnable by anyone, manually or otherwise -- until ported
+to `main`. Following this repo's established pattern (PR #14 and its
+predecessors), the port was done by branching fresh from `main`'s own
+tip and copying over only the files needed, never by merging this
+branch's history into `main`.
+
+**New pull request**: **#15**,
+<https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/15>,
+source branch `feature/production-backup-restore-workflows` (branched
+from `main` at `c8a11da`, single commit `d1e9577`), target branch
+`main`. **Open, not merged.**
+
+**Every file included in PR #15, and why it is necessary** -- exactly
+two files, both added verbatim (confirmed byte-for-byte identical via
+matching git blob hash to their copies on this branch: `d6ac55b9...`
+and `cb49f8a0...`), zero other files touched:
+- `.github/workflows/d1-backup-nightly-production.yml` -- the
+  Production nightly D1 export/encrypt/upload-to-R2 workflow;
+  necessary because it does not yet exist on `main` and per the
+  registration constraint above, cannot be dispatched by anyone until
+  it does.
+- `.github/workflows/d1-restore-verify-monthly-production.yml` -- the
+  Production monthly scratch-restore verification workflow; same
+  reason. Its only repo-script dependency,
+  `scripts/verify-remote-restore.mjs`, already exists on `main`
+  unmodified (confirmed via blob hash) and is fully database-agnostic
+  -- it takes a decrypted backup file path as its CLI argument and
+  always generates its own uniquely-named, throwaway scratch D1
+  database for the restore test, regardless of which real database the
+  backup came from. Its own transitive dependencies
+  (`lib/data-health/production-baseline.ts`,
+  `lib/operations/d1-restore-order.ts`,
+  `production-baseline/schema-manifest.json`) are likewise already
+  current on `main` (synced via PR #14's merge). **No application code
+  change was required anywhere.**
+
+**Tests performed and results**:
+- Confirmed both new files' only trigger is `workflow_dispatch: {}` --
+  no `schedule`, `push`, or `pull_request` anywhere in either file
+  (direct grep, zero matches for the latter three).
+- Confirmed neither file contains any `wrangler deploy`, `d1
+  migrations apply`, or Pages-deploy command (direct grep, zero
+  matches) -- neither workflow can deploy a Worker or apply a
+  migration under any circumstance.
+- Confirmed both files reference only `fundraising-os-production-db`
+  (never `fundraising-os-staging-db`), only the Production R2
+  buckets/`_PRODUCTION`-suffixed secrets and vars (plus the two reused
+  account-wide secrets), and never write/copy donor data anywhere
+  persistent -- the restore-verify workflow only ever restores into a
+  throwaway scratch D1 database that is deleted at the end of the run.
+- Validated both files as syntactically well-formed YAML (parsed with
+  no errors via the `yaml@2` package).
+- Confirmed `scripts/verify-remote-restore.mjs` and its three
+  dependency files are present, unmodified, on the new PR branch
+  (inherited automatically from `main`).
+- Ran `main`'s own test suite (`npm test`, `node --test`, a different
+  runner/count than this branch's own `pnpm test`/178 tests) on the new
+  PR branch: **149/149 passing**, identical to `main`'s own existing
+  baseline -- confirming these two CI-only workflow files have zero
+  effect on any application code or existing test.
+- Checked `main`'s complete `.github/workflows/` directory (now 4
+  files total after this PR: the two pre-existing Staging workflows,
+  unaffected, plus the two new Production ones) for any `pull_request`
+  or `push` trigger that could fire from opening or pushing this PR --
+  none exists anywhere in the directory, so opening/merging PR #15
+  cannot itself trigger any GitHub Actions run, Production or
+  otherwise.
+
+**Unresolved security, deployment, or compatibility concerns**: none
+newly introduced by this round. The pre-existing, previously-documented
+gap remains: no Production Worker has ever been deployed, so the
+Production backup/restore workflows, even after this PR merges, would
+be backing up/restore-testing an empty database with no real donor
+data in it yet -- intentional, since Production Worker deployment and
+donor-data migration are separate, later, explicitly-approved steps
+not authorized or attempted this round.
+
+**What remains before Production backup verification and deployment**:
+(1) independent review and merge of PR #15 (not done -- explicitly
+withheld per this round's instructions); (2) a real Production Worker
+deployment (`pnpm run build:production-independent` +
+`wrangler deploy` against `wrangler.production.jsonc`), still not
+performed; (3) the status-worker's own Production deployment
+(`status-worker/wrangler.production.jsonc`), also not performed -- the
+main Production Worker's `STATUS_WORKER` service binding will not
+resolve until this happens; (4) only once real donor data exists in
+Production would a manual `workflow_dispatch` run of
+`d1-backup-nightly-production.yml` followed by
+`d1-restore-verify-monthly-production.yml` constitute a meaningful end-
+to-end verification -- running either workflow against the still-empty
+Production database earlier than that would exercise the mechanism but
+not prove anything about real data; (5) a separate, explicitly-approved
+decision to add `schedule:` triggers to either workflow, deliberately
+not included in PR #15.
+
+**Recommendation for next step**: after independent (ChatGPT) review of
+this round's work, merge PR #15 into `main` (no code/application risk --
+confirmed by the 149/149 main-baseline test run and the trigger/
+dependency analysis above). Do not deploy the Production Worker or
+run either new workflow until that merge is independently reviewed and
+approved, and until a deliberate decision is made about whether to
+exercise the still-empty-database workflows pre-emptively (recommended:
+wait until real data migration is approved, to get a meaningful first
+verification run rather than an empty-database dry run).
+
+**What was NOT changed or executed this round** -- stated explicitly
+per this round's safety restrictions: the pull request was **not
+merged**; neither Production Worker (main app or status-worker) was
+deployed; no Production database migration was run; no donor data was
+copied, imported, or modified anywhere; no Production backup or
+restore workflow was ever dispatched/run (only read and statically
+analyzed); no Cloudflare resource was created, changed, or deleted; no
+GitHub secret was created, changed, read, or displayed; Independent
+Staging infrastructure and data were not touched (not read, not
+queried, not modified) at any point this round; no credential or
+encryption passphrase value was ever displayed, logged, or committed
+anywhere.
+
+Stopping here for independent (ChatGPT) review before any further
+action -- per this round's explicit instruction.
