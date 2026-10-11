@@ -31243,3 +31243,70 @@ rollback procedure" section.
 
 Nothing was deployed or redeployed this round. Stopping here per explicit
 instruction.
+
+---
+
+## Production Health Reporting Fix -- DEPLOYED (2026-10-11, ~14:54 UTC) -- main Worker only, verified working against real live data
+
+Full report: `docs/PRODUCTION-HEALTH-FIX-DEPLOYMENT-VERIFICATION.md`.
+
+### Deployment
+
+Redeployed only the main Production Worker (`fundraising-os-production`)
+with commit `95bb541`. Previous version `1b0a79f9-...` -> new version
+`c1eee654-fd37-47be-b71b-ac2552baa6c7`, now live at 100%. Status-worker,
+both databases, Staging, secrets, Access policy, and GitHub Actions
+workflows were untouched.
+
+### Preflight (all 7 items passed, re-verified fresh)
+
+Scope diff confirmed only the three intended files
+(lib/data-health/model.ts, lib/data-health/read.ts,
+tests/production-readiness-diagnostics.test.mjs) plus docs changed since
+the prior deployment. Production DB confirmed empty of donor/financial
+data; baseline marker intact; existing Worker operational; Access still
+blocking anonymous requests; D1/Staging isolation unchanged; zero
+conflicting GitHub Actions activity; status-worker secret list empty.
+Fresh tsc/test/build all passed.
+
+### Post-deployment verification
+
+**Anonymous access: PASSED, no critical failure** -- still 302 to the
+correct Access login, zero application content. **Database/isolation:
+confirmed** -- donors/gifts/giving_activities still 0; one `users` row
+now exists (the owner's own account, created by their login during the
+prior investigation round, not new data from this deployment); baseline
+marker unchanged; Staging completely unaffected (donor count 254,
+Access still 302, neither Staging Worker redeployed).
+
+**Workspace Health: verified via a safe, read-only simulation** -- ran
+the actual deployed health-report functions locally against real data
+pulled read-only from live Production (full schema DDL,
+import_preview_sessions columns), without logging in as the owner.
+Result matches every expected outcome: "Live schema version: 0022/0022,
+Healthy"; "Production rehearsal baseline: 0019 - Verified"; "Production
+<-> baseline schema: Match"; "Production launch readiness: Ready", zero
+blockers; every label is Production-specific, none read "Staging ...".
+One deviation from the task's stated expectation, explained and not a
+defect: "Production data state" reads "Live records present" rather
+than "Empty", because that specific card counts the owner's own account
+row (users=1) -- donor/financial data remains genuinely zero and is
+reported correctly elsewhere ("Active donors: 0").
+
+**Live, owner-authenticated dashboard view itself: PENDING OWNER
+VERIFICATION** -- the simulation above is strong evidence, not a
+substitute for the owner actually loading `/settings` and confirming it.
+
+### Failures
+
+None. No rollback needed or performed.
+
+### Remaining launch blockers
+
+Owner-interactive dashboard verification (pending); the separate,
+unrelated backup-watchdog WORKFLOW_FILE bug (still unfixed, out of
+scope); no scheduled backups yet (deliberate); donor-data migration
+rehearsal against this target (not advanced this round).
+
+Stopping here per explicit instruction. Awaiting owner verification and
+separate authorization before any further Production action.
