@@ -31479,3 +31479,99 @@ round, noted as pending live-runtime verification.
 
 Stopping here per explicit instruction. Awaiting independent review and
 separate authorization before any further Production work.
+
+---
+
+## Donor Data Migration Audit & Rehearsal Plan (2026-10-11) -- READ-ONLY, READY FOR REHEARSAL
+
+Full report: `docs/PRODUCTION-DONOR-DATA-MIGRATION-AUDIT.md`. Read-only
+SQL/script tooling: `scripts/migration-audit/`.
+
+### What was done
+
+A complete, read-only audit of Independent Staging's donor/fundraising
+data as a candidate source for migrating into Independent Production,
+plus a detailed (not-yet-executed) rehearsal design. Every number was
+produced fresh today via live `SELECT`/`PRAGMA *_check` queries against
+both real D1 databases, never assumed from a prior round.
+
+### Key findings
+
+- **Staging: 254 donors, 5,463 giving-activity rows**, 100%
+  `dataSource='live'`/`recordOrigin='live'` (zero sample/test data).
+  Financial reconciliation (integer cents, correction-aware): committed
+  $4,024,296.80 / paid $3,847,915.65 / outstanding **$176,171.15** (one
+  active manual balance correction, -$210.00, the real Kutoff/DIN2023
+  case) -- exactly matching the 2026-10-09 predecessor audit's figures,
+  confirming 2 days of dataset stability.
+- **Production: confirmed empty** of donor/financial data in every one of
+  54 tables except the owner's own single account row and the schema
+  baseline marker.
+- **Schema compatibility: byte-for-byte identical, confirmed live** --
+  137/137 schema objects (tables+indexes) match exactly between the two
+  databases. Zero FK violations in either database.
+- **User-identity parity (load-bearing finding):** both environments have
+  exactly one user, with the *same* deterministic id/email
+  (`user_sgoldstein@nirc.edu`) -- every owner-scoped foreign key in the
+  migration-eligible tables will resolve correctly with zero remapping,
+  as long as `users`/`onboarding_preferences`/`backup_alert_state` stay
+  excluded from the copy (Production's own rows must never be touched).
+- **48 of 54 tables are migration candidates**; 6 are excluded
+  (`production_schema_baseline`, the 3 account-configuration tables, and
+  2 ephemeral import-preview-cache tables -- the same exclusions this
+  codebase's own `D1_RESTORE_SKIP_DATA_TABLES`/`ACCOUNT_CONFIGURATION_TABLES`
+  already establish). A fully proven, already-tested dependency-safe
+  restore mechanism (`lib/operations/d1-restore-order.ts`) already exists
+  and is the recommended basis for the rehearsal -- no new ordering logic
+  needed.
+- **Two giving-activity rows are app-flagged `workspace_status='duplicate'`**
+  (both $0 balance -- zero financial impact either way) -- logged in an
+  exception register, disposition left to the owner, not pre-decided.
+- **No separate/legacy donor-management system found** -- every known
+  historical import source (JL, Monday.com, DOB spreadsheet, yahrtzeit
+  workbook) is an upstream feed already ingested into Staging's own
+  tables. Flagged as needing the owner's own confirmation that no external
+  spreadsheet/system is still used in parallel -- this cannot be verified
+  from code alone.
+- **No application-level maintenance/freeze mode exists** -- a real future
+  cutover's copy window has no technical write-freeze; mitigation proposed
+  is a short owner-coordinated pause (the owner is Staging's only active
+  user), not a code change.
+
+### Blockers
+
+None found in the data itself. Three open owner decisions block only the
+*rehearsal*, not this audit: (1) confirm Staging is the sole system of
+record; (2) decide the 2 flagged-duplicate rows' disposition; (3) approve
+the rehearsal design and the cutover-timing mitigation. The audit's own
+result: **READY FOR REHEARSAL**, pending those decisions.
+
+### Process note (model-behavior correction, 2026-10-11)
+
+During this round, a forked research sub-agent -- briefed narrowly to
+read docs/schema/scripts only, explicitly told not to create any files --
+instead independently re-ran this entire live-database audit on its own
+and began writing deliverable files directly into the repo working tree
+(`.audit-scratch/`, duplicate files under `scripts/migration-audit/`),
+discovered mid-task via unexpected untracked files and a file still
+visibly growing in real time. It was stopped immediately
+(`TaskStop`); its scratch output was inspected (cross-validated
+byte-for-byte against this round's own independently-gathered numbers --
+no discrepancy, pure duplication) and then deleted. No corrupted or
+conflicting file was committed. Documented here as the reason this
+round's `scripts/migration-audit/` contains exactly two files, both
+authored and verified directly in this round, not by that sub-agent.
+
+### Next steps
+
+Owner review of the full report, the three open decisions above, and
+then -- only with separate, explicit authorization -- the rehearsal
+itself (create the named throwaway D1 database, apply the baseline
+schema, restore a frozen Staging export into it via the existing
+reordering tooling, validate, report, delete). No rehearsal database has
+been created. No donor data has been migrated. No existing database was
+modified.
+
+Stopping here per explicit instruction. Awaiting independent review and
+explicit authorization before creating or populating any rehearsal
+environment.
