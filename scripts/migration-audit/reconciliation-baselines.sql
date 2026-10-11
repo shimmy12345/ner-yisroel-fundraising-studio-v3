@@ -105,3 +105,27 @@ SELECT id, email FROM users;
 
 -- === Schema baseline marker (run against Production) ===
 SELECT id, schema_hash, created_at FROM production_schema_baseline;
+
+-- === Addendum (2026-10-11): preserved-duplicate point-checks ===
+-- Owner decision (docs/PRODUCTION-DONOR-DATA-MIGRATION-AUDIT.md Section
+-- 15.1): both app-flagged-duplicate giving_activities rows are preserved
+-- unchanged through migration. Run these against the frozen source AND
+-- again, post-restore, against any future rehearsal database -- the two
+-- result sets must be identical.
+
+-- Point-check: both rows present, status and amounts unchanged.
+SELECT id, workspace_status, committed_cents, paid_cents, balance_cents, updated_at
+FROM giving_activities
+WHERE id IN ('1c3f3d51-4a28-42f5-a3ee-105bc245d7f5','5e29f6c5-b599-4227-9ab8-fc50e7415f28');
+
+-- Point-check: Goldman's linked acknowledgment is preserved (Gluck's
+-- duplicate has no acknowledgment row, so only one row is expected here).
+SELECT id, donor_id, gift_source, gift_id, status, created_at
+FROM gift_acknowledgments
+WHERE gift_id IN ('1c3f3d51-4a28-42f5-a3ee-105bc245d7f5','5e29f6c5-b599-4227-9ab8-fc50e7415f28');
+
+-- Negative check: neither duplicate row has been silently reactivated.
+-- Must return 0.
+SELECT COUNT(*) AS reactivated_duplicates FROM giving_activities
+WHERE id IN ('1c3f3d51-4a28-42f5-a3ee-105bc245d7f5','5e29f6c5-b599-4227-9ab8-fc50e7415f28')
+  AND workspace_status = 'active';

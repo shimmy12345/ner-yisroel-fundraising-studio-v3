@@ -31669,3 +31669,104 @@ from a migration.
 
 No file other than this one was modified. No flags were changed, no
 records deleted, no migration run, nothing deployed.
+
+## Migration plan update: duplicate-record preservation decision (read-only, 2026-10-11)
+
+Follow-up to the migration audit and the duplicate-giving-activity
+investigation (both above). The owner reviewed the investigation and
+made a decision; this round updates the migration audit, the read-only
+reconciliation scripts, and this handoff to reflect it. No database was
+modified, no rehearsal database was created, and no code was deployed.
+
+### Owner decision (confirmed)
+
+Both flagged `giving_activities` rows -- Goldman (`1c3f3d51-...`, $500)
+and Gluck (`5e29f6c5-...`, $10) -- are already marked `duplicate` in
+Staging and already excluded from Staging's displayed financial totals
+by the application's own existing `workspace_status='active'` rule.
+**Decision: preserve both unchanged through migration.** No delete,
+merge, reactivate, or exclude. Goldman's linked `gift_acknowledgments`
+row is preserved too. The migration now targets **all 5,463
+`giving_activities` rows**, not 5,461 plus a pending exception. See
+`docs/PRODUCTION-DONOR-DATA-MIGRATION-AUDIT.md` Section 7 (exception
+register, now closed) and Section 15 (full addendum).
+
+### Financial-reporting verification (code-level)
+
+Every SQL query and in-memory filter that computes a committed/paid/
+outstanding total was located and inspected directly in source (donor
+giving summary, the "Today" dashboard feed, Portfolio Focus, Meeting
+Brief, import-time duplicate/payment matching, data-health business-
+record counts). **All of them consistently exclude `workspace_status !=
+'active'` rows**, either via `lib/giving/management.ts`'s
+`countsInGivingTotals()`/`COUNTED_GIVING_SQL` (applied in JS after an
+intentionally broader fetch, for the donor-page/Giving-Management
+surface) or via the identical filter applied directly in SQL (dashboard,
+Portfolio Focus, Meeting Brief, duplicate-match, business-record
+counts). This is corroborated by existing unit tests, not just this
+round's reading. The Donation History timeline deliberately does *not*
+hide duplicate-flagged rows -- it shows them with an explicit
+`"excluded"` status badge -- which is exactly the "preserved for history,
+excluded from reporting" behavior the owner's decision describes, and
+was already built into the app before this round. **No inconsistency
+was found in any actual financial-reporting surface.** There is no
+dedicated workspace-wide financial dashboard page in this codebase
+today; the aggregate view used for planning is the audit's own
+reconciliation SQL, which already applies the same filter. Full detail
+in the audit doc's Section 15.2.
+
+### Reconciliation strengthening
+
+Added point-checks (by exact id) confirming both duplicate rows and
+Goldman's acknowledgment survive a restore unchanged, plus a negative
+check that neither row is silently reactivated
+(`scripts/migration-audit/reconciliation-baselines.sql`, appended). Added
+a new `scripts/migration-audit/row-level-reconciliation.sql` -- an
+ordered, deterministic column dump (not just aggregate counts/sums) for
+`giving_activities`, `gift_acknowledgments`, and
+`pledge_balance_corrections`, meant to be diffed byte-for-byte between a
+frozen source snapshot and a post-restore rehearsal database. Full
+detail in Section 15.3.
+
+### Ownership/synthetic-user resolution
+
+Found and fixed an internal inconsistency in the original rehearsal
+design: Section 8.6 proposed synthesizing a throwaway test user for
+validation, but every `ownerUserId`/`userId` column across the 48
+MIGRATE tables is a real schema-enforced foreign key to the one
+deterministic id `user_sgoldstein@nirc.edu` (Section 4.6) -- a synthetic
+id would make every migrated row fail `PRAGMA foreign_key_check`. Fixed:
+the rehearsal must insert that one real `users` row (id/email only).
+This is safe because the `users` table carries no credential-shaped
+column at all (confirmed directly in `db/schema.ts`) -- authentication
+lives entirely outside this table. Production's own existing owner
+account/row is never written to, copied, or modified by any part of this
+plan. Full detail in Section 15.4 (and the corrected Section 8.6).
+
+### Updated readiness status
+
+**Ready for an isolated rehearsal:** yes, pending 4 open owner decisions
+(sole-system-of-record confirmation; rehearsal-design approval including
+the ownership resolution above; cutover-timing mitigation approval;
+confirmation that a fresh pre-rehearsal audit re-run is still required).
+The duplicate-record decision no longer blocks anything.
+
+**Ready for a real Production migration:** not yet, and this round does
+not imply or grant that authorization. A real cutover still additionally
+requires a successful validated rehearsal, the sole-system-of-record
+confirmation resolved *before* cutover (not just before rehearsal), the
+cutover-timing mitigation actually executed, and a fresh re-run of the
+full reconciliation baseline immediately before the real cutover.
+
+### Remaining owner decisions
+
+1. Confirm Staging is the sole current system of record.
+2. Approve the rehearsal's exact design, including the ownership
+   resolution above.
+3. Approve the cutover-timing mitigation (or propose an alternative).
+4. Confirm this audit's figures remain the planning basis, understanding
+   a fresh re-run is still required immediately before any real cutover.
+
+No database was modified, no rehearsal database was created, no Worker
+was deployed, and no migration was executed in producing this round's
+updates.
