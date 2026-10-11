@@ -30331,3 +30331,150 @@ conclude the file is missing or unreadable, when it is fully intact.
 This is a documentation/tooling note only -- no application, workflow,
 or secret data is affected, and nothing about the Production backup/
 restore investigation changes because of it.
+
+## R2 Read-Credential Correction -- Secrets Updated by Owner; PROPOSED Read-Only Verification Awaiting Approval (2026-10-11) -- NOTHING EXECUTED YET
+
+The account owner created a new Cloudflare R2 API token, scoped to
+Object Read on `fundraising-os-production-backups` only, and updated
+the two GitHub secrets this round's prior diagnosis identified.
+
+**Confirmed, read-only, no values retrieved or displayed**: both
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION` and
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION` now show an
+`updated_at` timestamp distinctly later than their original
+`created_at` (`2026-10-11T04:26:16Z` and `2026-10-11T04:26:54Z`,
+versus the original `2026-10-11T02:31:49Z`/`02:32:41Z`) -- confirming
+a genuine change was made. The paired `R2_BACKUP_WRITE_*_PRODUCTION`
+secrets remain untouched (`created_at == updated_at`), confirming
+only the intended two secrets were modified.
+
+**Nothing has been fixed or verified yet -- only proposed.** GitHub
+never exposes a secret's value outside of an actual Actions workflow
+run, so the only way to exercise these exact two secrets at all is
+via a real (narrowly scoped) GitHub Actions job. This round proposes,
+but does **not** create or run, exactly one new, minimal,
+`workflow_dispatch`-only workflow file whose entire purpose is a
+read-only credential/object sanity check:
+
+```yaml
+# PROPOSED -- not yet created. .github/workflows/
+# r2-production-read-credential-check.yml
+name: R2 Production read-credential check (manual, read-only)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_NAME: fundraising-os-production-db
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: HeadObject against the existing backup's latest/ pointer
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          aws s3api head-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" \
+            --key "latest/${DATABASE_NAME}.sql.gz.gpg"
+
+      - name: GetObject -- download the ciphertext only, never decrypt
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" \
+            --key "latest/${DATABASE_NAME}.sql.gz.gpg" check.sql.gz.gpg
+          test -s check.sql.gz.gpg
+          echo "Downloaded $(wc -c < check.sql.gz.gpg) bytes."
+          head -c 2 check.sql.gz.gpg | od -An -tx1
+
+      - name: Clean up
+        if: always()
+        run: rm -f check.sql.gz.gpg
+```
+
+**Why this is safe -- by construction, not just by intent**:
+- `HeadObject` and `GetObject` are inherently non-mutating S3/R2
+  operations -- there is no parameter or code path in either call
+  that can modify, overwrite, or delete any object.
+- The file contains **zero** `put-object`/`delete-object`/`copy-object`
+  calls, and references **no write-scoped credential at all** (not
+  even `R2_STATUS_WRITE_*`, which the real workflows use for status
+  reporting but this check does not need).
+- The file contains **zero** `wrangler`/D1 commands and never
+  references `CLOUDFLARE_D1_API_TOKEN` -- it cannot touch any
+  database, Production or Staging, even in principle.
+- No `gpg`/decrypt step exists -- the downloaded object is inspected
+  only by byte count and its first two raw bytes (to confirm it is
+  still binary/encrypted-looking, not corrupted or accidentally
+  plaintext), never decrypted or parsed as SQL, so no donor-adjacent
+  content (there is none -- the backup contains zero donor rows
+  regardless) is ever exposed.
+- Only reads a single already-known object
+  (`latest/fundraising-os-production-db.sql.gz.gpg`, the same one
+  this session already downloaded and verified via Cloudflare's own
+  native API in an earlier round) -- no enumeration, no listing of
+  other objects.
+- `permissions: contents: read` (no write scope for the GITHUB_TOKEN
+  itself); `workflow_dispatch: {}` only -- no automatic trigger.
+
+**Expected results if the credential correction worked**: both steps
+succeed; the downloaded size matches the already-known `5,746` bytes;
+the first two bytes match the OpenPGP binary packet pattern already
+observed in this session's earlier direct inspection of this same
+object. **If it still fails**, the exact new error (hopefully
+different from, or confirming, the prior `403`/`SignatureDoesNotMatch`
+pair) narrows the diagnosis further without any additional risk.
+
+**Limitations, stated plainly**:
+- This test proves the credential can authenticate and that the
+  object is retrievable and still looks like valid ciphertext. It
+  does **not** prove the backup decrypts correctly or that its SQL
+  content passes the real restore-verify script's schema/baseline
+  assertions -- only actually running
+  `d1-restore-verify-monthly-production.yml` (a separate, later,
+  explicitly authorized step) can prove that.
+- Per this session's own established, empirically-confirmed finding,
+  a `workflow_dispatch`-only workflow is not dispatchable by GitHub
+  until it exists on the repository's default branch (`main`).
+  **Creating this file on `feature/independent-cloudflare-sandbox`
+  alone would not make it runnable** -- actually executing this test
+  would require a small follow-up PR-to-`main` step, mirroring PR
+  #15's own pattern but far narrower in scope (one read-only-only
+  file, zero D1/Worker/write-credential access). This has not been
+  proposed or started.
+- Whether this diagnostic file should remain in the repository
+  permanently (as a reusable credential health check) or be removed
+  once this specific issue is resolved is an open question for the
+  account owner to decide, not assumed here.
+
+**Nothing in this proposal has been created, committed, merged, or
+run.** This section documents the proposed procedure only, per this
+round's explicit instruction to seek review and approval before any
+execution.
+
+**Recommended next step**: review the proposed workflow content above.
+If approved, Claude Code would (1) create this one file on a new
+branch off `main`'s current tip, (2) open a PR against `main` (not
+merge it) for review, mirroring PR #15's process, and (3) only after
+that PR is reviewed/merged and with separate, explicit authorization,
+manually dispatch it once and report the result here -- still without
+touching the real restore-verification workflow, any database, or
+Staging.
+
+Stopping here. Awaiting review and approval of this proposed procedure
+before creating, committing, or running anything.
