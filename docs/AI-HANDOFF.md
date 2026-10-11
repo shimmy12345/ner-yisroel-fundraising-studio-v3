@@ -31575,3 +31575,97 @@ modified.
 Stopping here per explicit instruction. Awaiting independent review and
 explicit authorization before creating or populating any rehearsal
 environment.
+
+## Duplicate giving-activity investigation (read-only, 2026-10-11)
+
+Follow-up to the migration audit's exception register (above): a
+dedicated, strictly read-only investigation into the exact two rows the
+audit flagged as `workspace_status = 'duplicate'`:
+`1c3f3d51-4a28-42f5-a3ee-105bc245d7f5` (Goldman) and
+`5e29f6c5-b599-4227-9ab8-fc50e7415f28` (Gluck), both in Staging's
+`giving_activities`. No database was modified; every query run was a
+`SELECT`. Confirmed via `git status --short` before and after that
+nothing changed.
+
+### How the flag itself works (important context)
+
+`workspace_status = 'duplicate'` is set only by a human fundraiser
+clicking "Mark duplicate" in the Giving Management UI
+(`app/donors/[id]/GivingManagement.tsx` -> `PATCH /api/giving/[id]`).
+There is no automated fingerprint/dedup-detection algorithm behind the
+flag, and no field records *why* -- only an optional free-text
+`private_note` (null on both of these rows) and a bare status-transition
+audit row (`giving_activity_management_audits`, `undone_at: null` on
+both). The flag is a human judgment call, not inherent proof of
+duplication.
+
+### Record 1 -- Goldman (`1c3f3d51-...`)
+
+- Donor: Mr. & Mrs. Hillel Avichayil Goldman, donor code 58189
+- Date 2026-08-10, committed/paid $500.00, balance $0.00,
+  `completed_gift`, source JL Solutions, fingerprint `d851aa1a79...`
+- Flagged duplicate 2026-08-19 16:54:31 UTC, 6 minutes after creation, no
+  note recorded
+- Root cause: this row came from JL's **Payments** file; the import's
+  payment-matching logic evaluated it and decided `"new_gift"` rather
+  than linking it to an existing pledge (`jl_payment_assignment_audits`
+  row `e88d4795...`)
+- Matching original: `d71d4d41-e7f9-458b-8a28-873db794493e`, same
+  donor/date/amount/campaign (`DYSP5786`), created ~3 minutes later in
+  the same import batch from JL's **Pledges** file, reported there as
+  already fully paid ($500 paid / $0 balance), still `active`
+- Assessment: **genuine duplicate** -- the Pledges file and the Payments
+  file both described the same real $500 contribution; the import's
+  auto-matcher failed to link them
+- Downstream note: both the duplicate and the original each have their
+  own `gift_acknowledgments` "thank_you_sent" row (`23061ede...` /
+  `a94a1fef...`); excluding the duplicate without also excluding/
+  relinking its acknowledgment row would leave a non-FK-enforced
+  reference pointing at a gift no longer present
+
+### Record 2 -- Gluck (`5e29f6c5-...`)
+
+- Donor: Rabbi & Mrs. Chaim Gluck, donor code 62380
+- Date 2026-08-11, committed/paid $10.00, balance $0.00,
+  `completed_gift`, source JL Solutions, fingerprint `ba7b2d03d9...`
+- Flagged duplicate 2026-08-19 16:55:11 UTC, 6 minutes after creation, no
+  note recorded
+- Root cause: same mechanism, decided `"new_gift"`
+  (`jl_payment_assignment_audits` row `635f729c...`)
+- Matching original: not a sibling gift row but the still-open pledge
+  `3c365c21-fdf8-4c6a-a066-5f9dd900c7a7` (campaign `NDLK`, due date
+  8/11/2026, $120 committed, $100 balance outstanding today), created in
+  the same batch from the Pledges file, which at the time already
+  reported `"Paid": "$10.00"` against it -- the same $10
+- Assessment: **genuine duplicate**, though the pairing is a pattern
+  match (date/amount/campaign/import-batch) against a still-open
+  pledge's own paid-to-date figure rather than as airtight a 1:1 closed
+  pair as Goldman's case
+- Downstream note: no acknowledgment record tied to this duplicate --
+  clean exclusion, no orphaning risk
+
+### Financial / relationship impact of exclusion
+
+Both rows are fully paid, zero-balance, closed gifts. Excluding either
+or both from migration totals changes only the *committed/paid* running
+totals (by $500 and $10 respectively) and has **zero effect on any
+outstanding balance** (Goldman's pair is already $0/$0 on both sides;
+Gluck's pledge balance of $100 already excludes this $10). Neither
+record is referenced by `jl_payment_assignments` (as a pledge target),
+`pledge_payment_plans`, or `pledge_balance_corrections`, so no payment
+plan or correction history is affected either way.
+
+### Disposition (investigator's assessment, not yet an owner decision)
+
+Recommend **excluding both** from migration-eligible totals as genuine
+duplicates of money already reflected elsewhere -- Goldman's exclusion
+should also address its orphaned acknowledgment row; Gluck's exclusion
+is clean. This is this investigation's own assessment based on the
+import-mechanics evidence above (not inferred from the duplicate flag
+alone, which by design proves nothing). Per the migration audit's own
+principle, the owner's explicit sign-off on the exception register
+should still be the final word before either row is actually excluded
+from a migration.
+
+No file other than this one was modified. No flags were changed, no
+records deleted, no migration run, nothing deployed.
