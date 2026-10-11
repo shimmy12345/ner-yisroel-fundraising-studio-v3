@@ -48,7 +48,7 @@ function captureLogs() {
 // ---- Fresh backup: no GitHub call at all, whether or not a token is configured ----
 {
   const fetchImpl = fakeFetch([]);
-  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(2 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(2 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "staging-independent" };
   const logs = captureLogs();
   await runBackupWatchdog(env, NOW, fetchImpl);
   logs.restore();
@@ -57,6 +57,9 @@ function captureLogs() {
 }
 
 // ---- Stage 1 (no token): stale backup logs recovery_needed but NEVER calls GitHub ----
+// Deliberately omits BACKUP_WORKFLOW_ENVIRONMENT too, matching the
+// currently deployed Production Worker's real configuration -- the
+// token check must still be the first gate reached and reported.
 {
   const fetchImpl = fakeFetch([]);
   const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }) };
@@ -73,19 +76,20 @@ function captureLogs() {
     new Response(JSON.stringify({ workflow_runs: [{ status: "completed" }] }), { status: 200 }), // active-run check: none active
     new Response(null, { status: 204 }), // dispatch
   ]);
-  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "staging-independent" };
   const logs = captureLogs();
   await runBackupWatchdog(env, NOW, fetchImpl);
   logs.restore();
   assert.equal(fetchImpl.calls.length, 2, "exactly one active-run check and one dispatch call, no more");
   assert.ok(logs.lines.some((l) => l.event === "recovery_dispatch_requested"));
   assert.doesNotMatch(JSON.stringify(logs.lines), /token/i, "the dispatch token must never appear in a log line");
+  assert.match(fetchImpl.calls[0].url, /d1-backup-nightly\.yml/, "a correctly configured Staging Worker must still resolve to its own existing workflow filename");
 }
 
 // ---- Active run already in progress -> no dispatch ----
 {
   const fetchImpl = fakeFetch([new Response(JSON.stringify({ workflow_runs: [{ status: "in_progress" }] }), { status: 200 })]);
-  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "staging-independent" };
   const logs = captureLogs();
   await runBackupWatchdog(env, NOW, fetchImpl);
   logs.restore();
@@ -112,7 +116,7 @@ function captureLogs() {
     if (key === "backup-latest-success.json" && getCallCount > 1) return { async text() { return successJson(5 * 60_000); } };
     return originalGet(key);
   };
-  const env = { STATUS_BUCKET: bucket, GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const env = { STATUS_BUCKET: bucket, GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "staging-independent" };
   const logs = captureLogs();
   await runBackupWatchdog(env, NOW, fetchImpl);
   logs.restore();
@@ -126,7 +130,7 @@ function captureLogs() {
     new Response("rate limited", { status: 403 }), // active-run check fails
     new Response(null, { status: 204 }), // dispatch still attempted
   ]);
-  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "staging-independent" };
   const logs = captureLogs();
   await runBackupWatchdog(env, NOW, fetchImpl);
   logs.restore();
@@ -140,11 +144,47 @@ function captureLogs() {
     new Response(JSON.stringify({ workflow_runs: [] }), { status: 200 }),
     new Response("server error", { status: 500 }),
   ]);
-  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "staging-independent" };
   const logs = captureLogs();
   await assert.doesNotReject(runBackupWatchdog(env, NOW, fetchImpl));
   logs.restore();
   assert.ok(logs.lines.some((l) => l.event === "recovery_dispatch_failed" && l.status === 500));
+}
+
+// ---- Token present but environment identity missing: must fail closed, never call GitHub ----
+{
+  const fetchImpl = fakeFetch([]);
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token" };
+  const logs = captureLogs();
+  await runBackupWatchdog(env, NOW, fetchImpl);
+  logs.restore();
+  assert.equal(fetchImpl.calls.length, 0, "a missing BACKUP_WORKFLOW_ENVIRONMENT must block every GitHub call, including the active-run check");
+  assert.ok(logs.lines.some((l) => l.event === "recovery_dispatch_blocked_unresolved_environment"));
+}
+
+// ---- Token present but environment identity unknown: must fail closed ----
+{
+  const fetchImpl = fakeFetch([]);
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "qa" };
+  const logs = captureLogs();
+  await runBackupWatchdog(env, NOW, fetchImpl);
+  logs.restore();
+  assert.equal(fetchImpl.calls.length, 0, "an unrecognized BACKUP_WORKFLOW_ENVIRONMENT must block dispatch, never guess the closest match");
+  assert.ok(logs.lines.some((l) => l.event === "recovery_dispatch_blocked_unresolved_environment"));
+}
+
+// ---- A Production-configured Worker can only ever resolve Production's own workflow, never Staging's ----
+{
+  const fetchImpl = fakeFetch([
+    new Response(JSON.stringify({ workflow_runs: [] }), { status: 200 }),
+    new Response(null, { status: 204 }),
+  ]);
+  const env = { STATUS_BUCKET: mockBucket({ "backup-latest-success.json": successJson(30 * HOUR_MS) }), GITHUB_BACKUP_DISPATCH_TOKEN: "token", BACKUP_WORKFLOW_ENVIRONMENT: "production-independent" };
+  const logs = captureLogs();
+  await runBackupWatchdog(env, NOW, fetchImpl);
+  logs.restore();
+  assert.match(fetchImpl.calls[0].url, /d1-backup-nightly-production\.yml/, "a Production-configured Worker must dispatch its own dedicated workflow");
+  assert.doesNotMatch(fetchImpl.calls[0].url, /\/d1-backup-nightly\.yml\//, "a Production-configured Worker must never resolve Staging's workflow filename");
 }
 
 // ---- Missing success entirely -> recovery_needed, never crashes ----

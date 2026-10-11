@@ -15,12 +15,53 @@
 //     see docs/DEPLOYMENT.md's "Backup watchdog" section for the exact
 //     PAT setup). Never logs the token itself.
 const REPO = "shimmy12345/ner-yisroel-fundraising-studio-v3";
-const WORKFLOW_FILE = "d1-backup-nightly.yml";
 const BACKUP_REF = "main";
 const API_BASE = "https://api.github.com";
 // GitHub requires a User-Agent on every REST API request; this identifies
 // the caller in GitHub's own request logs, nothing more.
 const USER_AGENT = "fundraising-os-backup-watchdog";
+
+// Explicit, closed allowlist: the ONLY two workflow filenames this watchdog
+// is ever permitted to dispatch, each pinned to exactly one deployed
+// environment identity. This is deliberately a static map, never a string
+// built from the environment value (e.g. `d1-backup-nightly${suffix}.yml`)
+// -- an unexpected/mistyped environment identity can then only ever fail to
+// resolve (see resolveBackupWorkflowFile below), never silently resolve to
+// an unintended filename. Verified against the actual repository
+// (.github/workflows/) 2026-10-11.
+const WORKFLOW_FILE_ALLOWLIST = {
+  "staging-independent": "d1-backup-nightly.yml",
+  "production-independent": "d1-backup-nightly-production.yml",
+} as const;
+
+export type BackupWorkflowEnvironment = keyof typeof WORKFLOW_FILE_ALLOWLIST;
+
+export type WorkflowFileResolution = { ok: true; workflowFile: string } | { ok: false; reason: string };
+
+// Fail-closed environment-to-workflow resolution (docs/PRODUCTION-BACKUP-
+// WATCHDOG-CORRECTION.md). Missing, unknown, or otherwise unrecognized
+// environment identity never falls back to any default workflow -- it can
+// only ever return `ok: false`, which callers must treat as "do not
+// dispatch." There is no code path from a Production environment identity
+// to the Staging filename, or vice versa: each identity maps to exactly one
+// allowlisted filename, and the resolved filename is re-validated against
+// the same allowlist's values before ever being returned.
+export function resolveBackupWorkflowFile(environment: string | undefined): WorkflowFileResolution {
+  if (!environment) {
+    return { ok: false, reason: "no backup workflow environment identity configured (BACKUP_WORKFLOW_ENVIRONMENT is unset)" };
+  }
+  if (!Object.prototype.hasOwnProperty.call(WORKFLOW_FILE_ALLOWLIST, environment)) {
+    return { ok: false, reason: `unrecognized backup workflow environment identity: "${environment}"` };
+  }
+  const workflowFile = WORKFLOW_FILE_ALLOWLIST[environment as BackupWorkflowEnvironment];
+  // Defense in depth: re-validate the resolved filename is itself one of
+  // the allowlisted values, never trusting the lookup alone.
+  const allowedFiles: readonly string[] = Object.values(WORKFLOW_FILE_ALLOWLIST);
+  if (!allowedFiles.includes(workflowFile)) {
+    return { ok: false, reason: `resolved workflow file is not in the allowlist: "${workflowFile}"` };
+  }
+  return { ok: true, workflowFile };
+}
 
 export type ActiveRunCheck =
   | { hasActiveRun: true }
@@ -34,9 +75,9 @@ export type ActiveRunCheck =
 
 export type DispatchResult = { ok: true } | { ok: false; status: number | null; error: string };
 
-export async function checkActiveBackupRun(fetchImpl: typeof fetch): Promise<ActiveRunCheck> {
+export async function checkActiveBackupRun(fetchImpl: typeof fetch, workflowFile: string): Promise<ActiveRunCheck> {
   try {
-    const response = await fetchImpl(`${API_BASE}/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?per_page=5`, {
+    const response = await fetchImpl(`${API_BASE}/repos/${REPO}/actions/workflows/${workflowFile}/runs?per_page=5`, {
       headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": USER_AGENT },
     });
     if (!response.ok) return { hasActiveRun: null, error: `GitHub runs list returned HTTP ${response.status}` };
@@ -49,9 +90,9 @@ export async function checkActiveBackupRun(fetchImpl: typeof fetch): Promise<Act
   }
 }
 
-export async function dispatchBackupWorkflow(fetchImpl: typeof fetch, token: string): Promise<DispatchResult> {
+export async function dispatchBackupWorkflow(fetchImpl: typeof fetch, token: string, workflowFile: string): Promise<DispatchResult> {
   try {
-    const response = await fetchImpl(`${API_BASE}/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`, {
+    const response = await fetchImpl(`${API_BASE}/repos/${REPO}/actions/workflows/${workflowFile}/dispatches`, {
       method: "POST",
       headers: {
         accept: "application/vnd.github+json",

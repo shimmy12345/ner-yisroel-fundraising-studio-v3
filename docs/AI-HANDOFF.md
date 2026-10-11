@@ -31310,3 +31310,99 @@ rehearsal against this target (not advanced this round).
 
 Stopping here per explicit instruction. Awaiting owner verification and
 separate authorization before any further Production action.
+
+---
+
+## Production Backup Watchdog Correction (2026-10-11) -- IMPLEMENTED AND TESTED, NOT DEPLOYED
+
+Full report: `docs/PRODUCTION-BACKUP-WATCHDOG-CORRECTION.md`.
+
+### What was done
+
+Fixed the previously-known `status-worker/src/github-dispatch.ts` defect:
+a single hardcoded `WORKFLOW_FILE = "d1-backup-nightly.yml"` constant used
+by both GitHub-dispatch functions regardless of which environment the
+status-worker was deployed as -- meaning a Production status-worker that
+ever gained a `GITHUB_BACKUP_DISPATCH_TOKEN` secret would have dispatched
+Staging's own backup workflow instead of Production's dedicated one
+(`d1-backup-nightly-production.yml`), silently leaving Production without
+real automated recovery.
+
+Replaced the constant with an explicit, closed allowlist
+(`WORKFLOW_FILE_ALLOWLIST` in `github-dispatch.ts`) and a pure
+`resolveBackupWorkflowFile(environment)` function that fails closed --
+returns no filename at all -- for anything other than an exact match on
+`"staging-independent"` or `"production-independent"`. `runBackupWatchdog()`
+(`index.ts`) now resolves this (from a new, non-secret
+`BACKUP_WORKFLOW_ENVIRONMENT` Wrangler `vars` entry) before any GitHub
+call, right after the existing token-presence gate; an unresolved
+environment blocks dispatch exactly like a missing token does. Added the
+`vars` entry to both `status-worker/wrangler.jsonc` ("staging-independent")
+and `status-worker/wrangler.production.jsonc` ("production-independent").
+
+### Notable live-state finding
+
+Read-only verification this round found Independent **Staging's**
+status-worker already holds a live `GITHUB_BACKUP_DISPATCH_TOKEN` secret
+(Stage 2, dispatch-capable, ticking hourly) -- this was not previously
+called out this plainly in prior docs. It has caused no incorrect dispatch
+because the old hardcoded constant happened to match Staging's own
+filename. Production's status-worker (live since the first deployment
+round, version `932a70e2-...`) was reconfirmed to have **zero** secrets --
+still Stage 1/detection-only, so the dangerous scenario this fix prevents
+has not yet been reachable. Also corrected, in passing, a stale "NOT YET
+DEPLOYED" comment in `wrangler.production.jsonc` left over from before
+that Worker was actually deployed.
+
+### Exact files changed
+
+`status-worker/src/github-dispatch.ts`, `status-worker/src/index.ts`,
+`status-worker/wrangler.jsonc`, `status-worker/wrangler.production.jsonc`,
+`tests/backup-watchdog-github-dispatch.test.mjs`,
+`tests/backup-watchdog-scheduled.test.mjs`,
+`tests/backup-watchdog-workflow-selection.test.mjs` (new),
+`scripts/run-tests.mjs` (registers the new test file). No application
+code, database, migration, D1/R2 binding, or Access configuration changed.
+
+### Validation results
+
+- `pnpm exec tsc --noEmit`: clean.
+- `pnpm test`: 179/179 test files passed (178 pre-existing + 1 new,
+  covering: Staging/Production each resolve their own workflow; missing,
+  unknown, and conflicting/malformed environment identity all fail closed;
+  Production can never resolve Staging's filename or vice versa; no
+  dispatch without a token; existing retry/alerting/race-recheck/failure
+  behavior all preserved).
+- `pnpm run build:production-independent`: succeeded (main app, unaffected).
+- Status-worker's own build (`wrangler deploy --dry-run` against both real
+  Wrangler configs, the actual command this repo uses to bundle it):
+  succeeded for both Staging and Production configs, each confirming the
+  correct `BACKUP_WORKFLOW_ENVIRONMENT` binding.
+
+### Deployment requirements and safety
+
+Requires a future, separately authorized redeploy of **both**
+status-workers (not the main application Worker, which has no dependency
+on the status-worker's internal code) via
+`wrangler deploy --config status-worker/wrangler.jsonc` and
+`--config status-worker/wrangler.production.jsonc`. No new secret, no
+`GITHUB_BACKUP_DISPATCH_TOKEN` change, no GitHub Actions workflow trigger
+change. Deploying itself cannot activate dispatch -- `scheduled()` only
+runs on its own Cron Trigger, never as a side effect of `wrangler deploy`.
+Staging's already-live dispatch behavior is proven unchanged (same
+resolved filename) by the preserved test assertions above.
+
+### Remaining risks / approval gates
+
+Not yet exercised against a live Worker runtime (local validation only).
+Staging's live dispatch-capable token is pre-existing, unrelated to this
+round, unchanged by it. The allowlist covers only the two "-independent"
+identities actually in use; a legacy status-worker instance would fail
+closed under it today (intentional). Enabling
+`GITHUB_BACKUP_DISPATCH_TOKEN` for Production remains a separate, future,
+explicitly-gated decision -- not advanced by this round.
+
+Nothing was deployed, migrated, or modified live this round. No GitHub
+Actions workflow was triggered. No secret was created, rotated, or
+configured. Stopping here per explicit instruction, awaiting independent
+review and separate deployment authorization.

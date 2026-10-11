@@ -24,6 +24,15 @@
       "bucket_name": "fundraising-os-backup-status"
     }
   ],
+  // Plain (non-secret) environment identity consumed by
+  // resolveBackupWorkflowFile() (status-worker/src/github-dispatch.ts) to
+  // select the one GitHub Actions backup workflow this Worker is allowed
+  // to dispatch -- see docs/PRODUCTION-BACKUP-WATCHDOG-CORRECTION.md. This
+  // value only takes effect on the next `wrangler deploy` of this config;
+  // it has no effect on the currently deployed Worker, which already has
+  // no GITHUB_BACKUP_DISPATCH_TOKEN secret and therefore never reaches the
+  // dispatch path regardless.
+  "vars": { "BACKUP_WORKFLOW_ENVIRONMENT": "staging-independent" },
   // Backup-freshness watchdog (docs/BACKUP-SCHEDULING-RELIABILITY.md) --
   // hourly, deliberately offset from :00 (GitHub's own documented
   // highest-load minute for its `schedule` trigger, and also the minute

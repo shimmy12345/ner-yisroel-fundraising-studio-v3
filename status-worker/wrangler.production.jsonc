@@ -1,18 +1,22 @@
 {
   // Production counterpart of wrangler.jsonc (Independent Staging's
   // status-worker config) -- prepared 2026-10-09, see
-  // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md. NOT YET DEPLOYED.
+  // docs/PRODUCTION-INFRASTRUCTURE-SETUP.md. Deployed 2026-10-11 alongside
+  // the first Production deployment round (version `932a70e2-...`, live
+  // since 2026-10-11T13:56:23Z) -- this note previously said "NOT YET
+  // DEPLOYED," which is now stale; corrected 2026-10-11 during the backup
+  // watchdog correction round. Its hourly Cron Trigger below has been
+  // ticking live since that deployment, in Stage 1 (detection-only)
+  // because no GITHUB_BACKUP_DISPATCH_TOKEN secret has ever been
+  // configured for it (reconfirmed via `wrangler secret list` during
+  // every Production round since) -- it has never been able to call
+  // GitHub at all, regardless of this file's own `vars`/trigger config.
   //
   // Identical architecture to the Staging instance -- same "no public
   // URL, read-only R2 binding, reachable only via Worker-to-Worker
   // service binding" design (see wrangler.jsonc's own header comment for
   // the full rationale) -- pointed at Production's own, separate
-  // resources only. Because this Worker has no public route of any kind
-  // even once deployed, deploying it carries none of the "operational
-  // Production URL" exposure concern this round's restrictions are
-  // about -- but it was left undeployed this round anyway, to deploy
-  // together with the main Production Worker once Cloudflare Access is
-  // configured, rather than partially standing up the chain.
+  // resources only.
   "name": "fundraising-os-production-backup-status",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-06",
@@ -27,6 +31,20 @@
       "bucket_name": "fundraising-os-production-backup-status"
     }
   ],
+  // Plain (non-secret) environment identity consumed by
+  // resolveBackupWorkflowFile() (status-worker/src/github-dispatch.ts) to
+  // select the one GitHub Actions backup workflow this Worker is allowed
+  // to dispatch -- see docs/PRODUCTION-BACKUP-WATCHDOG-CORRECTION.md.
+  // Pinned to "production-independent" so this Worker can only ever
+  // resolve the dedicated Production workflow (d1-backup-nightly-
+  // production.yml) -- never Staging's. Adding this value to the
+  // repository's config file has no effect on the currently running
+  // deployed Worker (version `932a70e2-...`, see this file's own header
+  // comment) until that Worker is explicitly redeployed with this config
+  // in a separately authorized round -- and even then, dispatch also
+  // still requires a GITHUB_BACKUP_DISPATCH_TOKEN secret, which does not
+  // exist today.
+  "vars": { "BACKUP_WORKFLOW_ENVIRONMENT": "production-independent" },
   // Backup-freshness watchdog -- same architecture as wrangler.jsonc's
   // own, offset by a further few minutes purely to avoid synchronized
   // platform load with Staging's own watchdog tick (17 * * * *). NOT

@@ -193,6 +193,7 @@ const TEST_FILES = [
   "tests/backup-watchdog-github-dispatch.test.mjs",
   "tests/backup-watchdog-scheduled.test.mjs",
   "tests/backup-watchdog-security.test.mjs",
+  "tests/backup-watchdog-workflow-selection.test.mjs",
   "tests/backup-alert-decision.test.mjs",
   "tests/backup-alert-email.test.mjs",
   "tests/backup-alert-safety.test.mjs",

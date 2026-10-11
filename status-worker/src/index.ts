@@ -32,7 +32,7 @@
 //     "Backup watchdog" section. It is never logged, never returned in
 //     any response, and never reaches the main application Worker.
 import { evaluateBackupFreshness, type BackupAttemptStatus, type BackupSuccessStatus } from "./watchdog.ts";
-import { checkActiveBackupRun, dispatchBackupWorkflow } from "./github-dispatch.ts";
+import { checkActiveBackupRun, dispatchBackupWorkflow, resolveBackupWorkflowFile } from "./github-dispatch.ts";
 
 export interface Env {
   STATUS_BUCKET: R2Bucket;
@@ -42,6 +42,15 @@ export interface Env {
   // physically only dispatch once this secret exists. See
   // docs/BACKUP-SCHEDULING-RELIABILITY.md Section 15.
   GITHUB_BACKUP_DISPATCH_TOKEN?: string;
+  // Plain (non-secret) Wrangler `vars` entry identifying which deployed
+  // environment this Worker instance is -- the ONLY input
+  // resolveBackupWorkflowFile() (github-dispatch.ts) uses to choose which
+  // GitHub Actions backup workflow it is allowed to dispatch. Optional in
+  // this type because its absence is a valid (fail-closed, never-dispatch)
+  // state, not a type error -- see docs/PRODUCTION-BACKUP-WATCHDOG-
+  // CORRECTION.md. This is never derived from the Worker's own name or any
+  // other loosely-matched string.
+  BACKUP_WORKFLOW_ENVIRONMENT?: string;
 }
 
 // Minimal shape of Cloudflare's real ExecutionContext -- only the one
@@ -136,7 +145,22 @@ export async function runBackupWatchdog(env: Env, now: number, fetchImpl: typeof
       return;
     }
 
-    const activeRunCheck = await checkActiveBackupRun(fetchImpl);
+    // Fail-closed environment-to-workflow resolution (docs/PRODUCTION-
+    // BACKUP-WATCHDOG-CORRECTION.md): a token alone is no longer
+    // sufficient to dispatch. Missing, unknown, or otherwise unresolved
+    // BACKUP_WORKFLOW_ENVIRONMENT configuration blocks dispatch entirely --
+    // there is no fallback to any default workflow, so a misconfigured
+    // Production Worker can never dispatch Staging's workflow (or vice
+    // versa). This check happens before any GitHub call, including the
+    // active-run check.
+    const workflowResolution = resolveBackupWorkflowFile(env.BACKUP_WORKFLOW_ENVIRONMENT);
+    if (!workflowResolution.ok) {
+      logWatchdogEvent("recovery_dispatch_blocked_unresolved_environment", { reason: workflowResolution.reason });
+      return;
+    }
+    const { workflowFile } = workflowResolution;
+
+    const activeRunCheck = await checkActiveBackupRun(fetchImpl, workflowFile);
     if (activeRunCheck.hasActiveRun === true) {
       logWatchdogEvent("already_recovering", { note: "a backup workflow run is already in_progress/queued" });
       return;
@@ -173,7 +197,7 @@ export async function runBackupWatchdog(env: Env, now: number, fetchImpl: typeof
       return;
     }
 
-    const dispatchResult = await dispatchBackupWorkflow(fetchImpl, env.GITHUB_BACKUP_DISPATCH_TOKEN);
+    const dispatchResult = await dispatchBackupWorkflow(fetchImpl, env.GITHUB_BACKUP_DISPATCH_TOKEN, workflowFile);
     if (dispatchResult.ok) {
       // A successful dispatch response means GitHub accepted the
       // request -- it does NOT mean the backup succeeded (Section 15).
