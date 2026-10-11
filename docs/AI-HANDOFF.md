@@ -30079,3 +30079,126 @@ modified (only read, for verification).
 Stopping here. Awaiting ChatGPT's independent review of this failure
 before any further Production action, including any credential
 correction.
+
+## R2 Read-Credential Diagnosis (2026-10-11) -- ROOT CAUSE ISOLATED, NOT CORRECTED -- awaiting a new token from the account owner
+
+Following ChatGPT's confirmation of the backup/restore-verify test
+results (commit `49da11b`), this round performed a read-only diagnosis
+of the `R2_BACKUP_READ_*_PRODUCTION` credential failure. **No
+correction was made -- the cause narrows to something only a new,
+dashboard-generated R2 API token can fix, and no secret value was
+invented, guessed, or changed.**
+
+**Root-cause findings and supporting evidence**:
+- Compared the exact `ENDPOINT_URL`/`BUCKET`/region construction
+  between the backup workflow's (succeeded) write path and the
+  restore-verify workflow's (failed) read path: **byte-for-byte
+  identical** -- both use `https://${{ secrets.CLOUDFLARE_ACCOUNT_ID
+  }}.r2.cloudflarestorage.com`, `${{ vars.R2_BACKUP_BUCKET_PRODUCTION
+  }}` (`fundraising-os-production-backups`), and
+  `AWS_DEFAULT_REGION: auto`. This rules out a wrong account id,
+  wrong bucket name, wrong region, or wrong endpoint/key construction
+  as the cause -- the **only** variable that differs between the
+  working write path and the failing read path is the credential pair
+  itself.
+- Three of the four distinct `_PRODUCTION` R2 credential pairs are
+  independently proven working this round: `R2_BACKUP_WRITE_*`
+  (succeeded uploading the real backup object) and
+  `R2_STATUS_WRITE_*` (succeeded publishing status in *both* the
+  backup run and the failed restore-verify run -- its "Publish
+  status" step still ran and succeeded via `if: always()`). Only
+  `R2_BACKUP_READ_*_PRODUCTION` fails, cleanly isolating the problem
+  to that one pair.
+- Checked this session's available Cloudflare API scope
+  (`wrangler whoami`): no R2-API-token-management scope is present
+  (R2 API tokens -- the S3-style access-key/secret pairs -- are
+  managed exclusively through the Cloudflare dashboard's R2 "Manage
+  API Tokens" page; there is no API available to this session, or in
+  general to anyone after creation, that can retrieve or re-verify an
+  existing token's secret value, and this session has no access to
+  inspect an existing token's configured scope either).
+- Checked GitHub's own secret metadata (names and timestamps only,
+  never values): all four `R2_BACKUP_{READ,WRITE}_*_PRODUCTION`
+  secrets show `created_at == updated_at` -- never modified since
+  creation -- and all four were created within the same ~4-minute
+  window (`02:28:36`-`02:32:41` UTC, 2026-10-11), shortly before this
+  round's backup+restore-verify test ran. This is consistent with all
+  four having been set in one sitting very recently, which makes a
+  simple data-entry error on the READ pair specifically (e.g. a
+  mistyped or mismatched secret access key, or a value copied from
+  the wrong token) the most likely explanation -- though a
+  token-scope misconfiguration (e.g. the underlying R2 API token not
+  actually granted read permission on this specific bucket) remains
+  equally consistent with the observed errors and **cannot be ruled
+  out without dashboard access this session does not have**.
+- The two distinct error types observed in the failed run
+  (`403 Forbidden` on `HeadObject`, `SignatureDoesNotMatch` on
+  `GetObject`, both using the identical credential pair against the
+  identical bucket/key) are both consistent with an invalid credential
+  pair and do not, by themselves, distinguish "wrong secret value"
+  from "insufficient token scope."
+
+**Conclusion: the cause is narrowed to the `R2_BACKUP_READ_*
+_PRODUCTION` credential pair itself (value or scope), but cannot be
+conclusively distinguished between those two possibilities, and in
+either case cannot be corrected using any existing, authorized
+credential this session holds** -- R2 API token secrets are shown by
+Cloudflare exactly once, at creation, and are never retrievable or
+independently verifiable afterward, by anyone, through any API. Per
+this round's own explicit instruction ("If a new R2 token must be
+generated, or the correct secret value cannot be verified securely,
+STOP and guide me through the required Cloudflare and GitHub steps.
+Do not invent or guess credentials."), **no secret was changed, and no
+value was invented or guessed.**
+
+**Whether the credentials were corrected**: No. **Exact GitHub secret
+names that would need to change (no values involved)**:
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION` and
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION`, once a new, correctly
+scoped R2 API token is generated via the Cloudflare dashboard.
+
+**Read-only authentication test**: not performed this round -- Phase
+3 of this round's own instructions is explicitly conditioned on "after
+correcting the credentials," which did not happen. No new attempt was
+made against R2 with the existing (suspect) credential pair beyond
+what the already-failed workflow run (`38109498404`) already
+demonstrated.
+
+**Outstanding blocker**: a new Cloudflare R2 API token, scoped to
+**read-only access on the `fundraising-os-production-backups` bucket
+specifically** (matching the existing design's least-privilege
+intent, distinct from the write-scoped token used for backups), must
+be created by the account owner via the Cloudflare dashboard (Account
+Home -> R2 -> "Manage API tokens"), since: (1) R2 API tokens cannot be
+created or scoped through any API this session has access to; (2) the
+secret value, once generated, is shown by Cloudflare exactly once and
+must be captured at creation time by whoever is logged into the
+dashboard.
+
+**Recommended next step**: the account owner creates a new R2 API
+token scoped to read-only access on `fundraising-os-production-backups`
+only, then either (a) provides the resulting Access Key ID and Secret
+Access Key via chat so Claude Code can install them into
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`/
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION` using this session's
+established secret-handling discipline (values never displayed,
+logged, or committed; set directly via the GitHub secrets API using
+libsodium sealed-box encryption), or (b) sets those two GitHub secrets
+directly themselves via the GitHub UI. After either path, a follow-up
+round should perform the read-only authentication test this round's
+Phase 3 called for (HeadObject + GetObject against the existing,
+already-verified-encrypted backup object, confirming it remains
+unchanged) **before** re-attempting the restore-verification workflow
+-- which itself requires separate authorization per this round's own
+restrictions.
+
+**What was NOT done this round**: no secret or variable was changed;
+no new credential value was invented or guessed; no R2 token was
+created (not possible from this session); no backup or restore
+workflow was triggered or retried; no Production Worker was deployed;
+no migration was applied; no donor data was touched; Staging was not
+modified.
+
+Stopping here. Awaiting the account owner's Cloudflare dashboard
+action (new R2 API token) before any credential correction can be
+made, and awaiting ChatGPT's review of this diagnosis.
