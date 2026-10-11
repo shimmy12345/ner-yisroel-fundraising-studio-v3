@@ -29398,3 +29398,127 @@ anywhere.
 
 Stopping here for independent (ChatGPT) review before any further
 action -- per this round's explicit instruction.
+
+## PR #15 Merged Into `main` (2026-10-10) -- STILL NO DEPLOYMENT, NO DONOR DATA MOVED
+
+Following ChatGPT's independent review and recommendation to approve
+PR #15, it was safely merged this round. Full pre-merge and post-merge
+verification was performed (not merged on trust alone):
+
+**Pre-merge verification (all confirmed immediately before merging)**:
+- PR #15 re-fetched live from GitHub: `state: open`, `merged: false`,
+  `draft: false`, `mergeable: true`, `mergeable_state: clean`, base
+  `main`, head `feature/production-backup-restore-workflows` at
+  `d1e9577` -- the exact same single commit, same head sha, reviewed
+  previously. `main`'s tip was still `c8a11da`, unchanged since the PR
+  was opened.
+- File list re-confirmed via the PR's own `/files` endpoint: exactly 2
+  files, both `added`, blob shas `d6ac55b9...` and `cb49f8a0...` --
+  identical to what was reviewed, proving **zero drift** since the
+  independent review (satisfying this round's "if anything differs,
+  stop" condition by finding nothing different).
+- Both files' content re-pulled directly from GitHub by blob sha (not
+  from local cache) and re-checked: only trigger is `workflow_dispatch:
+  {}`; zero matches anywhere for `schedule`, `push`, `pull_request`,
+  `wrangler deploy`, `d1 migrations`/`migrations apply`, `pages
+  deploy`, or any donor-data reference (`donor`, `insert into`,
+  "copy...data").
+- GitHub's own combined status on the PR's head commit: `success`
+  (the only check-runs present are Netlify's own unrelated
+  Redirect/Header/Pages-changed checks on this repo's legacy site,
+  all success/neutral, zero relation to these workflows). `main` has
+  no branch protection rules and no required status checks.
+
+**Merge performed**: `PUT /pulls/15/merge` with `merge_method: "merge"`
+(a real merge commit, matching PR #14's own established precedent --
+confirmed by inspecting PR #14's merge commit before choosing this
+method) and an explicit `sha` guard pinned to the exact head commit
+verified above, so the merge could only succeed against the precise
+reviewed state. Result: **merged, merge commit `aa101ee`**
+(`Merge pull request #15 from shimmy12345/feature/production-backup-restore-workflows`),
+parents `c8a11da` (prior `main` tip) + `d1e9577` (PR head) -- a true
+two-parent merge commit, not a squash or rebase.
+
+**Post-merge verification**:
+- `main` re-fetched: tip is now `aa101ee`, parents confirmed as above.
+- Both files confirmed present on `main` with the **exact same blob
+  shas** as pre-merge (`d6ac55b9...`, `cb49f8a0...`) -- byte-for-byte
+  unchanged through the merge. `main`'s `.github/workflows/` now holds
+  exactly 4 files total (the two pre-existing Staging workflows,
+  untouched, plus these two new Production ones).
+- GitHub's workflow-registration list now includes both: "D1 nightly
+  backup (Production)" (id `380979303`) and "D1 monthly restore
+  verification (Production)" (id `380979304`), both `state: active` --
+  confirming the registration gap documented in the prior round's
+  section is now resolved; they are dispatchable for the first time.
+- **Confirmed neither ran automatically**: queried each workflow's own
+  run history directly by id -- **0 total runs for both**, before and
+  after the merge. The 10 most recent Actions runs repo-wide are all
+  the pre-existing Staging workflows (nightly backup, monthly
+  restore-verify, restore/schema sync check), none of them the new
+  Production ones. This is expected and required -- `workflow_dispatch`
+  never fires from a merge event, and `main` has zero workflow with a
+  `pull_request` or `push` trigger that could have reacted to this
+  merge.
+- **Confirmed no Production Worker was deployed**: no `wrangler
+  deploy` was run this round (nor by anything the merge itself could
+  trigger); a live check against
+  `https://fundraising-os-production.sgoldstein.workers.dev/` returned
+  **HTTP 404** -- the hostname still resolves to "no Worker deployed
+  here," unchanged from every prior round.
+- **Confirmed Staging is completely unaffected**: a fresh, read-only
+  query against `fundraising-os-staging-db` returned
+  `donors=254, giving_activities=5463, pledge_balance_corrections=1,
+  pledge_payment_plans=45` and database file size `9,453,568` bytes --
+  an exact match to every prior round's baseline, with the query
+  itself reporting `changed_db: false, rows_written: 0`.
+
+**Current Production readiness status**: unchanged in substance from
+the prior round -- the two Production backup/restore workflows are now
+reachable and dispatchable from `main` (the only thing this round
+changed), but **no Production Worker has ever been deployed** and
+**no donor data has ever been migrated into Production**. Running
+either workflow now would exercise the mechanism against an empty
+database, not produce a meaningful real-data verification.
+
+**All 7 required `_PRODUCTION` GitHub secrets remain confirmed
+configured** (existence only, no values read or recorded, same
+standard as every prior round): `R2_BACKUP_WRITE_ACCESS_KEY_ID_PRODUCTION`,
+`R2_BACKUP_WRITE_SECRET_ACCESS_KEY_PRODUCTION`,
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`,
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION`,
+`R2_STATUS_WRITE_ACCESS_KEY_ID_PRODUCTION`,
+`R2_STATUS_WRITE_SECRET_ACCESS_KEY_PRODUCTION`,
+`BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION` -- unchanged this round; no
+secret was created, read, modified, or displayed.
+
+**Confirmation Production Workers remain undeployed and no donor data
+has been migrated**: both confirmed live this round (HTTP 404 on the
+Production hostname; Staging D1 counts unchanged -- see above). Nothing
+this round altered either fact.
+
+**Outstanding risks**: none newly introduced. The only remaining gap
+is the same one carried forward from every prior round: Production has
+no deployed Worker and no real data, so the newly-merged workflows,
+while now technically runnable, have nothing meaningful to back up or
+restore-verify yet.
+
+**Recommendation for next step**: the next Production launch step
+(Production Worker + status-worker deployment, and/or a first manual
+`workflow_dispatch` of the now-merged workflows) requires separate,
+explicit authorization and is **not started**. No code or
+infrastructure action was taken beyond the reviewed, approved merge
+itself.
+
+**What was NOT changed or executed this round** -- stated explicitly
+per this round's strict restrictions: neither Production Worker (main
+app or status-worker) was deployed; no Production database migration
+was run; no donor data was copied, imported, or modified; neither
+Production backup nor restore workflow was ever dispatched/run (only
+registered by the merge); no `schedule` trigger was added to either
+workflow; no GitHub secret was created, changed, read, or displayed;
+Independent Staging infrastructure and data were not modified (only
+read, once, for this round's own non-destructive verification).
+
+Stopping here per this round's explicit instruction -- awaiting
+separate authorization before any further Production launch step.
