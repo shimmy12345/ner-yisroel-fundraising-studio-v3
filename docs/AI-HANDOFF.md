@@ -30307,3 +30307,27 @@ data was touched; Staging was not modified.
 Stopping here. Awaiting explicit approval before any Production
 operation, and awaiting the account owner's Cloudflare dashboard
 action (new R2 API token) before any credential correction.
+
+## Note for anyone (human or AI) reading this file via the GitHub API (2026-10-11)
+
+This file is now large enough (~1.8 MB) that **GitHub's Contents API
+no longer returns it inline**. A request to
+`GET /repos/.../contents/docs/AI-HANDOFF.md` now returns `"encoding":
+"none"` with **no `content` field at all** -- this is standard GitHub
+behavior for any file over 1 MB via that specific endpoint, confirmed
+directly against this file this round (`size: 1814221`,
+`download_url` present). A tool that only reads the Contents API's
+`content` field will see an empty result and may incorrectly
+conclude the file is missing or unreadable, when it is fully intact.
+
+**To read this file's real content**, use either:
+- the `download_url` the Contents API response itself provides
+  (`https://raw.githubusercontent.com/shimmy12345/ner-yisroel-fundraising-studio-v3/<branch>/docs/AI-HANDOFF.md`), or
+- the Git Data API (`GET /repos/.../git/blobs/<sha>`, using the blob
+  sha from a tree listing), or
+- a plain `git fetch`/`git show <ref>:docs/AI-HANDOFF.md` from a local
+  clone.
+
+This is a documentation/tooling note only -- no application, workflow,
+or secret data is affected, and nothing about the Production backup/
+restore investigation changes because of it.
