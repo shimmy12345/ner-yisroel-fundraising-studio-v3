@@ -1,0 +1,210 @@
+# Production counterpart of d1-restore-verify-monthly.yml (Independent
+# Staging's monthly restore verification) -- prepared 2026-10-09, see
+# docs/PRODUCTION-INFRASTRUCTURE-SETUP.md. Identical mechanism and safety
+# design to that file (see its own header comment for the full
+# race-condition/provenance analysis) -- pointed at Production's own,
+# completely separate resources only.
+#
+# Safety properties, unchanged from the Staging file and re-confirmed here
+# for Production specifically:
+#   - Restores into a brand-new, uniquely-named, THROWAWAY remote D1
+#     database every run (fundraising-os-restore-verify-<timestamp>-
+#     <random>, generated fresh by scripts/verify-remote-restore.mjs) --
+#     never fundraising-os-production-db itself, never
+#     fundraising-os-staging-db.
+#   - Only ever reads from the Production backup bucket (via
+#     R2_BACKUP_READ_*_PRODUCTION, a read-only-scoped credential distinct
+#     from the write credential above) -- never writes to it, never
+#     touches the Staging backup bucket at all.
+#   - Deletes the scratch database in a try/finally, using only its own
+#     exact generated name -- confirmed, this exact mechanism, to run
+#     even when the job's own assertions fail (see this round's "Complete
+#     Backup Verification" entry in docs/AI-HANDOFF.md for a real example
+#     against Staging).
+#
+# DELIBERATELY NOT ON A SCHEDULE -- workflow_dispatch only, same "prepared
+# but gated" reasoning as d1-backup-nightly-production.yml. Add a
+# `schedule:` block (copy d1-restore-verify-monthly.yml's own cron) only
+# once the nightly Production backup is itself on a schedule and launch
+# readiness has been separately confirmed.
+name: D1 monthly restore verification (Production)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-monthly-restore-verify-production
+  cancel-in-progress: false
+
+env:
+  DATABASE_NAME: fundraising-os-production-db
+  WRANGLER_VERSION: "4.92.0"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install AWS CLI (R2's S3-compatible client)
+        run: |
+          set -euo pipefail
+          command -v aws >/dev/null 2>&1 || pip install --quiet awscli
+
+      - name: Determine and validate the immutable backup identity from latest/'s metadata
+        id: identity
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET_PRODUCTION }}
+        run: |
+          set -uo pipefail
+          echo "known=false" >> "$GITHUB_OUTPUT"
+          if aws s3api head-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "latest/${DATABASE_NAME}.sql.gz.gpg" > latest-head.json; then
+            DATED_KEY="$(jq -r '.Metadata["dated-backup-key"] // empty' latest-head.json)"
+            VALID=false
+            if [ -n "${DATED_KEY}" ] && [ "$(printf '%s' "${DATED_KEY}" | wc -l)" = "0" ]; then
+              EXPECTED_PATTERN="^daily/${DATABASE_NAME}-[0-9]{8}T[0-9]{6}Z\.sql\.gz\.gpg\$"
+              if [[ "${DATED_KEY}" =~ ${EXPECTED_PATTERN} ]]; then
+                VALID=true
+              fi
+            fi
+            if [ "${VALID}" = "true" ]; then
+              {
+                echo "known=true"
+                echo "key=${DATED_KEY}"
+              } >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::latest/'s dated-backup-key metadata is missing or does not match the expected form -- falling back to latest/ with unknown tested-backup identity."
+            fi
+          else
+            echo "::warning::Could not HEAD latest/ -- falling back to a direct download attempt with unknown tested-backup identity."
+          fi
+          rm -f latest-head.json
+
+      - name: Download the backup object to verify
+        id: download
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET_PRODUCTION }}
+          IDENTITY_KNOWN: ${{ steps.identity.outputs.known }}
+          IDENTITY_KEY: ${{ steps.identity.outputs.key }}
+        run: |
+          set -uo pipefail
+          DOWNLOADED=false
+          KNOWN=false
+          TESTED_AT=""
+          if [ "${IDENTITY_KNOWN}" = "true" ]; then
+            if aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "${IDENTITY_KEY}" latest.sql.gz.gpg > download-response.json; then
+              DOWNLOADED=true
+              KNOWN=true
+              RAW_LAST_MODIFIED="$(jq -r '.LastModified // empty' download-response.json)"
+              if [ -n "${RAW_LAST_MODIFIED}" ]; then
+                TESTED_AT="$(date -u -d "${RAW_LAST_MODIFIED}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+              fi
+              if [ -z "${TESTED_AT}" ]; then
+                echo "::warning::Could not determine the restored object's LastModified -- tested-backup identity recorded as unknown for this run."
+                KNOWN=false
+              fi
+            else
+              echo "::warning::Could not download the specific dated backup object (${IDENTITY_KEY}) -- falling back to latest/ with unknown tested-backup identity."
+            fi
+          fi
+          if [ "${DOWNLOADED}" != "true" ]; then
+            if ! aws s3api get-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "latest/${DATABASE_NAME}.sql.gz.gpg" latest.sql.gz.gpg; then
+              echo "::error::Could not download any backup object (neither the specific dated object nor latest/) -- nothing to restore-test."
+              exit 1
+            fi
+          fi
+          test -s latest.sql.gz.gpg || { echo "::error::Downloaded backup object is empty."; exit 1; }
+          rm -f download-response.json
+          {
+            echo "known=${KNOWN}"
+            if [ "${KNOWN}" = "true" ]; then
+              echo "key=${IDENTITY_KEY}"
+              echo "at=${TESTED_AT}"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Decrypt and decompress
+        env:
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          PASSFILE="$(mktemp)"
+          printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"
+          gpg --batch --yes --decrypt --passphrase-file "${PASSFILE}" --output latest.sql.gz latest.sql.gz.gpg
+          gunzip -c latest.sql.gz > latest.sql
+          shred -u "${PASSFILE}" latest.sql.gz.gpg latest.sql.gz
+          test -s latest.sql
+          head -c 64 latest.sql | grep -q 'PRAGMA defer_foreign_keys=TRUE;' \
+            || { echo "::error::Decrypted backup does not start with the expected PRAGMA line -- refusing to restore a possibly-corrupt file."; exit 1; }
+
+      - name: Restore into a scratch D1 database and run every integrity check
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/verify-remote-restore.mjs -- latest.sql
+
+      - name: Clean up local files
+        if: always()
+        run: rm -f latest.sql.gz.gpg latest.sql.gz latest.sql
+
+      - name: Publish restore-verification status (best-effort; must never fail this job)
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_STATUS_WRITE_ACCESS_KEY_ID_PRODUCTION }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_STATUS_WRITE_SECRET_ACCESS_KEY_PRODUCTION }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          STATUS_BUCKET: ${{ vars.R2_STATUS_BUCKET_PRODUCTION }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TESTED_KNOWN: ${{ steps.download.outputs.known }}
+          TESTED_KEY: ${{ steps.download.outputs.key }}
+          TESTED_AT: ${{ steps.download.outputs.at }}
+        run: |
+          set -uo pipefail
+          COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LATEST_KEY="latest/${DATABASE_NAME}.sql.gz.gpg"
+          jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg status "${JOB_STATUS}" \
+                --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+            '{schemaVersion: 1, databaseName: $db, attemptAt: $at, attemptStatus: $status, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+            > attempt.json
+          aws s3api put-object \
+            --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+            --key "restore-latest-attempt.json" --body attempt.json --content-type application/json \
+            || echo "::warning::Failed to publish restore-latest-attempt.json -- restore verification's own result is unaffected."
+          if [ "${JOB_STATUS}" = "success" ]; then
+            if [ "${TESTED_KNOWN}" = "true" ]; then
+              jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg latestKey "${LATEST_KEY}" \
+                    --arg backupKey "${TESTED_KEY}" --arg backupAt "${TESTED_AT}" \
+                    --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+                '{schemaVersion: 1, databaseName: $db, completedAt: $at, verifiedLatestObjectKey: $latestKey, verifiedBackupObjectKey: $backupKey, verifiedBackupCompletedAt: $backupAt, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+                > success.json
+            else
+              jq -n --arg db "${DATABASE_NAME}" --arg at "${COMPLETED_AT}" --arg latestKey "${LATEST_KEY}" \
+                    --arg runId "${{ github.run_id }}" --arg runUrl "${RUN_URL}" \
+                '{schemaVersion: 1, databaseName: $db, completedAt: $at, verifiedLatestObjectKey: $latestKey, verifiedBackupObjectKey: null, verifiedBackupCompletedAt: null, workflowRunId: $runId, workflowRunUrl: $runUrl}' \
+                > success.json
+            fi
+            aws s3api put-object \
+              --endpoint-url "${ENDPOINT_URL}" --bucket "${STATUS_BUCKET}" \
+              --key "restore-latest-success.json" --body success.json --content-type application/json \
+              || echo "::warning::Failed to publish restore-latest-success.json -- restore verification itself succeeded and is unaffected."
+          fi
+          rm -f attempt.json success.json
