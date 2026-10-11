@@ -30993,3 +30993,101 @@ donor-data migration.
 
 Nothing was deployed, migrated, or modified this round. Stopping here per
 explicit instruction.
+
+---
+
+## FIRST PRODUCTION DEPLOYMENT -- EXECUTED (2026-10-11, ~13:56-13:59 UTC) -- both empty Production Workers deployed, anonymous access correctly blocked
+
+Full report: `docs/PRODUCTION-FIRST-DEPLOYMENT-VERIFICATION.md`.
+
+### Deployment timestamps and identifiers
+
+- **`fundraising-os-production-backup-status`** (status-worker): deployed
+  `2026-10-11T13:56:23.705Z`, version `932a70e2-d1ec-4b4a-86ce-29acdcfd626c`.
+- **`fundraising-os-production`** (main Worker): deployed
+  `2026-10-11T13:57:35.315Z`, version `1b0a79f9-3e05-43d9-9624-af4b986ceb10`.
+- **Actual Production URL**: `https://fundraising-os-production.sgoldstein.workers.dev`
+  -- exact match to the pre-deployment prediction.
+
+### Mandatory preflight (all 10 items, re-verified fresh immediately before deploying)
+
+Canonical branch HEAD was exactly `ff25d1d` (the preflight's own commit),
+clean working tree; no commit touched any deployment-relevant file since
+`b81ca3f` (2026-10-09). Production D1 confirmed empty
+(`donors=0, gifts=0, giving_activities=0, users=0`). Both Workers confirmed
+undeployed (`code: 10007`). `GITHUB_BACKUP_DISPATCH_TOKEN` confirmed unable
+to exist (secret-list against the undeployed status-worker failed with
+"Worker not found"). Both Production workflows confirmed still
+`workflow_dispatch`-only on `main` (`316f005`, unchanged). No
+in-progress/queued GitHub Actions runs anywhere in the repo. Fresh
+`tsc --noEmit` clean, `pnpm test` 178/178, fresh
+`pnpm run build:production-independent` succeeded with the
+`production-independent` constant re-confirmed baked into the bundle.
+
+### Deployment and verification results
+
+- Status-worker deployed first, exactly as required. Confirmed via deploy
+  output: `env.STATUS_BUCKET` bound to Production's own bucket; cron
+  `23 * * * *`; no public route (`curl .../status` -> `404`, confirming no
+  live content is served there); `wrangler secret list` -> `[]` (empty) --
+  **confirmed, post-deployment, that `GITHUB_BACKUP_DISPATCH_TOKEN` does
+  not exist**, so the watchdog's dispatch code path (the one with the
+  hardcoded Staging workflow filename, flagged in the preflight) remains
+  unreachable.
+- Main Worker deployed second. Confirmed via deploy output: `env.DB` ->
+  `fundraising-os-production-db`; `env.STATUS_WORKER` service binding
+  resolved correctly (status-worker existed first); real `TEAM_DOMAIN`/
+  `POLICY_AUD`/`STAGING_OWNER_EMAIL`/`APP_BASE_URL`; no cron trigger.
+- **Anonymous access test: PASSED.** `curl -D -` against the live URL
+  returned `302 Found` to
+  `https://fundraising-os.cloudflareaccess.com/cdn-cgi/access/login/...`
+  with a `kid` matching Production's own `POLICY_AUD` exactly; response
+  body was 143 bytes of generic Cloudflare HTML, zero application content,
+  zero donor data, no session established. **No critical failure --
+  rollback/deletion was not needed and was not performed.**
+- **Owner authentication: NOT VERIFIED.** Cannot be completed from this
+  environment without either the owner's real credentials or impersonating
+  them -- reported honestly rather than claimed. Exact manual step
+  documented in the full report's Section 3.2.
+- **Unauthorized access:** verified the safe way (per explicit instruction
+  not to impersonate a real user) -- the existing `tests/
+  cloudflare-access-auth.test.mjs` owner-restriction cases, re-run fresh as
+  part of the 178/178 pass immediately before deployment.
+- **Environment isolation: confirmed.** Production D1 id/counts unchanged
+  post-deploy; Staging D1 donor count still `254` (unchanged); Staging's
+  own Worker/status-worker deployment timestamps both predate today,
+  confirming neither was touched; Staging's own Access login still returns
+  `302` unchanged; R2 bucket inventory unchanged (still exactly 4 buckets).
+- **Scheduled-operation safety:** cron deployed (`23 * * * *`), confirmed
+  detection-only by construction (no dispatch token exists, re-confirmed
+  post-deploy). Next invocation due `14:23Z`; had not yet occurred as of
+  this report -- reported as **PENDING OBSERVATION**, per the instruction
+  not to wait indefinitely for it. No manual invocation was performed.
+
+### Failures
+
+None. Both deployments succeeded on the first attempt; no rollback or
+retry was needed or performed.
+
+### Exact remaining launch blockers
+
+1. Owner-interactive login/verification at `/settings` (Section 3.2 of the
+   full report) -- required before calling this deployment "confirmed safe
+   for use," not just "successfully deployed."
+2. `status-worker/src/github-dispatch.ts`'s hardcoded `WORKFLOW_FILE` --
+   still zero risk today, still required before ever adding
+   `GITHUB_BACKUP_DISPATCH_TOKEN`.
+3. No scheduled/automatic backup protection yet (deliberate, unchanged).
+4. Donor-data migration rehearsal against this real target -- not advanced
+   by this round, which only stood up the destination infrastructure.
+5. Cron's first live invocation -- PENDING OBSERVATION, follow up after
+   14:23Z whenever convenient.
+
+### Recommended next action
+
+Owner completes the manual login-and-verify step (Section 3.2 of the full
+report) and reports back. No further Production action (Stage 2 watchdog,
+scheduling, migration, cutover) should proceed without that confirmation
+plus its own separate authorization.
+
+Stopping here per explicit instruction. Awaiting independent review.
