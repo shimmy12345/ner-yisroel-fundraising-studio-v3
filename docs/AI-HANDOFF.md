@@ -30202,3 +30202,108 @@ modified.
 Stopping here. Awaiting the account owner's Cloudflare dashboard
 action (new R2 API token) before any credential correction can be
 made, and awaiting ChatGPT's review of this diagnosis.
+
+## R2 Read-Credential Failure -- Deeper Code/Config Comparison (2026-10-11) -- CONFIRMED: NOT A CODE DEFECT, NO PATCH MADE
+
+Follow-up to the prior round's diagnosis (commit `3034921`), requested
+to specifically rule out (or confirm) a code- or workflow-configuration-
+level cause before concluding the fix must be credential-only. **This
+round's deeper comparison confirms, with additional evidence, that the
+workflow code itself is correct -- no patch was made, because none is
+warranted.**
+
+**Additional comparisons performed this round**:
+- **Runner image identity**: both the backup run (`38109341883`) and
+  the restore-verify run (`38109498404`) executed on the **exact same**
+  GitHub-hosted runner image -- `ubuntu-24.04`, image version
+  `20261004.327.1`, identical Hosted Compute Agent version and commit,
+  three minutes apart. This rules out any theory involving a
+  tooling-version difference (e.g. a newer/older AWS CLI build with
+  different default checksum/signing behavior) between the two runs --
+  whatever `aws` binary and version is preinstalled on that image, it
+  was identical for both the successful `PUT` calls and the failed
+  `GET`/`HEAD` calls.
+- **Exact `aws s3api` invocation syntax, every call in both files**:
+  extracted and compared every `put-object`/`get-object`/
+  `head-object` invocation verbatim. All calls in both files use the
+  same minimal flag set (`--endpoint-url`, `--bucket`, `--key`, and
+  for writes `--body`/`--content-type`) -- no checksum-related flags
+  (`--checksum-algorithm`, `--content-md5`, etc.), no signing-related
+  flags, no flag present in one file and absent in the other. The
+  restore-verify workflow's own two `put-object` calls (publishing its
+  failure-attempt status, using `R2_STATUS_WRITE_*_PRODUCTION`)
+  **succeeded in the same failed run**, using the identical invocation
+  pattern as the backup workflow's successful uploads -- directly
+  proving the pattern itself works correctly within this exact
+  workflow file, under this exact runner, moments after the read
+  calls failed.
+- **Env var sourcing**: re-confirmed `AWS_ACCESS_KEY_ID`/
+  `AWS_SECRET_ACCESS_KEY`/`AWS_DEFAULT_REGION`/`ENDPOINT_URL` are
+  conventional, correctly-spelled AWS CLI environment variable names
+  in both files, differing only in which secret name feeds each
+  (previously confirmed to exactly match GitHub's real secret names,
+  no typo).
+
+**Conclusion restated with this round's added evidence**: the backup
+workflow's code is proven correct (it succeeded against real
+Production R2). The restore-verify workflow's code is structurally
+identical in form, uses the exact same runner/tooling, and its own
+write calls (different credential) succeed within the same run. The
+only variable that changes between every working call and the two
+failing calls is the `R2_BACKUP_READ_*_PRODUCTION` credential pair.
+**No code or workflow-configuration correction is prepared this
+round, because none is supported by the evidence** -- writing a
+speculative "fix" to code that is already proven correct would
+misdiagnose the problem and risk introducing an unrelated change
+without addressing the actual cause.
+
+**Local validation performed**: `node scripts/run-tests.mjs` --
+**178/178 tests pass** (the full suite covers migrations, backup/
+restore ordering, production-wrangler-config, auth-provider-selection,
+and all existing areas; unaffected since no source file was changed).
+`tsc --noEmit` -- clean, zero type errors.
+
+**If GitHub or Cloudflare changes are required (restated, exact, no
+values guessed)**: the account owner needs to create a **new
+Cloudflare R2 API token**, scoped to **read-only access on the
+`fundraising-os-production-backups` bucket only** (Cloudflare
+dashboard -> Account Home -> R2 -> "Manage API tokens" -> Create API
+token -> Permissions: "Object Read" -> scope to that one bucket, not
+account-wide), since: (1) this is the only remaining untested
+possibility (the existing pair's secret value cannot be re-verified
+by any API, and R2 API tokens cannot be created, scoped, or inspected
+through any API this session has access to); (2) the new Access Key
+ID and Secret Access Key are displayed by Cloudflare exactly once, at
+creation. Once generated, update exactly these two GitHub Actions
+secrets (names only, never values, and not performed this round):
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`,
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION`.
+
+**Remaining risks**: unchanged from the prior round -- the
+restore-verification workflow remains unverified against Production;
+the existing, already-verified-encrypted backup object from run
+`38109341883` is still intact in R2 and does not need to be
+regenerated once the credential is corrected.
+
+**Exact next proposed verification step** (requires separate
+authorization, not performed this round): once the new R2 API token's
+values are installed into the two GitHub secrets above, perform a
+safe, **read-only** authentication test directly against R2 (a
+`HeadObject` and a `GetObject` against the existing backup object)
+*before* re-attempting the restore-verification GitHub Actions
+workflow -- confirming the new credential can authenticate and that
+the backup object remains unchanged and still encrypted -- then, only
+after that passes and is reviewed, re-dispatch
+`d1-restore-verify-monthly-production.yml` as a separate, explicitly
+authorized action.
+
+**What was NOT done this round**: no code or workflow file was
+changed (none was warranted); no GitHub secret or variable was
+changed; no Cloudflare resource or permission was changed; no backup
+or restore-verification workflow was triggered or retried; no
+Production Worker was deployed; no migration was applied; no donor
+data was touched; Staging was not modified.
+
+Stopping here. Awaiting explicit approval before any Production
+operation, and awaiting the account owner's Cloudflare dashboard
+action (new R2 API token) before any credential correction.
