@@ -31770,3 +31770,84 @@ full reconciliation baseline immediately before the real cutover.
 No database was modified, no rehearsal database was created, no Worker
 was deployed, and no migration was executed in producing this round's
 updates.
+
+## Migration rehearsal executed — PASS (2026-10-11)
+
+Under the owner's explicit authorization, created, populated, verified,
+and deleted a temporary, isolated Cloudflare D1 database
+(`fundraising-os-migration-rehearsal-20261011`, UUID
+`04b60cb0-745a-44ad-8480-b2da6231eab3`) to rehearse the Staging-to-
+Production donor-data migration. Full detail, every figure, and every
+check: `docs/PRODUCTION-DONOR-DATA-MIGRATION-REHEARSAL.md`.
+
+**Result: PASS.** All 48 migration-eligible tables reconciled exactly
+at the row level -- 40 tables with data verified via full row-and-
+column SHA-256 hash comparison against a frozen Staging export (not
+just row counts or financial totals), 8 confirmed empty in both source
+and rehearsal. Financial totals reconciled to the cent (committed
+$4,024,296.80 / paid $3,847,915.65 / corrected outstanding balance
+$176,171.15 -- identical to the audit's figures). Both duplicate-
+flagged giving activities (Goldman `1c3f3d51-...`, Gluck `5e29f6c5-
+...`) survived unchanged and un-reactivated; Goldman's linked
+acknowledgment survived intact. Zero FK violations, zero duplicate
+primary keys, zero orphaned references (including application-level
+ones not enforced by a real foreign key, like
+`gift_acknowledgments.gift_id`). Schema confirmed byte-identical
+(137/137 objects) to the production baseline.
+
+**New finding, solved without a workaround:** the frozen export
+contained one oversized single-row INSERT
+(`data_imports.report_json`, ~162KB) exceeding D1's bulk-import
+inline-statement ceiling. The already-designed fix
+(`parameterizeInsertStatement` + the D1 HTTP API's parameterized path)
+needs a bare `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`, not
+available in this session (which authenticates via a cached `wrangler`
+OAuth session instead). Solved with a new technique using only
+`wrangler d1 execute`: insert the row with that one column empty, then
+append the value in safe-sized pieces via repeated `col = col ||
+'<chunk>'` UPDATEs. Row-level hash comparison proved the final value
+byte-identical to source. Captured in
+`scripts/migration-audit/build-rehearsal-restore-files.mjs` for reuse.
+
+**Resolved the rehearsal plan's own previously-open "synthetic user"
+question** (see the prior round's audit addendum, Section 15.4): the
+rehearsal received the one real, deterministic `users` row
+(`user_sgoldstein@nirc.edu`), not a synthetic one, since every
+ownership FK in the 48 MIGRATE tables already points at that exact id
+and the table carries no credential-shaped column. Production's own
+owner account was never read, copied, or modified.
+
+**One check blocked by the platform, not by this round:** `PRAGMA
+integrity_check` returned "not authorized: SQLITE_AUTH" against D1's
+remote query API in this environment. Not one of the task's explicitly
+required checks; the row-level hash match and FK/PK checks already
+independently cover what it would otherwise speak to. Documented, not
+hidden.
+
+**Cleanup confirmed:** rehearsal database deleted
+(`wrangler d1 delete ... -y`); `wrangler d1 list` immediately after
+showed only the original two databases, unchanged file sizes. All
+local scratch files (the Staging export and derived per-table SQL,
+which contained real donor data) were removed from the session-scoped
+temp directory -- never committed, never inside the repo working tree.
+Staging and Production were never modified. No Worker was deployed or
+redirected to the rehearsal database at any point.
+
+### Remaining before a real Production migration
+
+1. Confirm Staging is the sole system of record (before cutover, not
+   just before rehearsal).
+2. Approve the cutover-timing mitigation (short owner-coordinated
+   pause during the real copy window).
+3. Re-run the full reconciliation baseline immediately before any real
+   cutover -- today's and this rehearsal's figures will be stale by
+   then.
+4. Decide how a real migration will handle the oversized-row case:
+   provision API-token credentials for the originally-designed
+   parameterized path, or reuse this round's chunked-UPDATE technique.
+5. A real migration still requires its own separate, explicit owner
+   authorization -- this PASS proves the mechanism works, not that
+   cutover is authorized.
+
+No database was modified, no Worker was deployed, and no donor data
+was migrated into Production in producing this round's work.
