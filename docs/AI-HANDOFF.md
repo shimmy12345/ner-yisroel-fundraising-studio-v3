@@ -29882,3 +29882,200 @@ verification).
 
 Stopping here. Awaiting ChatGPT's independent review before any
 further Production launch step is authorized.
+
+## First Production Backup + Restore-Verification Test (2026-10-10) -- BACKUP PASSED, RESTORE-VERIFICATION FAILED (credential issue, not a data problem) -- OVERALL: FAIL
+
+Following ChatGPT's approval of the schema-initialization report
+(commit `f515763`), this round executed the first real Production
+backup and attempted the first real Production restore-verification.
+**Result: the backup succeeded completely and was independently
+verified; the restore-verification run failed before ever reaching
+the restore step, due to an R2 read-credential problem unrelated to
+data integrity.** Per this round's own instruction, the failure was
+not retried, and no repair was attempted.
+
+**Phase 1 preflight -- all 9 checks passed before triggering anything**:
+1. Re-fetched and re-read `docs/AI-HANDOFF.md` on `origin/feature/
+   independent-cloudflare-sandbox` -- confirmed still at `f515763`,
+   unchanged since the prior round.
+2. `wrangler d1 list`: `fundraising-os-production-db` =
+   `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`, account
+   `2f34086b78ac8643498a1a600b846757` -- exact match.
+3. Direct query: `total_tables: 56`, `application_tables: 53`,
+   `baseline_hash` matches the source file exactly, `donors`/`gifts`/
+   `users` all `0`.
+4. Staging id `6c18396c-...` confirmed distinct from Production's
+   `a51c6571-...`.
+5. `main`'s tip still `aa101ee` (unchanged since the merge round); both
+   workflow files' blob hashes still exactly `d6ac55b9...` and
+   `cb49f8a0...` -- byte-for-byte unchanged from the reviewed version.
+6. All 7 required `_PRODUCTION` secrets + 2 reused secrets confirmed
+   present by name; both `_PRODUCTION` variables confirmed with
+   correct bucket-name values.
+7. Both Production R2 buckets confirmed present with unchanged
+   creation timestamps.
+8. GitHub Actions runs API: `0` in-progress, `0` queued runs
+   repo-wide -- nothing else running.
+9. Both Production Worker names confirmed nonexistent on the account
+   (Cloudflare error `10007` for both).
+
+All 9 passed; proceeded to Phase 2.
+
+**Phase 2 -- first Production backup -- PASSED**:
+- Dispatched `d1-backup-nightly-production.yml` (workflow id
+  `380979303`) against `main`. **Run id `38109341883`**:
+  <https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38109341883>.
+  Completed `success` in under a minute; every step succeeded
+  (export, verify, encrypt, upload dated object, update `latest`
+  pointer, cleanup, publish status).
+- **Backup object key**: `daily/
+  fundraising-os-production-db-20261011T034435Z.sql.gz.gpg`.
+  Downloaded and directly inspected this round: **5,746 bytes**,
+  content begins with raw OpenPGP binary packet bytes (`8c 0d 04 09
+  03...`), confirming it is genuinely GPG-encrypted, **never
+  plaintext SQL**. The `latest/` pointer object is identical in size.
+  `backup-latest-success.json` and `backup-latest-attempt.json` in the
+  status bucket both correctly recorded `attemptStatus/`
+  `completedAt`/the exact object key/this run's id and URL.
+- Raw export stats (from the job log): `794 lines, 41,233 bytes`
+  before encryption -- consistent with the real 53-table schema with
+  zero data rows (the prior round's schema initialization).
+- **Credential exposure check**: downloaded and fully scanned the raw
+  job log. 12 GitHub-redacted `***` markers appear exactly where the
+  passphrase and R2 write credentials are referenced; zero unmasked
+  AWS-key-shaped strings anywhere; the only long hex/base64-looking
+  strings present are the GitHub-hosted runner's own infrastructure
+  commit hash and git ref shas -- not secrets.
+- Re-confirmed immediately after: Production still `donors=0,
+  gifts=0, users=0`, baseline hash unchanged; Staging still
+  `donors=254, giving_activities=5463, pledge_balance_corrections=1,
+  pledge_payment_plans=45` -- both completely unaffected by the backup
+  run.
+
+**Phase 3 -- first Production restore-verification -- FAILED (before
+the restore step)**:
+- Dispatched `d1-restore-verify-monthly-production.yml` (workflow id
+  `380979304`) against `main`. **Run id `38109498404`**:
+  <https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38109498404>.
+  Completed `failure`.
+- **Exact failure, step by step**: "Determine and validate the
+  immutable backup identity from `latest/`'s metadata" ran its own
+  `aws s3api head-object` call using
+  `R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`/
+  `R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION` and got **`An error
+  occurred (403) when calling the HeadObject operation: Forbidden`**
+  -- handled gracefully by the script's own design (logs a warning,
+  sets `known=false`, step itself still reports success). The next
+  step, "Download the backup object to verify," then fell back to
+  downloading `latest/fundraising-os-production-db.sql.gz.gpg`
+  directly via `aws s3api get-object` with the same credential pair,
+  and got **`An error occurred (SignatureDoesNotMatch) when calling
+  the GetObject operation: The request signature we calculated does
+  not match the signature you provided. Check your secret access key
+  and signing method.`** -- this one is asserted by the script, so the
+  step and the job failed: `##[error]Could not download any backup
+  object... nothing to restore-test.` The workflow never reached
+  "Decrypt and decompress" or "Restore into a scratch D1 database"
+  (both show `skipped`).
+- **Root-cause assessment (not fixed this round -- changing secrets is
+  explicitly outside this round's authorization)**: two different
+  error classes (`403 Forbidden` on HEAD, `SignatureDoesNotMatch` on
+  GET) from the same credential pair against the same bucket in the
+  same run strongly suggests a genuine problem with the
+  `R2_BACKUP_READ_*_PRODUCTION` credential pair itself -- most likely
+  the secret access key value, since `SignatureDoesNotMatch`
+  specifically indicates the computed signature doesn't match using
+  the secret key provided (a classic symptom of a key that was
+  mistyped, truncated, or copied with extra whitespace when created).
+  This is distinct from the `R2_BACKUP_WRITE_*_PRODUCTION` pair, which
+  Phase 2's backup run just proved works correctly -- the two
+  credential pairs are provisioned and stored separately.
+- **Confirmed per this round's explicit "if it fails" requirements**:
+  no scratch D1 database was ever created (`wrangler d1 list` still
+  shows exactly the same 2 databases as before -- Production and
+  Staging, nothing new); the live Production database was not
+  modified (re-confirmed `donors=0`, baseline hash unchanged); Staging
+  was not touched (re-confirmed `donors=254, giving_activities=5463`);
+  the "Clean up local files" and "Publish restore-verification status"
+  steps both still ran and succeeded despite the earlier failure
+  (`if: always()` working as designed) --
+  `restore-latest-attempt.json` correctly recorded `attemptStatus:
+  "failure"` with this run's id/URL; no `restore-latest-success.json`
+  exists (correct -- there has never been a successful run).
+  Full job log scanned for credential exposure: 12 `***` redaction
+  markers present where expected; zero unmasked credential-shaped
+  strings; the only non-obvious hex strings present are an R2 object
+  ETag/VersionId from the status-publish step's own response and the
+  GitHub runner's own infrastructure commit hash -- neither a secret.
+  Per instruction, **the run was not retried and no repair was
+  attempted.**
+
+**Phase 4 -- final verification, against what actually happened**:
+- Backup workflow run: **succeeded** (`38109341883`).
+- Restore-verification workflow run: **did not succeed**
+  (`38109498404`) -- credential failure, not reached far enough to
+  validate the backup's contents.
+- Encrypted backup object: **confirmed present**, correct bucket,
+  correct prefix, confirmed encrypted (not plaintext).
+- Restore-verification validating that backup: **did not happen** --
+  blocked by the credential failure before reaching that step.
+- Scratch databases remaining: **none** (never created).
+- Production donor records: **still zero** (unaffected by either run).
+- Staging's recorded counts: **unchanged**
+  (`254`/`5463`/`1`/`45`, confirmed both before and after both runs).
+- Neither Production Worker was deployed (unaffected by either run;
+  not independently re-checked this round beyond Phase 1's check 9,
+  since neither workflow has any code path that could deploy a
+  Worker).
+- No automatic schedule was enabled (both workflow files' blob hashes
+  remain byte-for-byte unchanged from the reviewed version; no file
+  was edited this round).
+
+**OVERALL DETERMINATION: FAIL** -- specifically, a **partial result**:
+the backup half of the pipeline is proven working end-to-end against
+real Production infrastructure (encrypted, correctly stored, status
+correctly reported, zero data exposure); the restore-verification half
+is blocked by what appears to be a malformed or incorrect
+`R2_BACKUP_READ_*_PRODUCTION` credential pair, discovered for the
+first time by this round's test precisely because it had never been
+exercised against Production before. No data was lost, corrupted, or
+exposed; nothing destructive happened; the failure is cleanly isolated
+to one specific credential pair's correctness.
+
+**Warnings / outstanding risks** (carried forward, unchanged, plus one
+new finding): (1) status-worker's hardcoded Staging workflow filename;
+(2) the `ubuntu-latest` -> Ubuntu 26 migration on 2026-10-19; (3) the
+pre-existing inability to independently verify the live Cloudflare
+Access policy via API. **New this round**: (4) the
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`/
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION` credential pair appears
+to be invalid or malformed -- `HeadObject` returns `403 Forbidden` and
+`GetObject` returns `SignatureDoesNotMatch` against the correct
+bucket/key. This must be investigated and corrected (most likely by
+regenerating/re-copying the secret access key value) before any
+further restore-verification attempt; this round took no action on
+it, since changing GitHub secrets is outside this round's
+authorization.
+
+**Recommended next step**: the account owner (or an explicitly
+authorized follow-up round) should regenerate or re-verify the
+`R2_BACKUP_READ_ACCESS_KEY_ID_PRODUCTION`/
+`R2_BACKUP_READ_SECRET_ACCESS_KEY_PRODUCTION` R2 API token pair and
+update the corresponding GitHub secrets, then re-attempt a single
+manual `workflow_dispatch` of `d1-restore-verify-monthly-production.yml`
+only (the backup half needs no changes and no re-run -- a valid,
+verified encrypted backup already exists in R2 for this test to
+target). Do not re-run the backup workflow as part of fixing this --
+it already succeeded and is unaffected by the read-credential problem.
+
+**What was NOT done this round beyond the two authorized workflow
+dispatches**: no automatic retry was attempted; no secret or variable
+was changed; no repair or cleanup beyond the restore workflow's own
+built-in (and in this case, never-reached) scratch-database cleanup
+was attempted; no Production Worker was deployed; no additional
+migration was applied; no donor data was imported; Staging was not
+modified (only read, for verification).
+
+Stopping here. Awaiting ChatGPT's independent review of this failure
+before any further Production action, including any credential
+correction.
