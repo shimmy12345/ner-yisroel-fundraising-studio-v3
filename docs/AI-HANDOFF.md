@@ -31091,3 +31091,81 @@ scheduling, migration, cutover) should proceed without that confirmation
 plus its own separate authorization.
 
 Stopping here per explicit instruction. Awaiting independent review.
+
+---
+
+## Production Schema Mismatch Investigation (2026-10-11) -- RESOLVED AS HEALTH-REPORTING DEFECT, not a real schema problem
+
+Full report: `docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md`.
+
+### What was reported
+
+After the owner's first successful login to the newly deployed Production
+environment, Workspace Health showed "Live schema version: 0022 / 0019 --
+ERROR" with "Do not deploy database changes until reconciled," alongside
+"Production baseline artifact: 0019 Packaged" and "Staging <-> baseline
+schema: Match."
+
+### Root cause (read-only investigation, no code/data changed)
+
+Two compounding, pre-existing defects in `lib/data-health/model.ts` /
+`read.ts`, both confirmed by direct code read and live Production queries:
+
+1. **`EXPECTED_MIGRATION_LEVEL = "0019"`** (set 2026-08-05, never updated)
+   is compared against `facts.currentMigrationLevel` (a live-inspection
+   heuristic capped at `"0022"`, the newest rung `inferMigrationLevel()`
+   knows how to detect). The packaged baseline artifact has since been
+   regenerated multiple times -- most recently for migration 0042 -- while
+   deliberately keeping its original "0019" label
+   (`production-baseline.ts`'s own comment: "that label identifies the
+   single bootstrap file's origin, not its current contents"). Confirmed
+   live: Production's `import_preview_sessions` table genuinely has the
+   `decisions_json`/`status`/`progress_resolved` columns the "0022" rung
+   checks for -- the detection is correct, the comparison basis is stale.
+2. **The `"production-independent"` environment value (added 2026-10-09)
+   was never wired into any of this file's `=== "production"` branches**
+   -- a gap the code's own comment explicitly flagged and deferred:
+   "revisit before anyone actually deploys and views this page against
+   fundraising-os-production-db." That moment arrived this round. As a
+   result, Production's real, live-evidence baseline-verification card
+   and real readiness-gate card never run for this environment -- it
+   silently gets Staging-oriented informational copy instead (confirmed:
+   the exact "Production baseline artifact: 0019 Packaged" line the owner
+   saw is the build-time-only informational card, not the live-verified
+   one). A separate, unconditional label bug ("Staging <-> baseline
+   schema", hardcoded regardless of environment) compounds the confusing
+   presentation.
+
+**The authoritative check -- `schemaMatchesBaseline` ("Staging <-> baseline
+schema: Match") -- already compares the live schema against the full,
+current, 43-migration packaged baseline correctly, and passed.** There is
+no genuine schema incompatibility. A repo-wide search found zero other
+application code (auth, donor data, staging-reset, etc.) depends on this
+exact environment-string distinction -- the consequence is scoped entirely
+to the Workspace Health dashboard's own self-description.
+
+### Severity and recommendation
+
+Medium severity, reporting/observability only -- not data-integrity, not
+security. Recommended smallest-safe fix (three parts, detailed in the full
+report's Section 9): (A) extend the `=== "production"` recognition to also
+match `"production-independent"` in both model.ts and read.ts; (B)
+compare the live-schema card against `LATEST_MIGRATION_LEVEL` rather than
+the now-stale `EXPECTED_MIGRATION_LEVEL` for any baseline-bootstrapped
+environment; (C) fix the hardcoded "Staging"-specific copy. Missing test
+coverage identified: zero existing tests use
+`deploymentEnvironment: "production-independent"` anywhere in `tests/`.
+
+### Should Production deployment remain blocked for further data migration?
+
+Not newly blocked by this finding -- the schema itself is correct, and
+donor-data migration was already gated behind the separate, pre-existing
+owner-approval chain (fresh audit -> rehearsal -> sign-off -> cutover),
+unaffected by this bug either way. **However: do not rely on the
+"Production launch readiness"/"Live schema version" dashboard cards as
+part of that approval chain until the fix above lands and is verified** --
+they cannot currently render a trustworthy verdict for this environment.
+
+Nothing was deployed, migrated, or modified this round. Stopping here per
+explicit instruction, awaiting separate authorization before implementing
+any fix.
