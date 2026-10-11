@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { APP_VERSION, buildDataHealthReport } from "../lib/data-health/model.ts";
+import { APP_VERSION, EXPECTED_MIGRATION_LEVEL, LATEST_MIGRATION_LEVEL, buildDataHealthReport, isProductionEnvironment, usesLatestDetectableMigrationLevel } from "../lib/data-health/model.ts";
 
 const now = 1_786_000_000;
 
@@ -86,6 +86,28 @@ function independentStagingFacts(overrides = {}) {
     backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: new Date().toISOString(), attemptStatus: "success", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
     restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date().toISOString(), verifiedBackupObjectKey: "latest/fundraising-os-staging-db.sql.gz.gpg", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
     restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: new Date().toISOString(), attemptStatus: "success", workflowRunId: "2", workflowRunUrl: "https://github.com/example/repo/actions/runs/2" },
+    ...overrides,
+  };
+}
+
+function independentProductionFacts(overrides = {}) {
+  return {
+    ...productionFacts(),
+    deploymentEnvironment: "production-independent",
+    // The packaged baseline artifact is continually regenerated to include
+    // every migration while deliberately keeping its own historical "0019"
+    // file-origin label unchanged (see production-baseline.ts's own
+    // comment on PRODUCTION_BASELINE_LEVEL) -- a freshly-bootstrapped
+    // independent Production database genuinely reports "0022" here, the
+    // newest migration inferMigrationLevel can detect, never the stale
+    // "0019" pin. This is the realistic fixture value the 2026-10-11
+    // investigation found missing from this test file
+    // (docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md) -- every prior
+    // "production" fixture here used "0019", silently matching
+    // EXPECTED_MIGRATION_LEVEL by construction and never exercising the
+    // real-world case that actually reached the owner's screen.
+    currentMigrationLevel: "0022",
+    businessRecordCounts: { donors: 0, givingActivities: 0, interactions: 0, reminders: 0 },
     ...overrides,
   };
 }
@@ -253,4 +275,130 @@ test("a present deployed commit shows the app version and a short SHA, and stays
   const release = check(report, "release");
   assert.equal(release.status, "healthy");
   assert.equal(release.value, `${report.platform.appVersion} · abcdef1`);
+});
+
+// ---- Independent Production (deploymentEnvironment: "production-independent")
+// -- added 2026-10-11 after the first real deployment surfaced a false
+// "Live schema version: 0022 / 0019 -- ERROR" and several Staging-labeled
+// cards on the real, live Production environment. See
+// docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md (root cause) and
+// docs/PRODUCTION-HEALTH-REPORTING-FIX.md (the fix these tests cover). ----
+
+test("independent production: a healthy environment at the realistic 0022 schema level reports Ready with no blockers", () => {
+  const report = buildDataHealthReport(independentProductionFacts());
+  const liveSchema = check(report, "live-schema");
+  assert.equal(liveSchema.status, "healthy", "0022 is the correct live level for a freshly-bootstrapped independent Production database -- it must not read as a mismatch against the stale 0019 pin");
+  assert.equal(liveSchema.value, "0022 / 0022");
+  assert.equal(check(report, "production-readiness").status, "healthy");
+  assert.equal(check(report, "production-readiness").value, "Ready");
+  assert.equal(report.platform.productionReady, true);
+  assert.deepEqual(report.platform.productionReadinessBlockers, []);
+});
+
+test("independent production: a valid baseline marker is verified against the real, live production_schema_baseline row -- not the build-time-only informational artifact independent production previously fell through to", () => {
+  const report = buildDataHealthReport(independentProductionFacts());
+  const baseline = check(report, "production-baseline");
+  assert.equal(baseline.label, "Production rehearsal baseline", "must take the real, live-query branch");
+  assert.equal(baseline.status, "healthy");
+  assert.equal(baseline.value, "0019 · Verified");
+  assert.match(baseline.explanation, /schema_hash matches the packaged 0019 baseline exactly/);
+});
+
+test("independent production: a missing baseline marker blocks readiness exactly as it does for legacy production", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ productionBaselineState: "not-applied", productionBaselineApplied: false }));
+  const baseline = check(report, "production-baseline");
+  assert.equal(baseline.status, "critical");
+  assert.equal(baseline.value, "0019 · Not yet applied");
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+  assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("baseline is not verified")));
+});
+
+test("independent production: an incorrect baseline hash blocks readiness and flags business-data risk", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
+  const baseline = check(report, "production-baseline");
+  assert.equal(baseline.status, "critical");
+  assert.equal(baseline.value, "0019 · Mismatch");
+  assert.equal(baseline.evidence.businessDataAtRisk, true);
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+});
+
+test("independent production: a genuine structural schema mismatch still fails, independent of the baseline marker and the migration-level heuristic", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ schemaMatchesBaseline: false, schemaComparisonDifferences: ["Missing table: pledge_balance_corrections."] }));
+  assert.equal(check(report, "production-baseline").status, "healthy", "an unrelated structural drift must not retroactively fail the baseline marker check");
+  const comparison = check(report, "schema-comparison");
+  assert.equal(comparison.status, "critical");
+  assert.deepEqual(comparison.diagnosticLines, ["Missing table: pledge_balance_corrections."]);
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+  assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("baseline schema comparison found")));
+});
+
+test("independent production: a genuinely stale live schema (below the detectable ceiling) still fails -- the fix must not blanket-suppress real staleness", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ currentMigrationLevel: "0019" }));
+  const liveSchema = check(report, "live-schema");
+  assert.equal(liveSchema.status, "critical", "a database that has not actually been bootstrapped from the current baseline must still be flagged");
+  assert.equal(liveSchema.value, "0019 / 0022");
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+  assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("Live migration level is 0019; expected 0022")));
+});
+
+test("independent production: an empty database (zero business data) is healthy, with a Production-specific label", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ businessDataRows: 0 }));
+  const state = check(report, "business-data-state");
+  assert.equal(state.label, "Production data state");
+  assert.equal(state.status, "healthy");
+  assert.equal(state.value, "Schema only");
+});
+
+test("independent production: every dashboard card carries a Production-specific label, with no leftover Staging-only wording", () => {
+  const report = buildDataHealthReport(independentProductionFacts());
+  assert.equal(check(report, "staging-migration-history").label, "Production migration history");
+  assert.equal(check(report, "schema-comparison").label, "Production ↔ baseline schema");
+  assert.equal(check(report, "business-data-state").label, "Production data state");
+  assert.equal(check(report, "production-baseline").label, "Production rehearsal baseline");
+  const readiness = check(report, "production-readiness");
+  assert.notEqual(readiness.value, "Evaluated on production only", "independent production must receive a real verdict, never the non-production placeholder");
+  assert.notEqual(readiness.status, "info");
+  for (const item of report.checks) {
+    assert.doesNotMatch(item.label, /^Staging/, `check "${item.id}" must not carry a Staging-prefixed label when viewed on independent production`);
+  }
+});
+
+test("isProductionEnvironment / usesLatestDetectableMigrationLevel correctly classify every deployment environment", () => {
+  assert.equal(isProductionEnvironment("production"), true);
+  assert.equal(isProductionEnvironment("production-independent"), true);
+  assert.equal(isProductionEnvironment("staging"), false);
+  assert.equal(isProductionEnvironment("staging-independent"), false);
+  assert.equal(usesLatestDetectableMigrationLevel("staging-independent"), true);
+  assert.equal(usesLatestDetectableMigrationLevel("production-independent"), true);
+  assert.equal(usesLatestDetectableMigrationLevel("production"), false, "legacy production's provenance was not re-verified by this fix -- it must not silently move to the 0022 ceiling");
+  assert.equal(usesLatestDetectableMigrationLevel("staging"), false);
+  assert.notEqual(EXPECTED_MIGRATION_LEVEL, LATEST_MIGRATION_LEVEL);
+});
+
+test("legacy production behavior is preserved: still compares against the historical 0019 pin, not the 0022 detection ceiling", () => {
+  const healthyLegacy = buildDataHealthReport(productionFacts());
+  assert.equal(check(healthyLegacy, "live-schema").value, "0019 / 0019");
+  assert.equal(check(healthyLegacy, "live-schema").status, "healthy");
+  // Feeding the same "0022" reading that independent production now
+  // correctly treats as healthy, into LEGACY production (whose own
+  // provenance this fix deliberately leaves unverified and unchanged),
+  // must still report a mismatch -- proving this fix did not quietly move
+  // legacy production's comparison basis along with independent production's.
+  const hypotheticalLegacyAt0022 = buildDataHealthReport(productionFacts({ currentMigrationLevel: "0022" }));
+  assert.equal(check(hypotheticalLegacyAt0022, "live-schema").status, "critical");
+  assert.equal(check(hypotheticalLegacyAt0022, "live-schema").value, "0022 / 0019");
+});
+
+test("independent staging behavior is fully preserved: unchanged labels, unchanged 0022/0022 comparison, unchanged informational production-readiness verdict", () => {
+  const report = buildDataHealthReport(independentStagingFacts());
+  assert.equal(check(report, "live-schema").value, "0022 / 0022");
+  assert.equal(check(report, "live-schema").status, "healthy");
+  assert.match(check(report, "live-schema").explanation, /0020 is data-only/i);
+  assert.equal(check(report, "schema-comparison").label, "Staging ↔ baseline schema", "staging-independent keeps its own existing label, unaffected by the new Production-specific label");
+  assert.equal(check(report, "staging-migration-history").label, "Staging migration history");
+  assert.equal(check(report, "production-baseline").label, "Production baseline artifact", "staging-independent keeps taking the non-production, informational branch exactly as before");
+  const readiness = check(report, "production-readiness");
+  assert.equal(readiness.status, "info");
+  assert.equal(readiness.value, "Evaluated on production only");
+  assert.match(readiness.explanation, /never derived from staging/);
 });

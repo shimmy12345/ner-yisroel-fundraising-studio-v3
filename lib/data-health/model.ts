@@ -51,15 +51,13 @@ export type RestoreSuccessStatus = { schemaVersion: number; databaseName: string
 export type RestoreAttemptStatus = BackupAttemptStatus;
 
 export type DataHealthFacts = {
-  // "production-independent" (lib/environment.ts, added 2026-10-09) is
-  // accepted here for type correctness, but none of this file's own
-  // `=== "production"` / `=== "staging-independent"` branches below
-  // match it yet -- it currently falls through to the same path legacy
-  // "staging" takes. That is a deliberate, conservative default (no
-  // branch silently misfires), not a considered design for how
-  // Workspace Health should present an independent Production
-  // environment -- revisit before anyone actually deploys and views
-  // this page against fundraising-os-production-db.
+  // "production-independent" (lib/environment.ts, added 2026-10-09) now
+  // receives the same treatment as legacy "production" everywhere in this
+  // file that means "a real production environment with a live baseline
+  // marker to verify" -- see isProductionEnvironment() below. Fixed
+  // 2026-10-11 after the first real deployment surfaced the gap (see
+  // docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md): until then it
+  // silently fell through to the same path legacy "staging" takes.
   deploymentEnvironment: "staging" | "production" | "staging-independent" | "production-independent";
   databaseConnected: boolean;
   schemaReady: boolean;
@@ -171,19 +169,59 @@ export type DataHealthReport = {
   };
 };
 
-// Continues to gate production launch readiness specifically -- production
-// is deliberately pinned to the verified 0019 baseline until it is itself
-// migrated forward, a separate decision from what independent staging runs.
+// Legacy (ChatGPT Sites) production's own provenance has not been
+// independently re-verified against the current, continually-regenerated
+// baseline artifact, so its comparison stays pinned to this historical
+// value unless and until that is explicitly checked. Independent
+// Production and independent Staging are NOT compared against this
+// constant -- see usesLatestDetectableMigrationLevel() below, and
+// docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md for why comparing a
+// baseline-bootstrapped database against this fixed pin produces a false
+// mismatch once the baseline has been regenerated past it.
 export const EXPECTED_MIGRATION_LEVEL = "0019";
 // The newest migration inferMigrationLevel can currently detect via schema
-// inspection. Kept distinct from EXPECTED_MIGRATION_LEVEL: independent
-// staging intentionally runs ahead of production's pinned baseline, and its
-// "Live schema version" card must compare against what it actually has, not
-// production's separate expectation. 0020_financial_date_only.sql is
-// data-only and has no schema signature, so it is never detectable this way
-// -- 0021 and 0022 both changed import_preview_sessions and are.
+// inspection -- the correct comparison basis for any environment bootstrapped
+// from the production-baseline artifact (independent Staging and independent
+// Production both are), because that artifact is continually regenerated to
+// include every migration while keeping its own historical "0019" file-origin
+// label unchanged (see production-baseline.ts's own comment on
+// PRODUCTION_BASELINE_LEVEL). This is a detection ceiling, not a claim that
+// no later migration exists: 0020_financial_date_only.sql is data-only and
+// has no schema signature, so it is never detectable this way -- 0021 and
+// 0022 both changed import_preview_sessions and are. A database whose real
+// schema is at migration 0042 reports identically to one at exactly 0022
+// here; "Staging/Production ↔ baseline schema" (the full structural
+// comparison, elsewhere in this file) is what actually proves more than
+// that.
 export const LATEST_MIGRATION_LEVEL = "0022";
 export const APP_VERSION = "0.1.0";
+
+// Both the dedicated independent Production Worker and the legacy ChatGPT
+// Sites production platform carry a live, verifiable production_schema_baseline
+// marker and gate real launch readiness; everywhere in this module that
+// means "a real production environment" should use this instead of
+// comparing against the bare "production" string, so a newly-added
+// production-shaped environment value is never silently excluded again --
+// this is exactly the gap "production-independent" (added 2026-10-09) fell
+// into until it was closed here on 2026-10-11, the first time anyone
+// actually deployed and viewed this page against fundraising-os-production-db.
+// See docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md for the full story.
+export function isProductionEnvironment(env: DataHealthFacts["deploymentEnvironment"]): boolean {
+  return env === "production" || env === "production-independent";
+}
+
+// True for any environment whose database is bootstrapped from the
+// continually-regenerated production-baseline artifact rather than a real,
+// replayed migration journal -- independent Staging and independent
+// Production both are; legacy staging/production are not (or at least have
+// not been independently re-verified to be, so their original comparison
+// basis, EXPECTED_MIGRATION_LEVEL, is left unchanged). These are the
+// environments for which comparing "Live schema version" against
+// LATEST_MIGRATION_LEVEL (the heuristic's own detection ceiling) is correct,
+// rather than against the historical EXPECTED_MIGRATION_LEVEL pin.
+export function usesLatestDetectableMigrationLevel(env: DataHealthFacts["deploymentEnvironment"]): boolean {
+  return env === "staging-independent" || env === "production-independent";
+}
 
 export const EXPECTED_MIGRATION_TAGS = [
   "0000_foundation",
@@ -504,7 +542,7 @@ function restoreVerificationCheck(facts: DataHealthFacts, now: number): HealthCh
 
 function productionBaselineCheck(facts: DataHealthFacts): HealthCheck {
   const level = facts.productionBaselineLevel;
-  if (facts.deploymentEnvironment !== "production") {
+  if (!isProductionEnvironment(facts.deploymentEnvironment)) {
     const packagedValid = facts.productionBaselineVerified;
     return {
       id: "production-baseline",
@@ -546,7 +584,7 @@ function productionBaselineCheck(facts: DataHealthFacts): HealthCheck {
 }
 
 function productionReadinessCheck(facts: DataHealthFacts, productionReady: boolean, blockers: string[]): HealthCheck {
-  if (facts.deploymentEnvironment !== "production") {
+  if (!isProductionEnvironment(facts.deploymentEnvironment)) {
     return {
       id: "production-readiness",
       label: "Production launch readiness",
@@ -675,18 +713,31 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
   // Derived from checkedAt (not a fresh Date.now() call) so freshness
   // classification is deterministic and testable against a fixed clock.
   const now = Date.parse(checkedAt);
-  const productionBaselineApplied = deploymentEnvironment === "production" ? facts.productionBaselineState === "verified" : true;
+  const productionBaselineApplied = isProductionEnvironment(deploymentEnvironment) ? facts.productionBaselineState === "verified" : true;
   const businessDataRows = facts.businessDataRows ?? facts.activeDonors;
   const hasData = (facts.activeDonors ?? 0) > 0;
   const givingReady = [facts.givingSourceTotalCents, facts.givingLinkedTotalCents, facts.invalidGivingRows, facts.duplicateGivingFingerprints].every((value) => value !== null);
   const givingHealthy = givingReady && facts.givingSourceTotalCents === facts.givingLinkedTotalCents && facts.invalidGivingRows === 0 && facts.duplicateGivingFingerprints === 0;
   const relationshipIntegrityHealthy = [facts.duplicateJlCodes, facts.orphanedGifts, facts.orphanedInteractions, facts.orphanedReminders, facts.orphanedPayments, facts.brokenMergeRedirects].every((value) => value === 0);
-  const productionReady = facts.schemaReady && facts.currentMigrationLevel === EXPECTED_MIGRATION_LEVEL && facts.productionBaselineVerified && productionBaselineApplied && facts.schemaMatchesBaseline && givingHealthy && relationshipIntegrityHealthy;
-  const productionBlockers: string[] = deploymentEnvironment === "production" && !productionReady ? [
+  // See usesLatestDetectableMigrationLevel()'s own comment: independent
+  // Staging and independent Production both boot from the same
+  // continually-regenerated baseline artifact, so LATEST_MIGRATION_LEVEL
+  // (the detector's own ceiling) is the correct comparison basis for
+  // either -- comparing against the historical EXPECTED_MIGRATION_LEVEL pin
+  // produces a false mismatch once the baseline has moved past it. Legacy
+  // staging/production keep the original comparison unchanged.
+  const expectedMigrationLevel = usesLatestDetectableMigrationLevel(deploymentEnvironment) ? LATEST_MIGRATION_LEVEL : EXPECTED_MIGRATION_LEVEL;
+  const liveSchemaMatchesExpectedLevel = facts.schemaReady && facts.currentMigrationLevel === expectedMigrationLevel;
+  // Shared between the "live-schema" card's own explanation and the full
+  // structural-comparison card below, so the two can never name each other
+  // inconsistently.
+  const schemaComparisonLabel = isProductionEnvironment(deploymentEnvironment) ? "Production ↔ baseline schema" : "Staging ↔ baseline schema";
+  const productionReady = liveSchemaMatchesExpectedLevel && facts.productionBaselineVerified && productionBaselineApplied && facts.schemaMatchesBaseline && givingHealthy && relationshipIntegrityHealthy;
+  const productionBlockers: string[] = isProductionEnvironment(deploymentEnvironment) && !productionReady ? [
     ...(!facts.schemaReady ? ["Live schema is not ready: required application tables or columns are missing."] : []),
-    ...(facts.currentMigrationLevel !== EXPECTED_MIGRATION_LEVEL ? [`Live migration level is ${facts.currentMigrationLevel ?? "Unknown"}; expected ${EXPECTED_MIGRATION_LEVEL}.`] : []),
+    ...(!liveSchemaMatchesExpectedLevel ? [`Live migration level is ${facts.currentMigrationLevel ?? "Unknown"}; expected ${expectedMigrationLevel}.`] : []),
     ...(!productionBaselineApplied || !facts.productionBaselineVerified ? [`Production rehearsal baseline is not verified (current state: ${facts.productionBaselineState}).`] : []),
-    ...(!facts.schemaMatchesBaseline ? [`Staging ↔ baseline schema comparison found ${facts.schemaComparisonDifferences.length} difference(s).`] : []),
+    ...(!facts.schemaMatchesBaseline ? [`${schemaComparisonLabel} comparison found ${facts.schemaComparisonDifferences.length} difference(s).`] : []),
     ...(!givingHealthy ? ["Giving-total reconciliation has not passed."] : []),
     ...(!relationshipIntegrityHealthy ? ["One or more relationship-data integrity checks (duplicates, orphans, broken merge redirects) have not passed."] : []),
   ] : [];
@@ -699,35 +750,26 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       value: facts.databaseConnected ? "Connected" : "Unavailable",
       explanation: facts.databaseConnected ? "Fundraising OS can read the D1 workspace." : "Fundraising OS could not read D1. No workspace integrity checks were completed.",
     },
-    (() => {
-      // Independent staging intentionally runs ahead of production's
-      // pinned 0019 expectation (it has migrations 0021/0022 applied);
-      // comparing it against EXPECTED_MIGRATION_LEVEL would falsely read
-      // as a mismatch. Production and legacy staging keep the original
-      // comparison unchanged.
-      const expected = deploymentEnvironment === "staging-independent" ? LATEST_MIGRATION_LEVEL : EXPECTED_MIGRATION_LEVEL;
-      const matches = facts.schemaReady && facts.currentMigrationLevel === expected;
-      return {
-        id: "live-schema",
-        label: "Live schema version",
-        status: matches ? "healthy" : "critical",
-        value: `${facts.currentMigrationLevel ?? "Unknown"} / ${expected}`,
-        explanation: matches
-          ? deploymentEnvironment === "staging-independent"
-            ? "The live D1 schema contains every expected table and column through migration 0022. Migration 0020 is data-only and has no schema signature, so it cannot be independently verified by schema inspection alone — see \"Staging ↔ baseline schema\" for the authoritative structural comparison."
-            : "The live D1 schema contains every expected table and column."
-          : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled.",
-      };
-    })(),
-    deploymentEnvironment === "production"
+    {
+      id: "live-schema",
+      label: "Live schema version",
+      status: liveSchemaMatchesExpectedLevel ? "healthy" : "critical",
+      value: `${facts.currentMigrationLevel ?? "Unknown"} / ${expectedMigrationLevel}`,
+      explanation: liveSchemaMatchesExpectedLevel
+        ? usesLatestDetectableMigrationLevel(deploymentEnvironment)
+          ? `The live D1 schema contains every expected table and column through migration ${LATEST_MIGRATION_LEVEL} (the newest migration this check can independently detect from schema inspection alone — migration 0020 is data-only and has no schema signature, so it is invisible to this check specifically). The packaged baseline artifact may already include later migrations beyond what this heuristic can see — see "${schemaComparisonLabel}" for the authoritative, complete structural comparison.`
+          : "The live D1 schema contains every expected table and column."
+        : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled.",
+    },
+    isProductionEnvironment(deploymentEnvironment)
       ? { id: "staging-migration-history", label: "Production migration history", status: productionBaselineApplied ? "healthy" : "critical", value: productionBaselineApplied ? "Baseline 0019" : "Unverified", explanation: productionBaselineApplied ? "This database was created from the verified 0019 production baseline. Legacy staging history was not copied." : "The production baseline marker or schema hash is missing. Do not load business data." }
       : { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
     productionBaselineCheck(facts),
-    { id: "schema-comparison", label: "Staging ↔ baseline schema", status: facts.schemaMatchesBaseline ? "healthy" : "critical", value: facts.schemaMatchesBaseline ? "Match" : `${facts.schemaComparisonDifferences.length} differences`, explanation: facts.schemaMatchesBaseline ? "Application tables, columns, indexes, and constraints match the verified 0019 baseline. Cloudflare-managed infrastructure tables are reported separately from application schema." : "Material application-schema differences exist between staging and the production rehearsal.", diagnosticLines: facts.schemaComparisonDifferences },
+    { id: "schema-comparison", label: schemaComparisonLabel, status: facts.schemaMatchesBaseline ? "healthy" : "critical", value: facts.schemaMatchesBaseline ? "Match" : `${facts.schemaComparisonDifferences.length} differences`, explanation: facts.schemaMatchesBaseline ? "Application tables, columns, indexes, and constraints match the verified 0019 baseline. Cloudflare-managed infrastructure tables are reported separately from application schema." : "Material application-schema differences exist between the live database and the packaged baseline.", diagnosticLines: facts.schemaComparisonDifferences },
     productionReadinessCheck(facts, productionReady, productionBlockers),
     {
       id: "business-data-state",
-      label: deploymentEnvironment === "production" ? "Production data state" : "Staging data state",
+      label: isProductionEnvironment(deploymentEnvironment) ? "Production data state" : "Staging data state",
       status: businessDataRows === null || businessDataRows === undefined ? "unavailable" : businessDataRows === 0 ? "healthy" : "info",
       value: businessDataRows === null || businessDataRows === undefined ? "Not checked" : businessDataRows === 0 ? "Schema only" : "Live records present",
       explanation: businessDataRows === null || businessDataRows === undefined ? "The application tables could not be counted." : businessDataRows === 0 ? "No users, donors, gifts, interactions, reminders, imports, or audit records are stored." : "Application records are present; the health report continues to validate ownership, links, and totals without exposing them.",
@@ -850,7 +892,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
       productionReadinessBlockers: productionBlockers,
       productionBaselineLevel: facts.productionBaselineLevel,
       schemaMatchesBaseline: facts.schemaMatchesBaseline,
-      expectedMigrationLevel: EXPECTED_MIGRATION_LEVEL,
+      expectedMigrationLevel,
       ledgerComplete: facts.migrationLedgerComplete,
       appVersion: facts.appVersion,
       deployedCommit: facts.deployedCommit,

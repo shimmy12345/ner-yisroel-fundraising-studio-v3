@@ -23,6 +23,7 @@ import {
   LEDGERED_MIGRATION_TAGS,
   buildDataHealthReport,
   inferMigrationLevel,
+  isProductionEnvironment,
   migrationLevelFromTags,
   reconcileRemoteMigrationTags,
   schemaIsReady,
@@ -114,9 +115,11 @@ const deployedCommit = typeof __FUNDRAISING_OS_COMMIT__ === "string" && __FUNDRA
   : null;
 // The independent staging Worker is bootstrapped from the same verified
 // baseline as production and carries a live production_schema_baseline
-// marker, so it is checked the same way. Only legacy (ChatGPT Sites)
-// staging is structurally exempt.
-const checksLiveBaseline = deploymentEnvironment === "production" || deploymentEnvironment === "staging-independent";
+// marker, so it is checked the same way -- as does the independent
+// Production Worker itself (isProductionEnvironment() covers both it and
+// legacy ChatGPT Sites production). Only legacy (ChatGPT Sites) staging is
+// structurally exempt.
+const checksLiveBaseline = isProductionEnvironment(deploymentEnvironment) || deploymentEnvironment === "staging-independent";
 
 const emptyFacts = (): DataHealthFacts => ({
   deploymentEnvironment,

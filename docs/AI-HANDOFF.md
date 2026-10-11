@@ -31169,3 +31169,77 @@ they cannot currently render a trustworthy verdict for this environment.
 Nothing was deployed, migrated, or modified this round. Stopping here per
 explicit instruction, awaiting separate authorization before implementing
 any fix.
+
+---
+
+## Production Workspace Health Reporting Fix (2026-10-11) -- IMPLEMENTED AND TESTED, NOT DEPLOYED
+
+Full report: `docs/PRODUCTION-HEALTH-REPORTING-FIX.md`.
+
+### What was done
+
+Implemented the smallest safe correction for the two defects identified in
+`docs/PRODUCTION-SCHEMA-MISMATCH-INVESTIGATION.md`: added
+`isProductionEnvironment()` and `usesLatestDetectableMigrationLevel()`
+helpers to `lib/data-health/model.ts`, used them to replace every bare
+`=== "production"` / `=== "staging-independent"` comparison that was
+meant to recognize a real production or baseline-bootstrapped environment
+(`productionBaselineCheck`, `productionReadinessCheck`,
+`productionBaselineApplied`, `productionBlockers`, the migration-history
+card, the business-data-state label, the "Live schema version" card's own
+comparison basis), and wired the same recognition into
+`lib/data-health/read.ts`'s `checksLiveBaseline` so the live
+`production_schema_baseline` query actually runs for
+`"production-independent"`. Also fixed the hardcoded "Staging ↔ baseline
+schema" label (now "Production ↔ baseline schema" on production
+environments) and its "between staging and the production rehearsal"
+explanation text.
+
+Legacy `"production"`'s own comparison basis (`EXPECTED_MIGRATION_LEVEL`,
+"0019") was deliberately left unchanged -- its provenance was never
+independently re-verified, so extending the "0022" comparison to it would
+not have been justified. Independent Staging's behavior is completely
+unaffected -- verified by a dedicated regression test asserting the exact
+pre-fix labels/values/explanations are still what it shows.
+
+### Exact files changed
+
+`lib/data-health/model.ts`, `lib/data-health/read.ts`,
+`tests/production-readiness-diagnostics.test.mjs`. Nothing else --
+`tests/data-health.test.mjs` was inspected but needed no change (it tests
+orthogonal SQL-integrity logic, not environment recognition).
+
+### Validation results
+
+- `pnpm exec tsc --noEmit`: clean.
+- `pnpm test`: 178/178 test files passed (includes 11 new regression
+  tests: healthy independent-Production, valid/missing/mismatched
+  baseline marker, genuine structural mismatch still fails, genuinely
+  stale schema still fails, empty database, Production-specific labels,
+  helper-function classification, legacy-production preservation,
+  independent-staging preservation).
+- `pnpm run build:production-independent`: succeeded; output bundle
+  re-confirmed to contain the `production-independent` constant.
+- One pre-existing test (`tests/workspace-health-semantics.test.mjs`)
+  initially regressed (asserted the specific phrase "0020 is data-only"
+  in the live-schema explanation) -- fixed by restoring that exact phrase
+  in the new explanation text, not by loosening the test.
+
+### Remaining risks
+
+Not yet exercised against a live Worker (local validation only). Legacy
+production's true schema provenance remains unverified -- this fix did
+not assume it's safe to change. The separate backup-watchdog
+`WORKFLOW_FILE` hardcoding bug remains, unfixed, exactly as instructed --
+out of scope for this round.
+
+### Recommended next action
+
+Independent code review, then a separately authorized deployment of the
+main Production Worker only (the status-worker is untouched by this fix
+and does not need redeploying) -- exact commands and a live-verification
+checklist are in the full report's "Exact Production deployment and
+rollback procedure" section.
+
+Nothing was deployed or redeployed this round. Stopping here per explicit
+instruction.
