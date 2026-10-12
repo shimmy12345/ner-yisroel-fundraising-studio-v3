@@ -33592,3 +33592,168 @@ read-only protection were all left untouched. No new scheduled task or
 automation was created -- the one existing routine was investigated
 and an edit to it was attempted and found blocked, never worked around.
 No merge to `main`. No unrelated application change was deployed.
+
+## Google OAuth / `is_agentic` Classification Audit (2026-10-12)
+
+**Scope, per explicit instruction: READ-ONLY audit only.** No OAuth
+classification, credential, scope, Google Cloud setting, or deployed
+application was changed. Nothing was written to Google Cloud Console.
+Named target project: `fundraising-os-506715` (Google's October 12,
+2026 announcement of a new `is_agentic` OAuth client classification,
+with an action deadline referenced by the owner as November 11/12,
+2026).
+
+**Method.** This was a static, codebase-and-documentation audit
+(`grep` across the whole repo for Google/OAuth/Gmail/Calendar/Drive/MCP
+usage, plus every prior AI-HANDOFF.md entry documenting Google Cloud
+project/OAuth-client creation). A live check against Google Cloud
+Console's Credentials page for `fundraising-os-506715` was attempted
+but deliberately **not completed**: navigating there triggered a
+Google re-authentication prompt asking for `sgoldstein@nirc.edu`'s
+account password. Entering a user's real account password is outside
+this session's permitted actions, so the tab was closed without typing
+anything and without proceeding past that prompt. Everything below is
+therefore derived from the repo/docs, not a live Cloud Console read --
+flagged explicitly wherever that matters.
+
+### 1. Google OAuth clients used by Fundraising OS
+
+Two distinct Google Cloud OAuth 2.0 clients exist, confirmed from this
+repo's own prior work (see the "Daily Fundraising Agenda Email" setup
+and "Google Workspace identity provider" rounds above) -- **no others
+were found anywhere in the codebase**:
+
+| # | Client | Google Cloud project | Scope(s) | Purpose |
+|---|---|---|---|---|
+| 1 | Gmail send client (name not recorded; secrets named `GMAIL_OAUTH_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`) | The original **"Fundraising OS"** project, created by the owner, with `gmail.googleapis.com` enabled -- project ID was never recorded in this repo's docs; **likely `fundraising-os-506715`, the project the owner named this round, but that match was not live-verified** (see Method above) | `https://www.googleapis.com/auth/gmail.send` only (send-only, no inbox read) | Sends the Daily Fundraising Agenda email from a Cloudflare Worker cron |
+| 2 | "Cloudflare Access - Fundraising OS Staging" (Web application type) | **`fundraising-os-access-login`**, Project Number `228231265578` -- a deliberately separate project under the `nirc.edu` org, confirmed distinct from the Gmail project at creation time | `openid`, `email`, `profile` only | Google Workspace SSO identity provider for human login to Cloudflare Access (both Staging and, per the login rollout's own stated design, Production) |
+
+Client secrets for both were entered directly into Cloudflare (Worker
+secrets for #1, the Cloudflare Access identity-provider form for #2)
+and are not stored in this repo; this audit did not read, log, or
+otherwise expose either secret.
+
+### 2. Google APIs called
+
+- **Gmail**: yes -- `gmail.googleapis.com` (`users.messages.send` via
+  client #1), plus `oauth2.googleapis.com/token` for refresh-token
+  exchange. Implemented in `lib/agenda/gmail-client.ts` as plain
+  `fetch()` calls -- no `googleapis` npm package or any Google client
+  library is in `package.json`.
+- **Calendar**: no. `grep -ri "calendar.google"` across the entire repo
+  returns zero matches. No Calendar API usage exists.
+- **Drive**: no. `grep -ri "drive.google"` across the entire repo
+  returns zero matches. No Drive API usage exists.
+- Client #2 only ever reaches Google's standard OIDC/login endpoints
+  (`openid`/`email`/`profile`) via Cloudflare Access's own SSO flow --
+  it does not call any Google data API.
+
+### 3. Google Workspace MCP servers vs. REST APIs
+
+No Google Workspace MCP server is used by the Fundraising OS
+application itself. `grep -ri "mcp"` combined with any Google term
+returns zero matches in the repo. The Gmail integration (client #1) is
+a conventional, hand-written REST/OAuth2 refresh-token flow directly
+against `gmail.googleapis.com`, not an MCP server of any kind.
+
+(Separately, *this Claude Code session* has access to MCP-based Gmail/
+Calendar/Drive tools listed in its own tool configuration --
+`mcp__claude_ai_Gmail__*`, `mcp__claude_ai_Google_Calendar__*`,
+`mcp__claude_ai_Google_Drive__*`. Those are Claude.ai platform
+integrations available to this chat session, entirely separate from
+Fundraising OS's own code and its own Google Cloud OAuth clients --
+not used anywhere in the application, not implicated by this audit,
+and not touched by it.)
+
+### 4. Is any OAuth client directly used by an AI agent?
+
+**No.** Both clients are used by conventional, deterministic
+application code with no AI agent in the call path:
+
+- **Client #1 (Gmail send)** is called from a Cloudflare Worker's
+  scheduled `cron` handler (`lib/agenda/gmail-client.ts`), on a fixed
+  daily schedule, sending one deterministic, template-built email.
+  Nothing in that call path is an AI agent -- it is a plain
+  server-to-server refresh-token exchange followed by one `fetch()` to
+  the send endpoint.
+- **Client #2 (Access login)** is used only when a human completes a
+  browser-based SSO login through Cloudflare Access -- initiated and
+  completed by a person, not an agent.
+
+The one place an AI agent (a claude.ai routine, "Morning brief") does
+interact with this system, it does **not** use either Google OAuth
+client at all -- it authenticates to Fundraising OS's own
+`/api/morning-brief` endpoint using a **Cloudflare Access Service
+Token** (a Cloudflare credential, unrelated to Google OAuth), per
+`docs/AI-HANDOFF.md`'s prior "Claude Morning Check" sections. That
+endpoint itself never calls any Google API.
+
+### 5. Does the Gmail integration require action before Nov 11/12, 2026?
+
+**Likely yes, but this could not be fully confirmed read-only without
+Cloud Console access (see Method).** Based on the publicly described
+shape of Google's `is_agentic` classification (a new OAuth-client
+attribute Google is rolling out for clients whose authorization flow
+is driven by an AI agent rather than a human in a browser), client #1
+is a strong candidate for requiring **no** change: it uses the
+`refresh_token` grant type obtained once through a human-completed,
+browser-based consent flow (documented in the "Daily Fundraising
+Agenda Email" setup above), and every subsequent token refresh is
+plain server-to-server, cron-triggered application code -- not an
+agent-initiated authorization. On that basis it should not need to be
+marked `is_agentic`.
+
+That said, this audit could not verify Google's actual current
+classification of `fundraising-os-506715`'s OAuth client(s) in Cloud
+Console (blocked at the password re-authentication step, by design --
+see Method), nor could it read Google's own announcement/deadline
+language directly from the owner's Cloud Console notifications, which
+is reportedly where Google surfaces this requirement per-project. The
+owner should log into Cloud Console themselves (IAM & Admin ->
+Security, or the OAuth consent screen / Credentials pages for
+`fundraising-os-506715`) and check for any banner or required-action
+item referencing `is_agentic` or an `is_agentic`-related deadline, since
+that is the authoritative source this session could not reach.
+
+### 6. Should a separate agentic OAuth client be created for future AI integrations?
+
+**Recommendation: yes, if and when any future integration has an AI
+agent itself complete a Google OAuth consent flow or hold Google API
+credentials directly** (as opposed to today's pattern, where only
+human-completed, pre-authorized refresh tokens or Cloudflare-native
+Service Tokens are used). Reasoning:
+
+- Today, **no existing client needs to be marked agentic** -- neither
+  Gmail send (cron-triggered, human-authorized once) nor Access login
+  (human SSO) is agent-driven by Google's apparent definition.
+- If the owner later wants an AI agent (e.g., a Claude or ChatGPT
+  integration) to call Gmail, Calendar, or Drive **directly** on their
+  behalf -- rather than through Fundraising OS's own deterministic
+  application code -- that should go through a **new, separate**
+  OAuth client created specifically for that purpose, scoped only to
+  the APIs/scopes that integration actually needs, and marked
+  `is_agentic` per Google's new classification. This matches the
+  precedent this repo already set when adding client #2: "a brand-new
+  OAuth 2.0 Client ID... entirely separate from the Gmail one... never
+  reusing the Gmail `gmail.send` credentials" (Round 3, Google
+  Workspace identity provider). Reusing client #1 for agent-initiated
+  access would both mis-classify it and widen the blast radius of the
+  `gmail.send` credential beyond its current narrow, cron-only use.
+- No such integration exists today, so no new OAuth client is needed
+  yet -- this is a forward-looking recommendation, not an action item.
+
+### Limitations of this audit (disclosed, not hidden)
+
+- No live read of Google Cloud Console (`fundraising-os-506715` or
+  `fundraising-os-access-login`) was performed -- blocked by a
+  password re-authentication prompt this session correctly declined to
+  fill. The project-ID match for client #1 (`fundraising-os-506715`)
+  is inferred from this repo's own history, not independently
+  confirmed against Cloud Console.
+- Google's `is_agentic` classification mechanics (how it's set, where
+  the deadline is surfaced, what happens if unset) are described here
+  based on the owner's own summary of Google's October 12, 2026
+  announcement plus the codebase's existing OAuth setup -- this audit
+  did not fetch Google's announcement page itself.
+- No secrets were read, displayed, or logged at any point in this
+  audit.
