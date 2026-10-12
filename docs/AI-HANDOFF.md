@@ -31851,3 +31851,74 @@ redirected to the rehearsal database at any point.
 
 No database was modified, no Worker was deployed, and no donor data
 was migrated into Production in producing this round's work.
+
+## Production cutover prepared -- READY, awaiting owner GO (2026-10-12)
+
+Under the owner's confirmation that Staging is authoritative, the
+rehearsal passed, and Production should become primary, prepared (but
+did **not execute**) the real Production cutover. Full runbook:
+`docs/PRODUCTION-DONOR-DATA-CUTOVER-RUNBOOK.md`.
+
+**Phase 1 (read-only verification), re-run live, not assumed:**
+Staging = `fundraising-os-staging-db` (`6c18396c-...`); Production =
+`fundraising-os-production-db` (`a51c6571-...`) -- unambiguous, exactly
+two databases exist. Production schema: 137/137 objects, byte-identical
+to the baseline, marker matches. Production owner account: exactly one
+`users` row (`user_sgoldstein@nirc.edu`), same deterministic id as
+Staging's. **All 50 fundraising-data tables confirmed at 0 rows** --
+no unexpected donor data, no STOP condition triggered.
+
+**Critical safety finding this round:** the rehearsal's restore script
+deliberately included a `users` row because its target was a brand-new
+empty database. Production already HAS its own real `users` row --
+inserting it again would at best no-op and at worst violate the
+primary-key uniqueness constraint. Fixed
+`scripts/migration-audit/build-rehearsal-restore-files.mjs` so
+excluding `users` is now the **default** (safe for Production); a new
+`--include-users-row` flag exists for the rehearsal-only case and must
+never be passed when targeting Production.
+
+**Phase 2:** full runbook prepared, covering all 11 required items --
+pre-cutover Production backup (verified via the already-proven
+`scripts/verify-remote-restore.mjs`), frozen Staging snapshot, fresh
+reconciliation, the Staging-pause plan (operational, since there's no
+app-level freeze mode -- an already-known, pre-existing gap), a
+no-concurrent-writer guarantee, exact commands targeting only
+`fundraising-os-production-db`, the proven oversized-row chunking
+technique, full row-level hash reconciliation (reusing the rehearsal's
+own scripts unchanged), FK/ownership/orphan checks, cent-exact financial
+reconciliation, and a rollback procedure. Rollback is low-risk here
+specifically because Production's 48 MIGRATE tables are confirmed
+empty today: rollback = delete everything the forward restore added,
+in `STAGING_RESET_TABLE_ORDER`'s already-proven child-before-parent
+order, then re-confirm empty -- restoring to an independently-verified
+starting state, not a destructive guess.
+
+**Phase 3 readiness checkpoint:** reported in this session's final chat
+response (fresh Staging counts/totals, backup readiness, risks,
+downtime estimate) rather than duplicated here, since those figures go
+stale the moment Staging is used again.
+
+**One tooling gap, honestly flagged, not worked around:** this round's
+environment lacks a working `gh` CLI and `wrangler r2 object get`
+failed with a local environment error (missing `workerd.exe`/an
+internal wrangler error) unrelated to Cloudflare account state --
+neither let this round re-confirm the automated nightly backup's
+literal latest run live. Backups were independently confirmed
+operational earlier this session
+(`docs/PRODUCTION-BACKUP-WATCHDOG-DEPLOYMENT-VERIFICATION.md`); re-verify
+the latest run's timestamp with working `gh`/R2 tooling immediately
+before Phase 4, not assumed from this round alone.
+
+### Remaining before Phase 4 may run
+
+1. Owner's separate, explicit GO -- not given by this round.
+2. Re-verify the latest automated backup run with working tooling.
+3. Confirm the Staging-pause window with the owner before starting the
+   final snapshot.
+4. Everything else needed is already prepared and script-backed in the
+   runbook.
+
+No database was modified. Production was not written to. No Worker was
+deployed. No GitHub Actions schedule or secret was changed. Phases 4
+and 5 remain unexecuted.

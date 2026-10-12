@@ -18,8 +18,10 @@ import {
   parameterizeInsertStatement,
 } from "../../lib/operations/d1-restore-order.ts";
 
-const [exportPath, outDir] = process.argv.slice(2);
-if (!exportPath || !outDir) throw new Error("Usage: node build-rehearsal-restore-files.mjs <export.sql> <outDir>");
+const args = process.argv.slice(2).filter((a) => a !== "--include-users-row");
+const includeUsersRow = process.argv.includes("--include-users-row");
+const [exportPath, outDir] = args;
+if (!exportPath || !outDir) throw new Error("Usage: node build-rehearsal-restore-files.mjs <export.sql> <outDir> [--include-users-row]");
 const resolvedOutDir = path.resolve(outDir);
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 if (resolvedOutDir === repoRoot || resolvedOutDir.startsWith(repoRoot + path.sep)) {
@@ -31,17 +33,32 @@ const sqlText = fs.readFileSync(path.resolve(exportPath), "utf8");
 const parsed = parseRestoreStatements(sqlText);
 if (parsed.unrecognized.length > 0) throw new Error(`${parsed.unrecognized.length} unrecognized statements -- refusing to guess.`);
 
-// Rehearsal-specific restore order (docs/PRODUCTION-DONOR-DATA-MIGRATION-AUDIT.md
-// Section 8.4/8.6/15.4): drop production_schema_baseline (the rehearsal
-// DB gets its own fresh marker from the baseline schema file),
-// onboarding_preferences and backup_alert_state (account-config,
-// nothing references either by FK). KEEP "users" -- every
-// ownerUserId/userId FK in the 48 MIGRATE tables points at the one
-// real deterministic id, and the users table carries no
-// credential-shaped column (db/schema.ts), so restoring its one real
-// row is safe and required for PRAGMA foreign_key_check to pass.
-const DROP_FROM_REHEARSAL = new Set(["production_schema_baseline", "onboarding_preferences", "backup_alert_state"]);
+// Restore order (docs/PRODUCTION-DONOR-DATA-MIGRATION-AUDIT.md Section
+// 8.4/8.6/15.4; docs/PRODUCTION-DONOR-DATA-CUTOVER-RUNBOOK.md Section
+// 2.6): production_schema_baseline, onboarding_preferences, and
+// backup_alert_state are ALWAYS dropped -- the target gets its own
+// fresh schema-baseline marker from the baseline schema file, and
+// nothing references either account-config table by FK.
+//
+// "users" is the one case that depends on what kind of target this
+// is, and getting it wrong is dangerous in opposite ways depending on
+// direction:
+//   - A REHEARSAL target is a brand-new, EMPTY database with no users
+//     row of its own yet -- it needs Staging's one real row inserted,
+//     or PRAGMA foreign_key_check fails on every row (every
+//     ownerUserId/userId FK points at that one deterministic id).
+//   - The REAL Production target already HAS its own real users row
+//     (same deterministic id -- migration audit Section 4.6). Inserting
+//     it again would at best no-op and at worst fail the row's own
+//     PRIMARY KEY uniqueness constraint, since it already exists.
+// Default: EXCLUDE "users" (the safe choice for the real cutover,
+// which is this script's eventual real purpose). Pass
+// --include-users-row ONLY when targeting a confirmed-empty rehearsal
+// database that has no users row yet -- never pass it when targeting
+// Production or any database that might already have one.
+const DROP_FROM_REHEARSAL = new Set(["production_schema_baseline", "onboarding_preferences", "backup_alert_state", ...(includeUsersRow ? [] : ["users"])]);
 const REHEARSAL_ORDER = D1_RESTORE_DATA_ORDER.filter((t) => !DROP_FROM_REHEARSAL.has(t));
+console.log(`users row handling: ${includeUsersRow ? "INCLUDED (rehearsal mode -- target must be a confirmed-empty database with no users row yet)" : "EXCLUDED (default/real-cutover-safe mode -- target's own existing users row, if any, is never touched)"}`);
 
 const skip = new Set(D1_RESTORE_SKIP_DATA_TABLES);
 const known = new Set([...REHEARSAL_ORDER, ...DROP_FROM_REHEARSAL]);
@@ -123,7 +140,12 @@ for (const table of D1_RESTORE_SKIP_DATA_TABLES) {
 }
 for (const table of DROP_FROM_REHEARSAL) {
   const n = (parsed.insertsByTable.get(table) ?? []).length;
-  manifest.tables.push({ table, rows: n, file: null, bytes: 0, skipped: table === "production_schema_baseline" ? "rehearsal gets its own fresh marker from the baseline schema file" : "account-config table excluded by migration plan (nothing references it by FK)" });
+  const skipReason = table === "production_schema_baseline"
+    ? "target gets its own fresh marker from the baseline schema file"
+    : table === "users"
+      ? "excluded by default (real-cutover-safe mode) -- target's own existing users row is never touched; pass --include-users-row only for a confirmed-empty rehearsal target"
+      : "account-config table excluded by migration plan (nothing references it by FK)";
+  manifest.tables.push({ table, rows: n, file: null, bytes: 0, skipped: skipReason });
 }
 
 fs.writeFileSync(path.join(resolvedOutDir, "schema.sql"), [...parsed.preamble, ...parsed.schema].join("\n") + "\n", "utf8");
