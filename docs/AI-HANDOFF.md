@@ -32290,3 +32290,139 @@ No donor data was touched. No backup destination, retention, secret,
 or database identifier was changed. The feature branch was not merged
 into `main` -- only the two authorized workflow files were updated
 there directly.
+
+## Independent Verification of Production Backup and Restore Runs (2026-10-12)
+
+Owner reported both Production workflows had been run manually and
+succeeded. This round independently re-verified that claim rather than
+trusting the green checkmarks -- using the public, unauthenticated
+GitHub REST API for run/job metadata, this session's own Cloudflare
+credentials for live D1 state, and fresh timestamp arithmetic against
+the known migration commit, all read-only.
+
+**D1 nightly backup (Production) -- run `38109341883`
+(https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38109341883)**
+- `conclusion: success`, `head_branch: main`.
+- This run's *original* dispatch (`run_attempt` 1) was created
+  2026-10-11T03:44:12Z against commit `aa101ee352...` (confirmed an
+  ancestor of current `main`: PR #15, the commit that first added
+  these two workflow files) -- that attempt failed downstream (see the
+  companion restore-verify run below) and predates the donor-data
+  migration.
+- The run that actually succeeded is **`run_attempt` 2** (a GitHub
+  "re-run jobs," same run id, same dispatch ref) -- `run_started_at`
+  **2026-10-12T03:31:34Z**, job completed **2026-10-12T03:32:06Z**.
+  This is the execution whose step list was checked below, and it is
+  the one that matters: `wrangler d1 export` always reads the *live*
+  remote database at execution time, independent of which commit
+  triggered the job, and the workflow file's job logic is byte-for-byte
+  identical between `aa101ee` and current `main` (only the `on:`
+  trigger and header comments differ -- already diff-verified in the
+  prior round). So attempt 2's export captured Production's state as
+  of 2026-10-12T03:31Z.
+- This **is after** the Production donor-data migration: the
+  migration's own commit (`a84ccec`, docs/PRODUCTION-DONOR-DATA-
+  CUTOVER-EXECUTION.md) is timestamped 2026-10-11T20:53:38-04:00 =
+  **2026-10-12T00:53:38Z** -- roughly 2.5 hours before attempt 2 ran.
+- Every step in attempt 2 reports its own `conclusion: success`
+  individually (not just the overall job status), checked via the
+  REST jobs API rather than trusting the job-level rollup alone:
+  Export -> Verify the export before trusting it -> Compress and
+  encrypt -> Compute timestamp -> Upload dated backup to R2 -> Update
+  the 'latest' pointer -> Clean up local plaintext/ciphertext ->
+  Publish backup status. The "Publish backup status" step (which has
+  `continue-on-error: true` by design, so a silent swallow was
+  specifically checked for) itself reports `success`, meaning the
+  actual status-JSON uploads succeeded rather than hitting its
+  fallback warning path.
+- **Not independently re-confirmed this round:** the literal contents
+  of `backup-latest-success.json` / the exact dated object key.
+  `wrangler r2 object get` still fails locally with the same
+  `workerd.exe` `ENOENT` documented in the prior round (re-tested
+  fresh, same error) -- a local environment limitation, not a
+  Cloudflare-side one. No raw job-log download was available either
+  (fresh unauthenticated `GET .../logs` -> `403`, consistent with every
+  earlier round's finding that this session has no GitHub Actions
+  log-download credential). Correctness of the upload step is
+  therefore established by its own reported step conclusion plus the
+  workflow's internal "Verify the export before trusting it" step
+  (which asserts the export is non-empty and starts with the expected
+  `PRAGMA defer_foreign_keys=TRUE;` line) -- not by reading the
+  uploaded object's bytes directly.
+- Target confirmed from source on current `main`:
+  `DATABASE_NAME: fundraising-os-production-db` hardcoded, matching
+  the one and only D1 database by that name (UUID
+  `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`, confirmed via a fresh
+  `wrangler d1 list`) -- the same canonical Production UUID tracked
+  all session, never swapped.
+
+**D1 monthly restore verification (Production) -- run `38200144876`
+(https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38200144876)**
+- `conclusion: success`, `run_attempt` 1 (a genuinely fresh dispatch,
+  not a re-run), `head_sha: 1b6bec744...` -- current `main`'s tip, the
+  same commit that activated the schedule triggers.
+- `run_started_at` **2026-10-12T03:32:23Z**, completed
+  **2026-10-12T03:35:49Z** -- started only 17 seconds after the backup
+  run's attempt 2 finished (03:32:06Z), meaning it validated the
+  backup that attempt had *just* produced, not a stale one.
+- Every step individually `success`: checkout -> setup-node -> install
+  AWS CLI -> determine backup identity from `latest/`'s metadata ->
+  download the backup object -> decrypt and decompress -> **restore
+  into a scratch D1 database and run every integrity check** -> clean
+  up local files -> publish restore-verification status.
+- Confirmed from source on current `main` that this workflow can only
+  ever use the Production backup, never Staging's: all credentials are
+  `_PRODUCTION`-suffixed (`R2_BACKUP_READ_*_PRODUCTION`,
+  `R2_BACKUP_BUCKET_PRODUCTION`), and the restore target is always a
+  brand-new, uniquely-named throwaway database generated by
+  `scripts/verify-remote-restore.mjs` -- never
+  `fundraising-os-production-db` or `fundraising-os-staging-db`
+  themselves.
+- Confirmed the scratch database was actually deleted afterward (not
+  just assumed from the step's green checkmark): a fresh
+  `wrangler d1 list --json` run this round shows **exactly two**
+  databases in the account --
+  `fundraising-os-production-db` (`a51c6571-...`) and
+  `fundraising-os-staging-db` (`6c18396c-...`) -- no leftover
+  `fundraising-os-restore-verify-*` database from either this run or
+  the two from the prior day.
+- That same `d1 list` output, plus a direct
+  `SELECT COUNT(*) FROM donors / giving_activities` against the live
+  Production database, together confirm neither live database was
+  modified by this workflow: Production's UUID, row counts, and file
+  size are all unchanged from their known-good values.
+
+**Automatic scheduling -- independently re-confirmed from `main`
+fresh this round (not reused from the prior round's memory):**
+fetched `origin/main` again and read both files directly from it.
+`d1-backup-nightly-production.yml`: `schedule: - cron: "15 8 * * *"` +
+`workflow_dispatch: {}`. `d1-restore-verify-monthly-production.yml`:
+`schedule: - cron: "20 9 1 * *"` + `workflow_dispatch: {}`. Both
+workflows report `"state": "active"` via a fresh
+`GET /actions/workflows/{id}` call. `main`'s tip is still `1b6bec7`
+(unchanged since the prior round -- no concurrent edits).
+
+**Data protection / integrity:** a fresh, direct read of the live
+Production database (`SELECT COUNT(*) FROM donors`, `SELECT COUNT(*)
+FROM giving_activities`) returned **254 donors, 5,463 giving
+activities** -- the exact expected post-migration counts, zero drift,
+read roughly 15 minutes after the backup run's export step completed.
+No legitimate changes to reconcile. Combined with the "Verify the
+export before trusting it" step's own internal structural check, this
+is strong (though, per the point above, not byte-level) evidence the
+backup itself captured this same dataset.
+
+**Documented limitation carried forward, not resolved this round:**
+this session still cannot read R2 object contents (`workerd.exe`
+`ENOENT`, local to this machine) or download GitHub Actions job logs
+(`403`, no write/log-scope credential). Both are pre-existing,
+previously-diagnosed constraints, not new findings. Everything above
+was corroborated through independent channels that don't depend on
+either -- the public Actions API's own per-step conclusions, live D1
+reads, and `d1 list` -- rather than resolving the underlying
+limitation.
+
+No backup or restore was performed this round. No application code,
+Worker deployment, schedule, credential, database, or backup
+configuration was changed -- this was a read-only verification pass,
+plus this documentation update.
