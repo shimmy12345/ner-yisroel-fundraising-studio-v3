@@ -75,12 +75,14 @@ function independentStagingFacts(overrides = {}) {
     // ("0022"), not EXPECTED_MIGRATION_LEVEL.
     currentMigrationLevel: "0022",
     businessRecordCounts: { donors: 0, givingActivities: 0, interactions: 0, reminders: 0 },
-    // Automated backup / restore verification only render on
-    // staging-independent -- default to a healthy, reachable status here
-    // so tests unrelated to this pipeline (e.g. deployed-commit metadata)
-    // aren't incidentally affected by it. See
-    // tests/workspace-health-semantics.test.mjs for this pipeline's own
-    // freshness/attempt-floors-status/unavailable-state coverage.
+    // Automated backup / restore verification render on both independent
+    // Staging and independent Production (not legacy staging/production) --
+    // default to a healthy, reachable status here so tests unrelated to
+    // this pipeline (e.g. deployed-commit metadata) aren't incidentally
+    // affected by it. See tests/workspace-health-semantics.test.mjs for
+    // this pipeline's own freshness/attempt-floors-status/unavailable-state
+    // coverage, and this file's own "Production Workspace Health" block
+    // below for independent Production's equivalent coverage.
     backupStatusReachable: true,
     backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", completedAt: new Date().toISOString(), backupObjectKey: "daily/fundraising-os-staging-db-example.sql.gz.gpg", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
     backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-staging-db", attemptAt: new Date().toISOString(), attemptStatus: "success", workflowRunId: "1", workflowRunUrl: "https://github.com/example/repo/actions/runs/1" },
@@ -401,4 +403,75 @@ test("independent staging behavior is fully preserved: unchanged labels, unchang
   assert.equal(readiness.status, "info");
   assert.equal(readiness.value, "Evaluated on production only");
   assert.match(readiness.explanation, /never derived from staging/);
+});
+
+// ---- Production Workspace Health: missing "Automated backup" / "Monthly
+// restore test" cards (2026-10-12) -- these two cards are built by
+// backupAndRestoreChecks() (lib/data-health/model.ts) and were historically
+// only ever spliced into the checks array for deploymentEnvironment ===
+// "staging-independent". Independent Production has carried its own,
+// separate status-worker/R2 binding since 2026-10-09/11
+// (wrangler.production.jsonc's STATUS_WORKER -> fundraising-os-production-
+// backup-status) and lib/data-health/read.ts's fetchBackupStatus() was
+// already environment-agnostic, so the live backup/restore evidence was
+// being fetched correctly the whole time -- it was simply never rendered
+// as cards on Production's own Workspace Health page. This block proves
+// the fix without re-testing pipelineStatusCheck/restoreVerificationCheck's
+// own freshness/attempt-floors-status logic, which tests/workspace-health-
+// semantics.test.mjs already covers exhaustively against staging-independent
+// and is unchanged by this fix (both functions are reused verbatim). ----
+
+function productionBackupFacts(overrides = {}) {
+  return independentProductionFacts({
+    backupStatusReachable: true,
+    backupSuccess: { schemaVersion: 1, databaseName: "fundraising-os-production-db", completedAt: "2026-10-12T08:03:00.000Z", backupObjectKey: "daily/fundraising-os-production-db-20261012T080300Z.sql.gz.gpg", workflowRunId: "101", workflowRunUrl: "https://github.com/example/repo/actions/runs/101" },
+    backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-production-db", attemptAt: "2026-10-12T08:03:00.000Z", attemptStatus: "success", workflowRunId: "101", workflowRunUrl: "https://github.com/example/repo/actions/runs/101" },
+    restoreSuccess: { schemaVersion: 1, databaseName: "fundraising-os-production-db", completedAt: "2026-10-01T09:10:00.000Z", verifiedLatestObjectKey: "latest/fundraising-os-production-db.sql.gz.gpg", verifiedBackupObjectKey: "daily/fundraising-os-production-db-20261001T080300Z.sql.gz.gpg", verifiedBackupCompletedAt: "2026-10-01T08:03:00.000Z", workflowRunId: "102", workflowRunUrl: "https://github.com/example/repo/actions/runs/102" },
+    restoreAttempt: { schemaVersion: 1, databaseName: "fundraising-os-production-db", attemptAt: "2026-10-01T09:10:00.000Z", attemptStatus: "success", workflowRunId: "102", workflowRunUrl: "https://github.com/example/repo/actions/runs/102" },
+    ...overrides,
+  });
+}
+
+test("independent production: Automated backup / Monthly restore test cards now render, using only Production's own status facts", () => {
+  const report = buildDataHealthReport(productionBackupFacts(), "2026-10-12T12:00:00.000Z");
+  const backup = check(report, "automated-backup");
+  const restore = check(report, "restore-verification");
+  assert.notEqual(backup, undefined, "the Automated backup card must now render on independent Production");
+  assert.notEqual(restore, undefined, "the Monthly restore test card must now render on independent Production");
+  assert.equal(backup.label, "Automated backup");
+  assert.equal(restore.label, "Monthly restore test");
+  assert.equal(backup.status, "healthy");
+  assert.equal(restore.status, "healthy");
+  // The displayed date/time is Production's own recorded completedAt, not a
+  // fabricated or reformatted value.
+  assert.equal(backup.value, "2026-10-12T08:03:00.000Z");
+  assert.equal(restore.value, "2026-10-01T09:10:00.000Z");
+  assert.match(backup.explanation, /fundraising-os-production-db-20261012T080300Z/, "must reflect Production's own object key, never Staging's");
+  assert.doesNotMatch(JSON.stringify(report), /fundraising-os-staging-db/, "no Staging backup/restore identity may leak into a Production report");
+});
+
+test("independent production: Healthy, Overdue (attention), and Unavailable backup/restore statuses are all reachable with real data, same as independent Staging", () => {
+  const unavailable = check(buildDataHealthReport(independentProductionFacts({ backupStatusReachable: false, backupSuccess: null, backupAttempt: null, restoreSuccess: null, restoreAttempt: null }), "2026-10-12T12:00:00.000Z"), "automated-backup");
+  assert.equal(unavailable.status, "unavailable");
+  assert.equal(unavailable.value, "Unknown");
+
+  const overdueBackup = check(buildDataHealthReport(productionBackupFacts({ backupSuccess: { ...productionBackupFacts().backupSuccess, completedAt: "2026-10-08T08:03:00.000Z" }, backupAttempt: { ...productionBackupFacts().backupAttempt, attemptAt: "2026-10-08T08:03:00.000Z" } }), "2026-10-12T12:00:00.000Z"), "automated-backup");
+  assert.equal(overdueBackup.status, "critical", "a backup over 72h old (Oct 8 -> Oct 12) must be critical, proving real freshness evaluation runs on Production too");
+
+  const failedBackup = check(buildDataHealthReport(productionBackupFacts({ backupSuccess: null, backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-production-db", attemptAt: "2026-10-12T08:03:00.000Z", attemptStatus: "failure", workflowRunId: "999", workflowRunUrl: "https://github.com/example/repo/actions/runs/999" } }), "2026-10-12T12:00:00.000Z"), "automated-backup");
+  assert.equal(failedBackup.status, "critical");
+  assert.equal(failedBackup.value, "Never succeeded");
+});
+
+test("independent production: backup/restore cards are still absent from legacy production, matching every other production-independent-only check", () => {
+  const legacyReport = buildDataHealthReport(productionFacts());
+  assert.equal(check(legacyReport, "automated-backup"), undefined);
+  assert.equal(check(legacyReport, "restore-verification"), undefined);
+});
+
+test("independent production: the independent-staging-only informational cards (Environment/Baseline lineage/Business data/Account setup) still never appear on independent Production", () => {
+  const report = buildDataHealthReport(productionBackupFacts());
+  for (const id of ["independent-staging-environment", "independent-staging-baseline", "independent-staging-business-data", "independent-staging-account-setup"]) {
+    assert.equal(check(report, id), undefined, `"${id}" is Staging-specific wording and must not appear on independent Production`);
+  }
 });

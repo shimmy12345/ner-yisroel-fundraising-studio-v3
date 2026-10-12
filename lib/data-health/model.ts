@@ -540,6 +540,34 @@ function restoreVerificationCheck(facts: DataHealthFacts, now: number): HealthCh
   };
 }
 
+// The "Automated backup" / "Monthly restore test" cards, shared verbatim
+// (not reimplemented) between independent Staging and independent
+// Production -- both environments have their own dedicated status-worker
+// service binding and R2 status bucket (wrangler.staging.jsonc /
+// wrangler.production.jsonc's own, separate `STATUS_WORKER` service
+// entries, each pointed at that environment's own bucket), so `facts`
+// passed in here already reflects only the calling environment's own
+// backup/restore evidence -- this function never cross-reads the other
+// environment's status. See lib/data-health/read.ts's fetchBackupStatus(),
+// which is environment-agnostic by construction: it only ever calls
+// whatever `env.STATUS_WORKER` this deployment was bound to.
+function backupAndRestoreChecks(facts: DataHealthFacts, now: number): HealthCheck[] {
+  return [
+    pipelineStatusCheck({
+      id: "automated-backup",
+      label: "Automated backup",
+      reachable: facts.backupStatusReachable,
+      success: facts.backupSuccess ? { completedAt: facts.backupSuccess.completedAt, objectKeyLabel: "object", objectKey: facts.backupSuccess.backupObjectKey, workflowRunUrl: facts.backupSuccess.workflowRunUrl } : null,
+      attempt: facts.backupAttempt ? { attemptAt: facts.backupAttempt.attemptAt, attemptStatus: facts.backupAttempt.attemptStatus, workflowRunUrl: facts.backupAttempt.workflowRunUrl } : null,
+      healthyBelowMs: BACKUP_FRESHNESS_HEALTHY_MS,
+      criticalAboveMs: BACKUP_FRESHNESS_CRITICAL_MS,
+      now,
+      neverRunExplanation: "No automated backup run has been recorded yet. This is expected before the nightly workflow's first scheduled run.",
+    }),
+    restoreVerificationCheck(facts, now),
+  ];
+}
+
 function productionBaselineCheck(facts: DataHealthFacts): HealthCheck {
   const level = facts.productionBaselineLevel;
   if (!isProductionEnvironment(facts.deploymentEnvironment)) {
@@ -686,25 +714,13 @@ function independentStagingSummaryChecks(facts: DataHealthFacts, now: number): H
       value: facts.accountConfigurationRows === null ? "Not checked" : facts.accountConfigurationRows === 0 ? "No owner configured yet" : `${facts.accountConfigurationRows} owner${facts.accountConfigurationRows === 1 ? "" : "s"} configured`,
       explanation: "The number of app-account rows in this environment, created automatically the first time an owner authenticates. This is account/configuration state, not fundraising business data, and is never counted toward Business data above.",
     },
-    // Automated backup / restore verification are scoped to this
-    // environment specifically -- the nightly/monthly D1 pipeline backs up
-    // fundraising-os-staging-db (this environment's own database), and the
-    // status-worker service binding is only wired up here. Not shown on
-    // production or legacy staging, which have no such binding and would
-    // otherwise show a permanently confusing "unavailable" for a pipeline
-    // that was never meant to cover them.
-    pipelineStatusCheck({
-      id: "automated-backup",
-      label: "Automated backup",
-      reachable: facts.backupStatusReachable,
-      success: facts.backupSuccess ? { completedAt: facts.backupSuccess.completedAt, objectKeyLabel: "object", objectKey: facts.backupSuccess.backupObjectKey, workflowRunUrl: facts.backupSuccess.workflowRunUrl } : null,
-      attempt: facts.backupAttempt ? { attemptAt: facts.backupAttempt.attemptAt, attemptStatus: facts.backupAttempt.attemptStatus, workflowRunUrl: facts.backupAttempt.workflowRunUrl } : null,
-      healthyBelowMs: BACKUP_FRESHNESS_HEALTHY_MS,
-      criticalAboveMs: BACKUP_FRESHNESS_CRITICAL_MS,
-      now,
-      neverRunExplanation: "No automated backup run has been recorded yet. This is expected before the nightly workflow's first scheduled run.",
-    }),
-    restoreVerificationCheck(facts, now),
+    // Automated backup / restore verification: shared with independent
+    // Production via backupAndRestoreChecks() above (added once production
+    // got its own dedicated status-worker/R2 binding -- see that function's
+    // own comment). Previously duplicated inline here and gated to this
+    // environment only, which is also why it was missing from Production's
+    // Workspace Health page until this fix.
+    ...backupAndRestoreChecks(facts, now),
   ];
 }
 
@@ -743,6 +759,15 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
   ] : [];
   const checks: HealthCheck[] = [
     ...(deploymentEnvironment === "staging-independent" ? independentStagingSummaryChecks(facts, now) : []),
+    // Independent Production has its own dedicated status-worker/R2 binding
+    // (wrangler.production.jsonc's `STATUS_WORKER` service entry, pointed at
+    // fundraising-os-production-backup-status -- entirely separate from
+    // Staging's fundraising-os-backup-status), so these cards here reflect
+    // only Production's own backup/restore evidence. Legacy "production" is
+    // deliberately excluded, matching every other production-independent-only
+    // check in this file (it has no such binding and would otherwise show a
+    // permanently confusing "unavailable").
+    ...(deploymentEnvironment === "production-independent" ? backupAndRestoreChecks(facts, now) : []),
     {
       id: "database",
       label: "Database connection",

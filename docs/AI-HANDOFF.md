@@ -33757,3 +33757,161 @@ Service Tokens are used). Reasoning:
   did not fetch Google's announcement page itself.
 - No secrets were read, displayed, or logged at any point in this
   audit.
+
+## Fix: Missing "Automated backup" / "Monthly restore test" Cards on Production Workspace Health (2026-10-12)
+
+**Report.** The owner confirmed visually that Independent Staging's
+Workspace Health page shows "Automated backup" and "Monthly restore
+test" cards, but Independent Production's does not -- despite GitHub
+Actions confirming the scheduled Production D1 nightly backup ran
+successfully on October 12, 2026 (branch `main`), and a manual
+Production backup/restore verification having previously succeeded.
+
+### Root cause
+
+The two cards are built by `pipelineStatusCheck()` +
+`restoreVerificationCheck()` in `lib/data-health/model.ts`, fed by
+`DataHealthFacts.backupSuccess` / `backupAttempt` / `restoreSuccess` /
+`restoreAttempt` / `backupStatusReachable`. Two separate layers were
+involved:
+
+1. **Data layer -- already correct.** `lib/data-health/read.ts`'s
+   `fetchBackupStatus()` is environment-agnostic: it only ever calls
+   `env.STATUS_WORKER`, whatever this specific Worker deployment is
+   bound to. Independent Production has had its own, separate
+   `STATUS_WORKER` service binding since 2026-10-09/11
+   (`wrangler.production.jsonc` -> `fundraising-os-production-backup-
+   status`, a dedicated Worker reading its own, separate R2 bucket --
+   distinct from Independent Staging's `fundraising-os-backup-status`).
+   Production's live backup/restore evidence was being fetched
+   correctly this whole time.
+2. **Presentation layer -- the actual bug.** `buildDataHealthReport()`
+   only ever spliced the two cards into its `checks` array when
+   `deploymentEnvironment === "staging-independent"` (inside
+   `independentStagingSummaryChecks()`, alongside three other cards
+   that genuinely are Staging-only wording: "Environment," "Baseline
+   lineage," "Business data"). There was no equivalent branch for
+   `"production-independent"` at all -- the already-correct, already-
+   fetched Production facts were simply never rendered as cards. This
+   is a pure UI-layer gap, not a data-isolation bug: no Staging data
+   was ever shown on Production (there was no code path that could),
+   it was only ever Production's own real cards that were missing.
+
+### Fix
+
+`lib/data-health/model.ts`: extracted the two cards into a new,
+shared `backupAndRestoreChecks(facts, now)` function (calling the
+existing `pipelineStatusCheck()` / `restoreVerificationCheck()`
+helpers verbatim -- zero logic duplicated or reimplemented), then:
+- `independentStagingSummaryChecks()` now calls it instead of
+  inlining the two cards (Staging's other three cards --
+  Environment/Baseline lineage/Business data -- are untouched).
+- `buildDataHealthReport()`'s main `checks` array now also splices in
+  `backupAndRestoreChecks(facts, now)` when `deploymentEnvironment ===
+  "production-independent"`, mirroring the existing Staging branch.
+  Legacy `"production"` and legacy `"staging"` remain deliberately
+  excluded (neither has a `STATUS_WORKER` binding), matching every
+  other production-independent-only check in this file.
+
+No changes to `lib/data-health/read.ts`, `lib/backup-status/
+freshness.ts`, any backup/restore GitHub Actions workflow, `status-
+worker/`, retention, credentials, or donor data. `app/settings/
+DataHealthDashboard.tsx` (the UI component) required zero changes --
+it already renders whatever `report.checks` contains generically, by
+id.
+
+**Data isolation (requirement: Production must read only its own
+backup/restore status, never Staging's).** Verified structurally, not
+just by convention: `wrangler.production.jsonc`'s `STATUS_WORKER`
+binding points at `fundraising-os-production-backup-status`, a
+dedicated Worker with its own `STATUS_BUCKET` R2 binding
+(`fundraising-os-production-backup-status`, created 2026-10-09,
+explicitly documented as "no shared status objects between the two
+environments"). The live Production deploy below shows this binding
+is actually wired, and the live-verified page below shows the
+Production-specific backup object key
+(`daily/fundraising-os-production-db-...`), never a Staging one.
+
+### Tests
+
+`tests/production-readiness-diagnostics.test.mjs` -- added a new
+block (5 tests) under `independentProductionFacts()`:
+- Both cards render on `production-independent` with Production's own
+  facts (label, status, displayed date/time, object-key identity);
+  asserts the full serialized report never contains
+  `fundraising-os-staging-db`.
+- Healthy / critical (overdue, >72h) / critical ("Never succeeded",
+  failed attempt) / unavailable (unreachable) states all evaluate
+  correctly on Production facts, proving real freshness logic runs
+  (not a fixed/fake "Healthy" value) -- reusing the same
+  `pipelineStatusCheck`/`restoreVerificationCheck` freshness math
+  already exhaustively covered for Staging in
+  `tests/workspace-health-semantics.test.mjs` (unchanged by this fix).
+- Cards remain absent from legacy `"production"`.
+- The four Staging-only informational cards (Environment/Baseline
+  lineage/Business data/Account setup) remain absent from
+  `production-independent`.
+
+Also updated a now-stale comment in the same file's
+`independentStagingFacts()` fixture that previously said these cards
+"only render on staging-independent."
+
+**Full suite: 181/181 test files passed.** `npx tsc --noEmit`: clean,
+zero errors. `node scripts/build-production-independent.mjs`: exit 0,
+"Build complete."
+
+### Deployment
+
+Deployed via `npx wrangler@4.92.0 deploy --config
+wrangler.production.jsonc` (the existing, unchanged
+`deploy:production-independent` script) -- the smallest possible
+change: two files (`lib/data-health/model.ts` + its test), no schema,
+no cron, no secrets, no bindings, no workflow file touched. Confirmed
+bindings on deploy exactly as expected: `env.DB` ->
+`fundraising-os-production-db`, `env.STATUS_WORKER` ->
+`fundraising-os-production-backup-status`, cron trigger unchanged at
+`0 * * * *` (the existing daily email cron, untouched). First deploy
+Version ID `0ce6cc70-98f3-4c61-8517-fc485feeadcf`; a second deploy
+after committing (to make the page's own "Deployed version" card
+reflect this fix's real commit SHA rather than the prior commit) --
+see commit hash below.
+
+### Live verification (Production Workspace Health page itself, not just tests)
+
+Navigated to `https://fundraising-os-production.sgoldstein.workers.dev
+/health` in an already-authenticated browser session (existing
+Cloudflare Access cookie; no login prompt, no credentials entered) and
+clicked "Run health check" for a fresh live read:
+
+- Overall status: **Healthy**. "Health check complete. Everything is
+  healthy."
+- **Automated backup** card: present, green check, value "Oct 12,
+  2026, 1:49 PM" -- "Completed successfully
+  2026-10-12T17:49:56Z (object: daily/fundraising-os-production-db-
+  20261012T174949Z.sql.gz.gpg)." This exact object key and timestamp
+  match the owner's own report of the October 12, 2026 nightly backup
+  GitHub Actions run.
+- **Monthly restore test** card: present, green check, value "Oct 11,
+  2026, 11:35 PM" -- "Successfully restored and verified the Oct 12,
+  2026 backup. Restore testing runs monthly."
+- Every other existing Production card (Database connection, Live
+  schema version 0022/0022, Production migration history, Production
+  rehearsal baseline 0019 · Verified, Production ↔ baseline schema
+  Match, Production launch readiness Ready, Production data state,
+  Active donors 254, all seven integrity-check cards at 0, Giving-
+  total reconciliation Reconciled, Unmatched JL Codes 0, Pending
+  pledge assignments 0, Import review state, Last household/donation
+  refresh, Manual workspace export, Deployed version, Legacy test
+  orphans) is present and unchanged -- nothing was lost or altered.
+- No Staging object keys, Staging database name, or Staging wording
+  appeared anywhere on the page.
+
+### Safeguards confirmed
+
+No backup schedule, GitHub Actions workflow, retention policy,
+credential/secret, or donor/financial record was changed. The daily
+email cron (`0 * * * *`), Gmail secrets, Staging's read-only
+protection, and Cloudflare Access policies were all untouched and
+unreviewed by this round (not needed -- this was a pure read-model/UI
+fix). No merge to `main`. No unrelated application change was bundled
+into this deploy.
