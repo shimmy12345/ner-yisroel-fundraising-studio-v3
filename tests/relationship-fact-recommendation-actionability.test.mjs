@@ -252,6 +252,46 @@ async function run() {
     assert.doesNotMatch(opportunity.action, /happy birthday/, "the expired well-wish fact must never be chosen over the still-durable fact");
   }
 
+  // --- Regression: the real Sonnenblick/Mark Danziger Production report
+  // (2026-10-12). Both donors' only current fact is a bare completed-
+  // milestone-event report ("Son had a bar mitzvah." / "Grandson had a
+  // bar mitzvah."), created by scripts/relationship-facts-manual-review-
+  // resolution.mjs with lifecycle correctly stored as `time_bound` only
+  // AFTER this round's classifier fix -- exercised here with `lifecycle:
+  // "time_bound"` directly (as a fresh/corrected acceptance would now
+  // produce it) rather than re-deriving it, matching this file's own
+  // established convention of constructing fact() objects directly. At
+  // ~53 days old (the real gap between the fundraiser's completed
+  // congratulatory call, 2026-08-20, and "now" in this investigation,
+  // 2026-10-12) this must no longer be actionable -- the bug this whole
+  // investigation traced. ---
+  {
+    const sonnenblickFact = fact({ factText: "Son had a bar mitzvah.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-sonnenblick-call", sourceInteractionOccurredAt: daysAgo(53) });
+    const evidence = evidenceFor({ relationshipFacts: [sonnenblickFact], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.equal(opportunity, undefined, "a completed bar-mitzvah milestone report, ~53 days after the congratulatory call, must no longer be actionable");
+  }
+  {
+    const danzigerFact = fact({ factText: "Grandson had a bar mitzvah.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-danziger-call", sourceInteractionOccurredAt: daysAgo(53) });
+    const evidence = evidenceFor({ relationshipFacts: [danzigerFact], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.equal(opportunity, undefined, "same shape, grandson instead of son, must also no longer be actionable");
+  }
+
+  // --- Same shape, but genuinely fresh (5 days old, no completed
+  // outreach yet) -- must still generate relationship_opportunity. The
+  // fix is a shorter decay window for an already-stale report, never a
+  // blanket suppression of every "had a/an <event>." fact -- a brand-new
+  // milestone the fundraiser hasn't acted on yet is exactly the kind of
+  // genuinely new opportunity this must not suppress. ---
+  {
+    const freshFact = fact({ factText: "Son had a bar mitzvah.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-fresh-milestone", sourceInteractionOccurredAt: daysAgo(5) });
+    const evidence = evidenceFor({ relationshipFacts: [freshFact], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.ok(opportunity, "a genuinely fresh completed-milestone report must still be actionable");
+    assert.match(opportunity.action, /bar mitzvah/);
+  }
+
   console.log("relationship-fact-recommendation-actionability: ok");
 }
 

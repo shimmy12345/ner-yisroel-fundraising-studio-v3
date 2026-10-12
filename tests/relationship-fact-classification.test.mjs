@@ -8,6 +8,7 @@ import {
   resolveDecayWindowDays,
   CATEGORY_DECAY_WINDOW_DAYS,
   COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS,
+  COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS,
   DURABLE_BASELINE_SCORE,
   RELEVANCE_FLOOR,
 } from "../lib/relationships/fact-classification.ts";
@@ -146,6 +147,43 @@ async function run() {
   assert.equal(COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS, 30);
   assert.equal(resolveDecayWindowDays("family_milestone", "His daughter Danielle is getting married in November."), CATEGORY_DECAY_WINDOW_DAYS.family_milestone);
   assert.equal(resolveDecayWindowDays("solicitation", "Solicited for a plaque ($5k)"), CATEGORY_DECAY_WINDOW_DAYS.solicitation);
+
+  // --- Regression: COMPLETED_MILESTONE_EVENT_PATTERN (2026-10-12, found
+  // investigating a real Production report: the Daily Fundraising Agenda
+  // kept recommending "Reach out and reference: Son had a bar mitzvah."/
+  // "...Grandson had a bar mitzvah." for Mr. & Mrs. Yaakov Sonnenblick
+  // and Dr. & Mrs. Mark Danziger, weeks after the fundraiser's
+  // congratulatory call was already logged. Their facts were created by
+  // scripts/relationship-facts-manual-review-resolution.mjs, which
+  // deliberately isolates a standing family fact from the fundraiser's
+  // completed well-wish ACTION -- correctly, per the Danielle/"beautiful
+  // simcha" precedents just above -- but in doing so strips the "wish/
+  // mazel tov/this shabbos" wording COMPLETED_WELL_WISH_PATTERN needs,
+  // so the isolated text alone fell through to step 4's `durable`
+  // default. A bare "<relation> had a/an <event>." report must now come
+  // out time_bound, exactly like a completed well-wish ACTION. ---
+  assert.deepEqual(classifyRelationshipFact("Son had a bar mitzvah."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("Grandson had a bar mitzvah."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("Daughter had a bat mitzvah."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("His son had a bar mitzvah."), { category: "family_milestone", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("Her granddaughter had a wedding."), { category: "family_milestone", lifecycle: "time_bound" });
+  // No trailing period is still matched (the `.?` in the pattern).
+  assert.equal(classifyFactLifecycle("Son had a bar mitzvah", "family_milestone"), "time_bound");
+
+  // Must NOT touch either approved precedent this pattern was designed
+  // around: a narrative sentence with trailing color (never a bare
+  // "<relation> had a/an <event>." shape -- the `$` anchor excludes it)
+  // stays durable exactly as before, and a non-event identity fact is
+  // not matched at all.
+  assert.deepEqual(classifyRelationshipFact("His grandson had his bar mitzvah, a beautiful simcha."), { category: "family_milestone", lifecycle: "durable" }, "narrative color after the event report must stay durable, unaffected by this pattern");
+  assert.deepEqual(classifyRelationshipFact("His daughter is Danielle."), { category: "family_milestone", lifecycle: "durable" }, "a standing identity fact, not an event report, must be unaffected");
+
+  // --- resolveDecayWindowDays: a completed milestone event gets the same
+  // short window as a completed well-wish (reused from commitment_
+  // followup's 30 days), not family_milestone's normal 180-day window. ---
+  assert.equal(resolveDecayWindowDays("family_milestone", "Son had a bar mitzvah."), COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS);
+  assert.equal(COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS, 30);
+  assert.equal(resolveDecayWindowDays("family_milestone", "His grandson had his bar mitzvah, a beautiful simcha."), CATEGORY_DECAY_WINDOW_DAYS.family_milestone);
 
   // --- Regression: hasSubstantiveContentBesidesCommitment -- the real
   // Weinschneider case (Kollel donation + a follow-up instruction in one

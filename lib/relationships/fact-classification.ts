@@ -104,6 +104,50 @@ export const PERMANENT_LIFE_EVENT_PATTERN = /\bpassed away\b/i;
 // speculative broader vocabulary.
 export const COMPLETED_WELL_WISH_PATTERN = /\bwish(?:ed)?\b.{0,20}\b(?:happy birthday|mazel tov)\b/i;
 
+// A bare, isolated report of a completed, one-time family MILESTONE
+// EVENT -- "Son had a bar mitzvah.", "Grandson had a bar mitzvah." --
+// evidenced 2026-10-12 investigating a real Production report: the
+// Daily Fundraising Agenda kept recommending "Reach out and reference:
+// Son had a bar mitzvah." for Mr. & Mrs. Yaakov Sonnenblick and "...
+// Grandson had a bar mitzvah." for Dr. & Mrs. Mark Danziger, weeks
+// after the fundraiser had already placed the congratulatory call (a
+// real, completed `interactions` row logged 2026-08-20 for both, whose
+// own text -- "called to wish mazel tov on [grand]son's bar mitzvah
+// this shabbos" -- already correctly classifies `time_bound` via
+// COMPLETED_WELL_WISH_PATTERN/RELATIVE_TIME_PATTERN above, per the
+// existing regression tests). The stale suggestion traced to a
+// DIFFERENT text: scripts/relationship-facts-manual-review-resolution.mjs
+// (2026-10-08, owner-approved) deliberately isolated each donor's
+// DURABLE family fact from the fundraiser's completed well-wish ACTION
+// -- correctly, matching this module's own "His grandson had his bar
+// mitzvah, a beautiful simcha." precedent (tests/relationship-fact-
+// classification.test.mjs) and the approved "His daughter is Danielle."
+// precedent (tests/relationship-fact-recommendation-actionability.
+// test.mjs) that a standing family fact should keep being a legitimate
+// `relationship_opportunity` prompt indefinitely -- but that isolation
+// step stripped away the very "wish/mazel tov/this shabbos" wording
+// COMPLETED_WELL_WISH_PATTERN depends on, so classifying the NEW,
+// isolated text alone (exactly what that script does, by design: "via
+// the real, imported classifyRelationshipFact(), never hand-picked")
+// fell through to step 4's `durable` default.
+//
+// This is the general shape that default produces for THIS kind of
+// fact and will recur any time a one-time milestone EVENT fact is
+// isolated this way: a bare "<relation> had a/an <event>[.]" sentence,
+// with no additional descriptive/rapport color after it. Deliberately
+// anchored start-to-end (`^...$`) so it matches ONLY that bare shape --
+// never a narrative sentence that happens to contain the same words
+// amid other context, which is exactly what keeps this from touching
+// the approved "His grandson had his bar mitzvah, a beautiful simcha."
+// precedent (the trailing ", a beautiful simcha" clause fails the `$`
+// anchor) or the approved "His daughter is Danielle." precedent (not
+// an event-report sentence at all -- no `had` + event-noun shape).
+// Narrowly scoped to the exact evidenced event nouns, matching this
+// module's own established convention (COMPLETED_WELL_WISH_PATTERN,
+// the "Shabbos" RELATIVE_TIME_PATTERN entry) of a narrow, evidence-
+// gated pattern over a speculative broader one.
+export const COMPLETED_MILESTONE_EVENT_PATTERN = /^(?:his |her |their )?(?:son|daughter|grandson|granddaughter|child|grandchild|nephew|niece)(?:'s)?\s+had\s+(?:a|an|his|her|their)\s+(?:bar mitzvah|bat mitzvah|wedding|engagement|baby|bris|upsherin|graduation)\.?$/i;
+
 // Category: WHAT the fact is about -- checked in a fixed priority order
 // against the WHOLE input text (a single specificFacts sentence at
 // accept time in Phase 2+, or, for Phase 1's backfill, a donor's entire
@@ -147,7 +191,13 @@ export function classifyFactCategory(text: string): FactCategory {
 //    moment), OR matches COMPLETED_WELL_WISH_PATTERN (a completed
 //    well-wish outreach ACTION, e.g. "sent text to wish happy birthday"
 //    -- the touch itself is a point-in-time event, not a standing fact
-//    about the donor, so it must decay like any other dated occurrence).
+//    about the donor, so it must decay like any other dated occurrence),
+//    OR matches COMPLETED_MILESTONE_EVENT_PATTERN (a bare "<relation>
+//    had a/an <event>." report of a completed, one-time family
+//    milestone -- the event itself is a point-in-time occurrence, same
+//    reasoning as the well-wish case just above, and distinct from an
+//    evergreen standing fact like "His daughter is Danielle.", which
+//    this pattern does not match and which correctly stays durable).
 // 4. Otherwise, the default depends on CATEGORY, not a single global
 //    fallback: the two singular-state categories (`solicitation`,
 //    `health`) default to `time_bound` -- an ask-in-progress or a health
@@ -168,7 +218,7 @@ export function classifyFactCategory(text: string): FactCategory {
 export function classifyFactLifecycle(text: string, category: FactCategory): FactLifecycle {
   if (PERMANENT_LIFE_EVENT_PATTERN.test(text)) return "durable";
   if (COMMITMENT_PATTERN.test(text)) return "follow_up";
-  if (RELATIVE_TIME_PATTERN.test(text) || TRANSIENT_HEALTH_STATE_PATTERN.test(text) || RELATIONSHIP_CHANGE_PATTERN.test(text) || COMPLETED_WELL_WISH_PATTERN.test(text)) return "time_bound";
+  if (RELATIVE_TIME_PATTERN.test(text) || TRANSIENT_HEALTH_STATE_PATTERN.test(text) || RELATIONSHIP_CHANGE_PATTERN.test(text) || COMPLETED_WELL_WISH_PATTERN.test(text) || COMPLETED_MILESTONE_EVENT_PATTERN.test(text)) return "time_bound";
   return isSingularStateCategory(category) ? "time_bound" : "durable";
 }
 
@@ -252,15 +302,26 @@ export const CATEGORY_DECAY_WINDOW_DAYS: Record<FactCategory, number> = {
 // rather than inventing a new number.
 export const COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS = CATEGORY_DECAY_WINDOW_DAYS.commitment_followup;
 
+// A completed one-time MILESTONE EVENT report (e.g. "Son had a bar
+// mitzvah.") decays on the same fast window as a completed well-wish
+// ACTION (same reasoning: a completed, point-in-time occurrence whose
+// value as a future "reach out and reference" hook fades fast, unlike
+// family_milestone's full 180-day window, which is calibrated for
+// genuinely standing-relevance milestones still worth raising as a
+// topic -- see COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS's own comment).
+export const COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS = CATEGORY_DECAY_WINDOW_DAYS.commitment_followup;
+
 // The decay window scoreFact() must actually use for a `time_bound` fact:
-// COMPLETED_WELL_WISH_PATTERN's narrower window takes priority over the
-// fact's own category's window when the text matches (checked by text,
-// not category, so a family_milestone fact's WHAT-classification stays
-// unchanged -- only the HOW-LONG window differs for this one evidenced
-// text shape). Every other time_bound fact is unaffected: falls straight
-// through to its existing category window, byte-for-byte as before.
+// COMPLETED_WELL_WISH_PATTERN's and COMPLETED_MILESTONE_EVENT_PATTERN's
+// narrower windows take priority over the fact's own category's window
+// when the text matches (checked by text, not category, so a
+// family_milestone fact's WHAT-classification stays unchanged -- only
+// the HOW-LONG window differs for these two evidenced text shapes).
+// Every other time_bound fact is unaffected: falls straight through to
+// its existing category window, byte-for-byte as before.
 export function resolveDecayWindowDays(category: FactCategory, factText: string): number {
   if (COMPLETED_WELL_WISH_PATTERN.test(factText)) return COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS;
+  if (COMPLETED_MILESTONE_EVENT_PATTERN.test(factText)) return COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS;
   return CATEGORY_DECAY_WINDOW_DAYS[category];
 }
 

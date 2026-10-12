@@ -32721,3 +32721,226 @@ Both checks together confirm: the banner renders correctly against the
 real deployed hostname, and unauthorized writes are rejected at two
 independent layers (Access, then the app's own guard) -- not merely
 "configured" but actually exercised live.
+
+## Investigate Recurring "Reach out and reference: ...bar mitzvah" Agenda Suggestions (2026-10-12)
+
+The owner reported the Production Daily Fundraising Agenda kept
+recommending "Reach out and reference: Son had a bar mitzvah." for Mr.
+& Mrs. Yaakov Sonnenblick and "...Grandson had a bar mitzvah." for Dr.
+& Mrs. Mark Danziger, even though the congratulatory outreach for both
+had already been completed. Investigated read-only against Production
+D1 first; a code fix + regression tests were then written and
+committed (not deployed -- see Status below).
+
+### Verified facts, read live from Production D1
+
+**Donor IDs:** Sonnenblick `072ec28e-e73e-4981-a91d-5157aedad72d`, Mark
+Danziger `bb929584-0ba8-4741-84b6-746427724bc4`. A third donor from the
+same source script, Dr. & Mrs. Joel Danziger
+(`e34dc801-ab11-468e-b1bf-b6af52653262`), has the identical shape and
+is equally exposed, though not mentioned in the owner's report.
+
+**Structured relationship facts** (`donor_relationship_facts`, one row
+each, `status: current`):
+
+| Donor | Fact id | fact_text | category | lifecycle (before fix) | source_interaction_id | source_interaction_occurred_at |
+|---|---|---|---|---|---|---|
+| Sonnenblick | `ce73ef48-a1b7-4a7a-999a-37d303130588` | "Son had a bar mitzvah." | family_milestone | durable | NULL | 1791467912 (2026-10-08) |
+| Mark Danziger | `a991ecc1-1ec3-4ef4-8f91-358db7ac2b3c` | "Grandson had a bar mitzvah." | family_milestone | durable | NULL | 1791467912 (2026-10-08) |
+| Joel Danziger | `7d9a9104-e809-49ef-9030-7166a44066f9` | "Son had a bar mitzvah." | family_milestone | durable | NULL | 1791467912 (2026-10-08) |
+
+`source_interaction_occurred_at` on all three is the date
+`scripts/relationship-facts-manual-review-resolution.mjs` ran (its
+"this run's own timestamp" clamp), not the date of any real event.
+
+**Completed interactions** (`interactions`, real, already-logged rows
+-- the outreach itself):
+
+| Donor | Interaction id | type | summary | occurred_at |
+|---|---|---|---|---|
+| Sonnenblick | `7704afa6-a26e-4543-a6f6-a1e1b9191ca7` | call | "called to wish mazel tov on son's bar mitzvah this shabbos" | 1787254560 (2026-08-20) |
+| Mark Danziger | `1c69f90a-59b4-431a-bbf4-eabee0bd6d36` | call | "called to wish mazel tov on grandson's bar mitzvah this shabbos" | 1787255040 (2026-08-20) |
+| Joel Danziger | `0156aa91-95a2-42fe-8f08-3eb18edc985d` | visit | "Dropped off bottle of schnaps for son's bar mitzvah" | 1787272080 (2026-08-20) |
+
+As of this investigation (2026-10-12), the completed outreach is ~53
+days old. `relationship_queue_dismissals` and `recommendations` have
+**zero rows** for all three donors -- the fundraiser never had reason
+to manually dismiss or action this, since nothing flagged it as
+resolved automatically.
+
+### Root cause (traced through `lib/workspace/live-data.ts` →
+`lib/relationships/recommendation-evidence.ts` →
+`lib/relationships/fact-synthesis.ts` →
+`lib/relationships/recommendation-candidates.ts` →
+`lib/agenda/agenda-model.ts`)
+
+This is **not** a bug in the live, ongoing Capture/Outcome/Monday-
+import fact-acceptance pipeline, and **not** a bug in the Daily
+Agenda's own assembly logic (`agenda-model.ts` only consumes whatever
+`generateCandidates()` returns -- it has no independent dedup/decay of
+its own). It is a narrow gap in one specific, already-identified code
+path:
+
+1. `classifyRelationshipFact()`'s existing `COMPLETED_WELL_WISH_PATTERN`
+   (added 2026-10-08, citing these exact two donors by name in its own
+   comment) already correctly classifies the ORIGINAL interaction text
+   ("called to wish mazel tov on son's bar mitzvah this shabbos") as
+   `time_bound` -- proven by the existing, still-passing regression
+   test at `tests/relationship-fact-classification.test.mjs:114-115`.
+2. But `scripts/relationship-facts-manual-review-resolution.mjs`
+   (2026-10-08, owner-approved) deliberately does **not** use that
+   text. Its "RESOLVE" action isolates each donor's standing family
+   fact from the fundraiser's completed well-wish ACTION -- correctly,
+   by design, matching this module's own approved precedent ("His
+   grandson had his bar mitzvah, a beautiful simcha." stays `durable`;
+   "His daughter is Danielle." stays `durable`) that a standing family
+   fact should remain a legitimate talking point indefinitely. It then
+   classifies that NEW, hand-authored, isolated text ("Son had a bar
+   mitzvah.") via the real `classifyRelationshipFact()` -- correctly
+   per the script's own stated intent ("never hand-picked") -- but the
+   isolated text no longer contains the "wish/mazel tov/this shabbos"
+   wording `COMPLETED_WELL_WISH_PATTERN` depends on, so classification
+   fell through to `classifyFactLifecycle()`'s step-4 default:
+   `durable`.
+3. `scoreFact()` (`lib/relationships/fact-synthesis.ts`) gives every
+   `durable` fact a fixed `DURABLE_BASELINE_SCORE` (0.3) that **never
+   decays with age** -- always above `RELEVANCE_FLOOR` (0.1).
+   `findMostActionableFact()` therefore always returns this fact (each
+   donor's only current fact), and
+   `relationshipOpportunityCandidate()` (`recommendation-candidates.ts`)
+   turns it into "Reach out and reference: ..." every single day,
+   forever, with zero completion-awareness and zero memory of
+   yesterday's agenda.
+
+**Classification: missing completion-awareness, specifically in one
+one-off maintenance script's call to the classifier -- not stale
+classification in general, not missing interaction linkage as the
+primary cause (though `source_interaction_id`/`_occurred_at` are also
+wrong, see below), and not a general lifecycle-handling defect.** The
+`durable` lifecycle tier working exactly as designed (non-decaying) is
+correct for an evergreen identity fact; it was the wrong lifecycle for
+a fact describing a completed, one-time milestone EVENT, and nothing
+in the pipeline currently distinguishes those two shapes of
+`family_milestone` fact.
+
+### Fix implemented (committed to this branch; NOT deployed)
+
+Added `COMPLETED_MILESTONE_EVENT_PATTERN` to
+`lib/relationships/fact-classification.ts`: a narrowly-scoped,
+evidence-gated pattern (matching this module's own established
+convention, e.g. `COMPLETED_WELL_WISH_PATTERN`) that recognizes a
+**bare** "`<relation> had a/an <event>.`" report (bar/bat mitzvah,
+wedding, engagement, baby, bris, upsherin, graduation) -- anchored
+start-to-end so it matches only that exact shape, never a narrative
+sentence with trailing color. Wired into `classifyFactLifecycle()`'s
+step 3 (alongside `COMPLETED_WELL_WISH_PATTERN`) and into
+`resolveDecayWindowDays()`, reusing the same fast 30-day window
+(`COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS`, reused from
+`commitment_followup`'s existing window, same reasoning as
+`COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS`).
+
+Verified this does **not** regress either approved precedent:
+`classifyRelationshipFact("His grandson had his bar mitzvah, a
+beautiful simcha.")` still returns `durable` (trailing color fails the
+new pattern's `$` anchor); `classifyRelationshipFact("His daughter is
+Danielle.")` still returns `durable` (not an event-report shape at
+all) -- both asserted directly in the new regression tests.
+
+**Regression tests added:**
+- `tests/relationship-fact-classification.test.mjs`: the exact
+  Sonnenblick/Danziger fact text, both with and without a trailing
+  period, classifies `time_bound`; both approved precedents
+  (bar-mitzvah-with-color, Danielle) remain `durable`; the new 30-day
+  decay window is exercised directly.
+- `tests/relationship-fact-recommendation-actionability.test.mjs`:
+  reproduces both donors' exact real shape (one lone `family_milestone`
+  fact, `time_bound`, ~53 days old) through the real
+  `buildRecommendationEvidence`/`generateCandidates` pipeline and
+  asserts `relationship_opportunity` no longer fires for either -- the
+  actual reported symptom, fixed end to end, not just at the
+  classifier. A parallel case at 5 days old asserts the candidate
+  *still* fires, proving the fix doesn't suppress a genuinely fresh,
+  not-yet-acted-on milestone.
+
+**Test/type-check evidence:** `pnpm test` → 180/180 passed (including
+all new cases). `tsc --noEmit` → clean.
+
+**Files changed (committed, this branch only):**
+`lib/relationships/fact-classification.ts`,
+`tests/relationship-fact-classification.test.mjs`,
+`tests/relationship-fact-recommendation-actionability.test.mjs`. No
+`wrangler.*.jsonc` file touched, no deploy performed, no D1 write of
+any kind performed against Staging or Production.
+
+### Expected impact once deployed
+
+Any **future** fact accepted through the live Capture/Outcome/Monday-
+import flow, or through any future one-off maintenance script, that
+ends up as a bare "`<relation> had a/an <event>.`" report will
+correctly decay out of actionability ~30 days after its recorded
+source date, while remaining permanently visible in
+`donor_relationship_facts`/the donor-page history view (nothing is
+ever deleted). A genuinely fresh milestone (no completed outreach yet)
+still surfaces normally for about the first 2-3 weeks. This does
+**not**, by itself, retroactively fix Sonnenblick, Mark Danziger, or
+Joel Danziger's already-stored `durable` rows -- classification only
+runs at insert time.
+
+### Data correction requiring owner approval (NOT performed)
+
+An existing, already-built, previously-used maintenance script,
+`scripts/relationship-facts-lifecycle-reclassify.mjs`, is the
+established tool for exactly this kind of retroactive correction: it
+finds every `status='current'` row whose stored `lifecycle` disagrees
+with what the current (fixed) `classifyFactLifecycle()` would now
+produce, and updates only `lifecycle` + `updated_at` -- never
+`fact_text`, `category`, `status`, `source_interaction_id/_occurred_at`,
+or `fingerprint`. It currently targets `fundraising-os-staging-db`
+only (its `DB_NAME`/`CONFIG` constants would need pointing at
+Production, or a Production-scoped run approved separately).
+
+Running it (once this round's code fix is approved and deployed) would
+correctly flip all three rows above from `lifecycle: durable` to
+`lifecycle: time_bound`. **That alone is not sufficient to stop
+today's recurrence immediately**: each row's
+`source_interaction_occurred_at` is still the 2026-10-08 backfill-run
+timestamp (~4 days old today), not the real 2026-08-20 completed-
+outreach date (~53 days old) -- with the 30-day window, the
+reclassified fact would keep being actionable for roughly 26 more days
+before naturally decaying, rather than stopping immediately.
+
+To stop immediately, in addition to the lifecycle reclassification
+above, the owner would need to separately approve a targeted UPDATE
+correcting `source_interaction_id`/`source_interaction_occurred_at` on
+these exact three rows to point at their real completed interactions
+(the script above deliberately never touches these fields, by design,
+so this is a distinct, smaller, hand-reviewed statement):
+
+```sql
+UPDATE donor_relationship_facts SET source_interaction_id = '7704afa6-a26e-4543-a6f6-a1e1b9191ca7', source_interaction_occurred_at = 1787254560, updated_at = <now>
+  WHERE id = 'ce73ef48-a1b7-4a7a-999a-37d303130588' AND status = 'current';
+UPDATE donor_relationship_facts SET source_interaction_id = '1c69f90a-59b4-431a-bbf4-eabee0bd6d36', source_interaction_occurred_at = 1787255040, updated_at = <now>
+  WHERE id = 'a991ecc1-1ec3-4ef4-8f91-358db7ac2b3c' AND status = 'current';
+UPDATE donor_relationship_facts SET source_interaction_id = '0156aa91-95a2-42fe-8f08-3eb18edc985d', source_interaction_occurred_at = 1787272080, updated_at = <now>
+  WHERE id = '7d9a9104-e809-49ef-9030-7166a44066f9' AND status = 'current';
+```
+
+None of this was executed. No `donor_relationship_facts` row, no
+`donors` row, and no other Production or Staging table was written to
+during this investigation -- every query above was read-only, matching
+the task's explicit instruction.
+
+### Summary
+
+- **Root cause:** confirmed -- a one-off maintenance script correctly
+  isolated a durable family fact from a completed well-wish action,
+  but classified the isolated text alone, losing the completion
+  signal; the `durable` lifecycle's non-decaying score then made the
+  resulting fact permanently "actionable."
+- **Fix:** implemented, tested, committed to this branch. Not
+  deployed.
+- **Data correction:** proposed above (lifecycle reclassify + targeted
+  source-date correction for 3 named rows); requires explicit owner
+  approval before any D1 write.
+- **No Production or Staging data was modified. No deploy was
+  performed. No scheduled email behavior was changed.**
