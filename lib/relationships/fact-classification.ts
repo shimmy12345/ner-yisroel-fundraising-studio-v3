@@ -325,6 +325,58 @@ export function resolveDecayWindowDays(category: FactCategory, factText: string)
   return CATEGORY_DECAY_WINDOW_DAYS[category];
 }
 
+// Completion-awareness (2026-10-12) -- the 30-day decay window above
+// (COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS/COMPLETED_MILESTONE_EVENT_
+// DECAY_WINDOW_DAYS) fixes a fact that is simply OLD, but the real
+// Sonnenblick/Mark Danziger/Joel Danziger complaint was sharper than
+// age: the fundraiser had ALREADY completed the implied outreach (a
+// real, logged `interactions` row -- a call or visit explicitly
+// reporting "called to wish mazel tov on ... bar mitzvah" / "Dropped
+// off bottle of schnaps for son's bar mitzvah"), and the suggestion
+// should stop the moment that's true, not 30 days later. This answers
+// that directly, using only data that already exists (the fact's own
+// `source_interaction_id` link, and that interaction's own `type`/
+// `summary`) -- no new column, no migration, no donor-wide search.
+//
+// Deliberately narrow and two-ply, per this investigation's own
+// "prefer explicit linkage/defensible evidence over broad text
+// similarity or donor-level suppression" requirement:
+//   1. The FACT's own text must already independently read as a
+//      completed, point-in-time touch/event (COMPLETED_WELL_WISH_
+//      PATTERN or COMPLETED_MILESTONE_EVENT_PATTERN -- the exact same
+//      two patterns that already drive the 30-day window above, never
+//      a third, broader fact-text signal). A forward-looking fact like
+//      "Daughter is getting married in November" matches neither, so
+//      it is structurally never eligible for this check at all,
+//      regardless of what any interaction says -- this is what keeps
+//      an unrelated or even a topically-matching-but-not-yet-acted-on
+//      interaction from ever suppressing a genuinely still-needed
+//      outreach fact.
+//   2. ONLY the fact's own EXPLICITLY linked `source_interaction_id`
+//      is consulted -- never a broader scan of the donor's other
+//      interactions. That interaction must be a real donor-facing
+//      contact (OUTREACH_CONTACT_INTERACTION_TYPES below -- excludes
+//      'note'/'personal', which are internal record types, not an
+//      actual touch), and its own `summary` must independently match
+//      MILESTONE_OUTREACH_COMPLETION_PATTERN (an action verb --
+//      called/visited/dropped off/texted/emailed/wished -- followed
+//      within a short span by a milestone-event noun). A reminder
+//      being dismissed is never consulted here at all (reminders and
+//      this fact-completion check are two entirely separate
+//      mechanisms); an interaction that merely MENTIONS a milestone in
+//      passing, with no action verb, does not match and does not
+//      suppress anything.
+const OUTREACH_CONTACT_INTERACTION_TYPES: ReadonlySet<string> = new Set(["call", "email", "meeting", "visit", "text"]);
+
+export const MILESTONE_OUTREACH_COMPLETION_PATTERN = /\b(?:call(?:ed)?|visited|stopped by|dropped off|sent (?:a |an )?(?:text|email|card|gift)|texted|emailed|wished)\b[\s\S]{0,60}\b(?:bar mitzvah|bat mitzvah|wedding|engagement|baby|bris|upsherin|graduation)\b/i;
+
+export function isConfirmedOutreachCompletion(factText: string, sourceInteractionType: string | null, sourceInteractionSummary: string | null): boolean {
+  if (!(COMPLETED_WELL_WISH_PATTERN.test(factText) || COMPLETED_MILESTONE_EVENT_PATTERN.test(factText))) return false;
+  if (sourceInteractionType === null || !OUTREACH_CONTACT_INTERACTION_TYPES.has(sourceInteractionType)) return false;
+  if (sourceInteractionSummary === null) return false;
+  return MILESTONE_OUTREACH_COMPLETION_PATTERN.test(sourceInteractionSummary);
+}
+
 // Fixed, non-time-decaying relevance score for `durable` facts -- a
 // constant, reasoned not derived, matching this codebase's own
 // established "not a claim worth making" convention for recencyScore's

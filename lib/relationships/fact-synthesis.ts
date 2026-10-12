@@ -1,4 +1,4 @@
-import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
+import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, isConfirmedOutreachCompletion, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
 
 // Relationship Intelligence Phase 2 -- deterministic synthesis, exactly
 // as approved in docs/AI-HANDOFF.md's "Relationship Snapshot Synthesis
@@ -16,6 +16,16 @@ export type SynthesisFact = {
   status: "current" | "superseded" | "archived_with_source";
   sourceInteractionId: string | null;
   sourceInteractionOccurredAt: number; // epoch seconds
+  // Completion-awareness (2026-10-12) -- see fact-classification.ts's
+  // isConfirmedOutreachCompletion() for the full contract: the real
+  // `type`/`summary` of the interaction `sourceInteractionId` points
+  // at, when the caller has them available. Optional and defaults to
+  // "no evidence" (via scoreFact()'s `?? null`) so every existing
+  // caller that doesn't supply these -- e.g. fact-accept.ts's
+  // archival-resynthesis path -- keeps compiling and behaving exactly
+  // as before, falling back to ordinary decay-based scoring unchanged.
+  sourceInteractionType?: string | null;
+  sourceInteractionSummary?: string | null;
 };
 
 // Same exact linear decay shape as lib/relationships/recommendation-
@@ -47,6 +57,21 @@ function scoreFact(fact: SynthesisFact, now: number, pinnedFresh: PinnedFreshSou
   // fact.lifecycle === "time_bound" (follow_up is filtered out by the
   // caller before this function ever sees it -- see
   // synthesizeRelationshipSnapshot below).
+  //
+  // Completion-awareness (2026-10-12, see fact-classification.ts's
+  // isConfirmedOutreachCompletion()): checked BEFORE the normal decay
+  // formula, not as a replacement for it -- a fact with no confirmed
+  // completion evidence (the common case: `sourceInteractionType`/
+  // `sourceInteractionSummary` absent, or present but not confirming)
+  // falls straight through to the exact same decay math as before,
+  // byte-for-byte. Returning 0 here (rather than a new threshold) reuses
+  // every existing downstream mechanic unchanged: RELEVANCE_FLOOR still
+  // gates actionability the same way a fully-decayed fact already does,
+  // and synthesizeRelationshipSnapshot's "never blank" fallback still
+  // applies if this is the donor's only current fact -- the fact stays
+  // permanently visible in donor_relationship_facts and (as a last
+  // resort) in the Snapshot, it just stops being "actionable."
+  if (fact.lifecycle === "time_bound" && isConfirmedOutreachCompletion(fact.factText, fact.sourceInteractionType ?? null, fact.sourceInteractionSummary ?? null)) return 0;
   if (fact.category === "solicitation" && fact.sourceInteractionId !== null && pinnedFresh.has(fact.sourceInteractionId)) return 1;
   const daysAgo = Math.max(0, (now - fact.sourceInteractionOccurredAt) / 86400);
   return recencyScore(daysAgo, resolveDecayWindowDays(fact.category, fact.factText));

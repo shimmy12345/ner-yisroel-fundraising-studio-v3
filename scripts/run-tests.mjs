@@ -181,6 +181,7 @@ const TEST_FILES = [
   "tests/agenda-render.test.mjs",
   "tests/agenda-safety.test.mjs",
   "tests/relationship-fact-recommendation-actionability.test.mjs",
+  "tests/relationship-fact-completion-awareness.test.mjs",
   "tests/relationship-snapshot-stage3.test.mjs",
   "tests/portfolio-focus-materiality.test.mjs",
   "tests/portfolio-focus-components.test.mjs",

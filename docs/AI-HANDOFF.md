@@ -32944,3 +32944,253 @@ the task's explicit instruction.
   approval before any D1 write.
 - **No Production or Staging data was modified. No deploy was
   performed. No scheduled email behavior was changed.**
+
+## Complete Outreach Recommendation Fix and Production Corrections (2026-10-12)
+
+The owner authorized completing the fix (immediate completion-awareness,
+not just the 30-day decay), correcting the three named Production
+facts, and deploying to Production.
+
+### 1. Completion-awareness implementation
+
+The 30-day decay fix alone was insufficient -- it stops a completed
+milestone fact from being suggested forever, but still waits up to 30
+days. Added genuine completion-awareness, using only existing data
+structures (no schema migration):
+
+- **`lib/relationships/fact-classification.ts`**: new
+  `isConfirmedOutreachCompletion(factText, sourceInteractionType,
+  sourceInteractionSummary)`. Requires BOTH (1) the fact's own text
+  already independently reads as a completed, point-in-time touch/event
+  (`COMPLETED_WELL_WISH_PATTERN` or `COMPLETED_MILESTONE_EVENT_PATTERN`
+  -- the same two patterns already driving the 30-day window, never a
+  third, broader signal -- so a forward-looking fact like "Daughter is
+  getting married in November" is structurally never eligible), AND (2)
+  the fact's own explicitly-linked `source_interaction_id` interaction
+  is a real contact type (call/email/meeting/visit/text -- not
+  'note'/'personal') whose own summary independently matches the new
+  `MILESTONE_OUTREACH_COMPLETION_PATTERN` (an action verb --
+  called/visited/dropped off/texted/emailed/wished -- within 60
+  characters of a milestone-event noun). Deliberately scoped to the
+  fact's OWN linked interaction only -- never a donor-wide scan of other
+  interactions (satisfies "prefer explicit linkage... over broad text
+  similarity or donor-level suppression"). Reminders/dismissals are
+  never consulted (satisfies "do not infer completion from a dismissed
+  reminder").
+- **`lib/relationships/fact-synthesis.ts`**: `SynthesisFact` gained two
+  OPTIONAL fields, `sourceInteractionType`/`sourceInteractionSummary`
+  (undefined = "no evidence", so every existing caller that doesn't
+  supply them -- e.g. the archival-resynthesis path in fact-accept.ts --
+  keeps compiling and behaving byte-for-byte as before). `scoreFact()`
+  now returns `0` immediately when a `time_bound` fact's completion is
+  confirmed, checked BEFORE the normal decay formula -- reuses every
+  existing downstream mechanic unchanged (`RELEVANCE_FLOOR` gating,
+  `synthesizeRelationshipSnapshot`'s "never blank" fallback), so a
+  suppressed fact behaves exactly like any other fully-decayed fact:
+  no longer actionable, still permanently retrievable.
+- **`lib/workspace/live-data.ts`**: the existing batched
+  `donor_relationship_facts` query gained a `LEFT JOIN interactions`
+  (one query, no N+1) to pull the linked interaction's `type`/`summary`
+  alongside every fact row, threaded straight into the `SynthesisFact`
+  objects passed to `buildRecommendationEvidence`. `LEFT`, not `INNER`:
+  every fact with no linked interaction (the common case) returns
+  exactly as before, with the two new fields simply `null`.
+
+No new DB column, no migration, no new table.
+
+### 2. Preserved the existing lifecycle fix
+
+Re-verified: `classifyRelationshipFact("His grandson had his bar
+mitzvah, a beautiful simcha.")` and `classifyRelationshipFact("His
+daughter is Danielle.")` both still return `durable`, unaffected.
+`tests/relationship-fact-classification.test.mjs` and
+`tests/relationship-fact-recommendation-actionability.test.mjs` (the
+prior round's files) pass unmodified alongside the new work -- no
+existing assertion was weakened or removed to make the new code pass.
+
+### 3. Production record corrections -- precondition verification
+
+All six records (3 facts, 3 interactions) were read fresh from
+Production D1 immediately before writing (not reused from the prior
+investigation round):
+
+| Donor | Fact id | Pre-state verified | Interaction id | donor_id matches | Text confirms completed outreach |
+|---|---|---|---|---|---|
+| Sonnenblick | `ce73ef48-...` | lifecycle=durable, source_interaction_id=NULL, fact_text="Son had a bar mitzvah.", status=current | `7704afa6-...` | `072ec28e-...` = `072ec28e-...` ✓ | "called to wish mazel tov on son's bar mitzvah this shabbos" ✓ |
+| Mark Danziger | `a991ecc1-...` | lifecycle=durable, source_interaction_id=NULL, fact_text="Grandson had a bar mitzvah.", status=current | `1c69f90a-...` | `bb929584-...` = `bb929584-...` ✓ | "called to wish mazel tov on grandson's bar mitzvah this shabbos" ✓ |
+| Joel Danziger | `7d9a9104-...` | lifecycle=durable, source_interaction_id=NULL, fact_text="Son had a bar mitzvah.", status=current | `0156aa91-...` | `e34dc801-...` = `e34dc801-...` ✓ | "Dropped off bottle of schnaps for son's bar mitzvah" ✓ |
+
+All three interaction timestamps (1787254560, 1787255040, 1787272080)
+confirmed as 2026-08-20 in America/New_York local time (Joel Danziger's
+`0156aa91` is `2026-08-21T00:28:00Z` in UTC, which is `2026-08-20
+20:28` Eastern -- a UTC-day-boundary artifact, not a discrepancy).
+Donor display names independently re-confirmed (Yaakov Sonnenblick,
+Mark Danziger, Joel Danziger) against each donor_id.
+
+### Corrections applied
+
+Three individually CAS-guarded `UPDATE` statements (`WHERE id = ? AND
+status = 'current' AND lifecycle = 'durable' AND source_interaction_id
+IS NULL AND fact_text = ?`), each checked for `changes = 1` before
+proceeding to the next -- none failed, so all three were applied:
+
+| Donor | Field | Before | After |
+|---|---|---|---|
+| Sonnenblick | lifecycle | durable | time_bound |
+| | source_interaction_id | NULL | `7704afa6-a26e-4543-a6f6-a1e1b9191ca7` |
+| | source_interaction_occurred_at | 1791467912 | 1787254560 |
+| Mark Danziger | lifecycle | durable | time_bound |
+| | source_interaction_id | NULL | `1c69f90a-59b4-431a-bbf4-eabee0bd6d36` |
+| | source_interaction_occurred_at | 1791467912 | 1787255040 |
+| Joel Danziger | lifecycle | durable | time_bound |
+| | source_interaction_id | NULL | `0156aa91-95a2-42fe-8f08-3eb18edc985d` |
+| | source_interaction_occurred_at | 1791467912 | 1787272080 |
+
+`fact_text`, `category`, `status`, `donor_id`, `user_id`, `fingerprint`,
+`created_at` untouched on all three. No audit row was written to
+`donor_relationship_fact_changes` -- matching the established
+precedent of `scripts/relationship-facts-lifecycle-reclassify.mjs`'s
+own apply mode (a lifecycle-only correction updates `lifecycle` +
+`updated_at` and nothing else, no separate audit insert). Re-read fresh
+after the writes: all three confirmed in the intended post-state.
+Confirmed exactly 3 `donor_relationship_facts` rows carry this run's
+`updated_at` value -- no bulk or unintended change. No other table was
+written to.
+
+### 4. Regression tests
+
+New file `tests/relationship-fact-completion-awareness.test.mjs`
+(registered in `scripts/run-tests.mjs`), exercising the real
+`buildRecommendationEvidence`/`generateCandidates`/
+`buildDonorRecommendation`/`buildAgenda` pipeline, never a
+reimplementation:
+
+1. Sonnenblick's exact real fact/interaction shape -- suppressed.
+2. Mark Danziger's exact real fact/interaction shape -- suppressed.
+3. Joel Danziger's exact real fact/interaction shape (a `visit`, not a
+   `call`) -- suppressed.
+4. A recent milestone with no linked interaction at all -- still
+   actionable.
+5. A 2-day-old milestone WITH a confirmed completed interaction --
+   suppressed immediately (the claim the 30-day decay fix alone could
+   never satisfy).
+6. A linked interaction whose text does not actually address the
+   milestone ("Called to discuss pledge renewal") -- does not suppress.
+7. A second, genuinely new milestone fact on the same donor as a
+   suppressed one -- still surfaces, proving suppression is scoped to
+   one fact, never the donor/category.
+8. The suppressed fact's row stays `status: current`, and
+   `synthesizeRelationshipSnapshot`'s "never blank" fallback still
+   returns its text when it's the donor's only fact -- visible, not
+   actionable.
+9. An unrelated `follow_up_pledge` candidate on the same donor is
+   unaffected by a suppressed milestone fact.
+10. Both consuming surfaces: `buildDonorRecommendation` (what
+    `live-data.ts` calls to build the Today page's `WorkspacePriority`)
+    returns `null` for the suppressed-only donor and a real
+    `relationship_opportunity` for a fresh-milestone donor; that same
+    `WorkspacePriority` shape fed into the real `buildAgenda()` shows
+    the fresh donor in Suggested and nothing referencing the old bar
+    mitzvah.
+
+**Test/type-check/lint evidence:** `pnpm test` → 181/181 passed.
+`tsc --noEmit` → clean. `pnpm run lint` → 94 pre-existing errors/43
+pre-existing warnings across the repo, **zero** in any file this round
+touched (`lib/relationships/fact-classification.ts`,
+`lib/relationships/fact-synthesis.ts`, `lib/workspace/live-data.ts`,
+`scripts/run-tests.mjs`, `tests/relationship-fact-completion-
+awareness.test.mjs`) -- confirmed by grepping the lint output for each
+file name.
+
+### 5. Deployment
+
+`git diff --stat` reviewed before deploying: exactly 4 files touched
+(`lib/relationships/fact-classification.ts`,
+`lib/relationships/fact-synthesis.ts`, `lib/workspace/live-data.ts`,
+`scripts/run-tests.mjs`) plus the 1 new test file -- no
+`wrangler.*.jsonc`, no cron, no secret, no Access config, no backup
+workflow file touched. Production's D1 binding/config re-confirmed
+unchanged before deploying (`fundraising-os-production-db`,
+`a51c6571-...`, cron still `0 * * * *`).
+
+Built with `pnpm run build:production-independent`, deployed with
+`pnpm run deploy:production-independent`. **Deployed to Production
+only** -- the owner's authorization this round was scoped to
+"deployment of this specific fix to Production"; Staging was not
+rebuilt or redeployed (its `wrangler.staging.jsonc` and deployed
+Worker version are untouched from the prior round).
+
+**Production deployment version: `d981c1b8-3830-43eb-9063-c9e03dfd3c05`.**
+Deploy output confirmed `schedule: 0 * * * *` still registered and
+every existing binding (`DB`, `STATUS_WORKER`, `TEAM_DOMAIN`,
+`POLICY_AUD`, `STAGING_OWNER_EMAIL`, `APP_BASE_URL`,
+`MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID`) unchanged.
+
+### 6. Live Production verification (post-deploy, post-correction)
+
+- Re-read all three corrected fact rows fresh: all confirmed linked to
+  their real completed interaction, `lifecycle: time_bound`,
+  `source_interaction_occurred_at` matching the real 2026-08-20 dates.
+- `GET https://fundraising-os-production.sgoldstein.workers.dev/api/agenda/preview`
+  (the real Daily Fundraising Agenda preview route, via the owner's own
+  authenticated Chrome session): live page text captured and searched
+  -- zero matches for "bar mitzvah" anywhere on the page.
+  **SUGGESTED** section shows Weinschneider (Kollel solicitation),
+  Zachter, and Broide's own, unrelated `relationship_opportunity`
+  suggestions, confirming unrelated recommendations are completely
+  unaffected.
+- Homepage (`/`) independently checked the same way: zero "bar
+  mitzvah" matches.
+- Sonnenblick's own donor profile page
+  (`/donors/072ec28e-e73e-4981-a91d-5157aedad72d`) visually confirmed:
+  **"SUGGESTED ACTION: No suggested action available"**, directly
+  below the still-visible relationship-snapshot text **"Son had a bar
+  mitzvah."** -- the exact "visible in history, no longer actionable"
+  behavior this fix was built for, seen live on the real page, not
+  just in a test.
+- Production donor/giving counts re-checked live: 254 donors / 5,463
+  giving activities, unchanged.
+- Staging re-checked live: unauthenticated `GET /` and `POST
+  /api/donors` both still return `302` to the Cloudflare Access login
+  page -- unchanged, still fully gated; `wrangler.staging.jsonc` has no
+  `triggers` block (confirmed via direct read) -- still correctly
+  inactive.
+- Production's cron confirmed active (`schedule: 0 * * * *` from this
+  round's own deploy output).
+- No email was sent: the preview route (`app/api/agenda/preview/route.ts`)
+  never imports or calls `sendGmail`/`sendDailyAgenda` (unchanged,
+  re-confirmed by this round's own source read); no manual send was
+  triggered.
+
+### Unresolved limitations
+
+- `MILESTONE_OUTREACH_COMPLETION_PATTERN`/`COMPLETED_MILESTONE_EVENT_
+  PATTERN` are narrowly scoped to the exact evidenced event-noun
+  vocabulary (bar/bat mitzvah, wedding, engagement, baby, bris,
+  upsherin, graduation) and action verbs, matching this codebase's own
+  established convention for this kind of pattern -- a future
+  completed-milestone fact using different phrasing would not
+  automatically benefit from either the 30-day decay or immediate
+  completion-suppression until evidenced and added, the same
+  "evidence-gated, not speculative" tradeoff already disclosed for
+  every sibling pattern in this file.
+- Completion-awareness only applies to a fact that is explicitly
+  linked (`source_interaction_id`) to its completing interaction. A
+  fact accepted with no link (the Phase 1 backfill population, or any
+  future fact a caller declines to link) can only ever benefit from
+  the 30-day decay, never immediate suppression -- by design, per this
+  round's own "do not invent evidence that isn't there" instruction.
+
+### Final report
+
+1. **Completion-awareness fix — PASS.**
+2. **Three Production record corrections — PASS.**
+3. **Production deployment — PASS** (version `d981c1b8-3830-43eb-9063-c9e03dfd3c05`).
+4. **Stale recommendations removed — VERIFIED** (live, via the real
+   agenda preview, homepage, and Sonnenblick's own donor page).
+5. **Daily email schedule — UNCHANGED** (Production `0 * * * *`
+   active, Staging inactive, neither touched this round; no email was
+   sent).
+6. **Remaining issues:** none blocking. The two disclosed limitations
+   above (narrow pattern vocabulary; linkage-dependent) are expected,
+   evidence-gated tradeoffs, not open defects.

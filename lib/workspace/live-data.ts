@@ -61,7 +61,14 @@ type JlRefreshRow = { last_donation_refresh_at: number | null };
 // Staging: Wisotsky, Goldstein, Singer, Ramras) gets every ELIGIBLE
 // plan's own reminder, genuinely pledge-specific rather than donor-wide.
 type PledgeRenewalPlanRow = { plan_id: string; donor_id: string; pledge_activity_id: string; original_pledge_date: number; commitment_duration_months: number; ended_at: number | null; renewal_acknowledged_at: number | null; committed_cents: number | null; balance_cents: number | null; source_campaign: string | null };
-type RelationshipFactRow = { donor_id: string; category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number };
+// source_interaction_type/source_interaction_summary (2026-10-12,
+// completion-awareness) -- the linked interaction's own type/summary,
+// via a LEFT JOIN, so scoreFact() can confirm whether the fact's
+// implied outreach was already completed without a second per-donor
+// query. Both null when source_interaction_id is null (no linked
+// interaction -- e.g. a Phase 1 backfilled fact) or, after the JOIN,
+// when the referenced interaction row no longer exists.
+type RelationshipFactRow = { donor_id: string; category: string; lifecycle: string; status: string; fact_text: string; source_interaction_id: string | null; source_interaction_occurred_at: number; source_interaction_type: string | null; source_interaction_summary: string | null };
 
 // score: the recommendation engine's own real 0-1 score() value for this
 // item's underlying candidate -- only present for recommendation-kind
@@ -381,8 +388,17 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // opportunity actionability; a donor with zero rows here falls back to
     // the existing legacy narrative-text behavior unchanged. No demo/
     // sample data exists for this table, matching the other demo-skipped
-    // queries above.
-    demo ? Promise.resolve({ results: [] as RelationshipFactRow[] }) : env.DB.prepare(`SELECT donor_id, category, lifecycle, status, fact_text, source_interaction_id, source_interaction_occurred_at FROM donor_relationship_facts WHERE user_id = ? AND status = 'current'`).bind(userId).all<RelationshipFactRow>(),
+    // queries above. LEFT JOIN interactions (2026-10-12, completion-
+    // awareness) -- pulls the linked interaction's own type/summary in
+    // the SAME batched query (never a second, per-fact lookup), so
+    // scoreFact() can confirm whether a fact's implied outreach was
+    // already completed. LEFT, not INNER: source_interaction_id is null
+    // for Phase 1 backfilled facts, and every existing fact/donor with
+    // no linked interaction must keep returning exactly as many rows as
+    // before, just with these two columns null.
+    demo ? Promise.resolve({ results: [] as RelationshipFactRow[] }) : env.DB.prepare(`SELECT f.donor_id, f.category, f.lifecycle, f.status, f.fact_text, f.source_interaction_id, f.source_interaction_occurred_at, i.type AS source_interaction_type, i.summary AS source_interaction_summary
+      FROM donor_relationship_facts f LEFT JOIN interactions i ON i.id = f.source_interaction_id
+      WHERE f.user_id = ? AND f.status = 'current'`).bind(userId).all<RelationshipFactRow>(),
   ]);
   const queryFanoutDurationMs = Math.round(performance.now() - __loaderStart);
   logger.info("workspace_brief_phase", {
@@ -713,7 +729,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       historicalContext: (historicalContextByDonor.get(donorId) ?? []).map((row) => ({ text: row.text, source: row.source, sourceDate: row.source_date })),
       yahrtzeits: (yahrtzeitsByDonor.get(donorId) ?? []).map((row) => ({ deceasedNameEnglish: row.deceased_name_english, deceasedNameHebrew: row.deceased_name_hebrew, relationship: row.relationship, hebrewMonth: row.hebrew_month as HebrewMonthName, hebrewDay: row.hebrew_day })),
       importantDates: (importantDatesByDonor.get(donorId) ?? []).map((row) => ({ type: row.type, personName: row.person_name, relationship: row.relationship, month: row.month, day: row.day, year: row.year })),
-      relationshipFacts: (relationshipFactsByDonor.get(donorId) ?? []).map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at })),
+      relationshipFacts: (relationshipFactsByDonor.get(donorId) ?? []).map((row) => ({ factText: row.fact_text, category: row.category as SynthesisFact["category"], lifecycle: row.lifecycle as SynthesisFact["lifecycle"], status: row.status as SynthesisFact["status"], sourceInteractionId: row.source_interaction_id, sourceInteractionOccurredAt: row.source_interaction_occurred_at, sourceInteractionType: row.source_interaction_type, sourceInteractionSummary: row.source_interaction_summary })),
       pendingAskSourceInteractionIds: pendingAskSourceInteractionIdsByDonor.get(donorId) ?? [],
     }, now, timezone);
     const milestoneDaysBefore = evidence.giving.openPledge?.activePaymentPlan?.milestoneDaysBefore ?? null;
