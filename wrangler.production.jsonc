@@ -108,27 +108,17 @@
     // security restriction is weakened by setting this var early.
     "MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID": "983ea5fccaebc48932c5e69df510f74a.access"
   },
-  // Daily Fundraising Agenda email cron -- PREPARED, NOT YET ACTIVE
-  // (2026-10-12 Production Operational Transition round,
-  // docs/AI-HANDOFF.md). Production is now the authoritative
-  // environment and this cron is the intended long-term home for the
-  // daily email, but activating it today would make it fail silently
-  // every day: `wrangler secret list --config wrangler.production.jsonc`
-  // confirms Production has ZERO secrets configured, so
-  // GMAIL_OAUTH_CLIENT_ID/_SECRET/_REFRESH_TOKEN (see cloudflare-env.d.ts)
-  // are all missing. Setting them is a `wrangler secret put` action this
-  // round's own authorization explicitly excludes without separate
-  // approval. Staging's matching cron (wrangler.staging.jsonc) stays
-  // active in the meantime so the daily email keeps arriving without a
-  // gap.
-  //
-  // To complete the transition once the owner has set Production's
-  // three Gmail secrets (either the same OAuth client/refresh token
-  // already used on Staging, or a fresh one -- the owner's choice):
-  // uncomment the `"triggers"` line below, REMOVE the matching
-  // `"triggers"` block from wrangler.staging.jsonc, and deploy BOTH in
-  // the same step -- never one without the other, or the email either
-  // stops entirely for a day or sends twice.
-  // "triggers": { "crons": ["0 * * * *"] },
+  // Daily Fundraising Agenda email cron -- ACTIVE (2026-10-12 Production
+  // Daily Email Cutover round, docs/AI-HANDOFF.md). The owner entered
+  // the three Gmail secrets directly in the Cloudflare dashboard;
+  // independently re-verified via `wrangler secret list --config
+  // wrangler.production.jsonc` before this change (all three present).
+  // This is now the sole live copy of this cron -- the matching
+  // `"triggers"` block was removed from wrangler.staging.jsonc in the
+  // same deploy step. runScheduledBackupAlertCheck (lib/backup-alert/
+  // run.ts) shares this same scheduled() invocation (worker/index.ts),
+  // so moving this cron also activates Production's backup-failure
+  // alerting -- no separate change needed for that.
+  "triggers": { "crons": ["0 * * * *"] },
   "observability": { "enabled": true }
 }

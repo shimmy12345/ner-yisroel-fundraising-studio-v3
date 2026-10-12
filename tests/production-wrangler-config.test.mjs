@@ -20,8 +20,12 @@ import { readFile } from "node:fs/promises";
 //      the mechanism with 14 cases), but proof that THIS file's
 //      specific values drive it the same way.
 //   3. Production's D1 binding is not Staging's.
-//   4. No `triggers` (cron) block exists yet -- enabling scheduled
-//      production use is a separate, later, explicitly-approved step.
+//   4. The daily-agenda `triggers` (cron) block is active -- enabling
+//      scheduled production use was the explicitly-approved 2026-10-12
+//      Production Daily Email Cutover round, once the owner had entered
+//      Production's three Gmail secrets directly in the Cloudflare
+//      dashboard (independently re-verified via `wrangler secret list`
+//      before the cutover, never read here).
 //
 // Source-text assertions on the raw .jsonc file (matching this
 // codebase's established convention for config files that aren't
@@ -75,12 +79,11 @@ test("wrangler.production.jsonc: D1 binding is Production's own database, never 
   assert.equal(databaseId, "a51c6571-ae16-4614-aa9a-08f8e6be3ecd", "must be the real fundraising-os-production-db id provisioned this round");
 });
 
-test("wrangler.production.jsonc: no scheduled trigger (cron) is configured yet -- activating Production for daily use is a separate, later, explicitly-approved step", () => {
+test("wrangler.production.jsonc: the daily-agenda scheduled trigger (cron) is active, matching Staging's own former hourly schedule exactly", () => {
   // Anchored to the start of a line (only leading whitespace allowed) so
-  // this matches a real, active "triggers" key, never the file's own
-  // comment mentioning the literal string as an example of what NOT to
-  // add yet (that line is prefixed with "// ", which this pattern excludes).
-  assert.doesNotMatch(config, /^\s*"triggers"\s*:/m, "enabling a cron trigger here would start real scheduled work the moment this Worker is deployed");
+  // this matches a real, active "triggers" key, never a commented-out
+  // line (which would be prefixed with "// ", excluded by this pattern).
+  assert.match(config, /^\s*"triggers":\s*\{\s*"crons":\s*\["0 \* \* \* \*"\]\s*\}/m, "Production's cron must be active and must match the exact hourly schedule the daily-agenda send-hour guard (lib/agenda/timezone.ts) expects -- this is the sole live copy now that Staging's matching block was removed in the same deploy");
 });
 
 test("wrangler.production.jsonc: never references any Staging R2 bucket by name", () => {

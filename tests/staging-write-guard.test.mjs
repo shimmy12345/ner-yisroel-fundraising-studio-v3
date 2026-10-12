@@ -91,12 +91,12 @@ for (const file of mutatingRouteFiles) {
 }
 
 // --- Config coverage: Production never carries the override, and the
-// two Workers' email-cron state matches the documented transition plan
-// (Staging still active, Production prepared-but-commented) at the
-// moment this test suite runs. This is deliberately a snapshot
-// assertion of a KNOWN transitional state, not a permanent invariant --
-// update it in the same change that flips the cron from Staging to
-// Production. ---
+// two Workers' email-cron state matches the post-cutover state (2026-
+// 10-12 Production Daily Email Cutover round: Production active,
+// Staging's matching block removed in the same deploy) at the moment
+// this test suite runs. This is deliberately a snapshot assertion of a
+// KNOWN state, not a permanent invariant -- update it again if the cron
+// ever moves. ---
 
 const wranglerStaging = await readFile(new URL("../wrangler.staging.jsonc", import.meta.url), "utf8");
 const wranglerProduction = await readFile(new URL("../wrangler.production.jsonc", import.meta.url), "utf8");
@@ -104,8 +104,7 @@ const wranglerProduction = await readFile(new URL("../wrangler.production.jsonc"
 assert.doesNotMatch(wranglerProduction, /"STAGING_WRITES_ENABLED"\s*:/, "Production must never carry this staging-only override var at all");
 assert.match(wranglerStaging, /\/\/\s*"STAGING_WRITES_ENABLED"\s*:\s*"true"/, "the override must exist only as a commented-out, explicit opt-in on Staging");
 
-assert.match(wranglerStaging, /"triggers":\s*\{\s*"crons":\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/, "Staging's agenda cron must stay active until Production's Gmail secrets exist");
-assert.doesNotMatch(wranglerProduction, /^\s*"triggers":\s*\{\s*"crons"/m, "Production's agenda cron must stay commented out until its Gmail secrets are confirmed set");
-assert.match(wranglerProduction, /\/\/\s*"triggers":\s*\{\s*"crons":\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/, "Production's agenda cron must be prepared as a commented-out line, ready for a one-line flip");
+assert.doesNotMatch(wranglerStaging, /^\s*"triggers":\s*\{\s*"crons"/m, "Staging's agenda cron must stay removed now that Production's own copy is active -- no duplicate daily email");
+assert.match(wranglerProduction, /^\s*"triggers":\s*\{\s*"crons":\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/m, "Production's agenda cron must be active, matching the exact schedule Staging's used to carry");
 
 console.log("staging-write-guard.test.mjs: all assertions passed");

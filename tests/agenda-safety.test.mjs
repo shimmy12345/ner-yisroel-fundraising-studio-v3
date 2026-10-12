@@ -19,6 +19,8 @@ const previewRoute = await readFile(new URL("../app/api/agenda/preview/route.ts"
 // this file's own top-of-file documentation comment legitimately names
 // "sendGmail"/"gmail-client" while explaining that neither is used.
 const previewRouteCode = previewRoute.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+const wranglerProduction = await readFile(new URL("../wrangler.production.jsonc", import.meta.url), "utf8");
+const wranglerProductionCode = wranglerProduction.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
 const wranglerStaging = await readFile(new URL("../wrangler.staging.jsonc", import.meta.url), "utf8");
 const wranglerStagingCode = wranglerStaging.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
 const workerIndex = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
@@ -65,13 +67,17 @@ async function run() {
   assert.match(previewRouteCode, /getChatGPTUser/);
   assert.match(previewRouteCode, /status: 401/);
 
-  // --- The Cron Trigger is APPROVED and ACTIVE (2026-08-26): exactly the
-  // approved hourly schedule, nothing broader (e.g. a fixed once-daily
-  // UTC cron, which would be the DST bug this whole design avoids) and
-  // nothing else registered alongside it. ---
-  assert.match(wranglerStagingCode, /"triggers"\s*:\s*\{\s*"crons"\s*:\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/, "the cron must be exactly the approved hourly schedule (\"0 * * * *\")");
-  const cronMatches = wranglerStagingCode.match(/"crons"\s*:/g) ?? [];
-  assert.equal(cronMatches.length, 1, "exactly one crons entry -- no duplicate or additional schedule");
+  // --- The Cron Trigger is APPROVED and ACTIVE on Production (moved from
+  // Staging in the 2026-10-12 Production Daily Email Cutover round):
+  // exactly the approved hourly schedule, nothing broader (e.g. a fixed
+  // once-daily UTC cron, which would be the DST bug this whole design
+  // avoids) and nothing else registered alongside it, on exactly one
+  // Worker -- never both at once (duplicate send) or neither (gap). ---
+  assert.match(wranglerProductionCode, /"triggers"\s*:\s*\{\s*"crons"\s*:\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/, "Production's cron must be exactly the approved hourly schedule (\"0 * * * *\")");
+  const productionCronMatches = wranglerProductionCode.match(/"crons"\s*:/g) ?? [];
+  assert.equal(productionCronMatches.length, 1, "exactly one crons entry on Production -- no duplicate or additional schedule");
+  const stagingCronMatches = wranglerStagingCode.match(/"crons"\s*:/g) ?? [];
+  assert.equal(stagingCronMatches.length, 0, "Staging must carry zero crons entries now -- the daily email has exactly one sender, not two");
 
   // --- The scheduled handler exists, is wired to the DST-safe guard, and
   // extends the Worker's lifetime -- the cron firing hourly must never by

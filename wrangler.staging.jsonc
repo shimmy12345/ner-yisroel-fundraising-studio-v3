@@ -67,31 +67,15 @@
     // request is blocked here while this stays absent.
     // "STAGING_WRITES_ENABLED": "true"
   },
-  // Daily Fundraising Agenda email -- APPROVED and ACTIVE (2026-08-26).
-  // Fires hourly, every calendar day including weekends; the scheduled()
-  // handler in worker/index.ts (via lib/agenda/send-agenda.ts's
-  // isDailyAgendaSendHour() guard) only actually sends on the one
-  // invocation per day where the real America/New_York wall-clock hour
-  // reads 9 -- computed fresh at execution time from Intl, never a fixed
-  // UTC offset, so this stays correct across both DST transitions without
-  // ever needing this cron string to change. The other 23 invocations
-  // every day are an intentional, silent no-op. See "Daily Fundraising
-  // Agenda Email" in docs/AI-HANDOFF.md for the full approval record.
-  //
-  // STILL ACTIVE HERE, DELIBERATELY, as of the 2026-10-12 Production
-  // Operational Transition round: Production's own copy of this cron
-  // (wrangler.production.jsonc) is prepared but NOT YET deployed,
-  // because Production has zero GMAIL_OAUTH_* secrets configured today
-  // -- enabling it there right now would just fail silently every day.
-  // Setting those three secrets is a `wrangler secret put` action this
-  // round's own authorization explicitly excludes without separate
-  // approval (see docs/PRODUCTION-OPERATIONAL-TRANSITION-VERIFICATION.md).
-  // Removing this cron before that happens would stop the daily email
-  // entirely, which the owner's instructions explicitly said to avoid.
-  // When the owner sets Production's Gmail secrets: remove this
-  // `triggers` block from THIS file and uncomment the matching block in
-  // wrangler.production.jsonc in the SAME deploy step, so there is
-  // never a day with zero sends or two.
-  "triggers": { "crons": ["0 * * * *"] },
+  // Daily Fundraising Agenda email cron -- REMOVED (2026-10-12 Production
+  // Daily Email Cutover round, docs/AI-HANDOFF.md). Was APPROVED and
+  // ACTIVE here from 2026-08-26 until this round; the owner entered
+  // Production's three Gmail secrets directly in the Cloudflare
+  // dashboard, so the sole live copy of this cron moved to
+  // wrangler.production.jsonc in this same deploy step. Staging keeps
+  // its DB binding, Gmail secrets, and Access protection untouched --
+  // only the scheduled trigger was removed, so Staging never sends the
+  // daily email again (no duplicate, no gap) while remaining otherwise
+  // identical.
   "observability": { "enabled": true }
 }

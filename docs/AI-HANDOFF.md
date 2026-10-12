@@ -32546,3 +32546,178 @@ or migrated. Production's backup workflows, schedules, and retention
 were not touched. Staging's read-only write-guard was not touched or
 disabled. No email recipient or delivery time was changed. No new
 integration was introduced. No merge to `main`.
+
+## Complete Production Daily Email Cutover (2026-10-12)
+
+The owner entered Production's three Gmail OAuth secrets directly in
+the Cloudflare dashboard. This round independently re-verified
+readiness, then executed the coordinated cron cutover that the prior
+round's "Consolidated exact owner actions" described.
+
+**Pre-change verification (all independently re-checked live, not
+assumed from docs):**
+
+- `wrangler secret list --config wrangler.production.jsonc` → all
+  three of `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`,
+  `GMAIL_OAUTH_REFRESH_TOKEN` present (names/types only -- values were
+  never retrieved, printed, logged, or committed).
+- Staging's own three Gmail secrets confirmed still present
+  (unaffected).
+- Production's D1 binding confirmed as `fundraising-os-production-db`
+  (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`) via a fresh read of
+  `wrangler.production.jsonc`.
+- Production donor data confirmed live: 254 donors / 5,463 giving
+  activities.
+- `git status` confirmed a clean working tree before any edit.
+
+**Change made:**
+
+1. `wrangler.production.jsonc`: uncommented the `"triggers"` block,
+   `{"crons": ["0 * * * *"]}` -- the exact schedule Staging used to
+   carry, unchanged.
+2. `wrangler.staging.jsonc`: removed its own `"triggers"` block
+   entirely (not commented out -- deleted), so Staging carries no
+   scheduled trigger of any kind going forward.
+3. Updated both files' surrounding comments to describe the new,
+   current state rather than the prior "prepared, not yet active"
+   state.
+4. Updated the four structural/config-snapshot tests that encoded the
+   pre-cutover state as a regression guard (`tests/
+   production-wrangler-config.test.mjs`, `tests/
+   staging-write-guard.test.mjs`, `tests/agenda-safety.test.mjs`,
+   `tests/backup-alert-safety.test.mjs`) to assert the new state:
+   Production's cron active and exactly matching the approved hourly
+   schedule, Staging's cron entirely absent, nothing else about either
+   file changed. These are deliberately snapshot assertions of a KNOWN
+   state (as their own comments say), not permanent invariants -- this
+   is the "same change that flips the cron" update their own prior
+   comments called for.
+
+**Tests and type-check**, run after the edits and again after the test
+updates: `pnpm test` → 180/180 passed (4 failed on the first run,
+exactly the four snapshot tests above, for the expected reason --
+asserting the old pre-cutover state -- then passed after being
+updated to the new state). `tsc --noEmit` → clean, no errors.
+
+**Build and deploy, in the required coordinated order** (both Workers
+share one `dist/` output directory, so build-then-deploy for one
+environment had to complete before starting the next):
+
+1. `pnpm run build:staging-independent` → succeeded.
+2. `pnpm run deploy:staging-independent` → succeeded. New Version ID
+   `7c7af405-88b3-418c-b45d-71fb889e3e6e`. Deploy output showed no
+   `schedule:` line (consistent with the cron being removed) and the
+   same D1/secrets/Access bindings as before -- nothing else changed.
+3. `pnpm run build:production-independent` → succeeded.
+4. `pnpm run deploy:production-independent` → succeeded. New Version
+   ID `f0352c0e-28a5-4077-a937-ce02290ab207`. Deploy output explicitly
+   printed `schedule: 0 * * * *`, confirming Cloudflare registered the
+   live cron. The deploy's own config diff also showed two incidental,
+   pre-existing drift fields being reconciled to match this file
+   (`services[].environment: "production"` and `observability.
+   redact_query_string: false`, both removed from the remote because
+   this file never declared them) -- neither is a var, secret, D1
+   binding, or cron, and this round introduced neither field nor
+   removed it from source; it was drift between a prior manual/default
+   remote state and this file, now reconciled to this file exactly.
+
+**Post-deploy independent verification:**
+
+- `wrangler secret list` on both Workers again → all three Gmail
+  secrets still present on both, unaffected by the deploys.
+- Production donor data re-checked live post-deploy: still 254 donors
+  / 5,463 giving activities, byte-identical `size_after` to the
+  pre-deploy read -- no write occurred.
+- `grep -c "READ ONLY\|StagingBanner" dist/server/index.js` → 2,
+  confirming the freshly-built server bundle contains the banner
+  component (see the next section -- this deploy is also what fixes
+  that separate issue).
+- Both Cloudflare Access Applications (Staging and Production)
+  confirmed still gating their respective hostnames exactly as
+  before -- no Access/Zero-Trust configuration was touched this round.
+
+**Daily email delivery: AWAITING NEXT SEND, not yet verified.** This
+deploy only activates the Cron Trigger; it does not itself send an
+email. The guard (`isDailyAgendaSendHour`, `lib/agenda/timezone.ts`)
+only actually sends during the one hourly invocation per day where
+America/New_York local time reads 9. No scheduled send has occurred
+yet as of this deploy. The next opportunity is the first 9 AM
+America/New_York hour after this deploy; delivery (and the
+backup-failure-alert check, which shares the same cron and the same
+scheduled handler) can be verified independently after that by
+re-reading the Worker's Observability logs for `daily_agenda_sent` /
+`daily_agenda_send_failed`, or by the owner confirming receipt.
+
+**Rollback procedure**, if a problem surfaces before or instead of a
+successful send: uncomment `"triggers"` back on
+`wrangler.staging.jsonc` (same `"0 * * * *"` schedule), comment it
+back out on `wrangler.production.jsonc`, revert the four test files'
+assertions to match, run `pnpm test`, then
+`pnpm run build:staging-independent && pnpm run deploy:staging-independent`
+followed by
+`pnpm run build:production-independent && pnpm run deploy:production-independent`,
+in that order. This restores exactly the pre-cutover state (Staging
+sending, Production prepared-but-inactive) without touching secrets,
+donor data, or either database.
+
+## Investigate and Fix Missing Staging "READ ONLY" Banner (2026-10-12)
+
+The owner reported the red "STAGING — READ ONLY" banner
+(`app/layout.tsx`'s `StagingBanner`) was not visible on the live
+Independent Staging site, despite the code existing in the repo.
+
+**Root cause, found by independent investigation (not assumed):**
+
+- `git log --oneline -- app/layout.tsx` shows the banner was added in
+  commit `d505c26` ("Complete Production operational transition..."),
+  timestamped `2026-10-11 21:21:08 -04:00` = `2026-10-12T01:21:08Z`.
+- `wrangler deployments list --config wrangler.staging.jsonc` showed
+  Staging's most recent deployment (before this round) was created at
+  `2026-10-12T01:15:28Z` (Version ID `a6143fd0-...`) -- about **6
+  minutes before** the banner commit existed. `git merge-base
+  --is-ancestor d505c26 HEAD` confirmed that commit is on this branch,
+  and none of the four commits between it and this round's starting
+  HEAD touched `app/layout.tsx`.
+- Conclusion: Staging had simply never been redeployed since the
+  banner code was written -- the live Worker was still serving a
+  server bundle built before `StagingBanner` existed. This was a
+  stale-deployment gap, not a code bug, a build-script bug, a
+  hostname/routing issue, or the write guard being inactive.
+
+**Fix:** the Staging redeploy required for the email cutover above
+(`pnpm run build:staging-independent && pnpm run deploy:staging-independent`,
+Version ID `7c7af405-88b3-418c-b45d-71fb889e3e6e`) rebuilt the server
+bundle from the current source tree, which includes the banner. No
+separate code change was needed or made.
+
+**Live verification performed (via the owner's own already-authenticated
+Chrome session, read-only/non-destructive):**
+
+1. Navigated to `https://fundraising-os-staging.sgoldstein.workers.dev/`
+   -- the red "STAGING — READ ONLY. All live donor updates and imports
+   must be entered in Production." banner is visible at the top of the
+   live page (screenshot captured).
+2. From that same authenticated page, executed
+   `fetch('/api/donors', { method: 'POST', body: '{}' })` in the page's
+   own JavaScript context (so it carried the real Cloudflare Access
+   session cookie, unlike an unauthenticated `curl`, and so actually
+   reached the Worker's own `shouldBlockStagingWrite` check rather than
+   being stopped earlier at the Access edge). Response:
+   `HTTP 403`, body `{"error":"Staging is read-only. All live donor
+   updates and imports must be entered in Production. ..."}`. Confirms
+   the write guard is genuinely active in the live deployment, not just
+   in unit tests -- and because `shouldBlockStagingWrite` is the very
+   first check in `worker/index.ts`'s `fetch()` (before any routing),
+   no donor record was read, validated, or written by this check.
+3. Separately, an unauthenticated `curl -X POST` to the same endpoint
+   (no Access session) returned `HTTP 302` to the Cloudflare Access
+   login page -- the request never reached the Worker at all. This is
+   the expected, stronger first line of defense (Access itself), ahead
+   of the app's own guard.
+4. No donor, giving-activity, or other record was created, edited, or
+   deleted by either check.
+
+Both checks together confirm: the banner renders correctly against the
+real deployed hostname, and unauthorized writes are rejected at two
+independent layers (Access, then the app's own guard) -- not merely
+"configured" but actually exercised live.

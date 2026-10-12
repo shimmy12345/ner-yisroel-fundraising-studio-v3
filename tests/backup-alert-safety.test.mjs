@@ -17,8 +17,8 @@ const run = await readFile(new URL("../lib/backup-alert/run.ts", import.meta.url
 const decision = await readFile(new URL("../lib/backup-alert/decision.ts", import.meta.url), "utf8");
 const email = await readFile(new URL("../lib/backup-alert/email.ts", import.meta.url), "utf8");
 const workerIndex = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
-const wranglerStaging = await readFile(new URL("../wrangler.staging.jsonc", import.meta.url), "utf8");
-const wranglerStagingCode = wranglerStaging.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+const wranglerProduction = await readFile(new URL("../wrangler.production.jsonc", import.meta.url), "utf8");
+const wranglerProductionCode = wranglerProduction.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
 
 async function run_() {
   // --- decision.ts and email.ts are pure: zero "cloudflare:workers"
@@ -84,8 +84,10 @@ async function run_() {
   // second trigger registered), wires the new check through its own
   // independent waitUntil() so a failure in one can never affect the
   // other, and still gates the Daily Agenda on its own DST-safe guard
-  // unchanged. ---
-  const cronMatches = wranglerStagingCode.match(/"crons"\s*:/g) ?? [];
+  // unchanged. Moved from Staging to Production in the 2026-10-12
+  // Production Daily Email Cutover round -- this check still shares that
+  // same single cron, now on Production. ---
+  const cronMatches = wranglerProductionCode.match(/"crons"\s*:/g) ?? [];
   assert.equal(cronMatches.length, 1, "exactly one crons entry -- Stage 3 must not add a second Cron Trigger");
   assert.match(workerIndex, /runScheduledBackupAlertCheck/, "the scheduled handler must call the new backup-alert check");
   const waitUntilCalls = workerIndex.match(/ctx\.waitUntil\(/g) ?? [];
