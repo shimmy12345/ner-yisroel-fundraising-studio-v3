@@ -33194,3 +33194,220 @@ every existing binding (`DB`, `STATUS_WORKER`, `TEAM_DOMAIN`,
 6. **Remaining issues:** none blocking. The two disclosed limitations
    above (narrow pattern vocabulary; linkage-dependent) are expected,
    evidence-gated tradeoffs, not open defects.
+
+## Complete Claude Morning Check Production Transition (2026-10-12)
+
+The owner authorized completing the morning-check transition. Per the
+task's own explicit instruction ("do not assume the morning check is
+running automatically merely because the endpoint exists"), this round
+re-investigated everything from evidence, not from prior rounds'
+conclusions, and additionally searched more broadly than any prior
+round for the external scheduler itself. **No code or config change
+was made this round** -- `/api/morning-brief` and Production's
+`MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` were already correctly
+configured by a prior round; this round's own fresh investigation
+confirms that configuration is still correct and still blocked on the
+same two owner-only items. No D1 write of any kind was performed.
+
+### Answers to the 7 investigation questions (evidence-based, not assumed)
+
+1. **What currently triggers it?** Unknown to this session. Some
+   external caller sends `GET /api/morning-brief` with Cloudflare
+   Access Service Token headers (`CF-Access-Client-Id`/
+   `CF-Access-Client-Secret` for Client ID
+   `983ea5fccaebc48932c5e69df510f74a.access`). What triggers that
+   external call -- a cron job, a calendar/reminder app, a manual
+   script run -- is not visible from this repository or this session.
+2. **Where is the scheduler hosted?** **NOT LOCATED**, despite a
+   genuinely broader search than any prior round (see below). Ruled
+   out, with direct evidence, not assumption: this repository (no
+   script, workflow, or config file references an external morning-
+   check caller beyond the endpoint's own implementation --
+   confirmed by grepping `scripts/`, `app/`, `lib/`, `.github/` for
+   "morning"); this session's own `CronList` (fresh call: "No
+   scheduled jobs" -- and `CronList`'s own tool description says
+   explicitly "in this session," so even a job on a *different*
+   session would not appear here, but there is no evidence one
+   exists either); `ListAgents` (fresh call: one unrelated peer
+   session, "Constant Contact email formatting ideas", offline, no
+   connection to this project); every GitHub Actions workflow in this
+   repo (`ls .github/workflows/`: 5 files, all D1 backup/restore,
+   none reference "morning" at all); every doc in `docs/` (grepped for
+   zapier/n8n/make.com/ifttt/cron-job.org/pipedream and any
+   webhook-morning pattern -- zero matches). This matches
+   `docs/PRODUCTION-OPERATIONAL-TRANSITION-VERIFICATION.md`'s own
+   repeated conclusion ("This repository has no visibility into where
+   that is"), now independently re-confirmed with a wider search.
+3. **What endpoint does it currently call?** Inferred, not directly
+   observed: `https://fundraising-os-staging.sgoldstein.workers.dev/api/morning-brief`
+   -- `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` has been configured on
+   `wrangler.staging.jsonc` since the feature was built, and on
+   `wrangler.production.jsonc` only since a later round. This is
+   evidence of *readiness*, not of an actual observed call --
+   see question 7.
+4. **What credentials does it use?** A Cloudflare Access Service
+   Token, Client ID `983ea5fccaebc48932c5e69df510f74a.access`. The
+   Client Secret has never been seen by this session, by design, at
+   any point in this project's history -- not retrieved, displayed,
+   logged, or rotated this round either.
+5. **What time does it run?** Unknown; not determinable from this
+   repository or session.
+6. **Where are results delivered?** Unknown; not determinable. The
+   endpoint returns plain JSON (`generatedAt`, `overview`,
+   `recommendedFocus`, `priorities[]`, `todaySchedule[]`/
+   `upcomingActivities[]`, `recentGifts[]`) -- how or where that JSON
+   is surfaced to the owner (a chat message, an email, a notification)
+   is entirely outside this repo and this session's visibility.
+7. **Does it run automatically, or does it require manual
+   invocation?** **NOT VERIFIED either way.** This session has no log
+   or Observability access that could distinguish a genuine recurring
+   automated call from a one-off manual test; no claim of automatic
+   execution is made in either direction.
+
+### 2. Production endpoint -- re-verified live and fresh
+
+- `wrangler.production.jsonc` (fresh read): `d1_databases` binds `DB`
+  to `fundraising-os-production-db` (`a51c6571-...`), never Staging's;
+  `TEAM_DOMAIN`/`POLICY_AUD` present and real;
+  `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` present, unchanged value.
+- **Live, unauthenticated** `curl -D -` against Production:
+  - `GET /` → `302` to the Cloudflare Access login page,
+    `redirect_url=/`, AUD matches `wrangler.production.jsonc`'s own
+    `POLICY_AUD` exactly.
+  - `GET /api/morning-brief` → `302` to the same Access login page,
+    `redirect_url=/api/morning-brief`, SAME AUD, plus a
+    `Www-Authenticate: Cloudflare-Access resource_metadata=".../.well-known/cloudflare-access-protected-resource/api/morning-brief"`
+    header -- direct live confirmation that (a) the route exists and
+    is known to Access specifically by path, (b) it sits behind the
+    identical Access Application as the rest of the site, and (c) an
+    unauthenticated request never reaches the route handler, so it
+    cannot retrieve any donor data.
+- **Source re-read fresh, confirmed unchanged and correct:**
+  `app/api/morning-brief/route.ts` authenticates via the shared
+  `getChatGPTUser()` (clean `401` if absent, never a data leak path)
+  and calls the same `loadWorkspaceBrief()` every other surface
+  uses -- no hardcoded database reference of any kind, so which D1 it
+  reads is determined entirely by which Worker serves the request
+  (Production's `env.DB` is `fundraising-os-production-db`,
+  structurally, not by any app-level choice).
+  `lib/auth/cloudflare-access.ts`'s `verifyAccessToken()`: verifies the
+  JWT's real signature against the team's JWKS plus issuer/audience,
+  and for a service-token JWT (no `email` claim) requires BOTH
+  `allowedServiceTokenClientId` AND `ownerEmail` configured AND an
+  exact `common_name` match before resolving any identity --
+  unchanged, still correctly strict.
+  `app/auth/cloudflare-access-provider.ts` wires
+  `env.MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID`/`env.STAGING_OWNER_EMAIL`
+  straight through, generically, for whichever Worker is running --
+  confirmed this round by direct re-read, not reused from a prior
+  summary. **No authentication was weakened; nothing was changed.**
+- **Not independently verifiable from this session:** an actual
+  Service-Token-authenticated request succeeding end-to-end. This
+  session has never possessed the token's Client Secret (by design)
+  and has no credential-store tool applicable to an API header, so it
+  cannot construct that request without exposing a value this task
+  explicitly forbids exposing. This is the same, unchanged limitation
+  every prior round reported, re-confirmed rather than newly
+  discovered.
+
+### 3. Cloudflare Zero Trust configuration -- STOPPED, owner action required
+
+Re-checked fresh (not assumed from any prior round):
+- `wrangler whoami`'s own live scope list: `account (read), user (read),
+  workers (write), workers_kv (write), workers_routes (write),
+  workers_scripts (write), workers_tail (read), d1 (write), pages
+  (write), zone (read), ssl_certs (write), ai (write), ai-search
+  (write/run), queues (write), pipelines (write), secrets_store
+  (write), artifacts (write), flagship (write), containers (write),
+  cloudchamber (write), connectivity (admin), email_routing (write),
+  email_sending (write), browser (write), offline_access`. **No
+  Access/Zero-Trust scope of any kind.**
+- `wrangler --help`: no `access` or `zero-trust` subcommand exists in
+  wrangler 4.92.0.
+
+**Per the task's own instruction, stopping this part here.** Exact
+dashboard instructions for the owner:
+
+1. Sign in to the Cloudflare Zero Trust dashboard for this account.
+2. Find the Access Application protecting
+   `fundraising-os-production.sgoldstein.workers.dev` -- it is in team
+   domain `fundraising-os.cloudflareaccess.com`, Application Audience
+   (AUD) tag `7cfff2279260cb67e19af8c129b2ba6cdd137ba855ddb638ff316493f8ef14e1`
+   (this exact value is visible in the live `302` redirect's own JWT
+   `meta` claim above, so it uniquely identifies the right Application
+   without guessing).
+3. Add a Service Auth policy to that Application authorizing Service
+   Token Client ID `983ea5fccaebc48932c5e69df510f74a.access` (the
+   existing token already used on Staging -- do not create a new one).
+4. Confirm the Application's path/policy scope covers `/api/morning-
+   brief` specifically (it protects the whole hostname today, per the
+   live redirect behavior above, so this is likely already covered,
+   but only the dashboard can confirm it).
+5. Leave every existing human-login policy on this Application
+   untouched -- only add the Service Auth policy alongside it.
+
+### 4. External scheduler -- NOT LOCATED, cannot be updated
+
+See question 2 above for the full search performed. Because the
+scheduler cannot be located, its endpoint cannot be updated from this
+session. **Exact owner action required:** wherever the owner (or
+whoever set this up on their behalf) originally configured "Claude's
+morning check" to call Staging's URL with this Service Token, change
+only the hostname:
+
+```
+FROM: https://fundraising-os-staging.sgoldstein.workers.dev/api/morning-brief
+TO:   https://fundraising-os-production.sgoldstein.workers.dev/api/morning-brief
+```
+
+keeping the exact same `CF-Access-Client-Id`/`CF-Access-Client-Secret`
+header values, the exact same schedule/timezone, and the exact same
+notification destination it already uses. No second scheduler or
+notification should be created alongside it -- this is a one-line edit
+to the existing one, wherever it lives.
+
+### 5. Current working configuration (reference point; nothing changed)
+
+| Item | Current state |
+|---|---|
+| Staging `/api/morning-brief` | Live, Access-protected, service-token auth configured and (presumably) already working today, unchanged |
+| Production `/api/morning-brief` | Live, Access-protected, service-token auth code-and-var configured since a prior round, still blocked on the Zero Trust policy grant above |
+| External scheduler | Unknown location; presumed still pointed at Staging (never confirmed, never changed) |
+
+**Rollback:** not applicable -- no code, config, or data was changed
+this round. If the owner later grants the Zero Trust policy and
+repoints the scheduler and something goes wrong, reverting is simply
+repointing the scheduler back to Staging's URL (Staging's own
+configuration was never touched and remains fully functional as a
+fallback).
+
+### Verification performed this round
+
+- Production `/api/morning-brief` existence, Access protection, and
+  D1-binding correctness -- all confirmed live and fresh (see above).
+- Unauthorized requests blocked -- confirmed live (`302`, never
+  reaches the handler).
+- Zero Trust Service Auth grant -- **not configured** (no API/CLI path
+  exists to check this definitively from the dashboard side, but the
+  live `302` behavior is consistent with "not yet granted," matching
+  every prior round).
+- External scheduler pointed at Production -- **NO**, cannot be,
+  location unknown.
+- Duplicate scheduler -- none created by this session.
+- Original notification destination -- unchanged (nothing touched).
+- Next scheduled execution -- **unknown**, cannot be determined.
+
+**Explicitly not claimed:** that the morning check runs automatically,
+on any schedule, from either Staging or Production, today. Only
+configuration state is reported above. A successful manual request
+against the endpoint (which this session could not even perform,
+lacking the Service Token's secret) would in any case be a different
+claim from a verified automatic scheduled execution, per the task's
+own instruction to distinguish the two.
+
+No donor or financial record was modified. The Production daily email
+cron, Gmail credentials/recipients, Production backups, Staging's
+read-only protection, and the morning-check schedule were all left
+untouched. No secret was exposed. No new automation was created. No
+merge to `main`. No unrelated application change was deployed --
+nothing in this repository changed this round.
