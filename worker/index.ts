@@ -4,10 +4,18 @@ import handler from "vinext/server/app-router-entry";
 import { runWithWorkspaceBriefRequestScope } from "../lib/workspace/live-data";
 import { runScheduledAgendaSend } from "../lib/agenda/send-agenda";
 import { runScheduledBackupAlertCheck } from "../lib/backup-alert/run";
+import { deploymentEnvironment } from "../lib/environment";
+import { shouldBlockStagingWrite, STAGING_READ_ONLY_MESSAGE, stagingReadOnlyResponseInit } from "../lib/operations/staging-write-guard";
 
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  // Independent Staging's read-only write guard escape hatch -- see
+  // lib/operations/staging-write-guard.ts. Absent/not "true" (the
+  // default, and the only value on Production regardless) means every
+  // mutating /api/** request on the independent staging deployment is
+  // blocked.
+  STAGING_WRITES_ENABLED?: string;
   // Not bound on the independent staging Worker (Cloudflare Images is not
   // required to run the app). When absent, image requests are served
   // unoptimized rather than transformed.
@@ -42,6 +50,16 @@ interface ScheduledController {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // Independent Staging read-only enforcement (Production Operational
+    // Transition, docs/AI-HANDOFF.md) -- checked before any routing, so
+    // no API route (existing or future) can bypass it. Never matches on
+    // Production: shouldBlockStagingWrite only returns true when
+    // deploymentEnvironment === "staging-independent", a value Production
+    // never resolves to. See lib/operations/staging-write-guard.ts.
+    if (shouldBlockStagingWrite(deploymentEnvironment, request.method, url.pathname, env.STAGING_WRITES_ENABLED)) {
+      return Response.json({ error: STAGING_READ_ONLY_MESSAGE }, stagingReadOnlyResponseInit());
+    }
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

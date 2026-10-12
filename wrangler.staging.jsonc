@@ -57,6 +57,15 @@
     // origin from. See cloudflare-env.d.ts for why this lives here rather
     // than as a hardcoded string in application source.
     "APP_BASE_URL": "https://fundraising-os-staging.sgoldstein.workers.dev"
+    // Independent Staging read-only write guard (lib/operations/
+    // staging-write-guard.ts, Production Operational Transition round,
+    // docs/AI-HANDOFF.md) -- OFF by default (this line stays commented
+    // out). Uncomment to "STAGING_WRITES_ENABLED": "true" and redeploy
+    // ONLY for a deliberate, time-boxed testing window where a real
+    // write through the app is genuinely needed; comment it back out
+    // and redeploy immediately afterward. Every mutating /api/**
+    // request is blocked here while this stays absent.
+    // "STAGING_WRITES_ENABLED": "true"
   },
   // Daily Fundraising Agenda email -- APPROVED and ACTIVE (2026-08-26).
   // Fires hourly, every calendar day including weekends; the scheduled()
@@ -68,6 +77,21 @@
   // ever needing this cron string to change. The other 23 invocations
   // every day are an intentional, silent no-op. See "Daily Fundraising
   // Agenda Email" in docs/AI-HANDOFF.md for the full approval record.
+  //
+  // STILL ACTIVE HERE, DELIBERATELY, as of the 2026-10-12 Production
+  // Operational Transition round: Production's own copy of this cron
+  // (wrangler.production.jsonc) is prepared but NOT YET deployed,
+  // because Production has zero GMAIL_OAUTH_* secrets configured today
+  // -- enabling it there right now would just fail silently every day.
+  // Setting those three secrets is a `wrangler secret put` action this
+  // round's own authorization explicitly excludes without separate
+  // approval (see docs/PRODUCTION-OPERATIONAL-TRANSITION-VERIFICATION.md).
+  // Removing this cron before that happens would stop the daily email
+  // entirely, which the owner's instructions explicitly said to avoid.
+  // When the owner sets Production's Gmail secrets: remove this
+  // `triggers` block from THIS file and uncomment the matching block in
+  // wrangler.production.jsonc in the SAME deploy step, so there is
+  // never a day with zero sends or two.
   "triggers": { "crons": ["0 * * * *"] },
   "observability": { "enabled": true }
 }

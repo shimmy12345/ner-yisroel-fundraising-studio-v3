@@ -58,6 +58,13 @@ declare module "cloudflare:workers" {
     // is ever remapped to a custom domain. Absent on legacy ChatGPT Sites
     // staging/production and local dev.
     APP_BASE_URL?: string;
+    // Independent Staging's write-guard escape hatch (lib/operations/
+    // staging-write-guard.ts) -- "true" temporarily re-enables donor/
+    // fundraising-data writes on the independent staging deployment for
+    // an explicitly authorized testing window; absent/anything else
+    // (the default, and Production's only state regardless) keeps
+    // every mutating /api/** request blocked there.
+    STAGING_WRITES_ENABLED?: string;
     // Gmail API send-only OAuth credentials for the Daily Fundraising
     // Agenda email (see docs/AI-HANDOFF.md's "Daily Fundraising Agenda
     // Email" section). All three are Cloudflare Worker *secrets*

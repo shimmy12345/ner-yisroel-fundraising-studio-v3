@@ -32000,3 +32000,92 @@ figures were captured.
 No unrelated Production change was made. Staging was never modified.
 No Worker was deployed or redirected. No GitHub Actions schedule or
 secret was changed.
+
+## Production Operational Transition (2026-10-12)
+
+Full detail: `docs/PRODUCTION-OPERATIONAL-TRANSITION-VERIFICATION.md`.
+Production is now confirmed the authoritative environment for donor/
+fundraising data; Staging is now read-only by default, server-side,
+deployed and tested. Two important automations (daily email, Claude's
+morning check) and automated backup scheduling are NOT yet fully
+transitioned -- each blocked on a specific, named action outside this
+round's authorization, reported precisely rather than silently assumed
+or worked around.
+
+**Staging read-only (deployed, live):** new
+`lib/operations/staging-write-guard.ts`, wired into `worker/index.ts`'s
+`fetch()` as the first check on every request -- blocks every POST/
+PUT/PATCH/DELETE under `/api/**` on the independent staging deployment
+unless `STAGING_WRITES_ENABLED="true"` is explicitly set in
+`wrangler.staging.jsonc` and redeployed. A blanket method-based block,
+not a per-route list, because this repo has 50+ mutating API routes --
+a new regression test walks the whole `app/` tree and asserts every
+one of them lives under `app/api/`, the invariant the blanket check
+depends on. Persistent "STAGING -- READ ONLY" banner added to
+`app/layout.tsx`. Cannot affect Production: the guard only ever
+matches `deploymentEnvironment === "staging-independent"`. Deliberately
+does NOT block `lib/backup-alert/run.ts`'s own `backup_alert_state`
+write (operational monitoring, not donor data). `pnpm test`: 180/180
+passed (179 existing + 1 new file). `tsc --noEmit` clean, `eslint`
+clean on changed files. Both Workers rebuilt and redeployed:
+`fundraising-os-staging` (a6143fd0-...), `fundraising-os-production`
+(7f7c4326-...). Post-deploy: Production's 254 donors/5,463 giving
+activities/owner account confirmed unchanged.
+
+**Daily Fundraising Agenda email -- PREPARED, blocked on a secret
+change outside this round's scope:** the email is already fully
+environment-scoped by its own existing code (reads only via `env.DB`
+and `env.STAGING_OWNER_EMAIL`) -- no code change was needed to make it
+read Production data once Production's cron fires. But
+`wrangler secret list --config wrangler.production.jsonc` returns `[]`
+-- Production has none of the three `GMAIL_OAUTH_*` secrets Staging
+has. Enabling Production's cron today would just fail silently every
+day. Setting those secrets is explicitly out of this round's
+authorization. Staging's cron stays ACTIVE (so the daily email keeps
+arriving without a gap); Production's cron is prepared as a
+commented-out line in `wrangler.production.jsonc` with the exact two-
+file flip documented for whenever the owner sets those secrets.
+
+**Claude's morning check -- EXTERNAL, cannot be modified from this
+session:** `GET /api/morning-brief`, authenticated via a Cloudflare
+Access Service Token. Confirmed currently pointed at Staging
+(`MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` is set in
+`wrangler.staging.jsonc`, absent from `wrangler.production.jsonc`).
+This session's own CronList tool has no jobs and is session-only by
+design, confirming the real morning-check script/scheduler lives
+entirely outside this repository and outside this session's visible
+tools -- exactly matching the original Morning Brief API entry's own
+"remaining work... outside this repo" note. Reported the exact three
+owner-only steps needed (Zero Trust Service Token for Production,
+confirm Access path scope, repoint the external script) rather than
+claiming any of them done.
+
+**Production backups -- THE MOST IMPORTANT FINDING THIS ROUND: not yet
+automatically protected.** Checked live via the GitHub Actions REST
+API (no `gh` CLI in this session; unauthenticated public read access
+was available and used instead): both
+`d1-backup-nightly-production.yml` and
+`d1-restore-verify-monthly-production.yml` are `workflow_dispatch`-
+only -- NO `schedule:` trigger exists in either file, by explicit,
+already-documented design ("must never fire automatically until the
+Production database has real data worth protecting AND... launch
+readiness has been separately confirmed"). That moment has now
+arrived, but the schedule was never added. The latest Production
+backup (2026-10-11T03:44:12Z) predates this round's migration
+(2026-10-12T00:38-00:41Z) -- it does NOT contain the migrated donor
+data. This round did not add the schedule (a backup-schedule change,
+out of scope) and could not manually trigger a fresh run either (no
+GitHub write credentials in this session). **Recommended the owner
+manually run both workflows via the GitHub Actions UI today**, and
+separately decide when to approve adding the schedule.
+
+**Future imports:** traced the JL/Monday/DOB/yahrtzeit/rebbeim import
+pipeline -- none of it references a database by name; every import
+writes through whichever deployment receives the request. The Staging
+write-guard above is what actually prevents a future import from
+silently writing to Staging, not a separate code change. No real
+import was executed as a test.
+
+No donor data was lost, modified, or recreated. No secret, backup
+schedule, retention policy, or external integration was changed. No
+merge to main.

@@ -89,10 +89,27 @@
     // if Cloudflare assigns anything different.
     "APP_BASE_URL": "https://fundraising-os-production.sgoldstein.workers.dev"
   },
-  // Daily Fundraising Agenda email cron DELIBERATELY NOT included here.
-  // Enabling it is a separate "activate Production for daily use"
-  // decision this round's authorization explicitly excludes -- add
-  // `"triggers": { "crons": ["0 * * * *"] }` (matching wrangler.staging.jsonc
-  // exactly) only as part of that later, separately-approved step.
+  // Daily Fundraising Agenda email cron -- PREPARED, NOT YET ACTIVE
+  // (2026-10-12 Production Operational Transition round,
+  // docs/AI-HANDOFF.md). Production is now the authoritative
+  // environment and this cron is the intended long-term home for the
+  // daily email, but activating it today would make it fail silently
+  // every day: `wrangler secret list --config wrangler.production.jsonc`
+  // confirms Production has ZERO secrets configured, so
+  // GMAIL_OAUTH_CLIENT_ID/_SECRET/_REFRESH_TOKEN (see cloudflare-env.d.ts)
+  // are all missing. Setting them is a `wrangler secret put` action this
+  // round's own authorization explicitly excludes without separate
+  // approval. Staging's matching cron (wrangler.staging.jsonc) stays
+  // active in the meantime so the daily email keeps arriving without a
+  // gap.
+  //
+  // To complete the transition once the owner has set Production's
+  // three Gmail secrets (either the same OAuth client/refresh token
+  // already used on Staging, or a fresh one -- the owner's choice):
+  // uncomment the `"triggers"` line below, REMOVE the matching
+  // `"triggers"` block from wrangler.staging.jsonc, and deploy BOTH in
+  // the same step -- never one without the other, or the email either
+  // stops entirely for a day or sends twice.
+  // "triggers": { "crons": ["0 * * * *"] },
   "observability": { "enabled": true }
 }

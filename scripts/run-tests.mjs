@@ -107,6 +107,7 @@ const TEST_FILES = [
   "tests/cloudflare-access-auth.test.mjs",
   "tests/auth-provider-selection.test.mjs",
   "tests/production-wrangler-config.test.mjs",
+  "tests/staging-write-guard.test.mjs",
   "tests/morning-brief-api.test.mjs",
   "tests/staging-reset.test.mjs",
   "tests/logger.test.mjs",
