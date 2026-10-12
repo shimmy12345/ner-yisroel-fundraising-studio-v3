@@ -32426,3 +32426,123 @@ No backup or restore was performed this round. No application code,
 Worker deployment, schedule, credential, database, or backup
 configuration was changed -- this was a read-only verification pass,
 plus this documentation update.
+
+## Transition Daily Email and Morning Check to Production (2026-10-12, re-verification round)
+
+Owner authorized completing the daily-email and morning-check
+transition. Per the task's own instruction, nothing from
+`docs/PRODUCTION-OPERATIONAL-TRANSITION-VERIFICATION.md` was assumed
+still current -- every material fact was re-checked live this round
+before concluding anything:
+
+| Fact | Previously documented | Re-checked this round | Changed? |
+|---|---|---|---|
+| Production secrets (`wrangler secret list`) | `[]` | `[]` | No |
+| Staging secrets | 3 `GMAIL_OAUTH_*` | 3 `GMAIL_OAUTH_*` | No |
+| Production `triggers` (cron) | commented out | commented out | No |
+| Staging `triggers` (cron) | `0 * * * *`, active | `0 * * * *`, active | No |
+| Live deployed Production version | `240785de-...` (2026-10-12T01:36Z) | same -- no newer deploy exists | No |
+| Live deployed Staging version | `a6143fd0-...` (2026-10-12T01:15Z) | same -- no newer deploy exists | No |
+| `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` on Production | configured (prior round) | still configured, unchanged value | No |
+| Cloudflare API token Access/Zero-Trust scope | absent | absent (fresh `whoami`) | No |
+| `wrangler access`/`zero-trust` subcommand | does not exist | still does not exist (wrangler 4.92.0) | No |
+| This session's own `CronList` | no jobs | no jobs | No |
+| Live `GET /` and `GET /api/morning-brief` Access redirect on both sites | `302`, correct per-site AUD | same, re-confirmed by fresh `curl`, AUDs match each `wrangler.*.jsonc` exactly | No |
+| `worker/index.ts` `scheduled()` handler | both `runScheduledAgendaSend` and `runScheduledBackupAlertCheck` share the one Cron Trigger | re-read fresh -- confirmed unchanged | No |
+| Production `fundraising-os-production-backup-status` status-worker | deployed | still deployed (confirmed via its own `deployments list`) | No |
+| Production donor data | 254 donors / 5,463 giving activities | same, re-confirmed live | No |
+
+**One new check this round, not performed before:** looked for a
+genuinely new way to configure Production's Gmail credentials without
+the owner re-entering the raw values -- Cloudflare's newer
+account-level **Secrets Store** (the API token does have
+`secrets_store (write)` scope, and `wrangler secrets-store` exists).
+If the existing Gmail credentials already lived there, both Workers
+could bind to the *same* stored secret without a second value entry.
+Checked: `wrangler secrets-store store list --remote` →
+**"List request returned no stores"** -- the account has no Secrets
+Store at all; the existing credentials are plain per-Worker secrets on
+Staging only. Setting one up now would mean introducing a new
+integration/architecture this task's own safeguards explicitly rule
+out ("do not introduce new integrations"), and it would still require
+the owner to type the real value in at least once -- Cloudflare's
+write-only security model has no exception for this. **Ruled out, not
+pursued.** The owner's three direct `wrangler secret put` calls on
+Production remain the correct, minimal, already-authorized path.
+
+**Daily email -- still BLOCKED on the identical owner-only action as
+every prior round**, now with one additional round of confirmation
+that no alternative exists. Per the task's own explicit instruction
+("If owner involvement is required, STOP before changing cron
+triggers"), neither `wrangler.production.jsonc`'s nor
+`wrangler.staging.jsonc`'s `triggers` block was touched this round.
+Nothing about the daily email's current operation changed -- Staging
+remains the sole active sender.
+
+**Morning check -- still PARTIALLY configured, same two remaining
+steps, both re-confirmed dashboard/external-only:**
+1. Granting the existing Service Token a Service Auth policy on
+   Production's Access Application -- re-confirmed no API/CLI path
+   exists from this session (fresh scope check, fresh subcommand
+   check).
+2. Repointing the external morning-check scheduler at Production's URL
+   -- re-confirmed this session has no visibility into where that
+   scheduler lives (`CronList` empty, by design session-scoped only).
+
+No new Service Token was created. No duplicate morning-check endpoint
+or code path was created. `GET /api/morning-brief` itself needed no
+change -- it was already correctly configured on Production in the
+prior round.
+
+**Tests and verification this round:** `pnpm test` 180/180 (including
+`tests/staging-write-guard.test.mjs`'s structural + cron-state
+snapshot assertions, which independently assert exactly the live
+state confirmed above -- Staging's cron active, Production's
+commented out but prepared, `STAGING_WRITES_ENABLED` absent from
+Production). `tsc --noEmit` clean. No deploy was performed this round
+-- nothing in either Worker's config or code changed, so there was
+nothing to redeploy.
+
+**Explicitly not claimed:** that the daily email or morning check has
+successfully run from Production -- neither has, since neither is
+configured to run from Production yet. Only configuration state and
+blocker status are reported above, consistent with the task's own
+"distinguish configuration verified from actual successful execution"
+instruction.
+
+### Consolidated exact owner actions (unchanged in substance, restated together for this round)
+
+1. **Gmail secrets:** run, in a terminal with wrangler access to this
+   Cloudflare account:
+   ```
+   wrangler secret put GMAIL_OAUTH_CLIENT_ID --config wrangler.production.jsonc
+   wrangler secret put GMAIL_OAUTH_CLIENT_SECRET --config wrangler.production.jsonc
+   wrangler secret put GMAIL_OAUTH_REFRESH_TOKEN --config wrangler.production.jsonc
+   ```
+   using either the same values already on Staging or a freshly
+   registered OAuth client -- the owner's choice; this session never
+   sees or needs the values.
+2. **Cron cutover (do in the same step, immediately after step 1):**
+   uncomment the `"triggers": { "crons": ["0 * * * *"] }` line in
+   `wrangler.production.jsonc`, remove the `"triggers"` block entirely
+   from `wrangler.staging.jsonc`, then deploy both
+   (`wrangler deploy --config wrangler.production.jsonc` and
+   `wrangler deploy --config wrangler.staging.jsonc`) back-to-back.
+   This single coordinated step turns on both the daily email AND
+   backup-failure alerting on Production, and turns both off on
+   Staging, with no gap and no double-send day.
+3. **Zero Trust:** in the Cloudflare Zero Trust dashboard, add a
+   Service Auth policy for Service Token Client ID
+   `983ea5fccaebc48932c5e69df510f74a.access` to Production's Access
+   Application, confirm its path scope covers `/api/morning-brief`.
+4. **External scheduler:** update wherever the actual "Claude's
+   morning check" script/scheduler lives to call
+   `https://fundraising-os-production.sgoldstein.workers.dev/api/morning-brief`
+   instead of Staging's URL, keeping the same Service Token headers,
+   schedule, and notification destination it already uses.
+
+No donor or financial data was modified. Neither database was reset
+or migrated. Production's backup workflows, schedules, and retention
+were not touched. Staging's read-only write-guard was not touched or
+disabled. No email recipient or delivery time was changed. No new
+integration was introduced. No merge to `main`.
