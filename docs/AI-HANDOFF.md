@@ -31922,3 +31922,81 @@ before Phase 4, not assumed from this round alone.
 No database was modified. Production was not written to. No Worker was
 deployed. No GitHub Actions schedule or secret was changed. Phases 4
 and 5 remain unexecuted.
+
+## Production cutover executed -- SUCCESS (2026-10-12)
+
+Under the owner's final, explicit GO, executed the real donor-data
+migration from Independent Staging into Independent Production,
+following the approved runbook exactly. Full detail, every figure and
+check: `docs/PRODUCTION-DONOR-DATA-CUTOVER-EXECUTION.md`.
+
+**Result: SUCCESS.** All 9 mandatory preflight checks passed (no STOP
+condition): exact database UUIDs confirmed; Production reconfirmed at
+0 rows across all 50 fundraising-data tables immediately before the
+write; schema byte-identical (137/137); Production's existing owner
+account captured for a before/after diff; a fresh Production backup
+was taken and *actually restored* into a disposable scratch database
+to prove it works (not just that an export file exists); the latest
+automated backup run was confirmed via the GitHub Actions REST API
+directly (both `gh` and `wrangler r2 object get` were broken in this
+session's environment -- worked around, not skipped); no other
+writing process was found running; Staging showed zero drift across
+two readings five minutes apart.
+
+**254 donors, 5,463 giving activities, all 48 migration tables
+restored into Production** -- 40 tables with data, zero failures, in
+one pass, using the already-proven dependency-safe restore order and
+the rehearsal's chunked-row technique for the one oversized
+`data_imports` row. `users`, `onboarding_preferences`,
+`backup_alert_state`, and `production_schema_baseline` were correctly
+excluded -- Production's own pre-existing owner account and schema
+marker were never touched (confirmed byte-identical before and after,
+down to `updated_at` not moving).
+
+**Full post-import verification, all clean:** row counts exact across
+all 48 tables; row-and-column SHA-256 hash match across 40/41 checked
+tables (the one reported "mismatch," on `users`, is expected and
+explained below); zero FK violations, zero duplicate primary keys,
+zero application-level orphans (acknowledgments, payment assignments,
+payment plans, balance corrections, import changes); financial totals
+reconcile to the cent (committed $4,024,296.80 / paid $3,847,915.65 /
+corrected outstanding balance $176,171.15); both duplicate-flagged
+giving activities (Goldman `1c3f3d51-...`, Gluck `5e29f6c5-...`)
+preserved unchanged and un-reactivated, with Goldman's acknowledgment
+intact.
+
+**One important non-finding, documented so a future reader doesn't
+misread it:** the row-level hash comparison script flags `users` as a
+"MISMATCH" between Staging and Production. This is correct and
+expected, not a defect -- that script was built for the rehearsal,
+where `users` is always restored fresh, but for this real cutover
+`users` was deliberately excluded (Production kept its own row).
+Direct comparison confirms `id`/`email` match (the same deterministic
+identity) while profile fields (`name`, `organization_name`, etc.) and
+timestamps differ, because the two rows were always independently
+created in each environment, never copied from one to the other.
+
+No database export, donor data, or credential was committed. Local
+scratch files (the Staging/Production exports and derived restore
+files, which held real donor data) were deleted after this report's
+figures were captured.
+
+### Remaining before regular Production use
+
+1. Owner-facing application verification (log into the actual deployed
+   app against Production, not just raw SQL, and confirm donor
+   records/giving history/financial dashboards render correctly).
+2. Once that passes: formally designate Production as primary and
+   Staging as a non-authoritative testing environment -- not done
+   automatically by this round.
+3. Decide and document where future donor updates/imports should be
+   pointed (the JL-import pipeline and manual entry) once Production
+   is confirmed operational -- this round did not change any
+   deployment/`env.DB` binding.
+4. No automated backup schedule was enabled or altered -- Production's
+   existing nightly backup workflow continues unchanged and will now
+   capture real donor data on its normal schedule.
+
+No unrelated Production change was made. Staging was never modified.
+No Worker was deployed or redirected. No GitHub Actions schedule or
+secret was changed.
