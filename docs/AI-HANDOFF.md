@@ -32194,3 +32194,99 @@ database ID swap (re-confirmed by direct file re-read + live
 No donor data was lost, modified, or recreated. No secret, backup
 retention policy, or storage destination was changed. No merge to
 main.
+
+## Activate Production Backup Schedules on Main (2026-10-11)
+
+Owner-authorized, narrowly-scoped update to `main` itself: the prior
+round's schedule triggers only existed on this feature branch, and
+GitHub Actions' `schedule:` trigger is only ever honored on the
+repository's default branch -- confirmed live (`"default_branch":
+"main"` via the public repo API) before touching anything.
+
+**Pre-change verification (all done before any write):**
+- Diffed both files, `main` vs this feature branch, directly
+  (`git diff origin/main origin/feature/independent-cloudflare-sandbox
+  -- <path>`): confirmed the *only* differences were the `schedule:`
+  block plus its adjacent header-comment prose in each file -- no
+  other line differed.
+- Re-read both files' full content as they stood on `main` beforehand:
+  confirmed both still hardcode `DATABASE_NAME: fundraising-os-
+  production-db`, every secret/var is `_PRODUCTION`-suffixed, and the
+  restore-verification workflow restores only into a disposable,
+  freshly-generated throwaway D1 database (`scripts/verify-remote-
+  restore.mjs`) -- never `fundraising-os-production-db` or
+  `fundraising-os-staging-db` themselves.
+- Checked `git log -- <path> <path>` on `main`: both files have exactly
+  one historical commit (`d1e9577`, their original creation) -- no
+  concurrent/in-flight edits to collide with.
+- Checked `GET /repos/.../branches/main`: `"protected": false` -- no
+  branch-protection review requirement, so a direct commit to `main`
+  was the authorized path (the task's own fallback-to-PR condition
+  didn't apply).
+- Confirmed the required Production-scoped GitHub Actions secrets are
+  configured and working -- without reading or exposing any value --
+  by checking real run history via the public, unauthenticated GitHub
+  REST API: the Production nightly-backup workflow has a manual
+  (`workflow_dispatch`) run on `main` that **succeeded**
+  (run `38109341883`, 2026-10-11T03:44:12Z), and the Production
+  restore-verification workflow has a manual run on `main` that also
+  **succeeded** (run `38139854757`, 2026-10-11T12:35:39Z, after one
+  earlier failed attempt at 03:47:09Z the same morning). Both runs
+  predate this change and are independent evidence the secrets exist
+  and the full backup/restore pipeline already works on `main`.
+
+**Change made:** on a new local branch off `origin/main`, checked out
+only these two files' content from this feature branch (already
+proven identical except for the authorized schedule/comment diff) and
+committed+pushed directly to `main`:
+- `.github/workflows/d1-backup-nightly-production.yml` --
+  `schedule: - cron: "15 8 * * *"` added, `workflow_dispatch` kept.
+- `.github/workflows/d1-restore-verify-monthly-production.yml` --
+  `schedule: - cron: "20 9 1 * *"` added, `workflow_dispatch` kept.
+
+`main` commit: `1b6bec7` (`316f005..1b6bec7`). No other file in the
+commit (`git show --stat` confirmed exactly these two paths).
+
+**Post-change verification:**
+- Re-fetched `origin/main` and re-diffed against the pre-change tip
+  (`316f005`): still exactly these two files, same line counts as the
+  pre-change diff.
+- Re-read both files fresh from `origin/main`: both `schedule:` blocks
+  present with the exact crons above, `workflow_dispatch: {}` still
+  present on both.
+- Re-validated YAML syntax of both files with `js-yaml` -- parsed
+  cleanly, `on:` block shape as expected.
+- `GET /repos/.../actions/workflows/380979303` and `/380979304`: both
+  still report `"state": "active"` (not disabled) after the push.
+- Did **not** attempt to manually dispatch either workflow from this
+  session: re-confirmed (fresh `curl -X POST .../dispatches` →
+  `401`, no `gh` CLI, no `GITHUB_TOKEN`/`GH_TOKEN` in the environment)
+  that this session still has no GitHub write/Actions-trigger
+  credential. This is unchanged from every earlier round this session.
+
+**Status, precisely:**
+- Both schedules: **active on `main`**, confirmed and verified.
+- A scheduled (cron-triggered) run of either workflow: **has not yet
+  occurred** -- the nightly schedule's first possible fire is
+  2026-10-12T08:15Z, and the monthly schedule's first possible fire is
+  2026-11-01T09:20Z. Nothing in this round claims a scheduled run
+  succeeded, because none has run yet.
+- A manually-triggered (`workflow_dispatch`) run against this exact
+  schedule-bearing version of either file: **not performed this
+  round** -- blocked by the same missing GitHub write credential as
+  every prior round. The pre-change evidence above (runs `38109341883`
+  and `38139854757`) shows the pipeline itself already works on
+  `main`, just not against today's specific commit.
+
+**Outstanding owner action (optional, not required for the schedules
+to work):** to get a native GitHub-Actions data point sooner than
+2026-10-12T08:15Z, open
+https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows/d1-backup-nightly-production.yml
+and https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows/d1-restore-verify-monthly-production.yml,
+click "Run workflow" on each (branch: `main`), and watch for a green
+check. No value needs to be entered; both take no inputs.
+
+No donor data was touched. No backup destination, retention, secret,
+or database identifier was changed. The feature branch was not merged
+into `main` -- only the two authorized workflow files were updated
+there directly.
