@@ -15,18 +15,25 @@
 # docs/PRODUCTION-INFRASTRUCTURE-SETUP.md for exactly which ones must be
 # created before this workflow can run).
 #
-# DELIBERATELY NOT ON A SCHEDULE. Unlike d1-backup-nightly.yml, this file
-# has no `schedule:` trigger -- workflow_dispatch only. This is the
-# explicit "prepared but disabled/gated" requirement: this workflow must
-# never fire automatically until the Production database has real data
-# worth protecting AND the Production-scoped secrets below actually exist
-# AND launch readiness has been separately confirmed. Add a `schedule:`
-# block (copy d1-backup-nightly.yml's own exact cron, offset by a few
-# minutes to avoid competing with Staging's own run) only as part of that
-# later, separately-approved step -- never earlier.
+# SCHEDULED, as of 2026-10-12 (Production Automation and Backup
+# Transition round, docs/AI-HANDOFF.md) -- the three previously-gating
+# conditions are now all true: the Production database holds the real,
+# migrated donor dataset (docs/PRODUCTION-DONOR-DATA-CUTOVER-EXECUTION.md),
+# the Production-scoped secrets below exist and were proven to work
+# (run 38109341883, 2026-10-11, success), and the owner has explicitly
+# authorized enabling this exact schedule, unchanged destination/
+# retention/credentials. Offset 15 minutes after d1-backup-nightly.yml's
+# own "0 8 * * *" so the two never compete for the same runner window.
+# `workflow_dispatch` is kept alongside the schedule for on-demand runs.
 name: D1 nightly backup (Production)
 
 on:
+  schedule:
+    # 08:15 UTC daily -- 15 minutes after Staging's own 08:00 UTC run
+    # (d1-backup-nightly.yml). Same best-effort caveat as that file: GitHub
+    # Actions schedules are "at least once a day", not an exact clock
+    # guarantee.
+    - cron: "15 8 * * *"
   workflow_dispatch: {}
 
 permissions:

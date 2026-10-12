@@ -48,11 +48,11 @@
     {
       "binding": "DB",
       "database_name": "fundraising-os-production-db",
-      // Created 2026-10-09 via `wrangler d1 create fundraising-os-production-db`.
-      // New, empty (zero application tables -- only D1's own internal
-      // _cf_KV system table), isolated from fundraising-os-staging-db
-      // (6c18396c-0a8f-4f2c-ba83-ea809ec10289). No donor data has been
-      // copied into it.
+      // Created 2026-10-09 via `wrangler d1 create fundraising-os-production-db`,
+      // isolated from fundraising-os-staging-db (6c18396c-0a8f-4f2c-ba83-
+      // ea809ec10289). Migrated 2026-10-12 (docs/PRODUCTION-DONOR-DATA-
+      // CUTOVER-EXECUTION.md) -- this is now the authoritative, live
+      // donor/fundraising dataset, not an empty database.
       "database_id": "a51c6571-ae16-4614-aa9a-08f8e6be3ecd"
     }
   ],
@@ -87,7 +87,26 @@
     // wrangler.staging.jsonc's own fundraising-os-staging.sgoldstein.workers.dev
     // pattern exactly) -- confirm and correct after the first real deploy
     // if Cloudflare assigns anything different.
-    "APP_BASE_URL": "https://fundraising-os-production.sgoldstein.workers.dev"
+    "APP_BASE_URL": "https://fundraising-os-production.sgoldstein.workers.dev",
+    // Morning-brief Service Token auth (lib/auth/cloudflare-access.ts),
+    // Production Automation and Backup Transition round, 2026-10-12. The
+    // SAME Client ID already used on Staging (wrangler.staging.jsonc) --
+    // reused, never a new/rotated token, per this round's own
+    // authorization. A Client ID alone grants no access (the Client
+    // Secret, which this Worker never sees, does) -- see
+    // cloudflare-env.d.ts's own doc comment.
+    //
+    // NOT YET EFFECTIVE on its own: this only lets the app's OWN identity
+    // check accept the token. Cloudflare Access itself must separately
+    // be told, in the Zero Trust dashboard, that THIS token is allowed to
+    // authenticate against Production's Access Application (a Service
+    // Auth policy) -- that step has no API this session's Cloudflare
+    // credentials can reach (confirmed: no Access/Zero-Trust scope; no
+    // `wrangler access`/`zero-trust` subcommand exists either) and must
+    // be done manually by the owner. Until then, a request bearing this
+    // token is rejected at the Access edge exactly as it is today -- no
+    // security restriction is weakened by setting this var early.
+    "MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID": "983ea5fccaebc48932c5e69df510f74a.access"
   },
   // Daily Fundraising Agenda email cron -- PREPARED, NOT YET ACTIVE
   // (2026-10-12 Production Operational Transition round,

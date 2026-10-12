@@ -32089,3 +32089,108 @@ import was executed as a test.
 No donor data was lost, modified, or recreated. No secret, backup
 schedule, retention policy, or external integration was changed. No
 merge to main.
+
+## Complete Production Automation and Backup Transition (2026-10-12, addendum)
+
+Full detail: `docs/PRODUCTION-OPERATIONAL-TRANSITION-VERIFICATION.md`
+(updated in place -- same file as the prior round's report, now
+covering both rounds). Nothing from the prior round's findings was
+assumed current -- every fact was re-checked live first (Section 0 of
+that doc): Production secrets still `[]`, no new backup runs, no `gh`/
+GitHub token in this session, Production/Staging data and identities
+all unchanged.
+
+**Production backups -- schedules ENABLED:** added a `schedule:`
+trigger to both `.github/workflows/d1-backup-nightly-production.yml`
+(`15 8 * * *`, 15 min after Staging's own run) and
+`d1-restore-verify-monthly-production.yml` (`20 9 1 * *`) -- a plain
+git-committed file edit, not a GitHub API call, so it worked despite
+this session having no GitHub write credentials. Both files' own
+header comments already named this exact change as the gated "later,
+separately-approved step" -- today's owner authorization is that
+approval. Destination bucket, retention, and every secret name are
+byte-identical to before. Verified from source (not assumed) that
+neither workflow can target Staging: both hardcode
+`fundraising-os-production-db` and every secret/var is `_PRODUCTION`-
+suffixed; the restore-verification workflow restores only into a
+disposable throwaway database, never either real one. YAML syntax
+validated via `js-yaml`. **Status: configured, awaiting its first
+scheduled run** -- not yet claimed as "a scheduled run has succeeded."
+
+**Could not trigger the GitHub Actions workflows on demand** (no `gh`
+CLI, no `GITHUB_TOKEN`/`GH_TOKEN`) -- stopped that specific sub-step
+and gave exact manual "Run workflow" instructions. **Independently
+substituted** a real, current backup verification using this session's
+own existing Cloudflare access: fresh `wrangler d1 export` of
+Production (confirmed 254 donors/5,463 giving-activity INSERTs in the
+export itself), restored into a disposable scratch D1 database using
+the same proven dependency-safe/chunked-row technique from the
+migration rehearsal, `PRAGMA foreign_key_check` = 0 violations, exact
+row-count match, then deleted the scratch database and the local
+export file. This proves today's data is currently backup-able and
+restorable; it is not the same as the GitHub Actions pipeline itself
+having a current successful run, which still doesn't exist and is
+reported as such.
+
+**Daily email -- still blocked, unchanged, re-confirmed not re-
+attempted:** Production still has zero Gmail secrets. Determined there
+is no safe mechanism in this session to transfer the existing secret
+*values* -- Cloudflare Worker secrets are write-only by design, with no
+read-back API anywhere. The only paths are the owner running
+`wrangler secret put` themselves, or pasting the values into chat
+(explicitly not done, and not requested, per the instruction not to
+expose secrets in chat/logs/docs). Stopped this step per the task's own
+instruction. Nothing about the email's current operation was touched --
+Staging's cron is still the sole active sender.
+
+**Morning check -- partially configured, one step is dashboard-only
+and inaccessible from this session:** added the existing (not new, not
+rotated) `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` to
+`wrangler.production.jsonc` and deployed it -- safe on its own, since a
+Client ID alone grants no access and nothing security-relevant changes
+until Cloudflare Access's own Zero Trust policy for Production
+separately accepts this token, confirmed by re-checking Production's
+live `302` Access-login redirect is unchanged. Checked for an API path
+to make that Zero Trust grant from this session: no `wrangler access`/
+`zero-trust` subcommand exists, and this session's Cloudflare API token
+has no Access/Zero-Trust scope (confirmed via `wrangler whoami`'s own
+scope list, not assumed). Confirmed again that the real external
+morning-check scheduler is outside this repo and outside this session's
+own tools (`CronList` returns no jobs; those jobs are session-only by
+design anyway). Also noted: the "desired morning-check behavior"
+wishlist (backup/health/email-failure status) isn't data the existing
+`/api/morning-brief` endpoint returns today -- flagged as an open
+design question rather than built speculatively, to avoid risking the
+task's own "do not create a second morning check" warning.
+
+**Backup failure alerting:** found it shares the exact same single root
+cause as the daily email (both send via the same `sendGmail()` client,
+both need the Worker's own Cron Trigger) -- not a second, separate
+gap. Passive visibility (Settings -> Data Health reading the
+STATUS_WORKER binding) is already available on Production today;
+active automated alerting is blocked by that one shared cause.
+
+**Staging protections reconfirmed unaffected:** nothing in this round
+touched the write-guard, `worker/index.ts`, or `app/layout.tsx`.
+180/180 tests still pass, both sites' live `302` Access-gated behavior
+unchanged, Staging's cron still the sole active email sender.
+
+**Tests/deploy:** `pnpm test` 180/180, `tsc --noEmit` clean,
+`build:production-independent` succeeds, `wrangler deploy --dry-run`
+confirmed exact expected bindings before the real deploy. Deployed:
+`fundraising-os-production` Version `240785de-e0de-4886-ab02-
+1009cd3e95d3`. Staging was not redeployed (nothing in its config/code
+changed this round). Post-deploy: Production's donor data, owner
+account, and both sites' live behavior all confirmed unchanged. No
+database ID swap (re-confirmed by direct file re-read + live
+`d1 list`).
+
+### Remaining owner-only steps (unchanged in kind from the prior round, now precisely two)
+
+1. Run `wrangler secret put GMAIL_OAUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN --config wrangler.production.jsonc` themselves (their own existing values or a fresh client, their choice), then flip the cron from Staging to Production in one deploy step -- this unlocks BOTH the daily email and backup-failure alerting at once.
+2. In the Zero Trust dashboard: add the existing Service Token to a Service Auth policy on Production's Access Application, confirm its path scope covers `/api/morning-brief`, and repoint the external morning-check script/scheduler at Production's URL.
+3. Optionally: manually run both Production GitHub Actions workflows now via the "Run workflow" button, to get a native GH-Actions-pipeline data point sooner than the new 08:15 UTC schedule.
+
+No donor data was lost, modified, or recreated. No secret, backup
+retention policy, or storage destination was changed. No merge to
+main.

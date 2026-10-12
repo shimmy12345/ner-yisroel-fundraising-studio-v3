@@ -22,14 +22,21 @@
 #     Backup Verification" entry in docs/AI-HANDOFF.md for a real example
 #     against Staging).
 #
-# DELIBERATELY NOT ON A SCHEDULE -- workflow_dispatch only, same "prepared
-# but gated" reasoning as d1-backup-nightly-production.yml. Add a
-# `schedule:` block (copy d1-restore-verify-monthly.yml's own cron) only
-# once the nightly Production backup is itself on a schedule and launch
-# readiness has been separately confirmed.
+# SCHEDULED, as of 2026-10-12 (Production Automation and Backup
+# Transition round, docs/AI-HANDOFF.md) -- enabled in the same change
+# that put d1-backup-nightly-production.yml on its own schedule
+# (08:15 UTC daily), so this always has a same-day Production backup to
+# verify against. Offset 20 minutes after d1-restore-verify-monthly.yml's
+# own "0 9 1 * *" so the two never compete for the same runner window.
+# `workflow_dispatch` is kept alongside the schedule for on-demand runs.
 name: D1 monthly restore verification (Production)
 
 on:
+  schedule:
+    # 09:20 UTC on the 1st of every month -- after BOTH Staging's own
+    # monthly run (09:00 UTC) and Production's own nightly backup
+    # (08:15 UTC the same day), never before either.
+    - cron: "20 9 1 * *"
   workflow_dispatch: {}
 
 permissions:
