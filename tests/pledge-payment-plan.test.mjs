@@ -8,6 +8,8 @@ import {
   dayOfMonthFromDateOnlyEpoch,
   adjustNewPlanAnchorForPastDate,
   MONTHLY_PAYMENT_PLAN_GRACE_DAYS,
+  evaluateOpenPledgePlanStatus,
+  isOpenPledgeActionable,
 } from "../lib/relationships/pledge-payment-plan.ts";
 import { pledgePlanLine } from "../lib/relationships/meeting-brief-model.ts";
 
@@ -511,6 +513,37 @@ function run() {
   }
 
   console.log("Payment-plan intelligence checks passed.");
+
+  // ============================================================
+  // Multi-Open-Pledge Independent Evaluation (2026-10-13, see
+  // docs/AI-HANDOFF.md) -- the two shared primitives
+  // lib/workspace/live-data.ts, app/donors/[id]/page.tsx, and
+  // lib/fundraising-intelligence/situations.ts all use to decide
+  // whether ONE specific pledge, on its own, needs attention.
+  // ============================================================
+  {
+    // No plan at all -- hasPlan false, isOnTrack null, regardless of inputs.
+    const noPlan = evaluateOpenPledgePlanStatus(undefined, [], [], 50000, epoch(2026, 10, 13), "UTC");
+    assert.deepEqual(noPlan, { hasPlan: false, isOnTrack: null });
+    assert.equal(isOpenPledgeActionable(false, null, 10), false, "a plan-less pledge younger than the threshold is not actionable");
+    assert.equal(isOpenPledgeActionable(false, null, 60), true, "a plan-less pledge exactly at the 60-day threshold is actionable");
+    assert.equal(isOpenPledgeActionable(false, null, null), false, "a plan-less pledge with unknown age is never actionable");
+
+    // A real plan, genuinely on track -- the real Goldenberg/KOLX2026 shape.
+    const plan = { installment_amount_cents: 100000, expected_day_of_month: 23, next_expected_payment_at: epoch(2026, 10, 23), final_expected_payment_at: epoch(2027, 8, 23) };
+    const onTrack = evaluateOpenPledgePlanStatus(plan, [epoch(2026, 9, 23)], [100000], 1100000, epoch(2026, 10, 13), "America/New_York");
+    assert.equal(onTrack.hasPlan, true);
+    assert.equal(onTrack.isOnTrack, true);
+    assert.equal(isOpenPledgeActionable(true, true, null), false, "an on-track active plan is never actionable regardless of raw age");
+
+    // The same plan shape, but genuinely behind (no payment at all).
+    const behind = evaluateOpenPledgePlanStatus(plan, [], [], 1200000, epoch(2026, 11, 1), "America/New_York");
+    assert.equal(behind.hasPlan, true);
+    assert.equal(behind.isOnTrack, false);
+    assert.equal(isOpenPledgeActionable(true, false, null), true, "a behind-schedule active plan is actionable regardless of raw age");
+
+    console.log("Multi-open-pledge shared-primitive checks passed.");
+  }
 }
 
 run();

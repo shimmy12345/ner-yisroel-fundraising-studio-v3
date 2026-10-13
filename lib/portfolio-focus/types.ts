@@ -24,6 +24,32 @@ export type PledgeStaleClass = "current" | "legacy_needs_verification" | "immate
 
 export type ConfidenceLevel = "high" | "medium" | "low";
 
+// One donor's ONE open pledge, independently evaluated -- added
+// 2026-10-13 (Multi-Open-Pledge Independent Evaluation, see
+// docs/AI-HANDOFF.md's Goldenberg/JL 64792 investigation). Deliberately
+// NOT part of the calibrated scoring model this file's own header
+// warns against extending (PortfolioFocusDonorInput's singular
+// openPledgeBalanceCents/pledgePlanOnTrack/etc. fields, used by
+// score.ts/components.ts/the main Portfolio Focus ranking, are
+// completely unchanged by this type) -- `openPledges` below exists
+// solely so Fundraising Intelligence Brief's detectors
+// (lib/fundraising-intelligence/situations.ts) can evaluate EVERY open
+// pledge a donor has independently, never collapsing a donor with
+// multiple simultaneously open pledges down to a single representative
+// one before deciding whether any of them needs a stale-pledge or
+// behind-schedule follow-up.
+export type OpenPledgeEvidence = {
+  pledgeActivityId: string;
+  campaign: string | null;
+  description: string | null;
+  balanceCents: number;
+  totalCents: number;
+  activityDate: number | null; // resolveOpenPledgeActivityDate's own result -- last linked payment date, or the pledge's own activity_date
+  pledgeAgeDays: number | null;
+  pledgeCommitmentAgeDays: number | null;
+  pledgePlanOnTrack: boolean | null; // null = no active plan linked to THIS pledge
+};
+
 // Round 3 Section 9 (labeling correction applied in this implementation
 // per the user's Phase 1 instruction): the smallest vocabulary that
 // accurately represents the calibrated model. Every value must be
@@ -80,6 +106,13 @@ export type PortfolioFocusDonorInput = {
   // fixture/caller that predates this field keeps behaving exactly as
   // before.
   pledgePlanMilestoneDaysBefore?: 15 | 10 | 5 | null;
+  // EVERY open pledge this donor has, each independently evaluated --
+  // see OpenPledgeEvidence's own doc comment above. Optional, defaulting
+  // to an empty array, so every existing fixture/caller that predates
+  // this field keeps compiling and behaving exactly as before (an empty
+  // array reads as "no open pledges," never "unknown," matching how a
+  // null openPledgeBalanceCents already reads today).
+  openPledges?: OpenPledgeEvidence[];
 
   // Relationship
   askHistoryCount: number;

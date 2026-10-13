@@ -28,7 +28,11 @@ export async function loadPortfolioFocusRawData(userId: string): Promise<Portfol
     // effectiveBalanceCents is the one canonical rule this realizes in
     // SQL), so Portfolio Focus's own commitment totals/scoring can
     // never disagree with Today/the donor page about the same pledge.
-    env.DB.prepare(`SELECT ga.id, ga.donor_id, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents, ga.activity_date, ga.category, ga.item_type, ga.description
+    // ga.source_campaign added 2026-10-13 (Multi-Open-Pledge Independent
+    // Evaluation, see docs/AI-HANDOFF.md) -- lets Fundraising Intelligence
+    // Brief name the SPECIFIC pledge/campaign responsible for a stale or
+    // behind-schedule recommendation, rather than a generic "Open pledge."
+    env.DB.prepare(`SELECT ga.id, ga.donor_id, ga.paid_cents, COALESCE(pbc.corrected_balance_cents, ga.balance_cents) AS balance_cents, ga.activity_date, ga.category, ga.item_type, ga.description, ga.source_campaign
       FROM giving_activities ga
       LEFT JOIN pledge_balance_corrections pbc ON pbc.pledge_activity_id = ga.id AND pbc.reversed_at IS NULL
       WHERE ga.owner_user_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active' AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')`).bind(userId).all<RawGivingRow>(),

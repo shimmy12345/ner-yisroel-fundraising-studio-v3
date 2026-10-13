@@ -10,8 +10,10 @@
 // (reminders, facts, asks, pledge/plan state, momentum, financial
 // materiality, confidence axes) that already exists on Portfolio
 // Focus's computed output.
-import type { PortfolioFocusDonorInput, PortfolioFocusResult } from "../portfolio-focus/types.ts";
+import type { OpenPledgeEvidence, PortfolioFocusDonorInput, PortfolioFocusResult } from "../portfolio-focus/types.ts";
 import type { RawAskRow, RawRelationshipFactRow } from "../portfolio-focus/aggregate.ts";
+import { classifyPledgeStaleness } from "../portfolio-focus/stale-balance.ts";
+import { isOpenPledgeActionable } from "../relationships/pledge-payment-plan.ts";
 import type { BriefDisposition, BriefEvidenceRef, ConfidenceLevel, SituationType } from "./types.ts";
 
 const DAY = 86400;
@@ -163,68 +165,138 @@ function detectAskResolution(asks: RawAskRow[], now: number): DetectedSignal | n
   return null; // "committed" -- Phase 1 deliberately does not cross-reference against giving to detect a mismatch; see calibration doc's documented gap
 }
 
-function detectPledgeFollowUp(donor: PortfolioFocusDonorInput, result: PortfolioFocusResult): DetectedSignal | null {
-  if (donor.openPledgeBalanceCents == null || donor.openPledgeBalanceCents <= 0) return null;
-  // Reuse Portfolio Focus's OWN, already-calibrated pledge-staleness
-  // classification (lib/portfolio-focus/stale-balance.ts) rather than a
-  // second age rule -- a real 5+ year old balance is a dead bookkeeping
-  // artifact, never a live "worth a follow-up" situation, regardless of
-  // this detector's own 60-day nudge threshold below. (Found live during
-  // Phase 1 calibration: several real Independent Staging pledges are
-  // 12-27 YEARS old and were wrongly surfacing as "gone stale" DO items
-  // before this guard was added -- see the calibration doc.)
-  if (result.pledgeStaleClass === "immaterial_artifact") return null;
+// One open pledge's own follow-up-relevant verdict -- computed
+// independently for EVERY open pledge a donor has (Multi-Open-Pledge
+// Independent Evaluation, 2026-10-13, see docs/AI-HANDOFF.md's
+// Goldenberg/JL 64792 investigation). `isOpenPledgeActionable` is the
+// SAME shared primitive lib/workspace/live-data.ts and the donor page
+// use to pick their own single representative pledge -- never a second,
+// competing formula.
+type PledgeStatus = {
+  pledge: OpenPledgeEvidence;
+  hasPlan: boolean;
+  ageDays: number | null;
+  isActionable: boolean;
+  staleClass: ReturnType<typeof classifyPledgeStaleness>;
+};
 
-  const total = donor.openPledgeTotalCents ?? donor.openPledgeBalanceCents;
-  const remainingRatio = total > 0 ? donor.openPledgeBalanceCents / total : 1;
-  if (remainingRatio <= 0.25) return null; // near-complete -- commitment_progress's territory, not a follow-up gap
+function evaluatePledgeStatuses(donor: PortfolioFocusDonorInput): PledgeStatus[] {
+  return (donor.openPledges ?? [])
+    .map((pledge): PledgeStatus => {
+      const hasPlan = pledge.pledgePlanOnTrack !== null;
+      const ageDays = safeDays(pledge.pledgeAgeDays);
+      const staleClass = classifyPledgeStaleness({
+        openPledgeBalanceCents: pledge.balanceCents,
+        pledgeCommitmentAgeDays: pledge.pledgeCommitmentAgeDays,
+        pledgeAgeDays: pledge.pledgeAgeDays,
+        pledgePlanOnTrack: pledge.pledgePlanOnTrack,
+        daysSinceSubstantiveContact: donor.daysSinceSubstantiveContact,
+      });
+      return { pledge, hasPlan, ageDays, isActionable: isOpenPledgeActionable(hasPlan, pledge.pledgePlanOnTrack, ageDays), staleClass };
+    })
+    // Reuse Portfolio Focus's OWN, already-calibrated pledge-staleness
+    // classification (lib/portfolio-focus/stale-balance.ts) rather than
+    // a second age rule -- a real 5+ year old balance is a dead
+    // bookkeeping artifact, never a live "worth a follow-up" situation.
+    // (Found live during Phase 1 calibration: several real Independent
+    // Staging pledges are 12-27 YEARS old and were wrongly surfacing as
+    // "gone stale" DO items before this guard was added -- see the
+    // calibration doc.) Applied per pledge now, same as every other
+    // check here.
+    .filter((status) => status.staleClass !== "immaterial_artifact")
+    .filter((status) => {
+      const total = status.pledge.totalCents > 0 ? status.pledge.totalCents : status.pledge.balanceCents;
+      const remainingRatio = total > 0 ? status.pledge.balanceCents / total : 1;
+      return remainingRatio > 0.25; // near-complete -- commitment_progress's territory, not a follow-up gap
+    });
+}
 
-  const ageDays = safeDays(donor.pledgeAgeDays);
-  const hasPlan = donor.pledgePlanOnTrack !== null;
-  const isStale = (hasPlan && donor.pledgePlanOnTrack === false) || (!hasPlan && ageDays !== null && ageDays >= 60);
-  if (!isStale) return null;
+function detectPledgeFollowUp(donor: PortfolioFocusDonorInput): DetectedSignal | null {
+  const statuses = evaluatePledgeStatuses(donor);
+  const actionable = statuses.filter((s) => s.isActionable);
+  if (actionable.length === 0) return null;
+
+  // A pledge whose OWN active plan has fallen behind schedule is a more
+  // urgent, more specific signal than a plan-less pledge that has
+  // simply aged -- a broken active commitment deserves the headline
+  // before a long-dormant, never-managed one. Tie-break: larger open
+  // balance first (the more financially material gap).
+  actionable.sort((a, b) => (a.hasPlan === b.hasPlan ? b.pledge.balanceCents - a.pledge.balanceCents : a.hasPlan ? -1 : 1));
+  const primary = actionable[0];
+  const total = primary.pledge.totalCents > 0 ? primary.pledge.totalCents : primary.pledge.balanceCents;
+  const campaignName = primary.pledge.campaign ?? "pledge";
+
+  // Preserve legitimate status for every OTHER open pledge this donor
+  // has (requirement: never let picking one actionable pledge as the
+  // Brief's single headline silently lose what's true about the rest) --
+  // named individually, not folded into a count.
+  const others = statuses.filter((s) => s !== primary);
+  const otherPledgeNotes = others.map((other) => {
+    const label = other.pledge.campaign ?? "another open pledge";
+    if (other.hasPlan) return other.pledge.pledgePlanOnTrack ? `A separate ${label} payment plan is on track.` : `A separate ${label} payment plan is also behind schedule.`;
+    return `A separate ${label} pledge (${fmtCents(other.pledge.balanceCents)}) is also open${other.isActionable ? " and stale" : ""}.`;
+  });
 
   const contactDays = safeDays(donor.daysSinceSubstantiveContact);
   const warm = contactDays !== null && contactDays <= 60;
-  const needsVerification = result.pledgeStaleClass === "legacy_needs_verification";
+  const needsVerification = primary.staleClass === "legacy_needs_verification";
 
   return {
     situationType: "pledge_follow_up",
     disposition: "DO",
     priorityTier: 1,
     priorityOrder: 2,
-    headline: "Open pledge has gone stale",
-    explanation: `A ${fmtCents(total)} pledge (${fmtCents(donor.openPledgeBalanceCents)} still open) has had no recorded payment activity in ${ageDays ?? "an unknown number of"} days${hasPlan ? ", and its payment plan is currently behind schedule" : ""}.`,
+    // A genuinely overdue INSTALLMENT (an active plan behind schedule)
+    // gets its own payment-plan-specific headline, never the generic
+    // "gone stale" wording -- that wording is reserved for a pledge with
+    // no plan at all. An on-track plan can never reach this function at
+    // all (filtered out by isOpenPledgeActionable above), so this
+    // headline is never shown for a current, on-schedule commitment.
+    headline: primary.hasPlan ? `${campaignName} payment plan is behind schedule` : `${campaignName} has gone stale`,
+    explanation: `A ${fmtCents(total)} ${campaignName} pledge (${fmtCents(primary.pledge.balanceCents)} still open) has had no recorded payment activity in ${primary.ageDays ?? "an unknown number of"} days${primary.hasPlan ? ", and its payment plan is currently behind schedule" : ""}.${otherPledgeNotes.length > 0 ? ` ${otherPledgeNotes.join(" ")}` : ""}`,
     whyNow: warm ? "Recent, unrelated contact shows the relationship is active -- a friendly follow-up on this pledge is low-risk." : "This is an old, unresolved financial commitment worth a status check.",
     whatFosDoesNotKnow: warm ? null : "Whether this pledge has been discussed informally since its last recorded activity.",
-    possibleAction: "Follow up on the open pledge balance.",
+    possibleAction: primary.hasPlan ? `Follow up on the behind-schedule ${campaignName} payment plan.` : `Follow up on the open ${campaignName} balance.`,
     confidence: needsVerification ? "limited" : warm ? "high" : "medium",
-    evidence: [{ kind: "pledge_balance", detail: `${fmtCents(donor.openPledgeBalanceCents)} of ${fmtCents(total)} open, ${hasPlan ? "plan behind schedule" : "no active plan"}` }],
+    evidence: [{ kind: "pledge_balance", detail: `${fmtCents(primary.pledge.balanceCents)} of ${fmtCents(total)} open (${campaignName}), ${primary.hasPlan ? "plan behind schedule" : "no active plan"}` }],
   };
 }
 
 // --- Tier 2 --------------------------------------------------------
 
-function detectCommitmentProgress(donor: PortfolioFocusDonorInput, result: PortfolioFocusResult): DetectedSignal | null {
-  if (donor.openPledgeBalanceCents == null || donor.openPledgeTotalCents == null || donor.openPledgeTotalCents <= 0) return null;
-  if (result.pledgeStaleClass === "immaterial_artifact") return null; // an ancient dead balance is not "healthy progress" -- see detectPledgeFollowUp
-  const remainingRatio = donor.openPledgeBalanceCents / donor.openPledgeTotalCents;
-  if (remainingRatio > 0.25) return null;
-  if (donor.pledgePlanOnTrack === false) return null; // behind schedule is pledge_follow_up's territory, not "healthy progress"
+function detectCommitmentProgress(donor: PortfolioFocusDonorInput): DetectedSignal | null {
+  const candidates = (donor.openPledges ?? [])
+    .filter((pledge) => pledge.totalCents > 0)
+    .map((pledge) => ({ pledge, remainingRatio: pledge.balanceCents / pledge.totalCents }))
+    .filter(({ remainingRatio }) => remainingRatio <= 0.25)
+    .filter(({ pledge }) => pledge.pledgePlanOnTrack !== false) // behind schedule is pledge_follow_up's territory, not "healthy progress" -- per pledge now
+    .filter(({ pledge }) => classifyPledgeStaleness({
+      openPledgeBalanceCents: pledge.balanceCents,
+      pledgeCommitmentAgeDays: pledge.pledgeCommitmentAgeDays,
+      pledgeAgeDays: pledge.pledgeAgeDays,
+      pledgePlanOnTrack: pledge.pledgePlanOnTrack,
+      daysSinceSubstantiveContact: donor.daysSinceSubstantiveContact,
+    }) !== "immaterial_artifact"); // an ancient dead balance is not "healthy progress" -- see detectPledgeFollowUp
+  if (candidates.length === 0) return null;
 
+  // Most-paid-down (lowest remaining ratio) wins when more than one
+  // pledge qualifies as near-complete.
+  candidates.sort((a, b) => a.remainingRatio - b.remainingRatio);
+  const { pledge, remainingRatio } = candidates[0];
   const pctPaid = Math.round((1 - remainingRatio) * 100);
+  const campaignLabel = pledge.campaign ? ` ${pledge.campaign}` : "";
   return {
     situationType: "commitment_progress",
     disposition: "KNOW",
     priorityTier: 2,
     priorityOrder: 3,
     headline: "Commitment nearly fulfilled",
-    explanation: `${fmtCents(donor.openPledgeBalanceCents)} remains of a ${fmtCents(donor.openPledgeTotalCents)} pledge -- ${pctPaid}% already paid, on track.`,
+    explanation: `${fmtCents(pledge.balanceCents)} remains of a ${fmtCents(pledge.totalCents)}${campaignLabel} pledge -- ${pctPaid}% already paid, on track.`,
     whyNow: "Worth knowing this is close to done -- not a stewardship gap and not a new ask opportunity.",
     whatFosDoesNotKnow: null,
     possibleAction: null,
-    confidence: donor.pledgePlanOnTrack === true ? "high" : "medium",
-    evidence: [{ kind: "pledge_balance", detail: `${pctPaid}% paid, ${fmtCents(donor.openPledgeBalanceCents)} remaining` }],
+    confidence: pledge.pledgePlanOnTrack === true ? "high" : "medium",
+    evidence: [{ kind: "pledge_balance", detail: `${pctPaid}% paid, ${fmtCents(pledge.balanceCents)} remaining` }],
   };
 }
 
@@ -487,8 +559,8 @@ export function detectSituations(
   const signals = [
     detectExplicitFollowUp(donor, facts),
     detectAskResolution(asks, now),
-    detectPledgeFollowUp(donor, result),
-    detectCommitmentProgress(donor, result),
+    detectPledgeFollowUp(donor),
+    detectCommitmentProgress(donor),
     detectStewardshipMoment(donor, result, facts),
     detectFinancialChange(donor, result),
     detectRecentMeaningfulGift(donor),

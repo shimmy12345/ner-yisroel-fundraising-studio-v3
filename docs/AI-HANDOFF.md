@@ -35225,3 +35225,165 @@ rounds already established (Goldenberg's own two pledges, already
 fully documented above). **Per the owner's explicit instruction,
 awaiting approval of this design before writing or deploying any
 code.**
+
+## Multi-Open-Pledge Independent Evaluation -- IMPLEMENTED AND TESTED (2026-10-13) -- NOT DEPLOYED
+
+The owner approved the design above. Implemented exactly as designed,
+with one small cleanup beyond the design doc (removing the now-unused
+`result` parameter from the two rewritten detectors rather than leaving
+it as dead weight -- noted below). **Not deployed to Production** --
+stopping here per the owner's explicit instruction, for independent
+review.
+
+### Files changed (7 production, 3 test, 1 new test)
+
+- `lib/relationships/pledge-payment-plan.ts` -- two new, small, pure,
+  exported primitives: `evaluateOpenPledgePlanStatus()` (wraps the
+  real, unmodified `evaluatePaymentPlan()` for one pledge's own plan
+  row) and `isOpenPledgeActionable()` (the one shared "is this specific
+  pledge's status actionable" boolean rule). Nothing else in this file
+  changed -- `evaluatePaymentPlan`/`matchPaymentsToCycles` (the
+  donor-61566 fix) are byte-for-byte untouched.
+- `lib/portfolio-focus/data.ts` -- added `ga.source_campaign` to the
+  existing giving query (one column, same WHERE/JOIN).
+- `lib/portfolio-focus/aggregate.ts` -- extracted the existing
+  single-pledge evaluation logic into a new, equivalent
+  `evaluateOpenPledge()` helper (confirmed byte-for-byte behavior-
+  preserving by the full existing Portfolio Focus test suite re-running
+  unchanged), then called it once per EVERY open pledge a donor has to
+  build a new, additive `openPledges` array. The existing
+  `openPledgeRow`/singular fields that feed Portfolio Focus's own
+  calibrated scoring/ranking are unchanged in both code and behavior.
+- `lib/portfolio-focus/types.ts` -- new `OpenPledgeEvidence` type and
+  an optional `openPledges?: OpenPledgeEvidence[]` field on
+  `PortfolioFocusDonorInput`, with an explicit doc comment that it is
+  NOT part of the calibrated model this file's own header warns against
+  extending.
+- `lib/fundraising-intelligence/situations.ts` -- `detectPledgeFollowUp`
+  and `detectCommitmentProgress` rewritten to read `donor.openPledges`
+  and evaluate every entry independently via the shared
+  `isOpenPledgeActionable()`/the real `classifyPledgeStaleness()`
+  (reused unmodified). Beyond the design doc: both functions' now-
+  unused `result: PortfolioFocusResult` parameter was removed entirely
+  (and the two call sites in `detectSituations` updated to match)
+  rather than left as dead weight -- a cleaner outcome than the design
+  doc's placeholder `_result`, confirmed zero other callers exist.
+  `detectPledgeFollowUp` now: evaluates every open pledge, filters to
+  the genuinely actionable ones, picks the highest-priority one
+  (a behind-schedule ACTIVE PLAN outranks a plan-less stale pledge;
+  larger balance tie-breaks), names that pledge's own campaign in the
+  headline, uses PLAN-specific wording ("payment plan is behind
+  schedule") instead of generic "has gone stale" wording when the
+  primary issue is an active plan running late, and appends one
+  sentence per OTHER open pledge naming its own status so nothing is
+  silently lost. `detectCommitmentProgress` updated the same way
+  (independently finds the most-paid-down near-complete, non-behind-
+  schedule pledge).
+- `lib/workspace/live-data.ts` -- the `openPledgeByDonor` map (feeds
+  the Suggested Action/`follow_up_pledge` SUGGESTED-section candidate)
+  now groups every donor's open-pledge candidates and picks the single
+  most ACTIONABLE one via the same shared primitives, falling back to
+  the prior "most recent" choice when none is actionable -- identical
+  result for the overwhelming majority of donors who have exactly one
+  open pledge.
+- `app/donors/[id]/page.tsx` -- the donor page's own `openPledgeSource`
+  (feeds Suggested Action) gets the identical selection logic, using
+  this donor's own already-loaded `paymentEvents`/`paymentPlans`.
+- Tests: `tests/pledge-payment-plan.test.mjs` (new unit tests for the
+  two shared primitives), `tests/fundraising-intelligence.test.mjs`
+  (its `donor()` fixture helper now auto-synthesizes a one-entry
+  `openPledges` array from the pre-existing singular fields, so every
+  one of that file's pre-existing fixtures keeps working unchanged),
+  `scripts/run-tests.mjs` (registered the new test file), and the new
+  `tests/multi-open-pledge.test.mjs`.
+
+### Compatibility risks identified during implementation (and how each was resolved)
+
+1. **`PortfolioFocusResult.pledgeStaleClass` becoming dead in two
+   functions.** Once per-pledge `classifyPledgeStaleness()` calls
+   replaced the single donor-level one, the `result` parameter these
+   two functions received had nothing left to read. Resolved by
+   removing the parameter entirely (and its two call-site arguments)
+   rather than keeping an unused parameter -- confirmed via `tsc`/lint
+   that no other code depends on this exact signature.
+2. **Existing `tests/fundraising-intelligence.test.mjs` fixtures
+   predate `openPledges`.** Every existing test in that file sets only
+   the singular `openPledgeBalanceCents`/etc. fields; since
+   `detectPledgeFollowUp`/`detectCommitmentProgress` no longer read
+   those fields at all, every one of those tests initially broke (the
+   detector now saw zero open pledges). Resolved in the test fixture
+   helper itself (auto-synthesize the equivalent one-entry array from
+   the singular fields when `openPledges` isn't explicitly overridden)
+   -- confirmed by that file passing unchanged again afterward, with
+   zero changes to any individual test case's own assertions.
+3. **The `remainingRatio` near-complete filter and the
+   `immaterial_artifact` staleness-class filter both used to run once
+   per donor; moving them per-pledge changes WHICH pledge can
+   independently qualify.** Verified deliberately with new test cases
+   (Goldenberg's own two pledges have very different ratios/ages) that
+   each pledge's own filtering is now independent, matching the
+   design's explicit intent.
+4. **Risk NOT taken**: `RecommendationEvidence.giving.openPledge` and
+   Portfolio Focus's own calibrated scoring (`score.ts`/`components.ts`/
+   the main ranked list view) were deliberately left completely
+   untouched, per the design's own scope boundary -- confirmed by the
+   diff itself (neither file appears in the changed-files list) and by
+   the full existing test suite (Meeting Brief, solicitation
+   suppression, donor ranking, Portfolio Focus's own regression/
+   materiality/components/today-view/dedicated-view tests) passing
+   completely unchanged.
+
+### Test results
+
+`node scripts/run-tests.mjs` -> **182/182 test files passed** (181
+pre-existing + 1 new `tests/multi-open-pledge.test.mjs`). `tsc --noEmit`
+-> clean. `pnpm run build:production-independent` -> clean, exit 0.
+`pnpm run lint` -> zero new warnings/errors in any of the 11 touched
+files (confirmed by name-filtering the full lint run's own output).
+
+New regression coverage, mapped to the owner's own 8-item testing list:
+1. Goldenberg's exact scenario (KOLX2026 on track, CHSP2026 stale) --
+   `tests/multi-open-pledge.test.mjs` section 1, plus the cross-surface
+   consistency section (donor-page/Daily-Agenda selection logic agrees
+   with Fundraising Intelligence Brief's own choice).
+2. Active plan with no overdue installments -- never stale, single-
+   pledge case.
+3. Active plan with a genuinely overdue installment -- payment-plan-
+   specific wording, never the generic stale headline.
+4. Old pledge with no payment plan -- still correctly qualifies as
+   stale (explicitly NOT suppressed by this fix).
+5. A late payment resolving an overdue installment -- the "before"/
+   "after" pair, demonstrating the warning disappears with nothing to
+   regenerate.
+6. The same "before"/"after" pair IS the proof that a previously-
+   generated recommendation whose conditions resolved disappears
+   automatically (no persisted `recommendations` row exists for this
+   situation type at all -- re-confirmed this round, same finding as
+   the prior investigation round).
+7. Consistency across donor page/Daily Agenda and Fundraising
+   Intelligence Brief -- the dedicated cross-surface section, run over
+   BOTH chronological orderings.
+8. System-wide, multiple donors -- a 3-donor test (`multi-a`/`multi-b`/
+   `multi-c`), each independently and correctly resolved, plus the
+   explicit duplicate/contradiction guard (two problem pledges on one
+   donor still produce exactly one `pledge_follow_up` signal, never
+   two).
+9. Both chronological orderings explicitly (the owner's own
+   requirement) -- Goldenberg's real ordering (newer pledge has the
+   plan) AND the deliberate inverse (older pledge has the plan) are
+   each their own dedicated test case, at both the Fundraising
+   Intelligence Brief level and the donor-page/Daily-Agenda selection
+   level.
+10. Donor 61566's own reconciliation fix re-confirmed intact this
+    round: `tests/recurring-payment-alert-e2e.test.mjs` (including its
+    D1-D4 Rosenbaum-shaped cases) re-run in isolation, all 8 still
+    passing, byte-for-byte unchanged files.
+
+### Not done this round
+
+No deploy was performed. No donor, pledge, payment, or payment-plan
+record was created, modified, or deleted -- every change this round is
+application code and test code only. No `wrangler.*.jsonc` file, no
+migration, no GitHub Actions workflow was touched. Staging was not read
+or written. **Per the owner's explicit instruction, stopping here for
+independent review before any Production deployment.**

@@ -9,7 +9,7 @@ import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../r
 import type { SynthesisFact } from "../relationships/fact-synthesis.ts";
 import { buildDonorRecommendation } from "../relationships/recommendation-rank.ts";
 import { CONTINUE_CONVERSATION_WINDOW_DAYS, type RecommendationCandidateKind } from "../relationships/recommendation-candidates.ts";
-import { deriveFulfilledCultivationByDonor, evaluatePledgeRenewal, evaluatePaymentPlan, evaluateRecurringPaymentAlert } from "../relationships/pledge-payment-plan.ts";
+import { deriveFulfilledCultivationByDonor, evaluatePledgeRenewal, evaluatePaymentPlan, evaluateRecurringPaymentAlert, evaluateOpenPledgePlanStatus, isOpenPledgeActionable } from "../relationships/pledge-payment-plan.ts";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../giving/acknowledgment.ts";
 import type { HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { selectSuggestionDonorIds, HOMEPAGE_MAX_RESULTS, CONTACT_GAP_POOL_SIZE } from "./suggestion-candidates.ts";
@@ -449,14 +449,14 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     const contactedAfterGift = (contactByDonor.get(item.donor_id) ?? 0) >= (item.activity_date ?? 0);
     if ((item.paid_cents ?? 0) > 0 && recent && !contactedAfterGift && !recentGiftByDonor.has(item.donor_id)) recentGiftByDonor.set(item.donor_id, item);
   }
-  const openPledgeByDonor = new Map<string, GivingRow>();
-  for (const item of giving.results) if ((item.balance_cents ?? 0) > 0 && !openPledgeByDonor.has(item.donor_id)) openPledgeByDonor.set(item.donor_id, item);
   // Grouped by pledge (giving_activities.id), not by donor -- a donor's
-  // open pledge is only ever one row (openPledgeByDonor above), but this
-  // map must be keyed on the exact pledge id so a payment linked to a
-  // DIFFERENT pledge (or a different donor entirely) can never leak into
-  // this one's "last activity" date. Feeds resolveOpenPledgeActivityDate
-  // in the per-donor loop below.
+  // represented open pledge is only ever one row (openPledgeByDonor
+  // below), but this map must be keyed on the exact pledge id so a
+  // payment linked to a DIFFERENT pledge (or a different donor
+  // entirely) can never leak into this one's "last activity" date.
+  // Feeds resolveOpenPledgeActivityDate in the per-donor loop below,
+  // and (2026-10-13) the per-candidate selection loop that builds
+  // openPledgeByDonor itself.
   const paymentDatesByPledge = new Map<string, number[]>();
   // Parallel to paymentDatesByPledge (same filter, same push order) --
   // Late-Payment Dead-Zone Fix, 2026-10-13, see docs/AI-HANDOFF.md's
@@ -475,6 +475,42 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // (enforced by the create route, not a DB constraint) -- safe to key
   // by pledge_activity_id directly.
   const paymentPlanByPledge = new Map(paymentPlanRows.results.map((item) => [item.pledge_activity_id, item]));
+  // Multi-Open-Pledge Independent Evaluation (2026-10-13, see
+  // docs/AI-HANDOFF.md's Goldenberg/JL 64792 investigation). A donor can
+  // have more than one simultaneously open pledge; this picks the single
+  // MOST ACTIONABLE one (an off-track plan, or a plan-less pledge that
+  // has genuinely gone stale) to represent the donor everywhere a surface
+  // can only show one -- the Suggested Action/follow_up_pledge candidate
+  // below, and (via the same rule, see app/donors/[id]/page.tsx)
+  // the donor page -- using the SAME shared isOpenPledgeActionable()
+  // primitive Fundraising Intelligence Brief's own, fully independent
+  // per-pledge evaluation uses, so the two can never again disagree
+  // about which pledge actually needs attention. A donor with exactly
+  // one open pledge is completely unaffected (identical result to the
+  // prior "most recent" rule, since there is only one candidate).
+  const openPledgeCandidatesByDonor = new Map<string, GivingRow[]>();
+  for (const item of giving.results) {
+    if ((item.balance_cents ?? 0) <= 0) continue;
+    const list = openPledgeCandidatesByDonor.get(item.donor_id);
+    if (list) list.push(item); else openPledgeCandidatesByDonor.set(item.donor_id, [item]);
+  }
+  const openPledgeByDonor = new Map<string, GivingRow>();
+  for (const [donorId, candidates] of openPledgeCandidatesByDonor) {
+    // giving.results is ORDER BY activity_date DESC, so candidates
+    // already arrive most-recent-first -- the first ACTIONABLE one found
+    // wins; if none is actionable, the most recent (candidates[0]) is
+    // used, preserving today's exact behavior for an all-healthy donor.
+    let chosen = candidates[0];
+    for (const candidate of candidates) {
+      const linkedPaymentDates = paymentDatesByPledge.get(candidate.id) ?? [];
+      const linkedPaymentAmountsCents = paymentAmountsCentsByPledge.get(candidate.id) ?? [];
+      const { hasPlan, isOnTrack } = evaluateOpenPledgePlanStatus(paymentPlanByPledge.get(candidate.id), linkedPaymentDates, linkedPaymentAmountsCents, candidate.balance_cents ?? 0, now, timezone);
+      const activityDate = resolveOpenPledgeActivityDate(candidate.activity_date, linkedPaymentDates);
+      const ageDays = activityDate !== null ? Math.floor((now - activityDate) / 86400) : null;
+      if (isOpenPledgeActionable(hasPlan, isOnTrack, ageDays)) { chosen = candidate; break; }
+    }
+    openPledgeByDonor.set(donorId, chosen);
+  }
   // "Existing commitment fulfilled, consider the next one" -- pure
   // derivation (lib/relationships/pledge-payment-plan.ts's
   // deriveFulfilledCultivationByDonor, unit-tested there); no new D1

@@ -389,6 +389,60 @@ export function evaluatePaymentPlan(
   };
 }
 
+// Multi-Open-Pledge Independent Evaluation (2026-10-13, see
+// docs/AI-HANDOFF.md's Goldenberg/JL 64792 investigation). A donor can
+// have more than one simultaneously open pledge. These two small, pure
+// functions are the ONE shared "is a SPECIFIC pledge's own status
+// actionable" rule -- reused by lib/portfolio-focus/aggregate.ts
+// (Fundraising Intelligence Brief's per-pledge evidence),
+// lib/workspace/live-data.ts, and app/donors/[id]/page.tsx (both
+// picking the single MOST actionable open pledge to represent a donor
+// where the surface can only show one), so the three surfaces can never
+// again independently invent three different answers to "is this
+// pledge stale" the way the pre-fix codebase did.
+
+export type RawPledgePaymentPlanRow = { installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
+
+// Evaluates ONE pledge's own plan status -- `hasPlan: false` (and
+// `isOnTrack: null`) when no plan row is linked to this exact pledge,
+// matching this module's own established "null = no active plan"
+// convention everywhere else. Calls the real, unmodified
+// evaluatePaymentPlan() (this session's donor-61566 late-payment fix,
+// reused verbatim -- never a second, competing evaluation) when a plan
+// exists.
+export function evaluateOpenPledgePlanStatus(
+  plan: RawPledgePaymentPlanRow | null | undefined,
+  linkedPaymentDates: number[],
+  linkedPaymentAmountsCents: number[],
+  balanceCents: number,
+  now: number,
+  timezone: string,
+): { hasPlan: boolean; isOnTrack: boolean | null } {
+  if (!plan) return { hasPlan: false, isOnTrack: null };
+  const fields: PaymentPlanFields = {
+    nextExpectedPaymentAt: plan.next_expected_payment_at,
+    expectedDayOfMonth: plan.expected_day_of_month,
+    finalExpectedPaymentAt: plan.final_expected_payment_at,
+    endedAt: null,
+    installmentAmountCents: plan.installment_amount_cents,
+  };
+  const evaluation = evaluatePaymentPlan(fields, linkedPaymentDates, balanceCents, now, timezone, linkedPaymentAmountsCents);
+  return { hasPlan: true, isOnTrack: evaluation.isOnTrack };
+}
+
+export const STALE_PLEDGE_AGE_DAYS = 60;
+
+// The exact rule a stale-pledge/follow-up recommendation is built on,
+// per pledge: a pledge WITH an active plan is only ever "actionable"
+// when that plan has fallen behind schedule -- an on-track plan is
+// never actionable regardless of the pledge's raw age. A pledge with NO
+// plan is actionable once its own last-activity age crosses the
+// threshold. Never reads any OTHER pledge's status -- callers evaluate
+// every open pledge through this same function independently.
+export function isOpenPledgeActionable(hasPlan: boolean, isOnTrack: boolean | null, ageDays: number | null, staleAgeThresholdDays: number = STALE_PLEDGE_AGE_DAYS): boolean {
+  return (hasPlan && isOnTrack === false) || (!hasPlan && ageDays !== null && ageDays >= staleAgeThresholdDays);
+}
+
 // Corrects a newly-entered next-expected-payment anchor that is already
 // in the past relative to `now` -- the "born late" problem: a plan
 // created today with a fundraiser-entered anchor from weeks earlier

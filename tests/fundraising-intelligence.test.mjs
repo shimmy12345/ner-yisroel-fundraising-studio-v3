@@ -19,7 +19,7 @@ const DAY = 86400;
 const dollars = (d) => d * 100;
 
 function donor(overrides) {
-  return {
+  const base = {
     donorId: "x", displayName: "x", donorCode: null,
     lifetimeCents: 0, last365Cents: 0, prior365Cents: 0, distinctActivityYears: 0,
     historicalPeakGiftCents: null, historicalPeakCommitmentCents: null,
@@ -33,6 +33,30 @@ function donor(overrides) {
     recommendation: null,
     ...overrides,
   };
+  // Multi-Open-Pledge Independent Evaluation (2026-10-13, see
+  // docs/AI-HANDOFF.md) -- detectPledgeFollowUp/detectCommitmentProgress
+  // now read donor.openPledges, never the singular openPledgeBalanceCents
+  // etc. fields directly. Every pre-existing fixture in this file sets
+  // only the singular (single-pledge) fields -- auto-synthesize the
+  // equivalent one-entry array here so none of them need individual
+  // updates, unless a test explicitly overrides `openPledges` itself
+  // (the new multi-pledge cases do, to test two pledges at once).
+  if (base.openPledges === undefined) {
+    base.openPledges = base.openPledgeBalanceCents != null
+      ? [{
+          pledgeActivityId: `${base.donorId}-pledge`,
+          campaign: null,
+          description: null,
+          balanceCents: base.openPledgeBalanceCents,
+          totalCents: base.openPledgeTotalCents ?? base.openPledgeBalanceCents,
+          activityDate: null,
+          pledgeAgeDays: base.pledgeAgeDays,
+          pledgeCommitmentAgeDays: base.pledgeCommitmentAgeDays,
+          pledgePlanOnTrack: base.pledgePlanOnTrack,
+        }]
+      : [];
+  }
+  return base;
 }
 
 // Same realistic-shaped background population as the Portfolio Focus

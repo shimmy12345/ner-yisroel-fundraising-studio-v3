@@ -14,13 +14,13 @@ import { findMostActionableFact, resolveRelationshipSnapshot, type SynthesisFact
 import { nextYahrtzeitOccurrence, type HebrewMonthName } from "../calendar/hebrew-date.ts";
 import { nextGregorianRecurrence } from "../calendar/gregorian-recurring-date.ts";
 import type { ImportantDateType } from "../important-dates/validation.ts";
-import type { PortfolioFocusDonorInput } from "./types.ts";
+import type { OpenPledgeEvidence, PortfolioFocusDonorInput } from "./types.ts";
 
 const DAY = 86400;
 const KNOWN_GIVING_CATEGORIES = new Set(["completed_gift", "open_pledge", "partially_paid_pledge"]);
 
 export type RawDonorRow = { id: string; display_name: string; donor_code: string | null; relationship_summary: string | null; institutional_memory: string | null };
-export type RawGivingRow = { id: string; donor_id: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; category: string; item_type: string | null; description: string | null };
+export type RawGivingRow = { id: string; donor_id: string; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; category: string; item_type: string | null; description: string | null; source_campaign: string | null };
 export type RawAskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; status: string; asked_at: number; source_interaction_id: string | null };
 export type RawInteractionRow = { donor_id: string; type: string; occurred_at: number; role: string | null };
 export type RawReminderRow = { recommendation_id: string; donor_id: string; action: string; reason: string; due_at: number | null };
@@ -99,6 +99,35 @@ function cashEventsForDonor(donorGiving: RawGivingRow[], paymentsByPledge: Map<s
   return events.sort((a, b) => (b.date ?? -Infinity) - (a.date ?? -Infinity));
 }
 
+// Evaluates ONE pledge row's own activity date, age, and payment-plan
+// status -- pure, no D1. Extracted 2026-10-13 (Multi-Open-Pledge
+// Independent Evaluation, see docs/AI-HANDOFF.md) so the SAME logic
+// that used to run once per donor (against only the single
+// "representative" pledge) can also run once per EVERY open pledge a
+// donor has, with byte-identical results for the representative
+// pledge's own call -- confirmed by the existing Portfolio Focus test
+// suite re-running unchanged.
+function evaluateOpenPledge(pledgeRow: RawGivingRow, plan: RawPaymentPlanRow | undefined, linkedPayments: { date: number; cents: number }[], now: number, timezone: string) {
+  const linkedPaymentDates = linkedPayments.map((p) => p.date);
+  const linkedPaymentAmountsCents = linkedPayments.map((p) => p.cents);
+  const activityDate = resolveOpenPledgeActivityDate(pledgeRow.activity_date, linkedPaymentDates);
+  const pledgeAgeDays = activityDate !== null ? Math.floor((now - activityDate) / DAY) : null;
+  const pledgeCommitmentAgeDays = pledgeRow.activity_date != null && pledgeRow.activity_date <= now ? Math.floor((now - pledgeRow.activity_date) / DAY) : null;
+  const activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[]; linkedPaymentAmountsCents: number[] }) | null = plan
+    ? { installmentAmountCents: plan.installment_amount_cents, finalExpectedPaymentAt: plan.final_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, nextExpectedPaymentAt: plan.next_expected_payment_at, endedAt: null, linkedPaymentDates, linkedPaymentAmountsCents }
+    : null;
+  let pledgePlanOnTrack: boolean | null = null;
+  let pledgePlanMilestoneDaysBefore: 15 | 10 | 5 | null = null;
+  if (activePaymentPlan) {
+    const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, pledgeRow.balance_cents ?? 0, now, timezone, linkedPaymentAmountsCents);
+    // See docs/AI-HANDOFF.md's payment-plan-intelligence investigation
+    // for why isOnTrack (never !isLate) is the one correct source here.
+    pledgePlanOnTrack = evaluation.isOnTrack;
+    pledgePlanMilestoneDaysBefore = evaluation.milestoneDaysBefore;
+  }
+  return { activityDate, pledgeAgeDays, pledgeCommitmentAgeDays, activePaymentPlan, pledgePlanOnTrack, pledgePlanMilestoneDaysBefore };
+}
+
 export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: number, timezone: string): PortfolioFocusAggregation {
   for (const g of raw.giving) if (!KNOWN_GIVING_CATEGORIES.has(g.category)) throw new Error(`Portfolio Focus: unexpected giving_activities category "${g.category}" -- refusing to silently ignore it`);
   for (const g of raw.giving) if (!g.id) throw new Error(`Portfolio Focus: a giving_activities row for donor ${g.donor_id} has no id -- payment-audit join would silently fail`);
@@ -166,36 +195,42 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
     let pledgePlanOnTrack: boolean | null = null;
     let pledgePlanMilestoneDaysBefore: 15 | 10 | 5 | null = null;
     if (openPledgeRow) {
-      const linkedPaymentDates = (paymentsByPledge.get(openPledgeRow.id) ?? []).map((p) => p.date);
-      // Parallel to linkedPaymentDates (2026-10-13 late-payment dead-zone
-      // fix, see docs/AI-HANDOFF.md) -- feeds evaluatePaymentPlan's
-      // optional amount parameter so a late payment can only satisfy a
-      // cycle if its own amount actually covers the installment.
-      const linkedPaymentAmountsCents = (paymentsByPledge.get(openPledgeRow.id) ?? []).map((p) => p.cents);
-      const plan = paymentPlanByPledge.get(openPledgeRow.id);
-      const activityDate = resolveOpenPledgeActivityDate(openPledgeRow.activity_date, linkedPaymentDates);
-      pledgeAgeDays = activityDate !== null ? Math.floor((now - activityDate) / DAY) : null;
-      if (openPledgeRow.activity_date != null && openPledgeRow.activity_date <= now) pledgeCommitmentAgeDays = Math.floor((now - openPledgeRow.activity_date) / DAY);
-      const activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[]; linkedPaymentAmountsCents: number[] }) | null = plan
-        ? { installmentAmountCents: plan.installment_amount_cents, finalExpectedPaymentAt: plan.final_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, nextExpectedPaymentAt: plan.next_expected_payment_at, endedAt: null, linkedPaymentDates, linkedPaymentAmountsCents }
-        : null;
-      openPledgeForEvidence = { balanceCents: openPledgeRow.balance_cents ?? 0, campaign: null, description: openPledgeRow.description || openPledgeRow.item_type, activityDate, activePaymentPlan };
-      if (activePaymentPlan) {
-        const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, openPledgeRow.balance_cents ?? 0, now, timezone, linkedPaymentAmountsCents);
-        // BUG FIX (see docs/AI-HANDOFF.md's payment-plan-intelligence
-        // investigation): this used to be `!evaluation.isLate`, which
-        // reads as "on track" the moment a plan's final expected date has
-        // passed -- evaluatePaymentPlan deliberately forces isLate back
-        // to false once finalDatePassed is true (lateness stops being
-        // evaluated at that point; see isPlanEndedWithBalance instead), so
-        // the old formula silently misclassified an ended-with-balance
-        // plan (e.g. the real donor 68231 case) as healthy. isOnTrack
-        // already accounts for finalDatePassed/isCompleted/isActive
-        // together, so this is the one correct single source of truth.
-        pledgePlanOnTrack = evaluation.isOnTrack;
-        pledgePlanMilestoneDaysBefore = evaluation.milestoneDaysBefore;
-      }
+      const linkedPayments = paymentsByPledge.get(openPledgeRow.id) ?? [];
+      const evaluated = evaluateOpenPledge(openPledgeRow, paymentPlanByPledge.get(openPledgeRow.id), linkedPayments, now, timezone);
+      pledgeAgeDays = evaluated.pledgeAgeDays;
+      pledgeCommitmentAgeDays = evaluated.pledgeCommitmentAgeDays;
+      pledgePlanOnTrack = evaluated.pledgePlanOnTrack;
+      pledgePlanMilestoneDaysBefore = evaluated.pledgePlanMilestoneDaysBefore;
+      openPledgeForEvidence = { balanceCents: openPledgeRow.balance_cents ?? 0, campaign: null, description: openPledgeRow.description || openPledgeRow.item_type, activityDate: evaluated.activityDate, activePaymentPlan: evaluated.activePaymentPlan };
     }
+
+    // Multi-Open-Pledge Independent Evaluation (2026-10-13, see
+    // docs/AI-HANDOFF.md's Goldenberg/JL 64792 investigation) -- EVERY
+    // open pledge this donor has, each independently evaluated through
+    // the exact same evaluateOpenPledge() call as openPledgeRow above.
+    // Deliberately ADDITIVE: openPledgeRow/openPledgeForEvidence/the
+    // singular pledgePlanOnTrack etc. above (which feed Portfolio
+    // Focus's own CALIBRATED scoring/ranking/UI, untouched by this
+    // round) are computed exactly as before -- this array exists
+    // purely for Fundraising Intelligence Brief's own detectors, which
+    // must never collapse a donor's multiple pledges down to one before
+    // deciding whether either is stale.
+    const openPledgesRaw = donorGiving.filter((g) => (g.balance_cents ?? 0) > 0);
+    const openPledges: OpenPledgeEvidence[] = openPledgesRaw.map((pledgeRow) => {
+      const linkedPayments = paymentsByPledge.get(pledgeRow.id) ?? [];
+      const evaluated = evaluateOpenPledge(pledgeRow, paymentPlanByPledge.get(pledgeRow.id), linkedPayments, now, timezone);
+      return {
+        pledgeActivityId: pledgeRow.id,
+        campaign: pledgeRow.source_campaign,
+        description: pledgeRow.description || pledgeRow.item_type,
+        balanceCents: pledgeRow.balance_cents ?? 0,
+        totalCents: (pledgeRow.paid_cents ?? 0) + (pledgeRow.balance_cents ?? 0),
+        activityDate: evaluated.activityDate,
+        pledgeAgeDays: evaluated.pledgeAgeDays,
+        pledgeCommitmentAgeDays: evaluated.pledgeCommitmentAgeDays,
+        pledgePlanOnTrack: evaluated.pledgePlanOnTrack,
+      };
+    });
 
     const donorAsks = (asksByDonor.get(donor.id) ?? []).sort((a, b) => a.asked_at - b.asked_at);
     const pendingAsks = donorAsks.filter((a) => a.status === "pending");
@@ -269,6 +304,7 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
       openPledgeTotalCents: openPledgeRow ? (openPledgeRow.paid_cents ?? 0) + (openPledgeRow.balance_cents ?? 0) : null,
       openPledgeCategory: (openPledgeRow?.category as "open_pledge" | "partially_paid_pledge" | undefined) ?? null,
       pledgeAgeDays, pledgeCommitmentAgeDays, pledgePlanOnTrack, pledgePlanMilestoneDaysBefore,
+      openPledges,
       askHistoryCount: donorAsks.length,
       hasOpenReminder: !!openReminder,
       openReminderAction: openReminder?.action ?? null,

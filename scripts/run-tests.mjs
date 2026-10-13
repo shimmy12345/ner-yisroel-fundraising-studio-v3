@@ -153,6 +153,7 @@ const TEST_FILES = [
   "tests/relationship-date-today-bucket.test.mjs",
   "tests/pledge-payment-recency.test.mjs",
   "tests/pledge-payment-plan.test.mjs",
+  "tests/multi-open-pledge.test.mjs",
   "tests/pledge-payment-plan-timezone.test.mjs",
   "tests/pledge-payment-plan-layout.test.mjs",
   "tests/pledge-payment-plan-renewal.test.mjs",

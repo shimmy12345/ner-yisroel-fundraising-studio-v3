@@ -24,7 +24,7 @@ import { donorInitials, numericDonorCode } from "../../../lib/relationships/dono
 import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, type ResearchFindingView, type ResearchSourceView } from "./DonorResearch";
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
 import { resolveRelationshipSnapshot, type SynthesisFact } from "../../../lib/relationships/fact-synthesis";
-import { evaluatePaymentPlan, evaluatePledgeRenewal, shouldShowPaymentPlanCard } from "../../../lib/relationships/pledge-payment-plan";
+import { evaluatePaymentPlan, evaluatePledgeRenewal, shouldShowPaymentPlanCard, evaluateOpenPledgePlanStatus, isOpenPledgeActionable } from "../../../lib/relationships/pledge-payment-plan";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
 import { GiftAcknowledgmentActions } from "./GivingManagement";
@@ -311,7 +311,31 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   const paidFromActivities = countedActivities.filter((item) => (item.paid_cents ?? 0) > 0 && item.activity_date !== null).map((item) => ({ giftSource: "giving_activity" as GiftSource, giftId: item.id, amountCents: item.paid_cents!, occurredAt: item.activity_date!, campaign: item.source_campaign, description: item.description || item.item_type, acknowledged: acknowledgmentByGift.has(`giving_activity:${item.id}`) }));
   const paidFromLegacy = legacyGifts.map((gift) => ({ giftSource: "gift" as GiftSource, giftId: gift.id, amountCents: gift.amount_cents, occurredAt: gift.received_at, campaign: gift.fund as string | null, description: null as string | null, acknowledged: acknowledgmentByGift.has(`gift:${gift.id}`) }));
   const mostRecentPaidGiftForEvidence = [...paidFromActivities, ...paidFromLegacy].sort((a, b) => b.occurredAt - a.occurredAt)[0] ?? null;
-  const openPledgeSource = countedActivities.find((item) => (item.balance_cents ?? 0) > 0);
+  // Multi-Open-Pledge Independent Evaluation (2026-10-13, see
+  // docs/AI-HANDOFF.md's Goldenberg/JL 64792 investigation). A donor can
+  // have more than one simultaneously open pledge; Suggested Action can
+  // only ever name one, so this picks the single MOST ACTIONABLE one (an
+  // off-track plan, or a plan-less pledge that has genuinely gone
+  // stale), using the SAME shared isOpenPledgeActionable() primitive
+  // lib/workspace/live-data.ts's own SUGGESTED-section selection and
+  // Fundraising Intelligence Brief's fully independent per-pledge
+  // evaluation both use -- never a fourth, competing rule. A donor with
+  // exactly one open pledge is completely unaffected: `countedActivities`
+  // is already ORDER BY activity_date DESC (via DONOR_GIVING_SQL), so
+  // the loop below reduces to the prior "most recent" behavior whenever
+  // nothing is actionable.
+  const openPledgeCandidates = countedActivities.filter((item) => (item.balance_cents ?? 0) > 0);
+  const nowForOpenPledgeSelection = Math.floor(Date.now() / 1000);
+  let openPledgeSource = openPledgeCandidates[0];
+  for (const candidate of openPledgeCandidates) {
+    const candidateLinkedDates = paymentEvents.filter((event) => event.pledge_activity_id === candidate.id).map((event) => event.payment_date);
+    const candidateLinkedAmounts = paymentEvents.filter((event) => event.pledge_activity_id === candidate.id).map((event) => event.applied_cents);
+    const candidatePlan = paymentPlans.find((item) => item.pledge_activity_id === candidate.id);
+    const { hasPlan, isOnTrack } = evaluateOpenPledgePlanStatus(candidatePlan, candidateLinkedDates, candidateLinkedAmounts, candidate.balance_cents ?? 0, nowForOpenPledgeSelection, profile.timezone);
+    const candidateActivityDate = resolveOpenPledgeActivityDate(candidate.activity_date, candidateLinkedDates);
+    const candidateAgeDays = candidateActivityDate !== null ? Math.floor((nowForOpenPledgeSelection - candidateActivityDate) / 86400) : null;
+    if (isOpenPledgeActionable(hasPlan, isOnTrack, candidateAgeDays)) { openPledgeSource = candidate; break; }
+  }
   // Last payment activity, not the pledge's own original commitment date --
   // see resolveOpenPledgeActivityDate's doc comment. paymentEvents is
   // already fetched above (drives the "Most Recent Paid Gift" KPI); this
