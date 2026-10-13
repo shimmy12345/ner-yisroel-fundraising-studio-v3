@@ -33,7 +33,7 @@ type AcknowledgmentRow = { gift_source: GiftSource; gift_id: string; status: Gif
 type YahrtzeitRow = { id: string; donor_id: string; deceased_name_english: string; deceased_name_hebrew: string | null; relationship: string; hebrew_month: string; hebrew_day: number };
 type ImportantDateRow = { id: string; donor_id: string; type: ImportantDateType; person_name: string | null; relationship: string | null; month: number; day: number; year: number | null };
 type AskRow = { id: string; donor_id: string; amount_cents: number | null; purpose: string | null; asked_at: number; source_interaction_id: string | null };
-type PledgePaymentRow = { pledge_activity_id: string; payment_date: number };
+type PledgePaymentRow = { pledge_activity_id: string; payment_date: number; applied_cents: number };
 type PaymentPlanRow = { pledge_activity_id: string; installment_amount_cents: number | null; expected_day_of_month: number; next_expected_payment_at: number; final_expected_payment_at: number };
 // Recurring Payments Behind Schedule (2026-10-09, see docs/AI-HANDOFF.md)
 // -- `id`/`donor_id` added to the SAME existing paymentPlanRows query
@@ -346,7 +346,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     // giving_activities.activity_date, which never moves once a payment
     // is applied to that row. No demo/sample data exists for payment
     // assignments, matching the other demo-skipped queries above.
-    demo ? Promise.resolve({ results: [] as PledgePaymentRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, payment_date FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).bind(userId).all<PledgePaymentRow>(),
+    demo ? Promise.resolve({ results: [] as PledgePaymentRow[] }) : env.DB.prepare(`SELECT pledge_activity_id, payment_date, applied_cents FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).bind(userId).all<PledgePaymentRow>(),
     // Every ACTIVE (ended_at IS NULL) payment plan for this user's
     // pledges -- local fundraiser-declared stewardship metadata, never a
     // JL fact. Feeds openPledge.activePaymentPlan (see
@@ -458,9 +458,18 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
   // this one's "last activity" date. Feeds resolveOpenPledgeActivityDate
   // in the per-donor loop below.
   const paymentDatesByPledge = new Map<string, number[]>();
+  // Parallel to paymentDatesByPledge (same filter, same push order) --
+  // Late-Payment Dead-Zone Fix, 2026-10-13, see docs/AI-HANDOFF.md's
+  // "Payment Plan Reconciliation" entry (the real JL 61566/Rosenbaum
+  // DIN2025 case). Feeds evaluatePaymentPlan's own optional amount
+  // parameter everywhere this map is used, so a late payment can only
+  // satisfy a cycle if its own amount actually covers the installment.
+  const paymentAmountsCentsByPledge = new Map<string, number[]>();
   for (const item of pledgePaymentRows.results) {
     const list = paymentDatesByPledge.get(item.pledge_activity_id);
     if (list) list.push(item.payment_date); else paymentDatesByPledge.set(item.pledge_activity_id, [item.payment_date]);
+    const amountsList = paymentAmountsCentsByPledge.get(item.pledge_activity_id);
+    if (amountsList) amountsList.push(item.applied_cents); else paymentAmountsCentsByPledge.set(item.pledge_activity_id, [item.applied_cents]);
   }
   // At most one ACTIVE plan per pledge is an application-level invariant
   // (enforced by the create route, not a DB constraint) -- safe to key
@@ -529,12 +538,14 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
     const pledge = givingById.get(planRow.pledge_activity_id);
     if (!pledge) continue;
     const linkedPaymentDates = paymentDatesByPledge.get(planRow.pledge_activity_id) ?? [];
+    const linkedPaymentAmountsCents = paymentAmountsCentsByPledge.get(planRow.pledge_activity_id) ?? [];
     const evaluation = evaluatePaymentPlan(
-      { nextExpectedPaymentAt: planRow.next_expected_payment_at, expectedDayOfMonth: planRow.expected_day_of_month, finalExpectedPaymentAt: planRow.final_expected_payment_at, endedAt: null },
+      { nextExpectedPaymentAt: planRow.next_expected_payment_at, expectedDayOfMonth: planRow.expected_day_of_month, finalExpectedPaymentAt: planRow.final_expected_payment_at, endedAt: null, installmentAmountCents: planRow.installment_amount_cents },
       linkedPaymentDates,
       pledge.balance_cents ?? 0,
       now,
       timezone,
+      linkedPaymentAmountsCents,
     );
     const alert = evaluateRecurringPaymentAlert(evaluation, lastDonationRefreshAt);
     if (alert.status === null) continue;
@@ -706,6 +717,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
       openPledge: pledge
         ? (() => {
             const linkedPaymentDates = paymentDatesByPledge.get(pledge.id) ?? [];
+            const linkedPaymentAmountsCents = paymentAmountsCentsByPledge.get(pledge.id) ?? [];
             const plan = paymentPlanByPledge.get(pledge.id);
             return {
               balanceCents: pledge.balance_cents ?? 0,
@@ -713,7 +725,7 @@ async function loadWorkspaceBriefUncached(userId: string, timezone: string, mode
               description: pledge.description || pledge.item_type,
               activityDate: resolveOpenPledgeActivityDate(pledge.activity_date, linkedPaymentDates),
               activePaymentPlan: plan
-                ? { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null, installmentAmountCents: plan.installment_amount_cents, linkedPaymentDates }
+                ? { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null, installmentAmountCents: plan.installment_amount_cents, linkedPaymentDates, linkedPaymentAmountsCents }
                 : null,
             };
           })()

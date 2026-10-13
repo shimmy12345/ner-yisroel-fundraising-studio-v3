@@ -135,6 +135,94 @@ function run() {
 
   console.log("matchPaymentsToCycles checks passed (including the critical multi-cycle correction).");
 
+  // ============================================================
+  // Late-Payment Dead-Zone Fix (2026-10-13, see docs/AI-HANDOFF.md's
+  // "Payment Plan Reconciliation" entry -- the real JL 61566/Rosenbaum
+  // DIN2025 case). `matchPaymentsToCycles` called WITHOUT a 4th
+  // argument (as every test above does) is completely unaffected --
+  // this section exercises the opt-in `lateMatch` parameter directly.
+  // ============================================================
+  {
+    const INSTALLMENT = 15000; // $150, Rosenbaum's real amount
+
+    // --- The real Rosenbaum shape: Oct 4 due, $150 payment dated Oct
+    // 12 (8 days late -- one day past the primary window, which this
+    // suite's own "grace boundary" test above proves is NOT satisfied
+    // without the fallback). With the fallback, it must satisfy. ---
+    {
+      const cycles = [epoch(2026, 10, 4), epoch(2026, 11, 4)];
+      const payments = [epoch(2026, 10, 12)];
+      const satisfied = matchPaymentsToCycles(cycles, payments, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, { amountsCents: [15000], installmentAmountCents: INSTALLMENT });
+      assert.deepEqual(satisfied, [true, false], "the real Rosenbaum case: an 8-days-late $150 payment, exactly covering the installment, must satisfy October -- November remains correctly not-yet-addressed");
+    }
+
+    // --- Amount-blind (no lateMatch at all) must NOT satisfy the same
+    // dead-zone case -- confirms the fallback is strictly opt-in and
+    // every pre-existing direct caller of matchPaymentsToCycles is
+    // byte-for-byte unaffected by this fix. ---
+    {
+      const cycles = [epoch(2026, 10, 4), epoch(2026, 11, 4)];
+      const payments = [epoch(2026, 10, 12)];
+      assert.deepEqual(matchPaymentsToCycles(cycles, payments), [false, false], "without an explicit lateMatch argument, matchPaymentsToCycles must behave exactly as it did before this fix");
+    }
+
+    // --- Insufficient (partial) late payment must NOT satisfy -- the
+    // whole point of amount-awareness: a payment smaller than the
+    // installment can never falsely clear it, even if its date would
+    // otherwise be eligible. ---
+    {
+      const cycles = [epoch(2026, 10, 4), epoch(2026, 11, 4)];
+      const payments = [epoch(2026, 10, 12)];
+      const satisfied = matchPaymentsToCycles(cycles, payments, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, { amountsCents: [10000], installmentAmountCents: INSTALLMENT });
+      assert.deepEqual(satisfied, [false, false], "a late payment smaller than the installment amount must never satisfy the cycle");
+    }
+
+    // --- Oversized late payment covers TWO consecutive cycles, with
+    // the leftover from the first correctly rolling forward to the
+    // second -- no double-counting (the same payment's amount is never
+    // consumed twice, and the exact $150 leftover is what satisfies
+    // November, not a second copy of the full $300). ---
+    {
+      const cycles = [epoch(2026, 10, 4), epoch(2026, 11, 4), epoch(2026, 12, 4)];
+      const payments = [epoch(2026, 10, 12)];
+      const satisfied = matchPaymentsToCycles(cycles, payments, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, { amountsCents: [30000], installmentAmountCents: INSTALLMENT });
+      assert.deepEqual(satisfied, [true, true, false], "a single $300 late payment must satisfy both the $150 October and $150 November installments, with nothing left over for December");
+    }
+
+    // --- Two separate late payments in the same dead zone, together
+    // summing to exactly the installment amount -- multiple payments in
+    // one month, correctly combined, never double-counted. ---
+    {
+      const cycles = [epoch(2026, 10, 4)];
+      const payments = [epoch(2026, 10, 12), epoch(2026, 10, 15)];
+      const satisfied = matchPaymentsToCycles(cycles, payments, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, { amountsCents: [7500, 7500], installmentAmountCents: INSTALLMENT });
+      assert.deepEqual(satisfied, [true], "two $75 late payments in the same dead zone must combine to satisfy the $150 installment");
+    }
+
+    // --- The fallback must NEVER reach backward past a genuinely
+    // missed earlier cycle, even with amounts supplied -- re-proves the
+    // critical multi-cycle correction above still holds under the
+    // amount-aware fallback. ---
+    {
+      const cycles = [epoch(2026, 1, 15), epoch(2026, 2, 15), epoch(2026, 3, 15)];
+      const payments = [epoch(2026, 3, 16)];
+      const satisfied = matchPaymentsToCycles(cycles, payments, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, { amountsCents: [INSTALLMENT], installmentAmountCents: INSTALLMENT });
+      assert.deepEqual(satisfied, [false, false, true], "even with amounts supplied, a single late payment must satisfy only the cycle it falls within -- January and February stay genuinely unsatisfied");
+    }
+
+    // --- A payment with a known amount, dated too early to be in ANY
+    // cycle's dead zone, contributes nothing -- date eligibility still
+    // gates the first time a payment enters the ledger. ---
+    {
+      const cycles = [epoch(2026, 10, 4), epoch(2026, 11, 4)];
+      const payments = [epoch(2026, 9, 4)]; // a much-earlier payment, already accounted for elsewhere
+      const satisfied = matchPaymentsToCycles(cycles, payments, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, { amountsCents: [INSTALLMENT], installmentAmountCents: INSTALLMENT });
+      assert.deepEqual(satisfied, [false, false], "a payment dated before any enumerated cycle's own dead zone must not retroactively satisfy anything");
+    }
+
+    console.log("Late-payment dead-zone fallback (matchPaymentsToCycles lateMatch) checks passed.");
+  }
+
   // --- evaluatePaymentPlan: the full worked KOLX2026 scenarios. ---
   const kolxPlan = { nextExpectedPaymentAt: epoch(2026, 9, 18), expectedDayOfMonth: 18, finalExpectedPaymentAt: epoch(2027, 5, 18), endedAt: null };
 
@@ -264,13 +352,38 @@ function run() {
     assert.equal(evalResult.isPlanEndedWithBalance, false);
   }
 
-  // --- Payment amount is never inspected -- evaluatePaymentPlan doesn't
-  // even accept an amount parameter for payments, only dates. Confirmed
-  // structurally: the function signature itself has no amount input.
-  // Arity is 5, not 4, since the 2026-10-08 timezone-normalization fix
-  // (see docs/AI-HANDOFF.md) added the required `timezone` parameter --
-  // still no payment-amount slot anywhere in the signature. ---
-  assert.equal(evaluatePaymentPlan.length, 5, "evaluatePaymentPlan must accept exactly (plan, paymentDates, balanceCents, now, timezone) -- no payment-amount parameter exists to be inspected");
+  // --- The real Rosenbaum (JL 61566) DIN2025 case, at the full
+  // evaluatePaymentPlan level, sanitized amounts/dates (2026-10-13 fix,
+  // see docs/AI-HANDOFF.md). Plan: $150/month, next expected Oct 4,
+  // final Nov 4. The real $150 payment landed Oct 12 -- 8 days late.
+  // Evaluated "today" = Oct 13, matching the real incident date. ---
+  {
+    const plan = { nextExpectedPaymentAt: epoch(2026, 10, 4), expectedDayOfMonth: 4, finalExpectedPaymentAt: epoch(2026, 11, 4), endedAt: null, installmentAmountCents: 15000 };
+    const now = epoch(2026, 10, 13);
+    const evalResult = evaluatePaymentPlan(plan, [epoch(2026, 10, 12)], 15000, now, "UTC", [15000]);
+    assert.equal(evalResult.isOnTrack, true, "the late-but-sufficient October payment must read as on track, not overdue");
+    assert.equal(evalResult.isLate, false);
+    assert.equal(evalResult.daysLate, 0);
+    assert.equal(iso(evalResult.nextUnsatisfiedExpectedPaymentAt), "2026-11-04", "the next expected payment must correctly advance past the now-satisfied October 4 cycle to November 4");
+    assert.equal(evalResult.balanceRemainingCents, 15000, "the pledge's own $150 remaining balance is untouched by this evaluation -- it already reflects the one real remaining installment");
+  }
+
+  // --- Payment amount, when supplied, is the ONLY thing that can ever
+  // let a late payment satisfy a cycle it wasn't exactly on time for --
+  // confirmed structurally: the function signature's 6th (optional)
+  // parameter is the sole amount input anywhere in evaluatePaymentPlan.
+  // Arity is 6, not 5, since the 2026-10-13 late-payment dead-zone fix
+  // (see docs/AI-HANDOFF.md's "Payment Plan Reconciliation" entry, the
+  // real JL 61566/Rosenbaum DIN2025 case) added the OPTIONAL
+  // `linkedPaymentAmountsCents` parameter -- every call site that omits
+  // it (all of this file's own calls above, and every pre-existing
+  // caller elsewhere in the app) is byte-for-byte unaffected; omitting
+  // it simply keeps the late-payment pass amount-blind, exactly as it
+  // was before this fix. This assertion is deliberately updated here,
+  // not merely relaxed -- if this number changes again without a
+  // matching docs/AI-HANDOFF.md entry, that is the real regression this
+  // guard exists to catch. ---
+  assert.equal(evaluatePaymentPlan.length, 6, "evaluatePaymentPlan must accept exactly (plan, paymentDates, balanceCents, now, timezone, linkedPaymentAmountsCents?) -- update this assertion's own comment, with a docs/AI-HANDOFF.md entry, if a 7th parameter is ever deliberately added");
 
   console.log("Edge-case checks passed.");
 

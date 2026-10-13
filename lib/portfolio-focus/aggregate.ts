@@ -167,16 +167,21 @@ export function aggregatePortfolioFocusInputs(raw: PortfolioFocusRawData, now: n
     let pledgePlanMilestoneDaysBefore: 15 | 10 | 5 | null = null;
     if (openPledgeRow) {
       const linkedPaymentDates = (paymentsByPledge.get(openPledgeRow.id) ?? []).map((p) => p.date);
+      // Parallel to linkedPaymentDates (2026-10-13 late-payment dead-zone
+      // fix, see docs/AI-HANDOFF.md) -- feeds evaluatePaymentPlan's
+      // optional amount parameter so a late payment can only satisfy a
+      // cycle if its own amount actually covers the installment.
+      const linkedPaymentAmountsCents = (paymentsByPledge.get(openPledgeRow.id) ?? []).map((p) => p.cents);
       const plan = paymentPlanByPledge.get(openPledgeRow.id);
       const activityDate = resolveOpenPledgeActivityDate(openPledgeRow.activity_date, linkedPaymentDates);
       pledgeAgeDays = activityDate !== null ? Math.floor((now - activityDate) / DAY) : null;
       if (openPledgeRow.activity_date != null && openPledgeRow.activity_date <= now) pledgeCommitmentAgeDays = Math.floor((now - openPledgeRow.activity_date) / DAY);
-      const activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[] }) | null = plan
-        ? { installmentAmountCents: plan.installment_amount_cents, finalExpectedPaymentAt: plan.final_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, nextExpectedPaymentAt: plan.next_expected_payment_at, endedAt: null, linkedPaymentDates }
+      const activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[]; linkedPaymentAmountsCents: number[] }) | null = plan
+        ? { installmentAmountCents: plan.installment_amount_cents, finalExpectedPaymentAt: plan.final_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, nextExpectedPaymentAt: plan.next_expected_payment_at, endedAt: null, linkedPaymentDates, linkedPaymentAmountsCents }
         : null;
       openPledgeForEvidence = { balanceCents: openPledgeRow.balance_cents ?? 0, campaign: null, description: openPledgeRow.description || openPledgeRow.item_type, activityDate, activePaymentPlan };
       if (activePaymentPlan) {
-        const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, openPledgeRow.balance_cents ?? 0, now, timezone);
+        const evaluation = evaluatePaymentPlan(activePaymentPlan, linkedPaymentDates, openPledgeRow.balance_cents ?? 0, now, timezone, linkedPaymentAmountsCents);
         // BUG FIX (see docs/AI-HANDOFF.md's payment-plan-intelligence
         // investigation): this used to be `!evaluation.isLate`, which
         // reads as "on track" the moment a plan's final expected date has

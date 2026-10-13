@@ -86,7 +86,13 @@ test("multiple plans for one donor: acknowledging one plan's renewal never suppr
 
 test("evaluatePaymentPlan is completely unaware of renewal acknowledgment -- installment tracking is identical whether or not a renewal was acknowledged", () => {
   const plan = { nextExpectedPaymentAt: utcMidnight(2026, 10, 17), expectedDayOfMonth: 17, finalExpectedPaymentAt: utcMidnight(2026, 10, 17), endedAt: null };
-  assert.equal(evaluatePaymentPlan.length, 5, "evaluatePaymentPlan must take exactly its original 5 parameters -- never a 6th for acknowledgment");
+  // Arity is 6, not 5, since the 2026-10-13 late-payment dead-zone fix
+  // (see docs/AI-HANDOFF.md's "Payment Plan Reconciliation" entry) added
+  // an OPTIONAL `linkedPaymentAmountsCents` parameter -- unrelated to
+  // renewal acknowledgment, which this test's own assertion below is
+  // what actually guards (no renewalAcknowledgedAt-shaped parameter
+  // exists anywhere in the signature).
+  assert.equal(evaluatePaymentPlan.length, 6, "evaluatePaymentPlan must take exactly its current 6 parameters (plan, paymentDates, balanceCents, now, timezone, linkedPaymentAmountsCents?) -- still never a parameter for acknowledgment");
   const result = evaluatePaymentPlan(plan, [utcMidnight(2025, 8, 12)], 100000, et(2026, 10, 9), TZ);
   assert.equal(result.isOnTrack, true);
   assert.equal(result.balanceRemainingCents, 100000, "the outstanding balance/installment tracking is untouched by anything related to renewal acknowledgment");

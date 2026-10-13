@@ -54,7 +54,13 @@ export type RecommendationEvidenceInput = {
   // influence this one's evaluation. See lib/relationships/
   // pledge-payment-plan.ts for the pure evaluation logic (evaluatePaymentPlan)
   // this field feeds.
-  openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[] }) | null } | null;
+  // linkedPaymentAmountsCents (2026-10-13 late-payment dead-zone fix,
+  // see docs/AI-HANDOFF.md): OPTIONAL, parallel to linkedPaymentDates --
+  // same filter, same order, same length. Omitted = the late-payment
+  // match stays amount-blind for this evaluation (prior behavior,
+  // unaffected); supplied = a late payment can only satisfy a cycle if
+  // its own amount actually covers the installment.
+  openPledge: { balanceCents: number; campaign: string | null; description: string | null; activityDate: number | null; activePaymentPlan: (PaymentPlanFields & { installmentAmountCents: number | null; linkedPaymentDates: number[]; linkedPaymentAmountsCents?: (number | null)[] }) | null } | null;
   // See the output type's own doc comment (giving.fulfilledPledgeCultivationOpportunity)
   // for the full reasoning. Optional/defaults to null so every existing
   // caller/fixture that predates this field keeps behaving exactly as
@@ -308,7 +314,7 @@ export function buildRecommendationEvidence(input: RecommendationEvidenceInput, 
               ? {
                   installmentAmountCents: input.openPledge.activePaymentPlan.installmentAmountCents,
                   finalExpectedPaymentAt: input.openPledge.activePaymentPlan.finalExpectedPaymentAt,
-                  ...evaluatePaymentPlan(input.openPledge.activePaymentPlan, input.openPledge.activePaymentPlan.linkedPaymentDates, input.openPledge.balanceCents, now, timezone),
+                  ...evaluatePaymentPlan(input.openPledge.activePaymentPlan, input.openPledge.activePaymentPlan.linkedPaymentDates, input.openPledge.balanceCents, now, timezone, input.openPledge.activePaymentPlan.linkedPaymentAmountsCents),
                 }
               : null,
           }

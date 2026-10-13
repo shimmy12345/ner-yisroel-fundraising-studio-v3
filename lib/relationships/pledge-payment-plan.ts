@@ -123,14 +123,63 @@ export function enumerateExpectedCycles(anchorAt: number, anchorDay: number, thr
 // for why this greedy match is provably unambiguous for a monthly
 // cadence -- there is no scenario where a different assignment order
 // changes the result.
-export function matchPaymentsToCycles(cycles: number[], payments: number[], graceDays: number = MONTHLY_PAYMENT_PLAN_GRACE_DAYS): boolean[] {
+//
+// Late-Payment Dead-Zone Fix (2026-10-13, see docs/AI-HANDOFF.md's
+// "Payment Plan Reconciliation" entry -- the real JL 61566/Rosenbaum
+// DIN2025 case). A payment landing MORE than `graceDays` after its own
+// cycle, but BEFORE the next cycle's own `[cycle-graceDays, ...]` window
+// opens, previously matched NOTHING -- a real, correctly-applied payment
+// could permanently leave its cycle "unsatisfied" even though the money
+// was received, just late. `lateMatch`, when provided, runs a SECOND
+// pass after the primary window pass above (which is completely
+// unchanged -- every existing caller/test that never passes `lateMatch`
+// gets byte-identical behavior to before this fix): for each cycle the
+// primary pass left unsatisfied, in ascending order, any STILL-UNUSED
+// payment whose date falls strictly between this cycle's own primary
+// window and the start of the NEXT cycle's own primary window (or
+// unbounded above, for the last cycle) may satisfy it. This is the exact
+// dead zone the primary pass cannot reach, and nothing else -- it can
+// never reach backward past an EARLIER genuinely-missed cycle (each
+// cycle's own dead-zone range starts strictly after that cycle's own
+// primary window, never before), preserving the "one late payment must
+// not retroactively erase multiple earlier missed cycles" guarantee
+// above.
+//
+// If `lateMatch.installmentAmountCents` is null (no stated installment
+// amount to compare against), this second pass is amount-blind: any
+// single eligible payment satisfies, matching this fix's own minimal,
+// date-only proposal. If a real installment amount is known, the pass
+// becomes amount-aware: it sums still-available amounts from eligible
+// payments (oldest first) until the full installment amount is covered
+// -- so a partial payment can never falsely satisfy a full installment
+// on its own -- and any amount LEFT OVER after fully covering one cycle
+// rolls forward, unconditionally, to help satisfy the NEXT unsatisfied
+// cycle too (never backward) -- so one oversized payment can correctly
+// cover multiple consecutive installments without being reused or
+// double-counted (each cent is deducted from its source payment exactly
+// once, the moment it is actually consumed by a satisfied cycle).
+export type LatePaymentMatch = {
+  // Parallel to `payments` -- same length, same order, same index
+  // correspondence. `null` at an index means "amount unknown for this
+  // payment," which is never treated as sufficient on its own.
+  amountsCents: (number | null)[];
+  // `null` disables amount-aware matching for this second pass (falls
+  // back to "any single eligible payment satisfies") -- a plan with no
+  // stated installment amount has nothing to compare against.
+  installmentAmountCents: number | null;
+};
+
+export function matchPaymentsToCycles(cycles: number[], payments: number[], graceDays: number = MONTHLY_PAYMENT_PLAN_GRACE_DAYS, lateMatch?: LatePaymentMatch): boolean[] {
   const graceSeconds = graceDays * DAY_SECONDS;
-  const sortedPayments = [...payments].sort((a, b) => a - b);
-  const used = new Array<boolean>(sortedPayments.length).fill(false);
-  return cycles.map((cycle) => {
-    for (let i = 0; i < sortedPayments.length; i++) {
+  // Carries each payment's ORIGINAL index along through the sort, so
+  // `lateMatch.amountsCents` (parallel to the caller's own `payments`
+  // order) can still be looked up correctly after sorting by date.
+  const order = payments.map((date, originalIndex) => ({ date, originalIndex })).sort((a, b) => a.date - b.date);
+  const used = new Array<boolean>(order.length).fill(false);
+  const satisfied = cycles.map((cycle) => {
+    for (let i = 0; i < order.length; i++) {
       if (used[i]) continue;
-      const payment = sortedPayments[i];
+      const payment = order[i].date;
       if (payment >= cycle - graceSeconds && payment <= cycle + graceSeconds) {
         used[i] = true;
         return true;
@@ -138,6 +187,56 @@ export function matchPaymentsToCycles(cycles: number[], payments: number[], grac
     }
     return false;
   });
+
+  if (!lateMatch) return satisfied;
+
+  // Still-available amount per (sorted) payment: 0 for anything the
+  // primary pass above already consumed (never double-counted across
+  // the two passes); otherwise its own real amount, or a presumed-
+  // positive sentinel (1) in amount-blind mode, where availability
+  // itself -- not a real cents value -- is all that matters.
+  const amountBlind = lateMatch.installmentAmountCents === null;
+  const remaining = order.map(({ originalIndex }, i) => (used[i] ? 0 : amountBlind ? 1 : lateMatch.amountsCents[originalIndex] ?? 0));
+  // Becomes false for a payment the moment it first actually contributes
+  // to some cycle -- from then on its leftover rolls forward to a LATER
+  // cycle unconditionally (it is already "in play"), never re-checked
+  // against that later cycle's own date range.
+  const dateRestricted = order.map(() => true);
+
+  for (let cycleIndex = 0; cycleIndex < cycles.length; cycleIndex++) {
+    if (satisfied[cycleIndex]) continue;
+    const lowerExclusive = cycles[cycleIndex] + graceSeconds;
+    const upperExclusive = cycleIndex + 1 < cycles.length ? cycles[cycleIndex + 1] - graceSeconds : Infinity;
+    const isEligible = (i: number) => remaining[i] > 0 && (!dateRestricted[i] || (order[i].date > lowerExclusive && order[i].date < upperExclusive));
+
+    if (amountBlind) {
+      const index = order.findIndex((_, i) => isEligible(i));
+      if (index === -1) continue;
+      satisfied[cycleIndex] = true;
+      remaining[index] = 0;
+      continue;
+    }
+
+    const installmentAmountCents = lateMatch.installmentAmountCents!;
+    let accumulated = 0;
+    const contributors: number[] = [];
+    for (let i = 0; i < order.length && accumulated < installmentAmountCents; i++) {
+      if (!isEligible(i)) continue;
+      accumulated += remaining[i];
+      contributors.push(i);
+    }
+    if (accumulated < installmentAmountCents) continue; // insufficient -- stays unsatisfied, nothing consumed
+    satisfied[cycleIndex] = true;
+    let toConsume = installmentAmountCents;
+    for (const i of contributors) {
+      const take = Math.min(remaining[i], toConsume);
+      remaining[i] -= take;
+      toConsume -= take;
+      dateRestricted[i] = false;
+      if (toConsume <= 0) break;
+    }
+  }
+  return satisfied;
 }
 
 export type PaymentPlanFields = {
@@ -145,6 +244,14 @@ export type PaymentPlanFields = {
   expectedDayOfMonth: number;
   finalExpectedPaymentAt: number;
   endedAt: number | null;
+  // OPTIONAL (2026-10-13 late-payment dead-zone fix) -- when a real
+  // amount is known, enables amount-aware matching for a late payment
+  // that falls in the dead zone between two cycles' own primary windows
+  // (see matchPaymentsToCycles' own doc comment). Omitted/null/undefined
+  // preserves this module's prior amount-blind fallback behavior for
+  // that same dead zone -- every existing caller that never set this
+  // field keeps behaving exactly as before this fix.
+  installmentAmountCents?: number | null;
 };
 
 export type PaymentPlanEvaluation = {
@@ -195,7 +302,17 @@ export type PaymentPlanEvaluation = {
 // at the top, via today() -- every comparison below uses that normalized
 // value, never the raw `now` directly (see today()'s own doc comment for
 // why).
-export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates: number[], balanceCents: number, now: number, timezone: string): PaymentPlanEvaluation {
+export function evaluatePaymentPlan(
+  plan: PaymentPlanFields,
+  linkedPaymentDates: number[],
+  balanceCents: number,
+  now: number,
+  timezone: string,
+  // OPTIONAL, parallel to `linkedPaymentDates` (2026-10-13 late-payment
+  // dead-zone fix) -- omit entirely to preserve this function's prior
+  // amount-blind behavior for every existing caller.
+  linkedPaymentAmountsCents?: (number | null)[],
+): PaymentPlanEvaluation {
   const nowDateOnly = today(now, timezone);
   const isActive = plan.endedAt === null;
   // Derived directly from the live JL balance -- never from the plan's
@@ -207,7 +324,18 @@ export function evaluatePaymentPlan(plan: PaymentPlanFields, linkedPaymentDates:
   const latestActualPaymentAt = linkedPaymentDates.length > 0 ? Math.max(...linkedPaymentDates) : null;
 
   const cycles = enumerateExpectedCycles(plan.nextExpectedPaymentAt, plan.expectedDayOfMonth, Math.max(nowDateOnly, plan.finalExpectedPaymentAt));
-  const satisfied = matchPaymentsToCycles(cycles, linkedPaymentDates);
+  // Always runs the late-payment dead-zone pass (see matchPaymentsToCycles'
+  // own doc comment) -- amount-aware when this plan has a real installment
+  // amount AND the caller supplied amounts, otherwise amount-blind. Either
+  // way every evaluatePaymentPlan caller gets at least the date-only dead-
+  // zone fix; matchPaymentsToCycles called directly (as its own dedicated
+  // unit tests do) is completely unaffected unless it is itself given a
+  // `lateMatch` argument.
+  const lateMatch: LatePaymentMatch = {
+    amountsCents: linkedPaymentAmountsCents ?? linkedPaymentDates.map(() => null),
+    installmentAmountCents: plan.installmentAmountCents ?? null,
+  };
+  const satisfied = matchPaymentsToCycles(cycles, linkedPaymentDates, MONTHLY_PAYMENT_PLAN_GRACE_DAYS, lateMatch);
   const firstUnsatisfiedDueIndex = cycles.findIndex((cycle, index) => cycle <= nowDateOnly && !satisfied[index]);
   const nextUnsatisfiedExpectedPaymentAt = firstUnsatisfiedDueIndex !== -1
     ? cycles[firstUnsatisfiedDueIndex]

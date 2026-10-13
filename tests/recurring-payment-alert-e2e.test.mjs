@@ -91,11 +91,23 @@ function queryGivingById(db, userId) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 function queryPaymentDatesByPledge(db, userId) {
-  const rows = db.prepare(`SELECT pledge_activity_id, payment_date FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).all(userId);
+  const rows = db.prepare(`SELECT pledge_activity_id, payment_date, applied_cents FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).all(userId);
   const map = new Map();
   for (const r of rows) {
     const list = map.get(r.pledge_activity_id);
     if (list) list.push(r.payment_date); else map.set(r.pledge_activity_id, [r.payment_date]);
+  }
+  return map;
+}
+// Parallel to queryPaymentDatesByPledge (2026-10-13 late-payment dead-
+// zone fix, see docs/AI-HANDOFF.md) -- mirrors lib/workspace/
+// live-data.ts's own paymentAmountsCentsByPledge verbatim.
+function queryPaymentAmountsCentsByPledge(db, userId) {
+  const rows = db.prepare(`SELECT pledge_activity_id, payment_date, applied_cents FROM jl_payment_assignment_audits WHERE user_id = ? AND decision_type = 'apply_to_pledge' AND applied_cents > 0 AND payment_date IS NOT NULL`).all(userId);
+  const map = new Map();
+  for (const r of rows) {
+    const list = map.get(r.pledge_activity_id);
+    if (list) list.push(r.applied_cents); else map.set(r.pledge_activity_id, [r.applied_cents]);
   }
   return map;
 }
@@ -116,17 +128,20 @@ function evaluateAlertsFromDb(db, userId, now) {
   const givingById = queryGivingById(db, userId);
   const lastDonationRefreshAt = queryLastDonationRefreshAt(db, userId);
   const paymentDatesByPledge = queryPaymentDatesByPledge(db, userId);
+  const paymentAmountsCentsByPledge = queryPaymentAmountsCentsByPledge(db, userId);
   const rows = [];
   for (const plan of plans) {
     const pledge = givingById.get(plan.pledge_activity_id);
     if (!pledge) continue;
     const linkedPaymentDates = paymentDatesByPledge.get(plan.pledge_activity_id) ?? [];
+    const linkedPaymentAmountsCents = paymentAmountsCentsByPledge.get(plan.pledge_activity_id) ?? [];
     const evaluation = evaluatePaymentPlan(
-      { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null },
+      { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null, installmentAmountCents: plan.installment_amount_cents },
       linkedPaymentDates,
       pledge.balance_cents ?? 0,
       now,
       TZ,
+      linkedPaymentAmountsCents,
     );
     const alert = evaluateRecurringPaymentAlert(evaluation, lastDonationRefreshAt);
     if (alert.status === null) continue;
@@ -330,4 +345,130 @@ test("documented limitation: last_donation_refresh_at is one GLOBAL per-user tim
   for (const event of events) {
     assert.doesNotMatch(event.relationshipPhrase, /confirmed|guaranteed|certainly|definitely/i);
   }
+});
+
+// ================================================================
+// D. Late-Payment Dead-Zone Fix (2026-10-13, see docs/AI-HANDOFF.md's
+// "Payment Plan Reconciliation" entry) -- the REAL JL 61566/Rosenbaum
+// DIN2025 shape, reproduced exactly (sanitized donor name/code),
+// through the real evaluation -> alert -> Today -> Daily Agenda
+// pipeline, proving the fix end to end and not merely at the pure-
+// function level.
+// ================================================================
+
+const ROSENBAUM_NOW = utcMidnight(2026, 10, 13) + 14 * 3600; // ~10am EDT, Oct 13 2026
+
+test("D1. a late payment explicitly applied to the pledge (8 days after the Oct 4 due date, exactly covering the $150 installment) clears the alert and advances the next expected date to Nov 4, end to end", () => {
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d-rosenbaum", displayName: "Rabbi & Mrs. Sample Donor", donorCode: "61566" });
+  // Pre-payment state: balance already reflects the $150 payment having
+  // been applied to the pledge (exactly as the real import did) --
+  // committed $1,800, paid $1,650, balance $150 (one installment left).
+  seedPledge(db, { id: "p-rosenbaum", donorId: "d-rosenbaum", balanceCents: 15000 });
+  seedPlan(db, { id: "plan-rosenbaum", donorId: "d-rosenbaum", pledgeActivityId: "p-rosenbaum", nextExpectedPaymentAt: utcMidnight(2026, 10, 4), expectedDayOfMonth: 4, finalExpectedPaymentAt: utcMidnight(2026, 11, 4), installmentAmountCents: 15000 });
+  seedRefreshState(db, { lastDonationRefreshAt: utcMidnight(2026, 10, 13) });
+  // The real late payment: dated Oct 12 -- 8 days after the Oct 4 due
+  // date, one day past the primary +/-7-day grace window, but still
+  // before the Nov 4 cycle's own window opens (Oct 28).
+  seedPayment(db, { pledgeActivityId: "p-rosenbaum", donorId: "d-rosenbaum", paymentDate: utcMidnight(2026, 10, 12), appliedCents: 15000 });
+
+  const rows = evaluateAlertsFromDb(db, "u1", ROSENBAUM_NOW);
+  assert.equal(rows.length, 0, "the $150 late payment exactly covers the Oct 4 installment -- no alert, not even 'verify_import', must be produced");
+
+  const identityByDonor = identityMapFromDb(db, "u1");
+  const events = buildRecurringPaymentAlertEvents(rows, identityByDonor, TZ, ROSENBAUM_NOW);
+  assert.equal(events.length, 0);
+  const { today } = partitionRelationshipDateEventsByToday(events, ROSENBAUM_NOW, TZ);
+  const agenda = buildAgenda(emptyBrief({ todayRelationshipDates: today }), { now: ROSENBAUM_NOW, baseUrl: BASE_URL });
+  assert.ok(!agenda.importantDates.some((i) => i.donorCode === "61566"), "the real Daily Fundraising Agenda must no longer flag this donor as overdue for the satisfied October installment");
+
+  // The underlying evaluation (not just the absence of an alert) must
+  // show the NEXT expected date correctly advanced to November, not
+  // merely suppressed.
+  const plans = queryActivePlans(db, "u1");
+  const pledge = queryGivingById(db, "u1").get("p-rosenbaum");
+  const linkedPaymentDates = queryPaymentDatesByPledge(db, "u1").get("p-rosenbaum") ?? [];
+  const linkedPaymentAmountsCents = queryPaymentAmountsCentsByPledge(db, "u1").get("p-rosenbaum") ?? [];
+  const plan = plans.find((p) => p.id === "plan-rosenbaum");
+  const evaluation = evaluatePaymentPlan(
+    { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null, installmentAmountCents: plan.installment_amount_cents },
+    linkedPaymentDates, pledge.balance_cents ?? 0, ROSENBAUM_NOW, TZ, linkedPaymentAmountsCents,
+  );
+  assert.equal(evaluation.isOnTrack, true);
+  assert.equal(evaluation.isLate, false);
+  assert.equal(new Date(evaluation.nextUnsatisfiedExpectedPaymentAt * 1000).toISOString().slice(0, 10), "2026-11-04", "the next expected payment must correctly advance to November 4, not remain stuck on the already-satisfied October 4");
+});
+
+test("D2. an INSUFFICIENT late payment (same 8-days-late timing, but only $100 of the $150 due) must NOT clear the alert -- amount-aware reconciliation never lets a partial payment falsely satisfy a full installment", () => {
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d-partial", displayName: "Mr. & Mrs. Partial Payment Donor", donorCode: "61999" });
+  // Only $100 of the $150 installment was actually paid -- balance
+  // reflects that partial payment (started at $150, now $50 after a
+  // partial apply-to-pledge of $100), never the full installment.
+  seedPledge(db, { id: "p-partial", donorId: "d-partial", balanceCents: 5000 });
+  seedPlan(db, { id: "plan-partial", donorId: "d-partial", pledgeActivityId: "p-partial", nextExpectedPaymentAt: utcMidnight(2026, 10, 4), expectedDayOfMonth: 4, finalExpectedPaymentAt: utcMidnight(2026, 11, 4), installmentAmountCents: 15000 });
+  seedRefreshState(db, { lastDonationRefreshAt: utcMidnight(2026, 10, 13) });
+  seedPayment(db, { pledgeActivityId: "p-partial", donorId: "d-partial", paymentDate: utcMidnight(2026, 10, 12), appliedCents: 10000 });
+
+  const rows = evaluateAlertsFromDb(db, "u1", ROSENBAUM_NOW);
+  assert.equal(rows.length, 1, "a partial late payment must never clear the overdue warning -- only $100 of the $150 due arrived");
+  assert.equal(rows[0].status, "follow_up_needed");
+
+  const identityByDonor = identityMapFromDb(db, "u1");
+  const events = buildRecurringPaymentAlertEvents(rows, identityByDonor, TZ, ROSENBAUM_NOW);
+  assert.equal(events[0].relationshipPhrase, "Payment follow-up needed");
+  const { today } = partitionRelationshipDateEventsByToday(events, ROSENBAUM_NOW, TZ);
+  const agenda = buildAgenda(emptyBrief({ todayRelationshipDates: today }), { now: ROSENBAUM_NOW, baseUrl: BASE_URL });
+  assert.ok(agenda.importantDates.some((i) => i.donorCode === "61999"), "the genuinely-insufficient payment must still leave this donor correctly flagged on the real Daily Agenda");
+});
+
+test("D3. an OVERSIZED late payment (one $300 payment, 8 days after Oct 4, covering BOTH the Oct 4 and Nov 4 installments) satisfies both without double-counting, and the plan correctly completes", () => {
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d-oversized", displayName: "Mr. & Mrs. Oversized Payment Donor", donorCode: "61888" });
+  // $300 covers both remaining $150 installments -- balance goes to $0.
+  seedPledge(db, { id: "p-oversized", donorId: "d-oversized", balanceCents: 0 });
+  seedPlan(db, { id: "plan-oversized", donorId: "d-oversized", pledgeActivityId: "p-oversized", nextExpectedPaymentAt: utcMidnight(2026, 10, 4), expectedDayOfMonth: 4, finalExpectedPaymentAt: utcMidnight(2026, 11, 4), installmentAmountCents: 15000 });
+  seedRefreshState(db, { lastDonationRefreshAt: utcMidnight(2026, 10, 13) });
+  seedPayment(db, { pledgeActivityId: "p-oversized", donorId: "d-oversized", paymentDate: utcMidnight(2026, 10, 12), appliedCents: 30000 });
+
+  const rows = evaluateAlertsFromDb(db, "u1", ROSENBAUM_NOW);
+  assert.equal(rows.length, 0, "a single oversized late payment covering both remaining installments must satisfy the plan with no alert, no double-counting");
+
+  const plans = queryActivePlans(db, "u1");
+  const pledge = queryGivingById(db, "u1").get("p-oversized");
+  const linkedPaymentDates = queryPaymentDatesByPledge(db, "u1").get("p-oversized") ?? [];
+  const linkedPaymentAmountsCents = queryPaymentAmountsCentsByPledge(db, "u1").get("p-oversized") ?? [];
+  const plan = plans.find((p) => p.id === "plan-oversized");
+  const evaluation = evaluatePaymentPlan(
+    { nextExpectedPaymentAt: plan.next_expected_payment_at, expectedDayOfMonth: plan.expected_day_of_month, finalExpectedPaymentAt: plan.final_expected_payment_at, endedAt: null, installmentAmountCents: plan.installment_amount_cents },
+    linkedPaymentDates, pledge.balance_cents ?? 0, ROSENBAUM_NOW, TZ, linkedPaymentAmountsCents,
+  );
+  assert.equal(evaluation.isCompleted, true, "balance is already $0 -- the plan reads as financially completed");
+});
+
+test("D4. Staging/Production isolation: the real queries this test mirrors are scoped by user_id/owner_user_id alone -- a second user's identically-shaped late payment and plan are evaluated completely independently", () => {
+  const db = freshDatabase();
+  seedUser(db, "u1");
+  db.prepare("INSERT INTO users (id, email, created_at, updated_at) VALUES (?, ?, ?, ?)").run("u2", "owner2@example.test", NOW, NOW);
+  seedDonor(db, { id: "d-u1", displayName: "Mr. & Mrs. User One Donor", donorCode: "61566", userId: "u1" });
+  seedPledge(db, { id: "p-u1", donorId: "d-u1", balanceCents: 15000, userId: "u1" });
+  seedPlan(db, { id: "plan-u1", donorId: "d-u1", pledgeActivityId: "p-u1", nextExpectedPaymentAt: utcMidnight(2026, 10, 4), expectedDayOfMonth: 4, finalExpectedPaymentAt: utcMidnight(2026, 11, 4), installmentAmountCents: 15000, userId: "u1" });
+  seedRefreshState(db, { lastDonationRefreshAt: utcMidnight(2026, 10, 13), userId: "u1" });
+  seedPayment(db, { pledgeActivityId: "p-u1", donorId: "d-u1", paymentDate: utcMidnight(2026, 10, 12), appliedCents: 15000, userId: "u1" }); // satisfied
+
+  seedDonor(db, { id: "d-u2", displayName: "Mr. & Mrs. User Two Donor", donorCode: "61566", userId: "u2" }); // same donor code, different owner -- must never collide
+  seedPledge(db, { id: "p-u2", donorId: "d-u2", balanceCents: 15000, userId: "u2" });
+  seedPlan(db, { id: "plan-u2", donorId: "d-u2", pledgeActivityId: "p-u2", nextExpectedPaymentAt: utcMidnight(2026, 10, 4), expectedDayOfMonth: 4, finalExpectedPaymentAt: utcMidnight(2026, 11, 4), installmentAmountCents: 15000, userId: "u2" });
+  seedRefreshState(db, { lastDonationRefreshAt: utcMidnight(2026, 10, 13), userId: "u2" });
+  // User 2's payment is INSUFFICIENT -- must still be flagged, completely unaffected by user 1's satisfied plan.
+  seedPayment(db, { pledgeActivityId: "p-u2", donorId: "d-u2", paymentDate: utcMidnight(2026, 10, 12), appliedCents: 5000, userId: "u2" });
+
+  const rowsU1 = evaluateAlertsFromDb(db, "u1", ROSENBAUM_NOW);
+  const rowsU2 = evaluateAlertsFromDb(db, "u2", ROSENBAUM_NOW);
+  assert.equal(rowsU1.length, 0, "user 1's own fully-satisfied plan produces no alert");
+  assert.equal(rowsU2.length, 1, "user 2's own insufficient payment must still be flagged, regardless of user 1's identically-coded donor");
+  assert.equal(rowsU2[0].status, "follow_up_needed");
 });

@@ -168,6 +168,16 @@ function run() {
   // `now` involved), but explicitly re-confirmed here since the task
   // requires it: the existing 7-day grace window must still work exactly
   // as before.
+  //
+  // The "one day past grace" case below was updated 2026-10-13 (see
+  // docs/AI-HANDOFF.md's "Payment Plan Reconciliation" entry -- the real
+  // JL 61566/Rosenbaum DIN2025 case): a payment landing just past the
+  // PRIMARY window's own grace boundary, but still before the NEXT
+  // cycle's own window opens, now correctly satisfies the cycle via the
+  // late-payment dead-zone pass (amount-blind here, since this plan sets
+  // no installmentAmountCents) -- it no longer sits in a permanent dead
+  // zone just because it missed the primary window by one day. This is
+  // the exact bug this fix corrects, not a relaxation of it.
   // ============================================================
   {
     const plan = BASE_PLAN({ nextExpectedPaymentAt: utcMidnight(2026, 9, 10), expectedDayOfMonth: 10, finalExpectedPaymentAt: utcMidnight(2026, 11, 10) });
@@ -175,7 +185,7 @@ function run() {
     const exactlyAtGrace = evaluatePaymentPlan(plan, [utcMidnight(2026, 9, 10) + 7 * DAY], 100, now, TZ);
     assert.equal(exactlyAtGrace.isLate, false, "a payment exactly 7 days after the cycle (the grace boundary) must still satisfy it");
     const oneOverGrace = evaluatePaymentPlan(plan, [utcMidnight(2026, 9, 10) + 8 * DAY], 100, now, TZ);
-    assert.equal(oneOverGrace.isLate, true, "a payment 8 days after the cycle (one past grace) must not satisfy it");
+    assert.equal(oneOverGrace.isLate, false, "one day past the primary grace boundary, but still before the next cycle's own window, must now satisfy the cycle via the late-payment dead-zone fix -- it does not fall through to a permanent dead zone");
     const exactlyAtEarlyGrace = evaluatePaymentPlan(plan, [utcMidnight(2026, 9, 10) - 7 * DAY], 100, now, TZ);
     assert.equal(exactlyAtEarlyGrace.isLate, false, "a payment exactly 7 days BEFORE the cycle must still satisfy it");
   }

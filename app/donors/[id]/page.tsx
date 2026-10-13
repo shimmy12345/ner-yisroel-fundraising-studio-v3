@@ -317,6 +317,11 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // already fetched above (drives the "Most Recent Paid Gift" KPI); this
   // just scopes it to payments linked specifically to THIS open pledge.
   const openPledgePaymentDates = openPledgeSource ? paymentEvents.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.payment_date) : [];
+  // Parallel to openPledgePaymentDates (2026-10-13 late-payment dead-zone
+  // fix, see docs/AI-HANDOFF.md) -- feeds evaluatePaymentPlan's optional
+  // amount parameter so a late payment can only satisfy a cycle if its
+  // own amount actually covers the installment.
+  const openPledgePaymentAmountsCents = openPledgeSource ? paymentEvents.filter((event) => event.pledge_activity_id === openPledgeSource.id).map((event) => event.applied_cents) : [];
   const openPledgePlan = openPledgeSource ? paymentPlans.find((item) => item.pledge_activity_id === openPledgeSource.id) : undefined;
   // Every pledge this donor has that still needs a visible payment-plan
   // card, each with its own independent payment-plan state (never
@@ -356,14 +361,22 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       history: correctionHistory.map((c) => ({ id: c.id, importedBalanceCentsAtCorrection: c.imported_balance_cents_at_correction, correctedBalanceCents: c.corrected_balance_cents, reason: c.reason, createdAt: c.created_at, reversedAt: c.reversed_at, reversalReason: c.reversal_reason })),
     };
     if (!planRow) return { pledge, planState: null as PledgePlanState | null, correctionState };
-    const linkedPaymentDates = paymentEvents.filter((event) => event.pledge_activity_id === pledge.id).map((event) => event.payment_date);
+    const linkedPaymentEvents = paymentEvents.filter((event) => event.pledge_activity_id === pledge.id);
+    const linkedPaymentDates = linkedPaymentEvents.map((event) => event.payment_date);
+    // Late-Payment Dead-Zone Fix (2026-10-13, see docs/AI-HANDOFF.md) --
+    // parallel to linkedPaymentDates, same filter/order, so a late
+    // payment can only satisfy a cycle if its own amount actually covers
+    // the full installment (never a partial payment silently "clearing"
+    // a full installment, and never double-counting an oversized one).
+    const linkedPaymentAmountsCents = linkedPaymentEvents.map((event) => event.applied_cents);
     const nowForPlanEvaluation = Math.floor(Date.now() / 1000);
     const evaluation = evaluatePaymentPlan(
-      { nextExpectedPaymentAt: planRow.next_expected_payment_at, expectedDayOfMonth: planRow.expected_day_of_month, finalExpectedPaymentAt: planRow.final_expected_payment_at, endedAt: null },
+      { nextExpectedPaymentAt: planRow.next_expected_payment_at, expectedDayOfMonth: planRow.expected_day_of_month, finalExpectedPaymentAt: planRow.final_expected_payment_at, endedAt: null, installmentAmountCents: planRow.installment_amount_cents },
       linkedPaymentDates,
       pledge.balance_cents ?? 0,
       nowForPlanEvaluation,
       profile.timezone,
+      linkedPaymentAmountsCents,
     );
     // Pledge Renewal Reminders, Part 1 (2026-10-08, see docs/AI-HANDOFF.md;
     // commitment-duration correction 2026-10-08) -- same
@@ -396,7 +409,7 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
         description: openPledgeSource.description || openPledgeSource.item_type,
         activityDate: resolveOpenPledgeActivityDate(openPledgeSource.activity_date, openPledgePaymentDates),
         activePaymentPlan: openPledgePlan
-          ? { nextExpectedPaymentAt: openPledgePlan.next_expected_payment_at, expectedDayOfMonth: openPledgePlan.expected_day_of_month, finalExpectedPaymentAt: openPledgePlan.final_expected_payment_at, endedAt: null, installmentAmountCents: openPledgePlan.installment_amount_cents, linkedPaymentDates: openPledgePaymentDates }
+          ? { nextExpectedPaymentAt: openPledgePlan.next_expected_payment_at, expectedDayOfMonth: openPledgePlan.expected_day_of_month, finalExpectedPaymentAt: openPledgePlan.final_expected_payment_at, endedAt: null, installmentAmountCents: openPledgePlan.installment_amount_cents, linkedPaymentDates: openPledgePaymentDates, linkedPaymentAmountsCents: openPledgePaymentAmountsCents }
           : null,
       }
     : null;
