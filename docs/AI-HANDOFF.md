@@ -14,8 +14,12 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (committed, not yet pushed):
-**`29135a9`** -- "Fix pre-existing-pattern lint
+Current HEAD (committed and pushed):
+**`2019719`** -- "Document lint fix,
+balance-correction regression coverage, Staging redeploy, and live
+re-verification (2026-10-13)" -- documentation only, zero application
+code change, zero deploy from this commit itself. Sits on top of
+`29135a9` -- "Fix pre-existing-pattern lint
 error and add balance-correction regression coverage for multi-open-
 pledge fix" -- application code (one-line fix, `app/donors/[id]/
 page.tsx:328`, reuses the existing request-scoped `renderStart`
@@ -25,13 +29,21 @@ suppression, no behavior change) plus a new test file
 its registration in `scripts/run-tests.mjs`. Closes the one
 verification gap disclosed in the prior (`e1a1cae`) round via targeted
 automated coverage rather than a live example, per the owner's own
-fallback instruction. See "Multi-Open-Pledge Independent Evaluation --
-Lint Fix and Balance-Correction Regression Coverage, Deployed to
-Independent Staging Only (2026-10-13)" below for the full round
-(gates, Staging deployment, live verification). **DEPLOYED TO
-INDEPENDENT STAGING ONLY** (version `6c1acf7d-af2d-4faa-aacc-
-82365dc78ec0`) -- **no Production deployment has occurred for this
-commit or any commit in this chain back through `7034ee8`.** Sits on
+fallback instruction.
+
+**`2019719` (= `29135a9` application code, unchanged) is now DEPLOYED
+TO PRODUCTION**, under the owner's explicit written authorization
+(2026-10-13), after independent Staging deployment (version
+`6c1acf7d-af2d-4faa-aacc-82365dc78ec0`) and live verification. **Production
+Worker deployment version: `9174a465-09eb-4d52-9917-17f3c3bdec13`**,
+deployed 2026-10-13T18:48Z, rolling forward from the previously-live
+version `0dfa178f-20cf-49ef-92fa-681763d51e65` (commit `44b33e6`,
+retained as the rollback target). See "Multi-Open-Pledge Independent
+Evaluation -- PRODUCTION DEPLOYMENT (2026-10-13)" below for the full
+pre-deployment checks, gate results, and live Production verification
+record. No database migration, no donor-data change, no payment-plan
+change, no Cron Trigger change, no backup-schedule change -- application
+code and tests only. Sits on
 top of
 `0fcd217` -- documentation-only
 update to this section covering Stage 2 credential installation and
@@ -35774,3 +35786,242 @@ donor-61566 and Portfolio Focus scoring paths this chain depends on.
 **Per the owner's explicit instruction, no Production deployment has
 been performed or will be performed without a separate, explicit
 approval.**
+
+## Multi-Open-Pledge Independent Evaluation -- PRODUCTION DEPLOYMENT (2026-10-13)
+
+The owner issued explicit written Production deployment authorization
+(2026-10-13), naming the three implementation commits (`7034ee8`,
+`29135a9`, `2019719`), subject to the pre-deployment safety checks,
+final verification gates, and live-verification requirements below.
+Deployed application code SHA: **`29135a9`** (identical tree to
+`2019719`, which only adds the documentation commit on top -- no
+application code differs between the two).
+
+### 1. Pre-deployment safety checks
+
+- Branch confirmed: `feature/independent-cloudflare-sandbox`. HEAD
+  confirmed: `2019719`, working tree clean (`git status --short`
+  empty), fully pushed to `origin` before this round began.
+  `git merge-base --is-ancestor 7034ee8 HEAD` confirmed true -- all
+  three authorized commits are in the deployed history.
+- No concurrent deployment: `wrangler deployments list --config
+  wrangler.production.jsonc` showed the most recent Production
+  deployment finished at 2026-10-13T16:47:56Z (version `0dfa178f-...`,
+  commit `44b33e6`, the donor-61566 round), with no deployment in
+  progress.
+- Full deployment diff reviewed: `git diff --stat 44b33e6 HEAD` ->
+  exactly the 13 files already reviewed across the two prior rounds (7
+  application files, 4 test files, `scripts/run-tests.mjs`,
+  `docs/AI-HANDOFF.md`) -- nothing unexpected.
+  `git diff --stat 44b33e6 HEAD -- wrangler.production.jsonc
+  wrangler.staging.jsonc drizzle/ status-worker/` -> **empty output**,
+  confirming zero changes to Production/Staging Worker configuration,
+  zero new or modified migrations, and zero status-worker changes in
+  this deployment.
+- Production Worker configuration (`wrangler.production.jsonc`)
+  inspected directly: `d1_databases` -> `fundraising-os-production-db`
+  (`database_id: a51c6571-ae16-4614-aa9a-08f8e6be3ecd`), `triggers` ->
+  `{"crons": ["0 * * * *"]}` (the single, already-active hourly
+  Fundraising Agenda cron, unchanged), `vars` -> `TEAM_DOMAIN`,
+  `POLICY_AUD`, `STAGING_OWNER_EMAIL`, `APP_BASE_URL`,
+  `MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` all present and unchanged.
+- Latest Production backup and recoverability verified live (not from
+  docs) via the Production `/health` page (owner's own authenticated
+  session, read-only): **Automated backup -- "Completed successfully
+  2026-10-13T15:55:03Z"** (same-day, ~3 hours before this deployment);
+  **Monthly restore test -- "Successfully restored and verified the
+  Oct 12, 2026 backup."** Both green/successful.
+- Currently-deployed Production Worker version recorded for rollback:
+  **`0dfa178f-20cf-49ef-92fa-681763d51e65`** (commit `44b33e6`),
+  independently cross-confirmed via the `/health` page's own "Deployed
+  version: 0.1.0 · 44b33e6" card.
+- No migration or donor-data modification was required or performed
+  (confirmed by the empty `drizzle/` diff above).
+
+All eight pre-deployment checks passed; none of the STOP conditions
+were triggered.
+
+### 2. Final verification gates -- exact results, run immediately before deploying
+
+- `npx tsc --noEmit` -> **clean, zero errors.**
+- `node scripts/run-tests.mjs` -> **183/183 test files passed**,
+  including the donor-61566 reconciliation tests
+  (`tests/pledge-payment-plan.test.mjs`,
+  `tests/recurring-payment-alert-e2e.test.mjs`) and the new
+  multi-open-pledge balance-correction tests
+  (`tests/multi-open-pledge-balance-correction.test.mjs`).
+- `pnpm run lint` -> **94 errors / 43 warnings** -- exact pre-existing
+  baseline, zero new errors or warnings.
+- `pnpm run build:production-independent` -> clean, exit 0.
+
+All gates matched the expected baseline exactly; nothing failed.
+
+### 3. Deployed to Production
+
+Built with `pnpm run build:production-independent`, deployed with
+`pnpm run deploy:production-independent` (`wrangler deploy --config
+wrangler.production.jsonc`).
+
+**Production Worker deployment version: `9174a465-09eb-4d52-9917-17f3c3bdec13`,
+deployed 2026-10-13T18:48Z.** Deploy output confirmed: `env.DB` ->
+`fundraising-os-production-db` (correct database), `env.STATUS_WORKER`
+-> `fundraising-os-production-backup-status` (correct, Production's own
+status-worker, not Staging's), `env.APP_BASE_URL` -> the Production
+hostname, `schedule: 0 * * * *` reprinted (the existing hourly cron,
+unchanged -- not newly created, not removed). No Staging binding of
+any kind appeared anywhere in the output. **Scope strictly limited to
+the authorized application deployment** -- no migration was run, no
+donor record was touched, no payment plan was changed, no Cron Trigger
+was modified, no backup schedule was altered, and no unrelated feature
+was deployed.
+
+### 4. Live Production verification -- real donors, owner's authenticated session, read-only throughout
+
+**A. Goldenberg (JL 64792,
+`/donors/441e198c-2513-490d-8c3b-b9ecebc39d4b`):**
+
+- "PLEDGES — 2 pledges" shows both independently: KOLX2026 ($11,000,
+  "Monthly," **"Next expected: Oct 23, 2026,"** no overdue badge) and
+  CHSP2026 ($650, "Set payment plan" prompt, its own separate card).
+  Open Commitments: $11,650.
+- KOLX2026 is **not** described as stale or overdue anywhere on the
+  page.
+- The donor-card Suggested Action on live Production currently reads
+  **"Send a personal thank-you for the recent $1,000 gift to
+  KOLX2026"** rather than a CHSP2026 follow-up -- this is Production's
+  own real, more-recent data (an unacknowledged paid gift dated
+  2026-08-11, 63 days old) surfacing a different, independently
+  pre-existing situation type (gift-acknowledgment) that outranks the
+  pledge-follow-up situation in this donor's current real state. This
+  is expected, data-driven behavior unrelated to this fix -- the
+  requirement is that *when* a follow-up recommendation is shown it
+  names the specific pledge, not that one must always be shown ahead
+  of every other situation type.
+- **Fundraising Intelligence Brief** (`/fundraising-intelligence`):
+  Goldenberg's card reads exactly **"CHSP2026 has gone stale"** / "A
+  $650 CHSP2026 pledge ($650 still open) has had no recorded payment
+  activity in 165 days. **A separate KOLX2026 payment plan is on
+  track.**" -- the specific-campaign-naming and
+  preserve-the-sibling's-status requirements both confirmed live on
+  Production, word for word identical to the Staging result. Broide's
+  card (a second, independent real multi-open-pledge donor) shows the
+  same specific-campaign pattern, confirming generality.
+- **Donor page and Brief agree**: neither describes KOLX2026 as stale,
+  both independently and correctly identify CHSP2026 as the one open
+  item needing attention.
+
+**B. Rosenbaum (JL 61566,
+`/donors/33426bfe-c176-4980-b2a9-0514976ead9e`):**
+
+- Payment plan card: "Monthly," **"Next expected: Nov 4, 2026,"
+  "Final expected: Nov 4, 2026,"** "Expected installment: $150" --
+  **no overdue badge of any kind.**
+- Donor has since made a real, new $150 payment (dated 2026-10-12,
+  visible as "Most Recent Paid Gift") -- Open Commitments is now $150
+  (down from the $300 recorded in the prior Staging-verification
+  round), entirely normal, expected donor activity that happened on
+  its own between rounds; not something this deployment changed.
+- Not incorrectly included in the Daily Agenda for an overdue
+  installment (confirmed in Section D below -- Rosenbaum does not
+  appear under IMPORTANT DATES/STEWARDSHIP, correctly, since the plan
+  is now on track).
+- Paid, committed, and outstanding balance values are exactly what the
+  live database already held before this deployment -- nothing was
+  read-modify-written by this verification, only read.
+
+**C. Other legitimate overdue plans:**
+
+- **Klein**: Daily Agenda still shows **"Mr. & Mrs. Yaakov Yisroel
+  Klein — Payment follow-up needed today, $400.00 expected · 3 days
+  behind."** Unaffected by this deployment.
+
+**D. Daily Agenda** (`/api/agenda/preview`, the live Production route
+the real scheduled email renders from):
+
+```
+IMPORTANT DATES / STEWARDSHIP
+Kutoff — Payment plan ending in 5 days today ($250.00 remaining)
+Spetner — Renewal follow-up needed today
+Klein — Payment follow-up needed today ($400.00 expected · 3 days behind)
+Fink — Michael's birthday — Tomorrow
+
+SUGGESTED
+Broide — Follow up on the open $2,000 pledge (254 days)
+Weinberger — Follow up on the open $1,800 pledge (68 days)
+Weinschneider — Make a solicitation ask
+```
+
+No incorrect payment-plan alert, no contradictory pledge
+recommendation, every pre-existing legitimate follow-up still present.
+Rosenbaum correctly absent (on track, not overdue). Goldenberg absent
+from this particular send's top-3 `SUGGESTED` slots for the
+already-documented, unrelated reason (`MAX_SUGGESTED` capacity) -- his
+own donor-page Suggested Action and Brief card above are where his
+signal correctly shows. No scheduled email was triggered and no test
+email was sent to any real recipient -- this route was read
+(`GET`/preview) exactly as the prior Staging-verification rounds read
+it.
+
+### 5. Data integrity and environment isolation -- confirmed
+
+- No Production donor record was modified -- every page this round
+  visited was read-only; no edit, save, correction, or dismiss control
+  was clicked anywhere.
+- Pledge balances, payment assignments, and payment history are
+  exactly what the live database already held -- the one value that
+  changed (Rosenbaum's balance, $300 -> $150) changed because the
+  donor made a real payment between verification rounds, not because
+  of anything this deployment did.
+- Production and Staging remain isolated: this round's one deploy
+  targeted `wrangler.production.jsonc` exclusively; the deploy output's
+  bindings (`fundraising-os-production-db`,
+  `fundraising-os-production-backup-status`, the production hostname)
+  never referenced any Staging resource.
+- Production email scheduling configuration is unchanged: the deploy
+  output reprinted the same `schedule: 0 * * * *` that was already
+  active before this deployment; `wrangler.production.jsonc`'s
+  `triggers` block was confirmed byte-for-byte unchanged in the diff
+  (Section 1).
+- Staging's own disabled Cron Trigger (`"triggers": {"crons": []}`)
+  was not touched by this round at all -- this round deployed to
+  Production only.
+- No migration ran and no unexpected database write occurred: the
+  deploy is a Worker code/asset upload only (`wrangler deploy`), which
+  does not execute `drizzle/*.sql` or write to D1 on its own, and the
+  diff confirmed zero migration files changed.
+
+### 6. Unresolved issues / risks
+
+None newly introduced by this deployment. The one item carried forward
+from the prior rounds (no live donor was ever found combining an
+active balance correction with a second simultaneously open pledge)
+remains covered only by the automated regression suite
+(`tests/multi-open-pledge-balance-correction.test.mjs`), not by a live
+Production example -- unchanged status, already disclosed, not a known
+defect.
+
+### Deployment summary
+
+| | |
+|---|---|
+| Deployed commit | `29135a9` (tree identical to `2019719`) |
+| Production Worker version | `9174a465-09eb-4d52-9917-17f3c3bdec13` |
+| Deployed at | 2026-10-13T18:48Z |
+| Previous Production version (rollback target) | `0dfa178f-20cf-49ef-92fa-681763d51e65` (commit `44b33e6`) |
+| Pre-deployment backup | Verified successful, 2026-10-13T15:55:03Z |
+| Tests | 183/183 passed |
+| TypeScript | Clean |
+| Lint | 94 errors / 43 warnings (baseline, zero new) |
+| Build | Clean |
+| Donor data modified | None |
+| Migrations run | None |
+| Cron/backup/email config changed | None |
+| Rollback performed | No -- not needed |
+
+**Production deployment is complete and live-verified.** Goldenberg's
+two open pledges are evaluated and displayed independently on
+Production exactly as designed; Rosenbaum's payment-plan reconciliation
+fix remains intact and is now additionally confirmed by his own new,
+real on-time payment; Klein and every other pre-existing legitimate
+recommendation are unaffected; no donor data, migration, scheduled
+email, or Cron Trigger was changed.
