@@ -35387,3 +35387,208 @@ application code and test code only. No `wrangler.*.jsonc` file, no
 migration, no GitHub Actions workflow was touched. Staging was not read
 or written. **Per the owner's explicit instruction, stopping here for
 independent review before any Production deployment.**
+
+## Multi-Open-Pledge Independent Evaluation -- DEPLOYED TO INDEPENDENT STAGING ONLY, LIVE-VERIFIED (2026-10-13)
+
+The owner reviewed commit `7034ee849869618a1d161496709556a1860dc42f`
+and asked for independent Staging-only validation before any Production
+consideration. Verification gates re-run, deployed to Staging, and
+live-verified against the REAL donors this fix was built for -- not
+synthetic data.
+
+### 1. Implementation review (re-confirmed, nothing changed since)
+
+- `git rev-parse HEAD` = `7034ee849869618a1d161496709556a1860dc42f`,
+  working tree clean. The 12-file diff (7 production, 3 test updates,
+  1 new test file) reviewed in the prior round still stands unchanged.
+- Re-confirmed point by point: every open pledge is evaluated
+  independently (`lib/portfolio-focus/aggregate.ts`'s additive
+  `openPledges[]`, one entry per pledge, each through the same
+  `evaluateOpenPledge()` call); an on-track plan can never reach
+  `detectPledgeFollowUp`'s actionable branch (filtered out by
+  `isOpenPledgeActionable` before the function even runs); a second,
+  genuinely outstanding pledge is never hidden by another pledge's
+  active plan (the `openPledges` array has no cross-pledge
+  suppression -- each entry stands on its own); the donor page,
+  Suggested Action, Fundraising Intelligence Brief, and the Daily
+  Agenda's SUGGESTED section all now route through the same
+  `isOpenPledgeActionable()`/`evaluateOpenPledgePlanStatus()`
+  primitives (the Recurring Payment Alert line was already independent
+  per-plan and untouched); Portfolio Focus's own calibrated scoring/
+  ranking/UI files do not appear in the diff at all; the donor-61566
+  `evaluatePaymentPlan`/`matchPaymentsToCycles` fix is byte-for-byte
+  unchanged in this diff.
+- Pledge balance corrections: `lib/relationships/pledge-balance-
+  correction.ts` and `app/donors/[id]/PledgeBalanceCorrection.tsx`
+  do not appear in this diff either -- the correction mechanism feeds
+  `balance_cents` upstream of everything this fix touches (via the
+  existing `COALESCE(pbc.corrected_balance_cents, ga.balance_cents)`
+  the giving queries already apply), so a corrected pledge's
+  `OpenPledgeEvidence.balanceCents` already reflects any active
+  correction with zero new code -- confirmed by inspection, not newly
+  tested this round (no donor with both a correction AND a second open
+  pledge was found in live data to verify end-to-end; flagged below as
+  the one disclosed verification gap).
+
+### 2. Verification gates -- exact results
+
+- `npx tsc --noEmit` -> **clean, zero errors.**
+- `node scripts/run-tests.mjs` -> **182/182 test files passed.**
+- `pnpm run build:staging-independent` -> **clean, exit 0.**
+- `pnpm run lint` -> **95 errors / 43 warnings project-wide** (up from
+  the previously-reported 94 errors/43 warnings baseline). Investigated
+  rather than assumed unrelated: the one additional error is
+  `app/donors/[id]/page.tsx:328`, `Cannot call impure function during
+  render` (`Date.now()`), on the single new line this round's Part B
+  selection logic added (`nowForOpenPledgeSelection`). This exact rule
+  already fires at **~20 other, entirely pre-existing lines in this
+  same file** (confirmed by `git diff` -- none of those lines were
+  touched this round), including an identical `Math.floor(Date.now() /
+  1000)` pattern at line 396 from the donor-61566 round and line 462
+  from long before this session. This is not a new category of risk --
+  it is one more instance of an already-pervasive, already-shipped
+  pattern in this exact Server Component (request-scoped timestamps
+  computed directly in the component body), which this project's own
+  `tsc`/test/build gates (the ones that actually block a deploy) do not
+  treat as blocking, and which the build itself proves does not break
+  anything. Disclosed precisely rather than silently claimed as zero
+  impact.
+
+### 3. Deployed to Independent Staging only
+
+`git diff --stat` reviewed immediately before deploying: empty (no
+uncommitted changes -- deploying exactly commit
+`7034ee849869618a1d161496709556a1860dc42f`'s own already-committed
+code). Built with `pnpm run build:staging-independent`, deployed with
+`pnpm run deploy:staging-independent`.
+
+**Staging deployment Version ID: `8e2ee999-b516-4e8b-bcbe-aa6c5163b098`.**
+Deploy output confirmed the explicit empty `triggers: {"crons": []}`
+reasserted ("Deployed fundraising-os-staging triggers" printed, same
+confirmation shape as the 2026-10-13 cron-dead-zone fix earlier this
+session) -- Staging's daily-email cron remains correctly cleared, not
+accidentally revived by this deploy. Bindings confirmed: `env.DB` ->
+`fundraising-os-staging-db`, `env.APP_BASE_URL` -> the staging
+hostname -- no Production binding of any kind. **No Production
+deployment was performed.**
+
+### 4. Live verification -- real donors, not synthetic fixtures
+
+Staging already had representative data for both donors without any
+data copy/manufacture (confirmed via read-only D1 queries before
+deciding this was sufficient):
+
+- **Goldenberg (JL 64792, same donor UUID as Production)**: Staging's
+  own `giving_activities`/`pledge_payment_plans` independently carry
+  the identical real shape -- KOLX2026 ($11,000 open, active monthly
+  plan, one real $1,000 payment 2026-09-23) and CHSP2026 ($650 open,
+  no plan at all, last activity 2026-05-01).
+- **Rosenbaum (JL 61566)**: Staging's copy of the DIN2025 pledge
+  **never received** the 2026-10-12 late payment that was applied only
+  to Production (`balance_cents: 30000`/`paid_cents: 150000` in
+  Staging vs. Production's `15000`/`165000`) -- Staging therefore
+  independently provides a genuinely, still-unresolved overdue case,
+  distinct from Production's now-resolved one, at no cost.
+
+**Live results, via the owner's own already-authenticated Chrome
+session (no credentials entered):**
+
+- **Goldenberg's donor page**
+  (`/donors/441e198c-2513-490d-8c3b-b9ecebc39d4b`, live screenshots
+  captured): "PLEDGES — 2 pledges" shows BOTH independently -- KOLX2026
+  ($11,000, "Monthly," "Next expected: Oct 23, 2026," **no overdue
+  badge**) and CHSP2026 ($650, "Set payment plan" prompt, correctly
+  shown as a separate card). **Suggested Action: "Follow up on the
+  open $650 pledge to CHSP2026. No payment activity in 165 days. $650
+  open balance, CHSP2026, last activity 2026-05-01."** -- names the
+  exact pledge, never implies the donor's whole relationship or the
+  active KOLX2026 plan is stale.
+- **Fundraising Intelligence Brief** (`/fundraising-intelligence`, live
+  screenshot captured): Goldenberg's own card reads exactly: headline
+  **"CHSP2026 has gone stale,"** explanation **"A $650 CHSP2026 pledge
+  ($650 still open) has had no recorded payment activity in 165 days. A
+  separate KOLX2026 payment plan is on track."**, Worth Doing **"Follow
+  up on the open CHSP2026 balance."** -- this is the EXACT text the
+  design specified, confirming both the specific-campaign-naming
+  requirement and the "preserve the other pledge's status" requirement
+  live, word for word, not merely in a unit test. Two other real donors
+  (Mordechai Schwartz/DIN2026, Shmuel Luxenburg/DIN2025) show the same
+  specific-campaign headline pattern, confirming the fix is live and
+  general, not special-cased for Goldenberg.
+- **Daily Agenda preview** (`/api/agenda/preview`, the exact route the
+  real scheduled email renders from): Rosenbaum correctly still appears
+  under IMPORTANT DATES/STEWARDSHIP -- **"Payment follow-up needed
+  today · $150.00 expected · 2 days behind"** -- confirming a
+  genuinely overdue payment plan continues generating the appropriate
+  recommendation, completely unaffected by this round's changes.
+  Goldenberg does not appear in this particular send's top-3 SUGGESTED
+  slots (a capacity/ranking matter -- `MAX_SUGGESTED = 3` system-wide,
+  unrelated to this fix) or as a structured payment-plan alert (CHSP2026
+  has no plan, so it was never eligible for that specific mechanism) --
+  his own donor-page Suggested Action above is the correct place his
+  signal is guaranteed to show, and it does.
+- **Rosenbaum's own donor page**
+  (`/donors/33426bfe-c176-4980-b2a9-0514976ead9e`): "$300 DIN2025 ...
+  Monthly · **Expected payment overdue** ... Next expected: Oct 4,
+  2026" -- the genuinely-still-overdue Staging state (no late payment
+  ever applied here) correctly still shows the overdue badge, proving
+  the donor-61566 reconciliation logic itself is completely intact and
+  unaffected by this round -- not merely that its own regression suite
+  still passes, but that the real page shows the right thing for a
+  real, currently-overdue plan.
+
+### 5. Regression and data safety -- confirmed
+
+- No Production data was read or modified this round (only Staging D1
+  was queried, read-only, and only Staging was deployed to).
+- No pledge balance or payment allocation was changed anywhere --
+  every value re-read above matches what was already in each
+  database before this round began.
+- No duplicate/contradictory recommendation was observed anywhere on
+  the live pages checked -- each donor's Brief card and Suggested
+  Action showed exactly one coherent, internally-consistent
+  recommendation.
+- Existing legitimate follow-ups remain visible and correct: Klein's
+  and Rosenbaum's genuinely overdue plans, Kutoff's ending-soon plan,
+  Spetner's renewal follow-up, Fink's birthday, Weinschneider's
+  solicitation ask, and every other unrelated Daily Agenda item are
+  all present and unchanged from their pre-existing, already-verified
+  state.
+- Staging/Production isolation preserved throughout: all reads and the
+  one deploy this round targeted `wrangler.staging.jsonc` exclusively;
+  Rosenbaum's two databases independently show different, correct,
+  environment-appropriate states (Staging still overdue, Production
+  already resolved), direct live proof the two environments remain
+  genuinely separate live storage.
+- **No Production deployment occurred.**
+
+### 6. Unresolved issues / risks
+
+1. **One disclosed verification gap**: no donor combining an active
+   Manual Pledge Balance Correction AND a second simultaneously open
+   pledge was found in live Staging or Production data to verify the
+   correction-plus-multi-pledge interaction end to end on a real page.
+   Verified by code inspection only (the correction's effective-balance
+   value flows into `OpenPledgeEvidence.balanceCents` through the same
+   existing `COALESCE` every other surface already uses, with zero new
+   code in the correction path itself) -- not a known defect, but not
+   independently live-verified either.
+2. **The one new lint error** (Section 2) is a pre-existing-pattern
+   instance, not a new category -- does not block `tsc`/tests/build,
+   but is disclosed rather than silently absorbed into the baseline.
+3. Everything else checked in this round -- multi-pledge independence,
+   on-track-never-flagged, second-pledge-never-hidden, cross-surface
+   consistency, genuinely-overdue-still-flagged, donor-61566 intact,
+   data safety, environment isolation -- was live-verified with no
+   open question.
+
+### Ready for Production?
+
+Based on this round's results: **yes, with the one disclosed gap above
+noted for the owner's own risk tolerance.** Every specific scenario the
+owner asked to verify was checked against real data on a real,
+deployed Staging environment (not just tests), and every result matched
+the design exactly. No regression was found in the donor-61566
+reconciliation fix or in any unrelated existing recommendation. **Per
+the owner's explicit instruction, no Production deployment was
+performed or will be performed without separate, explicit approval.**
