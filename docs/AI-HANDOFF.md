@@ -14,8 +14,26 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (committed and pushed):
-**`0fcd217`** -- documentation-only
+Current HEAD (committed, not yet pushed):
+**`29135a9`** -- "Fix pre-existing-pattern lint
+error and add balance-correction regression coverage for multi-open-
+pledge fix" -- application code (one-line fix, `app/donors/[id]/
+page.tsx:328`, reuses the existing request-scoped `renderStart`
+timestamp instead of a second direct `Date.now()` call -- no
+suppression, no behavior change) plus a new test file
+(`tests/multi-open-pledge-balance-correction.test.mjs`, 4 tests) and
+its registration in `scripts/run-tests.mjs`. Closes the one
+verification gap disclosed in the prior (`e1a1cae`) round via targeted
+automated coverage rather than a live example, per the owner's own
+fallback instruction. See "Multi-Open-Pledge Independent Evaluation --
+Lint Fix and Balance-Correction Regression Coverage, Deployed to
+Independent Staging Only (2026-10-13)" below for the full round
+(gates, Staging deployment, live verification). **DEPLOYED TO
+INDEPENDENT STAGING ONLY** (version `6c1acf7d-af2d-4faa-aacc-
+82365dc78ec0`) -- **no Production deployment has occurred for this
+commit or any commit in this chain back through `7034ee8`.** Sits on
+top of
+`0fcd217` -- documentation-only
 update to this section covering Stage 2 credential installation and
 live verification (2026-08-28) -- zero code/workflow/Cloudflare/data
 change, zero deploy. See "D1 Nightly Backup Scheduling Reliability --
@@ -35592,3 +35610,167 @@ the design exactly. No regression was found in the donor-61566
 reconciliation fix or in any unrelated existing recommendation. **Per
 the owner's explicit instruction, no Production deployment was
 performed or will be performed without separate, explicit approval.**
+
+## Multi-Open-Pledge Independent Evaluation -- Lint Fix and Balance-Correction Regression Coverage, Deployed to Independent Staging Only (2026-10-13)
+
+Follow-up round closing out the two items the prior (`e1a1cae`) round
+disclosed: the one new lint error, and the one verification gap (no
+live donor combining a balance correction with a second open pledge).
+
+### 1. Lint fix
+
+`app/donors/[id]/page.tsx`: changed
+`const nowForOpenPledgeSelection = Math.floor(Date.now() / 1000);` to
+`const nowForOpenPledgeSelection = Math.floor(renderStart / 1000);`,
+reusing the existing `const renderStart = Date.now();` already declared
+at the top of the component (the same pattern the donor-61566 round and
+~20 pre-existing lines elsewhere in this file already use). No
+suppression, no new abstraction, no behavior change -- the value is
+still "now, in epoch seconds, read once per render."
+
+`pnpm run lint` -> **94 errors / 43 warnings**, back to the exact
+pre-existing baseline (down from the `e1a1cae` round's disclosed 95/43),
+confirmed zero hits anywhere in this round's touched files or lines.
+
+### 2. New regression coverage: balance correction + multi-pledge
+
+New file `tests/multi-open-pledge-balance-correction.test.mjs`,
+following this project's established e2e-test convention
+(`tests/pledge-balance-correction-e2e.test.mjs`,
+`tests/recurring-payment-alert-e2e.test.mjs`): a real in-memory
+`node:sqlite` `DatabaseSync` built from the actual committed migrations
+(`drizzle/*.sql`), a giving-SQL query mirroring
+`lib/portfolio-focus/data.ts`'s real query verbatim (including the real
+`COALESCE(pbc.corrected_balance_cents, ga.balance_cents)` join), and the
+real imported production functions throughout --
+`validateBalanceCorrection`, `aggregatePortfolioFocusInputs`,
+`buildPortfolioContext`, `scorePortfolioFocusDonor`, `detectSituations`,
+`evaluateOpenPledgePlanStatus`, `isOpenPledgeActionable` -- never a
+second, competing implementation of any of this logic.
+
+4 tests, all passing:
+
+1. A manually corrected balance on one open pledge (raised from
+   $100/$1000, near-complete and suppressed, to $600/$1000, now
+   stale-eligible) correctly determines whether *that* pledge needs
+   follow-up, independently of a second, sibling pledge's own
+   already-on-track plan -- exactly one `pledge_follow_up` signal is
+   produced, naming the corrected pledge, and the explanation preserves
+   the sibling's on-track status in its own sentence.
+2. Correcting a pledge's balance to $0 removes it from follow-up
+   consideration entirely -- before correction it is stale and flagged;
+   after, `openPledges.length === 0` for that pledge and no signal is
+   produced for it.
+3. Correcting one pledge's balance never changes a sibling pledge's own
+   independent plan evaluation -- asserted via `assert.deepEqual` on the
+   untouched sibling's full `OpenPledgeEvidence` before and after.
+4. The donor-page-style single-pledge selection and the Fundraising
+   Intelligence Brief agree on which pledge is most actionable even with
+   a corrected balance in play -- verified via a `selectMostActionablePledge()`
+   helper reproducing `page.tsx`'s real selection logic against the same
+   corrected data the Brief's `detectSituations` call sees.
+
+Registered in `scripts/run-tests.mjs`. Full suite: **183/183 passed**
+(up from 182/182 -- one new file, 4 new tests, zero existing test
+touched or re-asserted differently). `npx tsc --noEmit` -> clean, zero
+errors, re-run after the addition.
+
+Re-run in isolation to directly confirm no regression in the two prior
+fixes this chain depends on:
+`tests/portfolio-focus-regression.test.mjs`,
+`tests/portfolio-focus-components.test.mjs`,
+`tests/portfolio-focus-today-view.test.mjs`,
+`tests/portfolio-focus-dedicated-view.test.mjs` (Portfolio Focus's own
+calibrated scoring/ranking -- all pass, confirming it remains untouched
+by either this round or the `7034ee8` round), and
+`tests/recurring-payment-alert-e2e.test.mjs` (8/8, including the D1-D4
+Rosenbaum/61566 cases) plus `tests/pledge-payment-plan.test.mjs` (the
+Rosenbaum late-payment reconciliation fix, intact).
+
+`git diff --stat` reviewed immediately before committing: exactly
+`app/donors/[id]/page.tsx` (+8/-1) and `scripts/run-tests.mjs` (+1),
+plus the one new test file -- no unrelated refactoring. Committed as
+**`29135a9`** -- "Fix pre-existing-pattern lint error and add
+balance-correction regression coverage for multi-open-pledge fix."
+
+### 3. Deployed to Independent Staging only
+
+Built with `pnpm run build:staging-independent` (clean, exit 0),
+deployed with `pnpm run deploy:staging-independent`.
+
+**Staging deployment Version ID: `6c1acf7d-af2d-4faa-aacc-82365dc78ec0`.**
+Deploy output confirmed the explicit empty `triggers: {"crons": []}`
+reasserted ("Deployed fundraising-os-staging triggers" printed) and the
+source config (`wrangler.staging.jsonc` line 89) directly re-checked to
+still read `"triggers": { "crons": [] }` -- Staging's daily-email cron
+remains correctly disabled. Bindings confirmed: `env.DB` ->
+`fundraising-os-staging-db`, `env.APP_BASE_URL` -> the staging hostname
+-- no Production binding of any kind. **No Production deployment was
+performed.**
+
+### 4. Live verification -- repeated against the same real donors
+
+Via the owner's own already-authenticated Chrome session (no
+credentials entered), against the newly redeployed Staging:
+
+- **Goldenberg's donor page**
+  (`/donors/441e198c-2513-490d-8c3b-b9ecebc39d4b`): both pledges still
+  shown independently -- KOLX2026 ($11,000, "Next expected: Oct 23,
+  2026," no overdue badge) and CHSP2026 ($650, "Set payment plan"
+  prompt, its own card). Open Commitments: $11,650. **Suggested
+  Action: "Follow up on the open $650 pledge to CHSP2026."** -- still
+  names the specific campaign, never the whole relationship.
+- **Fundraising Intelligence Brief** (`/fundraising-intelligence`):
+  Goldenberg's card still reads exactly **"CHSP2026 has gone stale"** /
+  "A $650 CHSP2026 pledge ($650 still open) has had no recorded payment
+  activity in 165 days. **A separate KOLX2026 payment plan is on
+  track.**" -- byte-identical to the prior round's live result,
+  confirming the redeploy changed nothing about this behavior (as
+  expected -- this round's code change was lint-only plus new tests, no
+  logic change). Broide's card (another real multi-open-pledge donor)
+  independently confirmed the general pattern again.
+- **Rosenbaum's donor page**
+  (`/donors/33426bfe-c176-4980-b2a9-0514976ead9e`): still "$300 DIN2025
+  ... Monthly · **Expected payment overdue** ... Next expected: Oct 4,
+  2026" -- Staging's still-independently-overdue copy, unaffected.
+- **Daily Agenda preview** (`/api/agenda/preview`): Klein ("$400.00
+  expected · 3 days behind") and Rosenbaum ("$150.00 expected · 2 days
+  behind") both still correctly appear under IMPORTANT DATES/
+  STEWARDSHIP; Goldenberg still absent from this particular send's
+  SUGGESTED slots for the same already-documented, unrelated reason
+  (`MAX_SUGGESTED` capacity, not a defect). No new or missing entries
+  versus the prior round's live check.
+
+### 5. Regression and data safety -- confirmed
+
+No Production data read or modified this round (only Staging was
+queried/deployed to). No pledge balance, payment amount, or allocation
+changed anywhere -- all four new tests run against synthetic,
+in-memory-only SQLite fixtures, never real D1 data. No new lint
+suppressions. No unrelated refactoring (`git diff --stat` confirmed
+minimal, precisely-scoped diff before committing).
+
+### 6. Unresolved issues / risks
+
+The one previously-disclosed verification gap (balance correction +
+second open pledge, not found live) is now closed by targeted automated
+coverage using the real production functions end-to-end (Section 2
+above) -- it was not closed by finding a live example, which still does
+not exist in either environment's current data. This is a deliberate,
+disclosed substitution: automated coverage of the real code path, not a
+live observation. No other new risk identified this round.
+
+### Ready for Production?
+
+**Yes.** Both items disclosed at the end of the prior round are now
+resolved: the lint baseline is restored (94/43), and the
+balance-correction interaction has real, passing, end-to-end regression
+coverage using the actual production functions rather than resting on
+code inspection alone. All gates pass (183/183 tests, tsc clean, build
+clean, lint at baseline), the Independent Staging deployment is live
+and re-verified against the same real donors with identical, correct
+results, and no regression was found anywhere -- including the
+donor-61566 and Portfolio Focus scoring paths this chain depends on.
+**Per the owner's explicit instruction, no Production deployment has
+been performed or will be performed without a separate, explicit
+approval.**
