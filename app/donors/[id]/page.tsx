@@ -325,7 +325,13 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
   // the loop below reduces to the prior "most recent" behavior whenever
   // nothing is actionable.
   const openPledgeCandidates = countedActivities.filter((item) => (item.balance_cents ?? 0) > 0);
-  const nowForOpenPledgeSelection = Math.floor(Date.now() / 1000);
+  // Reuses renderStart (captured once, at the very top of this request --
+  // see its own declaration above) rather than a fresh Date.now() call
+  // here: same request-time instant for all practical purposes, and it
+  // avoids adding a new "impure function during render" lint violation
+  // on top of this file's existing, pre-existing ones (none of which
+  // this round touches).
+  const nowForOpenPledgeSelection = Math.floor(renderStart / 1000);
   let openPledgeSource = openPledgeCandidates[0];
   for (const candidate of openPledgeCandidates) {
     const candidateLinkedDates = paymentEvents.filter((event) => event.pledge_activity_id === candidate.id).map((event) => event.payment_date);
