@@ -34328,3 +34328,273 @@ attempt succeed or fail (not yet available). No code change was made
 this round (no new application defect was found to write a regression
 test for -- the live registration, which was the leading hypothesis,
 turned out to already be correct). No merge to `main`.
+
+## Payment Plan Reconciliation Investigation -- JL Code 61566 / Rosenbaum, DIN2025 (2026-10-13) -- READ-ONLY INVESTIGATION, ROOT CAUSE FOUND, FIX PROPOSED, NOT IMPLEMENTED
+
+The owner reported that a newly-uploaded late payment for donor JL
+Code 61566, explicitly applied to their open DIN2025 pledge during
+import, did not clear the pledge's "Expected payment overdue" status.
+Investigated read-only against Production exactly as instructed --
+narrowly-scoped queries by known IDs, no broad data pull, no write of
+any kind. **Per the owner's explicit instruction, stopping after this
+report -- no code or data change has been made.**
+
+### Donor and records (identifiers only, no unrelated donor data exposed)
+
+- Donor: `33426bfe-c176-4980-b2a9-0514976ead9e` (Rabbi & Mrs. Moshe
+  Aharon Rosenbaum), `donor_code`/`external_id` = `61566`.
+- Open pledge: `626e3556-...`, campaign DIN2025, `committed_cents`
+  180000 ($1,800), `paid_cents` 165000 ($1,650), `balance_cents` 15000
+  ($150), `category: partially_paid_pledge`, `updated_at`
+  2026-10-13T15:54:45Z (today, ~7 minutes before this investigation's
+  own first query).
+- Payment plan (`pledge_payment_plans`): monthly, `installment_amount_
+  cents` 15000, `expected_day_of_month` 4, `next_expected_payment_at`
+  2026-10-04, `final_expected_payment_at` 2026-11-04, `ended_at` NULL,
+  `commitment_duration_months` 12, `original_pledge_date`
+  2025-12-04, plan last edited 2026-10-09 (unrelated to today).
+- `jl_payment_assignment_audits` for this donor (exactly 2 rows ever):
+  an earlier $150 payment dated 2026-09-04 (applied 2026-09-07,
+  `remaining_balance_cents` 30000 after), and **today's new $150
+  payment, `payment_date` = 2026-10-12, `decision_type: apply_to_
+  pledge`, `pledge_activity_id` correctly = the DIN2025 pledge above,
+  `applied_cents` 15000, `remaining_balance_cents` 15000 after,
+  `created_at` 2026-10-13T15:54:45Z**, belonging to import
+  `5b50aed6-...` (`file_name: payment.csv`, `status: completed`,
+  `completed_at` = `created_at` -- the whole import, including this
+  audit row and the pledge balance update, committed in one atomic D1
+  batch, so there is no partial/stuck-import state to investigate).
+
+### 1. Payment verification -- CONFIRMED, fully and correctly applied
+
+- The payment is real, dated 2026-10-12 (not today's upload date --
+  `payment_date` correctly sources `activity.activityDate` from the
+  uploaded file, never `now`/upload time, confirmed by reading
+  `app/api/import/route.ts`'s own `assignmentAuditRows` construction).
+- The explicit "apply to existing open pledge" selection **was
+  correctly saved**: `decision_type = 'apply_to_pledge'`,
+  `pledge_activity_id` matches the DIN2025 pledge exactly, confirmed
+  directly in `jl_payment_assignment_audits`.
+- The pledge's own `balance_cents` dropped from $300 to $150 and
+  `paid_cents` rose from $1,500 to $1,650 -- an exact $150 decrement,
+  proving the application genuinely took effect on the pledge itself,
+  not just in the audit log.
+- The import batch (`data_imports`) status is `completed`, not
+  `processing`/`failed` -- ruling out a stuck-import-status gap (a
+  real, separate risk this investigation checked for, see Section 5).
+
+**Conclusion: the payment upload, donor matching, and explicit
+pledge-application steps all worked correctly and exactly as
+intended.** The defect is entirely downstream, in how the payment
+PLAN (not the pledge balance) accounts for a late payment.
+
+### 2. Root cause -- a grace-window "dead zone" in cycle-matching, not a caching, date, or import-freshness defect
+
+Traced the full chain (`app/donors/[id]/page.tsx` -> `evaluatePaymentPlan`
+-> `matchPaymentsToCycles`, `lib/relationships/pledge-payment-plan.ts`;
+confirmed `lib/workspace/live-data.ts` and `lib/relationships/
+recommendation-evidence.ts` feed the Daily Agenda through the exact
+same function and the exact same `jl_payment_assignment_audits`-sourced
+`linkedPaymentDates` -- one shared source of truth, not two
+diverging implementations):
+
+- `evaluatePaymentPlan` is pure and reads fresh D1 data on every page
+  load -- **not a caching issue**, confirmed by code inspection; there
+  is no persisted/memoized evaluation result anywhere in this path.
+- `matchPaymentsToCycles` (`MONTHLY_PAYMENT_PLAN_GRACE_DAYS = 7`)
+  matches a payment to a cycle only if the payment falls within
+  **exactly** `[cycle - 7 days, cycle + 7 days]`. This window exists to
+  keep the match provably unambiguous (monthly cycles are always
+  >=28 days apart; a 14-day-wide window can never overlap an adjacent
+  one) -- a deliberate, previously-correct design choice, not a typo.
+- Today's payment is dated **2026-10-12** -- **8 calendar days** after
+  the October 4 due date, i.e. **one day outside** the Oct 4 window
+  (which ends Oct 11). It also falls before the November 4 window
+  starts (Oct 28), so it lands in a genuine "dead zone" between the two
+  windows and matches **neither** cycle.
+- Result: `nextUnsatisfiedExpectedPaymentAt` remains **October 4**
+  (exactly what the card displays, live-derived, not a stale field --
+  confirmed via `page.tsx`'s own `planState.nextExpectedPaymentAt:
+  evaluation.nextUnsatisfiedExpectedPaymentAt`), `isLate: true`,
+  `daysLate: 2` (today minus Oct 4's grace boundary) -- exactly
+  matching the owner's report, despite the $150 the October cycle
+  needed having, in every practical sense, already been received.
+- **This is a genuine, previously-untested gap, not a misunderstanding
+  of intended behavior.** `tests/pledge-payment-plan.test.mjs`
+  already has a deliberate "8 days after expected -- LATE" case
+  (asserting `isLate`/`daysLate` when **no** payment exists that
+  month) and a deliberate "single late payment must satisfy only the
+  cycle it falls within" case (a payment 1 day after its OWN due date,
+  correctly matching that cycle, not an earlier missed one) -- but
+  nothing tests what happens when a real payment DOES arrive, just
+  slightly past the OTHER side of that same boundary. Rosenbaum's case
+  is exactly that previously-unexercised combination.
+- **Not caused by**: payment/upload date confusion (ruled out directly,
+  Section 1); import-batch freshness (ruled out, Section 1); double-
+  counting (only one $150 payment exists for October, applied once);
+  insufficient amount (the $150 payment exactly equals one full
+  installment); a stale/cached agenda (ruled out, pure function,
+  re-read fresh every time).
+
+### 3. Correct current status, reconciled against actual payment history
+
+With the October $150 installment's money unambiguously received
+(just 8 days late) and only one $150 installment's worth of balance
+remaining:
+
+- **Correct "Next expected payment": November 4, 2026** (not October
+  4 -- October's obligation has been met in substance).
+- **Correct status: on track**, not overdue (November 4 has not yet
+  arrived).
+- The pledge's own balance ($150) is already fully consistent with
+  this: exactly one more $150 installment remains, matching the one
+  remaining cycle (November) once October is correctly treated as
+  satisfied.
+- Nothing about this requires inventing a date or a fact -- every
+  number above is already present in the real data; only the cycle-
+  matching function's own boundary needs to recognize it.
+
+### 4. Daily Agenda impact
+
+**Yes, currently incorrectly flagged.** `lib/relationships/
+recommendation-evidence.ts` calls the identical `evaluatePaymentPlan`
+with the identical `linkedPaymentDates` source
+(`lib/workspace/live-data.ts`'s own `jl_payment_assignment_audits`
+query) that the donor page uses -- so the Daily Agenda's "Payment
+follow-up needed" / overdue surfacing for this donor is driven by the
+exact same `isLate`/`nextUnsatisfiedExpectedPaymentAt` values as the
+card, and is wrong for the identical reason. Donor 61566 will keep
+being recommended for payment follow-up on the real Production Daily
+Fundraising Agenda until this is fixed -- fixing the shared function
+fixes both surfaces at once, with no separate agenda-side change
+needed.
+
+One secondary, lower-severity inconsistency noticed while tracing
+this (not the cause of today's bug, flagged under Section 5 below):
+the donor page's own payment-events query additionally joins
+`data_imports` and requires `status IN ('active','completed')`
+before counting a linked payment; `lib/workspace/live-data.ts`'s
+query (which feeds the Agenda, Today page, and Morning Brief) does
+not have that same guard. In this specific case it made no difference
+(the import's status is `completed`), but the two surfaces are not
+literally running the identical SQL, only the identical downstream
+evaluation function on (currently) identical input.
+
+### 5. Systemic risk -- other donors likely affected, not yet enumerated
+
+Because the defect lives in the shared `matchPaymentsToCycles`
+function itself, **any** active monthly payment plan whose payment
+arrives more than `MONTHLY_PAYMENT_PLAN_GRACE_DAYS` (7) days after its
+due cycle, but before the next cycle's own window opens (day 8 through
+day ~20 late, for a typical monthly cadence), would hit the identical
+dead zone -- not specific to Rosenbaum or to JL Code 61566. **This
+session did not run a Production-wide query to count how many other
+active plans are currently affected** -- doing so would require
+re-implementing the cycle-enumeration/matching logic against every
+active plan's full payment history (not a simple SQL filter), which
+this round scoped out as data-layer work belonging with the fix
+itself, pending approval, rather than a quick read-only check. Also
+checked by source inspection only (not exhaustively per-donor):
+partial payments, multiple payments in one month, and payments
+covering/split across multiple installments are not specifically
+mishandled by this same mechanism (each cycle's match is a simple
+boolean "was ANY unused payment found in this window," so an
+additional same-window payment is simply left unused, never double-
+counted) -- the dead-zone gap is specifically a LATE-arrival timing
+issue, not an amount/double-counting issue.
+
+### 6. Proposed fix (not implemented -- awaiting approval)
+
+Add a second, narrower matching pass inside `evaluatePaymentPlan`
+(or as a new exported step `matchPaymentsToCycles` callers can opt
+into), run only AFTER the existing ±7-day pass, so every currently-
+tested behavior (on-time, early, exactly-at-grace, genuinely-skipped
+cycles, the "one late payment must not retroactively erase multiple
+earlier missed cycles" guarantee) is completely unchanged:
+
+- Any payment the first pass left unused may satisfy the SINGLE
+  oldest still-unsatisfied cycle, but only if:
+  1. the payment's date is strictly AFTER that cycle's own due date
+     (never pulls an earlier, unrelated payment forward), AND
+  2. the payment's date is strictly BEFORE the START of the next
+     enumerated cycle's own grace window (`nextCycle - 7 days`) --
+     so a payment clearly intended for (and within reach of) a LATER
+     cycle can never be misappropriated to cover an earlier one, AND
+  3. only one leftover payment may satisfy one leftover cycle, in
+     ascending cycle order -- preserving "each payment satisfies at
+     most one cycle, each cycle at most one payment" exactly.
+- This closes precisely the dead zone Rosenbaum's case fell into,
+  changes nothing about any case already covered by the first pass,
+  and does not widen the ±7-day window itself (so the file's own
+  proven-unambiguous-matching property for the primary pass is
+  untouched).
+- Worth considering alongside: exposing whether a cycle was satisfied
+  by the primary (near-exact) pass or the new fallback pass (e.g. a
+  `satisfiedLate: boolean[]` alongside the existing `satisfied`
+  array), so a future UI could show "Paid late" rather than looking
+  identical to an on-time payment -- not required for correctness, a
+  product-polish decision for the owner to make alongside approving
+  the core fix.
+- Alternative considered and set aside: simply widening
+  `MONTHLY_PAYMENT_PLAN_GRACE_DAYS` itself. Rejected because the
+  file's own correctness proof depends on the window staying under
+  half the minimum cycle gap (14 days); a blanket widen also changes
+  the on-time/late THRESHOLD for every plan (a 10-day-late payment
+  would newly read as "on track"), which is a different, larger
+  product change than the owner asked for and would still eventually
+  hit the same dead zone for a payment arriving even later.
+
+### 7. Data impact
+
+**No existing Production record requires correction.** The payment,
+the pledge balance, and the audit row are all already correct exactly
+as uploaded -- this is purely a presentation/evaluation defect in
+`evaluatePaymentPlan`'s cycle-matching, not a data error. Once the fix
+above is implemented and deployed, Rosenbaum's plan would correctly
+re-evaluate as "on track, next expected November 4" on its very next
+page load, with zero data migration or correction script needed.
+
+### 8. Test and deployment plan, once the fix design above is approved
+
+- New regression tests in `tests/pledge-payment-plan.test.mjs`:
+  Rosenbaum's exact real shape (Oct 4 due, $150 payment dated Oct 12,
+  8 days late) asserting the installment IS satisfied and
+  `nextUnsatisfiedExpectedPaymentAt` advances to Nov 4; a payment
+  genuinely too late to matter (e.g. landing inside the FOLLOWING
+  cycle's own window) still correctly satisfies that later cycle, not
+  the earlier one; the existing "multiple consecutive missed cycles"
+  test (Jan/Feb/Mar, single Mar16 payment) re-run unchanged to prove
+  the fallback pass never retroactively rescues a GENUINELY missed
+  earlier cycle (only the one immediately preceding an actual, merely-
+  late payment); an insufficient/partial payment still correctly
+  leaves the cycle unsatisfied.
+- New end-to-end test reproducing the real `recommendation-evidence.ts`
+  -> Daily Agenda path for this exact donor/fact shape, asserting the
+  "payment follow-up needed" recommendation disappears once the fix
+  lands -- mirroring this codebase's existing convention for this kind
+  of fix (e.g. `tests/relationship-fact-completion-awareness.test.mjs`).
+- Staging/Production isolation test: assert the fix is pure logic with
+  no environment branch, and (reusing this codebase's existing
+  convention) that no query or fixture in the new tests ever
+  references the other environment's database name/ID.
+- Run `node scripts/run-tests.mjs` (full suite) and `tsc --noEmit`
+  before any deploy.
+- Deployment, once approved: a `lib/relationships/pledge-payment-plan.ts`
+  -only code change (pure function, no schema/migration, no D1 write
+  of Rosenbaum's or any other donor's existing data) -- would follow
+  this codebase's standard build/test/deploy-to-Production sequence,
+  with the SAME live-verification discipline used for the 2026-10-12
+  bar-mitzvah fix (direct donor-page/API confirmation that Rosenbaum's
+  card and the live Daily Agenda both correctly read "on track, next
+  expected November 4" post-deploy, not merely "tests pass").
+
+### Safety confirmed
+
+No donor record, interaction, giving/pledge row, or reminder was
+created, deleted, or rewritten this round. No payment amount or date
+was changed. No "Correct Balance" or manual plan edit was applied to
+Rosenbaum's or any other pledge. No backup, authentication, credential,
+or email-schedule configuration was touched. No Staging data was read
+or written. No code was changed or deployed. **Per the owner's explicit
+instruction, this investigation stops here, awaiting approval before
+any implementation.**
