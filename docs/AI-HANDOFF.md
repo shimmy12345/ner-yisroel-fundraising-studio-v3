@@ -34824,3 +34824,159 @@ email-schedule configuration was modified. Staging was not read or
 written at all this round -- the fix is pure application logic with no
 environment branch, verified identically applicable to both
 environments without needing separate code paths. No merge to `main`.
+
+## "Open Pledge Has Gone Stale" Investigation -- Dr. & Mrs. Mordy Goldenberg (2026-10-13) -- READ-ONLY, ROOT CAUSE FOUND AND VERIFIED, FIX PROPOSED, NOT IMPLEMENTED
+
+The owner reported Fundraising Intelligence Brief's "Worth knowing &
+doing" section showing "Open pledge has gone stale" for this donor,
+despite an active monthly payment plan whose next installment (Oct 23,
+2026) is not yet due. Investigated entirely read-only against
+Production, per the explicit instruction to report before implementing.
+
+### 1-2. Donor's actual pledges, payment plan, and payment history
+
+Donor `441e198c-...` (JL 64792) has **two simultaneously open pledges**
+-- this multi-open-pledge shape is the entire story:
+
+| Pledge | Campaign | Activity date | Balance | Payment plan? |
+|---|---|---|---|---|
+| `1c96676d-...` | KOLX2026 | 2026-08-11 | $11,000 of $12,000 | **Yes** -- monthly, $1,000/installment, next due **2026-10-23**, final 2027-08-23 |
+| `11764b8e-...` | CHSP2026 | 2026-05-01 | $650 of $650 | No plan at all |
+
+### 3. Does any EARLIER installment remain unpaid on the real plan? No -- verified directly
+
+Ran the REAL, already-fixed `evaluatePaymentPlan` (same function, same
+amount-aware late-payment logic from this session's prior round)
+against KOLX2026's actual Production data (one real $1,000 payment,
+2026-09-23, matching `jl_payment_assignment_audits` exactly) at
+`now = 2026-10-13`:
+
+```
+isOnTrack: true, isLate: false, daysLate: 0,
+nextUnsatisfiedExpectedPaymentAt: 2026-10-23
+```
+
+**This plan is genuinely, completely current -- no earlier cycle is
+unsatisfied.** The owner's own description of the plan is exactly
+correct. The "stale" classification is not disagreeing with this
+plan's real status; it is not evaluating this plan AT ALL (see below).
+
+### 4-5. Tracing the "gone stale" logic
+
+`detectPledgeFollowUp` (`lib/fundraising-intelligence/situations.ts:166-204`):
+
+```ts
+const hasPlan = donor.pledgePlanOnTrack !== null;
+const isStale = (hasPlan && donor.pledgePlanOnTrack === false)
+  || (!hasPlan && ageDays !== null && ageDays >= 60);
+```
+
+In isolation, **this formula is correct** -- it already refuses to use
+raw age when a payment plan exists, exactly satisfying requirement 7's
+"an active payment plan... must not be classified as stale" for the
+plan it actually looks at. The defect is entirely upstream: which
+pledge `donor.pledgePlanOnTrack` was computed FROM.
+
+### The real root cause: inconsistent "which open pledge" selection across the codebase
+
+A donor can have multiple simultaneously open pledges. Three different
+places in the codebase each pick ONE to represent "the" open pledge for
+recommendation/evidence purposes -- and they do not agree:
+
+| Surface | Selection rule | Source |
+|---|---|---|
+| Donor page (`Suggested Action`) | `ORDER BY activity_date DESC` then `.find()` -- **most recent** open pledge wins | `lib/relationships/giving.ts`'s `DONOR_GIVING_SQL` + `app/donors/[id]/page.tsx:314` |
+| Daily Agenda / Today / SUGGESTED section | `ORDER BY ga.activity_date DESC`, first-seen-per-donor in a Map -- **most recent** wins | `lib/workspace/live-data.ts` (giving query + `openPledgeByDonor`) |
+| **Portfolio Focus + Fundraising Intelligence Brief** | `.sort((a,b) => a.activity_date - b.activity_date)[0]` -- **earliest** wins | `lib/portfolio-focus/aggregate.ts:162` (`aggregatePortfolioFocusInputs`, shared by `lib/portfolio-focus/index.ts` AND `lib/fundraising-intelligence/compute.ts`/`index.ts`) |
+
+For Goldenberg, KOLX2026 (Aug 11, the one with the active plan) is more
+recent than CHSP2026 (May 1, the one with no plan at all). The donor
+page and the Daily Agenda both correctly pick KOLX2026 -- which is
+exactly why the owner's own description of "an active monthly payment
+plan, next installment Oct 23" is accurate on those surfaces. Portfolio
+Focus's aggregation (the ONLY one of the three sorted ascending) picks
+CHSP2026 instead -- a real, genuinely neglected $650 pledge (no plan,
+~165 days since its last activity, correctly age-stale on ITS OWN
+terms) -- and `detectPledgeFollowUp` evaluates CHSP2026's
+plan-less/aged state, under a generic "Open pledge has gone stale"
+headline that does not name which pledge it means. The donor's actual,
+well-managed, on-track KOLX2026 plan is completely invisible to this
+one code path -- not disagreed with, simply never looked at.
+
+**This is confirmed system-wide, not Goldenberg-specific**: any donor
+with two or more simultaneously open pledges where the chronologically
+EARLIER one lacks a payment plan (or is otherwise worse-off) than a
+more recent one will hit the identical contradiction between Portfolio
+Focus/Fundraising Intelligence and every other surface. This session
+did not run a Production-wide query enumerating every such donor
+(would require replicating the full multi-pledge-per-donor join this
+investigation did by hand for one donor); flagged as unquantified
+system-wide risk, matching this investigation's own read-only scope.
+
+### 9. Consistency across surfaces -- confirmed NOT currently consistent
+
+Directly contradicts requirement 9 as currently implemented: three
+different tie-break rules for the same conceptual question ("which open
+pledge represents this donor") exist in three different files. The
+donor's dashboard and the Daily Agenda already agree with each other;
+Fundraising Intelligence Brief (and Portfolio Focus itself) are the
+odd ones out.
+
+### 10. Does the recommendation disappear once conditions change? Yes, structurally, already
+
+`app/fundraising-intelligence/page.tsx` uses `export const dynamic =
+"force-dynamic"` and calls `computeFundraisingIntelligenceBrief(...)`
+fresh on every page load -- no caching table, no persisted brief state
+found anywhere in the schema. Once the pledge-selection defect is
+fixed, this specific recommendation will correctly stop appearing (or
+correctly start referring to CHSP2026 by name, or correctly report
+KOLX2026 as on-track) on the very next page load, exactly like every
+other recommendation surface already audited in this project -- nothing
+about requirement 10 needs separate work.
+
+### Proposed system-wide fix (not implemented -- awaiting approval)
+
+**Recommended**: change the "which open pledge" selection rule in all
+three places to the SAME rule, and make that rule stronger than pure
+recency: **prefer a pledge that has an active payment plan over one
+that doesn't; tie-break by most recent `activity_date`** (matching the
+donor page's/Daily Agenda's existing direction). This is a materially
+different guarantee than simply flipping Portfolio Focus's sort to
+descending -- it structurally guarantees a donor's actively-managed
+plan is never shadowed by an unrelated, unmanaged pledge, REGARDLESS of
+which happens to be dated more recently (a sort-direction-only fix
+would still break if a donor's OLDER pledge were the one with the
+active plan -- the inverse of Goldenberg's specific case, but the same
+class of bug).
+
+Concretely: a small shared helper,
+e.g. `selectRepresentativeOpenPledge(pledges, planByPledgeId)`, used by
+`lib/portfolio-focus/aggregate.ts`'s `openPledgeRow`,
+`app/donors/[id]/page.tsx`'s `openPledgeSource`, and
+`lib/workspace/live-data.ts`'s `openPledgeByDonor` construction --
+written once, reused three times, so the three surfaces can structurally
+never diverge again (the same "single source of truth" principle this
+session's prior payment-plan fix already applied).
+
+**Narrower alternative, if the owner prefers the smaller change**: only
+flip `aggregate.ts`'s sort to descending (matching the other two
+surfaces' existing direction) without the plan-preference rule. Lower
+risk, fixes Goldenberg and the common case, but leaves the
+plan-preference guarantee (and therefore the strict reading of
+requirement 7) unaddressed for the inverse ordering.
+
+### Production data implications
+
+**None.** This is purely a pledge-selection/presentation defect in the
+aggregation layer -- no `giving_activities`, `pledge_payment_plans`, or
+`jl_payment_assignment_audits` row is wrong. No data correction of any
+kind is needed for Goldenberg or any other donor once the code is
+fixed.
+
+### What was deliberately NOT done
+
+No code was changed. No donation record, pledge balance, payment date,
+or payment-plan term was modified. This recommendation was not
+manually dismissed. No deploy was performed. Staging was not read or
+written. **Per the owner's explicit instruction, stopping here, awaiting
+approval before implementing or deploying this fix.**
