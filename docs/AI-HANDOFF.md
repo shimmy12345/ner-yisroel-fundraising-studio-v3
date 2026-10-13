@@ -34598,3 +34598,229 @@ or email-schedule configuration was touched. No Staging data was read
 or written. No code was changed or deployed. **Per the owner's explicit
 instruction, this investigation stops here, awaiting approval before
 any implementation.**
+
+## Payment Plan Reconciliation Fix -- IMPLEMENTED, TESTED, DEPLOYED TO PRODUCTION, LIVE-VERIFIED (2026-10-13)
+
+The owner approved the proposed late-payment dead-zone fix, extended
+with an explicit amount-awareness requirement (partial payments must
+never falsely satisfy a full installment; an oversized payment covering
+multiple installments must not double-count). Implemented, tested,
+built, deployed, and live-verified end to end this round.
+
+### Scope decision on amount-awareness
+
+Making the reconciliation amount-aware could in principle mean a full
+redesign (a running amortization ledger replacing the per-cycle
+windowed-matching model entirely) -- the owner's own task explicitly
+asked to stop and present options if that were required. On design
+review, it was not: the existing windowed-matching architecture (each
+cycle gets its own non-overlapping date range, proven unambiguous by
+the file's own correctness property) was EXTENDED, not replaced --
+the new late-payment fallback pass now tracks real cents (summed,
+oldest-eligible-payment-first, with leftover rolling forward to the
+next unsatisfied cycle) instead of a bare boolean "any payment present"
+check, while the existing, heavily-tested primary (near-exact-window)
+pass is completely untouched. This stayed within the originally-
+proposed fix's own shape, so no broader-redesign stop was needed.
+
+### Implementation -- `lib/relationships/pledge-payment-plan.ts`
+
+- `matchPaymentsToCycles` gained a new, OPTIONAL 4th parameter,
+  `lateMatch: { amountsCents, installmentAmountCents }`. The existing
+  primary pass (every call site/test in this suite that doesn't pass
+  it) is byte-for-byte unchanged. When provided, a SECOND pass runs
+  after the primary one, only for cycles still unsatisfied: any
+  still-unused payment dated strictly between that cycle's own primary
+  window and the start of the NEXT cycle's own primary window (or
+  unbounded above, for the last cycle) is eligible. If
+  `installmentAmountCents` is null, eligibility alone satisfies
+  (amount-blind, matching the original narrower proposal). If a real
+  installment amount is known, eligible payments' still-available
+  amounts are summed (oldest first) until the full installment is
+  covered -- a partial payment can never satisfy a cycle on its own --
+  and any amount left over after satisfying one cycle rolls forward,
+  unconditionally, to the next unsatisfied cycle (never backward),
+  with each cent deducted from its source payment exactly once the
+  moment it's actually consumed. The "one late payment must never
+  retroactively erase multiple earlier genuinely-missed cycles"
+  guarantee is structurally preserved: a cycle's own eligible range
+  never starts before that cycle's own primary window ends.
+- `PaymentPlanFields` gained an OPTIONAL `installmentAmountCents` field.
+  `evaluatePaymentPlan` gained an OPTIONAL 6th parameter,
+  `linkedPaymentAmountsCents` (parallel to `linkedPaymentDates`).
+  Critically, `evaluatePaymentPlan` ALWAYS enables the late-payment
+  pass internally (amount-blind if the caller omits the new amounts
+  parameter) -- so every existing caller gets at least the date-only
+  dead-zone fix automatically, with zero required changes, while
+  `matchPaymentsToCycles` called directly (as its own dedicated unit
+  tests do) stays fully opt-in/unaffected.
+
+### Callers wired with real amounts (for full amount-aware correctness)
+
+- `app/donors/[id]/page.tsx` -- the donor page's own Payment Plan card
+  (already selected `applied_cents` in its existing query; just needed
+  threading through) and its own "Suggested Action" evidence
+  construction.
+- `lib/workspace/live-data.ts` -- THE critical path for this incident:
+  (1) the Recurring Payment Alert loop that produces the real
+  "Payment follow-up needed" Daily Agenda line (added `applied_cents`
+  to the existing `jl_payment_assignment_audits` query, built a new
+  `paymentAmountsCentsByPledge` map parallel to the existing
+  `paymentDatesByPledge`), and (2) the `activePaymentPlan` evidence
+  construction feeding `follow_up_pledge` in the SUGGESTED section.
+  Both now pass real amounts.
+- `lib/portfolio-focus/aggregate.ts` -- already had `applied_cents`
+  available (`paymentsByPledge` stored `{date, cents}`); wired through
+  for consistency, since Portfolio Focus shares the same evaluation.
+- `lib/relationships/recommendation-evidence.ts` -- the shared type/call
+  site both `live-data.ts` and `page.tsx` feed through.
+- `meeting-brief.ts` deliberately left untouched -- it builds its own
+  `activePaymentPlan`-shaped data for display but never calls
+  `evaluatePaymentPlan` itself (confirmed by direct source search), so
+  there was nothing to wire there.
+
+### Pre-existing tests updated (behavior-preserving or intentionally corrected, never silently relaxed)
+
+- `tests/pledge-payment-plan.test.mjs` / `tests/pledge-renewal-
+  acknowledgment.test.mjs`: two deliberate arity guards
+  (`evaluatePaymentPlan.length === 5`) updated to `6`, with their own
+  comments rewritten to explain why -- both are now the current,
+  correct guard against a FUTURE unintended parameter, not a relaxation
+  of either guard's original intent (one guards against a payment-
+  amount parameter existing at all -- now correctly updated to confirm
+  it DOES, deliberately; the other guards against a renewal-
+  acknowledgment parameter specifically, which still does not exist).
+- `tests/pledge-payment-plan-timezone.test.mjs`: one assertion
+  ("a payment 8 days after the cycle... must not satisfy it") inverted
+  from `isLate: true` to `isLate: false`, with its comment rewritten --
+  this exact case IS the bug being fixed, not a relaxed invariant.
+- All other pre-existing tests in this file and 7 others (confirmed via
+  full suite run) pass completely unchanged -- the new fallback pass
+  never activates for any of their scenarios (none happen to land in a
+  dead zone), proving the fix is additive, not disruptive.
+- `tests/recurring-payment-alert-e2e.test.mjs`: its own `queryPayment
+  DatesByPledge`/`evaluateAlertsFromDb` helpers are explicitly
+  documented as mirroring `lib/workspace/live-data.ts`'s real queries
+  verbatim -- updated in lockstep (added `applied_cents` to the mirror
+  query, added `installmentAmountCents`/amounts to the mirrored
+  `evaluatePaymentPlan` call) so the mirror stays accurate to the real
+  file, per its own stated purpose.
+
+### New regression tests
+
+- `tests/pledge-payment-plan.test.mjs`: 7 new `matchPaymentsToCycles`-
+  level cases (the real Rosenbaum shape satisfied; amount-blind mode
+  confirmed unaffected without `lateMatch`; insufficient/partial
+  payment correctly NOT satisfying; an oversized payment correctly
+  satisfying two consecutive cycles with leftover rollover and no
+  double-counting; two small payments in one dead zone correctly
+  combining; the critical multi-missed-cycle guarantee re-proven under
+  the amount-aware fallback; a too-early payment correctly contributing
+  nothing) plus 1 new `evaluatePaymentPlan`-level case reproducing the
+  real Rosenbaum scenario end to end at the pure-function level.
+- `tests/recurring-payment-alert-e2e.test.mjs`: 4 new REAL end-to-end
+  tests (real in-memory SQLite, the real `evaluatePaymentPlan` ->
+  `evaluateRecurringPaymentAlert` -> `buildRecurringPaymentAlertEvents`
+  -> Today/Agenda pipeline, never reimplemented):
+  - D1: Rosenbaum's exact real shape ($150 due Oct 4, $150 paid Oct 12)
+    -- zero alerts, zero Agenda items, `nextUnsatisfiedExpectedPaymentAt`
+    correctly advances to Nov 4.
+  - D2: the identical late timing but only $100 of $150 paid -- the
+    alert and the real Daily Agenda item both correctly persist.
+  - D3: a single $300 late payment covering both the Oct 4 AND Nov 4
+    installments at once -- both satisfied, plan reads `isCompleted`,
+    no double-counting.
+  - D4: isolation -- a second, separate owner (`user_id`) with an
+    identically-coded donor (same donor_code, "61566") and an
+    insufficient payment is evaluated completely independently of the
+    first owner's fully-satisfied plan, demonstrating the same
+    owner-scoping principle that keeps Staging and Production (separate
+    databases entirely) from ever influencing each other.
+
+**Test/type-check/build evidence:** `node scripts/run-tests.mjs` ->
+**181/181 passed**. `tsc --noEmit` -> clean. `pnpm run lint` -> zero
+new warnings/errors in any of the 9 files this round touched (the only
+hits in `lib/workspace/live-data.ts` are two pre-existing, unrelated
+warnings at line 807, far from every edit this round made).
+
+### Deployment
+
+`git diff --stat` reviewed before deploying: exactly the 9 files above
+(5 production, 4 test) -- no `wrangler.*.jsonc`, no migration, no
+schema change, no donor-data write of any kind. Built with
+`pnpm run build:production-independent`, deployed with
+`pnpm run deploy:production-independent`.
+
+**Production deployment version: `0dfa178f-20cf-49ef-92fa-681763d51e65`.**
+Deploy output confirmed `schedule: 0 * * * *` still registered and
+every existing binding (`DB`, `STATUS_WORKER`, `TEAM_DOMAIN`,
+`POLICY_AUD`, `STAGING_OWNER_EMAIL`, `APP_BASE_URL`,
+`MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID`) unchanged. No Staging deploy
+was performed or needed -- this is a pure application-logic fix with no
+environment-specific behavior.
+
+### Live Production verification (post-deploy -- not just tests)
+
+Re-read Rosenbaum's pledge row directly from Production D1 first:
+`balance_cents`/`paid_cents`/`committed_cents` byte-identical to before
+the deploy (15000/165000/180000) -- confirms the deploy touched no
+data. Then, via the owner's own now-authenticated Chrome session (no
+credentials entered by this session):
+
+- **Donor page** (`/donors/33426bfe-c176-4980-b2a9-0514976ead9e`, live
+  screenshot captured): Payment Plan card reads "Monthly / Next
+  expected: Nov 4, 2026 / Final expected: Nov 4, 2026 / Expected
+  installment: $150" -- **no "Expected payment overdue" badge anywhere**.
+  "Most Recent Paid Gift: $150, Oct 12, 2026" and "Suggested Action:
+  Send a personal thank-you for the recent $1,650 gift to DIN2025"
+  (a different, appropriate candidate, since the plan no longer reads
+  as late) replace what was previously the false overdue nag.
+- **The real Daily Agenda** (`/api/agenda/preview`, the exact route the
+  real scheduled email renders from): Rosenbaum is **completely absent**
+  from both "IMPORTANT DATES / STEWARDSHIP" and "SUGGESTED" -- not
+  merely moved or reworded, gone. Mr. & Mrs. Yaakov Yisroel Klein's own,
+  genuinely still-unresolved overdue plan ("Payment follow-up needed
+  today · $400.00 expected · 3 days behind") is correctly still present
+  and unaffected, directly proving the fix suppresses only the
+  satisfied case and preserves every genuinely overdue one. Every other
+  unrelated item (Kutoff, Spetner, Fink, Weinschneider, Zachter, Broide)
+  is unchanged.
+
+### Answers to the owner's own report questions
+
+1. **Root cause**: confirmed exactly as investigated -- the +/-7-day
+   grace window used for cycle-matching created a dead zone (8 to ~20
+   days late, typical monthly cadence) where a real, correctly-applied
+   payment matched no cycle at all.
+2. **Payment verification**: unchanged from the investigation --
+   already fully correct, nothing to fix there.
+3. **Correct status**: now LIVE, not merely proposed -- "on track, next
+   expected November 4, 2026," confirmed on the real page.
+4. **Proposed fix**: implemented exactly as designed, with the
+   amount-awareness extension folded in without requiring the broader
+   redesign the task's own stop-clause anticipated.
+5. **Data impact**: none -- confirmed again post-deploy, byte-identical
+   balance/paid/committed values.
+6. **Agenda impact**: fixed and live-verified -- Rosenbaum no longer
+   appears anywhere on the real Production Daily Agenda.
+7. **System-wide impact**: every donor whose late payment lands in the
+   same dead zone, on any active plan, is fixed by this same change --
+   not re-audited by donor ID this round (would require the same
+   per-plan cycle re-enumeration the original investigation also
+   declined to run as a quick read-only check), but structurally fixed
+   going forward for all of them simultaneously, the moment this
+   deploy went live.
+8. **Deployment plan**: executed exactly as this section describes --
+   tests, type-check, build, review of the diff, deploy, live
+   verification, all before declaring this done.
+
+### Safety confirmed
+
+No donation, pledge, payment, or audit record was deleted, rewritten,
+or duplicated. No payment amount or date was changed. No payment plan
+was ended or balance-corrected. No reminder was created. No unrelated
+donor record was touched. No authentication, credential, backup, or
+email-schedule configuration was modified. Staging was not read or
+written at all this round -- the fix is pure application logic with no
+environment branch, verified identically applicable to both
+environments without needing separate code paths. No merge to `main`.
