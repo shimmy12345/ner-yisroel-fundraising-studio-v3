@@ -34980,3 +34980,31 @@ or payment-plan term was modified. This recommendation was not
 manually dismissed. No deploy was performed. Staging was not read or
 written. **Per the owner's explicit instruction, stopping here, awaiting
 approval before implementing or deploying this fix.**
+
+### Addendum (2026-10-13, re-confirmation round) -- "recommendation records" checked directly; nothing persisted to regenerate
+
+The owner's follow-up explicitly asked to inspect Goldenberg's
+"recommendation data" and to determine "whether existing recommendations
+are being retained after their underlying conditions change." Checked
+directly against Production: `SELECT * FROM recommendations WHERE
+donor_id = '441e198c-...'` -> **zero rows**. "Open pledge has gone
+stale" is not a stored `recommendations` row at all -- it is a
+Fundraising Intelligence Brief situation, recomputed fresh on every
+page load (`app/fundraising-intelligence/page.tsx`'s own
+`dynamic = "force-dynamic"`, confirmed in the investigation above).
+**There is nothing to regenerate or invalidate once the fix lands** --
+the very next page load after the pledge-selection fix is deployed
+will correctly reflect the corrected state, with zero migration,
+backfill, or cache-clear step of any kind. This also directly confirms
+the owner's own new requirement ("a newly imported payment applied to
+an existing pledge must be reflected in both payment-plan status and
+recommendations"): since nothing is ever cached, a new payment already
+flows through immediately today, and will continue to once this fix is
+in place -- the defect is exclusively about WHICH pledge gets evaluated,
+never about staleness of the evaluation itself.
+
+Root cause, verification, and proposed fix are otherwise unchanged from
+the investigation above -- re-confirmed, not re-derived, since nothing
+about Goldenberg's Production data or the application code changed
+between the two investigation rounds. **Still stopped, per the owner's
+repeated explicit instruction, awaiting approval before implementing.**
