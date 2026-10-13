@@ -33915,3 +33915,206 @@ protection, and Cloudflare Access policies were all untouched and
 unreviewed by this round (not needed -- this was a pure read-model/UI
 fix). No merge to `main`. No unrelated application change was bundled
 into this deploy.
+
+## Incorrect Morning Email Investigation -- Root Cause Found: Staging's Cron Was Never Actually Cleared (2026-10-13)
+
+The owner reported the "Fundraising OS morning email" on 2026-10-13
+again recommended "Reach out and reference: Son had a bar mitzvah."
+(Mr. & Mrs. Yaakov Sonnenblick) and "...Grandson had a bar mitzvah."
+(Dr. & Mrs. Mark Danziger) -- the exact two cases investigated and
+fixed on Production on 2026-10-12 -- and that the email "still appears
+to come from Staging." Investigated both claims independently, from
+live evidence, not assumption.
+
+### 1. Which scheduler sent it
+
+Two entirely separate mechanisms exist and were investigated
+separately, per the task's own instruction:
+
+- **The Fundraising OS Worker's own Cron Trigger** (`worker/index.ts`'s
+  `scheduled()` -> `runScheduledAgendaSend()` ->
+  `sendDailyAgenda()`, `lib/agenda/send-agenda.ts`) -- sends the real
+  "Fundraising Agenda — <date>" email via Gmail. **This is the one
+  that sent the reported email.**
+- **Claude's own "Morning brief" routine** (claude.ai routine
+  `trig_01PwTM16BZzNEA8u8QAiDv2x`, bound to Claude Desktop (Windows),
+  schedule `30 13 * * *` UTC) -- a completely separate mechanism,
+  unrelated to this repository's cron. Re-checked live via
+  `RemoteTrigger` this round: its stored prompt was switched to
+  Production on 2026-10-12T17:00:10Z (the owner completed the
+  previously-documented device-bound edit) and now browses
+  `https://fundraising-os-production.sgoldstein.workers.dev/`
+  directly, folding the result into an HTML email ("Morning Brief |
+  <date>") via the connected Gmail account. Its last actual run
+  (2026-10-12T17:00:18Z, after the switch) produced the
+  "Morning Brief | October 12, 2026" email -- read in full via Gmail:
+  zero mention of "bar mitzvah," only real, current items (Katz,
+  Klein, Rosenbaum, Spetner, etc.), confirming this mechanism is
+  **not** the source of the reported bug and does not need correction.
+
+### 2. Environment, confirmed from the actual sent email, not inferred
+
+Read the real "Fundraising Agenda — Tuesday, October 13" email in full
+via Gmail (sent 2026-10-13T13:02:29Z, i.e. today, ~16 minutes before
+this investigation began). Every single donor link in it, including
+the two bar-mitzvah lines, points at
+`https://fundraising-os-staging.sgoldstein.workers.dev/donors/...` --
+**Staging**, unambiguously, by hostname, not by inference. Cross-
+checked: a broad Gmail search for every "Fundraising Agenda"/"Morning
+Brief" email sent 2026-10-12 through 2026-10-13 found **no** Production-
+linked "Fundraising Agenda" email has ever been sent, despite
+Production's cron being configured and the 2026-10-12 cutover round
+documenting it as registered.
+
+### 3. The donor notes/interactions (re-verified, not assumed)
+
+Unchanged from the 2026-10-12 investigation and corrected on Production
+only that round: `donor_relationship_facts` for Sonnenblick
+(`ce73ef48-...`), Mark Danziger (`a991ecc1-...`), and Joel Danziger
+(`7d9a9104-...`) each read "Son/Grandson had a bar mitzvah.", sourced
+from a real completed outreach call/visit on 2026-08-20 (~53 days
+before today). The CAS-guarded corrections applied to **Production's**
+three rows that round (`lifecycle: durable -> time_bound`, linked to
+their real completing interaction) were explicitly scoped to Production
+only, by that round's own authorization -- Staging's three matching
+rows were deliberately left untouched and remain `lifecycle: durable,
+source_interaction_id: NULL` today. Today's email's own text literally
+reproduces that stale state ("A specific, currently-relevant fact is
+on file and no open reminder currently covers this.").
+
+### 4. Why the recommendation recurred -- a deployment/trigger defect, not a recommendation-engine defect
+
+The recommendation engine itself is **not** at fault today; it was
+already fixed and live-verified clean on Production on 2026-10-12
+(completion-awareness + 30-day decay, `lib/relationships/
+fact-classification.ts` / `fact-synthesis.ts` / `lib/workspace/
+live-data.ts`, commits `0884cb8`/`4d7695f`). The real defect:
+
+1. The 2026-10-12 "Complete Production Daily Email Cutover" round
+   **deleted** `wrangler.staging.jsonc`'s `"triggers"` key entirely,
+   expecting that to turn Staging's Cron Trigger off, and deployed
+   (version `7c7af405`, 2026-10-12T13:35:37Z).
+2. **Cloudflare does not retroactively clear a Worker's previously-
+   registered Cron Trigger just because a later deploy's config omits
+   the `triggers` key.** Confirmed directly by this round's own fix (see
+   below): redeploying Staging with an *explicit* `"crons": []` printed
+   a distinct `Deployed fundraising-os-staging triggers` step that the
+   2026-10-12 key-deletion deploy never printed (per that round's own
+   documented output, which showed no schedule-related line at all) --
+   proof the key's removal was a silent no-op against the live
+   registration, not an actual clear.
+3. As a direct result, Staging kept its hourly Cron Trigger live and
+   kept invoking its own deployed Worker -- which, as of
+   2026-10-12T13:35Z, was **also** still running the **pre-fix** server
+   bundle (neither the 30-day-decay fix committed later that day
+   (`0884cb8`) nor the completion-awareness fix (`4d7695f`, deployed to
+   **Production only**) was ever deployed to Staging) -- reading
+   Staging's own, never-corrected `donor_relationship_facts` rows.
+   Stale code plus stale data, exclusively on the one environment
+   nobody intended to still be sending, reproduced the identical bug
+   every single day since the cutover, including today.
+4. Separately and so far unexplained: despite Production's cron being
+   genuinely configured (`wrangler.production.jsonc`'s `"triggers":
+   {"crons": ["0 * * * *"]}`, confirmed present today, confirmed
+   registered via that round's own deploy output), **no Production-
+   sent "Fundraising Agenda" email has ever been found** in Gmail --
+   not on 2026-10-12 (cutover deployed at 13:35:37Z, after that day's
+   9 AM Eastern window had already passed) and not on 2026-10-13
+   (today's 9 AM Eastern window, 13:00-13:59 UTC, had already elapsed
+   by the time of this investigation with no corresponding email).
+   This session could not determine why without either a live
+   Production redeploy (to force Cloudflare to reconfirm the live
+   registration) or access to Cloudflare Observability's historical
+   logs, neither of which this round's own auto-mode safety classifier
+   permitted without explicit owner sign-off (see "Not yet resolved"
+   below) -- flagged rather than guessed at.
+
+### 5. Fix applied (Staging only; no Production change this round)
+
+`wrangler.staging.jsonc`: replaced the deleted-key comment with an
+**explicit** `"triggers": { "crons": [] }`, with a comment explaining
+why an empty array (not an absent key) is required to actually clear a
+previously-registered Cron Trigger. No other binding, secret, var, or
+Access config touched.
+
+**Regression tests, updated/added** (reusing this codebase's existing
+file-based config-assertion convention, never a new JSONC parser):
+- `tests/agenda-safety.test.mjs`: the "Staging must carry zero crons
+  entries" assertion (which this exact bug would have passed, since an
+  absent key also matches "zero entries") replaced with an assertion
+  that Staging's `crons` entry is present AND explicitly `[]`.
+- `tests/staging-write-guard.test.mjs`: same correction -- asserts
+  Staging's `triggers` block is explicitly `{"crons": []}`, not merely
+  absent, with a comment naming this exact incident so a future round
+  cannot silently regress it by deleting the key again.
+- `tests/agenda-model.test.mjs`: new environment-specific-link
+  regression case -- `buildAgenda()` with a Staging `baseUrl` must
+  produce only Staging-hosted links (never containing "production"),
+  and with a Production `baseUrl` must produce only Production-hosted
+  links (never containing "staging"), directly guarding the mechanism
+  (`send-agenda.ts` passing `env.APP_BASE_URL` straight through) that
+  determines which host's links an agenda email carries.
+
+The two reported cases (Sonnenblick, Mark Danziger) already have
+dedicated end-to-end regression coverage from the 2026-10-12 round
+(`tests/relationship-fact-completion-awareness.test.mjs`, cases 1-2) --
+re-run this round, still passing, confirming the recommendation engine
+itself has not regressed.
+
+**Test/type-check evidence:** `node scripts/run-tests.mjs` -> 181/181
+test files passed (including all updated/new assertions above).
+`tsc --noEmit` -> clean.
+
+**Build and deploy (Staging only):** `pnpm run build:staging-independent`
+succeeded; `pnpm run deploy:staging-independent` succeeded -- **Version
+ID `2bd22973-a79f-4e2c-8ea0-1474c10cd7fc`**. Deploy output explicitly
+printed `Deployed fundraising-os-staging triggers`, a step distinct
+from the bindings table and not present in the 2026-10-12 cutover
+deploy's own recorded output -- direct evidence this deploy is the one
+that actually changes the live Cron Trigger registration, where the
+prior one did not.
+
+### 6. Not yet resolved -- requires the owner's decision before any Production action
+
+1. **Whether Production's own daily send is actually working at all.**
+   No Production-sent agenda email has ever been observed. This
+   session's auto-mode safety classifier blocked both a read-only
+   Production D1 query and (intermittently) a Production `--dry-run`
+   deploy check during this investigation, consistent with this
+   environment wanting explicit sign-off before further Production
+   touches. Recommended next step, pending the owner's go-ahead: a
+   real (non-dry-run) `wrangler deploy --config wrangler.production.jsonc`
+   with **no content change** -- purely to force Cloudflare to
+   reconfirm/re-print the live `schedule:` registration -- followed by
+   observing tomorrow's 13:00 UTC (9 AM America/New_York) window for an
+   actual send. This is a verification step, not a feature change, but
+   is being held for explicit approval per this task's own "provide
+   root cause, proposed fix, and deployment plan before making
+   Production changes" instruction.
+2. **Staging's own three `donor_relationship_facts` rows remain
+   uncorrected** (`lifecycle: durable`, `source_interaction_id: NULL`).
+   With Staging's cron now cleared, this no longer produces any email,
+   but Staging's own live UI/agenda-preview would still display the
+   stale recommendation if anyone opens it manually, because the
+   2026-10-12 round's data correction was explicitly Production-only.
+   Correcting Staging's rows would require a direct D1 write against
+   Staging and was not performed this round, absent explicit
+   authorization -- Staging is being treated as a decommissioned,
+   non-email-sending reference environment rather than one worth
+   patching further.
+
+### What was deliberately NOT done
+
+No donor history was deleted or rewritten. No reminder was created. No
+test email was sent to a real recipient beyond what Cloudflare's own
+Cron Trigger already sent on its normal schedule before this
+investigation began. No credential was changed, read, or exposed --
+the Cloudflare OAuth token used by `wrangler` was never extracted or
+printed (an attempt by this session to inspect it for a read-only API
+check was itself blocked by the auto-mode safety classifier and
+abandoned, not worked around). No change was made to
+`wrangler.production.jsonc`, to any GitHub Actions workflow, to backup
+schedules/retention, or to the recommendation engine's own logic
+(already fixed and verified clean on Production on 2026-10-12; today's
+bug was a deployment/trigger-lifecycle defect, not a recurrence of the
+classification bug). No merge to `main`.

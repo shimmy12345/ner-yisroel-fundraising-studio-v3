@@ -630,6 +630,40 @@ async function run() {
     console.log("agenda-model: end-to-end resolvePriorityCap -> relationshipQueue -> buildAgenda() checks passed");
   }
 
+  // --- Environment-specific links (2026-10-13 incorrect-morning-email
+  // investigation, docs/AI-HANDOFF.md): buildAgenda() must turn every
+  // relative href into an absolute link under exactly the baseUrl it was
+  // given -- never a different host, and never a mix of hosts in one
+  // agenda -- since this is the ONLY thing standing between a Production
+  // send and a Production-hosted link (send-agenda.ts passes
+  // env.APP_BASE_URL straight through, per-Worker). ---
+  {
+    const STAGING_URL = "https://fundraising-os-staging.sgoldstein.workers.dev";
+    const PRODUCTION_URL = "https://fundraising-os-production.sgoldstein.workers.dev";
+    const suggestion = priority({
+      queueId: "priority:donor-env:suggestion",
+      donorId: "donor-env",
+      name: "Mr. & Mrs. Env Test",
+      reason: "Reach out and reference: some fact.",
+      why: "A specific, currently-relevant fact is on file.",
+      href: "/donors/donor-env",
+      dueAt: null,
+      dueLabel: "No due date recorded",
+      bucket: "upcoming",
+    });
+    const brief = emptyBrief({ relationshipQueue: { overdue: [], today: [], thisWeek: [], upcoming: [suggestion] } });
+
+    const stagingAgenda = buildAgenda(brief, { now: NOW, baseUrl: STAGING_URL });
+    assert.equal(stagingAgenda.suggested[0]?.href, `${STAGING_URL}/donors/donor-env`, "a Staging baseUrl must produce a Staging-hosted link");
+    assert.ok(!stagingAgenda.suggested[0]?.href.includes("production"), "a Staging baseUrl must never produce a Production-hosted link");
+
+    const productionAgenda = buildAgenda(brief, { now: NOW, baseUrl: PRODUCTION_URL });
+    assert.equal(productionAgenda.suggested[0]?.href, `${PRODUCTION_URL}/donors/donor-env`, "a Production baseUrl must produce a Production-hosted link");
+    assert.ok(!productionAgenda.suggested[0]?.href.includes("staging"), "a Production baseUrl must never produce a Staging-hosted link");
+
+    console.log("agenda-model: environment-specific link checks passed");
+  }
+
   console.log("agenda-model: all assertions passed");
 }
 

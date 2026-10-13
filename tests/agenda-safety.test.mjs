@@ -76,8 +76,15 @@ async function run() {
   assert.match(wranglerProductionCode, /"triggers"\s*:\s*\{\s*"crons"\s*:\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/, "Production's cron must be exactly the approved hourly schedule (\"0 * * * *\")");
   const productionCronMatches = wranglerProductionCode.match(/"crons"\s*:/g) ?? [];
   assert.equal(productionCronMatches.length, 1, "exactly one crons entry on Production -- no duplicate or additional schedule");
+  // Staging's "crons" key must be present AND EXPLICITLY EMPTY, not merely
+  // absent -- the 2026-10-13 incident (docs/AI-HANDOFF.md) found that
+  // deleting the "triggers" key entirely does NOT clear a Worker's
+  // previously-registered Cron Trigger on a later deploy; Staging kept
+  // sending the real daily email for a full day after the key was removed.
+  // An explicit "crons": [] is the verifiable way to actually turn it off.
   const stagingCronMatches = wranglerStagingCode.match(/"crons"\s*:/g) ?? [];
-  assert.equal(stagingCronMatches.length, 0, "Staging must carry zero crons entries now -- the daily email has exactly one sender, not two");
+  assert.equal(stagingCronMatches.length, 1, "Staging must carry exactly one crons entry -- an explicit empty array, not an absent key");
+  assert.match(wranglerStagingCode, /"triggers"\s*:\s*\{\s*"crons"\s*:\s*\[\s*\]\s*\}/, "Staging's crons entry must be explicitly empty -- the daily email has exactly one sender, not two, and not zero by accident");
 
   // --- The scheduled handler exists, is wired to the DST-safe guard, and
   // extends the Worker's lifetime -- the cron firing hourly must never by

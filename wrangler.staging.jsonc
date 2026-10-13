@@ -67,15 +67,25 @@
     // request is blocked here while this stays absent.
     // "STAGING_WRITES_ENABLED": "true"
   },
-  // Daily Fundraising Agenda email cron -- REMOVED (2026-10-12 Production
-  // Daily Email Cutover round, docs/AI-HANDOFF.md). Was APPROVED and
-  // ACTIVE here from 2026-08-26 until this round; the owner entered
-  // Production's three Gmail secrets directly in the Cloudflare
-  // dashboard, so the sole live copy of this cron moved to
-  // wrangler.production.jsonc in this same deploy step. Staging keeps
-  // its DB binding, Gmail secrets, and Access protection untouched --
-  // only the scheduled trigger was removed, so Staging never sends the
-  // daily email again (no duplicate, no gap) while remaining otherwise
-  // identical.
+  // Daily Fundraising Agenda email cron -- EXPLICITLY CLEARED, not merely
+  // omitted (2026-10-13 incorrect-morning-email investigation,
+  // docs/AI-HANDOFF.md). The 2026-10-12 cutover round deleted this file's
+  // "triggers" key entirely, expecting that to deactivate Staging's cron.
+  // It did not: Cloudflare does not retroactively clear a Worker's
+  // previously-registered Cron Trigger just because a later deploy's
+  // config omits the "triggers" key -- removal must be stated explicitly.
+  // As a direct result, Staging kept firing its hourly Cron Trigger and
+  // kept sending the real "Fundraising Agenda" email every day after the
+  // cutover (confirmed live: an email with Staging's own donor links went
+  // out again on 2026-10-13T13:02:29Z, a full day after the cutover was
+  // believed complete), using Staging's stale pre-fix code and
+  // Staging's never-corrected data -- this is what reproduced the
+  // "bar mitzvah" recommendation bug the owner reported that day, not a
+  // defect in the recommendation engine itself (Production's copy, fixed
+  // and data-corrected on 2026-10-12, was unaffected and clean). An empty
+  // array is the explicit, verifiable way to clear a Cron Trigger via
+  // `wrangler deploy` -- Staging keeps its DB binding, Gmail secrets, and
+  // Access protection untouched; only the schedule is turned off.
+  "triggers": { "crons": [] },
   "observability": { "enabled": true }
 }

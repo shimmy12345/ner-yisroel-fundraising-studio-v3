@@ -104,7 +104,14 @@ const wranglerProduction = await readFile(new URL("../wrangler.production.jsonc"
 assert.doesNotMatch(wranglerProduction, /"STAGING_WRITES_ENABLED"\s*:/, "Production must never carry this staging-only override var at all");
 assert.match(wranglerStaging, /\/\/\s*"STAGING_WRITES_ENABLED"\s*:\s*"true"/, "the override must exist only as a commented-out, explicit opt-in on Staging");
 
-assert.doesNotMatch(wranglerStaging, /^\s*"triggers":\s*\{\s*"crons"/m, "Staging's agenda cron must stay removed now that Production's own copy is active -- no duplicate daily email");
+// Staging's cron must be an EXPLICIT empty array, not an absent "triggers"
+// key -- the 2026-10-12 cutover round removed the key entirely and
+// Staging kept firing its old Cron Trigger registration anyway (confirmed
+// live: a real agenda email with Staging's own links went out again on
+// 2026-10-13), since Cloudflare does not clear a previously-registered
+// schedule just because a later deploy's config omits it. See
+// docs/AI-HANDOFF.md's 2026-10-13 incident writeup.
+assert.match(wranglerStaging, /^\s*"triggers":\s*\{\s*"crons":\s*\[\s*\]\s*\}/m, "Staging's agenda cron must be explicitly cleared (an empty crons array), not merely absent -- an absent key does not actually stop Cloudflare from still firing a previously-registered schedule");
 assert.match(wranglerProduction, /^\s*"triggers":\s*\{\s*"crons":\s*\[\s*"0 \* \* \* \*"\s*\]\s*\}/m, "Production's agenda cron must be active, matching the exact schedule Staging's used to carry");
 
 console.log("staging-write-guard.test.mjs: all assertions passed");
