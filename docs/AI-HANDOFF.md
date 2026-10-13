@@ -34118,3 +34118,213 @@ schedules/retention, or to the recommendation engine's own logic
 (already fixed and verified clean on Production on 2026-10-12; today's
 bug was a deployment/trigger-lifecycle defect, not a recurrence of the
 classification bug). No merge to `main`.
+
+## Production Daily Agenda Email -- Final Verification Round (2026-10-13, follow-up)
+
+The owner asked for a final, direct (not config-file-only) verification
+of Production's Cron Trigger and of why no Production-sent agenda
+email had yet been observed, with explicit pre-authorization to
+redeploy Production's existing, unchanged config if the live
+registration turned out to be missing or wrong, but NOT to manually
+send a real email or change the schedule/config without approval.
+
+### 1. Inspecting the actual Cloudflare registration, not just the config file
+
+- **Cloudflare dashboard**: attempted, via the owner's Chrome browser,
+  to open the Workers > `fundraising-os-production` > Triggers page
+  directly. Redirected to `dash.cloudflare.com/login` -- no cached
+  dashboard session exists in this browser (a different login context
+  than the Cloudflare Access-protected app itself). Per this session's
+  standing security rule, no password was entered; the tab was closed
+  without proceeding.
+- **The app itself** (`https://fundraising-os-production.sgoldstein.workers.dev/`):
+  also attempted, also redirected to the Cloudflare Access sign-in
+  page -- no cached Access session either (the authenticated session
+  used in the 2026-10-12 round's live verification did not carry over
+  to this round's browser). No password was entered here either.
+- **Cloudflare API via the `wrangler` OAuth token**: not attempted
+  again this round (blocked and abandoned in the prior round; not
+  retried).
+- **`wrangler tail --config wrangler.production.jsonc --format json`**:
+  started as a live, read-only monitor of Production's actual
+  Observability stream (no dashboard login required, no secret
+  exposed). Confirms every future invocation Cloudflare actually sends
+  to this Worker, scheduled or otherwise, going forward from this
+  round -- the one genuinely live, non-config-file signal available to
+  this session. Still armed as of this writing; results land as they
+  occur, not retroactively (Cloudflare Tail has no history -- it only
+  streams events that happen while a session is connected, so it
+  cannot show what happened at 13:00 UTC today, before this round
+  started watching).
+- **The pre-authorized redeploy** (see below) was therefore the only
+  immediately available way to get Cloudflare's own server-side
+  confirmation of the live registration, rather than relying on what
+  `wrangler.production.jsonc` merely claims.
+
+### 2. Redeploy executed -- registration confirmed genuinely live, not the root cause
+
+`git diff wrangler.production.jsonc` confirmed zero changes before
+deploying -- the exact file already committed and reviewed. Built with
+`pnpm run build:production-independent` (succeeded), deployed with
+`pnpm run deploy:production-independent` (succeeded).
+
+**Result: `Deployed fundraising-os-production triggers` printed,
+followed by `schedule: 0 * * * *`.** This is Cloudflare's own
+confirmation, returned from the live API call wrangler makes on every
+deploy that carries a non-empty `triggers.crons` array -- the same
+kind of explicit confirmation line this round's Staging fix relied on.
+**New Production Version ID: `f5f4886e-99d3-4009-9050-c980bfc2fd64`.**
+Deploy output showed the identical bindings (`DB`, `STATUS_WORKER`,
+`TEAM_DOMAIN`, `POLICY_AUD`, `STAGING_OWNER_EMAIL`, `APP_BASE_URL`,
+`MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID`) as every prior Production
+deploy -- nothing else changed.
+
+**This rules out "the Cron Trigger registration is missing or broken"
+as the root cause.** Because wrangler re-asserts the full desired
+`triggers.crons` value on every deploy that declares one (unlike
+Staging's prior bug, which was specifically about a later deploy
+*omitting* the key -- an entirely different code path that never calls
+Cloudflare's trigger-update API at all), Production's registration had
+already been correctly re-asserted by **every** Production deploy since
+2026-10-12, including the two from the prior "Workspace Health" round
+and this one. The schedule was never actually missing.
+
+### 3. Other candidate causes checked and ruled out, by source, not guess
+
+- **Send-once/dedup protection**: none exists anywhere in this code
+  path. `runScheduledAgendaSend()` (`worker/index.ts` ->
+  `lib/agenda/send-agenda.ts`) has no persisted "already sent today"
+  state of any kind -- re-read fresh this round to confirm. Cannot be
+  the cause.
+- **Date/timezone calculation**: `lib/agenda/timezone.ts` re-read in
+  full -- `currentEasternHour()`/`isDailyAgendaSendHour()` compute the
+  local America/New_York hour fresh from `Intl.DateTimeFormat` on every
+  call, identical code on both Workers, with no environment-specific
+  branch of any kind. Staging's own long history of correct 9 AM sends
+  proves this logic itself works; Production runs the exact same
+  compiled function. Cannot be the cause.
+- **Prior Staging activity interfering with Production**: structurally
+  impossible -- separate Worker scripts, separate Cron Trigger
+  registrations, separate D1 bindings/databases, separate Gmail OAuth
+  secrets. The only thing the two environments share is the human
+  recipient address; nothing about Staging sending (or not sending) can
+  block or suppress Production's own independent invocation.
+- **Gmail credentials/recipient**: `wrangler secret list --config
+  wrangler.production.jsonc` re-confirmed this round: all three of
+  `GMAIL_OAUTH_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN` present (names
+  only, never values -- not retrieved, not rotated). `STAGING_OWNER_EMAIL`
+  (the shared owner-email var `requireOwnerEmail()` reads for both
+  `from` and `to`) confirmed `sgoldstein@nirc.edu` in this round's own
+  deploy output. Secret *values* cannot be verified without exposing
+  them, which this task explicitly forbids -- if one of the three
+  values itself is wrong (e.g. mistyped during the owner's manual
+  dashboard entry on 2026-10-12), that would produce exactly this
+  symptom (a real, registered, correctly-firing cron whose actual send
+  attempt fails inside `sendGmail()`) and **cannot be ruled out or
+  confirmed from this session**.
+
+### 4. Production data and donor-link verification (point 11)
+
+Re-read, fresh, directly from Production D1 (narrowly scoped to the
+three already-known row IDs, not a broad query): all three corrected
+`donor_relationship_facts` rows (Sonnenblick `ce73ef48-...`, Mark
+Danziger `a991ecc1-...`, Joel Danziger `7d9a9104-...`) still read
+`status: current`, `lifecycle: time_bound`, each still linked to its
+real completed interaction (`source_interaction_id`/
+`source_interaction_occurred_at` unchanged from the 2026-10-12
+correction). No drift, no reversion.
+
+`node scripts/run-tests.mjs` re-run this round: **181/181 passed**,
+including `tests/relationship-fact-completion-awareness.test.mjs`'s
+three cases that reproduce these exact donors/facts end-to-end through
+the real `buildRecommendationEvidence` -> `generateCandidates` ->
+`buildDonorRecommendation` -> `buildAgenda` pipeline and assert
+suppression -- unchanged and still passing, proving the recommendation
+engine itself has not regressed since 2026-10-12.
+
+**Not independently re-verified this round via a live screenshot**:
+neither the dashboard nor the Access-protected app could be reached
+without a login this session was not authorized to perform (see
+Section 1). The data-level (fresh D1 read) and code-level (unchanged,
+passing regression tests reproducing the exact real shape) evidence
+above is the strongest confirmation available without that login, but
+is not the same as a fresh pixel-level look at the live page. If the
+owner can open
+`https://fundraising-os-production.sgoldstein.workers.dev/donors/072ec28e-e73e-4981-a91d-5157aedad72d`
+in their own already-authenticated browser, that would close this one
+remaining gap directly.
+
+### 5. Staging re-confirmed inert
+
+`wrangler.staging.jsonc`'s `"triggers": { "crons": [] }` (this round's
+earlier fix, version `2bd22973-...`) re-read fresh -- unchanged, still
+explicit-empty. Not redeployed again this round (nothing about it
+needed re-confirming; its own deploy already produced the distinct
+"Deployed ... triggers" confirmation line proving the clear took
+effect). No new "Fundraising Agenda" email from Staging has been sent
+since.
+
+### Answers to the owner's specific questions
+
+1. **Root cause of missing Production delivery**: **not conclusively
+   determined.** Directly ruled out: missing/broken Cron Trigger
+   registration (now positively confirmed live and correct, and in
+   fact was likely never actually broken, since Production's deploys
+   never omitted the triggers key the way Staging's did). Also ruled
+   out by source inspection: send-once protection (none exists),
+   timezone/date calculation (shared, proven-correct code), and
+   Staging interference (structurally isolated environments). The
+   remaining, unconfirmable-without-exposing-a-secret or without-
+   waiting-for-the-next-real-window possibility is a runtime failure
+   inside the one actual send attempt (today, 2026-10-13T13:00-13:03Z
+   UTC) -- most plausibly inside `sendGmail()`'s Gmail OAuth call,
+   since this was Production's **first-ever** real opportunity to
+   exercise that path end-to-end (every prior Production deploy's 9 AM
+   window had either already passed before that deploy, or simply
+   hadn't arrived yet).
+2. **Actual Cloudflare Production Cron Trigger status**: **confirmed
+   live and correct** (`schedule: 0 * * * *`), via a real deploy's own
+   server-confirmed response, as of Version `f5f4886e-...`.
+3. **Actual Staging Cron Trigger status**: **confirmed cleared**
+   (explicit empty array, confirmed via its own deploy's "Deployed ...
+   triggers" response, as of Version `2bd22973-...`, from the earlier
+   round today).
+4. **Was a Production deployment necessary?** Yes, and it was the only
+   way available to this session to get Cloudflare's own live
+   confirmation rather than relying on the config file alone, per the
+   owner's own instruction. The deployed config was byte-for-byte
+   unchanged (`git diff` confirmed empty before deploying) -- a
+   redeploy-to-reconfirm, not a fix to any discovered misconfiguration.
+5. **Is the current Production agenda free of the outdated
+   recommendations?** Yes, by data-level and regression-test evidence
+   (Section 4) -- not re-confirmed by a fresh live screenshot this
+   round (see the one disclosed gap above).
+6. **Should the next scheduled email send successfully?** The
+   registration and the recommendation data are both now independently
+   confirmed correct. Whether the Gmail send step itself succeeds
+   cannot be guaranteed from this session without exposing or testing
+   the actual secret values, which this task forbids.
+7. **What remains unverified until the next real scheduled delivery**:
+   whether `sendGmail()` actually completes successfully against
+   Production's Gmail OAuth credentials, and whether the resulting
+   email's content/links are correct in practice (not just in theory).
+   Per the owner's own closing instruction, **this issue is not being
+   declared fully resolved** -- it will be confirmed only once an
+   actual Production-sent "Fundraising Agenda" email is observed (next
+   opportunity: 2026-10-14, ~13:00 UTC / 9 AM America/New_York) with
+   `fundraising-os-production.sgoldstein.workers.dev` links and no
+   bar-mitzvah recommendation.
+
+### Not done, and why (stopping per the task's own instruction)
+
+No manual send was triggered (forbidden without separate approval). No
+additional Cron Trigger was created. No schedule or recipient was
+changed. No secret was read, rotated, or exposed -- the three Gmail
+secret values on Production remain unverified and unverifiable from
+this session, which is also why the root cause above cannot be stated
+with full certainty: confirming or ruling out a bad secret value would
+require either exposing it (forbidden) or observing a real send
+attempt succeed or fail (not yet available). No code change was made
+this round (no new application defect was found to write a regression
+test for -- the live registration, which was the leading hypothesis,
+turned out to already be correct). No merge to `main`.
