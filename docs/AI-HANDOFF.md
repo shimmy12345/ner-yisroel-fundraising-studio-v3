@@ -39140,3 +39140,290 @@ instruction) rather than reproduced end-to-end on Staging.
    pre-existing, disclosed gap, not newly introduced, but still a real
    gap in the broader "completed work shouldn't become a new task"
    guarantee the owner asked about.
+
+## Completed Outreach Action Fix, round 2 (2026-10-14)
+
+The owner reviewed round 1 (above) with a second party and raised two
+specific, correct objections, plus asked for the legacy pathway and the
+Production correction plan to be addressed directly.
+
+### What was found
+
+**Objection 1 -- round 1 still had a grace window.** Round 1's fix gave a
+completed-touch fact a shorter (30-day) decay window instead of the
+previous never-decaying `durable` default. That is a real improvement
+over the original bug, but it still meant a completed outreach action
+could be recommended for up to 30 days after it was performed -- exactly
+the outcome the owner said was still wrong: *"My goal is not simply to
+make completed outreach recommendations disappear after 30 days. My goal
+is to prevent Fundraising OS from recommending work that has already
+been completed."*
+
+**Objection 2 -- relying too heavily on vocabulary.** Investigated
+whether today's schema has ANY field that structurally distinguishes "a
+report of a completed one-time action" from "a standing fact about the
+donor" without reading the sentence's own grammar. It does not: interaction
+`type`, `occurred_at`, move/ask status, and `source_interaction_id` all
+already exist and are already used (the completion-awareness mechanism
+from the October 12 fix), but none of them records *what kind of sentence*
+a fact's text is -- that is purely a property of the free text itself.
+This is disclosed honestly rather than papered over with a fake
+structural signal: **there is no way to make this determination today
+without reading the fact's own text in some form.**
+
+What the investigation DID find, though, is a genuine, principled
+narrowing of which text shapes are actually ambiguous:
+
+- An **EVENT report** ("Son had a bar mitzvah.", no stated actor) is
+  genuinely ambiguous -- it could be a brand-new milestone the fundraiser
+  hasn't acted on yet, or something from weeks ago already addressed.
+  Age-based decay (round 1's approach, from the October 12 fix) is the
+  right, conservative answer for this shape, and is UNCHANGED this round.
+- An **ACTION report** ("Texted ... and thanked him for his support")
+  names the fundraiser as the actor performing a contact verb. This
+  cannot be ambiguous about completion: recording it as a fact in the
+  past tense IS the record that the action already happened. There is no
+  "not yet done" reading available. This is the shape round 1's fix
+  (`COMPLETED_OUTREACH_ACTION_PATTERN`) and the October 8 fix
+  (`COMPLETED_WELL_WISH_PATTERN`) both target, and is what justifies
+  dropping the grace window entirely for exactly these two patterns,
+  while leaving `COMPLETED_MILESTONE_EVENT_PATTERN` (the EVENT-report
+  case) completely untouched.
+
+**Legacy pathway**: a read-only Production scan found `relationship_
+summary`/`institutional_memory` populated for exactly 12 donors, and all
+12 already have a structured `donor_relationship_facts` row -- meaning
+`relationshipOpportunityCandidate`'s legacy branch is **not currently
+reachable by any donor in Production at all** (`hasStructuredFacts` is
+true for every donor who has any narrative text). The code path exists
+and has zero completion-awareness, but it is dormant today, not actively
+misfiring. This is a forward-looking gap (a future donor could reach it
+before migrating to structured facts), not a second live incident.
+
+### What was changed
+
+- **`lib/relationships/fact-classification.ts`**: new
+  `isUnambiguousCompletedOutreachAction(factText, category)`. Returns
+  true only for `COMPLETED_WELL_WISH_PATTERN`/`COMPLETED_OUTREACH_ACTION_
+  PATTERN` matches (the ACTION-report shapes), and only when `category`
+  is NOT a singular-state category (`solicitation`/`health`) -- the same
+  guard already used for round 1's decay-window override, carried
+  forward so a solicitation note that happens to open with "Called" is
+  never unconditionally suppressed; the ask's own subject matter may
+  still need follow-through even though the touch itself is done.
+- **`lib/relationships/fact-synthesis.ts`**: `scoreFact()` now checks
+  `isUnambiguousCompletedOutreachAction(fact.factText, fact.category)`
+  FIRST, before even the `durable` early-return, returning `0`
+  immediately, at any age. Checked against the fact's own TEXT, never
+  its stored `lifecycle` -- this is what makes the fix **self-healing for
+  the two already-written Production rows with zero data migration
+  required**: whatever `lifecycle` value is currently stored for
+  Zachter's and the gym-tour donor's rows, the next time either is read
+  through `scoreFact()`, the text itself is reclassified correctly.
+  `COMPLETED_MILESTONE_EVENT_PATTERN`'s existing age-based/confirmed-
+  completion treatment (October 12 fix) is completely unchanged.
+- **`lib/relationships/recommendation-candidates.ts`**:
+  `relationshipOpportunityCandidate`'s legacy branch now splits
+  `relationship_summary`/`institutional_memory` into sentences (reusing
+  `lib/capture/interaction.ts`'s own existing `sentenceList`, now
+  exported, never a second splitter) and suppresses the candidate only
+  when EVERY sentence is an unambiguous completed-action report (via
+  `classifyFactCategory()` per sentence, feeding the same guarded check
+  above -- never a second classification scheme). A narrative that mixes
+  an action report with other content is left completely untouched, so
+  no real donor context is ever silently dropped -- this is the direct
+  answer to the owner's explicit "preserve useful donor context"
+  instruction for a population without the structured-facts migration's
+  per-sentence granularity.
+
+### Alternative considered, not implemented this round
+
+A stored `fact_kind: 'action_report' | 'event_report' | 'standing_fact'`
+column, decided once at accept time, would let every later read skip
+re-running a text classifier at all. **Not implemented**, because it would
+either (a) need a new UI prompt at capture time asking the fundraiser to
+classify their own note (added friction, and the owner did not ask for a
+UI change), or (b) run this exact same pattern-based classifier at accept
+time instead of at read time -- moving today's judgment call earlier in
+the pipeline, not eliminating it, while adding a migration (backfilling
+the column for all 12 existing rows) and a permanent schema commitment.
+Flagging as an option for a future round if the owner wants it, not
+proceeding speculatively, per the explicit instruction to explain
+tradeoffs before building a larger architectural change.
+
+### Verified against real data vs. inferred from code (this round)
+
+- **Verified, read-only, against Production**: re-confirmed the same 2
+  affected structured-fact rows and their exact stored values; confirmed
+  all 12 donors with any legacy narrative text already have a structured
+  fact row (so the legacy path has zero current exposure); ran the new
+  `isUnambiguousCompletedOutreachAction` directly (via a throwaway,
+  read-only script, deleted after use) against all 12 real current fact
+  rows and confirmed it flags exactly the 2 Zachter/gym-tour rows plus
+  the 3 already-`time_bound` "wish happy birthday" rows (correctly
+  dropping their remaining grace window too, per the owner's explicit
+  instruction), and leaves the 3 bare "<relation> had a bar mitzvah"
+  rows and all 4 solicitation rows completely untouched.
+- **Inferred from code**: the legacy-path sentence-splitting behavior for
+  a hypothetical future donor (no such donor exists in Production today
+  to verify against live).
+
+### Regression tests
+
+- `tests/relationship-fact-classification.test.mjs`: direct unit coverage
+  for `isUnambiguousCompletedOutreachAction`, including the critical
+  solicitation/health guard (a sentence opening with "Called" must stay
+  unaffected under `solicitation`/`health`, and must still be flagged
+  under any other category) and the EVENT-vs-ACTION-report contrast
+  (`"Son had a bar mitzvah."` must NOT be flagged; the real Zachter/
+  gym-tour text must be).
+- `tests/relationship-fact-completed-outreach-action.test.mjs`: rewritten
+  for round 2 -- no-grace-window (suppressed even at day 0), the
+  self-healing property (stored `lifecycle` left at the real, uncorrected
+  `durable` value and still correctly suppressed), a genuinely
+  forward-looking fact remaining actionable (the real contrast case), a
+  second genuinely-new fact for the same donor still surfacing, dashboard/
+  Daily Agenda consistency, the solicitation decay-window guard, and three
+  new legacy-pathway scenarios: an all-action-report narrative suppressed,
+  a mixed narrative preserved verbatim, and a pure standing-fact narrative
+  completely unaffected.
+- `tests/relationship-fact-recommendation-actionability.test.mjs`: the
+  round-1 "a 10-day-old well-wish must still be actionable" assertion
+  was itself round 1's now-acknowledged mistake -- replaced with "must
+  NOT be actionable, at any age," plus a new case proving suppression
+  works even when the stored `lifecycle` is still `durable`.
+- `tests/relationship-fact-completion-awareness.test.mjs` (October 12
+  fix, EVENT-report case): unchanged and still green, confirming this
+  round did not touch that pattern's own, separately-justified, age-based
+  behavior.
+
+**Results: 190/190 test files passing, `tsc --noEmit` clean, lint
+baseline unchanged (94 errors/43 warnings, via the real `pnpm run lint`).**
+
+### Staging deployment and verification
+
+Deployed via the protected `pnpm run deploy:staging-independent` script.
+New Staging Worker version: `f2721843-769b-4a2d-9f4a-f15de04ea6de`.
+Confirmed Staging responds normally post-deploy. As with round 1,
+Staging's own D1 does not contain the real Zachter/gym-tour donors, so
+live-data verification for this round was done read-only against
+Production directly, and the fix itself was proven against that real
+data through the throwaway script described above plus the full,
+real-pipeline test suite.
+
+### Completed outreach can still be incorrectly recommended? / Is the
+legacy pathway addressed?
+
+For the two patterns this investigation has evidence for
+(`COMPLETED_WELL_WISH_PATTERN`, `COMPLETED_OUTREACH_ACTION_PATTERN`):
+**no grace window remains** -- suppression is immediate, at any age, and
+self-healing regardless of stored `lifecycle`. The legacy pathway now
+applies the identical check and is the direct, system-wide answer to the
+owner's "propose a system-wide solution rather than special-case
+exclusions" instruction (same function, same patterns, one additional
+caller). The disclosed, still-open gap is narrower than before: a
+completed-action sentence worded in a way that matches NEITHER existing
+pattern (no explicit past-tense contact verb at all) would still not be
+caught -- this remains a text-pattern system, by the owner's own
+instruction not to invent a new completion status, and a pattern-based
+system can only recognize shapes it has evidence for.
+
+### Production data correction plan -- NOT executed, awaiting explicit authorization
+
+Important context for this decision: because round 2's fix checks the
+fact's own TEXT before ever consulting the stored `lifecycle` column,
+**this correction is no longer behaviorally required** for the Daily
+Agenda/Today page to stop recommending Zachter's and the gym-tour
+donor's completed touches -- that already happens the moment the code
+itself is deployed to Production, regardless of this metadata value.
+This plan exists purely to keep the stored `lifecycle` column accurate
+(it currently reads the stale `durable` value for both rows), which the
+owner separately asked to have prepared.
+
+**Preconditions** (all must hold before running):
+1. The round-2 code fix has been deployed to Production (this plan
+   corrects metadata to match the code's own classifier; running it
+   against Production while Production is still running the OLD code
+   would leave the data correct but the behavior unprotected by the
+   self-healing mechanism in the interim -- low risk either way, but the
+   intended order is code first).
+2. Owner's explicit, separate authorization for this specific action.
+3. Immediately before running: a fresh read-only re-check of both rows'
+   current `lifecycle`/`category`/`fact_text` (matching `scripts/
+   relationship-facts-lifecycle-reclassify.mjs`'s own existing
+   "re-fetch and re-plan, never trust an earlier read" convention), in
+   case either row was independently touched since this plan was written.
+
+**Target rows and exact statements** (D1 database `fundraising-os-
+production-db`; `?NOW?` is the Unix epoch seconds at execution time):
+
+```sql
+-- Row 1: Yaakov Zachter
+UPDATE donor_relationship_facts
+SET lifecycle = 'time_bound', updated_at = ?NOW?
+WHERE id = '1550c6b7-ba7d-4bce-a819-a9cbfb320ee7' AND lifecycle = 'durable';
+
+-- Row 2: the gym-tour donor
+UPDATE donor_relationship_facts
+SET lifecycle = 'time_bound', updated_at = ?NOW?
+WHERE id = '208a5d68-705d-43b2-9037-578995819445' AND lifecycle = 'durable';
+```
+
+Each statement's reported `changes` count MUST equal exactly 1. A count
+of 0 means the row's `lifecycle` has already changed since the
+precondition re-check (a concurrent writer) -- stop, do not force, and
+re-investigate rather than retrying blind. No other column is touched by
+either statement: `fact_text`, `category`, `status`, `donor_id`,
+`source_interaction_id`, `source_interaction_occurred_at` are untouched
+for both rows, matching the existing reclassify script's own scoping
+discipline.
+
+**Expected before/after:**
+
+| id | donor | before | after |
+|---|---|---|---|
+| `1550c6b7-ba7d-4bce-a819-a9cbfb320ee7` | Yaakov Zachter | `lifecycle: durable` | `lifecycle: time_bound` |
+| `208a5d68-705d-43b2-9037-578995819445` | (gym-tour donor) | `lifecycle: durable` | `lifecycle: time_bound` |
+
+**Rollback procedure** (trivial -- a single-column, non-cascading
+metadata field with no derived/cached state stored elsewhere that reads
+it):
+
+```sql
+UPDATE donor_relationship_facts
+SET lifecycle = 'durable', updated_at = ?NOW?
+WHERE id = '1550c6b7-ba7d-4bce-a819-a9cbfb320ee7' AND lifecycle = 'time_bound';
+
+UPDATE donor_relationship_facts
+SET lifecycle = 'durable', updated_at = ?NOW?
+WHERE id = '208a5d68-705d-43b2-9037-578995819445' AND lifecycle = 'time_bound';
+```
+
+**Verification queries** (read-only, run both before and after, and
+compare):
+
+```sql
+SELECT id, donor_id, category, lifecycle, status, fact_text,
+       source_interaction_id, source_interaction_occurred_at, updated_at
+FROM donor_relationship_facts
+WHERE id IN ('1550c6b7-ba7d-4bce-a819-a9cbfb320ee7', '208a5d68-705d-43b2-9037-578995819445');
+```
+
+Confirm: both rows present, `status` still `current` for both, every
+column except `lifecycle`/`updated_at` byte-identical to the
+precondition read, and `lifecycle` is now `time_bound` for both. Also
+re-run the full donor-record safety checks already established earlier
+in this session (donor/giving-activity counts unchanged) as a final
+sanity pass, though neither statement above touches those tables.
+
+### Whether this is ready for Production
+
+**The code fix is ready and recommended for Production deployment**,
+pending the owner's explicit authorization (not yet given this round,
+per standing instruction -- no Production deploy was performed). It is
+deployed and verified on Staging, 190/190 tests pass, `tsc` is clean,
+lint is at its unchanged baseline, and it has been checked against all
+12 real current Production fact rows with the exact expected,
+narrowly-scoped effect. The data correction above is optional (the fix
+is self-healing without it) and should be run, if at all, only after the
+code is live and only with separate, explicit authorization.
