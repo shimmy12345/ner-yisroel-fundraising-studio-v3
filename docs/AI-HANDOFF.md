@@ -36735,3 +36735,180 @@ isolation/duplicate-prevention properties are all confirmed. What
 remains is the one thing that can only be confirmed by time passing:
 an actual scheduled execution producing exactly one, correctly-sourced,
 correctly-linked email tomorrow morning.
+
+## GitHub Actions #38574492466 -- `main` Restore/Schema Sync for Migration 0043 (2026-10-14)
+
+Commit `ff40bd4`'s migration (`0043_agenda_send_log.sql`) triggered
+`.github/workflows/d1-restore-sync-check.yml`'s `check` job to fail and
+`prepare-sync` to correctly refuse -- exactly the expected, intentional
+"new table" safety restriction `docs/D1-MIGRATION-SYNC-PROCESS.md`
+describes, not a bug. Both independently reproduced locally before
+touching anything:
+
+- `node scripts/check-main-restore-sync.mjs` -> drift confirmed:
+  "Tables missing from main's restore order: agenda_send_log,"
+  "Migrations present on the canonical branch but missing from main's
+  manifest: 0043_agenda_send_log.sql."
+- `node scripts/prepare-main-restore-sync-patch.mjs` -> `safe: false`,
+  `"New table(s) introduced: agenda_send_log. Restore-order placement
+  for a new table requires human judgment..."` -- confirming the
+  automation correctly refused rather than guessed.
+
+### 1. New table's foreign-key relationships, inspected directly
+
+`drizzle/0043_agenda_send_log.sql`'s only constraint: `FOREIGN KEY
+(user_id) REFERENCES users(id)`. No other dependency. This is the exact
+same shape as the existing `backup_alert_state` precedent (not
+`pledge_balance_corrections`, which has real donor-data foreign keys and
+is part of `STAGING_RESET_TABLE_ORDER`) -- confirmed by reading main's
+own current `lib/operations/d1-restore-order.ts` and
+`lib/data-health/production-baseline.ts` and matching the exact pattern
+already used there for `backup_alert_state`.
+
+### 2. Manual synchronization prepared, following the documented procedure exactly
+
+Isolated scratch worktree (`../dob-importer-0043-sync`, matching the
+naming convention of every prior worked example --
+`dob-importer-0038-sync`, `dob-importer-0041-0042-sync`, etc.) built
+from `origin/main` on a new branch,
+`fix/d1-restore-sync-0043-agenda-send-log`. Four files touched, same
+scope as every prior new-table sync:
+
+- `production-baseline/schema-manifest.json`: copied verbatim from this
+  branch's own current, verified manifest.
+- `lib/data-health/production-baseline.ts`: migration count 43 -> 44;
+  `agenda_send_log` added to `ACCOUNT_CONFIGURATION_TABLES`; doc comment
+  updated following the 0038/0041+0042 sync precedent exactly (including
+  correcting a path reference from `tests/` to main's own `test/`
+  directory, confirmed by direct `ls` before writing the comment).
+- `lib/operations/d1-restore-order.ts`: `agenda_send_log` added to
+  `D1_RESTORE_DATA_ORDER` as a fifth true root, positioned after
+  `"users"`.
+- `test/d1-restore-order.test.mjs`: the "four true roots" assertion
+  (roots list, `.slice(4)` tail index) updated to five/`.slice(5)`, and
+  a new test added mirroring the existing `backup_alert_state`
+  positioning test, for `agenda_send_log`.
+
+`lib/operations/staging-reset.ts` was deliberately **not** touched --
+confirmed by grep that neither `backup_alert_state` nor
+`agenda_send_log` appears there on either branch, since both are
+`ACCOUNT_CONFIGURATION_TABLES` (operational dedupe state), never part of
+a staging data reset.
+
+### 3. Verification -- exact results
+
+- `npm ci && npm test` (main's own real suite, in the sync worktree):
+  **150/150 passed** (up from 149 -- the one new positioning test).
+- `npm run build` (main's own real build): clean. (One incidental,
+  content-free `public/runtime-config.js` touch from running the build
+  locally was reverted via `git checkout --` before committing --
+  confirmed empty diff first, not a real change, not part of the sync.)
+- `MAIN_REF=fix/d1-restore-sync-0043-agenda-send-log node
+  scripts/check-main-restore-sync.mjs` (the unmodified drift check,
+  re-pointed at the candidate branch instead of `origin/main`): **"D1
+  restore/schema state on main is in sync with the canonical schema. No
+  drift detected."**
+
+All three of the automation's own validation steps pass against this
+exact patch -- the same bar `prepare-sync` itself would have had to
+clear had it been able to attempt this automatically.
+
+### 4. Pull request -- pushed, NOT opened via API, NOT merged
+
+Committed (`a019603`, normal session identity + attribution, matching
+every prior manual sync's own author -- not the automation's bot
+identity, which is reserved for `prepare-sync`'s own commits) and
+pushed: `fix/d1-restore-sync-0043-agenda-send-log` ->
+`origin/fix/d1-restore-sync-0043-agenda-send-log`.
+
+**The PR itself could not be opened this round.** No `gh` CLI is
+installed in this environment, no `GITHUB_TOKEN` is set, and GitHub's
+own web UI (attempted via the owner's browser) hit a sign-in wall --
+credentials were not entered, per this session's standing rule, and no
+alternate credential was hunted for or substituted. **Open it directly
+at:**
+
+**https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-sync-0043-agenda-send-log**
+
+**The PR was not merged, and nothing was merged on your behalf** -- per
+the explicit instruction not to auto-merge. Per
+`docs/D1-MIGRATION-SYNC-PROCESS.md`'s own review guidance, this PR
+touches exactly the same two file *categories* an automated sync would
+have (plus the new-table-specific `d1-restore-order.ts`/test file an
+automated sync explicitly cannot touch) and has already passed main's
+own real test suite, build, and the unmodified drift check -- review and
+merge it like any other PR.
+
+### 5. Production Health "Needs attention" -- investigated separately, NOT the same cause
+
+Traced precisely via source (`lib/data-health/model.ts`), not inferred:
+the two warnings are produced by comparing Production's **live
+`production_schema_baseline` D1 table row** (written once, at database
+bootstrap, by the one-time baseline SQL -- confirmed by grep that no
+other code path in this entire repository ever writes to this table
+outside a backup-export generator) against **whichever build is
+currently deployed to that Worker's own packaged
+`production-baseline/schema-manifest.json`**. The code's own comment is
+explicit and unambiguous: *"production_schema_baseline is a historical,
+point-in-time stamp -- it is never rewritten automatically when a later
+migration is applied to this environment's D1. A stale hash here means
+exactly that..., never that the live schema is corrupt or unexpected."*
+
+This is a **mechanically distinct** problem from the GitHub Actions
+failure above, sharing only the general pattern ("a baseline-tracking
+artifact drifts after a new-table migration and nothing re-stamps it
+automatically"):
+
+| | GitHub Actions failure | Production Health warning |
+|---|---|---|
+| What's compared | `main`'s own **committed files** vs. this branch's current schema | Production's **live D1 row** vs. the **currently-deployed build**'s packaged manifest |
+| Branch/environment | Cross-branch (`main` vs. `feature/independent-cloudflare-sandbox`) | Single environment (Production only) |
+| Fixed by | The PR above, once merged | No automated mechanism exists anywhere in this codebase (confirmed by the grep above) |
+
+**No additional verification work was needed to reach this conclusion**
+-- it follows directly and unambiguously from the one comment block in
+`lib/data-health/model.ts` that documents this exact check's own
+semantics, cross-checked against a full-repository grep for any write
+path to the table. **This round did not attempt to re-stamp
+Production's live marker row** -- doing so would mean writing to
+Production's D1 (even though only a verification-marker table, never
+donor data), which was outside today's specific authorization
+(investigate + prepare the `main`-branch PR). If the owner wants this
+cosmetic "Needs attention" state cleared, it requires a separate,
+explicitly authorized `UPDATE production_schema_baseline SET schema_hash
+= '9fc6f49c84fa1cd62506f30f0a8af0c2ac848132ff2a3627c04e89884eb409f8'
+WHERE id = '0019'` against Production's D1 -- a one-line, narrowly
+scoped, non-donor-data write, but a Production data write nonetheless,
+flagged here for a future round rather than performed now.
+
+### 6. October 15 scheduled-email verification -- confirmed undisturbed
+
+Verified, not assumed, that nothing this round could interfere with
+tomorrow's pending verification (Section "Phase 4" above):
+
+- All work happened in a separate worktree (`../dob-importer-0043-sync`)
+  on a new branch based on `origin/main` -- entirely disjoint from
+  `feature/independent-cloudflare-sandbox`,
+  `wrangler.staging.jsonc`/`wrangler.production.jsonc`, and any D1
+  binding. No `wrangler deploy`, no D1 write, no Gmail call was made.
+- Every `.github/workflows/*.yml` trigger was read directly: the four
+  backup/restore workflows fire only on `schedule`/`workflow_dispatch`
+  (never on a push); `d1-restore-sync-check.yml` fires only on a
+  push/PR against `feature/independent-cloudflare-sandbox` specifically
+  -- confirmed by reading its exact `on:` block -- so pushing
+  `fix/d1-restore-sync-0043-agenda-send-log` and opening a PR against
+  `main` triggers **none** of them.
+
+### Remaining steps
+
+1. Open the PR at the URL in Section 4 above, review it, and merge it
+   through the normal process (it is not time-sensitive relative to
+   tomorrow's email verification -- merging it only fixes `main`'s own
+   restore-order tracking, unrelated to Production or Staging's live
+   behavior).
+2. Tomorrow (Thursday, October 15, 2026, 9:00 AM America/New_York):
+   perform the Phase 4 verification already specified above -- still
+   explicitly pending, untouched by this round.
+3. If desired, separately authorize the one-line Production
+   `production_schema_baseline` re-stamp (Section 5 above) to clear the
+   cosmetic "Needs attention" state -- optional, not blocking anything.
