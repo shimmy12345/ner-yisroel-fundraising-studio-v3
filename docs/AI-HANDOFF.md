@@ -39542,3 +39542,238 @@ No verification failed; no rollback was needed or performed.
    idea remains unimplemented and unneeded unless the owner wants it; the
    legacy narrative pathway's fix remains unverified against a real
    Production donor since none currently reaches that code path.
+
+## Geographic Audit for Travel Planning -- Phase 1 (2026-10-14, read-only)
+
+Requested: help the owner organize fundraising travel by city/region,
+eventually letting him filter donors by travel region on the existing
+priority-ranked lists. This round is audit-only -- no feature was built,
+no Production or Staging write of any kind was made, and no city
+grouping was applied. Proposed groupings below are **not yet approved**.
+
+### How addresses are stored today
+
+`donors` has both a legacy single-line `address` column and a
+structured set (`address_line_1`, `city`, `state`, `postal_code`,
+`country`) -- the structured set is what every current consumer (the
+donor directory, donor profile, imports) actually reads. `city`/`state`
+are stored exactly as imported, verbatim, with **no normalization of any
+kind** -- `lib/import/jl-solutions.ts`/`lib/import/recognition.ts` map a
+source spreadsheet's own "City"/"State" columns straight through. There
+is no existing geography/region concept anywhere in the schema or code:
+`city`/`state` are read today only for on-screen display (`app/donors/
+page.tsx`'s directory query, the donor profile page) and are **never**
+part of search or filtering -- `lib/relationships/donor-search.ts`'s
+`matchesDonorQuery()` matches only last name, name, spouse, code, email,
+and phone; city/state are not in that list at all.
+
+### Audit scope
+
+Read-only queries against `fundraising-os-production-db`, scoped to
+`data_source = 'live' AND archived_at IS NULL` -- the exact same
+population `app/donors/page.tsx` itself queries (**254 donors**). No
+donor name, email, phone, or street address was included in any query
+result used for this report -- only `city`, `state`, `country`,
+aggregate counts, and (for the handful of incomplete rows) `postal_code`
+presence/absence.
+
+### Data quality: cleaner than typical
+
+- **0 of 254** donors are missing `city` or `address_line_1`.
+- **3 of 254** have no `state` -- all three are Israel addresses
+  (Betar Illit, Jerusalem, Ramat Beit Shemesh), where a US-style state
+  genuinely does not apply; this is not a data-entry defect.
+- **4 of 254** have no `postal_code` -- the same 3 Israel donors plus
+  the 1 Toronto, Ontario donor; again consistent with non-US addresses
+  rather than missing data.
+- **Zero** case/whitespace spelling duplicates (e.g. `"teaneck"` vs.
+  `"Teaneck"`) were found -- verified by grouping on
+  `LOWER(TRIM(city))`/`LOWER(TRIM(state))` and comparing against the
+  exact-match grouping; every normalized group contains exactly one raw
+  spelling.
+- **Zero** cities recorded under more than one state value (checked
+  directly) -- no "same city name, conflicting state" data errors.
+- **49 distinct city/state combinations** across the 254 donors; country
+  breakdown is 250 United States, 3 Israel, 1 Canada.
+
+This is a genuinely clean, single-source-of-truth address dataset -- the
+grouping work below is about geography (which nearby cities travel
+together), not data cleanup.
+
+### Complete city inventory (sorted by state, then city)
+
+| City | State | Donors | Missing/Incomplete |
+|---|---|---|---|
+| Betar Illit | *(Israel, no US state)* | 1 | No state, no postal code (expected -- international) |
+| Jerusalem | *(Israel, no US state)* | 1 | No state, no postal code (expected -- international) |
+| Ramat Beit Shemesh | *(Israel, no US state)* | 1 | No state, no postal code (expected -- international) |
+| La Jolla | CA | 3 | none |
+| Los Angeles | CA | 8 | none |
+| Sherman Oaks | CA | 1 | none |
+| Valley Village | CA | 1 | none |
+| Aventura | FL | 1 | none |
+| Boca Raton | FL | 4 | none |
+| Hollywood | FL | 3 | none |
+| Surfside | FL | 1 | none |
+| Savannah | GA | 1 | none |
+| Chicago | IL | 41 | none |
+| Lincolnwood | IL | 4 | none |
+| Baltimore | MD | 57 | none |
+| Silver Spring | MD | 1 | none |
+| Oak Park | MI | 1 | none |
+| Southfield | MI | 1 | none |
+| Minneapolis | MN | 1 | none |
+| Chesterfield | MO | 1 | none |
+| Saint Louis | MO | 12 | none |
+| Bergenfield | NJ | 15 | none |
+| Edison | NJ | 2 | none |
+| Elizabeth | NJ | 1 | none |
+| Englewood | NJ | 2 | none |
+| Fair Lawn | NJ | 1 | none |
+| Jackson | NJ | 1 | none |
+| Lakewood | NJ | 1 | none |
+| Passaic | NJ | 2 | none |
+| Teaneck | NJ | 23 | none |
+| Toms River | NJ | 1 | none |
+| Bronx | NY | 1 | none |
+| Brooklyn | NY | 4 | none |
+| Chestnut Ridge | NY | 2 | none |
+| East Setauket | NY | 1 | none |
+| Far Rockaway | NY | 2 | none |
+| Flushing | NY | 7 | none |
+| Great Neck | NY | 1 | none |
+| Lawrence | NY | 1 | none |
+| Monsey | NY | 11 | none |
+| Nanuet | NY | 1 | none |
+| New City | NY | 4 | none |
+| New York | NY | 2 | none |
+| Oceanside | NY | 1 | none |
+| Spring Valley | NY | 11 | none |
+| Staten Island | NY | 1 | none |
+| Suffern | NY | 5 | none |
+| Wesley Hills | NY | 1 | none |
+| Columbus | OH | 1 | none |
+| University Heights | OH | 1 | none |
+| Toronto | ON (Canada) | 1 | No postal code (expected -- international) |
+| Bala Cynwyd | PA | 1 | none |
+
+**Total: 254 donors, 49 distinct city/state combinations.**
+
+### Proposed geographic groupings (NOT approved -- for the owner's review/edit)
+
+Each group lists only cities actually present in the data above; every
+count is traceable back to the inventory table. Confidence reflects how
+geographically tight and travel-realistic the cluster is, not donor
+count.
+
+| # | Proposed region | Cities included (state) | Donors | Confidence | Notes |
+|---|---|---|---|---|---|
+| 1 | Baltimore & Maryland suburbs | Baltimore, Silver Spring (MD) | 58 | High for Baltimore; Silver Spring is ~40 mi away toward DC, not a Baltimore suburb -- flagged, not merged blindly | By far the largest single region |
+| 2 | Chicago & suburbs | Chicago, Lincolnwood (IL) | 45 | High | Lincolnwood is immediately adjacent |
+| 3 | North/Central NJ -- Teaneck/Bergenfield area | Teaneck, Bergenfield, Englewood, Fair Lawn, Passaic (NJ) | 43 | High | The owner's own named example |
+| 4 | Monsey/Spring Valley & Rockland County, NY | Monsey, Spring Valley, Suffern, New City, Chestnut Ridge, Nanuet, Wesley Hills (NY) | 35 | High | The owner's own named example |
+| 5 | Queens & western Long Island, NY | Flushing, Oceanside, Great Neck, East Setauket (NY) | 10 | Medium | Geographically spread out (Flushing to East Setauket is ~45 mi) -- likely 2+ separate trips, not one; shown as one candidate for the owner to split |
+| 6 | Los Angeles & San Fernando Valley, CA | Los Angeles, Sherman Oaks, Valley Village (CA) | 10 | High | |
+| 7 | South Florida / Miami area | Boca Raton, Hollywood, Aventura, Surfside (FL) | 9 | High | |
+| 8 | NYC boroughs | Brooklyn, Bronx, Staten Island, New York (NY) | 8 | Medium | Four boroughs, not realistically one single-day trip |
+| 9 | St. Louis & suburbs | Saint Louis, Chesterfield (MO) | 13 | High | |
+| 10 | Five Towns / Far Rockaway, NY | Far Rockaway, Lawrence (NY) | 3 | High | The owner's own named example -- small in this donor base |
+| 11 | Lakewood & Ocean County, NJ | Lakewood, Jackson, Toms River (NJ) | 3 | High | The owner's own named example -- small in this donor base |
+| 12 | Central NJ (Edison/Elizabeth) | Edison, Elizabeth (NJ) | 3 | Medium | ~25-30 mi from the Teaneck/Bergenfield cluster -- candidate for its own region, or owner may prefer folding into #3 |
+| 13 | San Diego, CA | La Jolla (CA) | 3 | High | Explicitly NOT part of Los Angeles (~120 mi away) despite sharing a state |
+| 14 | Detroit area, MI | Oak Park, Southfield (MI) | 2 | High | Both genuine Detroit suburbs |
+| 15 | Israel | Betar Illit, Jerusalem, Ramat Beit Shemesh | 3 | N/A | Not a domestic travel region -- tagging separately so these never get pulled into a US region by mistake |
+| -- | Ungrouped (no peer city in current data) | Savannah (GA), Minneapolis (MN), Columbus (OH), University Heights (OH), Toronto (ON), Bala Cynwyd (PA), Great Neck (NY, if #5 is split) | 5-6 | -- | Each is the only donor in its city; no natural cluster exists yet in this dataset |
+
+Explicitly flagged, not auto-merged, per the owner's own example list:
+**Great Neck** is geographically North Shore Long Island, not one of the
+actual Five Towns (Lawrence, Cedarhurst, Woodmere, Hewlett, Inwood) --
+grouped here under the Queens/Long Island candidate (#5) rather than
+Five Towns (#10). **Columbus, OH** and **University Heights, OH**
+(a Cleveland suburb) are ~140 miles apart and are correctly NOT grouped
+together despite sharing a state.
+
+### Recommended design: flexible groups without touching donor records
+
+**Never modify `city`/`state`/`address_line_1` on any donor row.** The
+grouping itself should be a separate mapping, read-only with respect to
+`donors`, so regions can be renamed, merged, split, or re-scoped at any
+time with zero data migration and zero risk to the underlying address
+record (which is also the source of truth for the JL re-import
+reconciliation and mailing-label systems elsewhere in this app).
+
+Two options, by increasing flexibility:
+
+- **Option A -- a small, pure, code-defined matcher** (recommended
+  starting point): a `TRAVEL_REGIONS` list, each entry `{ id, label,
+  matches: (city, state) => boolean }`, evaluated at read time against a
+  donor's existing `city`/`state` -- the exact same "deterministic, pure,
+  unit-testable function" pattern this codebase already uses throughout
+  (e.g. `classifyFactCategory` in `lib/relationships/fact-classification.
+  ts`). A donor can match zero, one, or several regions simply because
+  `matches()` is evaluated independently per region -- this is what
+  naturally supports a donor belonging to more than one useful region
+  (e.g. a Passaic donor matching both a tight "Passaic" grouping and a
+  broader "North Jersey" grouping, if the owner wants both to exist at
+  once). Zero schema change, trivially reversible, and matches "no
+  automatic city grouping changes" exactly -- the mapping lives in code,
+  reviewed and approved like any other change, never silently applied to
+  data.
+- **Option B -- an editable database table** (a natural later upgrade,
+  not recommended for the first cut): a `donor_travel_regions` or
+  `travel_region_rules` table mapping `(city, state) -> region_id`,
+  editable from a settings screen without a code deploy. More flexible
+  long-term (the owner could rename/merge/split regions himself), but is
+  a real schema migration plus a new CRUD UI -- worth building only once
+  the region definitions above are approved and have proven stable
+  through actual use.
+
+Recommend starting with Option A once the groupings above are approved,
+with an explicit path to Option B later if the owner finds himself
+wanting to edit region boundaries through the UI rather than asking for
+a code change each time.
+
+### Recommended integration with existing filtering and priorities
+
+The donor directory (`app/donors/page.tsx` /
+`DonorDirectoryExperience.tsx`) already fetches `city`/`state` for every
+donor and already has one working precedent for a single-select filter
+layered on top of search: the A-Z last-name letter filter in `lib/
+relationships/donor-search.ts`'s `filterDonorDirectory()` (letter narrows
+the list, then free-text search narrows further within that). A region
+filter is the same shape -- one more narrowing dimension, not a new
+search engine.
+
+A closer architectural match for the EVENTUAL "pick a region, see
+matching donors, use existing priority to decide who to visit" UI is
+Portfolio Focus (`app/portfolio-focus/PortfolioFocusExperience.tsx`,
+`lib/portfolio-focus/dedicated-view.ts`'s `PORTFOLIO_FOCUS_FILTERS`):
+a server-rendered array, already ranked by score, with client-side
+filter buttons (`{ id, label, matches() }`, "All" plus one button per
+category, each showing a live count) that only ever **narrow** that same
+ranked array -- filtering never re-sorts or renumbers. A Travel Region
+filter would reuse this identical mechanic: compute each donor's
+matching region id(s) once (Option A's pure function), add one filter
+button per region (plus "All"), and let the existing priority
+score/ranking already used by the Today page and Portfolio Focus decide
+the order within whichever region is selected. No new scoring model is
+needed -- this is purely a new filter dimension over an already-solved
+ranking problem.
+
+Simplest path for Phase 2, in order of effort: (1) add a region filter
+to the existing donor directory first (lowest effort, reuses the
+existing letter-filter pattern and the city/state data already fetched
+there); (2) if the owner wants priority-ordered results specifically for
+trip planning, add the same region filter to a ranked list (Portfolio
+Focus or a new dedicated view), reusing its exact filter-button
+mechanics rather than inventing a new one.
+
+### Safeguards honored this round
+
+No Production or Staging write of any kind; no address correction; no
+city grouping applied to any donor record; no Staging or Production
+deployment; every query result used in this report contains only
+city/state/country and aggregate counts, never donor name, email, phone,
+or street address. **Phase 2 (building the filter) has not begun and
+will not begin without the owner's explicit approval of the groupings
+above.**
