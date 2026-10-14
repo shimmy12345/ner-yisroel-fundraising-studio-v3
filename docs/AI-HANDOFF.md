@@ -40050,3 +40050,134 @@ Cloudflare Access session; a dedicated Travel Planning view / Portfolio
 Focus integration remains unbuilt by design, with the underlying logic
 already reusable there; no Production deployment has been requested or
 performed.
+
+## Geographic Filtering -- Production Deployment (2026-10-14)
+
+The owner explicitly authorized Production deployment of the completed,
+independently-reviewed geographic filtering feature (the 15 approved
+regions, individual-city filtering, and the Baltimore/Silver Spring
+correction), scoped to exactly that work -- no database writes, donor-
+record modifications, migrations, unrelated deployments, manual email
+sends, or scheduling/backup/payment-plan/recommendation changes.
+
+### Pre-deployment safety checks (all passed)
+
+- **Branch/commit**: `git fetch` + `git status` confirmed the local
+  branch matched `origin/feature/independent-cloudflare-sandbox`
+  exactly at `a6d8688`, working tree clean.
+- **No concurrent/unreviewed changes**: `git diff 9a05880 HEAD --stat`
+  (9a05880 being the last commit actually deployed to Production, the
+  "Completed Outreach Action Fix round 2" round) showed exactly the 12
+  files the geographic filtering feature and Baltimore correction
+  touched -- `app/donors/*`, `app/globals.css`, `lib/navigation/donor-
+  navigation.ts`, `lib/relationships/{travel-regions,donor-geo-filter}.ts`,
+  `scripts/run-tests.mjs`, three test files, and `docs/AI-HANDOFF.md`.
+  Nothing else. No STOP condition triggered.
+- **Tests/types**: 192/192 test files passing, `tsc --noEmit` clean.
+- **Production DB binding**: `wrangler.production.jsonc` confirmed `DB`
+  -> `fundraising-os-production-db` (never Staging).
+- **Protected deployment procedure**: confirmed `deploy:production-
+  independent` is `build:production-independent && node scripts/
+  verify-build-manifest.mjs production-independent && wrangler deploy
+  --config wrangler.production.jsonc` -- the full build -> verify ->
+  deploy chain, no bypass.
+- **Rollback target recorded**: the Production Worker version live
+  before this deploy was `c2c06f07-b3ab-4075-89d8-ab03475e4169`.
+- **Backup/restore health**: `backup_alert_state` empty (no active
+  stale-backup incident recorded).
+- **Baseline counts recorded**: 254 donors, 5,464 giving activities, 0
+  `agenda_send_log` rows, 12 current relationship facts.
+- **Gmail/cron/APP_BASE_URL**: all three Gmail secrets present by name;
+  `"triggers": { "crons": ["0 * * * *"] }` unchanged; `APP_BASE_URL`
+  still `https://shimmydonors.org`.
+
+No check failed; proceeded to deployment.
+
+### Deployment
+
+`pnpm run deploy:production-independent` (the protected chain; no
+direct/bypassing `wrangler deploy` was used). **New Production Worker
+version: `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`.**
+
+### Post-deployment verification (all read-only; no test donor created or modified)
+
+- **Build correctness**: `dist/build-manifest.json` read `{"environment":
+  "production-independent", ...}`; bundle grep showed the known-good
+  `production-independent` (8) vs. `staging-independent` (5) ratio; the
+  new UI strings ("Travel Region", "All Regions", "All Cities",
+  "Baltimore & Maryland suburbs", "Chicago & suburbs", the
+  `directory-filters` CSS class) each appeared exactly once in the
+  deployed client bundle.
+- **Production responds normally**: a fresh, no-cache request redirects
+  to the real Production Cloudflare Access Application, as expected.
+- **All 15 approved regions present, verified against REAL Production
+  donor data**: fetched the current, live city/state/count breakdown
+  (read-only, 49 city/state combinations, 254 donors -- unchanged from
+  every prior audit this session) and fed it through the actual
+  deployed `TRAVEL_REGIONS`/`filterByGeo`/`regionsForCityState`
+  functions via a throwaway, read-only script (deleted after use, never
+  committed). Every one of the 15 regions returned exactly the expected
+  donor count (Baltimore 57, Chicago 45, Teaneck/Bergenfield area 43,
+  Monsey/Spring Valley 35, Queens/western LI 10, LA/SFV 10, South FL/
+  Miami 9, NYC boroughs 8, St. Louis 13, Five Towns 3, Lakewood/Ocean
+  County 3, Central NJ 3, San Diego 3, Detroit area 2, Israel 3).
+- **Baltimore/Silver Spring correction confirmed against real data**:
+  Baltimore region = exactly 57 donors, its own city list contains only
+  `{"city":"Baltimore","state":"MD"}`; `regionsForCityState("Silver
+  Spring", "MD")` resolves to `[]`; the real Silver Spring donor still
+  appears once under "All Regions" and remains individually reachable
+  via the City filter.
+- **Region + city compose correctly with search**: proven by the full
+  test suite (`tests/donor-geo-filter.test.mjs`) running green against
+  this exact deployed commit, plus the direct real-data script above
+  confirming "All Regions + All Cities" returns all 254 donors (search
+  composition itself is exercised structurally in the test suite's
+  `filterByGeo(searched, ...)` wiring check in `tests/donor-navigation.
+  test.mjs`).
+- **Dynamic region matching for future donors, confirmed**: the same
+  script resolved a simulated brand-new donor (`Chicago, IL`; `Baltimore,
+  MD`) to the correct region on the first call, with no setup step --
+  consistent with the schema scan (no migration defines a `region`
+  column) already locked in by `tests/travel-regions.test.mjs`.
+- **Existing donor functionality intact**: the pre-deployment diff
+  scoping already confirmed no pledge, payment, interaction, or
+  recommendation file was touched; the full, unrelated pre-existing test
+  suite (190 files beyond this feature's own 2 new files) passed
+  unchanged.
+- **Donor/giving-activity counts recheck**: 254 donors, 5,464 giving
+  activities, 0 `agenda_send_log` rows, 12 current relationship facts --
+  byte-identical to the pre-deployment baseline.
+- **Production/Staging isolation confirmed**: the deploy's own binding
+  output showed `env.DB` -> `fundraising-os-production-db` and
+  `env.STATUS_WORKER` -> `fundraising-os-production-backup-status`,
+  distinct from Staging's `fundraising-os-staging-db`/
+  `fundraising-os-backup-status`.
+- **Gmail/cron/backup unchanged**: all three Gmail secrets reconfirmed
+  present by name post-deploy; cron still `0 * * * *`; `backup_alert_
+  state` unchanged (still empty). **No manual email was sent.**
+
+No verification failed; no rollback was needed or performed.
+
+### Final report
+
+1. **Production Worker version**: `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`.
+   **Rollback target**: `c2c06f07-b3ab-4075-89d8-ab03475e4169`.
+2. **Tests**: 192/192 test files passing, `tsc --noEmit` clean.
+3. **Deployment and verification**: completed via the protected script;
+   every check in this entry passed, including a direct, real-data
+   proof (not merely synthetic fixtures) that all 15 regions, the
+   Baltimore correction, and dynamic future-donor matching behave
+   exactly as approved.
+4. **No donor or financial data was modified**: donor, giving-activity,
+   and relationship-fact counts are byte-identical before and after;
+   no donor record was created, edited, or deleted; no migration ran.
+5. **Gmail, scheduling, and backups are unaffected**: secrets, cron, and
+   backup-alert state all reconfirmed unchanged; no manual email was
+   sent.
+6. **Unresolved issues**: none introduced by this deployment. Carried
+   over: live/mobile visual confirmation on Production is still
+   something only the owner can perform himself, for the same standing-
+   session reason as Staging; a dedicated Travel Planning view/Portfolio
+   Focus integration remains unbuilt by design. No further feature work
+   or data correction was performed under this authorization, per its
+   own explicit scope.
