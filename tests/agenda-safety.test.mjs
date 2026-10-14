@@ -20,6 +20,10 @@ const previewRoute = await readFile(new URL("../app/api/agenda/preview/route.ts"
 // this file's own top-of-file documentation comment legitimately names
 // "sendGmail"/"gmail-client" while explaining that neither is used.
 const previewRouteCode = previewRoute.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+// Same comment-stripping, for gmail-client.ts -- its own header comment
+// legitimately names `error_description` while explaining that this file
+// never reads it, which would otherwise trip that exact check below.
+const gmailClientCode = gmailClient.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
 const wranglerProduction = await readFile(new URL("../wrangler.production.jsonc", import.meta.url), "utf8");
 const wranglerProductionCode = wranglerProduction.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
 const wranglerStaging = await readFile(new URL("../wrangler.staging.jsonc", import.meta.url), "utf8");
@@ -27,18 +31,36 @@ const wranglerStagingCode = wranglerStaging.split("\n").filter((line) => !line.t
 const workerIndex = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
 
 async function run() {
-  // --- Never read/log a Gmail API response body on failure -- only
-  // response.status/response.statusText may be used, both of which are
-  // safe (never echo request/response content). ---
-  assert.doesNotMatch(gmailClient, /response\.text\(\)/, "the failure paths must never read the response body at all");
+  // --- Never read/log a raw Gmail/OAuth response body -- `response.text()`
+  // is never used anywhere in this file, and the one place this file does
+  // read a parsed body (the token-refresh failure branch, via
+  // `response.json()`) must route it through oauth-error-code.ts's fixed
+  // allowlist, never interpolate it directly. ---
+  assert.doesNotMatch(gmailClient, /response\.text\(\)/, "the failure paths must never read the response body as raw text");
   assert.doesNotMatch(gmailClient, /console\.(log|error|info)/, "gmail-client.ts must route through lib/logger.ts, never log directly itself");
-  // Every thrown Error in this file is built from status/statusText only
-  // -- grep for the two known throw sites and confirm neither interpolates
-  // anything else (e.g. a captured body variable) into the message.
+  assert.doesNotMatch(gmailClientCode, /error_description/, "error_description (Google's own free-text field) must never be read in this file");
+  assert.match(
+    gmailClient,
+    /import\s*\{\s*extractAllowlistedOAuthErrorCode\s*\}\s*from\s*["']\.\/oauth-error-code\.ts["']/,
+    "the token-refresh failure branch must derive its error code exclusively through oauth-error-code.ts's allowlist, never parse the body inline",
+  );
+  // The one spot this file calls response.json() on a failure path must be
+  // immediately passed into the allowlist function, never assigned to a
+  // variable used for anything else.
+  assert.match(
+    gmailClient,
+    /extractAllowlistedOAuthErrorCode\(await response\.json\(\)\)/,
+    "the parsed token-refresh failure body must flow straight into the allowlist function",
+  );
+
+  // Every thrown Error in this file is built from status/statusText (plus,
+  // for the token-refresh failure, the allowlisted code above) only -- grep
+  // for the three known throw sites and confirm none interpolates a raw
+  // body/payload/credential.
   const throwLines = gmailClient.split("\n").filter((line) => line.includes("throw new Error("));
-  assert.equal(throwLines.length, 3, "exactly the three expected throw sites (token refresh HTTP failure, missing access_token, send HTTP failure) -- update this test if a new one is deliberately added, and re-check it stays status-only");
+  assert.equal(throwLines.length, 3, "exactly the three expected throw sites (token refresh HTTP failure, missing access_token, send HTTP failure) -- update this test if a new one is deliberately added, and re-check it stays status/allowlisted-code-only");
   for (const line of throwLines) {
-    assert.doesNotMatch(line, /body|payload\.error|access_token\}/, `thrown Error must not interpolate response content: ${line}`);
+    assert.doesNotMatch(line, /body|payload\.error|access_token\}|error_description/, `thrown Error must not interpolate response content: ${line}`);
   }
 
   // --- The three OAuth secret names are read from the Worker's env

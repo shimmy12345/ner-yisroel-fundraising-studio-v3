@@ -20,8 +20,12 @@
 //   Authorization header value in a thrown Error's message or in any log
 //   line -- callers (the scheduled handler) log via lib/logger.ts, which
 //   only ever records `error.message`, so every message thrown here is
-//   written with that in mind: HTTP status/statusText only, never a
-//   request/response body, which could echo request contents back.
+//   written with that in mind: HTTP status/statusText, plus (token-refresh
+//   failures only) one allowlisted OAuth error *code* -- see
+//   oauth-error-code.ts's own header for exactly what that excludes (the
+//   raw body, `error_description`, and any code outside its fixed
+//   allowlist, all of which degrade silently to the original status-only
+//   message instead).
 // - Never log the full Gmail API response body on success either -- only
 //   the fields the caller actually needs (here, nothing beyond "it
 //   didn't throw").
@@ -30,6 +34,7 @@ import { env } from "cloudflare:workers";
 import { buildMimeMessage, type MimeMessageInput } from "./mime-message.ts";
 import { deploymentEnvironment } from "../environment.ts";
 import { isRealEmailSendAllowed, EmailSendBlockedError } from "./email-send-guard.ts";
+import { extractAllowlistedOAuthErrorCode } from "./oauth-error-code.ts";
 
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -65,9 +70,24 @@ export async function refreshAccessToken(): Promise<string> {
     }).toString(),
   });
   if (!response.ok) {
-    // Deliberately status-only -- the response body is never read here,
-    // so it can never end up in this Error's message or a log line.
-    throw new Error(`Gmail token refresh failed: HTTP ${response.status} ${response.statusText}`);
+    // Diagnostic-only enhancement (October 14 2026 incident --
+    // docs/AI-HANDOFF.md): attempt to read ONE allowlisted OAuth error code
+    // (e.g. "invalid_client") from the response body, so a future failure
+    // distinguishes a bad client from a bad grant instead of a bare HTTP
+    // status. Never the raw body, never `error_description` -- see
+    // oauth-error-code.ts's own header for the fixed allowlist this is
+    // narrowed to. Any failure to parse (not JSON, not an object, no
+    // string `error` field, or a code outside the allowlist) is caught and
+    // discarded here, falling back silently to this file's original,
+    // unconditionally safe status-only message.
+    let code: string | null = null;
+    try {
+      code = extractAllowlistedOAuthErrorCode(await response.json());
+    } catch {
+      code = null;
+    }
+    const codeSuffix = code ? ` (${code})` : "";
+    throw new Error(`Gmail token refresh failed: HTTP ${response.status} ${response.statusText}${codeSuffix}`);
   }
   const payload = (await response.json()) as { access_token?: string };
   if (!payload.access_token) throw new Error("Gmail token refresh response did not include an access token");
