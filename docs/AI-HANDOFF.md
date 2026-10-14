@@ -39427,3 +39427,118 @@ lint is at its unchanged baseline, and it has been checked against all
 narrowly-scoped effect. The data correction above is optional (the fix
 is self-healing without it) and should be run, if at all, only after the
 code is live and only with separate, explicit authorization.
+
+## Completed Outreach Action Fix, round 2 -- Production deployment (2026-10-14)
+
+The owner authorized Production deployment of round 2 (commit `5f0f2a2`,
+docs `4e820bf`), explicitly scoped to the recommendation-logic code only:
+no data correction, no Gmail/email/backup changes, no manual test send.
+
+### Pre-deployment safety checks (all passed)
+
+- **Code/commit**: `git status` clean, local branch matched `origin/
+  feature/independent-cloudflare-sandbox` at `4e820bf` (docs-only on top
+  of the actual fix, `5f0f2a2`).
+- **Tests/types/lint**: 190/190 test files passing, `tsc --noEmit`
+  clean, `pnpm run lint` at the unchanged baseline (94 errors/43
+  warnings).
+- **Production DB health**: `backup_alert_state` empty (no active
+  backup-staleness incident recorded); the Production status-worker
+  (`fundraising-os-production-backup-status`) confirmed deployed and
+  live via `wrangler deployments list`. (The authenticated Workspace
+  Health UI page itself was not re-opened this round -- per standing
+  instruction, this session never operates the owner's authenticated
+  browser session on its own; the read-only checks above are the
+  equivalent evidence available without it, and were sufficient given
+  this round made no database schema or backup-configuration change at
+  all.)
+- **Rollback target recorded**: current live Production Worker version
+  before this deploy was `e062c068-b04d-454c-8c3c-16ab0c281267`.
+- **Bindings**: `wrangler.production.jsonc` confirmed `DB` ->
+  `fundraising-os-production-db` (`a51c6571-...`), matching every query
+  this investigation has run all session.
+- **Gmail/email/cron**: `wrangler secret list --config wrangler.
+  production.jsonc` showed all three Gmail secrets present by name;
+  `"triggers": { "crons": ["0 * * * *"] }` unchanged in the config file
+  (this round made zero edits to it); `APP_BASE_URL`/`STAGING_OWNER_
+  EMAIL` unchanged.
+- **Baseline data counts recorded** (for before/after comparison): 254
+  donors, 5,464 giving activities, 0 `agenda_send_log` rows, 12 current
+  `donor_relationship_facts` rows.
+
+No check failed; proceeded to deployment.
+
+### Deployment
+
+`pnpm run deploy:production-independent` (the protected build -> verify-
+build-manifest -> wrangler deploy chain; no direct/bypassing `wrangler
+deploy` was used). **New Production Worker version: `c2c06f07-b3ab-4075-
+89d8-ab03475e4169`.**
+
+### Post-deployment verification (all read-only)
+
+- **Correct build**: fresh bundle grep showed `production-independent`
+  8 times vs. `staging-independent` 5 times (the same known-good ratio
+  established earlier this session), and `dist/build-manifest.json`
+  read `{"environment":"production-independent", ...}`. A fresh,
+  no-cache fetch of the Production URL redirected to the real Production
+  Cloudflare Access Application (`POLICY_AUD` matching `wrangler.
+  production.jsonc`'s real value) -- no Staging banner, no Staging
+  bindings.
+- **Data counts unchanged**: 254 donors, 5,464 giving activities, 0
+  `agenda_send_log` rows, 12 current relationship facts -- all four
+  byte-identical to the pre-deployment baseline above.
+- **The two existing fact rows deliberately untouched**: re-read both
+  (Zachter `1550c6b7-...`, gym-tour donor `208a5d68-...`) -- both still
+  `lifecycle: "durable"`, confirming the optional data correction was
+  NOT executed, exactly as instructed.
+- **The two recommendations are suppressed, verified against the REAL,
+  still-`durable` stored data**: fed both donors' exact current
+  Production fact rows (fetched moments earlier, unmodified) through the
+  actual deployed `buildRecommendationEvidence`/`generateCandidates`
+  code (a throwaway, read-only script, deleted after use) -- neither
+  produces a `relationship_opportunity` candidate. This directly proves
+  the self-healing property: the fix works against the data AS IT
+  ACTUALLY SITS in Production right now, with the stale `durable` value
+  still in place.
+- **Genuinely outstanding items remain eligible**: the same script fed a
+  real Production donor's actual open pledge balance ($64,585,
+  `dd142802-...`) through the identical pipeline -- `follow_up_pledge`
+  still fires and still wins as the top recommendation.
+- **Pledge/solicitation guard holds**: a synthetic solicitation fact
+  opening with a contact verb ("Called and discussed building naming
+  opportunity.") still produces `solicit` as the winning recommendation
+  -- confirming the fix's solicitation/health exclusion is intact in the
+  deployed code, not merely in the test suite.
+- **Secrets/cron reconfirmed post-deploy**: all three Gmail secrets
+  still present by name; cron still `0 * * * *`; this deployment's own
+  version (`c2c06f07-...`) appears at 100% in `wrangler deployments
+  list`.
+
+No verification failed; no rollback was needed or performed.
+
+### Final report
+
+1. **Production deployment version**: `c2c06f07-b3ab-4075-89d8-
+   ab03475e4169` (rollback target, if ever needed: `e062c068-b04d-454c-
+   8c3c-16ab0c281267`).
+2. **Tests/verification**: 190/190 test files, `tsc` clean, lint
+   baseline unchanged; every pre- and post-deployment check above
+   passed; no rollback performed.
+3. **The two incorrect recommendations are confirmed suppressed** against
+   the real, currently-stored (still uncorrected) Production data.
+4. **No Production donor data was modified** -- donor, giving-activity,
+   and relationship-fact counts and values are byte-identical before and
+   after; the two existing fact rows are still exactly `lifecycle:
+   "durable"`, confirming the optional correction was not run.
+5. **Tomorrow's scheduled email remains enabled**: cron trigger
+   unchanged (`0 * * * *`), all three Gmail secrets unchanged (names
+   only ever read), `agenda_send_log` still 0 rows -- this deployment did
+   not mark anything as sent and did not send a manual test email.
+6. **Unresolved issues**: none introduced by this deployment. Carried
+   over, unchanged: the optional two-row `lifecycle` metadata correction
+   remains unexecuted (by this round's own explicit scope -- not
+   authorized this round); the alternative, larger `fact_kind` schema
+   idea remains unimplemented and unneeded unless the owner wants it; the
+   legacy narrative pathway's fix remains unverified against a real
+   Production donor since none currently reaches that code path.
