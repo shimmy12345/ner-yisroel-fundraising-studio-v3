@@ -143,11 +143,12 @@ export function compareCrossBranchRestoreState(feature: CrossBranchRestoreState,
 
   // "Real/canonical" roots are never part of a branch's own ddlTopology
   // (production_schema_baseline, users' own account-configuration peers
-  // like onboarding_preferences/backup_alert_state/agenda_send_log) --
-  // they are deliberately prepended to D1_RESTORE_DATA_ORDER by hand (see
-  // lib/operations/d1-restore-order.ts's own header comment) and must
-  // never be flagged as "stale" merely for not appearing in ddlTopology.
-  const ROOT_ALLOWLIST = new Set(["production_schema_baseline", "users", "onboarding_preferences", "backup_alert_state", "agenda_send_log"]);
+  // like onboarding_preferences/backup_alert_state/agenda_send_log/
+  // agenda_manual_test_send_log) -- they are deliberately prepended to
+  // D1_RESTORE_DATA_ORDER by hand (see lib/operations/d1-restore-order.ts's
+  // own header comment) and must never be flagged as "stale" merely for
+  // not appearing in ddlTopology.
+  const ROOT_ALLOWLIST = new Set(["production_schema_baseline", "users", "onboarding_preferences", "backup_alert_state", "agenda_send_log", "agenda_manual_test_send_log"]);
   const staleInMainOrder = [...mainOrderSet].filter((table) => !featureTableNames.has(table) && !ROOT_ALLOWLIST.has(table)).sort();
 
   const migrationDrift = diffMigrationLists(feature.sourceMigrations, main.sourceMigrations);

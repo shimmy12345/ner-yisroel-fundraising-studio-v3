@@ -57,6 +57,18 @@ const EXPECTED_RESTORE_TABLES = new Set([...PRODUCTION_BASELINE_TABLES, "product
   assert.ok(usersIndex >= 0 && backupAlertIndex > usersIndex, "backup_alert_state must be inserted after users (its own real foreign key target)");
 }
 
+// ---- agenda_manual_test_send_log (the temporary Production Gmail OAuth
+// verification mechanism's one-time claim table, October 14 2026
+// incident) is the same kind of root-like table -- confirm the same
+// three properties. ----
+{
+  assert.ok(ACCOUNT_CONFIGURATION_TABLES.includes("agenda_manual_test_send_log"), "agenda_manual_test_send_log must be classified as account/operational configuration, not fundraising data");
+  assert.ok(!STAGING_RESET_TABLE_ORDER.includes("agenda_manual_test_send_log"), "agenda_manual_test_send_log must not appear in STAGING_RESET_TABLE_ORDER (it is preserved across a staging reset, like users/onboarding_preferences)");
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf("users");
+  const testSendLogIndex = D1_RESTORE_DATA_ORDER.indexOf("agenda_manual_test_send_log");
+  assert.ok(usersIndex >= 0 && testSendLogIndex > usersIndex, "agenda_manual_test_send_log must be inserted after users (its own real foreign key target)");
+}
+
 // Minimal, deliberately-scrambled `wrangler d1 export`-shaped fixture
 // builder -- only what the parser's regexes need (a PRAGMA preamble, one
 // CREATE TABLE per referenced table, and one single-row INSERT per row),

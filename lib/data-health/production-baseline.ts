@@ -9,13 +9,14 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 44 as of 0043_agenda_send_log.sql — adds one new table
-// (agenda_send_log, Daily Fundraising Agenda send idempotency; see
+// 45 as of 0044_agenda_manual_test_send_log.sql — adds one new table
+// (agenda_manual_test_send_log, the temporary Production Gmail OAuth
+// verification mechanism's one-time claim record; see
 // docs/AI-HANDOFF.md's "October 14 Email Incident" entry), not a rebuild
 // of anything existing, so PRODUCTION_BASELINE_HASH changed again
 // (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
 // single bootstrap file's origin, not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 44;
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 45;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
@@ -34,7 +35,13 @@ export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019"
 // state for the Daily Fundraising Agenda send (October 14 2026 incident,
 // docs/AI-HANDOFF.md), never donor or fundraising data. See
 // drizzle/0043_agenda_send_log.sql.
-export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences", "backup_alert_state", "agenda_send_log"];
+//
+// agenda_manual_test_send_log is the same kind of thing once more: the
+// one-time claim record for the temporary Production Gmail OAuth
+// verification mechanism (October 14 2026 incident, docs/AI-HANDOFF.md),
+// never donor or fundraising data. See
+// drizzle/0044_agenda_manual_test_send_log.sql.
+export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences", "backup_alert_state", "agenda_send_log", "agenda_manual_test_send_log"];
 export const FUNDRAISING_DATA_TABLES = PRODUCTION_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table));
 export const FUNDRAISING_DATA_COUNT_SQL = `SELECT ${FUNDRAISING_DATA_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 export const ACCOUNT_CONFIGURATION_COUNT_SQL = `SELECT COUNT(*) AS count FROM "users"`;

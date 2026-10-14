@@ -88,11 +88,12 @@ test("production baseline is isolated from staging and future drift fails closed
 });
 
 test("fundraising-data count excludes account/configuration tables while the backup-safety gate stays untouched", () => {
-  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences", "backup_alert_state", "agenda_send_log"]);
+  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences", "backup_alert_state", "agenda_send_log", "agenda_manual_test_send_log"]);
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("users"), "users must never count toward fundraising data");
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("onboarding_preferences"), "onboarding_preferences must never count toward fundraising data");
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("backup_alert_state"), "backup_alert_state (backup-alert dedupe state) must never count toward fundraising data");
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("agenda_send_log"), "agenda_send_log (Daily Agenda send dedupe state) must never count toward fundraising data");
+  assert.ok(!FUNDRAISING_DATA_TABLES.includes("agenda_manual_test_send_log"), "agenda_manual_test_send_log (temporary Gmail OAuth verification claim state) must never count toward fundraising data");
   assert.ok(FUNDRAISING_DATA_TABLES.includes("donors"));
   assert.ok(FUNDRAISING_DATA_TABLES.includes("gifts"));
   assert.match(BUSINESS_DATA_COUNT_SQL, /"users"/, "the pre-existing backup-safety gate SQL is unchanged and still counts users");
@@ -328,12 +329,25 @@ test("baseline picks up the schema-adding 0043 agenda send log migration", () =>
   // Fundraising Agenda send idempotency; see docs/AI-HANDOFF.md's
   // "October 14 Email Incident" entry) -- so the schema hash must change
   // again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0043_agenda_send_log.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 44);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  assert.ok(manifest.sourceMigrations.includes("0043_agenda_send_log.sql"));
   const sendLogTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "agenda_send_log");
   assert.ok(sendLogTable, "agenda_send_log must be a real table in the baseline topology");
   assert.match(sendLogTable.sql, /send_date/);
   assert.match(sendLogTable.sql, /claimed_at/);
+});
+
+test("baseline picks up the schema-adding 0044 agenda manual test send log migration", () => {
+  // 0044_agenda_manual_test_send_log.sql adds one new table
+  // (agenda_manual_test_send_log, the temporary Production Gmail OAuth
+  // verification mechanism's one-time claim record; see
+  // docs/AI-HANDOFF.md's "October 14 Email Incident" entry) -- so the
+  // schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0044_agenda_manual_test_send_log.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 45);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const testSendLogTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "agenda_manual_test_send_log");
+  assert.ok(testSendLogTable, "agenda_manual_test_send_log must be a real table in the baseline topology");
+  assert.match(testSendLogTable.sql, /claimed_at/);
+  assert.match(testSendLogTable.sql, /outcome/);
 });

@@ -22,6 +22,16 @@ CREATE TABLE `activity_status_audits` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `agenda_manual_test_send_log` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`status` text NOT NULL,
+	`claimed_at` integer NOT NULL,
+	`sent_at` integer,
+	`outcome` text,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `agenda_send_log` (
 	`user_id` text NOT NULL,
 	`send_date` text NOT NULL,
@@ -936,5 +946,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','9fc6f49c84fa1cd62506f30f0a8af0c2ac848132ff2a3627c04e89884eb409f8',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','7191186ae5af3495995c201e449842aa4b082b4454305168b64f7c3f897d304a',1785944072);
 PRAGMA optimize;
