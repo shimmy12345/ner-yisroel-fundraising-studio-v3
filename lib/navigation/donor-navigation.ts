@@ -55,3 +55,20 @@ export function donorDirectorySearchPath(currentPath: string, query: string) {
   if (query.trim()) parsed.searchParams.set("q", query.slice(0, 80)); else parsed.searchParams.delete("q");
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
+
+// Geographic Filtering for Travel Planning (2026-10-14) -- same shape
+// and convention as donorDirectorySearchPath above, for the directory's
+// two new filters (Travel Region, City). A bare value of "all" is
+// treated the same as absent (deleted from the URL, never written as
+// "?region=all") so the plain, unfiltered "/donors" URL stays the
+// common case. Because donorDirectoryReturnPath above already preserves
+// every query param except `from`/`origin` generically, these two new
+// params round-trip through donor-profile back-navigation automatically
+// -- no change needed there.
+export function donorDirectoryFilterPath(currentPath: string, updates: { region?: string; city?: string }) {
+  const safePath = safeInternalReturnPath(currentPath, "/donors");
+  const parsed = new URL(safePath, "https://fundraising-os.invalid");
+  if ("region" in updates) { if (updates.region && updates.region !== "all") parsed.searchParams.set("region", updates.region); else parsed.searchParams.delete("region"); }
+  if ("city" in updates) { if (updates.city && updates.city !== "all") parsed.searchParams.set("city", updates.city); else parsed.searchParams.delete("city"); }
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+}

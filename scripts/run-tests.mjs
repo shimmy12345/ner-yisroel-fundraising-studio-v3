@@ -88,6 +88,8 @@ const TEST_FILES = [
   "tests/mobile-search-names.test.mjs",
   "tests/donor-navigation.test.mjs",
   "tests/donor-search-reset.test.mjs",
+  "tests/travel-regions.test.mjs",
+  "tests/donor-geo-filter.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",
   "tests/data-health-repair.test.mjs",

@@ -4,7 +4,7 @@ import { DonorAutocomplete } from "../capture/DonorAutocomplete";
 import type { DonorSearchRecord } from "../../lib/relationships/donor-search";
 import { donorDirectorySearchPath } from "../../lib/navigation/donor-navigation";
 
-export function DonorDirectorySearch({ donors, initialQuery = "", resultCount, totalCount, onSearchChange }: { donors: DonorSearchRecord[]; initialQuery?: string; resultCount: number; totalCount: number; onSearchChange: (query: string, returnPath: string) => void }) {
+export function DonorDirectorySearch({ donors, initialQuery = "", resultCount, totalCount, filtering, onSearchChange }: { donors: DonorSearchRecord[]; initialQuery?: string; resultCount: number; totalCount: number; filtering: boolean; onSearchChange: (query: string, returnPath: string) => void }) {
   return <div className="directory-search shared-directory-search">
     <DonorAutocomplete
       donors={donors}
@@ -26,6 +26,6 @@ export function DonorDirectorySearch({ donors, initialQuery = "", resultCount, t
       label="Find a household"
       placeholder="Search last name, household, spouse, JL code, email, or phone"
     />
-    <p className="directory-search-count" aria-live="polite">{initialQuery ? `${resultCount} of ${totalCount} relationships` : `${totalCount} relationships`}</p>
+    <p className="directory-search-count" aria-live="polite">{filtering ? `${resultCount} of ${totalCount} relationships` : `${totalCount} relationships`}</p>
   </div>;
 }

@@ -4,8 +4,10 @@ import { useMemo, useState } from "react";
 import { DonorDirectorySearch } from "./DonorDirectorySearch";
 import { DonorOriginLink } from "../components/DonorNavigation";
 import { effectiveDonorLastName, searchDonors, type DonorSearchRecord } from "../../lib/relationships/donor-search";
-import { donorNavigationHref } from "../../lib/navigation/donor-navigation";
+import { donorNavigationHref, donorDirectoryFilterPath } from "../../lib/navigation/donor-navigation";
 import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
+import { ALL_REGIONS, ALL_CITIES, filterByGeo, cityOptionsForRegion, type RegionFilterValue } from "../../lib/relationships/donor-geo-filter";
+import { TRAVEL_REGIONS } from "../../lib/relationships/travel-regions";
 
 export type DirectoryRelationship = {
   id: string;
@@ -25,9 +27,15 @@ export type DirectoryRelationship = {
   external_source: string | null;
 };
 
-export function DonorDirectoryExperience({ relationships, initialQuery, initialReturnPath }: { relationships: DirectoryRelationship[]; initialQuery: string; initialReturnPath: string }) {
+export function DonorDirectoryExperience({ relationships, initialQuery, initialReturnPath, initialRegion = ALL_REGIONS, initialCity = ALL_CITIES }: { relationships: DirectoryRelationship[]; initialQuery: string; initialReturnPath: string; initialRegion?: RegionFilterValue; initialCity?: string }) {
   const [query, setQuery] = useState(initialQuery);
   const [returnPath, setReturnPath] = useState(initialReturnPath);
+  // Geographic Filtering for Travel Planning (2026-10-14, docs/
+  // AI-HANDOFF.md) -- two more, independently-optional narrowing
+  // dimensions alongside the existing free-text search, composed by
+  // plain array filtering (filterByGeo), never a second search engine.
+  const [regionId, setRegionId] = useState<RegionFilterValue>(initialRegion);
+  const [cityKey, setCityKey] = useState<string>(initialCity);
   const relationshipById = useMemo(() => new Map(relationships.map((relationship) => [relationship.id, relationship])), [relationships]);
   const donors = useMemo<DonorSearchRecord[]>(() => searchDonors(relationships.map((relationship) => ({
     id: relationship.id,
@@ -39,12 +47,62 @@ export function DonorDirectoryExperience({ relationships, initialQuery, initialR
     email: relationship.email,
     phone: relationship.phone || relationship.alternate_mobile_phone || relationship.home_phone,
   })), "", Number.MAX_SAFE_INTEGER), [relationships]);
-  const visible = useMemo(() => searchDonors(donors, query, Number.MAX_SAFE_INTEGER).map((donor) => relationshipById.get(donor.id)!).filter(Boolean), [donors, query, relationshipById]);
+  const searched = useMemo(() => searchDonors(donors, query, Number.MAX_SAFE_INTEGER).map((donor) => relationshipById.get(donor.id)!).filter(Boolean), [donors, query, relationshipById]);
+  // The City dropdown's own options are scoped to the SELECTED region --
+  // "the City filter should offer only cities within that region" -- and
+  // are derived from the full donor list (never from `searched`), so
+  // picking a region never shrinks because of an unrelated search term
+  // already typed in the search box.
+  const cityOptions = useMemo(() => cityOptionsForRegion(relationships, regionId), [relationships, regionId]);
+  const visible = useMemo(() => filterByGeo(searched, regionId, cityKey), [searched, regionId, cityKey]);
   const searching = Boolean(query);
+  const filtering = searching || regionId !== ALL_REGIONS || cityKey !== ALL_CITIES;
   const origin = query.trim() ? "search" : "donors";
 
+  // Shared by every filter (search/region/city) -- builds on whatever
+  // the URL already has (so the three never clobber each other) and
+  // keeps `returnPath` in sync, exactly mirroring DonorDirectorySearch's
+  // own onQueryChange handler below.
+  function applyFilterUpdate(updates: { region?: string; city?: string }) {
+    const path = donorDirectoryFilterPath(`${window.location.pathname}${window.location.search}${window.location.hash}`, updates);
+    window.history.replaceState(window.history.state, "", path);
+    setReturnPath(path);
+  }
+
+  function handleRegionChange(nextRegion: RegionFilterValue) {
+    // A region change that no longer contains the currently-selected
+    // city resets City back to "All Cities" -- never leaves a stale,
+    // now-impossible selection silently filtering everything out.
+    const nextCityOptions = cityOptionsForRegion(relationships, nextRegion);
+    const nextCity = cityKey === ALL_CITIES || nextCityOptions.some((option) => option.key === cityKey) ? cityKey : ALL_CITIES;
+    setRegionId(nextRegion);
+    setCityKey(nextCity);
+    applyFilterUpdate({ region: nextRegion, city: nextCity });
+  }
+
+  function handleCityChange(nextCity: string) {
+    setCityKey(nextCity);
+    applyFilterUpdate({ city: nextCity });
+  }
+
   return <>
-    <DonorDirectorySearch donors={donors} initialQuery={query} resultCount={visible.length} totalCount={relationships.length} onSearchChange={(nextQuery, nextReturnPath) => { setQuery(nextQuery); setReturnPath(nextReturnPath); }} />
+    <DonorDirectorySearch donors={donors} initialQuery={query} resultCount={visible.length} totalCount={relationships.length} filtering={filtering} onSearchChange={(nextQuery, nextReturnPath) => { setQuery(nextQuery); setReturnPath(nextReturnPath); }} />
+    <div className="directory-filters" role="group" aria-label="Filter by travel region or city">
+      <label className="directory-filter">
+        <span>Travel Region</span>
+        <select value={regionId} onChange={(event) => handleRegionChange(event.target.value as RegionFilterValue)}>
+          <option value={ALL_REGIONS}>All Regions</option>
+          {TRAVEL_REGIONS.map((region) => <option key={region.id} value={region.id}>{region.label}</option>)}
+        </select>
+      </label>
+      <label className="directory-filter">
+        <span>City</span>
+        <select value={cityKey} onChange={(event) => handleCityChange(event.target.value)}>
+          <option value={ALL_CITIES}>All Cities</option>
+          {cityOptions.map((option) => <option key={option.key} value={option.key}>{option.label} ({option.count})</option>)}
+        </select>
+      </label>
+    </div>
     {visible.length ? <section className="directory-list" aria-label="Donor relationships">{visible.map((relationship) => {
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");
       const location = [relationship.city, relationship.state].filter(Boolean).join(", ");
@@ -67,6 +125,6 @@ export function DonorDirectoryExperience({ relationships, initialQuery, initialR
         </span>
         <span className="directory-contact">{relationship.email || relationship.phone || "No primary contact supplied"}</span>{relationship.external_source && <span className="directory-source">{relationship.external_source === "JL Solutions" ? "JL Solutions" : "Manual"}</span>}<b aria-hidden="true">→</b>
       </DonorOriginLink>;
-    })}</section> : <section className="directory-empty"><h2>No relationships found</h2><p>{searching ? "Try a different household, person, code, email, or phone, or clear the search to see everyone." : "Import your donor data to begin building your relationship workspace."}</p>{!searching && <a href="/onboarding/import">Import donor data</a>}</section>}
+    })}</section> : <section className="directory-empty"><h2>No relationships found</h2><p>{filtering ? "Try a different household, person, code, email, or phone, or clear the search and filters to see everyone." : "Import your donor data to begin building your relationship workspace."}</p>{!filtering && <a href="/onboarding/import">Import donor data</a>}</section>}
   </>;
 }
