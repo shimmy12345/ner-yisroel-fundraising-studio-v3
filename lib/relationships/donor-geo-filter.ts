@@ -46,10 +46,16 @@ export type CityOption = { key: string; city: string; state: string | null; labe
 // membership AND actually present in the current donor data (so a
 // region never offers a city with zero current donors).
 //
-// Sorted by state then city (matching the Phase 1 audit table's own
-// sort), case-insensitively but displaying each city's own first-seen
-// raw spelling, never a normalized/lowercased copy -- consistent with
-// `formatCityState`'s own "always the caller's real text" rule.
+// Sorted alphabetically A-Z by CITY name first (owner feedback,
+// 2026-10-14: the original state-first sort made the dropdown hard to
+// scan -- a long flat list is far easier to use sorted the way a person
+// actually looks for a city, by its own name), with state used ONLY as
+// a tiebreaker when two cities share the exact same name (e.g. a
+// hypothetical "Springfield, IL" and "Springfield, MA"). Comparison is
+// case-insensitive; the displayed text is always each city's own
+// first-seen raw spelling, never a normalized/lowercased copy --
+// consistent with `formatCityState`'s own "always the caller's real
+// text" rule.
 export function cityOptionsForRegion<T extends GeoTaggable>(records: readonly T[], regionId: RegionFilterValue): CityOption[] {
   const inRegion = regionId === ALL_REGIONS ? records : records.filter((record) => matchesRegionFilter(record, regionId));
   const byKey = new Map<string, CityOption>();
@@ -65,6 +71,22 @@ export function cityOptionsForRegion<T extends GeoTaggable>(records: readonly T[
     if (existing) { existing.count += 1; continue; }
     byKey.set(key, { key, city: (record.city ?? "").trim(), state: record.state, label: formatCityState(record.city, record.state), count: 1 });
   }
-  const stateCollator = new Intl.Collator("en", { sensitivity: "base" });
-  return [...byKey.values()].sort((a, b) => stateCollator.compare(a.state ?? "", b.state ?? "") || stateCollator.compare(a.city, b.city));
+  const collator = new Intl.Collator("en", { sensitivity: "base" });
+  return [...byKey.values()].sort((a, b) => collator.compare(a.city, b.city) || collator.compare(a.state ?? "", b.state ?? ""));
+}
+
+// Searchable City selector support (owner feedback, 2026-10-14): a
+// pure, case-insensitive partial match against an already-built
+// `CityOption` list, directly unit-testable without React or a DOM.
+// Matches the city name OR the state (so typing "md" narrows to
+// Maryland cities too) -- never the combined ", "-joined label, which
+// would also match on the literal comma. An empty/whitespace-only
+// query returns every option unfiltered, exactly like `searchDonors()`
+// (lib/relationships/donor-search.ts) does for a blank donor search --
+// the same "no query means show everything" convention, not a second,
+// differently-shaped search engine.
+export function searchCityOptions(options: readonly CityOption[], query: string): CityOption[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...options];
+  return options.filter((option) => option.city.toLocaleLowerCase().includes(needle) || (option.state ?? "").toLocaleLowerCase().includes(needle));
 }

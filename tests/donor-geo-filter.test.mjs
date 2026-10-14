@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { filterByGeo, cityOptionsForRegion, matchesRegionFilter, matchesCityFilter, ALL_REGIONS, ALL_CITIES } from "../lib/relationships/donor-geo-filter.ts";
+import { filterByGeo, cityOptionsForRegion, matchesRegionFilter, matchesCityFilter, searchCityOptions, ALL_REGIONS, ALL_CITIES } from "../lib/relationships/donor-geo-filter.ts";
 import { cityStateKey } from "../lib/relationships/travel-regions.ts";
 
 // Geographic Filtering for Travel Planning -- Phase 2 (2026-10-14, see
@@ -141,18 +141,62 @@ async function run() {
     assert.deepEqual(emptyRegionOptions, []);
   }
 
-  // --- Sorted by state then city, matching the Phase 1 audit table's
-  // own sort convention -- international (null-state) entries sort
-  // first, then GA, IL, MD, NJ (Bergenfield before Teaneck). ---
+  // --- Regression: owner feedback (2026-10-14) -- sorted alphabetically
+  // A-Z by CITY name first, never by state first. Alphabetical by city:
+  // Baltimore, Bergenfield, Chicago, Jerusalem, Savannah, Silver Spring,
+  // Teaneck -- spanning MD/NJ/IL/(none)/GA/MD/NJ in that order, proving
+  // state plays no role except as a tiebreaker. ---
   {
     const sorted = cityOptionsForRegion(roster, ALL_REGIONS);
     const order = sorted.map((o) => o.label);
     const indexOf = (label) => order.indexOf(label);
-    assert.ok(indexOf("Jerusalem") < indexOf("Savannah, GA"), "a null-state (international) entry sorts before a real state");
-    assert.ok(indexOf("Savannah, GA") < indexOf("Chicago, IL"), "GA sorts before IL");
-    assert.ok(indexOf("Chicago, IL") < indexOf("Baltimore, MD"), "IL sorts before MD");
-    assert.ok(indexOf("Baltimore, MD") < indexOf("Bergenfield, NJ"), "MD sorts before NJ");
-    assert.ok(indexOf("Bergenfield, NJ") < indexOf("Teaneck, NJ"), "within NJ, cities sort alphabetically");
+    assert.ok(indexOf("Baltimore, MD") >= 0, "a known option must be present");
+    assert.ok(indexOf("Baltimore, MD") < indexOf("Bergenfield, NJ"), "Baltimore sorts before Bergenfield (city order, not state order)");
+    assert.ok(indexOf("Bergenfield, NJ") < indexOf("Chicago, IL"), "Bergenfield sorts before Chicago");
+    assert.ok(indexOf("Chicago, IL") < indexOf("Jerusalem"), "Chicago sorts before Jerusalem, even though Jerusalem has no state at all");
+    assert.ok(indexOf("Jerusalem") < indexOf("Savannah, GA"), "Jerusalem sorts before Savannah");
+    assert.ok(indexOf("Savannah, GA") < indexOf("Silver Spring, MD"), "Savannah sorts before Silver Spring");
+    assert.ok(indexOf("Silver Spring, MD") < indexOf("Teaneck, NJ"), "Silver Spring sorts before Teaneck, even though both Baltimore and Silver Spring share MD with a NJ city sorting between them -- state never groups cities together");
+  }
+
+  // --- Regression: state is used ONLY as a tiebreaker when two cities
+  // share the exact same name. A synthetic same-named-city roster proves
+  // this directly (no such real pair exists in actual Production data
+  // today, per the Phase 1 audit). ---
+  {
+    const sameNameRoster = [donor("spring-pa", "Springfield", "PA"), donor("spring-il", "Springfield", "IL"), donor("spring-ma", "Springfield", "MA")];
+    const sortedSameName = cityOptionsForRegion(sameNameRoster, ALL_REGIONS).map((o) => o.label);
+    assert.deepEqual(sortedSameName, ["Springfield, IL", "Springfield, MA", "Springfield, PA"], "identical city names fall back to state order");
+  }
+
+  // --- searchCityOptions: the Searchable City selector's own matching
+  // logic (owner feedback, 2026-10-14), tested independently of any
+  // React component. Partial, case-insensitive matching against the
+  // city name; an empty/whitespace query returns every option
+  // unfiltered, the same "no query means show everything" convention
+  // `searchDonors()` already uses. ---
+  {
+    const allOptions = cityOptionsForRegion(roster, ALL_REGIONS);
+    const teaneckMatches = searchCityOptions(allOptions, "tean");
+    assert.deepEqual(teaneckMatches.map((o) => o.city), ["Teaneck"], "a partial, lowercase substring of the city name must match");
+    const caseInsensitive = searchCityOptions(allOptions, "TEAN");
+    assert.deepEqual(caseInsensitive.map((o) => o.city), ["Teaneck"], "matching must be case-insensitive");
+    const mixedCase = searchCityOptions(allOptions, "ChIc");
+    assert.deepEqual(mixedCase.map((o) => o.city), ["Chicago"], "mixed-case partial query must still match");
+    assert.deepEqual(searchCityOptions(allOptions, ""), allOptions, "an empty query returns every option, unfiltered");
+    assert.deepEqual(searchCityOptions(allOptions, "   "), allOptions, "a whitespace-only query returns every option, unfiltered");
+    assert.deepEqual(searchCityOptions(allOptions, "zzz-not-a-real-city"), [], "a query matching nothing returns an empty list, not an error");
+    // A query matching more than one city returns all of them, still in
+    // the caller's own already-sorted order (this function reorders
+    // nothing -- see cityOptionsForRegion's own sort).
+    const sillyRoster = [...roster, { id: "silver-spring-dup", city: "Silverton", state: "OR" }];
+    const silverMatches = searchCityOptions(cityOptionsForRegion(sillyRoster, ALL_REGIONS), "silver");
+    assert.deepEqual(silverMatches.map((o) => o.city), ["Silver Spring", "Silverton"], "multiple matching cities are all returned, in alphabetical order");
+    // State also matches (a reasonable, documented superset of "partial
+    // city names") -- typing a state abbreviation narrows to that state's
+    // cities too.
+    const stateMatches = searchCityOptions(allOptions, "md");
+    assert.deepEqual(stateMatches.map((o) => o.city).sort(), ["Baltimore", "Silver Spring"], "a state abbreviation also narrows the options");
   }
 
   console.log("donor-geo-filter: ok");

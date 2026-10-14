@@ -90,6 +90,7 @@ const TEST_FILES = [
   "tests/donor-search-reset.test.mjs",
   "tests/travel-regions.test.mjs",
   "tests/donor-geo-filter.test.mjs",
+  "tests/city-combobox.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",
   "tests/data-health-repair.test.mjs",

@@ -8,6 +8,7 @@ import { donorNavigationHref, donorDirectoryFilterPath } from "../../lib/navigat
 import { donorInitials, numericDonorCode } from "../../lib/relationships/donor-identity";
 import { ALL_REGIONS, ALL_CITIES, filterByGeo, cityOptionsForRegion, type RegionFilterValue } from "../../lib/relationships/donor-geo-filter";
 import { TRAVEL_REGIONS } from "../../lib/relationships/travel-regions";
+import { CityComboBox } from "./CityComboBox";
 
 export type DirectoryRelationship = {
   id: string;
@@ -95,13 +96,7 @@ export function DonorDirectoryExperience({ relationships, initialQuery, initialR
           {TRAVEL_REGIONS.map((region) => <option key={region.id} value={region.id}>{region.label}</option>)}
         </select>
       </label>
-      <label className="directory-filter">
-        <span>City</span>
-        <select value={cityKey} onChange={(event) => handleCityChange(event.target.value)}>
-          <option value={ALL_CITIES}>All Cities</option>
-          {cityOptions.map((option) => <option key={option.key} value={option.key}>{option.label} ({option.count})</option>)}
-        </select>
-      </label>
+      <CityComboBox inputId="directory-city-filter" label="City" options={cityOptions} value={cityKey} onChange={handleCityChange} />
     </div>
     {visible.length ? <section className="directory-list" aria-label="Donor relationships">{visible.map((relationship) => {
       const members = [relationship.primary_first_name, relationship.spouse_first_name].filter(Boolean).join(" & ");
