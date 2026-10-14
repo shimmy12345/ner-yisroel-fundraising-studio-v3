@@ -14,23 +14,38 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (commit `ff40bd4`, pushed; Production deployment described
-below is a deploy-only action, not a new commit on top of it):
-**`ff40bd4`** (tree identical to `741a58c` -- `ff40bd4` only fixes a
-documentation self-reference) -- "Fix the October 14 2026 email
-incident: fail-closed environment guard, Daily Agenda send idempotency,
-and the Production APP_BASE_URL correction" -- application code, a new
-migration, and test changes; documented in full under "October 14 2026
-Email Incident" below. **DEPLOYED TO BOTH INDEPENDENT STAGING AND
-INDEPENDENT PRODUCTION**, the latter under the owner's explicit written
-authorization (2026-10-14). Staging: Worker version
+Current HEAD (commit `4fa356c`, pushed):
+**`4fa356c`** -- "Correct Production Health:
+a stale historical baseline stamp must never block launch readiness
+after a legitimate migration" -- application code
+(`lib/data-health/model.ts` only) and test changes; documented in full
+under "Production Health Correction" below. **DEPLOYED TO BOTH
+INDEPENDENT STAGING AND INDEPENDENT PRODUCTION**, the latter under the
+owner's explicit written authorization (2026-10-14). Staging: Worker
+version `c4f99303-a4b1-450c-85f4-8887ea670a75`. **Production: Worker
+version `9bef87e5-b357-4c73-927a-593b23fb91e8`** (rollback target:
+`ece6a636-fdff-4ee5-a54f-bd2ebdd1f2bd`) -- live-verified against real
+Production database evidence (not just unit tests): "Workspace health"
+Needs attention -> **Healthy**, "Production launch readiness" Blocked
+-> **Ready**, with the historical `production_schema_baseline` record
+independently confirmed byte-for-byte unchanged via a direct read-only
+D1 query. Zero D1 writes of any kind this round. Sits on top of
+`ff40bd4` -- "Fix the October 14 2026
+email incident: fail-closed environment guard, Daily Agenda send
+idempotency, and the Production APP_BASE_URL correction" (tree
+identical to `741a58c` -- `ff40bd4` only fixes a documentation
+self-reference) -- application code, a new migration, and test changes;
+documented in full under "October 14 2026 Email Incident" below.
+**DEPLOYED TO BOTH INDEPENDENT STAGING AND INDEPENDENT PRODUCTION**,
+the latter under the owner's explicit written authorization
+(2026-10-14). Staging: Worker version
 `95310d2e-cc5c-44ae-9907-345a49708a38`, migration 0043 applied to
-Staging's D1. **Production: Worker version
+Staging's D1. Production: Worker version
 `ece6a636-fdff-4ee5-a54f-bd2ebdd1f2bd`, migration 0043 applied to
 Production's D1 (confirmed additive-only, 0 rows after, donor/financial
 row counts unchanged), `APP_BASE_URL` live-confirmed as
 `https://shimmydonors.org`, live Daily Agenda links confirmed to use
-that domain.** See "October 14 2026 Email Incident -- PRODUCTION
+that domain. See "October 14 2026 Email Incident -- PRODUCTION
 DEPLOYMENT (2026-10-14)" below for the full five-phase record,
 including the explicitly unresolved Observability limitation and the
 still-pending next-scheduled-email verification (Thursday, October 15,
@@ -36909,6 +36924,235 @@ tomorrow's pending verification (Section "Phase 4" above):
 2. Tomorrow (Thursday, October 15, 2026, 9:00 AM America/New_York):
    perform the Phase 4 verification already specified above -- still
    explicitly pending, untouched by this round.
-3. If desired, separately authorize the one-line Production
+3. ~~If desired, separately authorize the one-line Production
    `production_schema_baseline` re-stamp (Section 5 above) to clear the
-   cosmetic "Needs attention" state -- optional, not blocking anything.
+   cosmetic "Needs attention" state -- optional, not blocking anything.~~
+   **Superseded** -- see "Production Health Correction" below: the owner
+   authorized a design-level fix instead of a data re-stamp, which is now
+   implemented, tested, and deployed to Production. `production_schema_
+   baseline`'s historical hash was never touched.
+
+## Production Health Correction -- Stale Baseline Stamp No Longer Blocks Launch Readiness (2026-10-14), DEPLOYED TO PRODUCTION
+
+The owner authorized a permanent, design-level correction to the
+Production Health warning (rather than a one-line data re-stamp) and
+explicitly authorized its Production deployment, subject to the safety
+checks below.
+
+### 1. Root cause, confirmed via source (not re-investigated from scratch)
+
+`lib/data-health/model.ts` already carried its own comment explaining
+that `production_schema_baseline` "is a historical, point-in-time
+stamp -- it is never rewritten automatically when a later migration is
+applied" -- and Independent Staging's own analogous "Baseline lineage"
+card already treated a stale stamp (`hash-mismatch`) correctly, as
+informational (`"info"`), non-blocking. Production's own equivalent
+logic never got the same treatment: `productionBaselineCheck`'s
+`hash-mismatch` branch rendered `status: "critical"`, value `"0019 ·
+Mismatch"`, `businessDataAtRisk: true`, and `repairStep: "Do not
+launch."`; the inline "Production migration history" card collapsed
+"verified" and every non-verified state into a flat
+healthy/"Unverified" binary; and `productionBaselineApplied` (the
+variable actually feeding `productionReady`/`productionBlockers`) only
+accepted the literal `"verified"` state. All three compounded into
+exactly what migration `0043_agenda_send_log.sql` triggered: Production
+Health read "Needs attention" / "Blocked" despite the live schema being
+structurally correct the entire time (proven by the same report's own
+"Production ↔ baseline schema: Match").
+
+### 2. Fix -- `lib/data-health/model.ts` only, no other file
+
+- `productionBaselineCheck`'s `hash-mismatch` branch: `critical` ->
+  `info`, `"0019 · Mismatch"` -> `"0019 · Stale stamp"`,
+  `businessDataAtRisk` `true` -> `false`, `repairStep` `"Do not
+  launch."` -> `"None. ... not a repair, and never automatic."` -- now
+  matching Independent Staging's own `INDEPENDENT_STAGING_BASELINE_
+  STATUS` precedent for the identical fact, word-for-word in spirit.
+- New `productionMigrationHistoryCheck()` function replaces the old
+  inline verified/non-verified binary: `"verified"` and
+  `"hash-mismatch"` both now correctly answer "yes, genuinely created
+  from the verified baseline" (critical only for
+  `not-applied`/`unreadable`/`not-applicable` -- states that genuinely
+  could not confirm that), with the stale case showing an explicit
+  `"Baseline 0019 · Stale stamp (date)"` value instead of a flat
+  `"Unverified"`.
+- `productionBaselineApplied` (inside `buildDataHealthReport`)
+  redefined from `state === "verified"` to `state === "verified" ||
+  state === "hash-mismatch"` -- this is the one change that actually
+  stops a stale stamp from reaching `productionReady`/
+  `productionBlockers`. Every other readiness input --
+  `facts.schemaMatchesBaseline` ("Production ↔ baseline schema"),
+  `liveSchemaMatchesExpectedLevel` ("Live schema version"),
+  `givingHealthy`, `relationshipIntegrityHealthy`, and backup/restore
+  freshness -- is completely untouched and still independently blocks
+  launch readiness on any genuine failure.
+- **The distinction the owner asked to be preserved is preserved
+  exactly**: historical baseline record ("Production rehearsal
+  baseline"/"Production migration history," now correctly
+  non-blocking for a stale-but-genuine stamp) vs. current schema
+  integrity ("Production ↔ baseline schema" -- unchanged, still fully
+  blocking) vs. migration verification ("Live schema version" --
+  unchanged, still fully blocking) vs. backup/restore readiness
+  ("Automated backup"/"Monthly restore test" -- unchanged, still fully
+  blocking). None of these four were merged or conflated by this fix.
+- **`production_schema_baseline`'s historical hash was never
+  overwritten anywhere** -- this is a pure read-side/display-logic
+  correction. No D1 write of any kind appears in this diff.
+
+### 3. Regression tests -- comprehensive, as requested
+
+`tests/production-readiness-diagnostics.test.mjs`: updated the two
+pre-existing hash-mismatch assertions (legacy `"production"` and
+`"production-independent"`) to their corrected values and added:
+
+- A dedicated test for the new "Production migration history" card's
+  stale-stamp wording, and a second proving it stays visibly distinct
+  (`"Unverified"`, critical) from a genuinely missing marker
+  (`not-applied`).
+- Seven new **overall `report.status` rollup** tests (not just
+  individual check fields -- what the owner actually sees as "Healthy"
+  vs. "Needs attention"): a stale stamp alone resolves to `healthy`;
+  every genuinely blocking `productionBaselineState`
+  (`not-applied`/`unreadable`) still resolves to `critical`; a genuine
+  structural schema mismatch, a genuinely stale live migration level, a
+  genuine relationship-data integrity failure, and a failed
+  giving-total reconciliation all still resolve to `critical`,
+  completely unaffected by this fix; and a stale stamp combined with a
+  **genuinely failed backup** still blocks on the backup failure alone
+  -- proving the fix cannot mask an unrelated real problem.
+
+### 4. Implemented and tested in Staging first
+
+Built and deployed to Independent Staging (`pnpm run
+build:staging-independent` / `deploy:staging-independent`) before any
+Production action. **Staging Worker version:
+`c4f99303-a4b1-450c-85f4-8887ea670a75`.** Live-verified, read-only:
+Staging's own "Baseline lineage" card (built by the pre-existing,
+unaffected `independentStagingSummaryChecks` code path -- Production's
+specific cards this fix touches are gated behind
+`isProductionEnvironment`, which Staging never satisfies) continued to
+render its already-correct `"0019 · Stale stamp (2026-08-05)"`,
+unaffected; "Workspace health: Healthy" overall; "Deployed version:
+0.1.0 · 4fa356c" confirmed the new build was genuinely live. This
+confirms the new code builds, deploys, and runs cleanly in a real
+Worker before touching Production -- the Production-specific cards
+this fix actually changes can only be observed on a real
+`production-independent` deployment, which is exactly why a controlled
+Production deployment was separately authorized next.
+
+### 5. Pre-deployment safety checks -- all passed, no STOP triggered
+
+- Branch/HEAD/clean tree confirmed (commit `4fa356c`, pushed).
+- `wrangler deployments list --config wrangler.production.jsonc`:
+  last deployment was the prior round's `ece6a636-...` (2026-10-14
+  13:53 UTC) -- no concurrent/newer deployment, nothing in progress.
+  **Recorded as the rollback target.**
+- Live `/health` check (Production, before deploying, read-only):
+  **Automated backup -- completed successfully 2026-10-14T13:39:23Z**
+  (same-day); **Monthly restore test -- successfully verified the Oct
+  12, 2026 backup.** Both green. (This same screenshot also captured
+  the exact pre-fix "Needs attention"/"Unverified"/"0019 ·
+  Mismatch"/"Blocked" state, for a clean before/after comparison.)
+  "Deployed version: 0.1.0 · ff40bd4" confirmed as the live pre-fix
+  commit.
+- `git diff --stat ff40bd4 HEAD`: exactly 3 files
+  (`docs/AI-HANDOFF.md`, `lib/data-health/model.ts`,
+  `tests/production-readiness-diagnostics.test.mjs`). A second,
+  targeted diff against the same two commits for
+  `lib/agenda/ lib/backup-alert/ worker/ wrangler.production.jsonc
+  wrangler.staging.jsonc app/donors/ app/api/pledge-balance-corrections/
+  app/api/recommendations/ drizzle/` returned **empty** -- confirmed,
+  not assumed, zero changes to email sending/scheduling, cron
+  configuration, database bindings, donor records, pledge logic, or
+  payment processing.
+- `npx tsc --noEmit` -> clean. `node scripts/run-tests.mjs` ->
+  **185/185 passed.** `pnpm run lint` -> **94 errors / 43 warnings**
+  (exact baseline). `pnpm run build:production-independent` -> clean;
+  the fresh bundle was grepped directly before deploying and confirmed
+  to contain `"Stale stamp"` (3 occurrences) and zero remaining
+  occurrences of the old `"Do not launch"` text.
+
+### 6. Deployed to Production
+
+`pnpm run deploy:production-independent`. **Production Worker version:
+`9bef87e5-b357-4c73-927a-593b23fb91e8`.** Deploy output confirmed:
+`env.DB` -> `fundraising-os-production-db`, `env.STATUS_WORKER` ->
+`fundraising-os-production-backup-status`, `env.APP_BASE_URL` ->
+`"https://shimmydonors.org"` (unchanged from the prior round),
+`schedule: 0 * * * *` reprinted unchanged. No Staging binding of any
+kind appeared in the output.
+
+### 7. Live Production verification -- read-only, against actual database evidence
+
+- Navigating to `/health` immediately after deploy initially showed
+  the OLD cached report (a stale server-rendered snapshot from before
+  the new deploy's first real check) -- clicking **"Run health
+  check"** (forcing a fresh, live recomputation, not a cached one)
+  then showed the corrected state: **"Workspace health: Healthy"**
+  (previously "Needs attention"); **"Production migration history:
+  Baseline 0019 · Stale stamp (2026-08-05)"** (previously
+  "Unverified"); **"Production rehearsal baseline: 0019 · Stale
+  stamp"** (previously "0019 · Mismatch"); **"Production ↔ baseline
+  schema: Match"** (unchanged -- still the authoritative structural
+  proof); **"Production launch readiness: Ready"** (previously
+  "Blocked"). This before/after pair, both captured live against the
+  same real Production database, is the direct proof the fix works as
+  designed, not merely that the unit tests pass.
+- Every donor-data integrity check remained green and numerically
+  unchanged throughout: 254 active donors, 0 duplicate JL codes, 0
+  orphaned gifts/interactions/reminders/pledge payments, 0 broken
+  merge redirects, giving-total "Reconciled," 0 unmatched JL codes.
+- **"Deployed version: 0.1.0 · 4fa356c"** confirmed the exact
+  authorized commit is live.
+- **Historical baseline record independently confirmed unchanged** via
+  a direct, read-only D1 query (not inferred from the health page
+  alone): `SELECT id, schema_hash, created_at FROM
+  production_schema_baseline` -> `id: "0019"`, `schema_hash:
+  "913299652ad37c0073e82aeccb30511dc1f13c784eebb5e4e7ecd3e237dea566"`
+  (the exact original historical hash from before migration 0043 was
+  ever added), `created_at: 1785944072` (the original bootstrap
+  timestamp) -- byte-for-byte identical to before this entire email-
+  incident chain of work began. **Confirms, independently of the
+  application code's own claims, that nothing in this round (or any
+  prior round) ever wrote to this record.**
+- `agenda_send_log` re-confirmed still holding 0 rows (read-only query)
+  -- untouched, as expected (today's 9 AM Eastern window had already
+  passed before this deploy; tomorrow's has not yet occurred).
+
+### 8. Email safety guard, idempotency, URL config, and cron -- confirmed unchanged
+
+All four confirmed by the same evidence already gathered in Sections 5
+and 6 above, not re-asserted separately: the diff against the
+currently-deployed commit touched zero files under `lib/agenda/`,
+`lib/backup-alert/`, `worker/`, or either `wrangler.*.jsonc`; the
+deploy output re-printed the identical `env.APP_BASE_URL` and
+`schedule: 0 * * * *` from the prior round; and `agenda_send_log`'s row
+count is unchanged. The fail-closed email-send guard and the Daily
+Agenda idempotency claim logic (`lib/agenda/email-send-guard.ts`,
+`lib/agenda/send-log.ts`) were not modified, read, or touched in any
+way by this round.
+
+### Rollback information
+
+| | |
+|---|---|
+| New Production Worker version | `9bef87e5-b357-4c73-927a-593b23fb91e8` |
+| Previous Production Worker version (rollback target) | `ece6a636-fdff-4ee5-a54f-bd2ebdd1f2bd` |
+| Rollback procedure if ever needed | Redeploy the prior build, or `wrangler rollback` to the version above -- Worker-only, no database involved; this round made zero D1 writes, so no data rollback of any kind would ever be needed |
+| `production_schema_baseline` | Unchanged -- never written to by this round |
+
+### Unresolved / remaining
+
+- The two items already carried forward from the prior rounds remain
+  exactly as they were: why Production's own Oct 14 scheduled email
+  did not arrive (Observability access required, unrelated to this
+  fix), and the `shimmydonors.org` → workers.dev Cloudflare-zone
+  redirect (owner action, outside this repository, unrelated to this
+  fix).
+- The `main`-branch restore-sync PR from the prior round
+  (`fix/d1-restore-sync-0043-agenda-send-log`) is still open and
+  unmerged -- unrelated to and unaffected by this round.
+- October 15's scheduled-email verification remains explicitly
+  pending, untouched by this round (this fix touches only
+  `lib/data-health/model.ts`, which the Daily Agenda send path never
+  imports or depends on).
