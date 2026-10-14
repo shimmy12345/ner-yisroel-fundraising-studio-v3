@@ -9,37 +9,36 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 43 as of 0042_pledge_balance_corrections.sql (feature/independent-
-// cloudflare-sandbox commits 3ff780c [0041_pledge_payment_plans_
-// renewal_acknowledged_at.sql] and ae86956 [0042_pledge_balance_
-// corrections.sql], synced to this branch 2026-10-09 -- schema-
+// 44 as of 0043_agenda_send_log.sql (feature/independent-cloudflare-
+// sandbox commit 741a58c, synced to this branch 2026-10-14 -- schema-
 // manifest.json copied verbatim from that branch's own current, verified
 // manifest, the same sync mechanism as commits 4ea1d5e/62628b3/ad80cf6/
-// 5e48837/114c7bb; see docs/AI-HANDOFF.md's "D1 Monthly Restore
-// Verification Repair" and "Production Readiness" entries). This sync
-// covers TWO migrations in one pass, same as the prior 0039+0040 sync:
-//   - 0041_pledge_payment_plans_renewal_acknowledged_at.sql: a pure
-//     nullable column addition to the existing pledge_payment_plans
-//     table -- no new table, no rebuild of anything else.
-//   - 0042_pledge_balance_corrections.sql: ADDS ONE NEW TABLE
-//     (pledge_balance_corrections), which is why this sync could not be
-//     handled by the automated prepare-sync job (it deliberately refuses
-//     any migration that introduces a new table -- see
-//     docs/D1-MIGRATION-SYNC-PROCESS.md -- confirmed by running
-//     scripts/prepare-main-restore-sync-patch.mjs on the canonical
-//     branch, which returned safe:false with exactly that reason) and had
-//     to be prepared by hand, following the same narrow pattern as the
-//     0038_pledge_payment_plan_reviews.sql sync (commit 114c7bb). See
-//     lib/operations/staging-reset.ts for this table's restore-order
-//     placement and test/d1-restore-order.test.mjs for the dependency-
-//     order regression.
+// 5e48837/114c7bb/[0041-0042 sync]; see docs/AI-HANDOFF.md's "D1 Monthly
+// Restore Verification Repair" and "October 14 2026 Email Incident"
+// entries). 0043_agenda_send_log.sql ADDS ONE NEW TABLE
+// (agenda_send_log, Daily Fundraising Agenda send idempotency -- see
+// docs/AI-HANDOFF.md's "October 14 2026 Email Incident" entry), which is
+// why this sync could not be handled by the automated prepare-sync job
+// (it deliberately refuses any migration that introduces a new table --
+// see docs/D1-MIGRATION-SYNC-PROCESS.md -- confirmed by running
+// scripts/prepare-main-restore-sync-patch.mjs on the canonical branch,
+// which returned safe:false with exactly that reason) and had to be
+// prepared by hand, following the same narrow pattern as the
+// 0038_pledge_payment_plan_reviews.sql sync (commit 114c7bb). This new
+// table's only foreign key is `user_id` -> `users.id` -- the same shape
+// as backup_alert_state just below, not pledge_balance_corrections --
+// so it is NOT part of STAGING_RESET_TABLE_ORDER
+// (lib/operations/staging-reset.ts is unchanged by this sync). See
+// lib/operations/d1-restore-order.ts for this table's restore-order
+// placement and test/d1-restore-order.test.mjs for the dependency-order
+// regression.
 // PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL stays
 // "0019": that label identifies the single bootstrap file's origin, not
 // its current contents). Caught by this repository's own generic
 // restore/schema drift guard (feature/independent-cloudflare-sandbox's
 // scripts/check-main-restore-sync.mjs) before any scheduled monthly
 // restore-verification run would have found it.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 43;
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 44;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
@@ -53,7 +52,12 @@ export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019"
 // feature/independent-cloudflare-sandbox's Backup Scheduling Reliability
 // Stage 3) holds the same kind of thing: operational dedupe state for a
 // scheduled email-alert check, never donor or fundraising data.
-export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences", "backup_alert_state"];
+//
+// agenda_send_log (added 2026-10-14, ported from feature/independent-
+// cloudflare-sandbox's October 14 2026 Email Incident fix) is the same
+// kind of thing again: operational dedupe state for the Daily
+// Fundraising Agenda send, never donor or fundraising data.
+export const ACCOUNT_CONFIGURATION_TABLES = ["users", "onboarding_preferences", "backup_alert_state", "agenda_send_log"];
 export const FUNDRAISING_DATA_TABLES = PRODUCTION_BASELINE_TABLES.filter((table) => !ACCOUNT_CONFIGURATION_TABLES.includes(table));
 export const FUNDRAISING_DATA_COUNT_SQL = `SELECT ${FUNDRAISING_DATA_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
 export const ACCOUNT_CONFIGURATION_COUNT_SQL = `SELECT COUNT(*) AS count FROM "users"`;

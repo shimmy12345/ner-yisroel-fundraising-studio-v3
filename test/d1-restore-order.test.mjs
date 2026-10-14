@@ -41,13 +41,16 @@ const FIXTURE = [
   'INSERT INTO "sqlite_stat1" ("tbl","idx","stat") VALUES(\'donors\',\'donors_owner_idx\',\'1 1\');',
 ].join('\n') + '\n';
 
-test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the four true roots, with no duplicates', () => {
+test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the five true roots, with no duplicates', () => {
   // backup_alert_state added 2026-09-01 (D1 Monthly Restore Verification
   // Repair, porting Backup Scheduling Reliability Stage 3's addition from
-  // feature/independent-cloudflare-sandbox) -- a fourth
-  // ACCOUNT_CONFIGURATION_TABLE root, not part of STAGING_RESET_TABLE_ORDER's
-  // reversal (same reasoning as users/onboarding_preferences).
-  const roots = ['production_schema_baseline', 'users', 'backup_alert_state', 'onboarding_preferences'];
+  // feature/independent-cloudflare-sandbox) and agenda_send_log added
+  // 2026-10-14 (porting the October 14 2026 Email Incident fix's
+  // addition from feature/independent-cloudflare-sandbox) are the fourth
+  // and fifth ACCOUNT_CONFIGURATION_TABLE roots, neither part of
+  // STAGING_RESET_TABLE_ORDER's reversal (same reasoning as users/
+  // onboarding_preferences).
+  const roots = ['production_schema_baseline', 'users', 'backup_alert_state', 'agenda_send_log', 'onboarding_preferences'];
   for (const root of roots) assert.ok(D1_RESTORE_DATA_ORDER.includes(root), `missing root table "${root}"`);
   assert.equal(new Set(D1_RESTORE_DATA_ORDER).size, D1_RESTORE_DATA_ORDER.length, 'no table should appear twice');
   // Every real fundraising table (from the same authoritative source the
@@ -61,7 +64,7 @@ test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the four true ro
   // STAGING_RESET_TABLE_ORDER exactly -- proves insertion order really is
   // the deletion order run backwards, not a separately hand-maintained
   // list that could quietly drift from it.
-  const tail = D1_RESTORE_DATA_ORDER.slice(4);
+  const tail = D1_RESTORE_DATA_ORDER.slice(5);
   assert.deepEqual([...tail].reverse(), [...STAGING_RESET_TABLE_ORDER]);
 });
 
@@ -69,6 +72,12 @@ test('backup_alert_state is positioned after "users", its own real foreign key t
   const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
   const backupAlertIndex = D1_RESTORE_DATA_ORDER.indexOf('backup_alert_state');
   assert.ok(usersIndex >= 0 && backupAlertIndex > usersIndex, 'backup_alert_state must be inserted after users');
+});
+
+test('agenda_send_log is positioned after "users", its own real foreign key target', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const agendaSendLogIndex = D1_RESTORE_DATA_ORDER.indexOf('agenda_send_log');
+  assert.ok(usersIndex >= 0 && agendaSendLogIndex > usersIndex, 'agenda_send_log must be inserted after users');
 });
 
 // donor_source_attributions (Giving Import Third-Party Source Attribution,
