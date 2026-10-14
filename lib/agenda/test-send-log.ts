@@ -20,7 +20,15 @@
 // attempt fails, a human must explicitly clear the row (or the table)
 // before a second real attempt is possible, which is the intended,
 // tightly-controlled behavior here, not a gap.
-export const TEST_SEND_CLAIM_ID = "2026-10-14-production-gmail-oauth-verification";
+//
+// This value has been advanced once already: the original
+// "2026-10-14-production-gmail-oauth-verification" claim ran and recorded a
+// failed 401 attempt (see docs/AI-HANDOFF.md). That row is untouched and
+// permanent -- changing this constant to a new, distinct id is the entire
+// mechanism for authorizing exactly one more attempt; it does not reset,
+// delete, or in any way affect the original row, which remains keyed by its
+// own, different id in the same table.
+export const TEST_SEND_CLAIM_ID = "2026-10-14-production-gmail-oauth-verification-2";
 
 export interface SqlQuery {
   sql: string;
