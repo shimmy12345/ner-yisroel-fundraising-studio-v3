@@ -40181,3 +40181,117 @@ No verification failed; no rollback was needed or performed.
    Focus integration remains unbuilt by design. No further feature work
    or data correction was performed under this authorization, per its
    own explicit scope.
+
+## Geographic Filtering -- UI Usability Fixes (2026-10-14)
+
+Owner feedback from using the Production deployment: (1) the City
+dropdown was sorted state-first, which made a long, flat list of ~49
+cities hard to scan; (2) there was no way to search it, only scroll.
+
+### What changed
+
+- **`lib/relationships/donor-geo-filter.ts`**: `cityOptionsForRegion()`'s
+  sort is now city name first (A-Z), with state used only as a
+  tiebreaker when two cities share the exact same name -- no real pair
+  like that exists in current Production data, but the sort handles it
+  correctly regardless (proven with a synthetic three-state "Springfield"
+  fixture in the test suite). New `searchCityOptions(options, query)`:
+  a pure, case-insensitive partial match against an already-built
+  option list (city name or state), directly unit-testable with no
+  React or DOM involved -- the same "empty query shows everything"
+  convention `lib/relationships/donor-search.ts`'s `searchDonors()`
+  already uses, not a differently-shaped rule.
+- **`app/donors/CityComboBox.tsx`** (new): replaces the City `<select>`
+  with an accessible combobox. Typing narrows the option list live
+  (case-insensitive, partial match); "All Cities" is always the first,
+  always-reachable row regardless of what's typed; a separate explicit
+  clear (×) button is also provided once a specific city is selected.
+  Full keyboard support: ArrowUp/ArrowDown moves the highlighted option,
+  Enter commits it, Escape reverts to the last committed selection
+  without changing it. Modeled directly on the existing `DonorAutocomplete`
+  pattern (ARIA `combobox`/`listbox`/`option` roles, the same
+  mousedown-`preventDefault()` guard that keeps a tap from being
+  cancelled by blur before the click handler runs) -- not a copy of it,
+  since donors and cities are different data shapes with no shared
+  rendering needs, and NOT a second donor-search engine: the component
+  imports nothing but React and this app's own `donor-geo-filter`
+  module, confirmed directly by a test that inspects every import line
+  in the file.
+- **Mobile**: a plain text `<input>` (the OS's own keyboard, no custom
+  widget to fight), 44px minimum touch targets (matching this
+  codebase's own established convention), and a `flex-wrap` filter row
+  that already stacks to full width on narrow screens -- no separate
+  mobile layout needed, same approach as the Phase 2 filters themselves.
+- **Everything else is unchanged by design**: `handleCityChange`, the
+  region-change city-reset logic, `donorDirectoryFilterPath()`'s URL
+  round-tripping, and the Travel Region `<select>` were not touched --
+  confirmed directly from the diff, not merely asserted. Region scoping
+  (the City combobox's own options are still exactly
+  `cityOptionsForRegion(relationships, regionId)`, so selecting a
+  region still narrows which cities are offered), composition with the
+  existing donor search, and dynamic matching for a newly created or
+  imported donor are therefore automatically preserved -- none of that
+  logic lives in the combobox itself.
+
+### Regression tests added
+
+- **`tests/donor-geo-filter.test.mjs`** (extended): the new city-first
+  sort order, proven against the real roster (Baltimore, Bergenfield,
+  Chicago, Jerusalem, Savannah, Silver Spring, Teaneck -- spanning
+  MD/NJ/IL/none/GA/MD/NJ, showing state plays no grouping role); the
+  state-tiebreaker case via a synthetic same-named-city fixture;
+  `searchCityOptions()` covering partial/case-insensitive matching,
+  empty and whitespace queries returning everything, a query matching
+  nothing returning an empty list, multiple matches staying in sorted
+  order, and state-abbreviation matching.
+- **`tests/city-combobox.test.mjs`** (new): since this codebase has no
+  React component-rendering test harness anywhere (and this round was
+  explicitly told not to add one), these verify the component's actual
+  source the same way `tests/donor-navigation.test.mjs` already verifies
+  other component wiring -- ARIA combobox/listbox/option attributes;
+  all four keyboard keys (ArrowDown/ArrowUp/Enter/Escape) handled, with
+  Escape reverting rather than clearing; the mousedown-preventDefault
+  guard present on both the clear button and every option; "All
+  Cities" and the clear action both present; confirmation that only
+  React and the local geo-filter module are imported (no new
+  dependency, no reference to `searchDonors`); and that
+  `DonorDirectoryExperience.tsx` wires `<CityComboBox>` in with the
+  exact same `options`/`value`/`onChange` props the old `<select>` used,
+  while the Travel Region `<select>` is confirmed unchanged.
+
+**Results: 193/193 test files passing (192 before this round, +1 new
+file), `tsc --noEmit` clean, lint baseline unchanged (94 errors/43
+warnings).**
+
+### Staging deployment and verification
+
+Deployed via the protected `pnpm run deploy:staging-independent`
+script. **New Staging Worker version: `1976bc48-ba66-40ed-808b-
+bfe2a9b3c0f0`.** `dist/build-manifest.json` confirmed `{"environment":
+"staging-independent", ...}`. Confirmed, by reading the actual deployed
+client bundle locally immediately after the build step (the same file
+`wrangler` uploaded): "All Cities", "No matching cities", "Clear city
+filter", and the new `city-combobox` CSS class each present. Worker
+responds normally (redirects to the real Staging Cloudflare Access
+Application, as expected).
+
+**Not verified this round, disclosed rather than assumed**: the live,
+rendered, interactive appearance and feel of the new combobox on an
+actual desktop or mobile browser. As with every prior round, that would
+require authenticating as the owner on his own Cloudflare Access
+session, which this session does not do on its own. The code- and
+bundle-level checks above, plus the full test suite, give strong
+confidence the feature is wired and styled correctly, but a brief
+hands-on look (typing a partial city name, trying arrow keys/Enter/
+Escape, and checking the layout on a phone) is still something only the
+owner can do.
+
+### Unresolved issues
+
+1. **Live/interactive verification on Staging is still outstanding**,
+   per the disclosure above.
+2. Carried over, unchanged: no Production deployment was performed or
+   requested this round; a dedicated Travel Planning view/Portfolio
+   Focus integration remains unbuilt by design, with the underlying
+   `donor-geo-filter`/`travel-regions` logic (now including
+   `searchCityOptions()`) already reusable there unmodified.
