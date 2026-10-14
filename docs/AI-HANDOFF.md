@@ -38082,3 +38082,124 @@ possibilities specifically to the stored OAuth credential values themselves
 or their relationship to each other -- exactly the one thing this session
 cannot read or compare directly. The diagnostic change in Section 6 above is
 the recommended next step before any further credential re-entry.
+
+## Diagnostic OAuth Error Code -- Implemented, Tested, Deployed to Production (2026-10-14)
+
+The owner authorized implementing exactly the diagnostic change proposed in
+the prior round's Section 6, subject to 12 numbered safeguards: record only
+the HTTP status and an **allowlisted** OAuth error code (never a raw body,
+`error_description`, credential, or token), handle malformed responses
+safely, add regression tests, verify the Production-only guard stays intact,
+test in Staging without sending email, review backup/diff/rollback/config
+before Production, deploy only if every check passes, never touch OAuth
+credentials/donor/payment/pledge records or the existing send-log, never
+reset the consumed test claim, never create a new claim or send without
+separate authorization, and update this document.
+
+### What was built
+
+- `lib/agenda/oauth-error-code.ts` (new, dependency-free, directly
+  unit-testable -- same split this codebase already uses for
+  `mime-message.ts`): `extractAllowlistedOAuthErrorCode(body)` returns one of
+  a fixed 7-code allowlist (`invalid_request`, `invalid_client`,
+  `invalid_grant`, `unauthorized_client`, `unsupported_grant_type`,
+  `invalid_scope` -- the full RFC 6749 section 5.2 token-endpoint set -- plus
+  Google's own `deleted_client` extension) or `null`. Never reads
+  `error_description`; never returns a code outside the allowlist; a
+  non-object body, missing/non-string `error` field, or any parse failure
+  all degrade to `null`.
+- `lib/agenda/gmail-client.ts`: `refreshAccessToken()`'s failure branch now
+  attempts `extractAllowlistedOAuthErrorCode(await response.json())` inside a
+  `try/catch` (so a non-JSON or malformed body never throws past this point)
+  and appends the result, if any, as `(code)` to the existing status-only
+  message -- e.g. `"Gmail token refresh failed: HTTP 401 Unauthorized
+  (invalid_client)"` instead of just the bare status. `sendGmail()`'s
+  fail-closed Production-only guard (`isRealEmailSendAllowed`) and the
+  separate Gmail-send-endpoint failure path are both completely untouched --
+  confirmed via `git diff`, scoped to exactly 5 files (the two source files,
+  `scripts/run-tests.mjs`'s test registration, and two test files).
+- `tests/agenda-oauth-error-code.test.mjs` (new): every allowlisted code
+  round-trips correctly; `error_description` never affects the result;
+  non-allowlisted codes (including a crafted string that merely *contains*
+  an allowlisted substring padded with extra text) are discarded; every
+  malformed shape (`null`, a bare string, a number, an array, an object with
+  no `error` field, a non-string `error` field, the wrong field name) returns
+  `null` without throwing.
+- `tests/agenda-safety.test.mjs` updated: added assertions that
+  `error_description` is never read, that the failure branch's parsed body
+  flows straight into the allowlist function (never assigned for any other
+  use), and widened the existing throw-site/no-body-interpolation checks to
+  also reject `error_description`. All gates: **188/188 tests pass** (one
+  new file), `tsc --noEmit` clean, lint at the unchanged 94-error/43-warning
+  baseline.
+
+### Staging test and Production pre-deployment checks
+
+Built and deployed to Staging (version `4e91ee57-94a2-4889-8918-0622cf746aaf`,
+bindings unchanged). An unauthenticated request to the Staging root returned
+`302` (the expected Cloudflare Access redirect) -- confirming the Worker
+booted and routed correctly post-deploy, not a crash. **No email was sent on
+Staging**: Staging's own fail-closed allowlist structurally cannot reach
+Google's token endpoint regardless of this change (confirmed unchanged), so
+the only thing Staging can ever verify is that the new code deploys and runs
+without error -- which it does. The parsing logic itself is already
+exhaustively covered by the new unit tests above (direct Google-shaped
+payloads), which is the ceiling of what any live environment could add on
+top.
+
+Before the Production deploy: rollback target confirmed
+(`1527fa4f-0471-433b-ab14-5f7522bfe141`, the test-send mechanism's version,
+live at the time); `git diff --stat` confirmed exactly the 5 intended files,
+zero changes to `email-send-guard.ts`, `send-agenda.ts`, `test-send-log.ts`,
+`worker/index.ts`, either `wrangler.*.jsonc`, or any donor-data route; live
+Workspace Health page checked in the owner's own authenticated session --
+**Healthy**: automated backup completed successfully 2026-10-14T13:39:23Z,
+monthly restore test verified the Oct 12 backup, database connected, live
+schema 0022/0022, Production <-> baseline schema match,
+Production launch readiness "Ready". All safety checks passed.
+
+### Production deployment
+
+`pnpm run deploy:production-independent` succeeded. **New Production Worker
+version: `6aece8e1-8e24-4dfd-9aaa-54b0b781c657`.** Bindings confirmed
+unchanged (`env.DB` -> `fundraising-os-production-db`, `env.APP_BASE_URL` ->
+`"https://shimmydonors.org"`, cron `0 * * * *` unchanged). The Production
+build bundle was re-confirmed (via `grep`) to contain
+`extractAllowlistedOAuthErrorCode`, all 7 allowlisted codes, and the existing
+`isRealEmailSendAllowed`/`EmailSendBlockedError` guard -- and **zero**
+occurrences of `error_description`.
+
+Read-only D1 verification immediately after deploy:
+
+- The consumed test claim (`id =
+  "2026-10-14-production-gmail-oauth-verification"`) is **exactly unchanged**
+  -- `status: "failed"`, `outcome: "Gmail token refresh failed: HTTP 401
+  Unauthorized"` (the old, pre-diagnostic message, since no new attempt was
+  made this round). Not reset, not deleted, per requirement 10.
+- Donor data unchanged: 254 donors, 5,464 giving activities.
+- `agenda_send_log`: still 0 rows, unchanged.
+- No new claim was created and no email was sent this round, per
+  requirement 11.
+
+### Whether the diagnostic result can be obtained safely at the next scheduled send, or whether another controlled test is needed
+
+**Yes -- the next scheduled 9 AM Eastern Production send will produce the
+diagnostic result automatically, with no further action required.** The
+code change lives in `refreshAccessToken()`, which is on the exact same call
+path `runScheduledAgendaSend` -> `sendDailyAgenda` -> `sendGmail` ->
+`refreshAccessToken` already uses every day. If tomorrow's cron attempt
+fails the same way today's did, Cloudflare Observability's
+`daily_agenda_send_failed` log line will include `error.message`, which will
+now read (for example) `"Gmail token refresh failed: HTTP 401 Unauthorized
+(invalid_client)"` instead of the bare status -- directly confirming or
+ruling out hypothesis 1 (bad client ID/secret) from the prior round, with no
+new deployment, claim, or manual send needed.
+
+**A controlled test is only needed if the owner wants the answer sooner than
+the next natural window**, since (as the "Post-Correction Verification
+Attempt" entry above already established and nothing in this round changes)
+there remains no way to exercise `refreshAccessToken()` in isolation from an
+actual send attempt. That would mean the same shape as the prior
+controlled test: a **new** claim ID (the current one is permanently
+consumed) and a fresh explicit authorization to invoke it -- not performed
+this round, per requirement 11.
