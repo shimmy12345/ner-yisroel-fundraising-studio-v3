@@ -38507,3 +38507,110 @@ Sources consulted this round:
 - [Error: unauthorized_client -- WP Mail SMTP](https://wpmailsmtp.com/docs/error-unauthorized_client/)
 - [unauthorized_client for desktop application -- Google Developers forum](https://discuss.google.dev/t/unauthorized-client-for-desktop-application/182388)
 - [Getting 'unauthorized_client' error with Nodemailer and Google OAuth2 -- Netlify community forum](https://answers.netlify.com/t/getting-unauthorized-client-error-with-nodemailer-and-google-oauth2-in-node-js/108979)
+
+## Deployment Safeguard Proposal -- Fail-Closed Build-Manifest Check (2026-10-14, NOT YET WIRED IN -- for review)
+
+Kept deliberately separate from the Gmail repair above, per explicit
+instruction. This section proposes, but does not activate, a fix for the
+deployment-process class of bug found and manually corrected earlier today
+(the "Staging-bundle-on-Production" incident).
+
+### Independent re-investigation of the incident (requirement 5)
+
+- **Root cause re-confirmed from first principles, not just re-asserted**:
+  `package.json`'s `deploy:staging-independent` and
+  `deploy:production-independent` scripts are, and always have been, exactly
+  `wrangler deploy --config wrangler.*.jsonc` -- neither has ever invoked a
+  build step. `dist/` is `/dist/`-gitignored (confirmed in `.gitignore`, line
+  40; confirmed via `git check-ignore -v` and `git log -- dist/` returning
+  nothing) -- meaning no build artifact from any past deploy, correct or
+  not, was ever retained anywhere this session could inspect it after the
+  fact. This is precisely why the bug was invisible until a live,
+  cache-disabled fetch of the running Worker was checked -- nothing in
+  source control could have revealed it.
+- **Whether this happened in any earlier round**: this document's own history
+  was searched for every past `build:staging-independent`/
+  `build:production-independent`/`deploy:staging-independent`/
+  `deploy:production-independent` mention (100+ matches). Every round that
+  interleaved a Staging and a Production deploy explicitly logged a fresh
+  `build:production-independent` immediately before its
+  `deploy:production-independent` (e.g. the 2026-10-12 cutover round:
+  "`build:staging-independent` -> `deploy:staging-independent` ->
+  `build:production-independent` -> `deploy:production-independent`", in
+  that exact order; the 2026-10-14 production/backup round similarly builds
+  both independently and explicitly before each deploy). **No other
+  documented round shows the broken sequence** (a Staging build with no
+  intervening Production build before a Production deploy) -- today's
+  incident appears to be an isolated, first-time slip, not a systemic
+  pattern, though this is necessarily based on what was logged in this
+  document rather than independent proof of every command actually run.
+
+### Proposed implementation -- written, tested standalone, NOT wired into any deploy script
+
+**New file, inert on its own:** `scripts/verify-build-manifest.mjs` -- reads
+`dist/build-manifest.json`, exits non-zero (refusing to deploy) if it's
+missing, was built for the wrong environment, or is older than 10 minutes
+(catching a long-forgotten stale `dist/` the environment check alone
+wouldn't). Takes the expected environment as its one argument. Has zero
+effect unless something calls it.
+
+**`scripts/build-production-independent.mjs` and `scripts/build-staging.mjs`**,
+both edited identically: after a successful build only, write
+`dist/build-manifest.json` with `{ environment, builtAt }`. This file lives
+at `dist/` (not `dist/client/`, which is the only directory `wrangler`
+actually uploads as static assets, and not `dist/server/`, which is the only
+file `wrangler` bundles as the Worker itself) -- it is a pure local
+build-tooling artifact, never deployed, never publicly served, never part of
+the Worker bundle.
+
+**Tested standalone, nothing deployed:** built Staging, confirmed the
+manifest; ran the verify script asking for `"production-independent"` --
+**it failed, reproducing the exact incident** ("dist/ was built for
+"staging-independent", not the expected "production-independent". Refusing
+to deploy..."). Built Production, confirmed the manifest; ran the verify
+script asking for `"production-independent"` -- passed. Confirmed the
+missing-argument case also fails closed. `node -c` syntax-checked all three
+files; `pnpm run lint` re-run at the unchanged 94-error/43-warning baseline.
+
+### Proposed `package.json` change -- NOT applied, for review only
+
+```diff
+-    "deploy:staging-independent": "wrangler deploy --config wrangler.staging.jsonc",
+-    "deploy:production-independent": "wrangler deploy --config wrangler.production.jsonc",
++    "deploy:staging-independent": "pnpm run build:staging-independent && node scripts/verify-build-manifest.mjs staging-independent && wrangler deploy --config wrangler.staging.jsonc",
++    "deploy:production-independent": "pnpm run build:production-independent && node scripts/verify-build-manifest.mjs production-independent && wrangler deploy --config wrangler.production.jsonc",
+```
+
+This makes each `deploy:*-independent` command **always** rebuild
+immediately before deploying -- eliminating the entire class of "stale or
+wrong `dist/`" mistake at its root, not merely detecting it -- with the
+manifest check as a second, independent layer of defense (e.g. against a
+build script itself someday writing to the wrong environment without
+actually failing). Because `&&` short-circuits, a failed build or a failed
+verify both stop `wrangler deploy` from ever running.
+
+### Risks and limitations, disclosed for review
+
+1. **Does not cover raw `wrangler deploy` run outside these npm scripts.**
+   Anyone invoking `wrangler deploy --config wrangler.production.jsonc`
+   directly, bypassing `pnpm run deploy:production-independent` entirely,
+   is not protected by this check. This matches every deploy actually
+   performed and documented in this project's history (always through the
+   `pnpm run deploy:*` scripts), but it is a real gap if that practice is
+   ever not followed.
+2. **Every deploy now always rebuilds**, adding the build's own duration
+   (observed: well under a minute) to every deploy invocation, including
+   ones where the `dist/` was already correct. This trades a small, constant
+   time cost for eliminating the failure mode outright.
+3. **The 10-minute freshness window is a judgment call.** Too short risks a
+   spurious failure on a slow machine or network; too long weakens the
+   "stale build" defense. 10 minutes was chosen as generously longer than
+   any observed build time this session, but is easy to revisit.
+4. **The manifest file itself is trusted input to the verify script** -- it
+   is plain, unsigned JSON written by the same build process it's meant to
+   check. It defends against the specific incident class (a leftover build
+   from a *different, legitimate* build invocation), not against a
+   deliberately falsified manifest, which was never the threat model here.
+
+**Awaiting explicit approval before applying the `package.json` change above
+and treating this safeguard as active.**
