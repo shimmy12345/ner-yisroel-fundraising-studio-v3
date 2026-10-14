@@ -148,6 +148,53 @@ export const COMPLETED_WELL_WISH_PATTERN = /\bwish(?:ed)?\b.{0,20}\b(?:happy bir
 // gated pattern over a speculative broader one.
 export const COMPLETED_MILESTONE_EVENT_PATTERN = /^(?:his |her |their )?(?:son|daughter|grandson|granddaughter|child|grandchild|nephew|niece)(?:'s)?\s+had\s+(?:a|an|his|her|their)\s+(?:bar mitzvah|bat mitzvah|wedding|engagement|baby|bris|upsherin|graduation)\.?$/i;
 
+// A completed, one-time OUTREACH TOUCH narrated in the fundraiser's own
+// past tense, OPENING the sentence -- evidenced 2026-10-14 investigating
+// a real Production report (Mr. & Mrs. Yaakov Zachter's fact, "Texted
+// video from first day of Zman and thanked him for his support that
+// makes it happen.") and, while checking for the same shape elsewhere in
+// Production, a SECOND, independently-found live fact with the identical
+// problem and no shared vocabulary at all ("Spoke with him and gave him
+// a tour of the new gym."). Both are category `engagement`, a non-
+// singular-state category; neither matches COMPLETED_WELL_WISH_PATTERN
+// (no "wish ... happy birthday/mazel tov") or COMPLETED_MILESTONE_EVENT_
+// PATTERN (no bare "<relation> had a/an <event>" shape), so both fell
+// through to step 4's `durable` default below and stayed permanently,
+// fully-scored actionable -- the exact same failure mode the two
+// patterns above already fix, but for open-ended real-world wording a
+// third narrow phrase list could never keep up with. This is the general
+// version: rather than enumerating every possible completed-touch
+// vocabulary, it recognizes the SHAPE -- a sentence whose very first
+// word is a past-tense outreach-contact verb is, by construction, a
+// narration of an action the fundraiser already performed, never a
+// standing fact ABOUT the donor ("His daughter is Danielle.", "Is a
+// major supporter of the yeshiva." -- neither opens with an action verb).
+//
+// Deliberately anchored to the START of the sentence (`^`), unlike
+// MILESTONE_OUTREACH_COMPLETION_PATTERN below (which matches an action
+// verb anywhere within an interaction's own, often multi-line, summary):
+// a FACT's text is always a single, isolated sentence (this module's
+// own "one sentence, one fact" convention), so requiring the verb to
+// lead is what keeps this from ever touching a sentence that merely
+// mentions a past touch in passing rather than opening with it -- e.g.
+// "Discussed Kollel donation and said to follow up after succos" (not
+// anchored here at all; also already resolved as `follow_up` by
+// COMMITMENT_PATTERN, checked first, before this ever runs).
+//
+// Deliberately NOT wired into isConfirmedOutreachCompletion's interaction-
+// summary confirmation side (below): that check must still verify the
+// linked interaction is topically about the SAME completed action (see
+// MILESTONE_OUTREACH_COMPLETION_PATTERN's own milestone-noun requirement
+// and its "unrelated interaction must never suppress" regression test),
+// and this pattern has no comparable topic noun to anchor that check on
+// for an open-ended appreciation/courtesy touch -- loosening that side to
+// "any outreach verb anywhere in the summary" would wrongly let an
+// unrelated interaction (e.g. a call about something else entirely)
+// suppress a genuinely different, still-open fact. The fast decay window
+// below is what actually fixes both real cases (both already well past
+// 30 days old), without that risk.
+export const COMPLETED_OUTREACH_ACTION_PATTERN = /^(?:call(?:ed)?|text(?:ed)?|visited|stopped by|dropped off|sent (?:a |an )?(?:text|email|card|gift|video|note)|emailed|wrote|spoke (?:with|to)|met with|wished)\b/i;
+
 // Category: WHAT the fact is about -- checked in a fixed priority order
 // against the WHOLE input text (a single specificFacts sentence at
 // accept time in Phase 2+, or, for Phase 1's backfill, a donor's entire
@@ -197,7 +244,12 @@ export function classifyFactCategory(text: string): FactCategory {
 //    milestone -- the event itself is a point-in-time occurrence, same
 //    reasoning as the well-wish case just above, and distinct from an
 //    evergreen standing fact like "His daughter is Danielle.", which
-//    this pattern does not match and which correctly stays durable).
+//    this pattern does not match and which correctly stays durable), OR
+//    matches COMPLETED_OUTREACH_ACTION_PATTERN (a sentence that OPENS
+//    with a past-tense outreach-contact verb -- the general case the two
+//    patterns just above are each a narrow instance of: any completed
+//    touch, whatever its vocabulary, is a point-in-time occurrence, not
+//    a standing fact).
 // 4. Otherwise, the default depends on CATEGORY, not a single global
 //    fallback: the two singular-state categories (`solicitation`,
 //    `health`) default to `time_bound` -- an ask-in-progress or a health
@@ -218,7 +270,7 @@ export function classifyFactCategory(text: string): FactCategory {
 export function classifyFactLifecycle(text: string, category: FactCategory): FactLifecycle {
   if (PERMANENT_LIFE_EVENT_PATTERN.test(text)) return "durable";
   if (COMMITMENT_PATTERN.test(text)) return "follow_up";
-  if (RELATIVE_TIME_PATTERN.test(text) || TRANSIENT_HEALTH_STATE_PATTERN.test(text) || RELATIONSHIP_CHANGE_PATTERN.test(text) || COMPLETED_WELL_WISH_PATTERN.test(text) || COMPLETED_MILESTONE_EVENT_PATTERN.test(text)) return "time_bound";
+  if (RELATIVE_TIME_PATTERN.test(text) || TRANSIENT_HEALTH_STATE_PATTERN.test(text) || RELATIONSHIP_CHANGE_PATTERN.test(text) || COMPLETED_WELL_WISH_PATTERN.test(text) || COMPLETED_MILESTONE_EVENT_PATTERN.test(text) || COMPLETED_OUTREACH_ACTION_PATTERN.test(text)) return "time_bound";
   return isSingularStateCategory(category) ? "time_bound" : "durable";
 }
 
@@ -311,17 +363,40 @@ export const COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS = CATEGORY_DECAY_WINDOW_DAYS.
 // topic -- see COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS's own comment).
 export const COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS = CATEGORY_DECAY_WINDOW_DAYS.commitment_followup;
 
+// A completed, one-time OUTREACH ACTION report (e.g. "Texted video from
+// first day of Zman and thanked him for his support that makes it
+// happen.") decays on the same fast window as the two patterns above,
+// same reasoning -- a completed, point-in-time touch's value as a future
+// "reach out and reference" hook fades fast, whatever its vocabulary.
+export const COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS = CATEGORY_DECAY_WINDOW_DAYS.commitment_followup;
+
 // The decay window scoreFact() must actually use for a `time_bound` fact:
-// COMPLETED_WELL_WISH_PATTERN's and COMPLETED_MILESTONE_EVENT_PATTERN's
-// narrower windows take priority over the fact's own category's window
-// when the text matches (checked by text, not category, so a
-// family_milestone fact's WHAT-classification stays unchanged -- only
-// the HOW-LONG window differs for these two evidenced text shapes).
-// Every other time_bound fact is unaffected: falls straight through to
-// its existing category window, byte-for-byte as before.
+// COMPLETED_WELL_WISH_PATTERN's, COMPLETED_MILESTONE_EVENT_PATTERN's, and
+// COMPLETED_OUTREACH_ACTION_PATTERN's narrower windows take priority over
+// the fact's own category's window when the text matches (checked by
+// text, not category, so a family_milestone/engagement fact's WHAT-
+// classification stays unchanged -- only the HOW-LONG window differs for
+// these evidenced text shapes). Every other time_bound fact is
+// unaffected: falls straight through to its existing category window,
+// byte-for-byte as before.
+//
+// COMPLETED_OUTREACH_ACTION_PATTERN's override is deliberately gated to
+// non-singular-state categories only (`!isSingularStateCategory`): a
+// solicitation or health fact already gets the correct time_bound
+// lifecycle and its own, deliberately longer category window (90/180
+// days) regardless of phrasing -- see classifyFactLifecycle's step-4
+// default -- and a solicitation note that happens to open with a contact
+// verb ("Called and discussed building naming opportunity") is often NOT
+// fully resolved; the subject matter, not just the touch, may still need
+// follow-through. Narrowing this fast window to the actual bug
+// population (engagement/family_milestone/general facts that were
+// defaulting to never-decaying `durable`) is what keeps this fix from
+// reintroducing the previously-fixed stale-pledge/solicitation problem
+// the investigation was explicitly warned against.
 export function resolveDecayWindowDays(category: FactCategory, factText: string): number {
   if (COMPLETED_WELL_WISH_PATTERN.test(factText)) return COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS;
   if (COMPLETED_MILESTONE_EVENT_PATTERN.test(factText)) return COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS;
+  if (!isSingularStateCategory(category) && COMPLETED_OUTREACH_ACTION_PATTERN.test(factText)) return COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS;
   return CATEGORY_DECAY_WINDOW_DAYS[category];
 }
 

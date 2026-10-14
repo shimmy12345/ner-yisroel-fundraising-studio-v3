@@ -205,13 +205,23 @@ async function run() {
   assert.doesNotMatch("Zman is starting soon! Wishing everyone a wonderful start to the new semester.", ZMAN_APPRECIATION_PATTERN, "the narrow appreciation pattern must not match generic zman wording with no thanks/support language");
 
   // ================================================================
-  // Existing Zman-appreciation behavior for genuine support/thanks
-  // remains fully intact (Zachter's own real Phase 1 fact text).
+  // Existing Zman-appreciation EXTRACTION behavior for genuine
+  // support/thanks remains fully intact (Zachter's own real Phase 1
+  // fact text) -- category classification is also unchanged. The
+  // LIFECYCLE value below was corrected 2026-10-14 (lib/relationships/
+  // fact-classification.ts's COMPLETED_OUTREACH_ACTION_PATTERN,
+  // docs/AI-HANDOFF.md's "Completed Outreach Action Fix"): this exact
+  // sentence is itself the real Production bug -- a completed outreach
+  // touch the fundraiser already performed was classified `durable`
+  // (never decaying) and kept generating "Reach out and reference"
+  // recommendations for an action already taken. `time_bound` is the
+  // now-correct answer; asserting the old `durable` value here would
+  // re-encode the bug this fix exists to remove as a protected invariant.
   // ================================================================
   const genuineAppreciation = "Texted video from first day of Zman and thanked him for his support that makes it happen.";
   const appreciationExtracted = extractInteraction(genuineAppreciation, "text", "");
   assert.equal(appreciationExtracted.relationshipSummary, genuineAppreciation, "genuine zman-appreciation text (thanking a donor for support) must still propose a fact exactly as before");
-  assert.deepEqual(classifyRelationshipFact(appreciationExtracted.relationshipSummary), { category: "engagement", lifecycle: "durable" }, "classification for genuine zman appreciation must be unchanged (matches Zachter's real Phase 1 fact)");
+  assert.deepEqual(classifyRelationshipFact(appreciationExtracted.relationshipSummary), { category: "engagement", lifecycle: "time_bound" }, "category classification for genuine zman appreciation is unchanged; lifecycle is now time_bound (completed-outreach-action fix) rather than the never-decaying durable default that caused the real Zachter recommendation bug");
 
   console.log("stewardship-activity: ok");
 }

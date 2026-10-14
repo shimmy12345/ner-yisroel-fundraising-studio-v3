@@ -9,6 +9,7 @@ import {
   CATEGORY_DECAY_WINDOW_DAYS,
   COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS,
   COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS,
+  COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS,
   DURABLE_BASELINE_SCORE,
   RELEVANCE_FLOOR,
 } from "../lib/relationships/fact-classification.ts";
@@ -203,6 +204,61 @@ async function run() {
   assert.equal(hasSubstantiveContentBesidesCommitment("Promised to send the updated schedule."), false);
   // Never flags text that isn't even follow_up-shaped in the first place.
   assert.equal(hasSubstantiveContentBesidesCommitment("His daughter is Danielle."), false);
+
+  // --- Regression: COMPLETED_OUTREACH_ACTION_PATTERN (2026-10-14, found
+  // investigating a real Production report: the Daily Fundraising
+  // Agenda recommended "Reach out and reference: Texted video from first
+  // day of Zman and thanked him for his support that makes it happen."
+  // for Mr. & Mrs. Yaakov Zachter, weeks after the fundraiser had already
+  // sent that exact text. Neither COMPLETED_WELL_WISH_PATTERN (no "wish
+  // ... happy birthday/mazel tov") nor COMPLETED_MILESTONE_EVENT_PATTERN
+  // (no bare "<relation> had a/an <event>" shape) caught this, so it fell
+  // through to step 4's `durable` default -- the general version of the
+  // same bug those two patterns already fix, for open-ended wording no
+  // fixed phrase list could anticipate. A SECOND, independently-found
+  // live Production fact with the identical shape and no shared
+  // vocabulary ("Spoke with him and gave him a tour of the new gym.")
+  // confirms this is systemic, not a one-donor wording quirk. ---
+  assert.deepEqual(classifyRelationshipFact("Texted video from first day of Zman and thanked him for his support that makes it happen."), { category: "engagement", lifecycle: "time_bound" });
+  assert.deepEqual(classifyRelationshipFact("Spoke with him and gave him a tour of the new gym."), { category: "engagement", lifecycle: "time_bound" });
+  // A few more completed-touch openers, proving the fix is general
+  // (shape-based), not a second narrow phrase list.
+  assert.equal(classifyFactLifecycle("Called and caught up on family news.", "general"), "time_bound");
+  assert.equal(classifyFactLifecycle("Visited and brought a gift for the new baby.", "family_milestone"), "time_bound");
+  assert.equal(classifyFactLifecycle("Dropped off a care package before Yom Tov.", "general"), "time_bound");
+
+  // Sanity: this pattern is anchored to the START of the sentence --
+  // naming the SAME completed touch in passing, rather than opening with
+  // it, must not trigger it. Standing facts about the donor (not an
+  // action the fundraiser performed) are unaffected either way.
+  assert.equal(classifyFactLifecycle("He mentioned the fundraiser had called last week.", "general"), "durable", "the verb must lead the sentence, not merely appear in it");
+  assert.deepEqual(classifyRelationshipFact("His daughter is Danielle."), { category: "family_milestone", lifecycle: "durable" }, "a standing identity fact, not an action report, must be unaffected");
+  assert.deepEqual(classifyRelationshipFact("Very close with Rabbi Cohen; mentioned they study together weekly."), { category: "general", lifecycle: "durable" }, "a standing relationship fact must be unaffected");
+
+  // Priority order is preserved: a commitment word still wins over this
+  // pattern even when the sentence also opens with a contact verb --
+  // "Called and promised to follow up" must stay `follow_up`, matching
+  // the exact Weinschneider-style precedent this module already protects.
+  assert.deepEqual(classifyRelationshipFact("Called and promised to follow up after succos."), { category: "commitment_followup", lifecycle: "follow_up" });
+
+  // --- resolveDecayWindowDays: a completed outreach action gets the same
+  // fast window as a completed well-wish/milestone-event (reused from
+  // commitment_followup's 30 days), not its own category's longer window. ---
+  assert.equal(resolveDecayWindowDays("engagement", "Texted video from first day of Zman and thanked him for his support that makes it happen."), COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS);
+  assert.equal(COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS, 30);
+  assert.equal(resolveDecayWindowDays("engagement", "Spoke with him and gave him a tour of the new gym."), COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS);
+
+  // --- Critical guard: the fast window must NEVER apply to a singular-
+  // state category (solicitation/health), even when the text opens with
+  // a contact verb -- a solicitation note that happens to start with
+  // "Called" is often NOT fully resolved (the call is done, but the ASK
+  // may still need follow-through), and this is exactly the previously-
+  // fixed stale-pledge/solicitation protection the investigation was
+  // explicitly warned not to reintroduce. Must fall through to
+  // solicitation's own, deliberately longer 90-day window unchanged. ---
+  assert.equal(resolveDecayWindowDays("solicitation", "Called and discussed building naming opportunity."), CATEGORY_DECAY_WINDOW_DAYS.solicitation);
+  assert.notEqual(CATEGORY_DECAY_WINDOW_DAYS.solicitation, COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS, "sanity check: the two windows must actually differ for this guard to be meaningful");
+  assert.equal(resolveDecayWindowDays("health", "Called to check in on his recovery."), CATEGORY_DECAY_WINDOW_DAYS.health);
 
   // --- Category taxonomy: isSingularStateCategory is exactly {solicitation, health}. ---
   assert.equal(isSingularStateCategory("solicitation"), true);
