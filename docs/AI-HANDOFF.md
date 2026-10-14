@@ -37708,3 +37708,140 @@ No corrective action is recommended beyond what the owner has already
 done -- this round found no defect, only an inherent limitation of
 testing an authentication step that has no safe isolation point from
 the action it gates.
+
+## Controlled Test-Email Authorization -- STOPPED, No Safe Existing Mechanism Found (2026-10-14)
+
+The owner authorized sending one controlled Production test email today
+to verify the new credentials, explicitly conditioned on first
+determining whether a safe existing mechanism supports it (requirement
+7) and, if not, stopping to explain the smallest safe change rather
+than deploying anything (requirement 10). **This round concluded no
+safe existing mechanism exists, stopped, and deployed nothing. No
+email was sent.**
+
+### Investigation, read-only throughout
+
+- `grep -rln "sendDailyAgenda\|sendGmail" app/ worker/` -> exactly one
+  match, `app/api/agenda/preview/route.ts` -- and that file's only
+  occurrence of either name is in its own header comment stating it
+  **never** calls `sendGmail()` (confirmed by re-reading the file in
+  full: it imports only `generateAgenda`, never `gmail-client.ts`).
+  **Zero HTTP routes anywhere in this application reach a real send.**
+- The only two callers of `sendDailyAgenda`/`sendGmail` in the entire
+  codebase are `runScheduledAgendaSend` (the Daily Agenda path) and the
+  backup-alert check, both reachable **only** via the Worker's
+  `scheduled()` export -- itself reachable only by a real Cloudflare
+  Cron Trigger firing, or by manually invoking the platform's own
+  scheduled-handler test endpoint (which this session does not use;
+  see the 2026-10-14 implementation round's own disclosed limitation
+  above).
+- `isDailyAgendaSendHour` was checked against the real current time
+  (2026-10-14, mid-afternoon UTC): **false**, and will not read true
+  again until tomorrow's real 9 AM Eastern window. `runScheduledAgendaSend`
+  returns on its very first line whenever this is false -- there is no
+  way to reach the token refresh or a send through this path right now
+  without literally waiting for tomorrow's real window, which is the
+  one thing the owner's own objective says not to interfere with.
+- `agenda_send_log` queried directly (read-only) on Production: **zero
+  rows exist for any date**, including `2026-10-14` -- the morning's
+  failed 401 attempt ran on code deployed *before* this table or the
+  idempotency logic existed, so nothing was ever claimed. This rules
+  out an idempotency *conflict* as a blocker, but does not by itself
+  create a way to reach the send path.
+
+**Conclusion: the application, as currently deployed, has no code path
+that can send a single isolated email without either (a) bypassing the
+9 AM hour gate -- which the owner's own requirement 7 says not to do
+without first determining a safe existing mechanism exists, and it does
+not -- or (b) waiting for tomorrow's real window, which is not "today."
+Per requirement 10, this round stops here rather than deploying
+anything.**
+
+### Smallest safe implementation change -- proposed, NOT implemented, NOT deployed
+
+A new, dedicated, owner-authenticated-only route, e.g.
+`app/api/agenda/test-send/route.ts`, modeled directly on the existing
+`app/api/agenda/preview/route.ts` (same auth gate, same shared
+functions, no reimplementation):
+
+```ts
+import { getChatGPTUser } from "../../../chatgpt-auth";
+import { sendDailyAgenda } from "../../../../lib/agenda/send-agenda";
+
+export async function POST(request: Request) {
+  const identity = await getChatGPTUser();
+  if (!identity) return Response.json({ error: "Authentication required" }, { status: 401 });
+  try {
+    await sendDailyAgenda(Math.floor(Date.now() / 1000));
+    return Response.json({ sent: true });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Send failed" }, { status: 500 });
+  }
+}
+```
+
+Why this is the *smallest* safe change, and exactly what it would and
+would not do:
+
+- **Reuses `sendDailyAgenda` exactly as-is** -- the identical function
+  the real scheduled path calls, built from `generateAgenda()`'s same
+  live Production data and the same `buildAgenda({..., baseUrl:
+  env.APP_BASE_URL})` -- genuine Production data and genuine
+  `https://shimmydonors.org` links by construction, satisfying
+  requirement 2 with zero new logic to get wrong.
+- **Automatically inherits the fail-closed guard** -- `sendGmail()`'s
+  `isRealEmailSendAllowed` check (the first statement in that function)
+  runs regardless of caller, so this route would refuse with
+  `EmailSendBlockedError` on Staging exactly like every other caller,
+  with no new guard code required. Satisfies requirement 5 by
+  construction, not by a new check.
+- **Recipient is never attacker- or caller-controlled** -- `sendDailyAgenda`
+  internally calls `requireOwnerEmail()` for both `from` and `to`; there
+  is no parameter on this proposed route that could send anywhere else.
+  Satisfies requirements 1 and 3 by construction.
+- **Deliberately bypasses the 9 AM hour gate** -- this route would call
+  `sendDailyAgenda` directly, never `runScheduledAgendaSend`, so
+  `isDailyAgendaSendHour` is never consulted. This is the one explicit
+  trade-off requirement 7 asks to be surfaced plainly rather than done
+  silently: **this is the bypass**, named as such, not hidden inside a
+  larger change.
+- **Does not touch `agenda_send_log` at all** in the minimal version
+  above -- no claim, no commit. Since the table is keyed by `(user_id,
+  send_date)` and today's manual test would use today's real date
+  (`2026-10-14`), while tomorrow's real scheduled send claims
+  `2026-10-15` -- a *completely different key* -- there is no possible
+  collision either way, satisfying requirement 6 regardless of whether
+  this route touches the table or not.
+- **Optional refinement, not required for safety**: this route could
+  additionally perform one read-only `SELECT` against `agenda_send_log`
+  for today's date before sending, and refuse (409) if a `'sent'` row
+  already exists -- purely a courtesy against accidentally double-
+  firing this same manual route twice, not a correctness requirement
+  (the real idempotency protection that matters for tomorrow is
+  already satisfied by the different-date-key argument above). It
+  could also optionally write its own `'sent'` row for today's date on
+  success, unifying the audit trail with the real system's own
+  bookkeeping -- also optional, also harmless to tomorrow's claim
+  either way.
+- Should be removed after use, or left in place as a permanent,
+  owner-auth-gated "send a test agenda now" feature -- the owner's
+  choice, not decided here.
+
+### Verification, if and when the owner approves
+
+Would use exactly the same evidence already proven effective this
+entire incident: a Gmail search for the new message and a direct read
+of its links/content (data provenance, Production vs. Staging, as
+already demonstrated repeatedly), plus (if the owner can supply it)
+Cloudflare Observability confirming `daily_agenda_sent` rather than
+`daily_agenda_send_failed` for this specific invocation.
+
+### Nothing was implemented, deployed, or sent this round
+
+`git status` confirmed a clean tree throughout, at the same `HEAD`
+(`dfb7025`) this round started at. No new file was created. No
+Production secret, donor record, pledge, payment, or `agenda_send_log`
+row was read or written beyond the one empty-table confirmation query
+above. **Awaiting the owner's explicit approval of this specific
+proposed code change (or a different one) before anything is written
+or deployed.**
