@@ -38383,3 +38383,127 @@ to match them) rather than attempting to recover whatever the refresh
 token's original, now-unknown issuing client was. Verification afterward
 could reuse this same controlled-test mechanism (a third claim ID, a fresh
 explicit authorization) or simply the next natural 9 AM Eastern window.
+
+## `unauthorized_client` -- What It Actually Means, and Owner Instructions for a New Refresh Token (2026-10-14, read-only, no credentials touched)
+
+Per explicit instruction, this round confirmed `unauthorized_client`'s
+meaning against Google's own documentation rather than relying on the prior
+round's own inference, and does **not** treat it as definitive proof of a
+refresh-token/client mismatch specifically.
+
+### 1. What the research actually found
+
+- **Google's own developer documentation does not define `unauthorized_client`
+  for the token endpoint.** Two of Google's own pages were checked directly:
+  the "Using OAuth 2.0 for Web Server Applications" guide (both halves of its
+  content) and the Nest Device Access "Authorization Errors" reference.
+  Neither mentions `unauthorized_client` at all. Google's docs define
+  `invalid_client` ("the OAuth 2.0 Client Secret is incorrect") and
+  `invalid_grant` (expired/invalidated/revoked token) explicitly, but this
+  specific code has no first-party Google definition that could be found.
+- **The generic OAuth 2.0 spec (RFC 6749 section 5.2)**, which Google's token
+  endpoint implements, defines it generically: "the authenticated client is
+  not authorized to use this authorization grant type." This is a real,
+  load-bearing standard but is generic across all OAuth providers, not
+  Google-specific guidance.
+- **Third-party sources describe three distinct, real-world causes**, not
+  one:
+  1. **Client/refresh-token mismatch** -- a Google Developers forum report
+     (a user got this exact error with an OAuth-Playground-issued refresh
+     token; completing the authorization step for the correct client fixed
+     it).
+  2. **Wrong OAuth client type** -- a Gmail-SMTP-specific troubleshooting
+     guide (WP Mail SMTP, itself built around the same `gmail.send`-via-
+     refresh-token pattern this app uses) names this as **the single most
+     common cause**: the OAuth credential was created as a **Desktop app**
+     instead of a **Web application**.
+  3. **Google Workspace admin restriction** -- the same guide describes an
+     admin blocking third-party API access for a specific OAuth client in
+     the Workspace Admin Console ("Manage Third-Party App Access"), which
+     can apply per-client, not only domain-wide -- so a newly-created or
+     newly-regenerated client could hit this even though the original,
+     long-used client never did.
+- **What the existing evidence (independent of this new research) still
+  favors, without being definitive:** the deployment log shows
+  `GMAIL_OAUTH_CLIENT_ID` was itself explicitly updated (a distinct secret
+  -put event from `GMAIL_OAUTH_CLIENT_SECRET`), while `GMAIL_OAUTH_REFRESH_TOKEN`
+  was explicitly left unchanged (confirmed, not assumed, via `wrangler
+  deployments list`'s own per-secret labels). This is consistent with
+  cause 1 (and arguably cause 2, if regenerating credentials meant creating
+  a new client rather than rotating the existing one's secret) but does not
+  rule out cause 3. **This document now states only what the evidence
+  actually supports: the current Client ID/Secret pair and the current
+  refresh token do not work together, for one of these three reasons, not
+  definitively the first one.**
+
+### 2. Should a new refresh token be issued for the existing Client ID/Secret?
+
+**Yes -- this remains the correct next step regardless of which of the three
+causes is actually true**, and it is informative either way:
+
+- If cause 1 (mismatch): a new refresh token minted against the *current*
+  Client ID/Secret directly fixes it.
+- If cause 2 (wrong client type): the interactive authorization step itself
+  may still succeed in issuing a token, but the question "is the current
+  Client ID actually a Web application?" can and should be checked directly
+  in Google Cloud Console (Credentials page) at the same time -- this is a
+  **read-only check in Google's own console**, not something this session
+  can do remotely.
+- If cause 3 (Workspace-blocked): the interactive consent step commonly
+  surfaces an explicit "blocked by your administrator" message, which would
+  itself be immediately diagnostic and point straight at the Workspace Admin
+  Console setting named above.
+
+No credential was changed and no email was sent to reach this conclusion --
+this section is pure research and analysis of the error already captured in
+the prior round's D1 record.
+
+### 3. Step-by-step instructions for the owner -- to be performed entirely outside this chat
+
+**Nothing below should ever be pasted into this conversation.** The owner
+performs every step in their own browser and their own terminal; this
+session never sees, requests, or handles a credential or token value at any
+point, matching this incident's established practice throughout.
+
+1. Open [Google OAuth 2.0 Playground](https://developers.google.com/oauthplayground/)
+   in your own browser.
+2. Click the gear icon (top right) to open settings. Check **"Use your own
+   OAuth credentials."** Enter the **Client ID** and **Client Secret**
+   currently stored on Production (the same values you entered into
+   Cloudflare earlier today). Close settings.
+3. In the left panel's scope list (or "Input your own scopes" box at the
+   bottom), enter exactly: `https://www.googleapis.com/auth/gmail.send` --
+   this one scope only, matching the original setup.
+4. Click **"Authorize APIs."** Sign in with the same Google/Workspace account
+   this app sends email as, and approve. **If you see any message here about
+   the app being blocked, restricted, or requiring admin approval, stop and
+   note the exact wording** -- that would directly confirm cause 3 above and
+   point at the Workspace Admin Console rather than the refresh token.
+5. After the redirect back to the Playground (Step 2 of its own flow), click
+   **"Exchange authorization code for tokens."**
+6. Copy the **Refresh token** value shown (not the Access token -- this app
+   only ever stores and uses the refresh token, minting a fresh access token
+   per send).
+7. In your own terminal, with `wrangler` available, run:
+   ```
+   wrangler secret put GMAIL_OAUTH_REFRESH_TOKEN --config wrangler.production.jsonc
+   ```
+   and paste the refresh token only at that interactive prompt -- never into
+   this chat. This matches exactly how every other Production secret in this
+   project has been entered throughout this incident.
+8. Let this session know once that's done. Verification can then happen
+   either through tomorrow's natural 9 AM Eastern scheduled send, or through
+   one more use of the existing controlled-test mechanism (a new, distinct
+   claim ID, under a fresh explicit authorization) if you want confirmation
+   sooner.
+
+**Not performed this round, per explicit instruction:** no Production
+secret was read, written, or requested; no email was sent; no new test claim
+was created.
+
+Sources consulted this round:
+- [Using OAuth 2.0 for Web Server Applications -- Google Identity](https://developers.google.com/identity/protocols/oauth2/web-server)
+- [Authorization Errors -- Google Nest Device Access](https://developers.google.com/nest/device-access/reference/errors/authorization)
+- [Error: unauthorized_client -- WP Mail SMTP](https://wpmailsmtp.com/docs/error-unauthorized_client/)
+- [unauthorized_client for desktop application -- Google Developers forum](https://discuss.google.dev/t/unauthorized-client-for-desktop-application/182388)
+- [Getting 'unauthorized_client' error with Nodemailer and Google OAuth2 -- Netlify community forum](https://answers.netlify.com/t/getting-unauthorized-client-error-with-nodemailer-and-google-oauth2-in-node-js/108979)
