@@ -38927,3 +38927,216 @@ the original plan rather than new findings:
    further action should be needed, and Cloudflare Observability should
    show `daily_agenda_sent` rather than `daily_agenda_send_failed` for the
    first time in this incident's history.
+
+## Completed Outreach Action Fix (2026-10-14)
+
+### The report
+
+Today's Production Daily Fundraising Agenda recommended, for Mr. & Mrs.
+Yaakov Zachter:
+
+> **Reach out and reference:** Texted video from first day of Zman and
+> thanked him for his support that makes it happen.
+>
+> **Why:** A specific, currently-relevant fact is on file and no open
+> reminder currently covers this.
+
+The owner had already performed that exact outreach -- the recommendation
+was asking him to do something he had already done.
+
+### Root cause (verified against real Production data, read-only)
+
+Traced the exact donor record via read-only D1 queries against
+`fundraising-os-production-db`:
+
+```
+donor_relationship_facts:
+  id: 1550c6b7-ba7d-4bce-a819-a9cbfb320ee7
+  donor_id: 19af69d6-f147-474b-88ad-f6358ff65b9a (Yaakov Zachter)
+  category: engagement
+  lifecycle: durable
+  status: current
+  fact_text: "Texted video from first day of Zman and thanked him for
+              his support that makes it happen."
+  source_interaction_id: null
+  source_interaction_occurred_at: 1787336520  (2026-08-21, ~54 days ago)
+```
+
+`recommendations` for this donor: **zero rows** -- confirming "no open
+reminder currently covers this" was literally true, and that the problem
+was never a missing-reminder bug.
+
+The actual defect is in `lib/relationships/fact-classification.ts`'s
+lifecycle waterfall (`classifyFactLifecycle`). This fact's category
+(`engagement`) is not one of the two singular-state categories
+(`solicitation`, `health`), and its text matched neither
+`COMPLETED_WELL_WISH_PATTERN` (no "wish ... happy birthday/mazel tov")
+nor `COMPLETED_MILESTONE_EVENT_PATTERN` (no bare "<relation> had a/an
+<event>" shape) -- the two existing, narrow patterns from the October 8
+and October 12 fixes for this exact category of bug (see this file's own
+earlier entries). With no step-3 signal firing, the fact fell through to
+step 4's `durable` default and was given a fixed, never-decaying
+relevance score (`DURABLE_BASELINE_SCORE = 0.3`), permanently clearing
+`RELEVANCE_FLOOR` and staying "currently actionable" forever, regardless
+of age. `isConfirmedOutreachCompletion()`'s completion-awareness check
+(the October 12 fix) never even ran, because it only applies to
+`time_bound` facts -- and separately, this fact's `source_interaction_id`
+is `null`, so that mechanism could not have helped here anyway (it
+requires a linked, confirming interaction row, which this backfilled fact
+never had).
+
+### Scope: systemic, not isolated to one donor
+
+Investigating further (read-only) found a **second, independently-worded
+live Production fact with the identical defect**:
+
+```
+donor_id: a5bde812-4bb0-456c-96f5-5f4960bd5cba
+category: engagement, lifecycle: durable, source_interaction_id: (set,
+  but linked interaction type is "personal", which
+  OUTREACH_CONTACT_INTERACTION_TYPES already excludes)
+fact_text: "Spoke with him and gave him a tour of the new gym."
+source_interaction_occurred_at: 2026-08-24 (~51 days ago)
+```
+
+No shared vocabulary with Zachter's text at all -- proving the defect is
+a general shape (a completed-action report defaulting to `durable`
+whenever its category isn't singular-state and its wording doesn't
+happen to match one of the two existing narrow phrase patterns), not a
+donor-specific wording quirk. A full read-only scan of every
+`status='current'` fact row in Production (12 rows total) found exactly
+these 2 affected; the other 10 (4 solicitation, 6 family_milestone,
+already `time_bound`) were correctly classified already.
+
+The much larger population of donors with **zero structured
+`donor_relationship_facts` rows** (the legacy `relationship_summary`/
+`institutional_memory` free-text path in `relationshipOpportunityCandidate`'s
+"legacy path" branch) has no per-fact date metadata at all and therefore
+no decay or completion-awareness mechanism whatsoever -- a pre-existing,
+already-disclosed architectural gap from the original Stage 1-3
+migration design (see this file's "Relationship Snapshot Architecture"
+entries), not something this fix could address without a much larger
+migration, and not something newly introduced by this investigation. This
+remains an **unresolved risk**, flagged below.
+
+### The fix
+
+`lib/relationships/fact-classification.ts` adds
+`COMPLETED_OUTREACH_ACTION_PATTERN`: rather than a third narrow phrase
+list, this generalizes the SHAPE -- a fact sentence that OPENS with a
+past-tense outreach-contact verb (`called`, `texted`, `visited`,
+`stopped by`, `dropped off`, `sent a/an text/email/card/gift/video/note`,
+`emailed`, `wrote`, `spoke with/to`, `met with`, `wished`) is, by
+construction, a narration of a completed action the fundraiser already
+performed, never a standing fact about the donor. Wired into:
+
+- `classifyFactLifecycle` step 3 (an additional `time_bound` trigger,
+  alongside the two existing patterns).
+- `resolveDecayWindowDays` (reuses the same fast, 30-day window as the
+  two existing completed-touch patterns) -- **deliberately gated to
+  non-singular-state categories only** (`!isSingularStateCategory`), so a
+  solicitation/health fact keeps its own, deliberately longer 90/180-day
+  window even if its text happens to open with a contact verb (e.g.
+  "Called and discussed building naming opportunity." -- the call is
+  done, but the ask itself may not be). This is the explicit guard
+  against reintroducing the previously-fixed stale-pledge/solicitation
+  problem.
+
+Deliberately NOT wired into `isConfirmedOutreachCompletion`'s
+interaction-summary confirmation side: that check must still verify the
+linked interaction is topically about the SAME action (its own
+`MILESTONE_OUTREACH_COMPLETION_PATTERN` requires a milestone noun), and
+loosening it to "any contact verb anywhere in the summary" would let an
+unrelated interaction wrongly suppress a genuinely different, still-open
+fact (this is exactly what the existing "unrelated interaction must never
+suppress" regression test in
+`tests/relationship-fact-completion-awareness.test.mjs` protects against).
+The fast decay window alone is sufficient to fix both real cases found
+(both already well past 30 days old) without that risk.
+
+### What was independently verified against real data vs. inferred from code
+
+- **Verified live, read-only, against `fundraising-os-production-db`**:
+  Zachter's exact fact row (category/lifecycle/text/null source
+  interaction/occurred-at), the second affected donor's fact row and its
+  linked interaction's `type`/`summary`, zero `recommendations` rows for
+  Zachter, and a full scan confirming exactly 2 of 12 current fact rows
+  are affected.
+- **Verified via a throwaway, read-only dry-run script** (imported the
+  real `classifyFactLifecycle` directly, fed it all 12 real Production
+  rows, never written to the repo) that after this fix, **exactly those
+  same 2 rows** compute a different lifecycle (`durable` -> `time_bound`)
+  and **all 10 other rows are byte-identical** to their currently-stored
+  value -- i.e., the fix touches precisely the affected population and
+  nothing else. Script was deleted after use; not part of the commit.
+- **Inferred from code, not independently re-derived**: the exact
+  `relationshipOpportunityCandidate`/`findMostActionableFact`/`scoreFact`
+  call chain that turns a `durable` fact into a permanent recommendation
+  (already traced and documented in this file's October 12 entry;
+  re-read, not re-verified against new evidence this round).
+
+### Regression tests added
+
+- `tests/relationship-fact-classification.test.mjs`: unit coverage for
+  `COMPLETED_OUTREACH_ACTION_PATTERN`/`classifyFactLifecycle`/
+  `resolveDecayWindowDays`, including the real Zachter and
+  gym-tour-donor text, several other completed-touch openers (proving
+  the fix is shape-based, not a second phrase list), the start-anchor
+  sanity check (mentioning a touch in passing must not trigger it),
+  priority-order preservation (a commitment word still wins), and the
+  critical solicitation/health decay-window guard.
+- `tests/relationship-fact-completed-outreach-action.test.mjs` (new):
+  end-to-end, through the real `buildRecommendationEvidence` ->
+  `generateCandidates`/`buildDonorRecommendation`/`buildAgenda` pipeline,
+  covering all 6 scenarios from the investigation's own requirements: a
+  completed move not recommended as undone; the no-open-reminder case;
+  a genuinely outstanding (fresh) follow-up remaining eligible; a second,
+  genuinely new fact for the same donor still surfacing; dashboard/Daily
+  Agenda consistency; and the solicitation decay-window guard plus an
+  unrelated pledge candidate staying unaffected.
+- `tests/stewardship-activity.test.mjs`: one pre-existing assertion had
+  literally encoded Zachter's buggy `durable` classification as a
+  protected invariant ("classification for genuine zman appreciation
+  must be unchanged (matches Zachter's real Phase 1 fact)") -- updated to
+  assert the now-correct `time_bound` value; the comment now explains why
+  the old assertion was itself the bug.
+
+**Results: 190/190 test files passing (189 before this round, +1 new
+file), `tsc --noEmit` clean, lint baseline unchanged (94 errors/43
+warnings, verified via the real `pnpm run lint` script -- a bare `eslint
+.` run picks up `dist`/`.next` and is not the real baseline).**
+
+### Staging deployment and verification
+
+Deployed via the protected `pnpm run deploy:staging-independent` script
+(build -> verify-build-manifest -> wrangler deploy chain; completing
+proves both steps passed). New Staging Worker version:
+`01d6c53e-e6eb-4aae-974f-2aa27c37c340`. Confirmed Staging responds
+normally post-deploy (redirects to Cloudflare Access, as expected).
+Staging's own D1 does not contain the real Zachter donor (sample/staging
+dataset), so this round's live-data verification was necessarily done
+read-only against Production directly (per the owner's explicit
+instruction) rather than reproduced end-to-end on Staging.
+
+### Unresolved risks / outstanding before Production
+
+1. **The two already-written Production fact rows are NOT yet
+   corrected.** A code-level classifier fix only changes what happens for
+   FUTURE accepted facts -- `donor_relationship_facts.lifecycle` is a
+   stored column, set once at accept time, never re-derived on read. The
+   existing `scripts/relationship-facts-lifecycle-reclassify.mjs` (used
+   for the identical October 8 fix) is hardcoded to Staging's own
+   database (`fundraising-os-staging-db`) by design and cannot reach
+   Production as written. **Explicit owner authorization is needed** to
+   apply the equivalent one-time data correction to Production's two
+   affected rows (`1550c6b7-...` Zachter: `durable` -> `time_bound`;
+   `208a5d68-...`: `durable` -> `time_bound`) -- until then, these two
+   specific recommendations will keep reappearing in Production even
+   after the code fix itself is deployed there.
+2. **Not yet deployed to Production** -- awaiting explicit authorization,
+   per standing instruction.
+3. **The legacy free-text narrative path** (donors with zero structured
+   facts) has no analogous protection at all, as noted above -- a
+   pre-existing, disclosed gap, not newly introduced, but still a real
+   gap in the broader "completed work shouldn't become a new task"
+   guarantee the owner asked about.
