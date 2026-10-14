@@ -75,7 +75,12 @@ export function inferSubject(note: string, kind: InteractionKind): string {
   return fallbacks[kind];
 }
 
-const sentenceList = (note: string) => note.trim().split(/(?:[.!?]+\s+|[\r\n]+)/).map((item) => item.trim()).filter(Boolean);
+// Exported so lib/relationships/recommendation-candidates.ts can apply the
+// same sentence boundaries to a donor's legacy relationship_summary/
+// institutional_memory narrative text (which, unlike a single structured
+// fact, may span more than one sentence) -- never a second, independently
+// maintained splitter.
+export const sentenceList = (note: string) => note.trim().split(/(?:[.!?]+\s+|[\r\n]+)/).map((item) => item.trim()).filter(Boolean);
 const concise = (value: string, max = 180) => value.length <= max ? value : `${value.slice(0, max - 1).trim()}…`;
 
 // Proven false positive (staging incidents): notes reading "Solicited for a

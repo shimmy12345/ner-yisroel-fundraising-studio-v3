@@ -1,4 +1,4 @@
-import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, isConfirmedOutreachCompletion, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
+import { DURABLE_BASELINE_SCORE, RELEVANCE_FLOOR, resolveDecayWindowDays, isConfirmedOutreachCompletion, isUnambiguousCompletedOutreachAction, type FactCategory, type FactLifecycle } from "./fact-classification.ts";
 
 // Relationship Intelligence Phase 2 -- deterministic synthesis, exactly
 // as approved in docs/AI-HANDOFF.md's "Relationship Snapshot Synthesis
@@ -53,6 +53,20 @@ function recencyScore(daysAgo: number, horizonDays: number) {
 export type PinnedFreshSourceInteractionIds = ReadonlySet<string>;
 
 function scoreFact(fact: SynthesisFact, now: number, pinnedFresh: PinnedFreshSourceInteractionIds): number {
+  // Completed Outreach Action Fix, round 2 (2026-10-14, docs/AI-HANDOFF.md)
+  // -- checked FIRST, before even the `durable` early-return, and against
+  // the fact's own TEXT rather than its stored `lifecycle`. An unambiguous
+  // ACTION report (the fundraiser's own past-tense contact verb, e.g.
+  // "Texted ... and thanked him") is never actionable at any age, with no
+  // grace window -- see isUnambiguousCompletedOutreachAction's own doc
+  // comment for why this is categorically different from an EVENT report
+  // ("Son had a bar mitzvah.", no stated actor, genuinely ambiguous about
+  // completion), which keeps its existing, unchanged, age-based treatment
+  // further below. Checking the TEXT rather than the stored `lifecycle`
+  // value is also what makes this self-healing for the two rows already
+  // written in Production with the stale `durable` value, with zero data
+  // migration required.
+  if (isUnambiguousCompletedOutreachAction(fact.factText, fact.category)) return 0;
   if (fact.lifecycle === "durable") return DURABLE_BASELINE_SCORE;
   // fact.lifecycle === "time_bound" (follow_up is filtered out by the
   // caller before this function ever sees it -- see

@@ -210,32 +210,46 @@ async function run() {
   }
 
   // --- Regression: the real Nussbaum shape (2026-10-08, flagged via the
-  // Daily Fundraising Agenda's "SUGGESTED" section). A completed
-  // well-wish touch ("sent text to wish happy birthday.") that is still
-  // genuinely recent (10 days ago) must still generate
-  // relationship_opportunity -- the fix is a SHORTER decay window, not
-  // "never actionable." ---
+  // Daily Fundraising Agenda's "SUGGESTED" section), REVISED 2026-10-14
+  // ("Completed Outreach Action Fix" round 2). Round 1 gave a completed
+  // well-wish touch a shorter (30-day) decay window, so a genuinely
+  // recent one (10 days old) was still actionable -- but the owner
+  // explicitly rejected that outcome: a well-wish the fundraiser already
+  // sent should never be recommended again, not even on day 1. A
+  // well-wish ACTION report ("sent text to wish happy birthday.") names
+  // the fundraiser as the actor and cannot be ambiguous about whether it
+  // happened -- see isUnambiguousCompletedOutreachAction's own doc
+  // comment. Both ages (10 days and 43 days) must now be suppressed
+  // identically; only the AGE-based 30-day window changed, not the fact
+  // text itself, so this is the same real Nussbaum fact at two real ages,
+  // both correctly non-actionable now. ---
   {
     const f = fact({ factText: "sent text to wish happy birthday.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-wellwish-fresh", sourceInteractionOccurredAt: daysAgo(10) });
     const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
     const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
-    assert.ok(opportunity, "a genuinely recent completed well-wish must still be actionable");
-    assert.match(opportunity.action, /happy birthday/);
+    assert.equal(opportunity, undefined, "a completed well-wish ACTION report must never be actionable, even on day 10 -- there is no grace window for an unambiguous completed action");
   }
 
-  // --- Same fact, but 43 days old (the real Nussbaum age at the time
-  // this was flagged) -- must NOT generate relationship_opportunity
-  // anymore. family_milestone's normal 180-day window would still call
-  // this actionable (score ~0.76); COMPLETED_WELL_WISH_PATTERN's
-  // dedicated 30-day window is what actually resolves the user's
-  // original complaint ("Reach out and reference: sent text to wish
-  // happy birthday" doesn't make sense once the touch is over a month
-  // old). ---
+  // --- Same fact, 43 days old -- must also NOT generate
+  // relationship_opportunity, for the same reason as the 10-day-old
+  // case just above (age is no longer what determines this). ---
   {
     const f = fact({ factText: "sent text to wish happy birthday.", category: "family_milestone", lifecycle: "time_bound", sourceInteractionId: "int-wellwish-stale", sourceInteractionOccurredAt: daysAgo(43) });
     const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
     const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
-    assert.equal(opportunity, undefined, "a well-wish touch over a month old must no longer be actionable (30-day dedicated window, not family_milestone's shared 180-day window)");
+    assert.equal(opportunity, undefined, "a well-wish touch over a month old must still not be actionable");
+  }
+
+  // --- A fact with lifecycle stored as `durable` (never corrected,
+  // exactly like the two already-written Production rows) whose text is
+  // still an unambiguous completed-action report must ALSO be suppressed
+  // -- the check runs against the fact's own TEXT, before the `durable`
+  // early-return, so this is self-healing with no data migration. ---
+  {
+    const f = fact({ factText: "sent text to wish happy birthday.", category: "family_milestone", lifecycle: "durable", sourceInteractionId: null, sourceInteractionOccurredAt: daysAgo(1) });
+    const evidence = evidenceFor({ relationshipFacts: [f], pendingAskSourceInteractionIds: [] });
+    const opportunity = generateCandidates(evidence).find((c) => c.kind === "relationship_opportunity");
+    assert.equal(opportunity, undefined, "a completed-action fact must be suppressed even when its stored lifecycle is still the stale `durable` value, with no linked interaction at all");
   }
 
   // --- A genuinely durable family_milestone fact in the SAME donor's

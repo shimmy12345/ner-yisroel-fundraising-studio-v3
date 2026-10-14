@@ -1,7 +1,8 @@
 import type { RecommendationEvidence } from "./recommendation-evidence.ts";
 import type { GiftSource } from "../giving/acknowledgment.ts";
-import { interactionKindLabel, relationshipSnapshotDetails, splitInteractionSummary, type InteractionKind } from "../capture/interaction.ts";
+import { interactionKindLabel, relationshipSnapshotDetails, splitInteractionSummary, sentenceList, type InteractionKind } from "../capture/interaction.ts";
 import { askDescriptor, askFollowUpAction } from "../capture/ask.ts";
+import { classifyFactCategory, isUnambiguousCompletedOutreachAction } from "./fact-classification.ts";
 
 // Plausible next-action candidates generated from one donor's evidence.
 // Each generator only fires on its own precondition, so a candidate simply
@@ -383,10 +384,43 @@ function relationshipOpportunityCandidate(evidence: RecommendationEvidence): Rec
       supportingDate: evidence.now,
     };
   }
-  // Legacy path -- UNCHANGED for a donor with zero structured facts yet
-  // (Stage 2's fallback: this population is migrated in a later stage).
+  // Legacy path -- for a donor with zero structured facts yet (Stage 2's
+  // fallback: this population is migrated in a later stage). As of the
+  // Completed Outreach Action Fix round 2 (2026-10-14, docs/AI-HANDOFF.md),
+  // no longer unconditional: this reuses the exact same, already-approved
+  // isUnambiguousCompletedOutreachAction() check the structured-facts path
+  // above now applies (fact-synthesis.ts's scoreFact()) -- the same
+  // function, never a second implementation -- so the two paths stay
+  // consistent, per the owner's explicit "system-wide solution, not
+  // special-case exclusions" instruction.
+  //
+  // relationship_summary/institutional_memory may span more than one
+  // sentence (unlike a single structured fact), so this splits on the
+  // same sentence boundary lib/capture/interaction.ts's own extraction
+  // already uses and suppresses ONLY when EVERY sentence is an
+  // unambiguous completed-action report. A text mixing an action report
+  // with other content ("Texted video... and thanked him. His daughter
+  // is Danielle.") is deliberately left untouched here -- without the
+  // Stage 1 structured-facts migration, there is no safe, narrower unit
+  // than the whole cached string to act on, and the owner's explicit
+  // "preserve useful donor context" instruction means this must never
+  // silently drop part of a donor's only recorded narrative. In
+  // practice, a read-only Production scan (12 of 12 donors with any
+  // narrative text already also have a structured fact row, so the
+  // legacy path is not reachable for any current donor at all) found
+  // zero donors affected either way; this is a forward-looking guard for
+  // a donor who reaches this path before migrating to structured facts.
   const text = evidence.narrative.relationshipSummary || evidence.narrative.institutionalMemory;
   if (!text) return null;
+  // No stored category for legacy narrative text (it's a single cached
+  // string, not a structured fact row) -- classifyFactCategory() is
+  // applied per sentence here, the exact same pure classifier Phase 1/2
+  // already run over this same kind of text when creating a structured
+  // fact, purely to supply isUnambiguousCompletedOutreachAction() with
+  // the solicitation/health guard it needs; never a second classification
+  // scheme.
+  const legacySentences = sentenceList(text);
+  if (legacySentences.length > 0 && legacySentences.every((sentence) => isUnambiguousCompletedOutreachAction(sentence, classifyFactCategory(sentence)))) return null;
   return {
     kind: "relationship_opportunity",
     // `text` is now always a specific, quoted fact (never a field-label

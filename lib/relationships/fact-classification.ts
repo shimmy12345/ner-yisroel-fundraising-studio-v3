@@ -400,6 +400,78 @@ export function resolveDecayWindowDays(category: FactCategory, factText: string)
   return CATEGORY_DECAY_WINDOW_DAYS[category];
 }
 
+// ACTION report vs. EVENT report (2026-10-14, "Completed Outreach Action
+// Fix" round 2 -- the owner reviewed round 1's decay-window fix and
+// correctly rejected it: "A completed outreach action can still generate
+// a recommendation during the first 30 days, even though the action has
+// already been performed. My goal is not simply to make completed
+// outreach recommendations disappear after 30 days.")
+//
+// Round 1 treated every completed-touch pattern the same way: a shorter
+// decay window, still eventually clearing to 0 but only after up to 30
+// days. That is the right answer for COMPLETED_MILESTONE_EVENT_PATTERN
+// (a bare "<relation> had a/an <event>." report) because that shape is
+// genuinely AMBIGUOUS about completion: "Daughter had a bat mitzvah." has
+// no stated actor at all -- it could be a brand-new, not-yet-acted-upon
+// milestone the fundraiser hasn't touched yet (the existing, deliberately
+// preserved regression: a 5-day-old instance with no linked interaction
+// must still be actionable), or it could be describing something from
+// weeks ago that was already addressed. Age-based decay is a reasonable,
+// conservative proxy for that genuine uncertainty.
+//
+// COMPLETED_WELL_WISH_PATTERN and COMPLETED_OUTREACH_ACTION_PATTERN are a
+// different, NARROWER case: both require the sentence to open with (or,
+// for the well-wish pattern, contain) the FUNDRAISER's own past-tense
+// contact verb -- "Texted ... and thanked him", "sent text to wish happy
+// birthday". A sentence that itself names the fundraiser as the actor
+// performing a completed touch cannot be ambiguous about whether that
+// touch happened: recording it as a fact in the past tense IS the record
+// that it already did. There is no "this just happened, nothing done
+// yet" reading available for an ACTION report the way there is for a
+// bare EVENT report. So these two patterns alone warrant the sharper
+// claim -- zero relevance immediately, at any age -- while
+// COMPLETED_MILESTONE_EVENT_PATTERN keeps its existing, more cautious,
+// age-based treatment completely unchanged.
+//
+// This is still a text-pattern check, not a new structured field --
+// investigated and rejected per the owner's explicit instruction not to
+// invent a completion status or assume completion when evidence is
+// ambiguous. No field in today's schema (interaction type, move status,
+// timestamp, source reference) independently distinguishes an ACTION
+// report from a standing identity fact ("His daughter is Danielle.") or
+// an EVENT report; that distinction is a property of the sentence's own
+// grammar (does it name the fundraiser performing a verb, or merely
+// describe the donor), which this codebase has never captured as a
+// separate column. See docs/AI-HANDOFF.md's "Completed Outreach Action
+// Fix" entry for the alternative considered (a stored `fact_kind`
+// column decided once at accept time) and why it was not implemented
+// this round: it would require either a new UI prompt at capture time or
+// quietly running this exact same pattern-based classifier at accept
+// time instead of at read time -- moving the same judgment call earlier
+// in the pipeline, not eliminating it, while adding a migration and a
+// permanent schema commitment this investigation was not asked to make.
+//
+// Deliberately checked directly against the fact's own TEXT, never its
+// STORED `lifecycle` value: this makes the fix self-healing for the two
+// rows already written in Production with the stale `durable` value
+// (see docs/AI-HANDOFF.md) with no data migration required -- the text
+// itself is reclassified correctly the moment this code runs, regardless
+// of what was persisted before this fix existed.
+//
+// Takes `category` and applies the exact same `!isSingularStateCategory`
+// guard resolveDecayWindowDays already uses for COMPLETED_OUTREACH_
+// ACTION_PATTERN, for the identical reason: a solicitation/health fact
+// that happens to open with a contact verb ("Called and discussed
+// building naming opportunity.") must never be unconditionally zeroed --
+// the call itself may be done, but the subject matter (an open ask, a
+// health status) may still need follow-through. Without this guard, this
+// function would wrongly suppress exactly the stale-pledge/solicitation
+// case the investigation was explicitly warned not to reintroduce.
+export function isUnambiguousCompletedOutreachAction(factText: string, category: FactCategory): boolean {
+  if (isSingularStateCategory(category)) return false;
+  return COMPLETED_WELL_WISH_PATTERN.test(factText) || COMPLETED_OUTREACH_ACTION_PATTERN.test(factText);
+}
+
 // Completion-awareness (2026-10-12) -- the 30-day decay window above
 // (COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS/COMPLETED_MILESTONE_EVENT_
 // DECAY_WINDOW_DAYS) fixes a fact that is simply OLD, but the real

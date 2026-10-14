@@ -10,6 +10,7 @@ import {
   COMPLETED_WELL_WISH_DECAY_WINDOW_DAYS,
   COMPLETED_MILESTONE_EVENT_DECAY_WINDOW_DAYS,
   COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS,
+  isUnambiguousCompletedOutreachAction,
   DURABLE_BASELINE_SCORE,
   RELEVANCE_FLOOR,
 } from "../lib/relationships/fact-classification.ts";
@@ -259,6 +260,33 @@ async function run() {
   assert.equal(resolveDecayWindowDays("solicitation", "Called and discussed building naming opportunity."), CATEGORY_DECAY_WINDOW_DAYS.solicitation);
   assert.notEqual(CATEGORY_DECAY_WINDOW_DAYS.solicitation, COMPLETED_OUTREACH_ACTION_DECAY_WINDOW_DAYS, "sanity check: the two windows must actually differ for this guard to be meaningful");
   assert.equal(resolveDecayWindowDays("health", "Called to check in on his recovery."), CATEGORY_DECAY_WINDOW_DAYS.health);
+
+  // --- Regression: isUnambiguousCompletedOutreachAction (2026-10-14,
+  // "Completed Outreach Action Fix" round 2). An ACTION report (the
+  // fundraiser's own past-tense contact verb leading the sentence) is
+  // unambiguous about completion at any age -- unlike an EVENT report
+  // (COMPLETED_MILESTONE_EVENT_PATTERN, deliberately NOT included here,
+  // see fact-synthesis.ts's scoreFact() for why it keeps its own,
+  // separate, age-based treatment). ---
+  assert.equal(isUnambiguousCompletedOutreachAction("Texted video from first day of Zman and thanked him for his support that makes it happen.", "engagement"), true);
+  assert.equal(isUnambiguousCompletedOutreachAction("Spoke with him and gave him a tour of the new gym.", "engagement"), true);
+  assert.equal(isUnambiguousCompletedOutreachAction("sent text to wish happy birthday.", "family_milestone"), true);
+  assert.equal(isUnambiguousCompletedOutreachAction("Son had a bar mitzvah.", "family_milestone"), false, "a bare EVENT report has no named actor and is deliberately excluded -- it keeps its own age-based treatment");
+  assert.equal(isUnambiguousCompletedOutreachAction("His daughter is Danielle.", "family_milestone"), false, "a standing identity fact is unaffected");
+  // The critical solicitation/health guard: an action-report-shaped
+  // sentence must never be treated as unambiguously completed when its
+  // category is singular-state -- the subject matter (an open ask, a
+  // health status) may still need follow-through even though the
+  // CONTACT itself is done. Without this guard, a solicitation note that
+  // happens to open with "Called" would be wrongly, permanently
+  // suppressed -- reintroducing exactly the stale-pledge/solicitation
+  // problem this investigation was warned against.
+  assert.equal(isUnambiguousCompletedOutreachAction("Called and discussed building naming opportunity.", "solicitation"), false, "solicitation is a singular-state category -- never unconditionally completed");
+  assert.equal(isUnambiguousCompletedOutreachAction("Called to check in on his recovery.", "health"), false, "health is a singular-state category -- never unconditionally completed");
+  // Sanity: the SAME text, under a non-singular-state category, is
+  // still correctly flagged -- the guard is about the category, not the
+  // text shape.
+  assert.equal(isUnambiguousCompletedOutreachAction("Called and discussed building naming opportunity.", "general"), true);
 
   // --- Category taxonomy: isSingularStateCategory is exactly {solicitation, health}. ---
   assert.equal(isSingularStateCategory("solicitation"), true);
