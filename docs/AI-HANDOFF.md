@@ -40295,3 +40295,117 @@ owner can do.
    Focus integration remains unbuilt by design, with the underlying
    `donor-geo-filter`/`travel-regions` logic (now including
    `searchCityOptions()`) already reusable there unmodified.
+
+## Geographic Filtering UI Usability Fixes -- Production Deployment (2026-10-14)
+
+The owner visually tested the City Search and Alphabetical Sorting
+improvements on Staging, confirmed they work correctly, and authorized
+Production deployment of exactly that work (commit
+`cf36599e239070822716540d9fde01d1d3dfb65f`).
+
+### Pre-deployment checks (all passed)
+
+- **Branch/commit**: `git fetch` + `git status` confirmed the local
+  branch matched `origin/feature/independent-cloudflare-sandbox`
+  exactly at `64127c7`, working tree clean. `git rev-parse cf36599`
+  confirmed the full hash (`cf36599e239070822716540d9fde01d1d3dfb65f`)
+  matches the owner's own reference exactly.
+- **No concurrent/unreviewed changes**: `git diff c4a5936 HEAD --stat`
+  (`c4a5936` being the commit actually live on Production before this
+  round) showed exactly the 8 files the City Search/sorting fix
+  touched -- `app/donors/CityComboBox.tsx` (new), `app/donors/
+  DonorDirectoryExperience.tsx`, `app/globals.css`, `lib/relationships/
+  donor-geo-filter.ts`, `scripts/run-tests.mjs`, two test files, and
+  `docs/AI-HANDOFF.md`. Nothing else. No STOP condition triggered.
+- **Tests/types**: 193/193 test files passing, `tsc --noEmit` clean.
+- **Production DB binding**: confirmed `DB` -> `fundraising-os-
+  production-db`.
+- **Build safeguards**: confirmed `deploy:production-independent` is
+  the full build -> `verify-build-manifest.mjs` -> `wrangler deploy`
+  chain, no bypass.
+- **Backup/restore health**: `backup_alert_state` empty (no active
+  stale-backup incident).
+- **Gmail/cron/APP_BASE_URL**: all three Gmail secrets present by
+  name; `"triggers": { "crons": ["0 * * * *"] }` unchanged;
+  `APP_BASE_URL` still `https://shimmydonors.org`.
+- **Rollback target recorded**: the Production Worker version live
+  before this deploy was `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`.
+- **Baseline counts recorded**: 254 donors, 5,464 giving activities, 0
+  `agenda_send_log` rows, 12 current relationship facts.
+
+No check failed; proceeded to deployment.
+
+### Deployment
+
+`pnpm run deploy:production-independent` (the protected chain, no
+bypass). **New Production Worker version: `1248d048-b21f-4157-b208-
+7f6bcc3082a9`.**
+
+### Post-deployment verification (all read-only; no test donor created, no manual email sent)
+
+- **Build correctness**: `dist/build-manifest.json` read
+  `{"environment":"production-independent", ...}`; bundle grep showed
+  the known-good `production-independent` (8) vs. `staging-
+  independent` (5) ratio. Production responds normally (redirects to
+  the real Production Cloudflare Access Application).
+- **Verified against REAL Production donor data** (fetched read-only,
+  254 donors, 49 city/state combinations -- unchanged from every prior
+  audit this session -- fed through the actual deployed functions via
+  a throwaway, read-only script, deleted after use, never committed):
+  - **Alphabetical sort confirmed**: the full city list came back
+    already sorted A-Z by city name (Aventura, Bala Cynwyd, Baltimore,
+    Bergenfield, Betar Illit, ... Toms River, Toronto, University
+    Heights, Valley Village, Wesley Hills) -- verified by comparing
+    against an independently-computed `localeCompare` sort of the same
+    list, not merely asserted.
+  - **Partial city search confirmed**: `"tean"` -> `["Teaneck, NJ"]`;
+    `"BALT"` (uppercase) -> `["Baltimore, MD"]`, proving case-
+    insensitive partial matching against real data.
+  - **Travel Region narrows available cities confirmed**: the Teaneck/
+    Bergenfield region's own city list came back as exactly
+    `["Bergenfield","Englewood","Fair Lawn","Passaic","Teaneck"]`.
+  - **Silver Spring confirmed accessible under All Regions**: 1 real
+    donor found under "All Regions"; `regionsForCityState("Silver
+    Spring","MD")` still resolves to `[]` (no region).
+  - **All 15 approved regions confirmed unchanged**, with the exact
+    expected donor counts: Baltimore 57, Chicago 45, Teaneck/
+    Bergenfield area 43, Monsey/Spring Valley 35, Queens/western LI 10,
+    LA/SFV 10, South FL/Miami 9, NYC boroughs 8, St. Louis 13, Five
+    Towns 3, Lakewood/Ocean County 3, Central NJ 3, San Diego 3,
+    Detroit area 2, Israel 3.
+  - **Dynamic region matching for new donors confirmed**: a simulated
+    Chicago/Baltimore donor resolved to the correct region on the first
+    call, consistent with the no-persisted-assignment guarantee already
+    locked in by the test suite.
+- **Donor/giving-activity counts recheck**: 254 donors, 5,464 giving
+  activities, 0 `agenda_send_log` rows, 12 current relationship facts
+  -- byte-identical to the pre-deployment baseline.
+- **Production/Staging isolation confirmed**: the deploy's own binding
+  output showed `env.DB` -> `fundraising-os-production-db` and
+  `env.STATUS_WORKER` -> `fundraising-os-production-backup-status`,
+  distinct from Staging's equivalents.
+- **Gmail/cron/backup unchanged**: all three Gmail secrets reconfirmed
+  present by name post-deploy; `backup_alert_state` unchanged (still
+  empty). **No manual email was sent; no test donor was created.**
+
+No verification failed; no rollback was needed or performed.
+
+### Final report
+
+1. **Production Worker version**: `1248d048-b21f-4157-b208-7f6bcc3082a9`.
+   **Rollback target**: `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`.
+2. **Tests**: 193/193 test files passing, `tsc --noEmit` clean.
+3. **Deployment and verification**: completed via the protected script;
+   every check in this entry passed, including direct, real-Production-
+   data proof of the alphabetical sort, partial-name search, region
+   scoping, Silver Spring's continued accessibility, all 15 regions'
+   unchanged membership/counts, and dynamic future-donor matching.
+4. **No donor or financial data was modified**: donor, giving-activity,
+   and relationship-fact counts are byte-identical before and after;
+   no donor record was created, edited, or deleted; no migration ran.
+5. **Gmail, scheduling, and backups are unaffected**: secrets, cron, and
+   backup-alert state all reconfirmed unchanged; no manual email was
+   sent.
+6. **Unresolved issues**: none introduced by this deployment. No further
+   feature work or data correction was performed, per this
+   authorization's own explicit scope.
