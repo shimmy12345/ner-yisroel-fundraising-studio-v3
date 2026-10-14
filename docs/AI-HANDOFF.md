@@ -38614,3 +38614,121 @@ verify both stop `wrangler deploy` from ever running.
 
 **Awaiting explicit approval before applying the `package.json` change above
 and treating this safeguard as active.**
+
+## Deployment Safeguard -- ACTIVATED (2026-10-14)
+
+The owner approved completing and activating the proposal above, explicitly
+limited to build/deployment tooling, with no Production application deploy
+performed merely to turn it on.
+
+### What changed
+
+- **`scripts/verify-build-manifest.mjs` refactored** (no behavior change for
+  the existing single-argument CLI usage, confirmed by re-running it against
+  this project's own real `dist/` both ways -- matching and mismatched
+  environment, both unchanged from before): its core logic is now the pure,
+  exported `evaluateManifest(rawManifestJson, expected, now)`, with the
+  original CLI behavior (read `dist/build-manifest.json`, call
+  `process.exit`) moved behind an `isDirectRun` guard so the file can be
+  safely `import`ed by a test without executing or exiting anything. An
+  optional third CLI argument (a manifest path, defaulting to this
+  project's real `dist/build-manifest.json`) lets tests point it at an
+  isolated temp file instead.
+- **`package.json`'s `deploy:staging-independent` and
+  `deploy:production-independent`** now read:
+  ```
+  "deploy:staging-independent": "pnpm run build:staging-independent && node scripts/verify-build-manifest.mjs staging-independent && wrangler deploy --config wrangler.staging.jsonc",
+  "deploy:production-independent": "pnpm run build:production-independent && node scripts/verify-build-manifest.mjs production-independent && wrangler deploy --config wrangler.production.jsonc",
+  ```
+  Each `deploy:*-independent` invocation now **always** rebuilds for its own
+  named environment immediately before verifying and deploying -- the exact
+  mistake that caused the 2026-10-14 incident (a stale bundle from building
+  a *different* environment moments earlier) can no longer reach `wrangler
+  deploy` at all, since `&&` stops the chain the instant either the build or
+  the verify step fails.
+- **`tests/verify-build-manifest.test.mjs`** (new): unit-tests
+  `evaluateManifest` directly -- the exact incident reproduced in both
+  directions (Staging-built deployed as Production, and the reverse),
+  correct-match, missing manifest, malformed JSON, a manifest with no
+  `environment` field, stale timestamp, the exact freshness boundary (not
+  yet stale still passes), a future timestamp, and an unparseable
+  timestamp -- plus a second block that spawns the real CLI against an
+  isolated OS-temp-directory manifest (never this project's own `dist/`),
+  confirming the actual exit-code/stdout/stderr contract the deploy scripts
+  depend on: exit 1 with the incident message on mismatch, exit 0 with "OK."
+  on a correct match, exit 1 on a missing argument, exit 1 on a missing
+  file. Registered in `scripts/run-tests.mjs`'s `TEST_FILES`.
+
+### Verification performed this round
+
+- `pnpm test`: **189/189** (188 before plus the one new file). `tsc --noEmit`:
+  clean. `pnpm run lint`: unchanged 94-error/43-warning baseline.
+- `node tests/verify-build-manifest.test.mjs` run directly: all assertions
+  pass, including the CLI subprocess block.
+- The refactored CLI re-run against this project's own real `dist/` both
+  ways (`production-independent` matching -> exit 0 "OK"; `staging-independent`
+  mismatched against a `dist/` actually built for production -> exit 1 with
+  the incident message) -- confirms the refactor preserved the exact
+  original single-argument behavior.
+- **End-to-end build+verify chain run for both environments, deliberately
+  without the trailing `wrangler deploy`** (per explicit instruction not to
+  deploy application code to Production merely to activate this safeguard):
+  `pnpm run build:staging-independent` then `node
+  scripts/verify-build-manifest.mjs staging-independent` -> exit 0; `pnpm
+  run build:production-independent` then `node
+  scripts/verify-build-manifest.mjs production-independent` -> exit 0. This
+  is exactly what each `deploy:*-independent` script's first two chained
+  commands now do.
+- `tests/staging-reset.test.mjs` re-run directly (8/8 passing, unchanged) --
+  confirms `authorizeStagingReset`'s environment gate is untouched by this
+  round's changes, which touched zero files under `app/` or `lib/`.
+- `git diff --stat` for this round: exactly `package.json` (2 lines),
+  `scripts/run-tests.mjs` (1 line), `scripts/verify-build-manifest.mjs`
+  (refactor), and the new `tests/verify-build-manifest.test.mjs` -- no
+  donor, pledge, payment, Gmail, or scheduled-email-path file touched.
+- **No Production deploy was performed this round.** `wrangler deployments
+  list --config wrangler.production.jsonc` re-checked immediately before
+  writing this entry: still `554f865b-f859-45e9-bfdc-7481034bc418`, the same
+  version confirmed live at the end of the prior round -- the existing
+  Production Worker is unchanged, byte-for-byte, by this safeguard's
+  activation. The safeguard only takes effect the next time someone actually
+  runs `pnpm run deploy:production-independent` or
+  `pnpm run deploy:staging-independent`.
+
+### Remaining bypass risks (unchanged from the proposal, restated for the now-active safeguard)
+
+1. **Direct `wrangler deploy` run outside these npm scripts is not
+   protected.** `wrangler deploy --config wrangler.production.jsonc`,
+   invoked directly rather than through `pnpm run
+   deploy:production-independent`, bypasses the build-then-verify chain
+   entirely -- there is no `wrangler`-level hook in this project's
+   `wrangler.*.jsonc` configuration (none was found to exist for this
+   purpose in this wrangler version) that could intercept that path. This
+   matches every deploy actually performed and documented in this project's
+   history (always through the `pnpm run deploy:*` scripts), but remains a
+   real gap if that practice is ever not followed, including by a future AI
+   session that reaches for `wrangler deploy` directly instead of the npm
+   script.
+2. **CI/automation gap**: this repository has no CI pipeline this session
+   has found that runs `pnpm run deploy:*` itself (deploys throughout this
+   project's history have been manual, human- or session-initiated) -- so
+   there is no separate automated enforcement point beyond the npm script
+   itself. If a CI-based deploy pipeline is ever added, it should invoke the
+   same `pnpm run deploy:*-independent` scripts rather than calling
+   `wrangler deploy` directly, to inherit this protection automatically.
+3. **A manually/externally edited `dist/build-manifest.json`** would be
+   trusted as-is -- the file is plain, unsigned JSON, and the safeguard's
+   threat model is a stale-but-legitimately-built `dist/`, never a
+   deliberately falsified manifest. Not a realistic risk given who can reach
+   this project's filesystem, but worth stating precisely rather than
+   implying a stronger guarantee than what was actually built.
+4. **The 10-minute freshness window remains a judgment call**, unchanged
+   from the proposal -- generous relative to observed build times, but not
+   derived from a hard requirement.
+5. **A build that silently writes the wrong `environment` value into the
+   manifest** (a bug in `build-production-independent.mjs`/`build-staging.mjs`
+   themselves, rather than in which script was run) would not be caught --
+   the manifest is written by the same process it's meant to check, by
+   design, since the actual incident class this responds to was "the right
+   build script was run, just not immediately before the right deploy," not
+   "a build script lied about what it built."
