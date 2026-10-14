@@ -38203,3 +38203,183 @@ actual send attempt. That would mean the same shape as the prior
 controlled test: a **new** claim ID (the current one is permanently
 consumed) and a fresh explicit authorization to invoke it -- not performed
 this round, per requirement 11.
+
+## Second Controlled Test -- Definitive Result: `unauthorized_client`, Plus a Deployment-Process Incident Found and Fixed En Route (2026-10-14)
+
+The owner authorized exactly one more controlled Production Gmail test to
+read the diagnostic code now deployed, subject to 15 numbered safeguards: a
+new unique claim ID via the existing mechanism, preserve the original failed
+claim and all send logs, smallest possible change, full gates, verify no
+effect on normal scheduled behavior, confirm backup/rollback/config before
+deploying, execute exactly once for the owner only, capture only the
+allowlisted code and status (never credentials/tokens/raw bodies), send a
+real email only if authentication actually succeeds, never touch donor/
+pledge/payment data or interfere with October 15's own idempotency record,
+never change OAuth credentials or Cloudflare secrets, and update this
+document. **Stop if any safety check fails.**
+
+### Step 1: a safety check DID fail -- a self-introduced deployment-process incident, found and corrected before the test ran
+
+Verifying "Production is running the new diagnostic code and the guard
+remains intact" (requirement 1) surfaced a real problem: a fresh,
+cache-disabled fetch of `https://shimmydonors.org/` was rendering the
+`app/layout.tsx` `StagingBanner()` -- server-rendered, and only ever shown
+when the Worker's own **build-time-baked-in** `deploymentEnvironment` equals
+`"staging-independent"` (confirmed via `cache-control: no-store, must-revalidate`
+on the response and a `cf-ray` header proving it was a genuine live request,
+not a cached one).
+
+**Root cause, fully traced:** during the prior round's own Staging test step,
+`pnpm run build:staging-independent` was run to produce the Staging bundle
+(correctly deployed to Staging). But the subsequent `pnpm run
+deploy:production-independent` command **does not build** -- it deploys
+whatever is currently in `dist/`, which at that point was still the
+Staging-flavored bundle from the step before. The result: Production's
+`6aece8e1` version had Production's correct D1 binding, secrets, cron, and
+`APP_BASE_URL` (all controlled by `wrangler.production.jsonc`, independent of
+the bundle), but the **application code itself** believed it was running as
+Staging.
+
+**Impact, assessed precisely, not performed to confirm:**
+
+- `lib/agenda/email-send-guard.ts`'s `isRealEmailSendAllowed` would have
+  **blocked** tomorrow's genuine 9 AM Eastern send with `EmailSendBlockedError`
+  -- the real October 15 agenda email would NOT have gone out, with no
+  credential problem at all being the cause.
+- `lib/operations/staging-reset.ts:132`'s environment gate
+  (`deploymentEnvironment !== "staging-independent"` -> 404) was satisfied,
+  meaning `/api/operations/staging-reset` -- a **destructive, staging-only
+  reset endpoint** that, per `docs/DEPLOYMENT.md`, deletes rows -- was
+  reachable (not a 404) against **Production's real D1 database** for anyone
+  who could separately pass its own owner-email check (the same single
+  owner authorized on both environments; this is not an open vulnerability to
+  a third party, but a defense-in-depth layer that exists specifically to
+  prevent exactly this kind of accident was itself disabled). **This endpoint
+  was never called** -- its exposure was identified from source
+  (`authorizeStagingReset()`'s own logic) and corrected without ever invoking
+  it, to avoid any risk of triggering it.
+- Donor data, `agenda_send_log`, and the existing failed test claim were
+  **not** affected by this incident at any point -- it changed which code
+  branches were reachable, not any stored data, and nothing reachable through
+  it was ever actually invoked.
+
+**Fix applied and verified before proceeding:** `pnpm run
+build:production-independent` (the correct script) rebuilt `dist/` fresh,
+confirmed via `grep` to have `var deploymentEnvironment =
+"production-independent";` constant-folded into the bundle (not merely
+present as a string literal elsewhere). Redeployed --
+**`554f865b-f859-45e9-bfdc-7481034bc418`**. Verified via a fresh,
+cache-disabled fetch: the Staging banner is gone; a full page screenshot
+after a hard navigation confirmed the same visually. Re-confirmed via
+read-only D1 query immediately after: donors (254), giving activities
+(5,464), `agenda_send_log` (0 rows), and the original failed claim row are
+all exactly unchanged. This rebuild also happened to carry this round's own
+already-gated-and-tested claim-ID change (see Step 2) in the same deploy,
+since both were sitting in the working tree together -- not a scope
+expansion, just one corrected deploy instead of two.
+
+**Process lesson, recorded so it isn't repeated:** `deploy:*` scripts in this
+repo never build -- always run the matching `build:*-independent` script
+**immediately before** the matching `deploy:*-independent` script, with no
+other build command in between, especially when a Staging test step is
+interleaved before a Production deploy in the same session.
+
+### Step 2: the minimal change, gated exactly as required
+
+`lib/agenda/test-send-log.ts`'s `TEST_SEND_CLAIM_ID` advanced from
+`"2026-10-14-production-gmail-oauth-verification"` to
+`"...-verification-2"` -- the entire mechanism for authorizing one more
+attempt, reusing the exact same atomic `INSERT ... ON CONFLICT(id) DO
+NOTHING` idempotency already in place. This is the only source change this
+round (`git diff --stat`: 1 file). Full gates re-run and passed: 188/188
+tests (the e2e test imports the constant rather than hardcoding the old
+string, so it required no changes and still passed), `tsc --noEmit` clean,
+lint at the unchanged 94/43 baseline. Confirmed via `grep -rl
+"test-send-log"` that this module has exactly one importer in the entire
+codebase (`app/api/agenda/test-send/route.ts`) -- nothing in the real
+scheduled path (`send-agenda.ts`, `send-log.ts`, `worker/index.ts`) can be
+affected by this change, satisfying requirement 5 by construction.
+
+### Step 3: execution and result
+
+With the owner authenticated at `https://shimmydonors.org` in their own
+browser session, the one-time call was made:
+
+```
+POST /api/agenda/test-send -> 500
+{ "error": "Gmail token refresh failed: HTTP 401 Unauthorized (unauthorized_client)" }
+```
+
+**This is a materially different, more specific result than the first
+test's bare 401.** Per RFC 6749 section 5.2, `unauthorized_client` is
+distinct from `invalid_client`: it means the client authenticated
+successfully (Google recognized the `client_id`/`client_secret` pair as
+real and matching) but that client **is not authorized to use the specific
+grant presented** -- here, the `refresh_token` grant with this specific
+`refresh_token` value. In Google's own implementation, this is the
+well-documented symptom of presenting a `refresh_token` together with
+`client_id`/`client_secret` from a **different OAuth client than the one
+that originally issued that refresh token**.
+
+This directly confirms hypothesis 2 from the prior root-cause round: the
+deployment log independently showed `GMAIL_OAUTH_CLIENT_ID` was itself
+explicitly updated (not just the secret) during the owner's correction, and
+`GMAIL_OAUTH_REFRESH_TOKEN` was explicitly left unchanged. **The new Client
+ID now stored on Production does not match the OAuth client that issued the
+currently-stored refresh token.** Hypothesis 1 (a transcription/typo error
+in the credential values themselves) is now ruled out -- a typo would
+produce `invalid_client` (Google never recognizing the client at all), not
+`unauthorized_client` (Google recognizing the client but rejecting this
+specific grant).
+
+### Verification -- all safety properties held
+
+- D1, read-only, immediately after: the **original** claim row
+  (`2026-10-14-production-gmail-oauth-verification`) is byte-for-byte
+  unchanged (`status: "failed"`, the original bare-401 outcome text) -- not
+  reset, not touched. The **new** row
+  (`2026-10-14-production-gmail-oauth-verification-2`) exists exactly once,
+  `status: "failed"`, `outcome: "Gmail token refresh failed: HTTP 401
+  Unauthorized (unauthorized_client)"`.
+- `agenda_send_log`: still 0 rows -- October 15's own idempotency record is
+  completely untouched, satisfying requirement 13. This route has zero code
+  path to that table by construction (confirmed in the prior implementation
+  round and unchanged since).
+- Donor data unchanged: 254 donors, 5,464 giving activities.
+- No email was sent -- the failure occurred at the token-refresh step,
+  before any call to Gmail's send endpoint, so requirement 10's
+  "send only if authentication succeeds" never came into play this time
+  either.
+- No OAuth credential or Cloudflare secret was changed this round
+  (requirement 14) -- only `wrangler secret list` (names only) and
+  `wrangler deployments list` (metadata only) touched Cloudflare
+  configuration state, and neither writes anything.
+- No donor, pledge, payment, or financial record was modified (requirement
+  12).
+- Both one-time claims (`...verification` and `...verification-2`) are now
+  permanently consumed, by the same no-reclaim design as before. A third
+  attempt would require a new, distinct claim ID and a fresh explicit
+  authorization, exactly as before.
+
+### Current Production deployment
+
+**Version `554f865b-f859-45e9-bfdc-7481034bc418`** is live (the corrected
+rebuild, carrying both the diagnostic-code deploy content and this round's
+claim-ID advancement). Bindings, cron (`0 * * * *`), and `APP_BASE_URL`
+unchanged throughout.
+
+### Recommended next action
+
+**Not performed this round, per requirement 14 (no credential changes):** the
+owner's own next step is to mint a **new `GMAIL_OAUTH_REFRESH_TOKEN`
+issued against the OAuth client whose Client ID/Secret are now stored on
+Production** -- i.e., repeat the original one-time interactive authorization
+(Google's OAuth Playground, "use your own OAuth credentials," the current
+Client ID/Secret, scope `https://www.googleapis.com/auth/gmail.send`) and
+`wrangler secret put GMAIL_OAUTH_REFRESH_TOKEN --config
+wrangler.production.jsonc` with the newly-issued value. This is the forward
+-looking fix (keep the credentials already entered; align the refresh token
+to match them) rather than attempting to recover whatever the refresh
+token's original, now-unknown issuing client was. Verification afterward
+could reuse this same controlled-test mechanism (a third claim ID, a fresh
+explicit authorization) or simply the next natural 9 AM Eastern window.
