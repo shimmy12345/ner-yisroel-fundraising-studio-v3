@@ -20,6 +20,7 @@ async function run() {
     donor("bergenfield-1", "Bergenfield", "NJ"),
     donor("chicago-1", "Chicago", "IL"),
     donor("baltimore-1", "Baltimore", "MD"),
+    donor("silver-spring-1", "Silver Spring", "MD"), // independent-review correction: NOT part of Baltimore
     donor("savannah-1", "Savannah", "GA"), // ungrouped -- real audit case
     donor("jerusalem-1", "Jerusalem", null), // international -- real audit case
     donor("unknown-1", null, null), // no address on file at all
@@ -30,6 +31,24 @@ async function run() {
   {
     const teaneckRegion = filterByGeo(roster, "north-central-nj-teaneck-bergenfield", ALL_CITIES);
     assert.deepEqual(teaneckRegion.map((d) => d.id).sort(), ["bergenfield-1", "teaneck-1", "teaneck-2"]);
+  }
+
+  // --- Regression: independent review correction (2026-10-14). The
+  // Baltimore region must contain ONLY the real Baltimore donor -- the
+  // Silver Spring donor must be excluded from it, while remaining fully
+  // visible under "All Regions" and individually filterable by city. ---
+  {
+    const baltimoreRegion = filterByGeo(roster, "baltimore-maryland-suburbs", ALL_CITIES);
+    assert.deepEqual(baltimoreRegion.map((d) => d.id), ["baltimore-1"], "the Baltimore region must contain exactly one donor -- Silver Spring must not be included");
+    const silverSpringUnderAllRegions = filterByGeo(roster, ALL_REGIONS, ALL_CITIES);
+    assert.ok(silverSpringUnderAllRegions.some((d) => d.id === "silver-spring-1"), "Silver Spring must remain visible under All Regions");
+    const silverSpringByCity = filterByGeo(roster, ALL_REGIONS, cityStateKey("Silver Spring", "MD"));
+    assert.deepEqual(silverSpringByCity.map((d) => d.id), ["silver-spring-1"], "Silver Spring must remain individually selectable via the City filter");
+    // Confirms the exclusion is real, not an artifact of this test's
+    // own roster -- Silver Spring must not match the Baltimore region
+    // even when explicitly filtered by it.
+    const silverSpringUnderBaltimore = filterByGeo(roster, "baltimore-maryland-suburbs", cityStateKey("Silver Spring", "MD"));
+    assert.deepEqual(silverSpringUnderBaltimore, [], "Silver Spring must not appear even when the Baltimore region AND its own city are both selected together");
   }
 
   // --- Individual-city filtering: narrows to exactly one (city, state),
@@ -92,6 +111,15 @@ async function run() {
     assert.equal(teaneckOption.label, "Teaneck, NJ");
     assert.ok(allCityOptions.some((o) => o.label === "Jerusalem"), "an international city with no state must still appear, without a stray ', null'");
     assert.ok(allCityOptions.some((o) => o.city === "Savannah"), "an ungrouped city must still appear in the All-Regions city list");
+    assert.ok(allCityOptions.some((o) => o.label === "Silver Spring, MD"), "Silver Spring must still appear in the All-Regions city list after the independent-review correction");
+  }
+
+  // --- Regression: the Baltimore region's own city dropdown must
+  // offer only Baltimore -- Silver Spring must not appear there, even
+  // though it still appears under "All Regions" (checked above). ---
+  {
+    const baltimoreOptions = cityOptionsForRegion(roster, "baltimore-maryland-suburbs");
+    assert.deepEqual(baltimoreOptions.map((o) => o.city), ["Baltimore"]);
   }
 
   // --- "When a travel region is selected, the City filter should offer

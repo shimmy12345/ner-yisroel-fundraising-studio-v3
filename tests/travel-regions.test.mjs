@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFile, readdir } from "node:fs/promises";
 import { TRAVEL_REGIONS, regionsForCityState, cityStateKey, formatCityState, travelRegionById } from "../lib/relationships/travel-regions.ts";
+
+const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 // Geographic Filtering for Travel Planning -- Phase 2 (2026-10-14, see
 // docs/AI-HANDOFF.md). Exercises the exact 15 regions and city/state
@@ -7,7 +10,7 @@ import { TRAVEL_REGIONS, regionsForCityState, cityStateKey, formatCityState, tra
 // never a reimplementation or an approximation of that list.
 
 const EXPECTED = {
-  "baltimore-maryland-suburbs": { label: "Baltimore & Maryland suburbs", cities: [["Baltimore", "MD"], ["Silver Spring", "MD"]] },
+  "baltimore-maryland-suburbs": { label: "Baltimore & Maryland suburbs", cities: [["Baltimore", "MD"]] },
   "chicago-suburbs": { label: "Chicago & suburbs", cities: [["Chicago", "IL"], ["Lincolnwood", "IL"]] },
   "north-central-nj-teaneck-bergenfield": { label: "North/Central NJ -- Teaneck/Bergenfield area", cities: [["Teaneck", "NJ"], ["Bergenfield", "NJ"], ["Englewood", "NJ"], ["Fair Lawn", "NJ"], ["Passaic", "NJ"]] },
   "monsey-spring-valley-rockland-ny": { label: "Monsey/Spring Valley & Rockland County, NY", cities: [["Monsey", "NY"], ["Spring Valley", "NY"], ["Suffern", "NY"], ["New City", "NY"], ["Chestnut Ridge", "NY"], ["Nanuet", "NY"], ["Wesley Hills", "NY"]] },
@@ -82,6 +85,16 @@ async function run() {
   assert.deepEqual(regionsForCityState("New York", "NY"), ["nyc-boroughs"]);
   assert.deepEqual(regionsForCityState("New York", "PA"), [], "a different state with the same city name must not match");
 
+  // --- Regression: independent review correction (2026-10-14). The
+  // owner's actual approval was "Baltimore = Baltimore, MD only" --
+  // Silver Spring, MD must NOT match this (or any) region, even though
+  // the Phase 1 audit's own proposal had included it with a flagged
+  // caveat. Baltimore itself must still match exactly its own region,
+  // nothing added or removed beyond this one correction. ---
+  assert.deepEqual(regionsForCityState("Silver Spring", "MD"), [], "Silver Spring must not match the Baltimore region (or any region) after the independent-review correction");
+  assert.deepEqual(regionsForCityState("Baltimore", "MD"), ["baltimore-maryland-suburbs"]);
+  assert.deepEqual(travelRegionById("baltimore-maryland-suburbs").cities, [{ city: "Baltimore", state: "MD" }], "Baltimore region must contain exactly one city");
+
   // --- Overlapping region membership is structurally supported: a
   // (city, state) pair listed under two different region entries must
   // resolve to BOTH ids, in the order the regions are defined. No two
@@ -115,6 +128,40 @@ async function run() {
   assert.equal(travelRegionById("not-a-real-region"), null);
   assert.equal(travelRegionById(null), null);
   assert.equal(travelRegionById(undefined), null);
+
+  // --- Dynamic membership, no one-time assignment process. A "new"
+  // donor here is simply a fresh object this test constructs on the
+  // spot, matching exactly what a just-created or just-imported donor
+  // row looks like to this module -- there is no setup step, no cache
+  // warm-up, no batch job to run first. Region membership is computed
+  // fresh from whatever city/state the donor currently has, every time,
+  // which is what makes this true: a donor's region membership updates
+  // itself automatically the moment their city/state is edited, with no
+  // code path that could leave it stale. ---
+  {
+    const brandNewManualDonor = { city: "Teaneck", state: "NJ" };
+    assert.deepEqual(regionsForCityState(brandNewManualDonor.city, brandNewManualDonor.state), ["north-central-nj-teaneck-bergenfield"], "a donor created moments ago, never seen by this module before, resolves correctly on the very first call");
+    const editedToADifferentCity = { city: "Baltimore", state: "MD" };
+    assert.deepEqual(regionsForCityState(editedToADifferentCity.city, editedToADifferentCity.state), ["baltimore-maryland-suburbs"], "the same donor, if their city/state is later edited, resolves to the NEW region immediately -- nothing needs to be re-run or migrated");
+  }
+
+  // --- Structural confirmation that no persisted "region" concept
+  // exists anywhere this donor's address could be written from: no
+  // migration ever added a region/travel-region column, and this
+  // module itself is read-only with respect to D1 (no env.DB, no SQL
+  // write verb) -- region membership can only ever be the live,
+  // recomputed result of regionsForCityState(), never a stored value
+  // that a backfill could leave stale. ---
+  {
+    const migrationFiles = (await readdir(new URL("../drizzle", import.meta.url))).filter((name) => name.endsWith(".sql"));
+    const migrationContents = await Promise.all(migrationFiles.map((name) => read(`drizzle/${name}`)));
+    for (const [index, sql] of migrationContents.entries()) {
+      assert.doesNotMatch(sql, /\bregion\b/i, `drizzle/${migrationFiles[index]} must not define any region/travel-region column -- region membership must stay a derived, live computation, never a stored assignment`);
+    }
+    const thisModuleSource = await read("lib/relationships/travel-regions.ts");
+    assert.doesNotMatch(thisModuleSource, /env\.DB/);
+    assert.doesNotMatch(thisModuleSource, /\b(INSERT|UPDATE|DELETE)\b/i);
+  }
 
   console.log("travel-regions: ok");
 }

@@ -60,9 +60,18 @@ export function cityStateKey(city: string | null | undefined, state: string | nu
 // geographic groupings" table (docs/AI-HANDOFF.md). Labels are the
 // audit's own region names, verbatim.
 export const TRAVEL_REGIONS: readonly TravelRegion[] = [
+  // Baltimore ONLY -- corrected 2026-10-14 during independent review.
+  // The Phase 1 audit's own proposal already flagged Silver Spring as
+  // doubtful ("~40 mi away toward DC, not a Baltimore suburb") but
+  // included it anyway with that caveat; the owner's actual approval
+  // excluded it. Silver Spring is NOT removed from the donor directory
+  // -- a donor there still appears under "All Regions" and remains
+  // individually selectable via the City filter (see
+  // lib/relationships/donor-geo-filter.ts's cityOptionsForRegion(),
+  // which lists every city actually present regardless of region
+  // membership) -- it simply no longer matches this region.
   { id: "baltimore-maryland-suburbs", label: "Baltimore & Maryland suburbs", cities: [
     { city: "Baltimore", state: "MD" },
-    { city: "Silver Spring", state: "MD" },
   ] },
   { id: "chicago-suburbs", label: "Chicago & suburbs", cities: [
     { city: "Chicago", state: "IL" },
