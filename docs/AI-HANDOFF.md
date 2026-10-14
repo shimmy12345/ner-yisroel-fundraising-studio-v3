@@ -14,17 +14,28 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (committed, not yet pushed):
-**`741a58c`** -- "Fix the October 14 2026
-email incident: fail-closed environment guard, Daily Agenda send
-idempotency, and the Production APP_BASE_URL correction" -- application
-code, a new migration, and test changes; documented in full under
-"October 14 2026 Email Incident" below. **DEPLOYED TO INDEPENDENT
-STAGING ONLY** (Worker version `95310d2e-cc5c-44ae-9907-345a49708a38`;
-migration `0043_agenda_send_log.sql` applied to Staging's D1 only) --
-**no Production deployment, Production Cloudflare configuration change,
-or Production data modification has occurred for this commit.** Sits on
-top of
+Current HEAD (commit `ff40bd4`, pushed; Production deployment described
+below is a deploy-only action, not a new commit on top of it):
+**`ff40bd4`** (tree identical to `741a58c` -- `ff40bd4` only fixes a
+documentation self-reference) -- "Fix the October 14 2026 email
+incident: fail-closed environment guard, Daily Agenda send idempotency,
+and the Production APP_BASE_URL correction" -- application code, a new
+migration, and test changes; documented in full under "October 14 2026
+Email Incident" below. **DEPLOYED TO BOTH INDEPENDENT STAGING AND
+INDEPENDENT PRODUCTION**, the latter under the owner's explicit written
+authorization (2026-10-14). Staging: Worker version
+`95310d2e-cc5c-44ae-9907-345a49708a38`, migration 0043 applied to
+Staging's D1. **Production: Worker version
+`ece6a636-fdff-4ee5-a54f-bd2ebdd1f2bd`, migration 0043 applied to
+Production's D1 (confirmed additive-only, 0 rows after, donor/financial
+row counts unchanged), `APP_BASE_URL` live-confirmed as
+`https://shimmydonors.org`, live Daily Agenda links confirmed to use
+that domain.** See "October 14 2026 Email Incident -- PRODUCTION
+DEPLOYMENT (2026-10-14)" below for the full five-phase record,
+including the explicitly unresolved Observability limitation and the
+still-pending next-scheduled-email verification (Thursday, October 15,
+2026, 9:00 AM America/New_York / 13:00 UTC) -- **this incident is not
+yet closed.** Sits on top of
 `33611ee` -- "Document Production
 deployment of Multi-Open-Pledge Independent Evaluation (2026-10-13)" --
 documentation only. Confirms, against the real deployed state: commit
@@ -36491,3 +36502,236 @@ October 14 incident fully closed.
 Production Cloudflare configuration change, or Production data
 modification has been performed or will be performed without a
 separate, explicit approval.**
+
+## October 14 2026 Email Incident -- PRODUCTION DEPLOYMENT (2026-10-14)
+
+The owner issued explicit written Production authorization for commits
+`741a58c`/`ff40bd4` (the fail-closed email guard, Daily Agenda
+idempotency, and the `APP_BASE_URL` correction), covering migration
+0043 and the Worker deploy only -- explicitly excluding donor-data
+changes, Cloudflare domain-routing changes, and any manual email send.
+
+### Phase 1: Pre-deployment verification -- all checks passed
+
+- Branch `feature/independent-cloudflare-sandbox`, HEAD `ff40bd4`
+  (sits on `741a58c`), working tree clean, matching the authorized
+  commits exactly.
+- `wrangler deployments list --config wrangler.production.jsonc`:
+  last deployment was the prior round's `9174a465-...` (2026-10-13
+  18:47Z) -- no concurrent or newer deployment, nothing in progress.
+- `git diff --stat 29135a9 HEAD` (29135a9 = the currently-deployed
+  Production commit): exactly the 20 files already reviewed in the
+  implementation round (the email guard, idempotency, config, test,
+  and schema-completeness files) -- confirmed via targeted diffs that
+  `wrangler.staging.jsonc` and every donor-data route/API file are
+  untouched, and `drizzle/` contains only the one new migration.
+- Live `/health` check (Production, read-only, before deploying):
+  **Automated backup -- completed successfully 2026-10-14T13:39:23Z**
+  (same-day, ~15 minutes before this deployment); **Monthly restore
+  test -- successfully verified the Oct 12, 2026 backup.** Overall
+  workspace "Healthy," 254 active donors, zero orphans/issues.
+- Currently-deployed Production Worker version recorded for rollback:
+  **`9174a465-09eb-4d52-9917-17f3c3bdec13`** (commit `2019719`/`29135a9`
+  tree -- identical application code, `2019719` only adds documentation
+  on top).
+- Migration 0043 re-confirmed additive-only by inspection (a single
+  `CREATE TABLE`, no `ALTER`/`DROP`/data statement) and already
+  rehearsed locally (`pnpm db:baseline:rehearse`, fully local
+  `node:sqlite`, no real D1 touched) in the prior implementation round.
+- `npx tsc --noEmit` -> clean. `node scripts/run-tests.mjs` ->
+  **185/185 passed.** `pnpm run lint` -> **94 errors / 43 warnings**
+  (exact baseline). `pnpm run build:production-independent` -> clean.
+- Build-time environment identity verified by inspecting the actual
+  compiled bundles (not just the build scripts' intent): the
+  `__FUNDRAISING_OS_ENVIRONMENT__` placeholder was fully substituted
+  (0 remaining occurrences) in both the Production and Staging builds;
+  `scripts/build-production-independent.mjs` defines it to
+  `"production-independent"`, `scripts/build-staging.mjs` to
+  `"staging-independent"` -- confirmed by direct read of both scripts.
+- `grep -rl "gmail.googleapis.com" lib/ app/ worker/ status-worker/`
+  -> exactly one file, `lib/agenda/gmail-client.ts` -- confirming no
+  other code path can reach Gmail outside the one guarded chokepoint.
+- `wrangler.production.jsonc`'s `APP_BASE_URL` re-confirmed, fresh
+  read: exactly `"https://shimmydonors.org"`.
+
+No STOP condition was triggered.
+
+### Phase 2: Production deployment
+
+- Confirmed `agenda_send_log` did not already exist on Production's D1
+  (`SELECT name FROM sqlite_master ... -> []`), then applied
+  `drizzle/0043_agenda_send_log.sql` via `wrangler d1 execute
+  fundraising-os-production-db --remote`. `num_tables` went 54 -> 55;
+  `agenda_send_log` confirmed to exist and hold **0 rows**
+  immediately after.
+- Donor/financial data confirmed unchanged by the migration: `donors`
+  (live) = 254, `giving_activities` = 5464, `pledge_payment_plans` =
+  45 -- identical to the pre-migration Workspace Health count.
+- Rebuilt fresh (`pnpm run build:production-independent`) and, before
+  deploying, confirmed the fix was actually baked into that specific
+  build: `EmailSendBlockedError` (3 occurrences), `agenda_send_log`
+  (8 occurrences), `"production-independent"` present, placeholder
+  identifier fully gone.
+- Deployed with `pnpm run deploy:production-independent`. **Production
+  Worker version: `ece6a636-fdff-4ee5-a54f-bd2ebdd1f2bd`.** Deploy
+  output bindings: `env.DB` -> `fundraising-os-production-db`,
+  `env.STATUS_WORKER` -> `fundraising-os-production-backup-status`,
+  `env.APP_BASE_URL` -> `"https://shimmydonors.org"` (full value shown,
+  not truncated), `schedule: 0 * * * *` reprinted unchanged. No Staging
+  binding of any kind appeared anywhere in the output.
+- `wrangler.staging.jsonc` re-confirmed unchanged by this round (not
+  redeployed): `database_name: "fundraising-os-staging-db"`,
+  `"triggers": { "crons": [] }` -- Staging's own last-deployed state
+  (Worker version `95310d2e-...` from the prior round) is untouched.
+
+### Phase 3: Live Production verification
+
+- **Application health**: `/health` loads normally post-deploy.
+  **"Deployed version: 0.1.0 · ff40bd4"** -- confirms the exact
+  authorized commit is live. "Database connection: Connected."
+  Donor-data integrity checks all remain green and unchanged: 254
+  active donors, 0 duplicate JL codes, 0 orphaned gifts/interactions/
+  reminders/pledge payments, 0 broken merge redirects, giving-total
+  "Reconciled," 0 unmatched JL codes.
+- **One expected, non-corrupting side effect, disclosed rather than
+  hidden**: "Workspace health" now reads **"Needs attention"**
+  ("Production launch readiness: Blocked") because "Production
+  migration history: Unverified" / "Production rehearsal baseline:
+  0019 · Mismatch" -- the same "stale baseline stamp" state
+  `docs/DEPLOYMENT.md` itself documents as the expected result of
+  applying *any* schema-changing migration ("reflects the baseline's
+  age, not a corrupt or unexpected live schema"), identical to what
+  Staging showed after this same migration was applied there last
+  round. The live, structurally-authoritative check right next to it,
+  **"Production ↔ baseline schema: Match,"** confirms the actual
+  schema is correct. No procedure or script to re-stamp the
+  `production_schema_baseline` marker row exists anywhere in this
+  codebase (searched); inventing one and running it against
+  Production's own self-attestation table was judged outside this
+  round's specific authorization (migration + Worker deploy), so it
+  was deliberately left as-is rather than guessed at. Flagged below as
+  a follow-up item, not a defect in the deployed fix.
+- **Daily Agenda preview** (`/api/agenda/preview`, live Production):
+  content is Production's own, correctly -- Rosenbaum absent (on
+  track, `$150` balance, `paid_cents: 165000`, unchanged), Klein
+  present and correctly overdue ("$400.00 expected · 4 days behind,"
+  one day further than yesterday's "3 days behind," consistent real
+  progression). **Every link's actual `href` confirmed (via the live
+  accessibility tree, not just visual inspection) to read
+  `https://shimmydonors.org/donors/...`** -- the core fix, live and
+  working.
+- **Rosenbaum** (`/donors/33426bfe-...`): "Next expected: Nov 4, 2026,"
+  no overdue badge -- unchanged from the prior round, confirming the
+  donor-61566 reconciliation fix remains intact.
+- **Goldenberg** (`/donors/441e198c-...`): KOLX2026 "Next expected:
+  Oct 23, 2026," no overdue badge -- unchanged, confirming the
+  multi-open-pledge fix remains intact; this round touched none of
+  that code.
+- **`agenda_send_log` table**: confirmed to exist and hold 0 rows
+  (Phase 2) -- it has not yet been exercised by a real send, since
+  today's 9 AM Eastern window had already passed before this
+  deployment went live.
+- **Deployed Worker version**: `ece6a636-fdff-4ee5-a54f-bd2ebdd1f2bd`,
+  confirmed both from the deploy output and independently from the
+  live `/health` page's commit identifier.
+
+**Production scheduler investigation -- explicitly limited, not
+fabricated.** Per the owner's own instruction not to claim the
+scheduler works merely because the cron appears in `wrangler.jsonc`:
+I attempted to determine whether Production's `scheduled()` handler
+actually executed at 13:00 UTC on 2026-10-14, whether a Gmail send was
+attempted, and whether it errored. **I could not determine any of
+this.** `lib/logger.ts` writes only to `console.info`/`console.error`
+(Cloudflare Observability) -- there is no D1 table or other persisted,
+queryable record of scheduled-invocation history anywhere in this
+codebase. The Cloudflare dashboard (the only place Observability logs
+are visible) hit a login wall; I did not enter credentials, per this
+session's standing rule. `wrangler` 4.92 has no subcommand to read
+historical Observability logs or Cron Trigger invocation history. **I
+am explicitly reporting this as an unresolved limitation, not claiming
+success.** The only directly-checkable fact is negative evidence: no
+second, correctly-linked "Fundraising Agenda" email exists anywhere in
+Gmail for 2026-10-14 (re-confirmed again this round, including after
+today's deployment, to rule out the deployment itself having triggered
+anything -- it cannot, since only a real `scheduled()` invocation calls
+`sendDailyAgenda`, never a deploy).
+
+### Phase 4: Next scheduled email -- explicitly pending, not triggered
+
+**No email was manually triggered.** The next naturally scheduled
+occurrence is **Thursday, October 15, 2026, 9:00 AM America/New_York**
+(EDT is still in effect -- DST ends the first Sunday of November 2026
+-- so that is 13:00 UTC). This has not yet occurred as of this report
+and is **explicitly left pending, not represented as verified.**
+
+When it occurs, verify it using:
+
+1. **Cloudflare scheduled execution evidence** -- requires Observability/
+   dashboard access this round did not have; would confirm whether
+   `scheduled()` fired on Production and whether it threw.
+2. **Production `agenda_send_log` record** -- read-only:
+   `wrangler d1 execute fundraising-os-production-db --remote
+   --command "SELECT * FROM agenda_send_log WHERE send_date =
+   '2026-10-15';"` should show exactly one row, `status = 'sent'`.
+3. **Gmail delivery evidence** -- search `subject:(Fundraising Agenda)
+   newer_than:1d` the morning of the 15th; expect exactly one message,
+   timestamped shortly after 13:00 UTC.
+4. **Production-only donor data** -- the message's content should match
+   Production's own live state at send time (e.g. Rosenbaum absent if
+   still on track, any genuinely-overdue donor present with the
+   correct day-count) -- cross-check against a live Production donor
+   page or the `/api/agenda/preview` route at approximately the same
+   time.
+5. **Correct Production links** -- every "Open in Fundraising OS" link
+   in the received message must read `https://shimmydonors.org/...`,
+   never a workers.dev hostname.
+6. **Confirmation Staging sent no real email** -- search Gmail for any
+   second "Fundraising Agenda" message that morning; there must be
+   none. (If Staging's `scheduled()` somehow still fires, the
+   fail-closed guard should cause it to throw `EmailSendBlockedError`
+   rather than send -- visible, if Observability access exists by
+   then, as a logged error on the Staging Worker, not as a second real
+   email.)
+7. **Confirmation only one agenda email was delivered** -- combines (3)
+   and (6): exactly one message, not zero, not two.
+
+**This incident remains open until that verification is performed
+against an actual scheduled execution** -- per the owner's own closing
+instruction.
+
+### Phase 5: Data integrity, scope discipline, and remaining risk
+
+- No donor record, pledge, payment, or payment plan was modified --
+  confirmed by identical before/after row counts (254/5464/45) and by
+  every data-integrity check on `/health` remaining green.
+- No Cloudflare domain-routing or unrelated infrastructure was
+  touched -- the `shimmydonors.org` → workers.dev redirect remains
+  exactly as found, unaddressed, requiring the owner's own separate
+  action outside this repository.
+- No real email was manually sent or triggered at any point this
+  round.
+- If this deployment had failed after migration 0043 was applied, the
+  plan was to preserve the additive table and roll back only the
+  Worker (via `wrangler rollback` or a redeploy of the prior build to
+  version `9174a465-09eb-4d52-9917-17f3c3bdec13`), never a destructive
+  database rollback -- not needed, since the deployment succeeded.
+- Remaining open items, unchanged from the implementation round: why
+  Production's own scheduled email did not arrive on October 14
+  (Observability access required); the `shimmydonors.org` redirect
+  rule (owner action required); no live HTTP trigger of the deployed
+  guard was obtained (blocked by Claude Code's own safety classifier
+  in the implementation round, not reattempted this round since the
+  email window had already passed and Phase 4 explicitly forbids
+  triggering a test email). One new, minor item: the "stale baseline
+  stamp" cosmetic state on Production's own `/health` page (Section
+  "Phase 3" above) -- not a defect, matches documented behavior, but
+  worth the owner's awareness since it shows "Needs attention" until
+  addressed or until the next schema change naturally supersedes it.
+
+**The incident is not yet closed.** The fix is deployed, live-verified
+for correctness wherever it could be checked without Observability
+access or triggering a real send, and the donor-data/environment-
+isolation/duplicate-prevention properties are all confirmed. What
+remains is the one thing that can only be confirmed by time passing:
+an actual scheduled execution producing exactly one, correctly-sourced,
+correctly-linked email tomorrow morning.
