@@ -39931,3 +39931,122 @@ wired correctly, but are not a substitute for seeing it rendered.
 3. **No Production deployment has been performed or requested this
    round** -- awaiting separate, explicit authorization, exactly as
    instructed.
+
+## Geographic Filtering -- Independent Review Correction (2026-10-14)
+
+Independent review of Phase 2 found that the owner's explicit approval
+was "Baltimore = Baltimore, MD only," but `lib/relationships/travel-
+regions.ts` still also included Silver Spring, MD in that region.
+
+### Root cause
+
+The Phase 1 audit's own proposal table (above, "Proposed geographic
+groupings") already flagged this exact doubt when it was first written:
+*"High for Baltimore; Silver Spring is ~40 mi away toward DC, not a
+Baltimore suburb -- flagged, not merged blindly."* Despite that caveat,
+Silver Spring was still listed in the proposal's city column, and Phase
+2's implementation transcribed the proposal literally, carrying the
+flagged city through into code. The owner's actual approval decided
+that flagged doubt in favor of exclusion; this round corrects the
+implementation to match.
+
+### Fix
+
+`lib/relationships/travel-regions.ts`: the `baltimore-maryland-suburbs`
+region now lists only `{ city: "Baltimore", state: "MD" }`. Silver
+Spring is removed from the region's membership ONLY -- no donor record
+was touched, and Silver Spring remains fully reachable exactly as the
+owner required: it still appears under "All Regions" and remains
+individually selectable in the City filter (`cityOptionsForRegion()`
+lists every city actually present regardless of region membership, so
+removing a city from a region's list never hides it from the directory).
+Baltimore's own donor count is now 57 (previously reported as 58, which
+included the 1 Silver Spring donor).
+
+### Verification of the other 14 regions against the approved list
+
+Re-read `lib/relationships/travel-regions.ts` and the Phase 1 audit's
+own proposal table side by side, region by region, city by city, state
+by state (not relying on memory of having written it correctly the
+first time). **All 14 other regions match exactly, with no further
+discrepancies**: Chicago & suburbs; North/Central NJ (Teaneck/
+Bergenfield/Englewood/Fair Lawn/Passaic); Monsey/Spring Valley &
+Rockland County (Monsey/Spring Valley/Suffern/New City/Chestnut Ridge/
+Nanuet/Wesley Hills); Queens & western Long Island (Flushing/Oceanside/
+Great Neck/East Setauket); Los Angeles & San Fernando Valley (Los
+Angeles/Sherman Oaks/Valley Village); South Florida/Miami (Boca Raton/
+Hollywood/Aventura/Surfside); NYC boroughs (Brooklyn/Bronx/Staten
+Island/New York); St. Louis & suburbs (Saint Louis/Chesterfield); Five
+Towns/Far Rockaway (Far Rockaway/Lawrence); Lakewood & Ocean County
+(Lakewood/Jackson/Toms River); Central NJ (Edison/Elizabeth); San Diego
+(La Jolla); Detroit area (Oak Park/Southfield); Israel (Betar Illit/
+Jerusalem/Ramat Beit Shemesh).
+
+This verification was performed directly against the only written
+record of what was approved -- the Phase 1 audit table in this same
+document, which the owner's approval referenced as "exactly as
+documented." If the owner has a separate reference beyond that document
+that specifies different memberships for any of the other 14 regions,
+please share it and it will be checked against the same way Baltimore
+was corrected here.
+
+### Dynamic region membership, confirmed -- no one-time assignment process
+
+Confirmed, and now locked in by a regression test
+(`tests/travel-regions.test.mjs`): region membership is a pure, live
+computation (`regionsForCityState(city, state)`) over whatever a
+donor's `city`/`state` columns currently hold -- there is no schema
+column, cache, or batch job that stores a region assignment anywhere.
+Checked directly:
+
+- Every migration under `drizzle/` was scanned for the word "region" --
+  none defines any such column.
+- `lib/relationships/travel-regions.ts` itself has no D1 access and no
+  SQL write verb (also asserted by the same test).
+- A fresh donor object this round's test constructs on the spot (never
+  previously seen by this module, exactly like a donor created moments
+  ago or just imported) resolves to the correct region on its very
+  first call; a second check proves that if a donor's city/state is
+  later edited, the SAME donor immediately resolves to the new region,
+  with nothing to re-run or backfill.
+
+A manually created donor, an imported donor, or an edited donor is
+therefore included in the correct region (or correctly excluded from
+every region) automatically, the next time anyone loads `/donors` --
+never dependent on when they were added.
+
+### Regression tests added
+
+`tests/travel-regions.test.mjs`: Silver Spring now resolves to zero
+regions; Baltimore still resolves to exactly its own region; the
+Baltimore region's own city list contains exactly one city; a new
+dynamic-membership test block (see above) plus a schema-scan test
+proving no region column exists anywhere. `tests/donor-geo-filter.test.mjs`:
+a Silver Spring donor added to the test roster is excluded from the
+Baltimore region's filtered results AND from the Baltimore region's own
+city dropdown, while remaining visible under "All Regions" and
+individually reachable via the City filter -- directly exercising the
+owner's explicit requirement, not merely the underlying region-matching
+function in isolation.
+
+**Results: 192/192 test files passing, `tsc --noEmit` clean, lint
+baseline unchanged (94 errors/43 warnings).**
+
+### Staging deployment
+
+Redeployed via the protected `pnpm run deploy:staging-independent`
+script. **New Staging Worker version: `bc20d5a3-be52-4e8b-b579-
+8ae76bb01d8a`.** `dist/build-manifest.json` confirmed `{"environment":
+"staging-independent", ...}`; the Worker responds normally post-deploy.
+No Production deployment was performed; no donor record on either
+Staging or Production was modified.
+
+### Unresolved issues
+
+Unchanged from the Phase 2 entry above: live/mobile visual verification
+on Staging is still something only the owner can perform under this
+session's standing rule against operating his own authenticated
+Cloudflare Access session; a dedicated Travel Planning view / Portfolio
+Focus integration remains unbuilt by design, with the underlying logic
+already reusable there; no Production deployment has been requested or
+performed.
