@@ -39777,3 +39777,157 @@ city/state/country and aggregate counts, never donor name, email, phone,
 or street address. **Phase 2 (building the filter) has not begun and
 will not begin without the owner's explicit approval of the groupings
 above.**
+
+## Geographic Filtering for Travel Planning -- Phase 2 (2026-10-14)
+
+The owner approved all 15 proposed regions from the Phase 1 audit above,
+exactly as documented, and authorized building and deploying the filter
+to Independent Staging only.
+
+### Implementation
+
+- **`lib/relationships/travel-regions.ts`** (new) -- the 15 approved
+  regions and their exact city/state membership, copied verbatim from
+  the Phase 1 audit table (no city added, removed, or re-scoped).
+  `regionsForCityState(city, state)` returns EVERY region whose
+  membership list matches (an array, never a single id), which is what
+  structurally supports a city belonging to more than one region later
+  without any further code change -- no two of the 15 approved regions
+  currently share a city, but nothing in this function assumes that
+  stays true. Matching is case/whitespace-tolerant (`cityStateKey()`
+  trims and lowercases before comparing); the real Production data has
+  no case/whitespace variation today (per the Phase 1 audit), so this is
+  a forward-looking robustness property, not a fix for an observed
+  defect. Never reads or writes `donors` directly -- it is a pure
+  function over whatever `city`/`state` text a caller hands it.
+- **`lib/relationships/donor-geo-filter.ts`** (new) -- `filterByGeo()`
+  and `cityOptionsForRegion()`, deliberately written against the
+  minimal `{ city, state }` shape rather than the donor directory's own
+  row type, so this exact logic can be reused from Portfolio Focus or a
+  future dedicated Travel Planning view (per the owner's own "prepare
+  for future travel planning" instruction) with zero changes.
+  `cityOptionsForRegion()` is what makes "the City filter should offer
+  only cities within that region" true: it derives the city list live
+  from whichever donors are actually passed in, scoped to the selected
+  region, rather than from a static list -- it will stay correct as
+  donors are added, archived, or edited.
+- **`app/donors`** -- `DonorDirectoryExperience.tsx` adds two `<select>`
+  filters (Travel Region, City) alongside the existing free-text search.
+  Region and city compose with search by plain array filtering
+  (`filterByGeo(searched, regionId, cityKey)`, applied AFTER the
+  existing search-based narrowing) -- never a second search engine.
+  Choosing a region that no longer contains the currently-selected city
+  resets City back to "All Cities" automatically, rather than silently
+  showing zero results. The donor count line now reflects search,
+  region, AND city together (previously it only reflected search).
+  `lib/navigation/donor-navigation.ts` gained `donorDirectoryFilterPath()`
+  (the same convention as the existing `donorDirectorySearchPath()`) so
+  region/city round-trip through the existing return-path URL params
+  automatically -- `donorDirectoryReturnPath()` already preserves every
+  query param generically, so no change was needed there.
+- **Donors outside every approved region, and international donors,
+  remain fully visible**: "All Regions" applies no region constraint at
+  all, and any city -- grouped or not -- is always offered in the City
+  dropdown when "All Regions" is selected.
+- **Mobile-friendly by construction, not a separate mobile UI**: both
+  filters are native `<select>` elements (no custom dropdown widget),
+  styled with `flex-wrap` so they stack to full width on narrow screens
+  using the exact same pattern `.directory-actions` already uses
+  elsewhere on this page, and a 44px minimum touch target height
+  matching this codebase's own existing convention (see `app/globals.css`).
+- **No donor address, pledge, payment, interaction, or recommendation
+  logic was touched.** `app/donors/page.tsx`'s own SQL remains the
+  exact same single, unmodified `SELECT` it was before this round --
+  the only change there is reading two more optional URL parameters.
+  No new scoring model was introduced; existing donor priorities,
+  recommendations, and the Daily Fundraising Agenda are completely
+  unaffected (no file under `lib/relationships/recommendation-*`,
+  `lib/agenda/`, or any giving/pledge/payment-plan module was touched --
+  confirmed directly from `git diff --stat`, not merely asserted).
+
+### Regression tests added
+
+- **`tests/travel-regions.test.mjs`** (new): all 15 regions and their
+  exact city/state membership match the approved audit byte-for-byte;
+  every approved city resolves to exactly its own region; case/
+  whitespace tolerance; international donors (null state) resolve
+  correctly and don't collide with a blank US state; donors outside
+  every region (the real ungrouped cities from the audit) resolve to
+  zero regions; same city name under a different state does not
+  cross-match; a direct proof that no two of the 15 approved regions
+  currently overlap, plus documentation that overlap is structurally
+  supported if a future edit introduces it; `formatCityState()`
+  display formatting; `travelRegionById()` safely handles an unknown id.
+- **`tests/donor-geo-filter.test.mjs`** (new): correct donor counts per
+  region; individual-city filtering, independent of and combined with a
+  region; donors outside all regions and international donors remain
+  visible under "All Regions" and findable via individual-city
+  filtering; a region + a city that isn't a member of it returns
+  nothing (never a crash or a silent fallback); case/whitespace
+  tolerance against a donor's own (hypothetically messy) stored text;
+  `cityOptionsForRegion()` scoping, counts, and sort order; a region
+  with zero current donors returns an empty city list rather than
+  erroring.
+- **`tests/donor-navigation.test.mjs`** (extended): `donorDirectoryFilterPath()`
+  round-trips region and city through the URL, composes with the
+  existing search `q` param without clobbering it, and proves
+  `donorDirectoryReturnPath()` needed no changes to keep preserving
+  them; a second test reads the actual directory/navigation source
+  files to confirm the UI wiring is present (selects rendered, the geo
+  filter composed with the already-search-filtered array, the count
+  line depends on the combined filter state) and that neither the two
+  new pure modules nor the directory page's own SQL contain any D1
+  write verb (`env.DB`/`INSERT`/`UPDATE`/`DELETE`) -- a direct,
+  automated check of the "no Production writes" requirement, not only
+  a manual diff review.
+
+**Results: 192/192 test files passing (190 before this round, +2 new
+files, +1 extended), `tsc --noEmit` clean, lint baseline unchanged (94
+errors/43 warnings, via the real `pnpm run lint` script).**
+
+### Staging deployment and verification
+
+Deployed via the protected `pnpm run deploy:staging-independent` script
+(build -> verify-build-manifest -> wrangler deploy chain). **New Staging
+Worker version: `1693c425-3f04-437f-ac2d-c6d6142f8c6d`.** `dist/build-
+manifest.json` confirmed `{"environment":"staging-independent", ...}`
+for this build. Staging's own donor count (254, matching Production's
+snapshot) confirmed unchanged before and after -- no write was performed.
+
+**Verified, without authenticating as the owner** (per this session's
+standing rule never to operate the owner's own Cloudflare Access
+session): the exact client bundle that was just uploaded
+(`dist/client/assets/DonorDirectoryExperience-xnPzSYQz.js`, read locally
+immediately after the build step, the same file `wrangler` uploaded)
+contains every expected new UI string exactly once -- "Travel Region",
+"All Regions", "All Cities", a real region label ("Chicago & suburbs"),
+and the new `directory-filters` CSS class in both the JS bundle and the
+compiled stylesheet. The deployed Worker responds normally (redirects to
+the real Cloudflare Access login, same as every other protected route
+and asset on this Worker -- static assets are also behind Access here,
+confirmed by the same redirect on the bundle URL itself).
+
+**Not verified this round, and disclosed rather than assumed**: the live,
+rendered appearance of the two new filters and their behavior on an
+actual mobile viewport. That requires opening the page as the
+authenticated owner, which this session does not do on its own. The
+owner is asked to take a brief look at `/donors` on Staging himself
+(desktop and phone) before this is considered fully verified -- the code-
+and bundle-level checks above give strong confidence the feature is
+wired correctly, but are not a substitute for seeing it rendered.
+
+### Unresolved issues
+
+1. **Live visual/mobile verification on Staging is still outstanding**,
+   per the disclosure above -- not a defect, a verification step only the
+   owner can perform under current standing instructions.
+2. **Region/city filter state is not yet available from a dedicated
+   Travel Planning view or Portfolio Focus** -- by this round's own
+   explicit scope ("prioritize a clean, reliable donor-directory
+   implementation rather than adding multiple new screens"). The
+   underlying logic (`lib/relationships/donor-geo-filter.ts`,
+   `lib/relationships/travel-regions.ts`) is already written to be
+   reused there unmodified, whenever that is wanted.
+3. **No Production deployment has been performed or requested this
+   round** -- awaiting separate, explicit authorization, exactly as
+   instructed.
