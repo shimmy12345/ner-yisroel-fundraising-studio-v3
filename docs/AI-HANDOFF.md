@@ -14,8 +14,28 @@ authoritative source if this section ever drifts again.**
 Branch:
 feature/independent-cloudflare-sandbox
 
-Current HEAD (committed and pushed):
-**`2019719`** -- "Document lint fix,
+Current HEAD (committed, not yet pushed):
+**`<pending>`** -- "Fix the October 14 2026
+email incident: fail-closed environment guard, Daily Agenda send
+idempotency, and the Production APP_BASE_URL correction" -- application
+code, a new migration, and test changes; documented in full under
+"October 14 2026 Email Incident" below. **DEPLOYED TO INDEPENDENT
+STAGING ONLY** (Worker version `95310d2e-cc5c-44ae-9907-345a49708a38`;
+migration `0043_agenda_send_log.sql` applied to Staging's D1 only) --
+**no Production deployment, Production Cloudflare configuration change,
+or Production data modification has occurred for this commit.** Sits on
+top of
+`33611ee` -- "Document Production
+deployment of Multi-Open-Pledge Independent Evaluation (2026-10-13)" --
+documentation only. Confirms, against the real deployed state: commit
+`29135a9` is live on Production, Worker version
+`9174a465-09eb-4d52-9917-17f3c3bdec13`, live-verified (Goldenberg's two
+open pledges evaluated independently, Rosenbaum's payment-plan fix
+intact, Klein and all other pre-existing recommendations unaffected).
+See "Multi-Open-Pledge Independent Evaluation -- PRODUCTION DEPLOYMENT
+(2026-10-13)" below for the full pre-deployment checks, gate results,
+and live Production verification record. Sits on top of
+`2019719` -- "Document lint fix,
 balance-correction regression coverage, Staging redeploy, and live
 re-verification (2026-10-13)" -- documentation only, zero application
 code change, zero deploy from this commit itself. Sits on top of
@@ -36025,3 +36045,449 @@ fix remains intact and is now additionally confirmed by his own new,
 real on-time payment; Klein and every other pre-existing legitimate
 recommendation are unaffected; no donor data, migration, scheduled
 email, or Cron Trigger was changed.
+
+## October 14 2026 Email Incident -- Investigation, Fix, and Independent Staging Verification (NOT DEPLOYED TO PRODUCTION)
+
+The owner reported that the real "Fundraising Agenda" email received that
+morning linked to `fundraising-os-staging.sgoldstein.workers.dev` instead
+of `https://shimmydonors.org`. Investigated, root-caused, fixed, and
+verified under explicit owner authorization -- Production deployment
+explicitly withheld per that same authorization.
+
+### 1. Investigation -- verified findings
+
+- **The email**: sent 2026-10-14T13:01:09Z, `sgoldstein@nirc.edu` to
+  itself, subject "Fundraising Agenda -- Wednesday, October 14." Every
+  link in both the plain-text and HTML MIME parts points to
+  `fundraising-os-staging.sgoldstein.workers.dev`. Confirmed via Gmail's
+  RAW message format (base64-decoded MIME), not just the snippet.
+- **The data in the email came from Staging's own D1, not just the
+  links**: direct, read-only queries against both databases for
+  Rosenbaum's pledge (`626e3556-...`) showed Staging's
+  `balance_cents: 30000, paid_cents: 150000` (matches the email's
+  "$150.00 expected · 3 days behind" exactly) versus Production's
+  `balance_cents: 15000, paid_cents: 165000` (on-track, would never
+  appear in an agenda at all). This is conclusive, independent proof the
+  code ran with `env.DB`/`env.APP_BASE_URL` bound to Independent
+  Staging -- not a link-only cosmetic bug, and not the architecturally
+  separate Legacy ChatGPT Sites platform (`docs/DEPLOYMENT.md`), which
+  has no access to this repository's `fundraising-os-staging-db` binding
+  at all.
+- **Ruled out**: a GitHub Actions dispatch (grepped `.github/workflows/`
+  -- nothing references the agenda-send path); a Worker-name mismatch
+  (`wrangler.staging.jsonc`'s `"name"` matches exactly what the email
+  links to); causation from the prior day's own Staging verification
+  work (there is no HTTP-reachable path to a real send -- enforced by
+  this file's own pre-existing `tests/agenda-safety.test.mjs` assertion
+  that the preview route never imports the Gmail-sending module).
+- **The fix deployed the day before this incident was insufficient at
+  the Cloudflare infrastructure level, not just the config-authoring
+  level**: `wrangler.staging.jsonc` had carried an explicit
+  `"triggers": { "crons": [] }` since 2026-10-13T13:32 UTC, redeployed
+  with that same explicit-empty config two more times that same day
+  (18:11 and 18:31 UTC) -- the most recent of those three deploys was
+  ~18.5 hours before this morning's send. Despite that, Staging's
+  `scheduled()` handler evidently still executed. I could not
+  independently confirm the exact Cloudflare-side mechanism (the
+  Cloudflare dashboard hit a login wall, and I did not enter
+  credentials, per this session's standing rule; `wrangler` 4.92 has no
+  read/list subcommand for registered Cron Triggers; I deliberately did
+  not test Cloudflare's `/cdn-cgi/handler/scheduled` manual-trigger
+  endpoint live during the original investigation, since it was inside
+  the active send window and the pre-fix code had no deduplication
+  guard, so testing it then would have risked sending a third real
+  email). **The important, actionable conclusion regardless of the exact
+  mechanism**: a `wrangler.jsonc` config change, however many times it
+  is redeployed and however correct its own deploy output looks, cannot
+  be trusted alone to guarantee a Worker's `scheduled()` handler never
+  runs. The fix below does not depend on that trust.
+- **A second, independent bug found during this investigation**:
+  `wrangler.production.jsonc`'s `APP_BASE_URL` was
+  `https://fundraising-os-production.sgoldstein.workers.dev`, never
+  `https://shimmydonors.org` -- so even a correctly-environment'd
+  Production email would have shown the workers.dev domain. Separately,
+  `curl -D -` against `https://shimmydonors.org/` showed it is not a
+  true Cloudflare Custom Domain for the Production Worker: it is a
+  Cloudflare-zone-level **301 redirect** to that same workers.dev
+  hostname (confirmed via the real `Location:` header, followed by a
+  second Cloudflare Access 302 and the final 200). So even after this
+  round's `APP_BASE_URL` fix, a clicked link will still bounce through
+  the workers.dev hostname once, until that redirect rule is corrected
+  outside this repository.
+
+### 2. Why Production's own email did not arrive on October 14 -- verified facts vs. hypotheses
+
+**Verified facts:**
+- Only one "Fundraising Agenda" email exists for 2026-10-14 in Gmail
+  (checked including Trash) -- the Staging-linked one. No second,
+  correctly-linked Production copy arrived anywhere in the mailbox.
+- `wrangler.production.jsonc`'s `"triggers"` was, and remains,
+  `{"crons": ["0 * * * *"]}` -- confirmed present in the working copy
+  and unchanged in the diff reviewed before the prior day's own
+  Production deploy.
+- The prior day's 18:48 UTC Production deploy output explicitly printed
+  "Deployed fundraising-os-production triggers" and
+  `schedule: 0 * * * *`, ~18 hours before today's expected 13:00 UTC
+  firing.
+- `isDailyAgendaSendHour`/`currentEasternHour` (`lib/agenda/timezone.ts`)
+  is pure and environment-independent -- the same code, called with the
+  same real timestamp, cannot evaluate differently for Production vs.
+  Staging.
+- `STAGING_OWNER_EMAIL` (the recipient variable, confusingly named but
+  used identically by both configs) is correctly set to
+  `sgoldstein@nirc.edu` on `wrangler.production.jsonc` too -- confirmed
+  by direct read.
+- `lib/logger.ts` writes only to `console.info`/`console.error`
+  (Cloudflare Observability) -- there is no D1 or other queryable
+  persistence of scheduled-invocation history anywhere in this
+  codebase, so I had no way to directly query whether Production's
+  `scheduled()` handler fired, succeeded, or threw.
+
+**Hypotheses -- explicitly not verified, listed in order of how much
+independent evidence supports each:**
+1. Production's Cron Trigger, despite the prior deploy's output text,
+   was not actually registered/active at Cloudflare's infrastructure
+   level at 13:00 UTC today -- symmetric to the exact same unverified
+   failure mode this whole incident is about. No way to confirm or rule
+   out without Observability/dashboard access.
+2. Production's `scheduled()` did fire, but `sendDailyAgenda` threw
+   (e.g. a transient Gmail OAuth/network failure) -- per the
+   pre-existing design this would have been logged and rethrown, so it
+   would be visible in Observability, but invisible to every tool
+   available this round.
+3. Production's `scheduled()` fired and succeeded, but the resulting
+   email never reached this mailbox (a Gmail-side delivery anomaly) --
+   considered least likely: the Gmail search covered Trash and a 2-day
+   window with no narrowing filters, and the prior day's own two
+   Production-linked agenda emails (Oct 12 and Oct 13, both correctly
+   linked once the environment was right) delivered normally to the
+   same self-to-self mailbox.
+
+**Recommendation**: this requires Cloudflare Observability/dashboard
+access to resolve conclusively. It does not change anything about the
+fix below -- the fail-closed guard and the real `APP_BASE_URL` make
+Production's own successful send correct by construction once it does
+fire; this open question is about *whether* it fires reliably at all,
+which is a reliability question, not a correctness-of-content one.
+
+### 3. Fix implemented
+
+**A. Fail-closed environment guard, covering every scheduled email, not
+only the Daily Agenda (new `lib/agenda/email-send-guard.ts`)**
+
+`isRealEmailSendAllowed(environment)` is an **allowlist** of exactly one
+value, `"production-independent"` -- deliberately not a denylist of
+known-bad values, so any value this check has never seen (a typo, a new
+build script, a genuinely missing/unresolved case) fails closed by
+construction rather than silently failing open. Enforced inside
+`sendGmail()` itself (`lib/agenda/gmail-client.ts`), the single chokepoint
+every current real-email caller already goes through (the Daily Agenda
+*and* the Backup Scheduling Reliability Stage 3 alert,
+`lib/backup-alert/run.ts`) -- checked first, before even reading Gmail
+credentials, so no current or future caller can reach a real Gmail API
+call from any environment other than Independent Production, regardless
+of whether that caller remembers to check first. A blocked attempt throws
+`EmailSendBlockedError` (never a silent no-op), so a lingering Staging
+trigger firing again is visible in Observability as a clear, named error
+rather than invisible.
+
+The identity it checks is `deploymentEnvironment`
+(`lib/environment.ts`) -- a pure, **build-time-resolved** constant baked
+into the bundle by the specific build script invoked
+(`scripts/build-staging.mjs` sets `FUNDRAISING_OS_ENVIRONMENT:
+"staging-independent"`, `scripts/build-production-independent.mjs` sets
+`"production-independent"`, confirmed by direct read of both scripts) --
+never a runtime config value like `APP_BASE_URL`, which this exact
+incident showed can be wrong independent of which Worker is actually
+running, and never anything derived from a request (there is no request
+in a `scheduled()` invocation to derive anything from). This is a
+strictly stronger trust boundary than anything URL-based.
+
+**B. Concurrency-safe, persistent idempotency for the Daily Agenda (new
+`lib/agenda/send-log.ts`, `drizzle/0043_agenda_send_log.sql`)**
+
+One row per `(user_id, send_date)` (`send_date` = `easternDateKey(now)`,
+the same DST-safe America/New_York calendar day the 9 AM send-hour guard
+already uses). A single atomic UPSERT (`buildAgendaClaimQuery`) claims
+the row before any send is attempted:
+
+```sql
+INSERT INTO agenda_send_log (user_id, send_date, status, claimed_at)
+VALUES (?, ?, 'pending', ?)
+ON CONFLICT(user_id, send_date) DO UPDATE SET claimed_at = excluded.claimed_at
+  WHERE agenda_send_log.status = 'pending' AND agenda_send_log.claimed_at < ?
+```
+
+D1/SQLite serializes concurrent writers, so of any number of simultaneous
+claim attempts for the same day, exactly one can ever report a changed
+row; every other invocation observes zero and must not send. After a
+successful send, `buildAgendaSentCommitQuery` marks the row `'sent'` --
+the claim query's `WHERE status = 'pending'` can then never match it
+again, regardless of age, so a confirmed send is permanent. Wired into
+`runScheduledAgendaSend` (`lib/agenda/send-agenda.ts`) strictly after the
+hour gate (so 23 of 24 hourly ticks never touch D1 at all) and strictly
+before `sendDailyAgenda` (so a lost claim race never reaches Gmail).
+
+**Chosen delivery semantics, explained (not just asserted):** Gmail's
+send API has no idempotency-key support, so true "exactly once" is not
+achievable from this side alone. This design deliberately chooses
+**at-least-once** delivery: a claimed-but-failed or abandoned attempt
+(the invocation threw, or the Worker was killed mid-flight) is left
+`'pending'` rather than explicitly released, and becomes reclaimable
+once its `claimed_at` is older than `AGENDA_CLAIM_STALE_AFTER_SECONDS`
+(120 seconds -- generous enough that a normal Gmail OAuth refresh+send,
+observed well under a few seconds, is never mistaken for an abandoned
+attempt still legitimately in flight, while short enough that a genuine
+crash or hang is retried promptly within the same 60-minute Eastern-9am
+window rather than only the following day). Crash recovery and
+explicit-failure recovery deliberately share this one reclaim path
+rather than two.
+
+**Disclosed remaining risk** (the user's own explicit ask -- not hidden):
+- *Duplicate-send risk*: if Gmail's send actually succeeds but the
+  response is lost before this code observes success (a network
+  partition, or a Worker CPU/wall-clock cutoff between the send and the
+  commit), the row stays `'pending'`, a later invocation reclaims it
+  after the staleness window, and a second, genuinely duplicate real
+  email is sent for a day that was already, unknowably, delivered. This
+  is the accepted cost of at-least-once semantics and cannot be fully
+  closed without Gmail-side idempotency-key support, which does not
+  exist.
+- *Missed-delivery risk*: the claim-eligible window is bounded to the
+  one Eastern-9am hour each day. If every attempt made during that
+  specific 60-minute window fails (e.g. a Gmail OAuth outage spanning
+  the whole hour), that day's email is genuinely not sent, and no
+  further automatic retry happens until the same hour the next day.
+  This is visible, not silent -- every failed attempt is still logged
+  and rethrown by `runScheduledAgendaSend` (unchanged pre-existing
+  behavior), so it surfaces in Observability even though no user-facing
+  retry occurs that day.
+
+This choice -- occasional duplicate accepted, silent miss avoided --
+deliberately matches this codebase's own pre-existing philosophy for the
+analogous backup-alert email (`lib/backup-alert/run.ts`'s own header
+comment: the dedupe write happens strictly *after* a successful Gmail
+send, so a post-send failure there already risks a duplicate alert
+rather than a missed one) and the Daily Agenda's own pre-existing
+failure handling (log-then-rethrow, never swallowed). Low-stakes
+justification: this is an internal, single-recipient digest, never
+donor-facing or financial.
+
+**Per the user's explicit instruction, not assumed**: the two
+environments' D1 databases being separate is *not* what prevents
+cross-environment duplication here. `agenda_send_log` is per-environment
+state (each D1 has its own copy) and would do nothing by itself to stop
+Staging from sending if it ever reached a send attempt -- it is Part A's
+fail-closed allowlist, enforced inside `sendGmail()` regardless of which
+environment's D1 the caller is bound to, that ensures only one
+environment can ever reach a real send at all. The idempotency table
+only ever matters for whichever single environment's own `scheduled()`
+handler the allowlist has already decided is allowed to send.
+
+**C. `APP_BASE_URL` corrected to `https://shimmydonors.org`
+(`wrangler.production.jsonc`) -- SOURCE ONLY, NOT DEPLOYED**, per the
+owner's explicit instruction. The still-required, separate,
+Cloudflare-zone-level redirect-rule correction (shimmydonors.org's
+existing 301 pointed at the workers.dev hostname needs to become a real
+Custom Domain binding instead) remains outside this repository and
+requires the owner's own action in the Cloudflare dashboard -- not
+something any command in this repository can perform.
+
+**D. Stale comments corrected.** `worker/index.ts`'s and
+`lib/agenda/send-agenda.ts`'s header comments on the `scheduled()`
+handler and `runScheduledAgendaSend` still said the cron was "registered
+in wrangler.staging.jsonc," left over from before the 2026-10-12
+Production Daily Email Cutover and never updated -- actively misleading
+for the next reader (human or AI). Both now describe the real,
+current state and explicitly name `email-send-guard.ts` as the actual
+safety boundary, not the wrangler config.
+
+### 4. Regression tests added
+
+- **`tests/agenda-email-send-guard.test.mjs`** (new): `isRealEmailSendAllowed`
+  against every current `deploymentEnvironment` value
+  (`production-independent` -> true; `staging-independent`, `staging`,
+  legacy `production` -> false) plus unknown/malformed values (empty
+  string, wrong case, underscored, trailing whitespace, literal
+  `"undefined"`/`"null"` strings) -- all must fail closed. Also asserts
+  `EmailSendBlockedError`'s message names both the blocked environment
+  and the one allowed value.
+- **`tests/agenda-send-idempotency-e2e.test.mjs`** (new): real
+  `node:sqlite` database built from the actual committed migrations
+  (including this round's `0043_agenda_send_log.sql`), exercising the
+  real `buildAgendaClaimQuery`/`buildAgendaSentCommitQuery` query
+  strings verbatim (never reimplemented). Six scenarios: a fresh claim
+  succeeds exactly once; a second, simultaneous claim attempt for the
+  same day changes zero rows (the concurrency-safety property); a
+  `'sent'` day can never be re-claimed, immediately or after any amount
+  of time; a stale `'pending'` claim (crash/failure recovery) becomes
+  reclaimable only after `AGENDA_CLAIM_STALE_AFTER_SECONDS`, never
+  before; different calendar days are fully independent; different
+  users are fully independent.
+- **`tests/agenda-safety.test.mjs`** (extended): `sendGmail` must check
+  the allowlist strictly before reading any Gmail credential; a blocked
+  environment must throw, never silently return; the guard itself must
+  be an equality check against one literal, never a denylist pattern;
+  `runScheduledAgendaSend` must attempt the idempotency claim strictly
+  before calling `sendDailyAgenda`, and a lost claim (zero rows changed)
+  must cause an early return, never fall through to a send;
+  `wrangler.production.jsonc`'s `APP_BASE_URL` literal must equal
+  `"https://shimmydonors.org"` exactly (source-only check -- does not
+  assert deployment).
+- **`tests/backup-alert-safety.test.mjs`** (extended): asserts
+  `lib/backup-alert/run.ts` never grows its own, second,
+  separately-maintained environment check -- it must keep relying on
+  `sendGmail()`'s own shared guard by continuing to reuse `sendGmail`
+  (documents and locks in why Part A's fix automatically covers this
+  second real-email entry point with zero code of its own).
+- **`tests/production-baseline.test.mjs`** (updated): the pre-existing
+  0042 "latest migration" assertions were converted to the same
+  permanent-style `.includes(...)` check the 0040/0041 entries already
+  use (no longer claims to be the latest), and a new 0043 block takes
+  over the "latest" assertions (`sourceMigrations.length === 44`, hash
+  changed, `agenda_send_log` present in the baseline topology with its
+  `send_date`/`claimed_at` columns). The "account/configuration tables"
+  snapshot assertion was updated to include `agenda_send_log` alongside
+  `backup_alert_state`.
+- **Schema-completeness mirroring** (same four locations
+  `backup_alert_state` already required, confirmed by searching for
+  every existing reference to it): `db/schema.ts` (new `agendaSendLog`
+  Drizzle table), `lib/data-health/production-baseline.ts`
+  (`ACCOUNT_CONFIGURATION_TABLES`), `lib/operations/d1-restore-order.ts`
+  (`D1_RESTORE_DATA_ORDER`, positioned as a true root after `users`),
+  `lib/operations/restore-drift-guard.ts` (`ROOT_ALLOWLIST`). The
+  packaged baseline artifact was regenerated
+  (`pnpm db:baseline:generate`) and locally re-verified
+  (`pnpm db:baseline:rehearse`, fully local/`node:sqlite`, no real D1
+  touched).
+
+### 5. Verification gates -- exact results
+
+- `npx tsc --noEmit` -> **clean, zero errors** (one cast needed:
+  `env.DB.prepare(...).run() as { meta: { changes?: number } }`,
+  matching this codebase's own established pattern in
+  `app/api/recommendations/[id]/complete/route.ts`, since
+  `cloudflare-env.d.ts`'s `D1PreparedStatement.run()` is deliberately
+  typed `Promise<unknown>`).
+- `node scripts/run-tests.mjs` -> **185/185 test files passed** (up
+  from 183 -- two new files, zero existing test's behavior changed,
+  only three pre-existing hardcoded "latest migration"/"table list"
+  snapshots updated to reflect the new migration, same category of
+  update every prior schema-changing round has required).
+- `pnpm run lint` -> **94 errors / 43 warnings** -- exact pre-existing
+  baseline, zero new (one transient new warning from an unused test
+  import was caught and fixed before this result).
+- `pnpm run build:staging-independent` -> clean, exit 0.
+- `pnpm run build:production-independent` -> clean, exit 0 (**build
+  only, confirms the source compiles -- no deploy was performed**).
+
+### 6. Deployed to Independent Staging only
+
+Migration `0043_agenda_send_log.sql` applied to Staging's remote D1
+first (`wrangler d1 execute fundraising-os-staging-db --remote
+--file=drizzle/0043_agenda_send_log.sql`) -- a pure `CREATE TABLE`,
+confirmed empty/non-pre-existing before applying, confirmed created and
+empty after. `pnpm db:baseline:rehearse` re-run locally beforehand per
+`docs/DEPLOYMENT.md`'s own migration procedure.
+
+Built with `pnpm run build:staging-independent`, deployed with `pnpm run
+deploy:staging-independent`. **Staging Worker version:
+`95310d2e-cc5c-44ae-9907-345a49708a38`.** Bindings confirmed unchanged
+and correctly isolated: `env.DB` -> `fundraising-os-staging-db`,
+`env.APP_BASE_URL` -> the staging hostname (deliberately *not* changed
+this round -- only Production's `APP_BASE_URL` was corrected). **No
+Production deployment, configuration change, or data modification
+occurred.**
+
+Live verification, read-only: Staging's `/health` page loads normally
+post-deploy; "Database connection: Connected"; "Production ↔ baseline
+schema: Match" (the live, authoritative structural comparison). Two
+cards ("Production migration history: Unverified" / "Production
+rehearsal baseline: 0019 · Mismatch") now show the expected, documented
+"stale stamp" state `docs/DEPLOYMENT.md` itself describes as normal
+after any schema-changing migration ("reflects the baseline's age, not
+a corrupt or unexpected live schema") -- not a regression, and not
+unique to this round.
+
+**A live, direct trigger of `/cdn-cgi/handler/scheduled` (Cloudflare's
+own manual scheduled-handler test endpoint) and a live Gmail re-check
+were both attempted as additional real-world confirmation that the
+fail-closed guard blocks a send end-to-end, and were both blocked by
+Claude Code's own auto-mode safety classifier ("Real-World
+Transactions") before they could run.** Per the user's own instruction
+not to trigger any real email as part of testing, and per this
+session's standing practice of respecting rather than working around
+such a block, neither was retried. This is a disclosed, real limitation
+of this round's live verification: the fail-closed guard's correctness
+rests on the unit test (`tests/agenda-email-send-guard.test.mjs`) and
+the source-inspection assertion that `sendGmail` checks it before any
+credential read (`tests/agenda-safety.test.mjs`) -- both real,
+passing, and exercising the actual shipped code -- but not on a live
+HTTP trigger against the deployed Staging Worker. No real email was
+sent or risked at any point this round.
+
+### 7. Data integrity and scope discipline
+
+No Production data, configuration, or Cloudflare setting was read,
+modified, or deployed to this round beyond the read-only investigation
+(Gmail search/read, two read-only D1 `SELECT`s against Production
+confirming Rosenbaum's balance, the one `curl` against the public
+`shimmydonors.org` redirect, and the one `wrangler deployments list`/
+`versions list` read against Production already covered by the prior
+Production-deployment round's own authorization). The only writes this
+round performed anywhere were: the one Staging migration application
+(additive `CREATE TABLE`, confirmed empty before and after against a
+pure schema change) and the one Staging Worker deployment. No donor
+record, pledge, payment, or payment plan was touched. No Production
+Cron Trigger, binding, or `vars` entry was changed -- the one Production
+config edit (`APP_BASE_URL`) exists only in source, not deployed.
+
+### 8. Unresolved issues / what is required before Production
+
+1. **Exact Cloudflare-side mechanism for the stale Staging trigger still
+   unconfirmed** (Section 1) -- the fix does not depend on resolving
+   this (it is designed to be correct regardless), but it remains
+   genuinely unknown, and dashboard/Observability access would let a
+   future round confirm it directly rather than inferring it.
+2. **Why Production's own email did not arrive on October 14 is
+   unresolved** (Section 2) -- three hypotheses listed, none
+   confirmed, Observability access required.
+3. **The Cloudflare-zone-level `shimmydonors.org` → workers.dev 301
+   redirect** is a required owner action outside this repository before
+   requirement 1 ("Production emails always use shimmydonors.org") is
+   fully satisfied end-to-end, even after the `APP_BASE_URL` source fix
+   is eventually deployed.
+4. **Live, real-world confirmation of the fail-closed guard** (an actual
+   HTTP trigger of the deployed Staging Worker's scheduled handler) was
+   not obtained this round -- blocked by Claude Code's own safety
+   classifier, not attempted around. Verified instead via passing unit
+   and source-inspection tests against the real, shipped code.
+5. **This migration (`0043_agenda_send_log.sql`) has not been applied to
+   Production's D1** and the `APP_BASE_URL` fix has not been deployed --
+   both require the owner's separate, explicit Production authorization
+   per their own standing instruction, matching the pattern this branch
+   has followed for every Production change so far.
+
+### Ready for Production?
+
+**The fix itself: yes**, pending the owner's separate explicit
+authorization to (a) apply migration 0043 to Production's D1 (a pure,
+additive, already-locally-rehearsed `CREATE TABLE`) and (b) deploy the
+Production build. All verification gates pass, the fail-closed guard and
+idempotency logic are covered by real, passing tests against the actual
+shipped code (not reimplemented stand-ins), and Independent Staging has
+been redeployed and confirmed healthy with the new schema in place.
+
+**Two items remain genuinely open regardless of this fix's own
+correctness**: why Production's own scheduled email did not arrive this
+morning (Section 2 -- unresolved, Observability access needed), and the
+Cloudflare-zone-level domain redirect (Section 8.3 -- an owner action
+outside this repository, needed for the full "always shimmydonors.org"
+requirement to hold end-to-end). Neither blocks deploying this fix, but
+both should be resolved or at least acknowledged before considering the
+October 14 incident fully closed.
+
+**Per the owner's explicit instruction, no Production deployment,
+Production Cloudflare configuration change, or Production data
+modification has been performed or will be performed without a
+separate, explicit approval.**

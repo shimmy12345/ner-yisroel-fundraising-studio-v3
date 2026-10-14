@@ -19,23 +19,25 @@ import { STAGING_RESET_TABLE_ORDER } from "./staging-reset.ts";
 // narrower data-only fix is ported to main -- see
 // docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair" entry.
 //
-// Four tables are prepended as true roots -- nothing in the schema has a
-// foreign key pointing at any of them (except backup_alert_state, which
-// only depends on users -- already listed before it here), so their
-// relative order otherwise never matters, but all of them must be
-// inserted before anything that could reference them:
-//   - "users" and "onboarding_preferences" are two of the three
+// Five tables are prepended as true roots -- nothing in the schema has a
+// foreign key pointing at any of them (except backup_alert_state and
+// agenda_send_log, which only depend on users -- already listed before
+// them here), so their relative order otherwise never matters, but all of
+// them must be inserted before anything that could reference them:
+//   - "users" and "onboarding_preferences" are two of the four
 //     ACCOUNT_CONFIGURATION_TABLES (lib/data-health/production-baseline.ts).
 //     STAGING_RESET_TABLE_ORDER never includes them -- a staging reset
 //     deliberately preserves the owner's account rows instead of deleting
 //     them -- so they are not part of its reversed order either.
-//   - "backup_alert_state" is the third ACCOUNT_CONFIGURATION_TABLE
-//     (added by Backup Scheduling Reliability Stage 3,
-//     drizzle/0035_backup_alert_state.sql) -- also excluded from
-//     STAGING_RESET_TABLE_ORDER for the same reason. Its own
-//     `userId` column IS a real foreign key to users.id, so it is listed
-//     here AFTER "users" specifically (not merely alongside it as a true
-//     zero-dependency root like production_schema_baseline below).
+//   - "backup_alert_state" and "agenda_send_log" are the other two
+//     ACCOUNT_CONFIGURATION_TABLEs (added by Backup Scheduling
+//     Reliability Stage 3, drizzle/0035_backup_alert_state.sql, and the
+//     October 14 2026 email incident, drizzle/0043_agenda_send_log.sql,
+//     respectively) -- also excluded from STAGING_RESET_TABLE_ORDER for
+//     the same reason. Both have a `userId` column that IS a real foreign
+//     key to users.id, so they are listed here AFTER "users" specifically
+//     (not merely alongside it as a true zero-dependency root like
+//     production_schema_baseline below).
 //   - "production_schema_baseline" is the schema-verification marker
 //     table. Nothing references it and it references nothing.
 //
@@ -69,6 +71,7 @@ export const D1_RESTORE_DATA_ORDER: readonly string[] = [
   "production_schema_baseline",
   "users",
   "backup_alert_state",
+  "agenda_send_log",
   "onboarding_preferences",
   ...[...STAGING_RESET_TABLE_ORDER].reverse(),
 ];

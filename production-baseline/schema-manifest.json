@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "913299652ad37c0073e82aeccb30511dc1f13c784eebb5e4e7ecd3e237dea566",
+  "schemaHash": "9fc6f49c84fa1cd62506f30f0a8af0c2ac848132ff2a3627c04e89884eb409f8",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -44,7 +44,8 @@
     "0039_pledge_payment_plans_original_pledge_date.sql",
     "0040_pledge_payment_plans_commitment_duration_months.sql",
     "0041_pledge_payment_plans_renewal_acknowledged_at.sql",
-    "0042_pledge_balance_corrections.sql"
+    "0042_pledge_balance_corrections.sql",
+    "0043_agenda_send_log.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -190,6 +191,69 @@
             "name": null,
             "columns": [
               "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
+        "name": "agenda_send_log",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "send_date",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 2
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "claimed_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "sent_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": null,
+            "columns": [
+              "user_id",
+              "send_date"
             ],
             "unique": true,
             "partial": false,
@@ -6512,6 +6576,11 @@
       "type": "table",
       "name": "activity_status_audits",
       "sql": "CREATE TABLE `activity_status_audits` ( `id` text PRIMARY KEY NOT NULL, `interaction_id` text NOT NULL, `user_id` text NOT NULL, `action` text NOT NULL, `from_status` text NOT NULL, `to_status` text NOT NULL, `previous_source` text NOT NULL, `next_source` text NOT NULL, `previous_occurred_at` integer NOT NULL, `next_occurred_at` integer NOT NULL, `previous_summary` text NOT NULL, `next_summary` text NOT NULL, `follow_up_id` text, `created_at` integer NOT NULL, `undone_at` integer, FOREIGN KEY (`interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "agenda_send_log",
+      "sql": "CREATE TABLE `agenda_send_log` ( `user_id` text NOT NULL, `send_date` text NOT NULL, `status` text NOT NULL, `claimed_at` integer NOT NULL, `sent_at` integer, PRIMARY KEY (`user_id`, `send_date`), FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",

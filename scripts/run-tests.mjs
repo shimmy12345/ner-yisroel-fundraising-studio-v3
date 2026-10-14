@@ -182,6 +182,8 @@ const TEST_FILES = [
   "tests/agenda-model.test.mjs",
   "tests/agenda-render.test.mjs",
   "tests/agenda-safety.test.mjs",
+  "tests/agenda-email-send-guard.test.mjs",
+  "tests/agenda-send-idempotency-e2e.test.mjs",
   "tests/relationship-fact-recommendation-actionability.test.mjs",
   "tests/relationship-fact-completion-awareness.test.mjs",
   "tests/relationship-snapshot-stage3.test.mjs",

@@ -28,6 +28,8 @@
 
 import { env } from "cloudflare:workers";
 import { buildMimeMessage, type MimeMessageInput } from "./mime-message.ts";
+import { deploymentEnvironment } from "../environment.ts";
+import { isRealEmailSendAllowed, EmailSendBlockedError } from "./email-send-guard.ts";
 
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -73,6 +75,13 @@ export async function refreshAccessToken(): Promise<string> {
 }
 
 export async function sendGmail(input: MimeMessageInput): Promise<void> {
+  // The fail-closed environment allowlist -- see email-send-guard.ts's own
+  // header comment. Checked first, before even reading credentials, so no
+  // caller (current or future) can ever reach a real Gmail API call from
+  // any environment other than Independent Production.
+  if (!isRealEmailSendAllowed(deploymentEnvironment)) {
+    throw new EmailSendBlockedError(deploymentEnvironment);
+  }
   requireGmailCredentials();
   const accessToken = await refreshAccessToken();
   const response = await fetch(SEND_ENDPOINT, {

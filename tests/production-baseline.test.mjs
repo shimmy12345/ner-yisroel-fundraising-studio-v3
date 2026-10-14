@@ -88,10 +88,11 @@ test("production baseline is isolated from staging and future drift fails closed
 });
 
 test("fundraising-data count excludes account/configuration tables while the backup-safety gate stays untouched", () => {
-  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences", "backup_alert_state"]);
+  assert.deepEqual(ACCOUNT_CONFIGURATION_TABLES, ["users", "onboarding_preferences", "backup_alert_state", "agenda_send_log"]);
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("users"), "users must never count toward fundraising data");
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("onboarding_preferences"), "onboarding_preferences must never count toward fundraising data");
   assert.ok(!FUNDRAISING_DATA_TABLES.includes("backup_alert_state"), "backup_alert_state (backup-alert dedupe state) must never count toward fundraising data");
+  assert.ok(!FUNDRAISING_DATA_TABLES.includes("agenda_send_log"), "agenda_send_log (Daily Agenda send dedupe state) must never count toward fundraising data");
   assert.ok(FUNDRAISING_DATA_TABLES.includes("donors"));
   assert.ok(FUNDRAISING_DATA_TABLES.includes("gifts"));
   assert.match(BUSINESS_DATA_COUNT_SQL, /"users"/, "the pre-existing backup-safety gate SQL is unchanged and still counts users");
@@ -313,14 +314,26 @@ test("baseline picks up the schema-adding 0042 pledge balance corrections migrat
   // docs/AI-HANDOFF.md) -- including its partial unique index enforcing
   // at most one active correction per pledge -- so the schema hash must
   // change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0042_pledge_balance_corrections.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 43);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  assert.ok(manifest.sourceMigrations.includes("0042_pledge_balance_corrections.sql"));
   const correctionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "pledge_balance_corrections");
   assert.ok(correctionsTable, "pledge_balance_corrections must be a real table in the baseline topology");
   assert.match(correctionsTable.sql, /corrected_balance_cents/);
   assert.match(correctionsTable.sql, /imported_balance_cents_at_correction/);
   const activeIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "pledge_balance_corrections_active_uidx");
   assert.ok(activeIndex, "the partial unique index enforcing at most one active correction per pledge must be captured in the baseline");
+});
+
+test("baseline picks up the schema-adding 0043 agenda send log migration", () => {
+  // 0043_agenda_send_log.sql adds one new table (agenda_send_log, Daily
+  // Fundraising Agenda send idempotency; see docs/AI-HANDOFF.md's
+  // "October 14 Email Incident" entry) -- so the schema hash must change
+  // again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0043_agenda_send_log.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 44);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const sendLogTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "agenda_send_log");
+  assert.ok(sendLogTable, "agenda_send_log must be a real table in the baseline topology");
+  assert.match(sendLogTable.sql, /send_date/);
+  assert.match(sendLogTable.sql, /claimed_at/);
 });

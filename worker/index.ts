@@ -87,16 +87,27 @@ const worker = {
   },
 
   // Daily Fundraising Agenda email -- APPROVED and ACTIVE. Runs on the
-  // hourly Cron Trigger ("0 * * * *") registered in wrangler.staging.jsonc
-  // (see that file's own comment for the full approval record).
-  // runScheduledAgendaSend() itself is the DST-safe 9 AM America/New_York
-  // guard (lib/agenda/send-agenda.ts's isDailyAgendaSendHour()) -- this
-  // handler does no time-zone logic of its own, just passes through the
-  // trigger's own scheduled time and extends the Worker's lifetime with
-  // waitUntil() so Cloudflare doesn't terminate it before the send (or
-  // its failure) completes. 23 of every 24 hourly invocations are an
-  // intentional, silent no-op; only the one where the real local hour
-  // reads 9 actually sends.
+  // hourly Cron Trigger ("0 * * * *") registered in
+  // wrangler.production.jsonc (moved there from wrangler.staging.jsonc in
+  // the 2026-10-12 Production Daily Email Cutover; see that file's own
+  // comment for the full approval record). This same code is also bundled
+  // into Independent Staging's Worker (there is only one worker/index.ts),
+  // so this handler itself NEVER assumes which environment it is running
+  // in -- lib/agenda/email-send-guard.ts's fail-closed allowlist, enforced
+  // inside the Gmail-sending function itself, is what actually stops a real send from
+  // anywhere other than Independent Production, regardless of which
+  // Worker's Cron Trigger state caused this function to run (see
+  // docs/AI-HANDOFF.md's "October 14 Email Incident" entry for why that
+  // distinction matters: a wrangler.jsonc config change alone was not
+  // sufficient). runScheduledAgendaSend() itself is the DST-safe 9 AM
+  // America/New_York guard (lib/agenda/send-agenda.ts's
+  // isDailyAgendaSendHour()) plus a concurrency-safe idempotency claim
+  // (lib/agenda/send-log.ts) -- this handler does no time-zone or dedup
+  // logic of its own, just passes through the trigger's own scheduled
+  // time and extends the Worker's lifetime with waitUntil() so Cloudflare
+  // doesn't terminate it before the send (or its failure) completes. 23
+  // of every 24 hourly invocations are an intentional, silent no-op; only
+  // the one where the real local hour reads 9 even attempts a send.
   // Backup Scheduling Reliability Stage 3 email alert -- APPROVED and
   // ACTIVE, sharing this same hourly Cron Trigger rather than adding a
   // second one. A completely separate waitUntil() from the Daily Agenda

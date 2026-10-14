@@ -14,6 +14,7 @@ import { readFile } from "node:fs/promises";
 
 const gmailClient = await readFile(new URL("../lib/agenda/gmail-client.ts", import.meta.url), "utf8");
 const sendAgenda = await readFile(new URL("../lib/agenda/send-agenda.ts", import.meta.url), "utf8");
+const emailSendGuard = await readFile(new URL("../lib/agenda/email-send-guard.ts", import.meta.url), "utf8");
 const previewRoute = await readFile(new URL("../app/api/agenda/preview/route.ts", import.meta.url), "utf8");
 // Comment-stripped view, for checks that must inspect real code only --
 // this file's own top-of-file documentation comment legitimately names
@@ -96,6 +97,40 @@ async function run() {
   assert.doesNotMatch(workerIndex, /sendDailyAgenda\(|sendGmail\(/, "the Worker entry point must never bypass the DST guard by calling the sender directly");
   assert.match(workerIndex, /ctx\.waitUntil\(/, "the scheduled handler must extend the Worker's lifetime with waitUntil, not return before the send completes");
   assert.match(sendAgenda, /isDailyAgendaSendHour\(now\)/, "runScheduledAgendaSend must still gate on the real DST-safe local-hour guard, not an unconditional send");
+
+  // --- October 14 2026 email incident (docs/AI-HANDOFF.md): the
+  // fail-closed environment allowlist must be enforced inside sendGmail()
+  // itself, before anything else in that function -- including before
+  // credentials are even read -- so that no current or future caller can
+  // ever reach a real Gmail API call from a non-production environment,
+  // regardless of whether that caller remembers to check first. ---
+  assert.match(gmailClient, /import\s*\{\s*deploymentEnvironment\s*\}\s*from\s*["']\.\.\/environment\.ts["']/, "gmail-client.ts must import the real, build-time-resolved deploymentEnvironment -- never a runtime config value like APP_BASE_URL");
+  assert.match(gmailClient, /isRealEmailSendAllowed/, "sendGmail must consult the fail-closed allowlist");
+  const sendGmailBody = gmailClient.slice(gmailClient.indexOf("export async function sendGmail("));
+  const guardCheckIndex = sendGmailBody.search(/isRealEmailSendAllowed/);
+  const credentialsCheckIndex = sendGmailBody.search(/requireGmailCredentials\(\)/);
+  assert.ok(guardCheckIndex >= 0 && credentialsCheckIndex >= 0 && guardCheckIndex < credentialsCheckIndex, "sendGmail must check the environment allowlist BEFORE reading any Gmail credential");
+  assert.match(gmailClient, /throw new EmailSendBlockedError/, "a blocked environment must throw, never silently return, so a stale Staging trigger firing is visible in Observability instead of a silent no-op");
+
+  // --- The allowlist itself: exactly one allowed literal, never a
+  // denylist of known-bad values (see email-send-guard.ts's own header
+  // comment for why that distinction is the whole point). ---
+  assert.match(emailSendGuard, /===\s*EMAIL_SEND_ALLOWED_ENVIRONMENT/, "the guard must compare for equality against exactly one allowed value (an allowlist), not test for membership in a denylist");
+  assert.match(emailSendGuard, /EMAIL_SEND_ALLOWED_ENVIRONMENT\s*=\s*"production-independent"/, "the one allowed environment must be exactly \"production-independent\"");
+
+  // --- Idempotency claim must happen BEFORE the real send is attempted,
+  // so a lost claim race never reaches Gmail at all. ---
+  const runScheduledBody = sendAgenda.slice(sendAgenda.indexOf("export async function runScheduledAgendaSend("));
+  const claimIndex = runScheduledBody.search(/buildAgendaClaimQuery/);
+  const sendDailyAgendaCallIndex = runScheduledBody.search(/await sendDailyAgenda\(/);
+  assert.ok(claimIndex >= 0 && sendDailyAgendaCallIndex >= 0 && claimIndex < sendDailyAgendaCallIndex, "runScheduledAgendaSend must attempt the idempotency claim before calling sendDailyAgenda");
+  assert.match(runScheduledBody, /changes\s*\?\?\s*0\)\s*===\s*0/, "a lost claim (zero rows changed) must cause an early return, never fall through to a send");
+
+  // --- Production's email links must point at the real custom domain,
+  // not a workers.dev placeholder -- the second, independent bug found
+  // during the October 14 investigation (docs/AI-HANDOFF.md). Source-only
+  // check: this does NOT assert the change has been deployed. ---
+  assert.match(wranglerProductionCode, /"APP_BASE_URL"\s*:\s*"https:\/\/shimmydonors\.org"/, "wrangler.production.jsonc's APP_BASE_URL must be the real custom domain, not a workers.dev placeholder");
 
   console.log("agenda-safety: all assertions passed");
 }

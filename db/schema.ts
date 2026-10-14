@@ -1094,3 +1094,25 @@ export const backupAlertState = sqliteTable("backup_alert_state", {
   firstAlertedAt: integer("first_alerted_at", { mode: "timestamp" }).notNull(),
   lastAlertedAt: integer("last_alerted_at", { mode: "timestamp" }).notNull(),
 });
+
+// Daily Fundraising Agenda send idempotency (October 14 2026 incident --
+// docs/AI-HANDOFF.md, drizzle/0043_agenda_send_log.sql). Same category as
+// backupAlertState above: operational dedupe state, never donor or
+// fundraising data -- see lib/data-health/production-baseline.ts's
+// ACCOUNT_CONFIGURATION_TABLES. One row per (user, Eastern calendar day),
+// claimed atomically before a real send is attempted and committed to
+// 'sent' only after it succeeds -- see lib/agenda/send-log.ts.
+export const agendaSendLog = sqliteTable("agenda_send_log", {
+  userId: text("user_id").notNull().references(() => users.id),
+  // "YYYY-MM-DD" in America/New_York (lib/agenda/timezone.ts's
+  // easternDateKey) -- the calendar day this claim/send is for, not a UTC
+  // date, so it lines up with the same DST-safe day the 9 AM send-hour
+  // guard uses.
+  sendDate: text("send_date").notNull(),
+  status: text("status", { enum: ["pending", "sent"] }).notNull(),
+  // Timestamp of the most recent claim attempt -- a 'pending' row older
+  // than AGENDA_CLAIM_STALE_AFTER_SECONDS is an abandoned claim, eligible
+  // to be re-claimed; a 'sent' row is never re-claimed regardless of age.
+  claimedAt: integer("claimed_at", { mode: "timestamp" }).notNull(),
+  sentAt: integer("sent_at", { mode: "timestamp" }),
+}, (table) => [primaryKey({ columns: [table.userId, table.sendDate] })]);

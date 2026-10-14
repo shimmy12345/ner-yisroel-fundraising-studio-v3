@@ -83,11 +83,18 @@
     // policy's own allow-list, which is configured separately in the
     // Access policy itself).
     "STAGING_OWNER_EMAIL": "sgoldstein@nirc.edu",
-    // Predicted default workers.dev URL for this Worker name (matching
-    // wrangler.staging.jsonc's own fundraising-os-staging.sgoldstein.workers.dev
-    // pattern exactly) -- confirm and correct after the first real deploy
-    // if Cloudflare assigns anything different.
-    "APP_BASE_URL": "https://fundraising-os-production.sgoldstein.workers.dev",
+    // The real custom domain, corrected 2026-10-14 (docs/AI-HANDOFF.md's
+    // "October 14 Email Incident" entry) from the previously-set
+    // workers.dev placeholder value
+    // ("https://fundraising-os-production.sgoldstein.workers.dev"), which
+    // every Daily Fundraising Agenda email link was built from until this
+    // fix. shimmydonors.org already routes to this Worker (confirmed via
+    // a live, read-only check 2026-10-14), so this is a pure identity
+    // correction -- not yet deployed; see that same AI-HANDOFF.md entry
+    // for the separate, Cloudflare-zone-level redirect-rule correction
+    // still required outside this repository before a clicked link stops
+    // bouncing through the workers.dev hostname.
+    "APP_BASE_URL": "https://shimmydonors.org",
     // Morning-brief Service Token auth (lib/auth/cloudflare-access.ts),
     // Production Automation and Backup Transition round, 2026-10-12. The
     // SAME Client ID already used on Staging (wrangler.staging.jsonc) --

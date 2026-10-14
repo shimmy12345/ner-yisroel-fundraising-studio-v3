@@ -46,6 +46,14 @@ async function run_() {
   // never a hardcoded/new recipient address. ---
   assert.match(run, /import \{ fetchBackupStatus \} from "\.\.\/data-health\/read\.ts"/, "must reuse the existing STATUS_WORKER read, not a second implementation");
   assert.match(run, /import \{ sendGmail \} from "\.\.\/agenda\/gmail-client\.ts"/, "must reuse the existing Gmail send path, not a second implementation");
+  // --- October 14 2026 email incident (docs/AI-HANDOFF.md): this is the
+  // whole reason the fail-closed environment allowlist lives inside
+  // sendGmail() itself rather than at send-agenda.ts's own call site --
+  // this file automatically inherits that same guard by reusing sendGmail,
+  // with zero code of its own to get wrong or forget. Asserted negatively
+  // here: this file must never grow its own, second, separately-maintained
+  // environment check. ---
+  assert.doesNotMatch(run, /deploymentEnvironment|isRealEmailSendAllowed|EmailSendBlockedError/, "the backup-alert check must rely on sendGmail()'s own shared guard, never duplicate it locally");
   assert.match(run, /env\.STAGING_OWNER_EMAIL/, "must reuse the existing canonical owner-email config");
   assert.doesNotMatch(run, /@\w+\.\w+/, "must never contain a hardcoded literal email address");
 
