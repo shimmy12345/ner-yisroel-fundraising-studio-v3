@@ -21,18 +21,20 @@
 // before a second real attempt is possible, which is the intended,
 // tightly-controlled behavior here, not a gap.
 //
-// This value has been advanced once already: the original
-// "2026-10-14-production-gmail-oauth-verification" claim ran and recorded a
-// failed 401 attempt (see docs/AI-HANDOFF.md). That row is untouched and
-// permanent -- changing this constant to a new, distinct id is the entire
-// mechanism for authorizing exactly one more attempt; it does not reset,
-// delete, or in any way affect the original row, which remains keyed by its
-// own, different id in the same table.
-export const TEST_SEND_CLAIM_ID = "2026-10-14-production-gmail-oauth-verification-2";
+// This value has been advanced twice already: the original
+// "2026-10-14-production-gmail-oauth-verification" claim recorded a failed
+// bare-401 attempt, and "...-verification-2" recorded a failed 401
+// (unauthorized_client) attempt after the diagnostic code was added (see
+// docs/AI-HANDOFF.md for both). Both rows are untouched and permanent --
+// changing this constant to a new, distinct id is the entire mechanism for
+// authorizing exactly one more attempt; it does not reset, delete, or in
+// any way affect either prior row, which remain keyed by their own,
+// different ids in the same table.
+export const TEST_SEND_CLAIM_ID = "2026-10-14-production-gmail-oauth-verification-3";
 
 export interface SqlQuery {
   sql: string;
-  params: readonly (string | number)[];
+  params: readonly (string | number | null)[];
 }
 
 // Atomically attempts to claim the one-time test-send slot. A single
@@ -53,11 +55,16 @@ export function buildTestSendClaimQuery(userId: string, now: number): SqlQuery {
 
 // Marks the claimed attempt as successfully sent -- a permanent, terminal
 // state. Scoped to status = 'pending' so this is a no-op, not an error,
-// if ever called more than once for the same claim.
-export function buildTestSendCommitQuery(now: number): SqlQuery {
+// if ever called more than once for the same claim. `messageId` is
+// Gmail's own opaque message id (see gmail-client.ts's own header comment
+// on why that one field alone is safe to store) recorded into the same
+// `outcome` column the failure path uses for its error message -- never a
+// credential or token, and optional since an older/different send path
+// might not have one to report.
+export function buildTestSendCommitQuery(now: number, messageId?: string): SqlQuery {
   return {
-    sql: `UPDATE agenda_manual_test_send_log SET status = 'sent', sent_at = ? WHERE id = ? AND status = 'pending'`,
-    params: [now, TEST_SEND_CLAIM_ID],
+    sql: `UPDATE agenda_manual_test_send_log SET status = 'sent', sent_at = ?, outcome = ? WHERE id = ? AND status = 'pending'`,
+    params: [now, messageId ?? null, TEST_SEND_CLAIM_ID],
   };
 }
 

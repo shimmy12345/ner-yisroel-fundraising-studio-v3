@@ -50,10 +50,15 @@ export async function generateAgenda(now = Math.floor(Date.now() / 1000)): Promi
   return buildAgenda(brief, { now, baseUrl: env.APP_BASE_URL ?? "" });
 }
 
-export async function sendDailyAgenda(now = Math.floor(Date.now() / 1000)): Promise<void> {
+// Return value is Gmail's own message id when available (see
+// gmail-client.ts's own header comment on why that one field alone is
+// safe to surface) -- `runScheduledAgendaSend` below ignores it entirely;
+// it exists for the controlled-test route, which reports it as delivery
+// evidence.
+export async function sendDailyAgenda(now = Math.floor(Date.now() / 1000)): Promise<string | undefined> {
   const ownerEmail = requireOwnerEmail();
   const agenda = await generateAgenda(now);
-  await sendGmail({
+  return sendGmail({
     from: ownerEmail,
     to: ownerEmail,
     subject: agenda.subject,

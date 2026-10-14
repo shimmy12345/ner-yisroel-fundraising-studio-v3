@@ -27,8 +27,11 @@
 //   allowlist, all of which degrade silently to the original status-only
 //   message instead).
 // - Never log the full Gmail API response body on success either -- only
-//   the fields the caller actually needs (here, nothing beyond "it
-//   didn't throw").
+//   the fields the caller actually needs. On success, that is exactly one
+//   field: Gmail's own `id` for the sent message, an opaque identifier
+//   (never a credential, token, or anything request-derived) used purely
+//   as delivery evidence for a controlled test (October 14 2026 incident
+//   -- docs/AI-HANDOFF.md). The rest of the success body is never read.
 
 import { env } from "cloudflare:workers";
 import { buildMimeMessage, type MimeMessageInput } from "./mime-message.ts";
@@ -94,7 +97,7 @@ export async function refreshAccessToken(): Promise<string> {
   return payload.access_token;
 }
 
-export async function sendGmail(input: MimeMessageInput): Promise<void> {
+export async function sendGmail(input: MimeMessageInput): Promise<string | undefined> {
   // The fail-closed environment allowlist -- see email-send-guard.ts's own
   // header comment. Checked first, before even reading credentials, so no
   // caller (current or future) can ever reach a real Gmail API call from
@@ -119,4 +122,11 @@ export async function sendGmail(input: MimeMessageInput): Promise<void> {
     // message.
     throw new Error(`Gmail send failed: HTTP ${response.status} ${response.statusText}`);
   }
+  // Only `id` is ever read -- see this file's own header comment. A
+  // failure to parse, or a response shaped unexpectedly, degrades to
+  // `undefined` rather than throwing: the email has already been
+  // successfully sent at this point, and a missing message id must never
+  // turn a real success into a reported failure.
+  const sent = await response.json().catch(() => null) as { id?: string } | null;
+  return typeof sent?.id === "string" ? sent.id : undefined;
 }

@@ -38732,3 +38732,198 @@ performed merely to turn it on.
    design, since the actual incident class this responds to was "the right
    build script was run, just not immediately before the right deploy," not
    "a build script lied about what it built."
+
+## Third Controlled Gmail Test -- SUCCESS: Real Email Sent and Independently Confirmed Delivered (2026-10-14)
+
+The owner updated all three Production Gmail secrets to a consistent,
+matching set (`GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`,
+`GMAIL_OAUTH_REFRESH_TOKEN` -- all from the same Web-application OAuth
+client, the refresh token freshly minted with the `gmail.send` scope) and
+authorized exactly one more controlled test, subject to 14 numbered
+safeguards largely mirroring the prior two rounds, plus two new ones: send a
+real email only if authentication genuinely succeeds, and capture the Gmail
+result (including a message id) without exposing credentials -- and an
+explicit instruction not to claim delivery from the Gmail API response
+alone.
+
+### Pre-flight checks (requirements 1-3), all passed
+
+- **Deployment/safeguard state**: `wrangler deployments list` showed
+  Production's live version had advanced to `7f4787dd-...` purely from the
+  owner's own three sequential `wrangler secret put` calls (each one
+  visible, individually timestamped and labeled -- "Updated secret:
+  GMAIL_OAUTH_CLIENT_ID" at 17:16:46 UTC, "...CLIENT_SECRET" at 17:17:15,
+  "...REFRESH_TOKEN" at 17:17:37) -- confirming all three were genuinely
+  updated, without reading any value. `package.json`'s
+  `deploy:production-independent` was re-confirmed to still read
+  `pnpm run build:production-independent && node
+  scripts/verify-build-manifest.mjs production-independent && wrangler
+  deploy ...` -- the safeguard activated last round is intact.
+- **Secrets present**: `wrangler secret list` -- all three
+  `GMAIL_OAUTH_*` names present, types only, no value read.
+- **Database/backup/rollback**: live Workspace Health page (owner's own
+  authenticated session) -- Healthy; automated backup completed
+  successfully Oct 14, 9:39 AM; monthly restore test verified the Oct 12
+  backup; database Connected; schema 0022/0022. D1 read-only query
+  confirmed connectivity directly: 254 donors, 5,464 giving activities,
+  `agenda_send_log` empty. Rollback target identified:
+  `7f4787dd-0136-4375-bdcb-cf62d6a9a62d` (the live version immediately
+  before this round's deploy).
+
+### The minimal change (requirements 4-6)
+
+Beyond advancing the one-time claim id (`lib/agenda/test-send-log.ts`'s
+`TEST_SEND_CLAIM_ID` -> `"...verification-3"`, the same single-constant
+mechanism as the prior two rounds -- the first two rows are untouched,
+permanent, keyed by their own distinct ids), this round also implemented
+**delivery-evidence capture**, itself part of what the owner's own
+authorization asked for (requirement 8):
+
+- `lib/agenda/gmail-client.ts`'s `sendGmail()` now returns `Promise<string |
+  undefined>` -- on success, it reads exactly one field, Gmail's own `id`
+  for the sent message (an opaque identifier, never a credential or token),
+  from the response body; any parse failure degrades to `undefined` rather
+  than ever turning an already-successful send into a reported failure.
+  Still never reads anything from a *failure* response beyond what the
+  diagnostic-code change already read (unchanged). The header comment's
+  "never log the full response body" rule now states precisely what the one
+  exception is and why it's safe.
+- `lib/agenda/send-agenda.ts`'s `sendDailyAgenda()` propagates this same
+  return value (`Promise<string | undefined>`); `runScheduledAgendaSend`
+  (the real scheduled path) simply ignores it, exactly as before --
+  confirmed via `grep` that this is still the only other caller, and its
+  own idempotency logic is completely unchanged.
+- `lib/agenda/test-send-log.ts`'s `buildTestSendCommitQuery` gained an
+  optional `messageId` parameter, stored in the same `outcome` column the
+  failure path already uses for its error message -- no migration needed
+  (the column was already nullable text).
+- `app/api/agenda/test-send/route.ts` captures `sendDailyAgenda`'s return
+  value and includes it in both the JSON response (`{ sent: true,
+  messageId }`) and the D1 commit -- the route itself still never reads a
+  response body directly; it only receives an already-sanitized value from
+  `sendDailyAgenda`.
+
+`git diff --stat`: exactly these 4 files. Zero donor, pledge, payment,
+Gmail-credential, Cloudflare-secret, or Google-OAuth-setting change.
+
+### Tests, types, lint (requirement 5)
+
+One self-referential test failure was hit and fixed during development: a
+new comment in `test-send/route.ts` explaining the message-id capture
+contained the literal substring `sendGmail(`, tripping
+`agenda-test-send-safety.test.mjs`'s own "the route must never call the
+Gmail API directly" source-inspection check -- rephrased to describe the
+same fact without that literal substring. After that fix: **189/189 tests**
+(including `agenda-test-send-safety.test.mjs`,
+`agenda-test-send-idempotency-e2e.test.mjs`, and `agenda-safety.test.mjs`,
+all re-run individually as well as part of the full suite), `tsc --noEmit`
+clean, lint at the unchanged 94-error/43-warning baseline. Confirmed via
+`grep` that `test-send-log.ts` still has exactly one importer in the whole
+codebase (the test-send route) -- the real scheduled send path cannot be
+affected by any of this round's changes.
+
+### Deployment (requirement 6 -- via the protected script)
+
+`pnpm run deploy:production-independent` -- the safeguard activated last
+round ran for the first time for a real deploy: build, then verify, then
+`wrangler deploy`, chained with `&&`. It completed successfully end to end
+(the mere fact that `wrangler deploy`'s own output appeared at all confirms
+both the build and the verify step passed, since either failing would have
+stopped the chain before `wrangler deploy` ever ran). **New Production
+Worker version: `e062c068-b04d-454c-8c3c-16ab0c281267`.** Bindings
+confirmed unchanged. Post-deploy: bundle re-confirmed via `grep` to be a
+genuine `production-independent` build (not a repeat of the prior
+incident); a fresh no-cache fetch confirmed no Staging banner; a safe POST
+with a deliberately wrong confirmation phrase to
+`/api/operations/staging-reset` confirmed it still returns `404` (the
+environment gate intact); donor data unchanged (254/5,464) both before and
+immediately after the deploy.
+
+### Execution and result (requirements 7-9)
+
+With the owner authenticated at `https://shimmydonors.org`, the one-time
+call was made:
+
+```
+POST /api/agenda/test-send -> 200
+{ "sent": true, "messageId": "1a13b72f1f64b817" }
+```
+
+**Per the owner's own explicit instruction, this alone was NOT treated as
+confirmed delivery.** Independent verification was performed using a
+separate channel entirely -- this session's own Gmail integration (a
+distinct connection to the owner's real Gmail account, with no code path
+through this app's `gmail-client.ts` at all) -- by fetching that exact
+message id directly:
+
+- **`labelIds`: `["UNREAD", "SENT", "INBOX"]`** -- critically, `INBOX`, not
+  only `SENT`. `SENT` alone would only prove the message left the sending
+  account; `INBOX` is Gmail's own confirmation that the message was
+  actually delivered to and filed in the recipient mailbox (this send is
+  owner-to-owner, so both are the same account).
+- **Subject**: "Fundraising Agenda — Wednesday, October 14" -- matches the
+  real agenda subject format.
+- **Sender and recipient**: both `sgoldstein@nirc.edu` -- the real,
+  configured owner, exactly as `requireOwnerEmail()` guarantees.
+- **Body content is unambiguously genuine Production data, not Staging**:
+  every link is `https://shimmydonors.org/donors/<uuid>` (the real custom
+  domain, not a `*.workers.dev` placeholder), and the donor names/amounts
+  --
+  Rabbi & Mrs. Michael Fink ("Turning 44"), Mr. & Mrs. Jonathan Spetner
+  ("$12,000.00 pledged (CT2025) ... $1,000.00 balance remaining"), Mr. &
+  Mrs. Yaakov Yisroel Klein ("$400.00 expected · 4 days behind") -- are an
+  **exact match** to the live Production "Today's Agenda" data this session
+  independently observed in the owner's own authenticated browser session
+  earlier today, satisfying requirement 9 with direct, specific evidence
+  rather than an inference from the domain alone.
+- **Timestamp**: `2026-10-14T17:25:50Z`, consistent with the deploy
+  (17:24:40 UTC) and the test call made moments after.
+
+**This is genuine, independently-confirmed delivery -- not merely a Gmail
+API success response.**
+
+### Safety properties verified after the send (requirements 10-11)
+
+- D1, read-only, immediately after: all **three** claim rows now exist and
+  are each exactly as expected -- the first two (`...verification` and
+  `...verification-2`) byte-for-byte unchanged from their original failed
+  states; the third (`...verification-3`) `status: "sent"`, `outcome:
+  "1a13b72f1f64b817"` (the message id -- no credential, no token, no
+  response body).
+- `agenda_send_log` (the real scheduled send's own idempotency table):
+  still **0 rows** -- completely untouched. This route has no code path to
+  that table by construction (confirmed again via source, unchanged from
+  every prior round).
+- Donor data unchanged: 254 donors, 5,464 giving activities, both before
+  and after.
+- No OAuth credential or Cloudflare secret was changed this round
+  (requirement 12) -- only names (`wrangler secret list`) and metadata
+  (`wrangler deployments list`) were ever read.
+
+### Current Production deployment
+
+**Version `e062c068-b04d-454c-8c3c-16ab0c281267`** is live. Cron (`0 * * *
+*`) and `APP_BASE_URL` unchanged.
+
+### Remaining issues
+
+**None outstanding for the Gmail OAuth incident itself.** The credentials
+the owner entered are confirmed working end-to-end: real token refresh,
+real Gmail send, real inbox delivery, with genuine Production data and
+links. Two minor, non-blocking housekeeping items remain, carried over from
+the original plan rather than new findings:
+
+1. **This temporary route should be removed or disabled now that
+   verification is complete**, per its own header comment's original
+   intent -- not done this round, since the owner did not ask for removal
+   as part of this round's 14 requirements, and doing so unprompted would
+   have been outside this round's explicit scope. All three one-time claims
+   are permanently consumed regardless (no further send is possible through
+   this route without a human manually clearing a row and advancing the
+   constant again), so leaving it in place a little longer carries no
+   ongoing risk.
+2. **Tomorrow's real 9 AM Eastern scheduled send** is now expected to
+   succeed on its own, using the same now-corrected credentials -- no
+   further action should be needed, and Cloudflare Observability should
+   show `daily_agenda_sent` rather than `daily_agenda_send_failed` for the
+   first time in this incident's history.

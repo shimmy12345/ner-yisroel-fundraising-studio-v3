@@ -31,7 +31,12 @@
 //   the real schedule's own record.
 // - Never logs or returns a credential, token, or response body -- every
 //   error surfaced is `.message` only, matching gmail-client.ts's own
-//   established discipline.
+//   established discipline. On success, the one value surfaced is
+//   Gmail's own message id, via sendDailyAgenda's return value (itself
+//   from the Gmail-sending function -- see gmail-client.ts's own header
+//   comment for exactly what it reads from the response and why that one
+//   field is safe), as delivery evidence for a controlled test -- this
+//   route never reads a response body itself.
 
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
@@ -67,10 +72,10 @@ export async function POST() {
   }
 
   try {
-    await sendDailyAgenda(now);
-    const commit = buildTestSendCommitQuery(now);
+    const messageId = await sendDailyAgenda(now);
+    const commit = buildTestSendCommitQuery(now, messageId);
     await env.DB.prepare(commit.sql).bind(...commit.params).run();
-    return Response.json({ sent: true });
+    return Response.json({ sent: true, messageId: messageId ?? null });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const failure = buildTestSendFailureQuery(now, message);
