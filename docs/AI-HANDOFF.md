@@ -37584,3 +37584,127 @@ Until the owner authorizes and performs the correction in Section 4,
 tomorrow's 9 AM Eastern Production attempt is likely to fail the same
 way -- safely (no wrong email, the guard is confirmed intact), but
 still with no real agenda delivered.
+
+## Post-Correction Verification Attempt -- Safe Testing Not Possible With Available Access (2026-10-14)
+
+The owner updated `GMAIL_OAUTH_CLIENT_ID` and `GMAIL_OAUTH_CLIENT_SECRET`
+on Production (a newly created client secret from the existing Google
+OAuth client; `GMAIL_OAUTH_REFRESH_TOKEN` left unchanged) and asked for
+a safe, read-only verification that the new credentials actually work,
+without sending any email. **This round made zero writes of any kind**
+-- only `wrangler secret list` and `wrangler deployments list` (both
+read-only, names/metadata only, no secret value ever requested or
+returned) were run.
+
+### 1. Confirmed: the secret update is genuinely deployed (without reading values)
+
+`wrangler deployments list --config wrangler.production.jsonc` shows,
+immediately after the previously-known Health-correction deploy
+(`9bef87e5-...`), two new versions Cloudflare itself labels by the
+secret name changed -- never a value:
+
+| Version | Created (UTC) | Cloudflare's own label |
+|---|---|---|
+| `90c3df62-f29c-424b-a56d-0ed8970141ba` | 2026-10-14T15:29:02.755Z | "Updated secret: GMAIL_OAUTH_CLIENT_ID" |
+| `77a2b21a-3486-40c6-9999-e737099c9c3c` | 2026-10-14T15:30:19.921Z | "Updated secret: GMAIL_OAUTH_CLIENT_SECRET" |
+
+`77a2b21a-...` is confirmed the current live version (end of the
+deployments list). `GMAIL_OAUTH_REFRESH_TOKEN` does **not** appear in
+this update sequence -- directly consistent with the owner's own
+statement that it was left unchanged, confirmed independently rather
+than taken on faith. `wrangler secret list --config
+wrangler.production.jsonc` re-run: all three secret names still
+present. **This is read-only, dated, Cloudflare-generated evidence
+that an update genuinely occurred and is live -- not an assumption.**
+
+### 2. Cannot safely determine whether the refresh token now succeeds -- explained, not worked around
+
+Checked directly, before attempting anything: `grep -rl
+"refreshAccessToken\|GMAIL_OAUTH" app/` returns **no results**. The
+token-refresh call (`lib/agenda/gmail-client.ts`'s
+`refreshAccessToken()`) has exactly two callers in the entire
+codebase -- `sendDailyAgenda()` and the backup-alert check -- and both
+are reachable **only** through the Worker's `scheduled()` export, which
+is itself reachable only by a real Cloudflare Cron Trigger firing or by
+manually invoking the platform's own scheduled-handler test endpoint.
+There is no existing code path, HTTP route, or health check anywhere
+in this application that exercises the token refresh in isolation from
+an actual send attempt.
+
+This means every available way to "test" the refresh falls into one of
+two outcomes, neither of which is the safe, informative result being
+asked for:
+
+- **Inside the gated 9 AM Eastern hour**: invoking the scheduled
+  handler would reach the real token refresh, and -- if the new
+  credentials work -- proceed immediately to a real Gmail send. There
+  is no code-level stopping point between "refresh succeeded" and
+  "message sent" to interrupt. This directly conflicts with "do not
+  send any emails."
+- **Outside that hour** (the actual situation right now --
+  `isDailyAgendaSendHour` checked and confirmed false at the time of
+  this investigation, 2026-10-14T15:34 UTC): `runScheduledAgendaSend`
+  returns immediately on its very first line, before ever reaching
+  `requireOwnerEmail()`, `sendDailyAgenda()`, or the token refresh.
+  Invoking the handler right now would be guaranteed not to send
+  anything, but would also be guaranteed to test **nothing** -- the
+  code never reaches Google's token endpoint at all.
+
+Building any new, narrower test path (an endpoint that calls
+`refreshAccessToken()` alone and stops) would require writing and
+deploying new application code -- explicitly out of scope ("do not
+deploy application changes or create a temporary Production endpoint
+solely for this test"). Constructing the token-refresh HTTP request
+independently, outside the Worker, was also considered and is not
+actually possible from this session regardless of the safety
+constraints: Cloudflare Worker secrets are **write-only** from every
+tool available here (`wrangler secret put` sets a value; no command of
+any kind reads one back) -- this session has never had access to
+Production's actual `GMAIL_OAUTH_CLIENT_SECRET` or
+`GMAIL_OAUTH_REFRESH_TOKEN` values to construct such a request with,
+independent of whether doing so would be advisable.
+
+**Conclusion: authentication cannot be safely tested in isolation with
+the access and constraints available this round.** Per the explicit
+instruction to explain this rather than attempt a workaround, no
+`/cdn-cgi/handler/scheduled` trigger, no local `wrangler dev` session
+against live Production secrets, and no new code path was attempted or
+deployed.
+
+### 3. Safety constraints maintained throughout
+
+- No donor record, pledge, payment, or `agenda_send_log` row was read
+  or written this round (only two read-only `wrangler` metadata
+  commands were run; neither touches D1 at all).
+- No OAuth credential, Google Cloud setting, or Cloudflare
+  configuration was modified, inspected for its value, or displayed.
+- No application code was deployed; `git status` confirmed a clean
+  tree at the same `HEAD` (`ae08e6b`) throughout.
+- No email, manual or scheduled, was sent or triggered.
+
+### What remains uncertain, and the recommended next safe step
+
+Whether the newly-deployed Client ID/Secret pair, combined with the
+unchanged existing refresh token, actually succeeds is **genuinely
+unknown** until something legitimately reaches
+`oauth2.googleapis.com/token` from Production. The two realistic,
+safe paths forward, neither performed this round:
+
+1. **Let tomorrow's real 9 AM Eastern window be the test** (as this
+   session already recommended before the credential correction was
+   made). If it succeeds, Cloudflare Observability will show
+   `daily_agenda_sent` instead of a 401/`daily_agenda_send_failed`,
+   and the owner will receive the real, correctly-sourced email --
+   itself the clearest possible confirmation, requiring no separate
+   test step at all.
+2. **If the owner wants confirmation sooner**, the only way to get it
+   is to explicitly authorize an actual real send attempt (there is no
+   way to test the refresh step alone) -- which this round deliberately
+   did not do, per the standing instruction not to send a manual Daily
+   Agenda email, and would need its own separate, explicit approval in
+   a future round if wanted.
+
+No corrective action is recommended beyond what the owner has already
+done -- this round found no defect, only an inherent limitation of
+testing an authentication step that has no safe isolation point from
+the action it gates.
