@@ -37156,3 +37156,250 @@ way by this round.
   pending, untouched by this round (this fix touches only
   `lib/data-health/model.ts`, which the Daily Agenda send path never
   imports or depends on).
+
+## Pre-October-15 Read-Only Audit: Gmail Configuration and Cron Scheduling (2026-10-14)
+
+Read-only audit requested ahead of the October 15, 2026, 9:00 AM
+America/New_York scheduled send. **Zero application or infrastructure
+changes were made** -- no email sent, no credential refreshed/revoked/
+rotated/displayed, no Google Cloud or Cloudflare setting touched, no
+deploy. Every finding below is labeled **VERIFIED** (directly
+confirmed, evidence cited) or **CANNOT VERIFY** (genuinely unknown with
+the access and safety constraints available this round) -- never
+blended.
+
+### Important finding this round: the real incident window is wider than previously framed
+
+Re-examined the actual Gmail send history (`newer_than:5d`, 6 messages)
+with the exact deployment timestamp of the Production cron cutover.
+**The Production cutover deploy (`f0352c0e-28a5-4077-a937-
+ce02290ab207`) was created at `2026-10-12T13:36:37Z`** -- confirmed via
+`wrangler deployments list --config wrangler.production.jsonc`, not
+assumed. Checked every real send since:
+
+| Date | Sent (UTC) | Links point to | Expected sender at send-time |
+|---|---|---|---|
+| Oct 10 | 13:01:32 | Staging | Staging (pre-cutover -- correct) |
+| Oct 11 | 13:01:37 | Staging | Staging (pre-cutover -- correct) |
+| Oct 12 | 13:03:01 | Staging | Staging (cutover deployed 13:36:37Z, ~33 min *after* this send -- correct) |
+| Oct 13 | 13:02:29 | Staging | **Production** -- but Staging sent. First day of the actual bug. |
+| Oct 14 | 13:01:09 | Staging | **Production** -- but Staging sent. Second day of the bug; investigated and (twice) fixed this same day. |
+
+**Since the moment Production's cron was supposed to take over
+(2026-10-12T13:36:37Z) through today, Production's own scheduled
+handler has not been confirmed to successfully send a single email --
+not once, on any of the two opportunities it has had (Oct 13, Oct 14).**
+Every real send in the entire observable history traces to Staging.
+This is a materially more significant open question than "one bad
+email on October 14" -- it means there is no positive historical
+precedent to extrapolate from for tomorrow's send succeeding on
+Production specifically, independent of whether the October 14 fix
+itself is correct.
+
+### 1. Gmail OAuth connection -- token status, scopes, expiration
+
+- **VERIFIED**: scope is `gmail.send` only (`users.messages.send`/
+  `users.drafts.send` -- no read/modify/settings/label access),
+  confirmed both by the original setup research and by
+  `lib/agenda/gmail-client.ts`'s own code, which requests nothing
+  broader.
+- **VERIFIED**: the OAuth app is registered as **Internal** user type
+  under the owner's own `nirc.edu` Google Workspace account (per the
+  "Implementation -- Gmail approved" entry above, 2026-08-26). Internal
+  apps have **no publishing-status-driven refresh-token expiry** -- the
+  7-day Testing-mode expiry risk flagged in the original research
+  (point 9, same section) does not apply to either environment's token,
+  since both derive from this same Internal app registration.
+- **VERIFIED, indirectly but strongly**: Staging's own Gmail
+  credentials are demonstrably valid and functional right now -- a real
+  token-refresh + Gmail API send succeeded on at least 5 consecutive
+  days (Oct 10-14 above), most recently this morning. A revoked,
+  expired, or misconfigured credential would have surfaced as an
+  `invalid_grant` error on send, which did not happen.
+- **CANNOT VERIFY**: Production's own Gmail credentials' live validity.
+  Only the secret *names* are confirmed present (`wrangler secret list
+  --config wrangler.production.jsonc`, read-only, values never
+  requested or displayed -- see Section 3). Since Production's cron has
+  never been confirmed to fire (above), there is no successful *or*
+  failed send attempt to examine. Per the explicit safety constraint,
+  no token-validation call of any kind was made against Google's APIs
+  this round.
+
+### 2. Google Cloud OAuth app configuration, consent-screen status, restrictions
+
+- **VERIFIED** (documented setup history, not re-investigated from
+  scratch): Internal Google Auth app, `gmail.send` scope only,
+  authorized by the owner against their own `nirc.edu` account.
+- **VERIFIED, indirectly**: no Google Workspace admin "App Access
+  Control" block occurred -- the original research flagged this as a
+  real, undetermined risk for an `.edu` tenant (point 4, same section),
+  but the one-time authorization the owner performed succeeded (the
+  refresh token exists and has remained in continuous successful use
+  since), which would not be possible if such a policy had blocked it.
+- **CANNOT VERIFY**: the Google Cloud Console / consent-screen pages
+  directly -- this would require logging into `console.cloud.google.com`
+  as the owner, which was not attempted (consistent with this session's
+  standing rule never to enter credentials on a login wall). This
+  round's confidence rests entirely on documented setup history plus
+  the indirect behavioral evidence above, not a fresh console read.
+
+### 3. Does Production share Gmail credentials with Staging, and does that add risk?
+
+- **VERIFIED**: both environments have all three `GMAIL_OAUTH_CLIENT_ID`
+  / `GMAIL_OAUTH_CLIENT_SECRET` / `GMAIL_OAUTH_REFRESH_TOKEN` secret
+  *names* present (`wrangler secret list` on both configs, read-only,
+  names/types only -- see the two JSON listings this round produced,
+  neither containing a value).
+- **CANNOT VERIFY**: whether the actual secret *values* are identical
+  (a single shared token/client) or distinct (a separate authorization,
+  same or different underlying OAuth Client). The owner entered
+  Production's three values directly in the Cloudflare dashboard
+  themselves (per the "Complete Production Daily Email Cutover" entry
+  above); the prior round's own instruction to the owner explicitly
+  left this as their choice ("their own existing values or a fresh
+  client"), and no record of which they chose exists anywhere in this
+  repository. Reading the values to find out is exactly what this
+  round's safety constraints forbid.
+- **Risk assessment, given that uncertainty**: it no longer matters for
+  preventing a *wrong* email -- the October 14 fail-closed guard
+  (`lib/agenda/email-send-guard.ts`, reconfirmed active in Section 7
+  below) blocks Staging from ever reaching the Gmail API at all,
+  regardless of whether its credentials are shared with or separate
+  from Production's. If they are shared and the single underlying
+  token/client is ever affected (revocation, the 50-live-token cap, a
+  Workspace policy change), both environments would be affected
+  together -- but since Staging can no longer send regardless, this
+  narrows to exactly the same open question as Section 1's Production-
+  specific gap, not an additional distinct risk.
+
+### 4. Actual deployed Cloudflare Cron Triggers (not just Wrangler config)
+
+- **VERIFIED (source config only)**: `wrangler.production.jsonc` ->
+  `"triggers": { "crons": ["0 * * * *"] }`; `wrangler.staging.jsonc` ->
+  `"triggers": { "crons": [] }` (explicit empty array).
+- **CANNOT VERIFY** the live, Cloudflare-side registered trigger state
+  for either Worker -- the same disclosed gap as both prior incident
+  rounds: no `wrangler` subcommand reads this (only `wrangler triggers
+  deploy`, write-only, exists); the Cloudflare dashboard hit a login
+  wall this session has consistently declined to pass through
+  (credentials never entered); no API token is available, and none was
+  extracted or substituted to work around this.
+- **This gap is now more consequential than previously framed.** The
+  table in the "Important finding" section above shows Staging's cron
+  demonstrably kept firing despite three separate explicit-empty-array
+  redeploys across 2026-10-13 -- direct evidence that Cloudflare's live
+  trigger state can diverge from `wrangler.jsonc` in ways this session
+  cannot directly observe for either Worker. The October 14 fail-closed
+  guard was deliberately designed not to depend on resolving this gap
+  (Section 7) -- it remains open regardless.
+
+### 5. Is Production's scheduled handler configured for the correct time (UTC vs. Eastern)?
+
+- **VERIFIED, analytically and via the real test suite**: `lib/agenda/
+  timezone.ts`'s `currentEasternHour`/`isDailyAgendaSendHour` use
+  `Intl.DateTimeFormat` with `timeZone: "America/New_York"` --
+  `tests/agenda-timezone.test.mjs` explicitly and currently passes
+  both DST boundaries for 2026: the March 8 spring-forward instant
+  (`2026-03-08T13:00:00Z` correctly reads as 9 AM EDT) and the November
+  1 fall-back instant (`2026-11-01T13:00:00Z` correctly reads as only
+  8 AM EST, with 9 AM EST correctly landing an hour later in UTC). This
+  logic is identical, unmodified, shared code on both Production and
+  Staging -- there is no environment-specific timing path to diverge.
+- October 15, 2026 is within EDT (DST does not end until November 1,
+  2026) -- 9:00 AM America/New_York = 13:00 UTC, the one qualifying
+  firing among the hourly cron's 24 daily invocations.
+- **CANNOT VERIFY** (same gap as Section 4): whether Production's Cron
+  Trigger actually fires at 13:00 UTC at the Cloudflare infrastructure
+  level. The code's *correctness* is verified; its actual *execution*
+  on Production specifically has never been directly observed to
+  succeed (see the "Important finding" table above).
+
+### 6. Did October 14 originate from Staging, and is there evidence of a Production attempt or Gmail auth failure?
+
+- **VERIFIED, conclusively, independently re-confirmed this round**:
+  October 14's email data and links both trace to Staging's own D1 and
+  hostname (established in the original incident investigation via
+  direct D1 comparison; re-confirmed this round by re-reading the
+  message's own links and content against the known Staging/Production
+  data divergence).
+- **New this round**: the identical conclusion holds for October 13's
+  send as well (see the table above) -- both are confirmed Staging-
+  sourced, both occurring after the cutover should have made Production
+  the sender.
+- **CANNOT ESTABLISH**: any Production send *attempt* (successful or
+  failed) or any Gmail-authorization failure specific to Production,
+  from any evidence available this round. No Cloudflare Observability/
+  dashboard access; `lib/logger.ts` writes only to
+  `console.info`/`console.error` (Observability), never to any
+  queryable, persisted store; no second, Production-linked "Fundraising
+  Agenda" email of any kind exists in Gmail on any date checked
+  (confirmed via the same `newer_than:5d` search covering the full
+  window).
+
+### 7. Is the Production-only email guard and `agenda_send_log` idempotency protection still active after the latest deployment?
+
+- **VERIFIED directly, two independent ways**:
+  1. `git diff --stat 741a58c HEAD -- lib/agenda/ worker/index.ts` ->
+     **empty output**. Zero changes to the fail-closed guard
+     (`lib/agenda/email-send-guard.ts`), the idempotency claim logic
+     (`lib/agenda/send-log.ts`), `lib/agenda/gmail-client.ts`, or
+     `lib/agenda/send-agenda.ts` since the October 14 email-safety fix
+     was first committed -- the subsequent Production Health correction
+     round touched only `lib/data-health/model.ts` and its own test
+     file, confirmed by the same diff technique at the time.
+  2. A fresh **local build only** (`pnpm run build:production-
+     independent`, not deployed -- this round made no deployment of any
+     kind) of the exact current `HEAD` state was grepped directly:
+     `EmailSendBlockedError` (3 occurrences) and `agenda_send_log` (8
+     occurrences) both present in the compiled bundle, confirming the
+     guard and idempotency logic are genuinely compiled into the same
+     code tree currently live on Production (Worker version
+     `9bef87e5-b357-4c73-927a-593b23fb91e8`, built from this identical
+     `HEAD`).
+- Both the fail-closed allowlist (`isRealEmailSendAllowed` ->
+  `"production-independent"` only) and the atomic claim/commit
+  idempotency table remain exactly as designed and tested on 2026-10-14
+  -- nothing in the intervening Production Health correction round
+  could have altered them, and this round's direct checks confirm it
+  did not.
+
+### Summary: is October 15 ready?
+
+**"No wrong email" is very well assured.** The fail-closed guard is
+confirmed present, unmodified, and compiled into the exact code
+currently live on Production; it was already proven correct by a full,
+passing regression suite (unit tests + a real-`node:sqlite` end-to-end
+idempotency test) in the October 14 round. Even if Staging's own cron
+keeps firing for reasons this session still cannot directly observe,
+`sendGmail()` will throw `EmailSendBlockedError` before ever reaching
+Google's API from any environment other than Independent Production.
+
+**"A correct email will be sent" is NOT assured -- this is the genuine
+open question going into tomorrow.** There is no prior instance, on
+any day since the cutover took effect, of Production's own scheduled
+handler successfully sending an email. This round could not determine
+whether that is because Production's Cron Trigger is not actually
+registered at the Cloudflare infrastructure level (symmetric to
+Staging's own demonstrated config/live-state divergence), because
+Production's stored Gmail credentials have some problem never yet
+triggered, or because of something else entirely -- all three remain
+equally plausible and equally unverifiable with the access and safety
+constraints available this round.
+
+**Specific corrective actions that would require the owner's approval
+(none taken, all optional, listed for awareness only):**
+
+1. Grant this session (or check personally) Cloudflare dashboard/
+   Observability access, to directly confirm Production's Cron
+   Trigger registration and, after tomorrow's window, whether
+   `scheduled()` fired and what `daily_agenda_sent`/
+   `daily_agenda_send_failed` logged.
+2. If October 15 produces no email at all, the most informative next
+   step would be checking Observability first (per #1) before assuming
+   a Gmail-credential problem specifically -- the cron-registration
+   question and the credential-validity question currently look
+   identical from the outside (silence), and only Observability access
+   can distinguish them.
+3. No code or configuration change is recommended at this time --
+   this round found no actionable defect, only verification gaps that
+   external access (not a code fix) would close.
