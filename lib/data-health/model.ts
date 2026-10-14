@@ -596,7 +596,21 @@ function productionBaselineCheck(facts: DataHealthFacts): HealthCheck {
   const byState = {
     verified: { status: "healthy" as const, value: `${level} · Verified`, explanation: "The production D1 database carries the production_schema_baseline marker and its schema_hash matches the packaged 0019 baseline exactly.", severity: "none" as const, businessDataAtRisk: false, repairStep: "None.", actual: "production_schema_baseline row for id '0019' present with a matching schema_hash." },
     "not-applied": { status: "critical" as const, value: `${level} · Not yet applied`, explanation: "The production D1 database does not contain the production_schema_baseline table. The verified baseline artifact has not been applied to this database yet.", severity: "high" as const, businessDataAtRisk: false, repairStep: "Apply production-baseline/drizzle/0000_production_baseline_0019.sql to the production D1 database (remote), then reload this page to re-verify.", actual: "No production_schema_baseline table exists in the live production D1." },
-    "hash-mismatch": { status: "critical" as const, value: `${level} · Mismatch`, explanation: "The production D1 database has a production_schema_baseline marker, but its recorded schema_hash does not match the packaged 0019 baseline. The live schema may not be what this build expects.", severity: "high" as const, businessDataAtRisk: true, repairStep: "Do not launch. Compare the live schema_hash against production-baseline/schema-manifest.json and investigate the discrepancy before taking any further action.", actual: "production_schema_baseline row present with a schema_hash that differs from the packaged baseline." },
+    // October 14 2026 Production Health correction (docs/AI-HANDOFF.md):
+    // a "hash-mismatch" means the live database's production_schema_baseline
+    // marker IS present and genuinely was applied -- its recorded hash
+    // simply predates one or more later, legitimate, additive migrations,
+    // and that historical stamp is never rewritten automatically (see this
+    // function's own evidenceSource and the shared comment on
+    // INDEPENDENT_STAGING_BASELINE_STATUS below, which already treated the
+    // identical fact this way on Independent Staging -- this brings
+    // Production's own wording into line with that established, correct
+    // precedent instead of alarming on expected drift). This must never be
+    // confused with the live schema actually being wrong: "Production ↔
+    // baseline schema" (schema-comparison) is the current, authoritative,
+    // always-fresh structural proof of that, computed independently of this
+    // historical stamp and still fully blocking on its own if it fails.
+    "hash-mismatch": { status: "info" as const, value: `${level} · Stale stamp`, explanation: "The production D1 database has a production_schema_baseline marker, but its recorded schema_hash predates one or more later, legitimate migrations -- this historical stamp is never rewritten automatically. This reflects the baseline's age, not a corrupt or unexpected live schema; see \"Production ↔ baseline schema\" and \"Live schema version\" for the current, authoritative checks.", severity: "none" as const, businessDataAtRisk: false, repairStep: "None. If you want the stamp itself refreshed, that is a separate, explicit maintenance action -- not a repair, and never automatic.", actual: "production_schema_baseline row present; schema_hash predates the currently packaged baseline." },
     unreadable: { status: "unavailable" as const, value: `${level} · Unknown`, explanation: "The production baseline marker could not be read from the live database (a connection or query error occurred). This is not a confirmed failure — the check could not complete.", severity: "medium" as const, businessDataAtRisk: true, repairStep: "Re-run the health check. If this persists, verify the production D1 binding and the health check's database permissions.", actual: "The verification query against production_schema_baseline did not complete." },
     "not-applicable": { status: "unavailable" as const, value: `${level} · Unknown`, explanation: "This request's deployment environment could not be classified as production, so the live baseline marker was not checked.", severity: "medium" as const, businessDataAtRisk: true, repairStep: "Re-run the health check on the production environment.", actual: "Deployment environment was not resolved as production." },
   };
@@ -609,6 +623,36 @@ function productionBaselineCheck(facts: DataHealthFacts): HealthCheck {
     explanation: detail.explanation,
     evidence: { expected: "A production_schema_baseline row for id '0019' whose schema_hash equals the packaged baseline's schemaHash.", actual: detail.actual, evidenceSource, lastVerifiedAt: verifiedAt, severity: detail.severity, businessDataAtRisk: detail.businessDataAtRisk, repairStep: detail.repairStep },
   };
+}
+
+// October 14 2026 Production Health correction (docs/AI-HANDOFF.md):
+// distinct from productionBaselineCheck's own "Production rehearsal
+// baseline" card (both derive from the same facts.productionBaselineState,
+// but this one answers "did this database genuinely originate from the
+// verified baseline?", not "does the historical stamp still match the
+// current packaged artifact?"). A "hash-mismatch" answers that first
+// question YES -- the database legitimately was created from the verified
+// 0019 baseline, migrations have simply been applied since -- so it must
+// never render as "Unverified" (which means the marker is missing or the
+// deployment environment is a real, un-investigated unknown). Only
+// "not-applied"/"unreadable"/"not-applicable" mean the question could not
+// be answered YES.
+function productionMigrationHistoryCheck(facts: DataHealthFacts): HealthCheck {
+  const state = facts.productionBaselineState;
+  const stampedAt = facts.productionBaselineVerifiedAt;
+  if (state === "verified" || state === "hash-mismatch") {
+    const stale = state === "hash-mismatch";
+    return {
+      id: "staging-migration-history",
+      label: "Production migration history",
+      status: stale ? "info" : "healthy",
+      value: stale ? `Baseline 0019 · Stale stamp${stampedAt ? ` (${stampedAt.slice(0, 10)})` : ""}` : "Baseline 0019",
+      explanation: stale
+        ? `This database was created from the verified 0019 production baseline${stampedAt ? ` (stamped ${stampedAt})` : ""}. Its historical stamp predates one or more later, legitimate migrations and is never rewritten automatically -- see "Production rehearsal baseline" and "Production ↔ baseline schema" for the current, authoritative checks. Legacy staging history was not copied.`
+        : "This database was created from the verified 0019 production baseline. Legacy staging history was not copied.",
+    };
+  }
+  return { id: "staging-migration-history", label: "Production migration history", status: "critical", value: "Unverified", explanation: "The production baseline marker or schema hash is missing. Do not load business data." };
 }
 
 function productionReadinessCheck(facts: DataHealthFacts, productionReady: boolean, blockers: string[]): HealthCheck {
@@ -729,7 +773,27 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
   // Derived from checkedAt (not a fresh Date.now() call) so freshness
   // classification is deterministic and testable against a fixed clock.
   const now = Date.parse(checkedAt);
-  const productionBaselineApplied = isProductionEnvironment(deploymentEnvironment) ? facts.productionBaselineState === "verified" : true;
+  // October 14 2026 Production Health correction (docs/AI-HANDOFF.md):
+  // "genuinely applied" (and therefore never itself a launch blocker) means
+  // the live database's production_schema_baseline marker confirms
+  // real lineage from the verified 0019 baseline -- true for BOTH
+  // "verified" (the historical stamp still matches the current packaged
+  // artifact byte-for-byte) and "hash-mismatch" (the stamp is real but
+  // predates a later, legitimate, additive migration -- see
+  // productionBaselineCheck's own hash-mismatch branch and
+  // productionMigrationHistoryCheck above for the full reasoning). Only
+  // "not-applied" (the marker is missing entirely -- no baseline was ever
+  // applied to this database), "unreadable" (the check itself failed to
+  // complete), or "not-applicable" (environment misclassified) mean this
+  // question could not be answered YES, and those -- and only those --
+  // must keep blocking launch readiness below. A genuine, CURRENT schema
+  // problem is still caught independently by facts.schemaMatchesBaseline
+  // ("Production ↔ baseline schema") and liveSchemaMatchesExpectedLevel
+  // ("Live schema version") further down, neither of which this change
+  // touches.
+  const productionBaselineApplied = isProductionEnvironment(deploymentEnvironment)
+    ? facts.productionBaselineState === "verified" || facts.productionBaselineState === "hash-mismatch"
+    : true;
   const businessDataRows = facts.businessDataRows ?? facts.activeDonors;
   const hasData = (facts.activeDonors ?? 0) > 0;
   const givingReady = [facts.givingSourceTotalCents, facts.givingLinkedTotalCents, facts.invalidGivingRows, facts.duplicateGivingFingerprints].every((value) => value !== null);
@@ -787,7 +851,7 @@ export function buildDataHealthReport(facts: DataHealthFacts, checkedAt = new Da
         : "The live schema does not match the packaged application schema. Do not deploy database changes until reconciled.",
     },
     isProductionEnvironment(deploymentEnvironment)
-      ? { id: "staging-migration-history", label: "Production migration history", status: productionBaselineApplied ? "healthy" : "critical", value: productionBaselineApplied ? "Baseline 0019" : "Unverified", explanation: productionBaselineApplied ? "This database was created from the verified 0019 production baseline. Legacy staging history was not copied." : "The production baseline marker or schema hash is missing. Do not load business data." }
+      ? productionMigrationHistoryCheck(facts)
       : { id: "staging-migration-history", label: "Staging migration history", status: "info", value: "Legacy · unverified", explanation: `Staging is intentionally treated as a legacy database. Its schema is inspected directly; migration SQL is never replayed and history is never guessed. Journal ${facts.journalMigrationLevel ?? "unknown"}; remote table ${facts.remoteMigrationTable ?? "not present"}.`, diagnosticLines: [...MISSING_LEDGER_MIGRATIONS.map((tag) => `${tag} is absent from the legacy journal.`), ...facts.remoteMigrationDiagnosticLines] },
     productionBaselineCheck(facts),
     { id: "schema-comparison", label: schemaComparisonLabel, status: facts.schemaMatchesBaseline ? "healthy" : "critical", value: facts.schemaMatchesBaseline ? "Match" : `${facts.schemaComparisonDifferences.length} differences`, explanation: facts.schemaMatchesBaseline ? "Application tables, columns, indexes, and constraints match the verified 0019 baseline. Cloudflare-managed infrastructure tables are reported separately from application schema." : "Material application-schema differences exist between the live database and the packaged baseline.", diagnosticLines: facts.schemaComparisonDifferences },

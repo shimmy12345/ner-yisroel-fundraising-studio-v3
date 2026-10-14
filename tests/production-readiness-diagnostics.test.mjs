@@ -136,13 +136,21 @@ test("missing artifact: production reports Not yet applied, not a generic Failed
   assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("baseline is not verified")));
 });
 
-test("stale artifact: hash mismatch is distinguished from missing artifact and flags business-data risk", () => {
+test("stale artifact: hash mismatch is distinguished from missing artifact and never blocks launch readiness or flags business-data risk (October 14 2026 Production Health correction)", () => {
   const report = buildDataHealthReport(productionFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
   const baseline = check(report, "production-baseline");
-  assert.equal(baseline.status, "critical");
-  assert.equal(baseline.value, "0019 · Mismatch");
+  // A hash-mismatch means the historical stamp predates a later, legitimate
+  // migration -- the baseline genuinely was applied, so this must never
+  // read as critical, never block readiness, and never claim business data
+  // is at risk. "Production ↔ baseline schema" (schema-comparison) is the
+  // current, authoritative structural proof, computed independently below.
+  assert.equal(baseline.status, "info");
+  assert.notEqual(baseline.status, "critical");
+  assert.equal(baseline.value, "0019 · Stale stamp");
   assert.notEqual(baseline.value, "0019 · Not yet applied");
-  assert.equal(baseline.evidence.businessDataAtRisk, true);
+  assert.equal(baseline.evidence.businessDataAtRisk, false);
+  assert.equal(check(report, "production-readiness").value, "Ready", "a stale stamp alone must never block Production launch readiness");
+  assert.deepEqual(report.platform.productionReadinessBlockers, []);
 });
 
 test("schema mismatch: staging/baseline schema comparison blocks readiness independently of the baseline check", () => {
@@ -315,13 +323,115 @@ test("independent production: a missing baseline marker blocks readiness exactly
   assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("baseline is not verified")));
 });
 
-test("independent production: an incorrect baseline hash blocks readiness and flags business-data risk", () => {
+test("independent production: a stale baseline stamp (hash differs from the current packaged manifest) never blocks readiness and is never a business-data risk (October 14 2026 Production Health correction)", () => {
   const report = buildDataHealthReport(independentProductionFacts({ productionBaselineState: "hash-mismatch", productionBaselineApplied: false }));
   const baseline = check(report, "production-baseline");
-  assert.equal(baseline.status, "critical");
-  assert.equal(baseline.value, "0019 · Mismatch");
-  assert.equal(baseline.evidence.businessDataAtRisk, true);
+  assert.equal(baseline.status, "info");
+  assert.notEqual(baseline.status, "critical");
+  assert.equal(baseline.value, "0019 · Stale stamp");
+  assert.equal(baseline.evidence.businessDataAtRisk, false);
+  assert.doesNotMatch(baseline.explanation, /may not be what this build expects/i, "must never claim the live schema itself is in doubt -- that is schema-comparison's job");
+  const readiness = check(report, "production-readiness");
+  assert.equal(readiness.value, "Ready", "an outdated historical baseline stamp alone must never block Production launch readiness after a legitimate migration");
+  assert.equal(readiness.status, "healthy");
+  assert.deepEqual(report.platform.productionReadinessBlockers, []);
+  assert.equal(report.platform.productionReady, true);
+});
+
+test("independent production: the Production migration history card reflects a stale stamp informationally, never as Unverified (October 14 2026 Production Health correction)", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ productionBaselineState: "hash-mismatch", productionBaselineVerifiedAt: "2026-08-01T00:00:00.000Z" }));
+  const history = check(report, "staging-migration-history");
+  assert.equal(history.label, "Production migration history");
+  assert.equal(history.status, "info");
+  assert.notEqual(history.status, "critical");
+  assert.equal(history.value, "Baseline 0019 · Stale stamp (2026-08-01)");
+  assert.notEqual(history.value, "Unverified", "the database genuinely was created from the verified baseline -- a stale stamp must never read as if the baseline marker were missing");
+  assert.match(history.explanation, /predates one or more later, legitimate migrations/i);
+});
+
+test("independent production: a genuinely missing baseline marker still shows Unverified on the Production migration history card, distinct from a stale stamp", () => {
+  const report = buildDataHealthReport(independentProductionFacts({ productionBaselineState: "not-applied" }));
+  const history = check(report, "staging-migration-history");
+  assert.equal(history.status, "critical");
+  assert.equal(history.value, "Unverified");
+});
+
+// ---- Comprehensive coverage for the October 14 2026 Production Health
+// correction: the overall report.status rollup (what the owner actually
+// sees as "Healthy" / "Needs attention"), not just individual check
+// fields, across every productionBaselineState value, plus proof that
+// every OTHER genuine problem category (schema mismatch, stale live
+// migration level, relationship-integrity failure, giving-reconciliation
+// failure, backup/restore failure) still fails the overall report exactly
+// as before -- this fix touches nothing but the hash-mismatch state. ----
+
+// Every test below passes the same fixed checkedAt the other
+// productionBackupFacts()-based tests in this file use
+// ("2026-10-12T12:00:00.000Z", matching productionBackupFacts()'s own
+// backup/restore completedAt values) -- without it, buildDataHealthReport
+// defaults to the real wall-clock time, making those fixed historical
+// backup dates look stale relative to whenever this suite actually runs,
+// which would fail these tests for a reason having nothing to do with the
+// baseline-stamp fix under test here.
+const BACKUP_FIXTURE_CHECKED_AT = "2026-10-12T12:00:00.000Z";
+
+test("overall report.status: a stale baseline stamp alone resolves to healthy, not attention or critical", () => {
+  // productionBackupFacts() (not the bare independentProductionFacts()) is
+  // required here so the unrelated Automated backup / Monthly restore test
+  // cards resolve to their own healthy defaults rather than "unavailable"
+  // (no backup facts supplied) -- this test is specifically isolating the
+  // baseline-stamp fix's effect on the overall rollup, not re-proving
+  // backup-status plumbing already covered elsewhere in this file.
+  const report = buildDataHealthReport(productionBackupFacts({ productionBaselineState: "hash-mismatch" }), BACKUP_FIXTURE_CHECKED_AT);
+  assert.equal(report.status, "healthy");
+  assert.equal(report.summary, "Workspace data and the application foundation are healthy.");
+});
+
+test("overall report.status: every genuinely blocking productionBaselineState still resolves to critical", () => {
+  for (const state of ["not-applied", "unreadable"]) {
+    const report = buildDataHealthReport(productionBackupFacts({ productionBaselineState: state }), BACKUP_FIXTURE_CHECKED_AT);
+    assert.equal(report.status, "critical", `productionBaselineState "${state}" must still produce a critical overall report`);
+    assert.equal(check(report, "production-readiness").value, "Blocked");
+  }
+});
+
+test("overall report.status: a genuine structural schema mismatch still resolves to critical, unaffected by this fix", () => {
+  const report = buildDataHealthReport(productionBackupFacts({ schemaMatchesBaseline: false, schemaComparisonDifferences: ["Missing table: donors."] }), BACKUP_FIXTURE_CHECKED_AT);
+  assert.equal(report.status, "critical");
   assert.equal(check(report, "production-readiness").value, "Blocked");
+});
+
+test("overall report.status: a genuinely stale live migration level still resolves to critical, unaffected by this fix", () => {
+  const report = buildDataHealthReport(productionBackupFacts({ currentMigrationLevel: "0019" }), BACKUP_FIXTURE_CHECKED_AT);
+  assert.equal(report.status, "critical");
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+});
+
+test("overall report.status: a genuine relationship-data integrity failure still resolves to critical even with a verified baseline, unaffected by this fix", () => {
+  const report = buildDataHealthReport(productionBackupFacts({ duplicateJlCodes: 3 }), BACKUP_FIXTURE_CHECKED_AT);
+  assert.equal(report.status, "critical");
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+  assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("relationship-data integrity")));
+});
+
+test("overall report.status: a failed giving-total reconciliation still resolves to critical even with a verified baseline, unaffected by this fix", () => {
+  const report = buildDataHealthReport(productionBackupFacts({ givingSourceTotalCents: 500, givingLinkedTotalCents: 400 }), BACKUP_FIXTURE_CHECKED_AT);
+  assert.equal(report.status, "critical");
+  assert.equal(check(report, "production-readiness").value, "Blocked");
+  assert.ok(report.platform.productionReadinessBlockers.some((line) => line.includes("Giving-total reconciliation")));
+});
+
+test("overall report.status: a stale baseline stamp combined with a genuinely failed backup still blocks on the backup failure alone -- the stamp never masks a real problem", () => {
+  const report = buildDataHealthReport(
+    productionBackupFacts({
+      productionBaselineState: "hash-mismatch",
+      backupSuccess: null,
+      backupAttempt: { schemaVersion: 1, databaseName: "fundraising-os-production-db", attemptAt: "2026-10-12T08:03:00.000Z", attemptStatus: "failure", workflowRunId: "999", workflowRunUrl: "https://github.com/example/repo/actions/runs/999" },
+    }),
+    "2026-10-12T12:00:00.000Z",
+  );
+  assert.equal(check(report, "production-baseline").status, "info", "the stale stamp itself must still read as informational, not critical");
+  assert.equal(check(report, "automated-backup").status, "critical", "a genuinely failed backup must still be flagged, proving the baseline fix does not mask unrelated real failures");
 });
 
 test("independent production: a genuine structural schema mismatch still fails, independent of the baseline marker and the migration-level heuristic", () => {
