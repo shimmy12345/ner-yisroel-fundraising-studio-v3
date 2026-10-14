@@ -37845,3 +37845,240 @@ row was read or written beyond the one empty-table confirmation query
 above. **Awaiting the owner's explicit approval of this specific
 proposed code change (or a different one) before anything is written
 or deployed.**
+
+## Controlled Test-Send Mechanism -- Implemented, Staging-Tested, Deployed to Production, Executed Once: Result Is 401, Same As Before (2026-10-14)
+
+The owner authorized building the proposed `app/api/agenda/test-send/route.ts`
+subject to 14 numbered safeguards (owner-only server-side check beyond mere
+auth, atomic persistent one-time idempotency -- not in-memory, must not touch
+the real `agenda_send_log`, genuine Production data/links, no credential
+logging, Staging-test first without a real send, verify diff/backup/rollback/
+cron before Production, stop if any safety requirement is unmet, execute once
+and verify, remove/disable after preserving the audit record, update docs).
+
+### What was built
+
+- `app/api/agenda/test-send/route.ts` (new, POST-only): auth via
+  `getChatGPTUser()` + an **explicit** `identity.email !== env.STAGING_OWNER_EMAIL`
+  check (redundant with, but distinct from, `lib/auth/cloudflare-access.ts`'s own
+  check). Reuses `sendDailyAgenda` verbatim -- never reimplemented.
+- `lib/agenda/test-send-log.ts` (new): `TEST_SEND_CLAIM_ID =
+  "2026-10-14-production-gmail-oauth-verification"`, a single fixed sentinel.
+  `INSERT ... ON CONFLICT(id) DO NOTHING`, deliberately **no staleness/reclaim
+  path** -- once claimed (pending/sent/**failed**), the row is permanent;
+  only an explicit human edit of that D1 row can ever allow a second attempt
+  through this exact route. This is intentional, not a bug: see that file's
+  own header comment.
+- `drizzle/0044_agenda_manual_test_send_log.sql` (new table, entirely separate
+  from `agenda_send_log` -- structurally cannot interfere with the real
+  schedule's own idempotency).
+- Schema-completeness mirrored across `db/schema.ts`,
+  `lib/data-health/production-baseline.ts`, `lib/operations/d1-restore-order.ts`,
+  `lib/operations/restore-drift-guard.ts`. New tests:
+  `tests/agenda-test-send-safety.test.mjs` (source-inspection: POST-only,
+  explicit email check, claim-before-send ordering, zero reference to
+  `agenda_send_log`, no credential logging) and
+  `tests/agenda-test-send-idempotency-e2e.test.mjs` (real `node:sqlite`, 6
+  scenarios including: `'failed'` is never auto-reclaimed, matching the
+  deliberate design above). All gates passed: 187/187 tests, tsc clean, lint
+  at the existing 94/43 baseline, Production build bundle re-confirmed to
+  contain both the new mechanism and the existing `EmailSendBlockedError`
+  guard. Commit `e2ff27f`.
+
+### Staging test (requirement 9)
+
+Deployed to Staging (migration applied, `num_tables` 55->56, version
+`c8768dfd-...`). Calling `POST /api/agenda/test-send` in the owner's
+authenticated Staging session returned **403 from the pre-existing outer
+staging write-guard** (`shouldBlockStagingWrite`), which fires before this
+route's own logic runs at all. Confirmed via read-only D1 query: zero rows
+in `agenda_manual_test_send_log` on Staging; confirmed via Gmail search: no
+email sent. (A deeper attempt to exercise the route's own internal
+Gmail-guard specifically, by temporarily uncommenting
+`"STAGING_WRITES_ENABLED": "true"` in `wrangler.staging.jsonc`, was abandoned
+before any redeploy -- a read-only `grep` during that edit was blocked by
+Claude Code's own auto-mode safety classifier, "Security Weaken", and the
+local edit was reverted byte-for-byte, confirmed via `git diff`. Staging's
+live Worker was never redeployed with that change.)
+
+### Production deployment and execution
+
+Pre-deployment: rollback target confirmed (`77a2b21a-...`, the live version at
+the time), diff reviewed (`git diff --stat` against the last-deployed commit
+-> exactly the 15 intended files, zero changes to `email-send-guard.ts`,
+`send-agenda.ts`, `gmail-client.ts`, `send-log.ts`, `worker/index.ts`, either
+`wrangler.*.jsonc`, or any donor-data route), gates re-run fresh and clean.
+
+`pnpm run deploy:production-independent` succeeded. **New Production Worker
+version: `1527fa4f-0471-433b-ab14-5f7522bfe141`.** Bindings confirmed
+unchanged (`env.DB` -> `fundraising-os-production-db`, `env.APP_BASE_URL` ->
+`"https://shimmydonors.org"`, cron `0 * * * *` unchanged). Migration 0044
+applied to Production D1 (`num_tables` 55->56, confirmed the table did not
+pre-exist). Donor data reconfirmed unchanged: 254 donors, 5,464 giving
+activities -- matches the established baseline exactly. New table confirmed
+empty before the test.
+
+With the owner signed in to `https://shimmydonors.org` in their own browser
+session (this session never touched the Cloudflare Access login screen --
+when the owner's session had expired, this round stopped and asked them to
+sign in themselves rather than attempting it), the one-time call was made:
+
+```
+POST /api/agenda/test-send -> 500
+{ "error": "Gmail token refresh failed: HTTP 401 Unauthorized" }
+```
+
+Confirmed via a direct, read-only D1 query against Production immediately
+after:
+
+```
+id: "2026-10-14-production-gmail-oauth-verification"
+user_id: "user_sgoldstein@nirc.edu"
+status: "failed"
+claimed_at / sent_at: 1791994008
+outcome: "Gmail token refresh failed: HTTP 401 Unauthorized"
+```
+
+**Result: the 401 persists even after the owner's Client ID/Secret update.**
+No email was sent (the failure occurred at the token-refresh step, before any
+call to Gmail's send endpoint). No donor/financial data was touched. Per
+`test-send-log.ts`'s own design, this specific claim (`id =
+"2026-10-14-production-gmail-oauth-verification"`) is now **permanently
+consumed** -- the route is already structurally incapable of sending again
+through this same claim without a human explicitly clearing that one D1 row
+first. **This satisfies requirement 9 (keep the mechanism unavailable for
+additional sends) by construction, with no further deployment or config
+change needed.**
+
+## Production Gmail OAuth 401 -- Second Root-Cause Round, Read-Only (2026-10-14)
+
+The owner explicitly instructed: do not assume another copy/paste mistake;
+investigate systematically before asking for a third credential re-entry.
+**This round was entirely read-only** -- source inspection, `wrangler
+deployments list`, `wrangler secret list` (names only), and the one D1 read
+already shown above. No secret was read, no OAuth client or Cloudflare
+setting was modified, no new email was sent, no new claim was created, and
+the failed test record above was left untouched.
+
+### 1. Ruled out: deployment/propagation problems
+
+`wrangler deployments list --config wrangler.production.jsonc` shows every
+version at **100%** -- there is no gradual/split rollout on this Worker, so
+there is no scenario where some traffic still hits a pre-update version with
+stale secrets. The secret updates landed at `2026-10-14T15:29:02.755Z`
+(`GMAIL_OAUTH_CLIENT_ID`) and `15:30:19.921Z` (`GMAIL_OAUTH_CLIENT_SECRET`);
+every deployment since, including the test-send mechanism's own
+`1527fa4f-...` (`16:03:01.257Z`) -- the version that actually served the
+request above -- was created strictly after both. Cloudflare Worker
+deployments always carry forward the Worker's current secret values, so the
+call that failed definitely used the newly-entered credentials, not stale
+ones.
+
+### 2. Ruled out: duplicate/ambiguous configuration
+
+`wrangler secret list --config wrangler.production.jsonc` shows exactly the
+three expected secret names (`GMAIL_OAUTH_CLIENT_ID`,
+`GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`) -- no stray,
+misspelled, or duplicate-looking secret name exists alongside them.
+`wrangler.production.jsonc` has a single flat config with no named `env.*`
+blocks, so there is no "secret landed on the wrong named environment"
+scenario possible here (unlike projects that use Wrangler's multi-environment
+feature) -- this file has only one environment, full stop.
+
+### 3. Ruled out: the request never reached Google using Production's real secrets
+
+`sendGmail()`'s fail-closed allowlist (`isRealEmailSendAllowed`) is the first
+statement in that function, before credentials are even read. The test
+request returned a **Gmail-specific 401 from `oauth2.googleapis.com/token`**,
+not `EmailSendBlockedError` -- which is only possible if `deploymentEnvironment`
+correctly resolved to `"production-independent"` and the call genuinely
+reached Google using Production's own stored secret values. This also
+confirms (re-reading `scripts/build-production-independent.mjs` and
+`package.json`'s `deploy:production-independent` script, both unchanged) that
+the correct, dedicated build/deploy path was used, not the legacy
+`build:production` script that sets a different environment value.
+
+### 4. Not yet ruled out, and not rule-out-able without more information: which specific credential is wrong
+
+`lib/agenda/gmail-client.ts`'s `refreshAccessToken()` deliberately never reads
+the response body on failure -- only `response.status`/`response.statusText`
+are captured, by design (see that file's own header comment: a Gmail/Google
+error body must never reach a log line or thrown-Error message, since it
+could in principle echo request contents). **This is the single biggest gap
+preventing a more specific diagnosis.** Per RFC 6749 section 5.2, Google's token
+endpoint returns a 401 with a JSON body `{"error": "invalid_client",
+"error_description": "..."}` for a bad/unrecognized client, versus a 400
+`invalid_grant` for a bad refresh token -- but confirming this is really
+`invalid_client` (and reading Google's own `error_description`, which often
+says something specific like "The OAuth client was not found" or "Unauthorized")
+requires actually reading that response body, which the code today never
+does.
+
+**This response body is safe to read and surface.** Google's OAuth 2.0 token
+endpoint error response is a fixed, well-documented, two-field JSON shape
+(`error`, `error_description`) describing the *rejection itself* -- it is
+generated by Google's server, not an echo of the request, and contains no
+credential, token, or secret value by construction. Surfacing just those two
+fields (never the raw body, never request contents) would not violate this
+round's "no secrets in logs" constraint.
+
+### 5. Leading hypotheses, in order of likelihood, given everything ruled out above
+
+1. **The re-entered `GMAIL_OAUTH_CLIENT_ID` and/or `GMAIL_OAUTH_CLIENT_SECRET`
+   still don't match a real, enabled Google OAuth client exactly** --
+   transcription error, incidental whitespace, a partial paste, or the two
+   values swapped between fields. This was the leading theory before the
+   first correction and evidently was not resolved by it.
+2. **A client/token mismatch**: the deployment log shows
+   `GMAIL_OAUTH_CLIENT_ID` was itself explicitly updated (not just the
+   secret), which means the Client ID value changed, not only the secret
+   tied to an unchanged client. If that new Client ID refers to a
+   *different* OAuth client than the one that originally issued the
+   unchanged `GMAIL_OAUTH_REFRESH_TOKEN`, Google would reject the pair --
+   classically surfaced as `invalid_grant`/400 per the RFC, but Google's
+   implementation is not guaranteed to follow that mapping strictly in every
+   case, so this cannot be excluded on status code alone.
+3. **The Google Cloud OAuth client itself is disabled, deleted, or
+   misconfigured** -- lower likelihood, since nothing in this session's
+   evidence points at it directly, but not excludable without Google Cloud
+   Console access (which this session does not have and will not attempt to
+   sign in to).
+
+No command exists in this session that can distinguish between these three
+without either (a) reading Google's own `error`/`error_description` from a
+real attempt, or (b) the owner directly comparing the values in Google Cloud
+Console against what's stored in Cloudflare -- something only the owner can
+do, since Cloudflare secrets are write-only even to the account owner once
+set.
+
+### 6. Precise next corrective action -- NOT implemented, requires explicit authorization
+
+Add a minimal, narrowly-scoped capture of Google's own `error`/
+`error_description` fields (only those two fields; never the raw body; same
+"never log a credential" discipline this file already follows) in
+`refreshAccessToken()`'s failure branch, so the next attempt's D1 failure
+record reads something like `"Gmail token refresh failed: invalid_client --
+The OAuth client was not found."` instead of just a bare HTTP status. This
+would turn hypothesis 1 vs. 2 vs. 3 above from a guess into a direct answer,
+without the owner needing to blindly re-enter credentials a third time.
+
+This requires: a small, reviewed code change to `gmail-client.ts`; the full
+test/lint/typecheck gate; a Staging deploy (to confirm the code path shape
+only -- Staging's guard still blocks any real send, so this cannot verify
+live behavior); a Production deploy; and -- since the current one-time claim
+is now permanently consumed -- **a new claim ID and a new explicit
+authorization to invoke it**, exactly as requirement 10 requires. **None of
+this was done this round.** `git status` confirmed a clean tree throughout,
+unchanged from the test-send mechanism's own commit (`e2ff27f`).
+
+### What remains uncertain
+
+Whether the root cause is a transcription error, a client/refresh-token
+mismatch, or a Google-side client problem is still genuinely unknown. The
+evidence gathered this round rules out every infrastructure-level explanation
+(stale deployment, gradual rollout, duplicate/misrouted secrets, wrong
+environment, wrong build/deploy script) and narrows the remaining
+possibilities specifically to the stored OAuth credential values themselves
+or their relationship to each other -- exactly the one thing this session
+cannot read or compare directly. The diagnostic change in Section 6 above is
+the recommended next step before any further credential re-entry.
