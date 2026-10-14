@@ -37403,3 +37403,184 @@ constraints available this round.
 3. No code or configuration change is recommended at this time --
    this round found no actionable defect, only verification gaps that
    external access (not a code fix) would close.
+
+## Production Gmail OAuth 401 -- Root Cause Investigation (2026-10-14, read-only, resolves most of the prior audit's open questions)
+
+The owner obtained real Cloudflare Observability evidence (access this
+session does not have) and reported it verbatim: on 2026-10-14 at
+9:01:16 AM Eastern, the **Production** Worker logged
+`workspace_brief_render` immediately followed by **"Gmail token refresh
+failed: HTTP 401 Unauthorized"** and `daily_agenda_send_failed`. The
+dashboard also showed Production carrying an active hourly Cron
+Trigger and Staging carrying none. **This investigation treats that
+report as reliable, owner-supplied evidence** (this session still has
+no Observability access of its own) and builds the analysis below on
+top of it. Zero commands beyond read-only source inspection and
+`wrangler secret list` (names only) were run this round; **no secret
+was read, no Google Cloud setting was touched, no email was sent, no
+deploy occurred.**
+
+### 1. This resolves three of the prior audit's open questions directly
+
+- **Production's Cron Trigger is real and fires on schedule.** The
+  9:01:16 AM Eastern timestamp matches this session's own DST-safe
+  analysis exactly (13:01 UTC = 9:01 AM EDT on 2026-10-14) and is
+  consistent with `workspace_brief_render` succeeding immediately
+  before -- the data-loading half of the pipeline worked. The
+  previously-disclosed "cannot verify whether Production's cron
+  actually fires" gap is now closed, affirmatively, in Production's
+  favor.
+- **Staging currently has zero registered Cron Triggers**, per the
+  owner's own dashboard check -- consistent with (not contradicting)
+  the earlier finding that it kept firing through the morning of
+  2026-10-14 itself: the Staging redeploys that implemented and tested
+  the fail-closed guard (versions `95310d2e-...` and later) all happened
+  *after* that morning's 13:01 UTC send, so it remains entirely
+  plausible one of those later redeploys is what finally cleared the
+  live trigger, consistent with Cloudflare's own best-effort sync
+  behavior already documented in this incident's history.
+- **A genuine Production send attempt, and its specific failure point,
+  are now established**: the pipeline reached the Gmail OAuth
+  token-refresh call and Google's own token endpoint
+  (`oauth2.googleapis.com/token`) rejected it with HTTP 401.
+
+### 2. What a 401 (vs. 400) on Google's token-refresh endpoint specifically means
+
+`lib/agenda/gmail-client.ts`'s `refreshAccessToken()` (re-read this
+round, confirmed unchanged) sends exactly one request:
+`POST https://oauth2.googleapis.com/token`, form-urlencoded body
+`client_id`, `client_secret`, `refresh_token`, `grant_type=refresh_
+token`. Per the OAuth 2.0 spec (RFC 6749 §5.2) and Google's own
+implementation of it, the token endpoint distinguishes two different
+rejection classes by HTTP status:
+
+- **`invalid_client` -> HTTP 401**: the authorization server could not
+  authenticate the *client itself* -- the `client_id`/`client_secret`
+  pair is wrong, unrecognized, or the client has been deleted/disabled.
+  This check happens **before** Google ever looks at the refresh token.
+- **`invalid_grant` -> HTTP 400**: the client authenticated fine, but
+  the specific `refresh_token` presented is invalid, expired, revoked,
+  or was issued to a *different* client than the one now authenticating.
+
+**The observed failure is 401, not 400.** Per this spec-level
+distinction, the evidence points first and most strongly at Production's
+stored `GMAIL_OAUTH_CLIENT_ID` and/or `GMAIL_OAUTH_CLIENT_SECRET`
+values being wrong, mismatched, or referring to a client Google no
+longer recognizes -- **not**, primarily, at the refresh token's own
+validity. Per the explicit instruction not to assume the refresh token
+is invalid without identifying the cause: this distinction is exactly
+that identification, and it points away from the refresh token as the
+primary suspect, not toward it.
+
+Two of the specific risks the original OAuth setup research flagged
+(docs/AI-HANDOFF.md's "Daily Fundraising Agenda Email" investigation,
+point 9) are **not consistent with a 401** and can be reasonably
+deprioritized as the explanation here: exceeding the 50-live-refresh-
+token cap, and manual revocation at `myaccount.google.com/permissions`
+-- both invalidate a specific *grant*, which Google surfaces as
+`invalid_grant`/400, not a client-authentication failure.
+
+### 3. Do Production's client ID, client secret, and refresh token belong to the same authorization?
+
+**Cannot be determined by reading the values** (forbidden by this
+round's own safety constraint, and Cloudflare Worker secrets are
+write-only even to the account owner once set -- there is no "view" to
+compare against). **But comparative behavioral evidence answers the
+more important question**: Staging's Gmail credentials are proven
+working right now -- a real token refresh + send succeeded as recently
+as this morning (2026-10-14, Section "Pre-October-15 Read-Only Audit"
+above) and on at least four prior consecutive days. **If the underlying
+Google OAuth Client itself (the Internal "gmail.send" app) were
+deleted, disabled, or had its secret regenerated, Staging's credentials
+-- which were set up against that exact same client -- would fail
+identically.** They did not. This rules out a client-wide, Google-side
+problem as the explanation and narrows the cause specifically to
+**Production's own stored secret values on Cloudflare** -- most likely
+entered incorrectly during the one manual step in this whole chain
+that was never automated: "the owner entered Production's three Gmail
+OAuth secrets directly in the Cloudflare dashboard" (the "Complete
+Production Daily Email Cutover" entry above). A manual, one-time,
+three-long-string dashboard entry is exactly the kind of step where a
+transcription error, a truncated paste, incidental whitespace, or the
+client ID and client secret being pasted into each other's fields
+would produce precisely this symptom -- all equally plausible
+candidates, none confirmable without the owner's own comparison
+against Google Cloud Console (which this session cannot access).
+
+### 4. Recommended correction -- NOT performed, requires the owner's separate explicit approval
+
+**Preferred approach: re-point Production at the exact same,
+already-proven-working Internal OAuth Client Staging uses**, rather
+than guessing at what's wrong with Production's current values:
+
+1. **In Google Cloud Console** (the project containing the Internal
+   `gmail.send` OAuth app from the original 2026-08-26 setup): APIs &
+   Services -> Credentials -> locate that exact OAuth 2.0 Client ID.
+   Confirm it still exists and is not deleted/disabled. Its Client ID
+   is visible directly (not secret, by OAuth convention); its Client
+   Secret can be re-copied or, if needed, reset from that same page.
+2. **In Cloudflare**, overwrite (not compare -- secrets cannot be
+   diffed, only replaced) Production's two values to match exactly:
+   `wrangler secret put GMAIL_OAUTH_CLIENT_ID --config
+   wrangler.production.jsonc` and `wrangler secret put
+   GMAIL_OAUTH_CLIENT_SECRET --config wrangler.production.jsonc`
+   (interactive prompts; values never echoed, matching every prior
+   secret-entry round in this project's history).
+3. **The refresh token requires one more judgment call**: a refresh
+   token is cryptographically bound to the specific client that issued
+   it. If Production's *existing* `GMAIL_OAUTH_REFRESH_TOKEN` was
+   originally minted against this same Client ID, leaving it as-is
+   after step 2 should be sufficient. If there's any doubt how it was
+   originally obtained, the safer path is minting a **fresh** one:
+   repeat the original one-time interactive authorization (Google's
+   OAuth Playground, "use your own OAuth credentials," pointed at the
+   Client ID from step 1, scope `https://www.googleapis.com/auth/
+   gmail.send`) and `wrangler secret put GMAIL_OAUTH_REFRESH_TOKEN
+   --config wrangler.production.jsonc` with the newly-issued value.
+4. **Alternative, if the owner specifically wants Production
+   credentially isolated from Staging rather than sharing the same
+   OAuth Client**: register a brand-new OAuth 2.0 Client ID under the
+   same Internal consent screen (Credentials -> Create Credentials ->
+   OAuth client ID -> Desktop app), perform a fresh one-time
+   authorization against it, and set all three Production secrets to
+   that new client's values. Functionally equivalent once correctly
+   entered; the shared-client approach above is simpler and reuses
+   something already proven to work.
+5. **Verification, without a manual test send**: the natural, lowest-
+   risk verification is simply letting the next scheduled 9 AM Eastern
+   window be the real test -- re-check Observability afterward for
+   `daily_agenda_sent` instead of `daily_agenda_send_failed`. A
+   deliberate manual send remains available but was not performed and
+   would need its own separate explicit approval per the owner's
+   standing instruction.
+
+**None of the above was executed this round.** No Production secret,
+Google Cloud setting, or deployment was changed; no email was sent.
+
+### 5. Production-only guard and `agenda_send_log` idempotency -- reconfirmed preserved
+
+`lib/agenda/gmail-client.ts` re-read in full this round: the fail-closed
+allowlist check (`isRealEmailSendAllowed(deploymentEnvironment)` ->
+`EmailSendBlockedError`) remains the first statement in `sendGmail()`,
+unchanged, exactly as deployed on 2026-10-14. `git status` confirmed a
+clean tree at the same `HEAD` (`1ca0054`) as the prior audit round --
+nothing in this investigation touched `lib/agenda/` or
+`lib/data-health/` in any way. The 401 failure happened *inside* the
+already-guarded path (Production is the one environment
+`isRealEmailSendAllowed` permits to reach this code at all) -- it is a
+credential problem on the one environment allowed to send, not a gap
+in the guard that protects every other environment from sending.
+
+### What this changes about October 15's readiness
+
+The prior round's summary said "a correct email will be sent is NOT
+assured -- no prior instance of Production succeeding exists." That
+remains true, but the *reason* is now far more specific and far more
+fixable than "unknown infrastructure gap": **Production's Cron Trigger
+and data pipeline both work correctly; only the Gmail credential step
+fails, and the evidence points at a specific, narrow, human-correctable
+cause (Production's own stored OAuth client values on Cloudflare).**
+Until the owner authorizes and performs the correction in Section 4,
+tomorrow's 9 AM Eastern Production attempt is likely to fail the same
+way -- safely (no wrong email, the guard is confirmed intact), but
+still with no real agenda delivered.
