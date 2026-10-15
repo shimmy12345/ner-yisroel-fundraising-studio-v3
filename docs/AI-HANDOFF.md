@@ -41663,3 +41663,190 @@ wants the attribution to be rewritten onto the confirmed row itself
 the import's own reconciliation, either is a change to logic this task
 explicitly asked to keep separately reviewable -- bring a proposal back
 before touching either.
+
+## Staging Verification: Independent Review Fixes, Commit 2ef7633 (2026-10-15)
+
+Formal Staging verification of commit `2ef7633` ("Fix grace-period-unaware
+installment timeline and trip-attributed pending gift reconciliation"),
+requested after independent review confirmed that commit contains the two
+financial-accuracy corrections above. No code changes were made in this
+round -- this entry records the verification evidence itself.
+**Deployed Worker version: `cdda8c64-64d4-4284-b332-3fe9520f5a16`**
+(Independent Staging only; Production untouched -- see below).
+
+### 1. Full test / TypeScript / protected-deployment checks
+
+- `node scripts/run-tests.mjs`: **199/199 test files passed**, 0 failed.
+- `npx tsc --noEmit`: clean, 0 errors.
+- `npm run lint`: 94 errors / 43 warnings -- the exact pre-existing
+  baseline from before this and the prior round; nothing new.
+- Protected-deployment checks, run explicitly:
+  - `node tests/verify-build-manifest.test.mjs` -- pass. This is the
+    guard (`scripts/verify-build-manifest.mjs`, wired into both
+    `deploy:*-independent` scripts) that exists specifically because of
+    the 2026-10-14 incident where a stale Staging build got deployed to
+    Production; it fails closed if `dist/` wasn't just built for the
+    exact target environment within the last 10 minutes.
+  - `node tests/staging-write-guard.test.mjs` -- pass (see section 5).
+
+### 2. Deploy to Independent Staging via the protected deployment script
+
+Ran `pnpm run deploy:staging-independent`
+(`build:staging-independent && verify-build-manifest.mjs staging-independent
+&& wrangler deploy --config wrangler.staging.jsonc`) -- the same script
+used for every prior Staging deploy this session, never a manual
+`wrangler deploy`. The build-manifest guard passed
+("`dist/ was built for "staging-independent" 0s ago. OK.`") before
+`wrangler deploy` was allowed to run. Deploy succeeded:
+
+```
+Uploaded fundraising-os-staging (11.59 sec)
+Deployed fundraising-os-staging triggers (4.27 sec)
+https://fundraising-os-staging.sgoldstein.workers.dev
+Current Version ID: cdda8c64-64d4-4284-b332-3fe9520f5a16
+```
+
+`wrangler deployments list --config wrangler.staging.jsonc` confirms this
+version is the current 100%-traffic deployment (created
+2026-10-15T12:25:48Z, immediately after the prior verification's
+`95702c6d-b705-4334-be14-ef304d7e8b68`, from the SAME commit -- this
+redeploy exists only to produce a fresh, formally-verified version id
+tied to this specific check, not because the code changed).
+
+### 3. Deployed-artifact verification: both fixes physically present
+
+Checked the EXACT files `wrangler` just uploaded (`dist/build-manifest.json`
+confirms `environment: "staging-independent"`, built seconds before
+deploy):
+
+- Server bundle (`dist/server/index.js`): `confirmed_by_activity_id`
+  (16 occurrences) and `resolved_via_import_match` (2 occurrences) are
+  present -- the pending-gift-reconciliation resolution logic.
+- Client bundle, trip dashboard chunk (`dist/client/assets/TripDashboardExperience-*.js`):
+  the literal strings `"Confirmed via import"` and
+  `"confirms manually once imported"` are present.
+- Client bundle, donor payment-plan chunk
+  (`dist/client/assets/PledgePaymentPlanManagement-*.js`): the literal
+  strings `"Payment due"` and `"installment-tick-due"` are present.
+- Stylesheet (`dist/client/assets/*.css`): the rule
+  `installment-tick-due{background:#fff;border:2px solid #b8863a}` is
+  present.
+
+Both fixes are confirmed present in the artifact actually running at
+`cdda8c64-64d4-4284-b332-3fe9520f5a16`, not merely in source.
+
+### 4. Workflow verification (read-only -- this session cannot operate the owner's authenticated browser)
+
+Per this session's standing constraint, workflow correctness was verified
+through the automated regression suite (which reproduces each exact
+scenario against a real SQLite database built from every committed
+migration, not a mock) plus read-only D1 queries against the live
+Staging database -- never through an authenticated UI click-through.
+
+- **Confirmed gifts count toward trip results exactly once.**
+  `tests/trip-financial-attribution-schema.test.mjs` reproduces the full
+  JL-import merge (new confirmed row inserted, original pending row
+  flipped to `workspace_status='merged'` with `confirmed_by_activity_id`
+  set) and asserts: the SAME attribution row resolves to the confirmed
+  record's own live figures (never duplicated); the confirmed row is
+  excluded from "Associate an existing donation or pledge" once its
+  pending predecessor is attributed; a direct attempt to attribute the
+  confirmed row is independently detected and rejected at the write path.
+  `tests/trip-financial-attribution.test.mjs` adds structural assertions
+  that both the resolution join and the write-path guard stay scoped to
+  the record's own owner. Read-only Staging query
+  (`SELECT giving_activity_id, COUNT(*) FROM trip_financial_attributions
+  WHERE removed_at IS NULL GROUP BY giving_activity_id HAVING COUNT(*) >
+  1`) returned zero rows -- no double-attribution exists on the real
+  database either (currently moot: Staging has 0 active attributions at
+  all, see below, but confirms the live schema enforces it).
+- **Pending pledges remain clearly identified.** `tests/pending-pledge.test.mjs`
+  confirms `pending_pledge` is excluded from `countsInGivingTotals` and
+  that `app/api/import/route.ts` never references it (the deliberate
+  scope limit -- see below). The deployed UI (confirmed in the client
+  bundle above) shows every unconfirmed record under its own "Pending
+  opportunities (not yet confirmed -- never counted above)" section, and
+  a `pending_pledge` row specifically now carries an inline "confirms
+  manually once imported" note distinguishing it from a `pending_gift`
+  (which this round's fix lets auto-resolve once JL-confirmed).
+- **Payment installments within grace period are not labeled overdue.**
+  `tests/payment-plan-display.test.mjs` asserts "due" (never "overdue")
+  on the due date itself and every single day through
+  `MONTHLY_PAYMENT_PLAN_GRACE_DAYS` (7), and "overdue" only starting the
+  day immediately after grace expires -- through well past it.
+- **Live-data caveat, disclosed rather than glossed over:** Staging
+  currently has zero `trip_financial_attributions` rows at all (the
+  owner has used the Trip Planning carve-out for prospects/meetings
+  between sessions, but not yet the Financial Results feature itself),
+  so there is no REAL merged-pending-gift case to observe live yet. The
+  verification above rests on the automated reproduction tests, which
+  exercise the exact SQL this code runs against a real migrated schema
+  -- not on an observed live example. The owner is still asked to
+  exercise this personally (record a pending gift on a trip, import a
+  matching real donation via the normal JL import flow, confirm the
+  trip dashboard updates) the first time real data flows through it.
+
+### 5. Staging write restrictions confirmed intact
+
+`tests/staging-write-guard.test.mjs` passes, including its repo-wide
+route-walk check (fails if any donor/financial/import route is ever
+placed under the `/api/trips/**` carve-out, or if any mutating route
+outside it is miscategorized). Direct read of
+`lib/operations/staging-write-guard.ts` confirms `shouldBlockStagingWrite()`
+is unchanged from the prior round: every mutating method under `/api/**`
+on `staging-independent` is still blocked by default, with the SAME two
+exceptions as before -- the explicit `STAGING_WRITES_ENABLED="true"`
+escape hatch, and the narrow `/api/trips` prefix carve-out (which covers
+this feature's attribution routes, since they live under
+`app/api/trips/[id]/prospects/[prospectId]/attributions/**`). This
+round's changes did not touch this file and did not add any write path
+outside that existing prefix.
+
+### 6. Production confirmed unchanged
+
+- `wrangler deployments list --config wrangler.production.jsonc`: still
+  shows `1248d048-b21f-4157-b208-7f6bcc3082a9` (created
+  2026-10-14T23:41:05Z) as the current 100% deployment -- no new
+  Production deployment occurred in this round or the prior one.
+- Production D1 row counts, read-only, before and after this round's
+  Staging deploy: `donors=254, giving_activities=5464, interactions=203`
+  -- identical both times, and identical to every other check this
+  session has run against Production.
+- No Production migration was run. `git diff --name-only -- wrangler.production.jsonc
+  wrangler.staging.jsonc cloudflare-env.d.ts worker/index.ts drizzle/`:
+  empty.
+- No change was made to `app/api/import/route.ts`, `lib/giving/management.ts`,
+  or any other file in the JL import/reconciliation pipeline.
+- Staging D1 row counts, read-only, after this deploy:
+  `donors=254, giving_activities=5463, interactions=203, trips=1,
+  trip_prospects=45` -- identical to every prior check this session
+  (the one pre-existing, disclosed `giving_activities` discrepancy
+  unchanged; the owner's own real trip/prospect data untouched).
+
+### 7. Remaining limitations (unchanged from the prior entry, re-confirmed)
+
+- `pending_pledge` is still not wired into the JL import's own
+  pending-match reconciliation -- a pending pledge recorded from a trip
+  requires the fundraiser to manually run "Associate an existing pledge"
+  once the real pledge is JL-imported. By design (prior disclosed scope
+  decision); now also surfaced directly in the UI.
+- `trip_financial_attributions` is not reassigned on a donor merge (the
+  same pre-existing gap already disclosed for `trip_prospects`).
+- No click-through UI verification was performed by the assistant --
+  this session cannot operate the owner's authenticated browser session.
+  Everything in section 4 above is read-only/automated verification; the
+  live-data caveat there (zero real attributions on Staging yet) is the
+  one gap that only the owner's own click-through can close.
+- The read-time resolution fix (section 2 of the prior entry) is a
+  deliberate, disclosed choice to never rewrite `trip_financial_attributions.
+  giving_activity_id` -- if a future need arises to make the rewrite
+  permanent (e.g. for a reporting system that reads this table directly
+  without replicating the resolution join), that is new scope requiring
+  its own review, not an extension of this fix.
+
+### Issues requiring owner decisions
+
+None. This was a verification-only pass against already-reviewed and
+already-approved code; no new design decision arose. The separate D1
+restore/schema-sync GitHub Actions failures mentioned by the owner are
+explicitly out of scope for this entry and will be addressed next.
