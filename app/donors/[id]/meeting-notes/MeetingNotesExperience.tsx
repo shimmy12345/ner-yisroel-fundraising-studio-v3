@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { InteractionKind } from "../../../../lib/capture/interaction";
 import { buildMeetingNotesSummaryText } from "../../../../lib/meeting-notes/format";
 import type { OrganizedMeetingNotes } from "../../../../lib/meeting-notes/organize";
+import { followUpFromSuggestion, emptyFollowUp, selectApprovedFollowUps, type FollowUpRow } from "../../../../lib/meeting-notes/follow-ups";
 
 const TYPE_OPTIONS: Array<{ value: InteractionKind; label: string }> = [
   { value: "meeting", label: "Meeting" },
@@ -12,8 +13,6 @@ const TYPE_OPTIONS: Array<{ value: InteractionKind; label: string }> = [
   { value: "personal", label: "Personal" },
   { value: "note", label: "Note" },
 ];
-
-type FollowUpRow = { id: string; description: string; dueAt: string; approved: boolean };
 
 function todayLocalDateValue(): string {
   const now = new Date();
@@ -88,12 +87,11 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
       setConfirmedCommitmentsText(data.confirmedCommitments.join("\n"));
       setPossibleCommitmentsText(data.possibleCommitments.join("\n"));
       setRelationshipContextText(data.relationshipContext);
-      setFollowUps(data.followUpActions.map((action) => ({
-        id: nextFollowUpId(),
-        description: action.description,
-        dueAt: action.suggestedDueDate ?? "",
-        approved: true,
-      })));
+      // AI-proposed follow-ups always start UNAPPROVED -- a suggestion,
+      // never a pre-checked default the fundraiser could save by
+      // accident. Explicit approval is required for every one, the same
+      // as a manually-added row (see addFollowUp below).
+      setFollowUps(data.followUpActions.map((action) => followUpFromSuggestion(action, nextFollowUpId())));
       setAiOrganized(true);
       setOrganizeStatus("done");
     } catch (error) {
@@ -103,7 +101,9 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
   }
 
   function addFollowUp() {
-    setFollowUps((current) => [...current, { id: nextFollowUpId(), description: "", dueAt: "", approved: true }]);
+    // Manually-added rows also start unapproved -- every follow-up, AI-
+    // proposed or hand-typed, requires the same explicit Approve step.
+    setFollowUps((current) => [...current, emptyFollowUp(nextFollowUpId())]);
   }
   function updateFollowUp(id: string, patch: Partial<FollowUpRow>) {
     setFollowUps((current) => current.map((row) => row.id === id ? { ...row, ...patch } : row));
@@ -127,8 +127,6 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
       })
       : transcript.trim();
 
-    const approvedFollowUps = followUps.filter((row) => row.approved && row.description.trim().length > 0);
-
     try {
       const response = await fetch("/api/meeting-notes", {
         method: "POST",
@@ -140,7 +138,7 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
           summary: finalSummary,
           aiOrganized,
           idempotencyKey,
-          followUps: approvedFollowUps.map((row) => ({ description: row.description.trim(), dueAt: row.dueAt || null })),
+          followUps: selectApprovedFollowUps(followUps),
         }),
       });
       const payload = await response.json() as { error?: string };
@@ -218,11 +216,14 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
 
     <section className="meeting-notes-card">
       <h2>Follow-up actions</h2>
-      <p className="meeting-notes-hint">Approve, edit, or remove each proposed follow-up. Only approved items are saved.</p>
+      <p className="meeting-notes-hint">Every follow-up below is only a proposal until you check Approve. Unapproved and removed items are never saved.</p>
       {followUps.length === 0 && <p className="meeting-notes-hint">No follow-up actions yet.</p>}
       <ul className="meeting-notes-followups">
-        {followUps.map((row) => <li key={row.id} className="meeting-notes-followup-row">
-          <input type="checkbox" checked={row.approved} onChange={(event) => updateFollowUp(row.id, { approved: event.target.checked })} aria-label="Approve this follow-up" />
+        {followUps.map((row) => <li key={row.id} className={row.approved ? "meeting-notes-followup-row meeting-notes-followup-approved" : "meeting-notes-followup-row meeting-notes-followup-proposed"}>
+          <label className="meeting-notes-followup-approve">
+            <input type="checkbox" checked={row.approved} onChange={(event) => updateFollowUp(row.id, { approved: event.target.checked })} />
+            <span>{row.approved ? "Approved" : "Proposed"}</span>
+          </label>
           <input type="text" value={row.description} onChange={(event) => updateFollowUp(row.id, { description: event.target.value })} placeholder="e.g. Call donor after Yom Tov to discuss Kollel sponsorship" />
           <input type="date" value={row.dueAt} onChange={(event) => updateFollowUp(row.id, { dueAt: event.target.value })} />
           <button type="button" onClick={() => removeFollowUp(row.id)} aria-label="Remove this follow-up">✕</button>

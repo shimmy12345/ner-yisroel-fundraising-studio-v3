@@ -3,6 +3,7 @@ import { getChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
 import { logger } from "../../../lib/logger";
 import type { InteractionKind } from "../../../lib/capture/interaction";
+import { interactionContentMatches, followUpListsMatch, type FollowUpContent } from "../../../lib/meeting-notes/idempotency";
 
 type FollowUpInput = { description?: string; dueAt?: string | null };
 type RequestBody = {
@@ -28,13 +29,28 @@ const MAX_FOLLOW_UPS = 20;
 // clicks Save on the review screen; this route performs no AI call of its
 // own.
 //
-// Idempotent by construction: the client generates one idempotencyKey per
-// review session (stable across repeated clicks or a retried request) and
-// this route uses it as the interaction's own deterministic primary key,
-// with INSERT OR IGNORE on both the interaction and every follow-up
-// recommendation row. A retried request with the same key can never create
-// a second interaction or duplicate follow-ups -- it simply re-confirms the
-// same already-saved rows.
+// Idempotency, strengthened (docs/AI-HANDOFF.md, "Meeting Notes Final
+// Safeguards and AI Readiness"): the client generates one idempotencyKey
+// per review session, used as the interaction's own deterministic primary
+// key and the prefix of every follow-up's recommendation id. The
+// interaction and every approved follow-up are written as ONE plain
+// (non-"OR IGNORE") D1 batch -- D1 runs a batch as a single transaction, so
+// a PRIMARY KEY conflict on any statement rolls back the entire batch,
+// never a partial write. A conflict means this exact key was already used:
+// this route then re-reads what was actually saved under that key and
+// compares it to the current request.
+//   - Identical content -> treated as a successful no-op replay (200,
+//     nothing written again) -- a double-click, a dropped response, or a
+//     network-level retry of the exact same save can never create a
+//     second interaction or duplicate follow-ups.
+//   - Different content under the same key -> rejected outright (409),
+//     nothing written at all -- a changed-payload retry can never create
+//     additional tasks or silently alter what was already saved. The
+//     fundraiser must start a new review session (a fresh page load gets a
+//     fresh key) to save something different.
+// This is enforced here, server-side, regardless of whether the browser's
+// own Save-button-disable-while-saving guard did its job -- never relied
+// on as the only protection.
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
@@ -67,8 +83,9 @@ export async function POST(request: Request) {
   if (!Number.isFinite(occurredAt.getTime())) return Response.json({ error: "Choose a valid meeting date" }, { status: 422 });
 
   const rawFollowUps = Array.isArray(body.followUps) ? body.followUps.slice(0, MAX_FOLLOW_UPS) : [];
-  const followUps: Array<{ description: string; dueAtEpoch: number | null }> = [];
-  for (const item of rawFollowUps) {
+  const followUps: FollowUpContent[] = [];
+  for (let index = 0; index < rawFollowUps.length; index += 1) {
+    const item = rawFollowUps[index];
     const description = item?.description?.trim() ?? "";
     if (description.length === 0) continue;
     if (description.length > MAX_FOLLOW_UP_DESCRIPTION) {
@@ -81,7 +98,11 @@ export async function POST(request: Request) {
       if (!Number.isFinite(parsed.getTime())) return Response.json({ error: "A follow-up action has an invalid date" }, { status: 422 });
       dueAtEpoch = Math.floor(parsed.getTime() / 1000);
     }
-    followUps.push({ description, dueAtEpoch });
+    // Re-indexed 0..N-1 over only the follow-ups that survived validation
+    // (a blank description is simply dropped, not counted) -- this index
+    // is what both the saved recommendation id and the later idempotency
+    // comparison key on.
+    followUps.push({ index: followUps.length, description, dueAtEpoch });
   }
 
   const profile = await ensureUserProfile(user);
@@ -94,30 +115,66 @@ export async function POST(request: Request) {
   const occurredAtEpoch = Math.floor(occurredAt.getTime() / 1000);
   const source = body.aiOrganized === true ? "meeting-notes:ai-organized" : "meeting-notes:manual";
 
+  const incomingContent = { donorId, type, occurredAtEpoch, occurredAtDateOnly: isDateOnly, summary };
+
   const statements = [
-    env.DB.prepare(`INSERT OR IGNORE INTO interactions (id, donor_id, user_id, type, occurred_at, occurred_at_date_only, summary, source, created_at, updated_at)
+    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, occurred_at_date_only, summary, source, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(interactionId, donorId, userId, type, occurredAtEpoch, isDateOnly ? 1 : 0, summary, source, now, now),
-  ];
-  followUps.forEach((followUp, index) => {
-    statements.push(
-      env.DB.prepare(`INSERT OR IGNORE INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
+    ...followUps.map((followUp) =>
+      env.DB.prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`)
-        .bind(`meeting-note-${interactionId}-${index}`, donorId, userId, followUp.description, "Follow-up proposed from meeting notes.", 90, followUp.dueAtEpoch, now, now),
-    );
-  });
+        .bind(`meeting-note-${interactionId}-${followUp.index}`, donorId, userId, followUp.description, "Follow-up proposed from meeting notes.", 90, followUp.dueAtEpoch, now, now)),
+  ];
 
-  let results: Array<{ meta?: { changes?: number } }>;
   try {
-    results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
+    await env.DB.batch(statements);
+    logger.info("meeting_notes_saved", { donorId, userId, interactionCreated: true, followUpsCreated: followUps.length, totalFollowUps: followUps.length });
+    return Response.json({ interactionId, saved: true, followUpsCreated: followUps.length }, { status: 201 });
   } catch (error) {
-    logger.error("meeting_notes_save_failed", error, { donorId, userId });
-    return Response.json({ error: "The meeting notes could not be saved" }, { status: 500 });
+    // Any batch failure (PRIMARY KEY conflict from a reused idempotency
+    // key, or a genuine unexpected error) rolls the whole batch back --
+    // nothing from this request was written. Re-read what, if anything,
+    // already exists under this exact key to tell those two cases apart.
+    const existingInteraction = await env.DB.prepare(
+      "SELECT donor_id, type, occurred_at, occurred_at_date_only, summary FROM interactions WHERE id = ?",
+    ).bind(interactionId).first<{ donor_id: string; type: string; occurred_at: number; occurred_at_date_only: number; summary: string }>();
+
+    if (!existingInteraction) {
+      // The key was never used before, so this is not a replay/conflict at
+      // all -- a genuine, unexpected failure.
+      logger.error("meeting_notes_save_failed", error, { donorId, userId });
+      return Response.json({ error: "The meeting notes could not be saved" }, { status: 500 });
+    }
+
+    const existingContent = {
+      donorId: existingInteraction.donor_id,
+      type: existingInteraction.type,
+      occurredAtEpoch: existingInteraction.occurred_at,
+      occurredAtDateOnly: existingInteraction.occurred_at_date_only === 1,
+      summary: existingInteraction.summary,
+    };
+
+    const candidateIds = Array.from({ length: MAX_FOLLOW_UPS }, (_, index) => `meeting-note-${interactionId}-${index}`);
+    const existingFollowUpRows = await env.DB.prepare(
+      `SELECT id, action, due_at FROM recommendations WHERE id IN (${candidateIds.map(() => "?").join(",")})`,
+    ).bind(...candidateIds).all<{ id: string; action: string; due_at: number | null }>();
+    const existingFollowUps: FollowUpContent[] = existingFollowUpRows.results.map((row) => ({
+      index: candidateIds.indexOf(row.id),
+      description: row.action,
+      dueAtEpoch: row.due_at,
+    }));
+
+    const isExactReplay = interactionContentMatches(existingContent, incomingContent) && followUpListsMatch(existingFollowUps, followUps);
+
+    if (isExactReplay) {
+      logger.info("meeting_notes_save_replayed", { donorId, userId, interactionId });
+      return Response.json({ interactionId, saved: true, followUpsCreated: 0 }, { status: 200 });
+    }
+
+    logger.info("meeting_notes_save_conflict", { donorId, userId, interactionId });
+    return Response.json({
+      error: "This meeting note was already saved with different content. Nothing was changed. Reload the page to start a new save.",
+    }, { status: 409 });
   }
-
-  const interactionCreated = (results[0]?.meta?.changes ?? 0) > 0;
-  const followUpsCreated = results.slice(1).filter((result) => (result.meta?.changes ?? 0) > 0).length;
-
-  logger.info("meeting_notes_saved", { donorId, userId, interactionCreated, followUpsCreated, totalFollowUps: followUps.length });
-  return Response.json({ interactionId, saved: true, followUpsCreated }, { status: 201 });
 }

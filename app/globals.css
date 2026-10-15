@@ -235,7 +235,11 @@ h1 { margin-bottom: 7px; font-family: Georgia, serif; font-size: clamp(30px, 3vw
 .meeting-notes-organize-button:disabled { background:#c8d1cc; cursor:not-allowed; }
 .meeting-notes-notice { margin:10px 0 0; padding:10px 12px; border-radius:9px; background:var(--green-soft); color:#2d5544; font-size:13px; }
 .meeting-notes-followups { list-style:none; margin:0 0 10px; padding:0; display:grid; gap:8px; }
-.meeting-notes-followup-row { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; }
+.meeting-notes-followup-row { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; border:1px solid transparent; }
+.meeting-notes-followup-proposed { background:#fdf6e9; border-color:#edddb3; }
+.meeting-notes-followup-approved { background:var(--green-soft); border-color:#bfe0cf; }
+.meeting-notes-followup-approve { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; white-space:nowrap; color:#8a6d23; }
+.meeting-notes-followup-approved .meeting-notes-followup-approve { color:#2d5544; }
 .meeting-notes-followup-row input[type="checkbox"] { width:20px; height:20px; }
 .meeting-notes-followup-row input[type="date"] { width:150px; }
 .meeting-notes-followup-row button { border:0; background:transparent; color:#a1533a; font-size:16px; cursor:pointer; padding:6px; }

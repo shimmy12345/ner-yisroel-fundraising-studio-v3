@@ -236,6 +236,9 @@ const TEST_FILES = [
   "tests/workspace-backup-restore-corrections.test.mjs",
   "tests/meeting-notes-organize.test.mjs",
   "tests/meeting-notes-format.test.mjs",
+  "tests/meeting-notes-followups.test.mjs",
+  "tests/meeting-notes-idempotency.test.mjs",
+  "tests/meeting-notes-fundraising-scenarios.test.mjs",
 ];
 
 function runOne(file) {
