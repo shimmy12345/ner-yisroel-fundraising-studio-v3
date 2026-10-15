@@ -42852,7 +42852,8 @@ executed:**
 
 The Section-4 plan above has been prepared for real (not executed):
 branch **`cleanup/remove-agenda-test-send-endpoint`**, current tip
-**`dc63dcc`** (code commit `21b42ec` plus a documentation addendum),
+**`54be993`** (code commit `21b42ec`, plus two documentation addenda
+including a final pre-deployment verification recommending **GO**),
 branched directly from Production's own deployed commit (`cf36599`) --
 never from this branch's own HEAD. Pushed to `origin`; **not merged
 anywhere, not deployed.**
@@ -42878,3 +42879,20 @@ Test-Send Endpoint") -- deliberately not duplicated here in full, to
 keep that candidate's own history self-contained and reviewable
 without pulling in this branch's much larger, unrelated history. Still
 awaiting the owner's explicit authorization before any deployment.
+
+## Next Priority (preserved, open -- not yet started)
+
+"The new financial dashboard has not yet undergone an authenticated,
+end-to-end test using actual Staging transactions."
+
+This must remain an open verification requirement until explicitly
+closed. After the cleanup deployment above is resolved, the next task
+is to test financial dashboard calculations, pledge and donation
+attribution, reconciliation, and displayed totals using actual Staging
+transactions -- without affecting Production. This applies to both the
+Payment-Plan Progress Dashboard and the Trip Fundraising Results
+Dashboard (both introduced earlier this session; neither has had a
+real, authenticated, end-to-end click-through on Staging with genuine
+transaction data, only code-level/unit-test verification and read-only
+D1 checks -- disclosed throughout this session's own dashboard entries
+as a standing limitation, not newly discovered here).
