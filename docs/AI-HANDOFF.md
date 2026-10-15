@@ -42851,15 +42851,29 @@ executed:**
 ## Isolated Cleanup-Only Deployment Candidate Prepared (2026-10-15) -- see its own branch for full detail
 
 The Section-4 plan above has been prepared for real (not executed):
-branch **`cleanup/remove-agenda-test-send-endpoint`**, commit
-**`21b42ec`**, branched directly from Production's own deployed commit
-(`cf36599`) -- never from this branch's own HEAD. Pushed to `origin`;
-**not merged anywhere, not deployed.** Full verification (191/191
-tests, `tsc` clean, lint at the unchanged baseline, a
-`production-independent` build confirmed free of
-`travel-planning`/`trips`/test-send code in the compiled output) and
-the complete rationale live in that branch's OWN `docs/AI-HANDOFF.md`
-entry ("Isolated Cleanup-Only Deployment Candidate -- Remove Temporary
+branch **`cleanup/remove-agenda-test-send-endpoint`**, current tip
+**`dc63dcc`** (code commit `21b42ec` plus a documentation addendum),
+branched directly from Production's own deployed commit (`cf36599`) --
+never from this branch's own HEAD. Pushed to `origin`; **not merged
+anywhere, not deployed.**
+
+**Note on comparing this branch on GitHub**: `main` and this entire
+Fundraising OS application history share no common git ancestor (`main`
+carries a separate, unrelated Netlify/Supabase application) -- this is
+a pre-existing, repository-wide fact, true of this candidate branch,
+this canonical branch, and every other Fundraising OS branch equally,
+not something introduced by this candidate. GitHub's compare view
+against `main` will never work for any of them. The correct comparison
+is against this candidate's own real base commit:
+https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/compare/cf36599e239070822716540d9fde01d1d3dfb65f...cleanup/remove-agenda-test-send-endpoint
+
+Full verification (191/191 tests, `tsc` clean, lint at the unchanged
+baseline, a `production-independent` build confirmed free of
+`travel-planning`/`trips`/test-send code in the compiled output,
+independently re-run fresh from a brand-new worktree checked out
+directly from `origin`) and the complete rationale live in that
+branch's OWN `docs/AI-HANDOFF.md` entry ("Isolated Cleanup-Only
+Deployment Candidate -- Remove Temporary
 Test-Send Endpoint") -- deliberately not duplicated here in full, to
 keep that candidate's own history self-contained and reviewable
 without pulling in this branch's much larger, unrelated history. Still
