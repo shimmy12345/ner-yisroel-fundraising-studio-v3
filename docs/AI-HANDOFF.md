@@ -41850,3 +41850,266 @@ None. This was a verification-only pass against already-reviewed and
 already-approved code; no new design decision arose. The separate D1
 restore/schema-sync GitHub Actions failures mentioned by the owner are
 explicitly out of scope for this entry and will be addressed next.
+
+## D1 restore/schema sync check -- Root Cause, Narrow-Branch Fix, and Local-Enforcement Safeguard (2026-10-15)
+
+### Root cause
+
+GitHub Actions run `38678941234` ("D1 restore/schema sync check," push,
+commit `e9a40f2`) failed both its `check` and `prepare-sync` jobs.
+Confirmed directly via the public GitHub API (no local credential used)
+and by re-running the exact same checks locally:
+
+- `node scripts/check-main-restore-sync.mjs` reproduced the identical
+  drift report: four missing tables (`agenda_manual_test_send_log`,
+  `trip_financial_attributions`, `trip_prospects`, `trips`), six missing
+  indexes, and migrations `0044`/`0045`/`0046` missing from `main`'s
+  manifest.
+- `node scripts/prepare-main-restore-sync-patch.mjs` confirmed
+  `prepare-sync`'s failure was the CORRECT, by-design outcome, not a
+  bug: `{"safe": false, "reason": "New table(s) introduced: ...
+  Restore-order placement for a new table requires human judgment ...
+  deliberately not automated"}`. This exact refusal rule has existed
+  since the "D1 Migration Sync Automation" round (see that entry above)
+  and worked exactly as designed here too.
+
+**The actual root cause is a process-adherence gap, not a missing or
+broken automation.** `docs/FUNDRAISING_OS_PRINCIPLES.md`'s "Mandatory
+migration preflight" rule -- run `check-main-restore-sync.mjs` before
+pushing any migration, and if it reports drift (always true for a new
+table), prepare `main`'s sync manually as part of the same task -- was
+already documented BEFORE migrations 0044, 0045, and 0046 were added
+(confirmed via `git log`: commit `b929319`, which added both the rule
+and the automation, is an ancestor of all three migration commits). All
+three were pushed anyway without that preflight step being run or its
+result acted on: `0044_agenda_manual_test_send_log.sql` (October 14 2026
+Email Incident's temporary Gmail OAuth verification mechanism),
+`0045_trips.sql` (Trip-Based Meeting Planning), and
+`0046_trip_financial_attributions.sql` (this session's own Trip
+Fundraising Results Dashboard round -- an oversight this session shares
+responsibility for, since the preflight step was skipped at the time).
+Three separate rounds relied on a documented, memory-dependent rule and
+all three missed it the same way.
+
+### PHASE 1 -- correction
+
+Prepared the smallest safe metadata-only synchronization, following the
+established narrow-branch pattern exactly (the same pattern as the
+0036/0037/0038/0041+0042/0043 syncs above), **not a blind copy**: every
+foreign key was independently re-verified directly against each
+migration's own `CREATE TABLE` statement (`drizzle/0044_*.sql`,
+`drizzle/0045_trips.sql`, `drizzle/0046_trip_financial_attributions.sql`)
+before being trusted, rather than copied from the canonical branch's own
+comments on faith:
+
+- `agenda_manual_test_send_log`: `user_id` -> `users.id` only.
+- `trips`: `owner_user_id` -> `users.id` only.
+- `trip_prospects`: `trip_id` -> `trips.id`, `donor_id` -> `donors.id`,
+  nullable `linked_interaction_id` -> `interactions.id`.
+- `trip_financial_attributions`: `user_id` -> `users.id`, `trip_id` ->
+  `trips.id`, `donor_id` -> `donors.id`, `giving_activity_id` ->
+  `giving_activities.id`.
+
+**PR opened against `main`, NOT merged, awaiting the owner's review:**
+branch `fix/d1-restore-sync-0044-0045-0046-metadata`, commit `4f75bf3`,
+pushed to `origin`. Create-PR link (this sandboxed session has no `gh`
+CLI and deliberately did not attempt to extract or reuse the git
+credential helper's stored token for a direct GitHub API call --
+the established boundary from the earlier `donor_source_attributions`
+incident, "using git's own push mechanism for its one sanctioned purpose
+is different from extracting that same stored secret for arbitrary
+reuse"):
+`https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-sync-0044-0045-0046-metadata`.
+**The owner needs to open this link (or the branch in the GitHub UI) and
+create the PR themselves; this session did not and cannot merge it.**
+
+Exactly 5 files changed, nothing else -- no application UI, API route,
+or seed script copied to `main`:
+- `lib/operations/staging-reset.ts`: adds `trip_financial_attributions`,
+  `trip_prospects`, `trips` to `STAGING_RESET_TABLE_ORDER`, positioned
+  after all of their real foreign key targets.
+- `lib/operations/d1-restore-order.ts`: adds
+  `agenda_manual_test_send_log` as a sixth true root (after `users`,
+  alongside `backup_alert_state`/`agenda_send_log`); the reversed
+  `STAGING_RESET_TABLE_ORDER` tail picks up the three trip tables
+  automatically (a live spread, never a separately copied list).
+- `lib/data-health/production-baseline.ts`: migration-count assertion
+  44 -> 47; `agenda_manual_test_send_log` added to
+  `ACCOUNT_CONFIGURATION_TABLES` (operational one-time claim record);
+  `trips`/`trip_prospects`/`trip_financial_attributions` deliberately
+  NOT added there (they are real fundraising/relationship data, so they
+  fall into `FUNDRAISING_DATA_TABLES` automatically).
+- `production-baseline/schema-manifest.json`: replaced verbatim from
+  this branch's own current manifest, regenerated fresh via
+  `node scripts/generate-production-baseline.mjs --write` immediately
+  before the sync and confirmed byte-identical to what was already
+  committed (i.e. this branch itself had zero drift of its own).
+- `test/d1-restore-order.test.mjs`: six new/updated regressions -- the
+  "every fundraising table plus the N true roots" coverage test updated
+  from five to six roots; a named placement test for
+  `agenda_manual_test_send_log`; named placement tests for `trips`,
+  `trip_prospects`, and `trip_financial_attributions`; one combined
+  `planD1Restore`/`reorderD1ExportForRestore` test proving all three trip
+  tables are accepted and correctly ordered against a real-shaped
+  export.
+
+**Validation performed, matching the established sequence exactly (per
+the explicit instruction not to assume a passing local check means
+GitHub Actions is green):**
+- `main`'s own real test suite, in an isolated worktree built from
+  `origin/main`: **155/155 passing** (149 prior + 6 new/updated).
+- `main`'s own real build (`npm run build`): succeeded.
+- A fresh re-run of the exact, UNMODIFIED
+  `scripts/check-main-restore-sync.mjs` from the canonical branch,
+  pointed at the candidate branch via `MAIN_REF=fix/d1-restore-sync-0044-0045-0046-metadata`:
+  **"No drift detected."** -- independent proof the generated patch
+  genuinely resolves the real drift, not merely self-consistently.
+- This is still NOT the same as a green GitHub Actions run: no CI has
+  executed against this candidate branch/PR from this session (no
+  `gh`/API credential available to dispatch or poll one). **The task is
+  not complete until the owner opens the PR and its own CI run goes
+  green**, and until the owner actually merges it -- neither has
+  happened yet.
+
+### PHASE 2 -- permanent prevention safeguard
+
+Re-investigated what already existed before building anything new, to
+avoid duplicating working infrastructure: the "D1 Migration Sync
+Automation" round (entry above) had already implemented items 1-5 of
+the task's Phase 2 list in full -- automatic drift detection on every
+push/PR (`check` job), automatic safe-patch generation and validation
+(`prepare-sync` job, `lib/operations/restore-sync-generator.ts`),
+automatic PR preparation for the safe case, a hard refusal requiring
+human judgment for any new table/removed table/retyped column/uncertain
+dependency, and a PR-only (never-merge, never-D1-touching) path to
+`main`. All of that is a GitHub Actions job that only ever fires AFTER a
+push -- the root cause above shows that detection-after-push was never
+actually the missing piece; what repeatedly failed was a human/session
+noticing and acting on a failing check that already existed.
+
+**The one new safeguard this round adds closes exactly that gap, and
+nothing else** (`scripts/run-tests.mjs`, the one command this repo's own
+standing instructions already require running before any task is
+declared complete): it now spawns the exact same, unmodified
+`scripts/check-main-restore-sync.mjs` as one more step after every test
+file, and fails the whole command's exit code on real drift. This
+converts "a documented step someone has to remember" into "a thing the
+command everyone already runs will not let pass quietly." Specifically
+engineered to satisfy every one of the task's explicit safety
+requirements:
+- **Never weakens anything**: calls the authoritative check completely
+  unmodified; does not touch `.github/workflows/d1-restore-sync-check.yml`,
+  `lib/operations/restore-sync-generator.ts`,
+  `lib/operations/restore-sync-branch-policy.ts`, or any file that
+  decides what counts as "safe."
+- **Fail-closed preserved, and strengthened**: a real, confirmed drift
+  report is always a hard failure of `npm test`'s exit code -- proven
+  live in this very round (see Verification below: the suite currently
+  reports this new check RED, correctly, because the Phase 1 PR above is
+  still unmerged).
+- **Never produces a false failure from environment limitations**:
+  network/git-remote unavailability (no connectivity, no `origin`
+  configured) is explicitly treated as "cannot verify" (a loud skip,
+  excluded from the pass/fail tally) -- never silently treated as "in
+  sync."
+- **No GitHub Actions change, no repository-settings change.** This is a
+  local script change only; it does not touch branch protection,
+  workflow permissions, or any repo setting. (Separately NOTED, not
+  implemented, not requested: `main` still has no branch protection, so
+  nothing GitHub-enforced actually stops a push from skipping even this
+  strengthened local check via `--no-verify`-equivalent inattention --
+  this remains a convention this tooling follows, not a platform-
+  enforced rule. Enabling branch protection on `main` requiring the
+  `check` status would make that platform-enforced; left entirely to the
+  owner's own discretion, exactly as the prior round already noted.)
+- **No application feature code copied anywhere.** This round touches
+  zero files under `app/`, `lib/` (other than the Phase 1 sync files
+  above), or any API route.
+
+Why NOT a git pre-push hook (considered and rejected): this repo's own
+established design deliberately detects drift AFTER a migration is
+pushed (CI can only react to what already landed; the safe-patch
+generator and the human-judgment new-table path both NEED the push to
+have happened first). A hook that BLOCKS the push introducing a new
+table would be self-defeating -- it would block the exact commit the
+whole downstream process is designed to react to, with no way to ever
+get past it short of `--no-verify`, which would simply move the same
+"documented step someone has to remember" problem one step earlier
+without fixing it. The `npm test` wiring instead catches the OMISSION
+(the follow-up preflight/sync step never being done) at the next natural
+checkpoint, without ever blocking the migration itself from going out.
+
+Docs updated: `docs/FUNDRAISING_OS_PRINCIPLES.md`'s "Mandatory migration
+preflight" bullet now states this is enforced by `npm test`, not only a
+remembered step. `docs/D1-MIGRATION-SYNC-PROCESS.md` gained a new
+"Third signal: local enforcement via `npm test`" section documenting
+exactly what changed and did not change.
+
+### PHASE 3 -- verification and handoff
+
+**Tests.** `node scripts/run-tests.mjs` on this branch: **199/199 test
+files passing** (zero regressions from this round's changes), PLUS the
+new migration-sync step, which correctly reports **FAILED** right now --
+not a bug, the expected and correct state until the Phase 1 PR above is
+reviewed and merged (real drift against `origin/main` genuinely still
+exists at the time of this writing). `npx tsc --noEmit`: clean, 0
+errors. `npm run lint`: 94 errors / 43 warnings -- the exact unchanged
+baseline from every prior round in this session; nothing new in any
+file this round touched.
+
+**GitHub Actions status.** Not independently re-checked after this
+round's changes, by design: this round pushed nothing to the canonical
+branch yet (the `scripts/run-tests.mjs`/docs changes below are queued
+for the next push, and the Phase 1 sync lives entirely on its own
+separate `fix/...` branch/PR, which this session cannot dispatch or poll
+CI for without a `gh`/API credential). Per the task's own explicit
+instruction not to assume a passing local check means GitHub Actions is
+green, this is stated as an open item, not inferred.
+
+**What was corrected.** The exact 5-file, metadata-only drift described
+in Phase 1, prepared on a separate branch/PR, not merged.
+
+**What permanent safeguards were implemented.** The `npm test`
+migration-sync step described in Phase 2 -- the one piece of the
+task's full Phase 2 wishlist that did not already exist from the prior
+"D1 Migration Sync Automation" round.
+
+**Which checks passed / remain failing.**
+- PASSED (this round, local/independent): `main`'s own test suite +
+  build in the candidate worktree; the unmodified drift check re-run
+  against the candidate branch; this branch's own full 199-file test
+  suite, `tsc`, and lint.
+- FAILING (expected, until the owner acts): this branch's own `npm test`
+  now reports the migration-sync step red, because `main` is still
+  genuinely out of sync -- it will go green automatically once the Phase
+  1 PR is merged, with no further code change needed.
+- NOT YET OBSERVED: a real GitHub Actions run against the Phase 1 PR
+  itself (needs the owner to open it; see link below) or a fresh run of
+  "D1 restore/schema sync check" on the canonical branch reflecting
+  these Phase 2 changes.
+
+**PR links requiring approval.**
+`https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-sync-0044-0045-0046-metadata`
+(branch `fix/d1-restore-sync-0044-0045-0046-metadata`, commit `4f75bf3`)
+-- metadata-only, 5 files, described in full above. This session could
+not open the PR itself (no `gh`/API credential); the owner needs to open
+it via that link or the GitHub UI, then review and merge (or decline)
+through the normal process.
+
+**Unresolved risks / manual steps.**
+- The owner must open and merge the Phase 1 PR for `main` to actually
+  become synchronized -- until then, the monthly real-backup restore-
+  verification workflow (`d1-restore-verify-monthly.yml`) remains
+  exposed to the same class of failure the check now also warns about on
+  every local test run.
+- This session's own `scripts/run-tests.mjs`/docs changes (Phase 2) are
+  committed to this branch locally but not yet pushed as of this
+  writing -- pushing them is the next step, separate from the Phase 1
+  PR, and will itself trigger a fresh `d1-restore-sync-check.yml` run
+  this session should watch.
+- `main` still has no branch protection -- the "a human must review
+  before `main` changes" guarantee remains a workflow-level convention,
+  not a GitHub-enforced rule, for every actor including this automation.
+  Noted again, not changed, per the task's own instruction to present
+  (not silently implement) anything that touches repository-level
+  security posture.

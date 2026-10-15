@@ -139,6 +139,45 @@ own real test suite, build, and the unmodified drift check before being
 opened. Review it like any other PR and merge it through the normal
 process -- **the automation never merges its own PR.**
 
+## Third signal: local enforcement via `npm test` (2026-10-15)
+
+The two CI signals above only ever fire once a commit is pushed. Three
+separate times -- migrations 0044, 0045, and 0046 -- the mandatory
+preflight step just above ("run `check-main-restore-sync.mjs` before
+pushing") was documented but not actually run, and the resulting CI
+failures (a correctly-failing `check` job, and a correctly-refusing
+`prepare-sync` job for each of these new-table migrations) went
+unaddressed for a full round or more each time. The automation was never
+the problem; a documented, memory-dependent step nobody was forced to
+act on was.
+
+`scripts/run-tests.mjs` (what `npm test`/`pnpm test` runs) now spawns
+the exact same, unmodified `scripts/check-main-restore-sync.mjs` as one
+more step after every test file, and fails the whole command's exit code
+if it reports real drift. This is the one command already run, as a
+matter of course, before any task that touches this codebase is declared
+complete -- so the preflight check now happens automatically as a side
+effect of normal work, not only when someone remembers the separate
+rule.
+
+Two things this deliberately does NOT change:
+- **It is still read-only and still never auto-repairs anything** -- it
+  only reports. For a safe (no-new-table) case, the real fix still
+  arrives via `prepare-sync`'s own PR after pushing, same as always. For
+  a new-table case, a human still prepares the sync by hand, same as
+  always.
+- **Network/git-remote unavailability never counts as "in sync."** If
+  `origin/main` cannot be reached (no connectivity, no remote
+  configured), the check is skipped with an explicit, loud warning --
+  never silently treated as passing. Only a successful comparison that
+  finds zero drift reports success.
+
+Practical effect: once a migration lands and drift exists, `npm test`
+reports failure (in addition to whatever `git push` later triggers in
+CI) until `main` is actually synced and merged -- it is expected and
+correct for this to stay red across that gap, not a sign something else
+is broken.
+
 ## Local command reference
 
 - `node scripts/check-main-restore-sync.mjs` -- the authoritative drift

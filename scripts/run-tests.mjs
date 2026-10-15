@@ -25,7 +25,11 @@
 // against a fresh directory listing of tests/*.test.mjs so a file added
 // to one but not the other is flagged immediately, rather than quietly
 // drifting the way the old hardcoded `&&` chain itself could (and did).
-
+//
+// D1 restore/schema main-sync check (2026-10-15, see checkMigrationSync()
+// below and docs/D1-MIGRATION-SYNC-PROCESS.md) is also run as part of
+// this same command, for the same "never silent" reason.
+//
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import path from "node:path";
@@ -250,6 +254,48 @@ function checkDrift() {
   return { missingFromDisk, missingFromList };
 }
 
+// D1 restore/schema main-sync check (2026-10-15, see docs/
+// D1-MIGRATION-SYNC-PROCESS.md and docs/AI-HANDOFF.md's "D1 restore/
+// schema sync check" entries). Migrations 0044, 0045, and 0046 each
+// landed on this branch with the documented "mandatory migration
+// preflight" rule (docs/FUNDRAISING_OS_PRINCIPLES.md) never actually
+// run before pushing -- the automation that detects and (for a safe
+// case) auto-repairs this drift already existed and worked exactly as
+// designed every time, but a documented, memory-dependent step a human
+// or session has to separately remember to run is exactly the kind of
+// rule that silently stops being followed. Converting it into something
+// `npm test` itself reports -- the one command this repo's own standing
+// instructions already require running before any task is declared
+// complete -- closes that gap without changing what the check verifies
+// or how strict it is: this spawns the SAME, unmodified
+// scripts/check-main-restore-sync.mjs every GitHub Actions run already
+// uses, never a second/relaxed copy of its logic.
+//
+// Network/git-remote unavailability (no connectivity, no `origin`
+// configured, an offline sandbox) is treated as "cannot verify," never
+// as "assume in sync" -- it prints a soft warning and returns null,
+// which main() below explicitly excludes from the pass/fail tally. This
+// can therefore never produce a false failure merely because an
+// environment has no network, and can never silently mask a real
+// failure as a skip either: a confirmed drift report (the check actually
+// ran and found real drift) still always fails the run; only a genuine
+// inability to reach `origin/main` at all is ever treated as
+// unverifiable.
+function checkMigrationSync() {
+  const canReachMain = spawnSync("git", ["rev-parse", "--verify", "origin/main"], { cwd: root, stdio: "pipe" }).status === 0
+    || spawnSync("git", ["fetch", "origin", "main"], { cwd: root, stdio: "pipe" }).status === 0;
+  if (!canReachMain) {
+    console.log("\nD1 restore/schema main-sync check: SKIPPED -- could not reach origin/main (no network or no remote configured). This is not evidence either way; re-run with connectivity before relying on a green result, and never treat this skip as \"in sync.\"");
+    return null;
+  }
+  console.log("\nD1 restore/schema main-sync check (scripts/check-main-restore-sync.mjs, unmodified):");
+  const result = spawnSync(process.execPath, ["scripts/check-main-restore-sync.mjs"], { cwd: root, stdio: "inherit" });
+  if (result.error) return { file: "scripts/check-main-restore-sync.mjs", ok: false, detail: result.error.message };
+  if (result.signal) return { file: "scripts/check-main-restore-sync.mjs", ok: false, detail: `terminated by signal ${result.signal}` };
+  if (result.status !== 0) return { file: "scripts/check-main-restore-sync.mjs", ok: false, detail: "main's restore/schema tracking is out of sync -- see docs/D1-MIGRATION-SYNC-PROCESS.md" };
+  return { file: "scripts/check-main-restore-sync.mjs", ok: true };
+}
+
 function main() {
   const results = TEST_FILES.map(runOne);
   const failed = results.filter((r) => !r.ok);
@@ -259,6 +305,16 @@ function main() {
   if (failed.length > 0) {
     console.log("FAILED:");
     for (const f of failed) console.log(`  ${f.file} (${f.detail})`);
+  }
+
+  // Kept separate from the "Test files run" tally above -- it is not a
+  // tests/*.test.mjs file, it is a live check against origin/main -- but
+  // its failure still fails this whole command's exit code (see below),
+  // never just a printed warning.
+  const migrationSync = checkMigrationSync();
+  if (migrationSync && !migrationSync.ok) {
+    failed.push(migrationSync);
+    console.log(`\nFAILED: ${migrationSync.file} (${migrationSync.detail})`);
   }
 
   const drift = checkDrift();

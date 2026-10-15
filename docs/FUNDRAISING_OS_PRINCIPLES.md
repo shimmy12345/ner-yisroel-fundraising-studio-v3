@@ -111,10 +111,22 @@ changes to Fundraising OS. It does not describe how the code currently works
   check or a failed monthly restore-verification run. See
   `docs/D1-MIGRATION-SYNC-PROCESS.md` for the exact mechanics. This is a
   narrow, explicitly-scoped exception to "do not modify `main`" above --
-  it only ever touches the two restore-tracking files, never application
-  code, and a push to `main` itself still always requires separate,
-  explicit approval, whether proposed by a human or by the automation's
-  own pull request.
+  it only ever touches the restore-tracking/baseline files, never
+  application code, and a push to `main` itself still always requires
+  separate, explicit approval, whether proposed by a human or by the
+  automation's own pull request.
+  **This is no longer only a remembered step** (2026-10-15, after
+  migrations 0044/0045/0046 each landed with this exact preflight never
+  actually run, three separate times -- see docs/AI-HANDOFF.md's "D1
+  restore/schema sync check" entry): `node scripts/run-tests.mjs`
+  (`npm test`/`pnpm test`) now ALSO spawns this same, unmodified check at
+  the end of every run and fails the whole command's exit code on real
+  drift. Since running the test suite before declaring any task complete
+  is already mandatory (see below), this means the preflight is now
+  checked automatically as a side effect of work any session already
+  does -- but it is a backstop, not a replacement: still run the command
+  explicitly and read its output the moment a migration is added, rather
+  than waiting to notice a failing test run at the end.
 - Never weaken data-integrity, authentication, backup, or launch safeguards.
 - If a fact cannot be verified, say so instead of guessing.
 - Run tests, type check, and production build before declaring
