@@ -42542,3 +42542,39 @@ historical comment -- no dangling reference anywhere else.
 `feature/independent-cloudflare-sandbox`; no Staging or Production
 deploy was performed as part of this round, per the task's own explicit
 instruction that any deploy requires separate authorization.
+
+## D1 Restore/Schema Sync Check -- FRESH GITHUB ACTIONS RUN CONFIRMED GREEN, INCIDENT FULLY CLOSED (2026-10-15)
+
+This round's `db/schema.ts` edit (the test-send cleanup's comment
+update, above) happens to be one of `.github/workflows/d1-restore-sync-check.yml`'s
+own trigger paths -- so pushing commit `023e847` naturally produced the
+first genuinely fresh GitHub Actions run of this workflow since the
+original failure, with zero need for the owner to click "Re-run all
+jobs" or any `workflow_dispatch`. Confirmed via the public GitHub API,
+not inferred from the local result alone:
+
+- **Run `38745537156`**, `push` event, `feature/independent-cloudflare-sandbox`
+  at `023e8474151b9a9cb457807f0477f0720f1d788a`, created
+  2026-10-15T13:46:15Z, completed 13:46:37Z (22 seconds).
+  **`status: completed`, `conclusion: success`.**
+- Both jobs individually confirmed `success` (not inferred from the
+  overall run status alone): `check`
+  (https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38745537156/job/116458069790)
+  and `prepare-sync`
+  (https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38745537156/job/116458135381).
+- This is the first run since the original failure (`38678941234`) to
+  execute against the now-synced `main` -- GitHub Actions itself, not
+  just this session's local re-derivation, now independently confirms
+  "no drift" and "nothing to sync."
+
+**This closes the one remaining open item from the prior "Final
+Verification After PR #18 Merge" entry** ("Is GitHub Actions confirmed
+green, or still awaiting a fresh run? Still awaiting a fresh run.") --
+it is no longer awaiting one. Both local verification (every round in
+this incident) and the platform's own CI (this run) now agree: `main`'s
+restore/baseline tracking is synchronized, and the permanent prevention
+safeguard (`npm test`'s migration-sync step, the unmodified
+`check`/`prepare-sync` jobs) is exercised and green end to end.
+
+**The D1 restore/schema synchronization incident -- including its
+GitHub Actions confirmation -- is now fully, completely closed.**
