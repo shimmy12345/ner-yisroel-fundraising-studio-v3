@@ -65,7 +65,7 @@ function StagingBanner() {
     >
       {writesEnabled
         ? "STAGING — TEMPORARY WRITES ENABLED FOR TESTING. Turn STAGING_WRITES_ENABLED off when finished."
-        : "STAGING — READ ONLY. All live donor updates and imports must be entered in Production."}
+        : "STAGING — READ ONLY, except Trip Planning. All live donor updates and imports must be entered in Production."}
     </div>
   );
 }

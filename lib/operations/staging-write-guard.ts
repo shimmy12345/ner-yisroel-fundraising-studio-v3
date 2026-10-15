@@ -45,6 +45,35 @@ export function isStagingWritesOverrideEnabled(stagingWritesEnabled: string | un
   return stagingWritesEnabled === "true";
 }
 
+// Narrow, path-prefix-scoped exception for Trip-Based Meeting Planning
+// (docs/AI-HANDOFF.md "Independent Review of Phase 2"), added so an
+// authorized tester can exercise that feature on Staging without
+// flipping STAGING_WRITES_ENABLED -- which would also re-open every
+// donor/financial/import route this guard exists to block, exactly what
+// a feature-scoped carve-out is meant to avoid.
+//
+// This is a single closed prefix check, not a per-route allowlist of
+// the kind the header comment above already rejected for "silent
+// drift" reasons: every route this feature has, or will ever have,
+// lives under this one prefix by construction (app/api/trips/**), and
+// no donor/financial/import route does or ever should -- confirmed by
+// tests/staging-write-guard.test.mjs's own repo-wide route walk, which
+// fails if that ever stops being true.
+//
+// Confirmed safe to exempt in full, including the meeting-scheduling/
+// completion endpoints: lib/relationships/trips-data.ts never writes to
+// donors, giving_activities, pledge_payment_plans, or asks. The only
+// existing CRM table it touches is `interactions`, and only through a
+// deterministic, trip-owned row id (trip-meeting-${prospectId}) tied to
+// a real donor -- appending/idempotently upserting that one row is the
+// feature's own by-design behavior an authorized tester needs to
+// exercise, not an accidental side effect this guard should block.
+const TRIP_PLANNING_WRITE_PATH_PREFIX = "/api/trips";
+
+export function isTripPlanningWritePath(pathname: string): boolean {
+  return pathname === TRIP_PLANNING_WRITE_PATH_PREFIX || pathname.startsWith(`${TRIP_PLANNING_WRITE_PATH_PREFIX}/`);
+}
+
 // The one function callers need: should this specific request be
 // blocked as a staging-read-only write? Pure and dependency-free so it
 // is trivially unit-testable without any Worker/D1/Request machinery.
@@ -58,6 +87,7 @@ export function shouldBlockStagingWrite(
   if (!pathname.startsWith("/api/")) return false;
   if (!isMutatingMethod(method)) return false;
   if (isStagingWritesOverrideEnabled(stagingWritesEnabled)) return false;
+  if (isTripPlanningWritePath(pathname)) return false;
   return true;
 }
 

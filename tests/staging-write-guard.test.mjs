@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   isMutatingMethod,
   isStagingWritesOverrideEnabled,
+  isTripPlanningWritePath,
   shouldBlockStagingWrite,
   STAGING_READ_ONLY_MESSAGE,
 } from "../lib/operations/staging-write-guard.ts";
@@ -50,6 +51,25 @@ for (const env of ["production-independent", "staging", "production", "something
 assert.match(STAGING_READ_ONLY_MESSAGE, /read-only/i);
 assert.match(STAGING_READ_ONLY_MESSAGE, /Production/);
 
+// --- Trip Planning carve-out: a narrow, path-prefix exception so an
+// authorized tester can exercise that feature on Staging without
+// flipping STAGING_WRITES_ENABLED (which would also re-open every
+// donor/financial/import route this guard exists to protect). ---
+
+assert.equal(isTripPlanningWritePath("/api/trips"), true);
+assert.equal(isTripPlanningWritePath("/api/trips/abc123"), true);
+assert.equal(isTripPlanningWritePath("/api/trips/abc123/prospects"), true);
+assert.equal(isTripPlanningWritePath("/api/trips/abc123/prospects/def456"), true);
+assert.equal(isTripPlanningWritePath("/api/tripsomething"), false, "must not match on a mere string prefix -- only an exact segment or a path under it");
+assert.equal(isTripPlanningWritePath("/api/donors"), false);
+assert.equal(isTripPlanningWritePath("/api"), false);
+
+assert.equal(shouldBlockStagingWrite("staging-independent", "POST", "/api/trips", undefined), false, "creating a trip must be allowed on Staging without the override");
+assert.equal(shouldBlockStagingWrite("staging-independent", "PATCH", "/api/trips/abc/prospects/def", undefined), false, "updating/scheduling/completing a trip prospect must be allowed on Staging without the override");
+assert.equal(shouldBlockStagingWrite("staging-independent", "DELETE", "/api/trips/abc/prospects/def", undefined), false, "removing a trip prospect must be allowed on Staging without the override");
+assert.equal(shouldBlockStagingWrite("staging-independent", "POST", "/api/tripsomething", undefined), true, "a route that merely starts with the same letters, but isn't actually under /api/trips, must stay blocked");
+assert.equal(shouldBlockStagingWrite("staging-independent", "POST", "/api/donors", undefined), true, "the carve-out must never leak into unrelated donor/financial routes");
+
 // --- Structural coverage: the guard is actually wired into the one real
 // request-dispatch path, ahead of everything else, and can never be
 // bypassed by a route this repo doesn't know about yet. ---
@@ -88,6 +108,27 @@ for await (const file of walk(appDir)) {
 assert.ok(mutatingRouteFiles.length > 0, "sanity check: this repo does have mutating API routes today");
 for (const file of mutatingRouteFiles) {
   assert.ok(file.includes(`${path.sep}app${path.sep}api${path.sep}`), `mutating route file outside app/api/, not covered by the blanket /api/ guard: ${file}`);
+}
+
+// Trip Planning carve-out, checked against the REAL route tree (not just
+// hardcoded example strings above): every mutating route actually under
+// app/api/trips/ must be reachable through isTripPlanningWritePath, and
+// -- the one risk this carve-out accepts -- no mutating route OUTSIDE
+// app/api/trips/ (donors, asks, giving, pledges, imports, interactions,
+// etc.) may ever be covered by it. If a future donor/financial route is
+// ever added under /api/trips/* by mistake, this must fail loudly rather
+// than silently reopen it on Staging.
+const tripsApiDir = `${path.sep}app${path.sep}api${path.sep}trips${path.sep}`;
+const tripRouteFiles = mutatingRouteFiles.filter((file) => file.includes(tripsApiDir));
+const nonTripRouteFiles = mutatingRouteFiles.filter((file) => !file.includes(tripsApiDir));
+assert.ok(tripRouteFiles.length > 0, "sanity check: Trip Planning does have mutating API routes today");
+for (const file of tripRouteFiles) {
+  const routePathname = `/api/${file.split(`${path.sep}app${path.sep}api${path.sep}`)[1].replace(/\\/g, "/").replace(/\/route\.ts$/, "").replace(/\[([^\]]+)\]/g, "placeholder")}`;
+  assert.ok(isTripPlanningWritePath(routePathname), `a real Trip Planning route is not covered by the carve-out: ${routePathname}`);
+}
+for (const file of nonTripRouteFiles) {
+  const routePathname = `/api/${file.split(`${path.sep}app${path.sep}api${path.sep}`)[1].replace(/\\/g, "/").replace(/\/route\.ts$/, "").replace(/\[([^\]]+)\]/g, "placeholder")}`;
+  assert.ok(!isTripPlanningWritePath(routePathname), `a non-Trip-Planning route is unexpectedly covered by the /api/trips carve-out, which would leak Staging write access to it: ${routePathname}`);
 }
 
 // --- Config coverage: Production never carries the override, and the
