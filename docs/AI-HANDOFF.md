@@ -42578,3 +42578,272 @@ safeguard (`npm test`'s migration-sync step, the unmodified
 
 **The D1 restore/schema synchronization incident -- including its
 GitHub Actions confirmation -- is now fully, completely closed.**
+
+## Production Deployment Readiness Review -- Daily Agenda Cleanup (2026-10-15) -- READ-ONLY, NOTHING DEPLOYED
+
+Requested: determine whether the Daily Agenda incident cleanup (test-send
+endpoint removal, commit `023e847`) is safe to deploy to Production.
+**Conclusion up front: B -- REQUIRES ISOLATED DEPLOYMENT.** The working
+branch is NOT a safe Production deployment candidate as a whole; a
+minimal, isolated cleanup-only plan was prepared and verified, not
+executed.
+
+### 1. Deployment scope -- the working branch contains far more than the email cleanup
+
+- **Production's currently deployed commit**: `cf36599e239070822716540d9fde01d1d3dfb65f`
+  (geographic filtering UI fix), Worker version
+  `1248d048-b21f-4157-b208-7f6bcc3082a9` (confirmed via fresh
+  `wrangler deployments list` -- unchanged since this morning, and
+  matches the Production-deployment entry's own recorded commit for
+  that version).
+- **Current working-branch HEAD**: `126cd70` (22 commits ahead of
+  Production).
+- **`git diff --name-status cf36599 126cd70`**: **54 files changed,
+  7,009 insertions, 442 deletions.** This is emphatically NOT "just the
+  email cleanup" -- confirmed by inspection, not assumed:
+  - **Trip-Based Meeting Planning** (entire feature): 2 new migrations
+    (`drizzle/0045_trips.sql`, `drizzle/0046_trip_financial_attributions.sql`,
+    4 new tables -- `trips`, `trip_prospects`, `trip_financial_attributions`,
+    plus `agenda_manual_test_send_log` already on Production, see
+    below), 6 new API routes (`app/api/trips/**`), 4 new UI files
+    (`app/travel-planning/**`), 3 new lib modules
+    (`lib/relationships/trip-model.ts`/`trips-data.ts`/`trip-financial-attribution.ts`),
+    8 new test files.
+  - **Payment-Plan Progress Dashboard**: modifies two EXISTING, live
+    Production files (`app/donors/[id]/page.tsx`,
+    `app/donors/[id]/PledgePaymentPlanManagement.tsx`), adds 4 new
+    shared UI components (`app/components/FinancialSummaryCard.tsx`,
+    `InstallmentTimeline.tsx`, `ProgressBar.tsx`, `StatusBadge.tsx`,
+    shared with Trip Fundraising Results), a new
+    `lib/relationships/payment-plan-display.ts`, and additive fields on
+    `lib/relationships/pledge-payment-plan.ts`.
+  - **Shared financial-classification change**: `lib/giving/management.ts`
+    adds `pending_pledge` to `COUNTED_GIVING_SQL`/`countsInGivingTotals`'s
+    exclusion list -- a real edit to sensitive, shared logic that
+    affects every giving-total calculation in the app, not scoped to
+    the new feature alone (inert today only because nothing on
+    Production can currently write a `pending_pledge` row -- see below).
+  - **Navigation**: `app/layout.tsx`, `app/page.tsx`,
+    `lib/navigation/donor-navigation.ts` all change to surface "Travel
+    Planning" in the main app nav.
+  - **D1 Migration Sync Automation safeguards** (this session's own
+    tooling work, CI/local-dev only): `scripts/run-tests.mjs`,
+    `lib/data-health/production-baseline.ts`,
+    `production-baseline/schema-manifest.json`,
+    `production-baseline/drizzle/0000_production_baseline_0019.sql`,
+    `lib/operations/staging-reset.ts`, `lib/operations/staging-write-guard.ts`
+    (Trip Planning carve-out -- inert on Production, see below),
+    `lib/operations/workspace-backup.ts`.
+  - **The actual email cleanup** (what was requested): `db/schema.ts`
+    comment update, `app/api/agenda/test-send/route.ts` +
+    `lib/agenda/test-send-log.ts` + 2 dedicated test files deleted,
+    `scripts/run-tests.mjs`'s 2-line removal.
+  - **Docs only**: `docs/AI-HANDOFF.md`, `docs/D1-MIGRATION-SYNC-PROCESS.md`,
+    `docs/FUNDRAISING_OS_PRINCIPLES.md`.
+- **Config/infrastructure**: `git diff --name-only cf36599 126cd70 --
+  wrangler.production.jsonc wrangler.staging.jsonc cloudflare-env.d.ts
+  worker/index.ts package.json` -- **empty**. Nothing in the entire
+  22-commit range touches deployment config, Worker bindings, or the
+  entrypoint.
+- **Concrete proof of what deploying HEAD would actually ship**: built
+  `pnpm run build:production-independent` against the real, current
+  HEAD. The resulting route manifest explicitly lists `/api/trips`,
+  `/api/trips/:id`, `/api/trips/:id/prospects`,
+  `/api/trips/:id/prospects/:prospectId`,
+  `/api/trips/:id/prospects/:prospectId/attributions`,
+  `/api/trips/:id/prospects/:prospectId/attributions/:attributionId`,
+  `/travel-planning`, and `/travel-planning/:id` as real, live routes
+  in that build. **Deploying HEAD as-is would make the entire,
+  never-reviewed-for-Production Trip Planning feature publicly
+  reachable** (behind the existing Cloudflare Access gate, same as
+  every other route -- not open to the internet, but reachable by any
+  authenticated user including the owner) **while its backing tables
+  do not exist on Production D1** -- every one of those routes would
+  fail at the first `env.DB` query against `trips`/`trip_prospects`/
+  `trip_financial_attributions`.
+
+### 2. Email cleanup safety -- verified correct in isolation
+
+- **Removal correctness, independently re-confirmed this round** (not
+  just trusted from the prior entry): `git show cf36599:app/api/agenda/test-send/route.ts`
+  succeeds (the route exists in Production's currently-deployed tree);
+  the proposed HEAD no longer contains it, its dedicated
+  `lib/agenda/test-send-log.ts`, or either of its two dedicated test
+  files.
+- **The real scheduled path's independence, re-verified by diff, not
+  just by grep**: `git diff --name-only cf36599 126cd70 --
+  lib/agenda/email-send-guard.ts lib/agenda/gmail-client.ts
+  lib/agenda/send-agenda.ts lib/agenda/send-log.ts worker/index.ts` --
+  **empty**. Not one line of the real Gmail-sending chokepoint, the
+  fail-closed allowlist, the real send function, the real idempotency
+  claim logic, or the scheduled-handler entrypoint has changed
+  ANYWHERE in the full 22-commit range, in either direction (Trip
+  Planning work or the cleanup itself).
+- **Duplicate-send protection, confirmed live and working TODAY**:
+  read-only Production query,
+  `SELECT COUNT(*) FROM agenda_send_log WHERE send_date='2026-10-15'`
+  -> **1** -- exactly one real send recorded for today, independently
+  confirming the owner's own report (not merely trusting it) that
+  exactly one correctly-sourced email went out this morning.
+- **Gmail credentials confirmed present** (names only, never values):
+  `wrangler secret list` on Production lists `GMAIL_OAUTH_CLIENT_ID`,
+  `GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`.
+- **Production/Staging email isolation confirmed, unchanged**:
+  `wrangler.production.jsonc` still `"triggers": {"crons": ["0 * * * *"]}`
+  against `fundraising-os-production-db`; `wrangler.staging.jsonc`
+  still `"triggers": {"crons": []}` against
+  `fundraising-os-staging-db` -- the historical Staging-cron-deactivation
+  fix (see that file's own header comment) remains intact and
+  unmodified by anything in this range.
+- **Important finding, not previously surfaced this explicitly**: the
+  temporary test-send route is **currently still live and deployed on
+  Production right now** -- `git show cf36599:app/api/agenda/test-send/route.ts`
+  succeeding proves it, since `cf36599` descends from the commit that
+  introduced it (`e2ff27f`) and was deployed afterward. Read-only
+  query of `agenda_manual_test_send_log` on Production shows all three
+  ever-issued claims are permanently terminal (`-1` failed/401, `-2`
+  failed/401 `unauthorized_client`, `-3` **sent** -- confirming the
+  manual mechanism did eventually succeed once, which is almost
+  certainly how the underlying Gmail OAuth credential issue was
+  actually confirmed fixed). Since `TEST_SEND_CLAIM_ID` is a fixed
+  string with no reclaim path, the route is already structurally
+  incapable of sending again without a future code change -- it is
+  dead but still present. **No temporary test-send route remains
+  accessible in the PROPOSED build** (confirmed: zero occurrences of
+  `test-send` in the isolated cleanup build's compiled server bundle,
+  see Section 3) -- deploying the cleanup, whenever authorized, is what
+  actually retires this dead code from Production, not merely
+  theoretical housekeeping.
+- **No test email was sent as part of this review.**
+
+### 3. Production safety
+
+- **Current Worker version**: `1248d048-b21f-4157-b208-7f6bcc3082a9`
+  (created 2026-10-14T23:41:05Z). **Rollback target**:
+  `bf60c39b-af8d-42ad-8ce7-09a62a607c1c` (the version immediately
+  before it, created 2026-10-14T23:07:54Z) -- confirmed via the full
+  `wrangler deployments list` history, not assumed.
+- **Latest Production backup**: GitHub Actions "D1 nightly backup
+  (Production)" run `38742060377`, `completed`/`success`,
+  2026-10-15T13:21:54Z -- **today**.
+- **Latest Production monthly restore verification**: run
+  `38200144876`, `completed`/`success`, 2026-10-12T03:32:23Z (most
+  recent of that workflow; an isolated failure on 2026-10-11 was
+  immediately followed by two consecutive successes and is unrelated
+  to this review -- part of this session's already-documented
+  restore-incident history above, not a new finding).
+- **`backup_alert_state` on Production**: `0` active rows -- no
+  outstanding stale-backup incident.
+- **No donor/payment/pledge/balance modification anywhere in scope**:
+  the proposed isolated cleanup touches exactly the 6 files listed in
+  Section 1 above, none of which is a donor-data route, a financial
+  calculation, or a migration. The WIDER branch does add `pending_pledge`
+  to shared classification logic (Section 1) -- inert today (no
+  Production code path can write that category), but a real reason the
+  isolated plan, not the whole branch, is the right unit to deploy.
+- **New migrations/schema dependencies, precisely identified**:
+  `drizzle/0045_trips.sql` and `drizzle/0046_trip_financial_attributions.sql`
+  (4 new tables total, including `agenda_manual_test_send_log` from the
+  already-applied 0044). **Confirmed via `git merge-base --is-ancestor`**
+  that neither 0045 nor 0046 is an ancestor of Production's deployed
+  commit, and via a direct, read-only Production query
+  (`SELECT name FROM sqlite_master WHERE type='table' AND name IN
+  ('trips','trip_prospects','trip_financial_attributions')` -> **empty
+  result**) that none of these three tables exist on Production D1.
+  **The proposed isolated cleanup plan requires zero migrations** --
+  it is pure application-code removal.
+- **Production/Staging database binding isolation**: unchanged (see
+  Section 2) -- `env.DB` still points to `fundraising-os-production-db`
+  on Production and `fundraising-os-staging-db` on Staging; neither
+  `wrangler.*.jsonc` file appears anywhere in the 22-commit diff.
+- **Test/typecheck/build results, both against the full branch AND the
+  isolated plan** (local results; GitHub Actions status is reported
+  separately in the D1 sync entries above and is unrelated to this
+  specific review's own commits, since nothing here was pushed):
+  - **Full working branch (HEAD `126cd70`)**: 197/197 tests passing
+    (confirmed earlier today), `tsc --noEmit` clean, lint 94/43
+    (unchanged baseline), `pnpm run build:production-independent`
+    succeeds -- but, as Section 1 shows, ships Trip Planning.
+  - **Isolated cleanup-only candidate** (built and tested in a
+    throwaway worktree, cherry-picking ONLY commit `023e847` onto
+    `cf36599`, never committed/pushed/merged -- removed after use):
+    `git cherry-pick --no-commit 023e847` applied with **zero conflict**
+    on every real code file (`app/api/agenda/test-send/route.ts`,
+    `lib/agenda/test-send-log.ts`, both dedicated test files,
+    `db/schema.ts`, `scripts/run-tests.mjs`) -- only `docs/AI-HANDOFF.md`
+    conflicted (expected, resolved by keeping Production's own copy for
+    this dry run only). **191/191 tests passing**, `tsc --noEmit`
+    clean, lint 94/43 (same unchanged baseline),
+    `pnpm run build:production-independent` succeeds, and the
+    resulting build's route manifest and compiled server bundle
+    contain **zero** occurrences of `travel-planning`, `/api/trips`, or
+    `test-send` -- confirmed by direct grep of both the build log and
+    `dist/server/index.js`, not assumed from the source diff alone.
+
+### 4. Recommendation: **B -- REQUIRES ISOLATED DEPLOYMENT**
+
+The working branch is not a safe unit to deploy to Production as-is --
+it would ship two entire, never-reviewed-for-Production features
+(Trip-Based Meeting Planning, Trip Fundraising Results Dashboard) whose
+backing tables do not exist there, producing live, reachable routes
+that would fail on first use, plus a real (if currently inert) edit to
+shared financial-classification logic. **Option A (safe to deploy as
+HEAD) does not apply.**
+
+**Minimal isolated cleanup-only plan, prepared and verified, NOT
+executed:**
+- **Base**: Production's own currently-deployed commit, `cf36599`.
+- **Change**: cherry-pick commit `023e847` ("Close the October 14 2026
+  Daily Agenda incident and remove the temporary test-send endpoint")
+  onto that base.
+- **Exact files touched** (6, all confirmed above): delete
+  `app/api/agenda/test-send/route.ts`, delete
+  `lib/agenda/test-send-log.ts`, delete
+  `tests/agenda-test-send-safety.test.mjs`, delete
+  `tests/agenda-test-send-idempotency-e2e.test.mjs`, edit
+  `db/schema.ts` (comment only), edit `scripts/run-tests.mjs` (removes
+  2 lines from `TEST_FILES`). `docs/AI-HANDOFF.md`'s own conflict (real
+  content, not a code risk) would need a short, hand-written entry for
+  this specific isolated deployment rather than the full branch
+  history -- trivial to prepare when authorized.
+- **How this avoids introducing Staging-only features into
+  Production**: by construction, not by care -- the base commit
+  (`cf36599`) predates every Trip Planning/Dashboard commit entirely,
+  so there is nothing to accidentally include; cherry-picking a single,
+  already-isolated commit onto that base cannot reach forward into
+  later history.
+- **Zero migrations required**: this plan touches no `drizzle/**` file
+  and requires no `wrangler d1 execute` against Production.
+- **Not executed**: no branch was created beyond a local, throwaway,
+  unpushed worktree (removed after verification); no commit from this
+  plan exists anywhere but locally during the dry run; nothing was
+  pushed, merged, or deployed.
+
+### 5. Summary
+
+- **Current Production version**: `1248d048-b21f-4157-b208-7f6bcc3082a9`
+  (commit `cf36599`).
+- **Proposed deployment scope**: the FULL working branch (HEAD
+  `126cd70`) is NOT recommended -- it includes Trip Planning/Dashboard
+  features and a new, untested-on-Production schema. The RECOMMENDED
+  scope is the isolated 6-file cleanup plan in Section 4, cherry-picked
+  from commit `023e847` onto `cf36599`.
+- **Test results**: full branch 197/197 + tsc clean + lint baseline;
+  isolated plan 191/191 + tsc clean + lint baseline + build confirmed
+  free of Trip Planning/test-send code.
+- **Backup/rollback readiness**: Production backup succeeded today
+  (2026-10-15); monthly restore verification last succeeded 2026-10-12;
+  zero active backup alerts; rollback target `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`
+  identified and unchanged.
+- **Risks/blockers**: deploying the full branch would expose broken
+  Trip Planning routes on Production (missing tables) and ship an
+  unreviewed shared financial-classification change -- both avoided by
+  the isolated plan instead. The temporary test-send route is currently
+  live (though permanently inert) on Production; the isolated cleanup
+  is what retires it.
+- **Recommended next action**: **await explicit owner authorization**
+  to prepare (not yet create) the isolated cleanup-only branch/PR
+  described in Section 4, following this repository's own established
+  narrow-branch review process, and deploy ONLY that to Production once
+  reviewed -- never the full working branch. Nothing was deployed,
+  migrated, merged, or sent as part of this review.
