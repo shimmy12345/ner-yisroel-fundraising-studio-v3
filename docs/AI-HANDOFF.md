@@ -41067,3 +41067,116 @@ conclusively.
    further investigation before Production authorization (independent
    of this feature, which did not cause it as far as this review could
    confirm).
+
+## Trip Planning: enabling Staging testing without opening donor/financial writes (2026-10-14/15)
+
+The owner tried to create a trip on Staging and got Staging's standard
+blanket read-only error (`lib/operations/staging-write-guard.ts`'s
+`STAGING_READ_ONLY_MESSAGE`): `POST /api/trips` is a mutating method
+under `/api/**`, and the independent Staging deployment blocks all of
+those unless `STAGING_WRITES_ENABLED=true` is set and redeployed. That
+escape hatch would have worked, but it also reopens every other
+donor/financial/import route the guard protects (donors, asks, giving,
+pledges, interactions, imports) -- far broader than "let me test the
+one new feature."
+
+**What was found.** The guard (`shouldBlockStagingWrite` in
+`lib/operations/staging-write-guard.ts`) is a single, blanket,
+method+path-prefix check -- deliberately not a per-route allow/deny
+list, per its own header comment, because this repo has 50+ API routes
+touching donor/fundraising data and a hand-maintained list would drift.
+That reasoning is sound for the general case, but Trip Planning is
+structurally different: every route it has, or will ever have, lives
+under one closed prefix, `/api/trips`, by construction, and no
+donor/financial/import route does or ever should.
+
+**What was verified before changing anything.** Re-read
+`lib/relationships/trips-data.ts`'s every D1 statement
+(`INTO`/`UPDATE`/`FROM`) end to end: the only tables it ever writes are
+`trips` and `trip_prospects` (both new, Trip-Planning-only tables) and
+`interactions` -- and the `interactions` writes are exclusively through
+a deterministic, trip-owned row id (`trip-meeting-${prospectId}`,
+idempotent upsert) created only when a fundraiser explicitly confirms
+scheduling or completing a meeting, which is the feature's own by-design
+behavior, not an accidental side effect. It never writes to `donors`,
+`giving_activities`, `pledge_payment_plans`, or `asks` at all (only
+`SELECT`s a donor's own name/state). So exempting the whole `/api/trips`
+prefix from the Staging block, unconditionally, carries no risk to any
+existing donor or financial record.
+
+**What changed** (commit `c6c4708`, 3 files):
+- `lib/operations/staging-write-guard.ts`: added
+  `isTripPlanningWritePath(pathname)` (exact match on `/api/trips` or
+  anything under it, not a loose string-prefix match -- `/api/tripsomething`
+  does **not** match) and one new early-exit line in
+  `shouldBlockStagingWrite`. Every other path keeps the exact same
+  blanket block as before; `STAGING_WRITES_ENABLED` is untouched and
+  still works exactly as it did.
+- `app/layout.tsx`: the persistent Staging banner now reads "STAGING —
+  READ ONLY, except Trip Planning" instead of just "READ ONLY", so a
+  tester isn't misled into thinking Trip Planning is still blocked.
+- `tests/staging-write-guard.test.mjs`: added unit coverage for
+  `isTripPlanningWritePath` and the carve-out inside
+  `shouldBlockStagingWrite` (including that a merely-similar path like
+  `/api/tripsomething` stays blocked), plus a structural test that walks
+  the **real** `app/api/` route tree and asserts every actual Trip
+  Planning route is covered by the carve-out and every actual
+  non-Trip-Planning mutating route is **not** -- so a future route
+  accidentally landing under `/api/trips/*` (or a Trip Planning route
+  landing somewhere else) fails the test suite loudly instead of
+  silently drifting.
+
+**Verification performed** (all independent, not trusting the change
+itself):
+- Full suite: 195/195 passing. `tsc --noEmit`: clean. `pnpm run lint`:
+  94 errors / 43 warnings -- the exact unchanged baseline.
+- `git diff --stat`: only the 3 files above changed; no migration, no
+  config file, nothing under `wrangler.production.jsonc` touched.
+- `wrangler deployments list` against Production: latest version is
+  still `1248d048-b21f-4157-b208-7f6bcc3082a9` -- no new Production
+  deploy happened.
+- Direct read-only D1 query, Production: `donors=254`,
+  `giving_activities=5464`, `interactions=203`, `pledge_payment_plans=45`
+  -- identical to the pre-task baseline.
+- Direct read-only D1 query, Staging: `donors=254`, `interactions=203`
+  (no new interaction rows -- confirms this change alone created no
+  test data), `giving_activities=5463` (the same previously-disclosed,
+  pre-existing one-row discrepancy from the earlier Phase 2 round,
+  unchanged by this round), `trips=0`, `trip_prospects=0` (still empty).
+- Deployed to Staging via the protected `pnpm run
+  deploy:staging-independent` script -> new Staging version
+  `060617a7-b685-466b-81c5-27b430700df1`. Confirmed
+  `isTripPlanningWritePath`, `TRIP_PLANNING_WRITE_PATH_PREFIX`, and the
+  new banner text are present in the deployed `dist/server/index.js`.
+  `STAGING_WRITES_ENABLED` is not set on Staging (confirmed via the
+  deploy's own binding list) -- the carve-out works independently of
+  that flag, as intended.
+
+**What is now true on Staging.** `STAGING_WRITES_ENABLED` is still
+unset. Every donor/financial/import route (`/api/donors/**`,
+`/api/asks/**`, `/api/giving/**`, `/api/pledge-*`, `/api/import/**`,
+etc.) is still blocked exactly as before. Only `/api/trips`,
+`/api/trips/[id]`, `/api/trips/[id]/prospects`, and
+`/api/trips/[id]/prospects/[prospectId]` -- the complete, already-built
+set of Trip Planning routes -- now accept writes. Concretely, an
+authorized tester can: create a trip, add/remove prospects (auto or
+manual), change a prospect's simple status, edit trip/prospect notes
+and fields, and schedule or mark a meeting completed.
+
+**One thing worth knowing before testing**: scheduling or completing a
+meeting creates a real `interactions` row tied to a real Staging donor
+(by design -- that's the feature). This is brand-new, additive data,
+never a rewrite of an existing record, and it is exactly the behavior
+Trip Planning needs to be tested end to end. If a tester would rather
+not see a new interaction appear on a real donor's timeline while
+testing, stick to creating trips and managing prospect status/notes,
+and skip the "confirm scheduled"/"confirm completed" actions, or use a
+donor whose timeline doesn't matter for this purpose.
+
+**Decision needing owner approval**: none required to start testing --
+this was implemented as the "safe, narrowly-scoped solution" the
+request asked for, with the architecture confirmed able to support a
+feature-specific exception without a per-route allowlist. If instead a
+broader donor-merge/interaction-safety review turns up something this
+review didn't anticipate, flag it before relying further on the
+carve-out.
