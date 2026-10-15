@@ -43992,3 +43992,292 @@ this round.
 merge, or financial-record modification was performed. Staging was the
 only environment changed. Awaiting the owner's explicit authorization
 before any Production action.**
+
+## Authorized Production Deployment -- Financial Dashboard, Payment-Plan Progress, Trip Planning (2026-10-15) -- SUCCESSFUL
+
+Owner explicitly authorized, by name, the exact two-part sequence
+recommended in the prior preflight (`167bd2b`) and confirmed ready in
+the Staging verification round (`b8155fd`): apply migrations
+`0045_trips.sql` and `0046_trip_financial_attributions.sql` to
+Production D1, then deploy the Staging-verified Worker code to
+Production. This entry records that deployment end-to-end. No
+unrelated code changes, financial-record corrections, or new features
+were introduced, and none of the explicitly-prohibited actions (branch
+merge, extra email send, cron change, Staging-to-Production data copy)
+occurred.
+
+### Phase 1 -- Mandatory safety checks (all PASS, run before any change)
+
+1. **Current Production Worker version**: PASS -- confirmed still
+   `8cc87988-32de-43b3-8dcd-c1a660176850` (created
+   2026-10-15T14:58:55.030Z), exactly matching the owner's stated last-
+   verified version. Proceeded.
+2. **Exact Git commit / application-code diff**: PASS -- HEAD was
+   `b8155fd` (feature/independent-cloudflare-sandbox, clean tree, in
+   sync with origin). `git diff --stat 167bd2b b8155fd` touches only
+   `docs/AI-HANDOFF.md` -- zero new application-code changes since the
+   Staging-verified baseline, consistent with the owner's own stated
+   allowance for documentation-only commits.
+3. **Staging Worker corresponds to the proposed Production code**:
+   PASS -- the exact same application code (identical since `bfa19e0`)
+   is what Staging is running as `b159572d-2ca2-4bb2-8490-5be1cadfa72e`.
+4. **Latest successful Production backup**: PASS -- "Completed
+   successfully 2026-10-15T13:22:30Z" (object: `daily/fundraising-os-
+   production-db-20261015T132223Z.sql.gz.gpg`), read live from
+   Production's own Settings > Data Health panel.
+5. **Latest successful restore-verification / no unresolved failures**:
+   PASS -- "Successfully restored and verified the Oct 12, 2026 backup.
+   Restore testing runs monthly" (checked Oct 11, 2026, 11:35 PM); the
+   Production `backup_alert_state` table (which only ever holds failure
+   records) was queried directly and is empty -- zero outstanding
+   failures.
+6. **Production D1 binding / Worker config / cron / Staging isolation**:
+   PASS -- `wrangler.production.jsonc` binds `fundraising-os-
+   production-db` (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`), distinct
+   from Staging's `fundraising-os-staging-db`
+   (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`); Production's own cron is
+   `"triggers": { "crons": ["0 * * * *"] }`, confirmed unchanged by a
+   zero-diff check on `wrangler.production.jsonc`/`worker/index.ts`
+   since the currently-live build.
+7. **Pre-deployment financial-integrity baseline, recorded**: donors
+   **254**; giving activities **5,464**; open pledges **31**; total
+   committed (open + partially-paid pledges) **$280,767.00**; total
+   paid (all giving activities) **$3,849,770.65**; total outstanding
+   balance (all giving activities) **$175,536.15**; active payment
+   plans **45**; interactions **203**.
+8. **No unrelated migrations pending**: PASS -- `drizzle/0046_...sql`
+   is confirmed the newest migration file in the repository (no
+   `0047` or later exists); a direct Production table check confirmed
+   migration 0044 (`agenda_manual_test_send_log`) was already applied
+   and migrations 0045/0046's tables (`trips`, `trip_prospects`,
+   `trip_financial_attributions`) did not yet exist -- exactly the two,
+   and only the two, migrations named in the authorization were
+   pending.
+
+No check failed; the deployment proceeded exactly as authorized.
+
+**One documentation discrepancy flagged, not a blocker**: migration
+file `drizzle/0046_trip_financial_attributions.sql`'s own header
+comment states "STAGING ONLY -- not applied to Production as part of
+this round," written at an earlier point in this feature's history.
+This is stale documentation, not a live safety gate -- the file's
+actual SQL (reviewed in full below) is purely additive, and the
+owner's authorization named this exact file explicitly and current by
+date. Proceeded per the owner's clear, current, explicit instruction;
+the stale comment itself was not corrected as part of this
+deployment's authorized scope (it is a documentation-only change, not
+part of the reviewed feature set).
+
+### Phase 2 -- Production database migrations
+
+**Both migrations' exact SQL was read in full before execution** (see
+`drizzle/0045_trips.sql`, `drizzle/0046_trip_financial_attributions.sql`
+in the repository). Confirmed purely additive: `0045` is 2 `CREATE
+TABLE` + 3 `CREATE INDEX` statements (`trips`, `trip_prospects`);
+`0046` is 1 `CREATE TABLE` + 3 `CREATE INDEX` statements
+(`trip_financial_attributions`, including the partial `UNIQUE` index
+that enforces the double-counting guard at the database level). Zero
+`ALTER`/`DROP`/`UPDATE`/`DELETE` statements in either file; neither
+touches any existing table.
+
+**Applied in order, via `wrangler d1 execute --remote --file=`**:
+- `0045_trips.sql`: 5 queries executed, 8 rows read, 9 rows written
+  (schema metadata only -- no data rows). `num_tables` 57 -> 58.
+- `0046_trip_financial_attributions.sql`: 4 queries executed, 7 rows
+  read, 6 rows written (schema metadata only). `num_tables` 58 -> 59.
+
+**Post-migration verification, all PASS**:
+- **New tables and indexes exist**: confirmed via direct
+  `sqlite_master` query -- `trips` (+ `trips_owner_status_idx` and its
+  auto-unique index), `trip_prospects` (+
+  `trip_prospects_trip_donor_idx`, `trip_prospects_donor_idx`, and its
+  auto-unique index), `trip_financial_attributions` (+
+  `trip_financial_attributions_active_giving_activity_uidx`,
+  `_donor_idx`, `_trip_idx`, and its auto-unique index) -- all present.
+- **Existing financial tables/data unchanged**: `PRAGMA
+  foreign_key_check` returned zero rows (no FK violations anywhere in
+  the database). The full financial baseline from Phase 1 Step 7 was
+  re-queried immediately after both migrations and is **byte-identical
+  in every field**: 254 donors, 5,464 giving activities, 31 open
+  pledges, $280,767.00 committed, $3,849,770.65 paid, $175,536.15
+  balance, 45 active payment plans, 203 interactions.
+- **New tables confirmed empty**: `trips`/`trip_prospects`/
+  `trip_financial_attributions` all return 0 rows -- no Staging test
+  data (Chicago trip, Amster/Magence/Grinblatt/Ramras attributions) was
+  ever transferred to Production.
+- **Transient, expected, fully-disclosed side effect**: because the
+  *old* Worker code (`54be993`) was still running at this point, its
+  packaged baseline manifest did not yet know about the 3 new tables.
+  Production's own `/settings` Data Health panel correctly flagged this
+  as "Needs attention" -- "Production <-> baseline schema: 9
+  differences" (the 3 new tables + their 6 named indexes, nothing
+  else) and "Production launch readiness: Blocked by 1 check" (the
+  same single root cause), with **"BUSINESS DATA AT RISK: No"**
+  explicitly stated by the check itself. This is exactly the transient
+  condition predicted in the prior preflight entry (`167bd2b`, Section
+  4) for this exact migrate-then-deploy ordering, and it resolved
+  completely once the new Worker code was deployed in Phase 3 (see
+  below). Every other Data Health item (duplicate JL codes, orphaned
+  gifts/interactions/reminders/pledge payments, broken merge redirects,
+  giving-total reconciliation, unmatched JL codes) remained ✓ clean
+  throughout.
+
+Neither migration failed or produced an unexpected result, so the
+deployment proceeded to Phase 3 per the owner's authorization.
+
+### Phase 3 -- Production Worker deployment
+
+Deployed via the established `pnpm run deploy:production-independent`
+script (same procedure used for every prior Production deploy this
+session). Immediately before deploying: working tree confirmed clean,
+HEAD confirmed `b8155fd` (no drift from Phase 1's check).
+
+- **Deployed Git commit**: `b8155fd` (docs-only on top of the
+  Staging-verified `bfa19e0`/`167bd2b` application code).
+- **New Production Worker version**: **`c5f5279b-1f55-4921-b134-dcd5bc547e35`**.
+- **Deployment timestamp**: **2026-10-15T18:17:20.891Z**.
+- **Deployment output**: `verify-build-manifest` confirmed the `dist/`
+  build was 0 seconds old at deploy time (guaranteeing no stale-build
+  risk); 24 new/modified static assets uploaded (47 already present);
+  Total Upload 3,727.75 KiB / gzip 675.07 KiB; Worker Startup Time 30
+  ms. Bindings confirmed in the deploy output itself: `env.DB
+  (fundraising-os-production-db)`, `env.STATUS_WORKER (fundraising-os-
+  production-backup-status)`, `env.APP_BASE_URL
+  ("https://shimmydonors.org")`, among others -- all Production-scoped,
+  none pointing at Staging. Cron schedule printed as `0 * * * *` --
+  unchanged. No branch merge was performed; this was a direct `wrangler
+  deploy` of the existing feature branch's code.
+- **Build-content confirmation**: zero occurrences of `test-send`
+  anywhere in the compiled `dist/` bundle; `TravelPlanningExperience-
+  CVsCZa3B.js` (the Trip Planning feature's own client bundle) present
+  and uploaded.
+
+### Phase 4 -- Immediate Production verification (read-only; all PASS)
+
+**Financial data integrity -- PASS**: the full baseline from Phase 1
+Step 7 was re-queried immediately after the Worker deploy and remains
+**byte-identical**: 254 donors, 5,464 giving activities, 31 open
+pledges, $280,767.00 committed, $3,849,770.65 paid, $175,536.15
+balance, 45 active payment plans, 203 interactions. `trips`/
+`trip_prospects`/`trip_financial_attributions` remain at 0 rows each --
+no existing record was created, edited, deleted, or reclassified, and
+no Staging test data was transferred.
+
+**Payment-Plan Progress -- PASS**: Mr. & Mrs. Yaakov Yisroel Klein's
+donor profile (via in-app navigation) shows `OVERDUE -- 5 days past the
+grace period, $400 expected, $1,200 remaining` -- exact match to the
+live Daily Agenda entry for Klein (below) and to the figure verified in
+every prior round. Grace-period labeling (the original fix) confirmed
+correct in Production.
+
+**Trip Planning and Financial Dashboard -- PASS**: `/travel-planning`
+loads without errors, correctly showing the empty state ("No trips
+yet," All/Planning/Active/Completed/Cancelled all 0) -- matching the
+Production database's real `trips` count of 0 exactly, confirming the
+new tables are reachable with zero runtime errors. Per the
+authorization's explicit instruction, **no trip, prospect, donation,
+pledge, or financial attribution was created on Production merely for
+testing** -- the per-trip Financial Dashboard's own empty-state
+rendering (identical code) was already verified extensively on Staging
+against the real Chicago trip in the prior round (`b8155fd`'s
+predecessor entry). Browser console checked clean (no errors) on this
+page after a fresh load.
+
+**Daily Agenda -- PASS**: "Today's Agenda" shows exactly 2 items both
+before and after the deployment, unchanged: Mr. & Mrs. Jonathan Spetner
+(pledge renewal, $1,000.00 balance remaining) and Mr. & Mrs. Yaakov
+Yisroel Klein ($400.00 expected, 5 days behind) -- matching Klein's own
+donor-profile figures exactly. No new or unexpected stale-pledge or
+overdue-payment warning was introduced by the new Trip Planning tables
+or code.
+
+**Production email scheduling -- PASS**: cron trigger printed in the
+Phase 3 deploy output as `0 * * * *`, identical to the pre-deployment
+value confirmed in Phase 1 Step 6 -- unchanged. `worker/index.ts` (the
+single `scheduled()` entrypoint shared by the agenda-send and backup-
+alert logic) has zero diff since the last-verified Staging build.
+Today's `agenda_send_log` row count re-checked immediately after
+deployment: still exactly **1** (the normal daily send, from before
+this deployment began) -- no extra send was triggered. No hourly cron
+boundary had elapsed between the 18:17:20Z deploy and this check
+(18:26Z), so idempotency protection was not freshly exercised by this
+deployment, but the unchanged cron/handler configuration means its
+behavior is unaffected.
+
+**Backups and health -- PASS**: a fresh "Run health check" after the
+Worker deploy returned **"Health check complete. Everything is
+healthy."** -- the "Needs attention" state from immediately after
+Phase 2 (described above) is now fully resolved: "Production ↔
+baseline schema: **Match**" (0 differences, down from 9) and
+"Production launch readiness: **Ready**" (down from Blocked), both
+confirming the new Worker code's updated baseline now correctly
+recognizes the 3 new tables. "Deployed version: 0.1.0 · **b8155fd**" --
+confirms the exact intended commit is what's actually running.
+Automated backup and monthly restore-test entries remain unchanged and
+current.
+
+**One tooling note, not an application defect**: the browser-automation
+`navigate` tool's direct full-page navigation to `/donors/:id` and
+`/travel-planning` intermittently landed on `/` instead of the
+requested path during this round. Investigated and ruled out as a
+server-side issue: a raw `fetch()` to both exact paths from within the
+authenticated page returned `200` with the correct, complete HTML
+(donor profile containing "Klein"; Travel Planning page content) and no
+redirect `Location` header. The same pages loaded correctly every time
+via in-app client-side navigation (clicking through from `/donors` or
+the home page's Quick Actions). This is a browser-automation-tool
+artifact, not a Production regression, and did not block any check in
+this report.
+
+### Phase 5 -- Failure handling and rollback
+
+**Not needed.** No regression, error, or financial-data discrepancy
+was detected at any point in Phase 2, 3, or 4. The Worker was not
+rolled back.
+
+### Pre-deployment Production Worker version, preserved as rollback target
+
+**`8cc87988-32de-43b3-8dcd-c1a660176850`** (created
+2026-10-15T14:58:55.030Z, source commit `54be993`) -- the version
+immediately prior to this deployment. Rollback command if ever needed
+for a *future* regression: `wrangler rollback
+8cc87988-32de-43b3-8dcd-c1a660176850 --config
+wrangler.production.jsonc`. Per the authorization's explicit
+instruction, a rollback must restore only the Worker and must never
+drop the now-additive `trips`/`trip_prospects`/
+`trip_financial_attributions` tables or reverse the migrations
+destructively.
+
+### Final Production deployment status: SUCCESSFUL
+
+Financial Dashboard, Payment-Plan Progress Dashboard, and Trip Planning
+functionality are now live on Production
+(`c5f5279b-1f55-4921-b134-dcd5bc547e35`, commit `b8155fd`). Every
+Phase 1 safety check, both migrations, the Worker deployment, and every
+Phase 4 verification area passed with zero defects. Financial data
+(donor, giving-activity, pledge, payment, and payment-plan figures) is
+confirmed byte-identical before and after the deployment. No Staging
+test data reached Production. No branch was merged, no extra email was
+sent, and no cron or other infrastructure configuration was changed
+beyond the two authorized, purely-additive migrations.
+
+**What is now live**: real donors and fundraisers can use Trip
+Planning (`/travel-planning`) to plan fundraising trips, track
+prospects, and see each trip's live Fundraising Results against its
+own goal -- reading real `giving_activities` figures through the new
+attribution layer, never a separate snapshot. The Payment-Plan Progress
+grace-period fix and trip-attribution double-counting guard (verified
+in rounds `add23a8`/`bfa19e0`) are also now live for all donors, not
+just Staging's test set.
+
+**What remains to be monitored**: this is the first real use of Trip
+Planning on live Production data -- the owner should watch for any
+issue the first time a real trip, prospect, or financial attribution is
+created for actual fundraising travel (not covered by this round's
+read-only verification, by design -- the authorization explicitly
+prohibited creating test data on Production). Payment reconciliation
+(scenario 5, from round `add23a8`) remains unverified by live UI, by
+the owner's own prior explicit choice. The `drizzle/0046_...sql` header
+comment's stale "STAGING ONLY" note (flagged in Phase 1) is a leftover
+documentation discrepancy worth a follow-up correction, with no effect
+on anything that actually ran.
