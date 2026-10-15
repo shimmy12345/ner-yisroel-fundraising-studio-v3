@@ -7,27 +7,32 @@ import { STAGING_RESET_TABLE_ORDER } from "./staging-reset.ts";
 // requirement is the opposite: every parent row must exist before any
 // child row whose foreign key references it.
 //
-// Five tables are prepended as true roots -- nothing in the schema has a
-// foreign key pointing at any of them (except backup_alert_state and
-// agenda_send_log, which only depend on users -- already listed before
-// them here), so their relative order otherwise never matters, but all
-// of them must be inserted before anything that could reference them:
-//   - "users" and "onboarding_preferences" are two of the four
+// Six tables are prepended as true roots -- nothing in the schema has a
+// foreign key pointing at any of them (except backup_alert_state,
+// agenda_send_log, and agenda_manual_test_send_log, which only depend on
+// users -- already listed before them here), so their relative order
+// otherwise never matters, but all of them must be inserted before
+// anything that could reference them:
+//   - "users" and "onboarding_preferences" are two of the five
 //     ACCOUNT_CONFIGURATION_TABLES (lib/data-health/production-baseline.ts).
 //     STAGING_RESET_TABLE_ORDER never includes them -- a staging reset
 //     deliberately preserves the owner's account rows instead of deleting
 //     them -- so they are not part of its reversed order either.
 //   - "backup_alert_state" (added by Backup Scheduling Reliability
 //     Stage 3 on feature/independent-cloudflare-sandbox, ported here
-//     2026-09-01) and "agenda_send_log" (added by the October 14 2026
+//     2026-09-01), "agenda_send_log" (added by the October 14 2026
 //     Email Incident fix on feature/independent-cloudflare-sandbox,
-//     ported here 2026-10-14) are the other two ACCOUNT_CONFIGURATION_
-//     TABLEs -- see the D1 Monthly Restore Verification Repair entries
-//     and the October 14 2026 Email Incident entry in docs/AI-HANDOFF.md.
-//     Both are also excluded from STAGING_RESET_TABLE_ORDER for the same
-//     reason. Each has a `user_id` column that IS a real foreign key to
-//     users.id, so both are listed here AFTER "users" specifically (not
-//     merely alongside it as a true zero-dependency root like
+//     ported here 2026-10-14), and "agenda_manual_test_send_log" (added
+//     by that same incident's temporary Gmail OAuth verification
+//     mechanism, migration 0044, on feature/independent-cloudflare-
+//     sandbox, ported here 2026-10-15) are the other three ACCOUNT_
+//     CONFIGURATION_TABLEs -- see the D1 Monthly Restore Verification
+//     Repair entries and the October 14 2026 Email Incident entry in
+//     docs/AI-HANDOFF.md. All three are also excluded from
+//     STAGING_RESET_TABLE_ORDER for the same reason. Each has a
+//     `user_id` column that IS a real foreign key to users.id, so all
+//     three are listed here AFTER "users" specifically (not merely
+//     alongside it as a true zero-dependency root like
 //     production_schema_baseline below).
 //   - "production_schema_baseline" is the schema-verification marker
 //     table. Nothing references it and it references nothing.
@@ -62,6 +67,7 @@ export const D1_RESTORE_DATA_ORDER: readonly string[] = [
   "users",
   "backup_alert_state",
   "agenda_send_log",
+  "agenda_manual_test_send_log",
   "onboarding_preferences",
   ...[...STAGING_RESET_TABLE_ORDER].reverse(),
 ];

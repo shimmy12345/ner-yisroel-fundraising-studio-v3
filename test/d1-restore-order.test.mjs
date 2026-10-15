@@ -41,16 +41,18 @@ const FIXTURE = [
   'INSERT INTO "sqlite_stat1" ("tbl","idx","stat") VALUES(\'donors\',\'donors_owner_idx\',\'1 1\');',
 ].join('\n') + '\n';
 
-test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the five true roots, with no duplicates', () => {
+test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the six true roots, with no duplicates', () => {
   // backup_alert_state added 2026-09-01 (D1 Monthly Restore Verification
   // Repair, porting Backup Scheduling Reliability Stage 3's addition from
-  // feature/independent-cloudflare-sandbox) and agenda_send_log added
+  // feature/independent-cloudflare-sandbox), agenda_send_log added
   // 2026-10-14 (porting the October 14 2026 Email Incident fix's
-  // addition from feature/independent-cloudflare-sandbox) are the fourth
-  // and fifth ACCOUNT_CONFIGURATION_TABLE roots, neither part of
-  // STAGING_RESET_TABLE_ORDER's reversal (same reasoning as users/
-  // onboarding_preferences).
-  const roots = ['production_schema_baseline', 'users', 'backup_alert_state', 'agenda_send_log', 'onboarding_preferences'];
+  // addition from feature/independent-cloudflare-sandbox), and
+  // agenda_manual_test_send_log added 2026-10-15 (porting that same
+  // incident's temporary Gmail OAuth verification mechanism, migration
+  // 0044) are the fourth, fifth, and sixth ACCOUNT_CONFIGURATION_TABLE
+  // roots, none part of STAGING_RESET_TABLE_ORDER's reversal (same
+  // reasoning as users/onboarding_preferences).
+  const roots = ['production_schema_baseline', 'users', 'backup_alert_state', 'agenda_send_log', 'agenda_manual_test_send_log', 'onboarding_preferences'];
   for (const root of roots) assert.ok(D1_RESTORE_DATA_ORDER.includes(root), `missing root table "${root}"`);
   assert.equal(new Set(D1_RESTORE_DATA_ORDER).size, D1_RESTORE_DATA_ORDER.length, 'no table should appear twice');
   // Every real fundraising table (from the same authoritative source the
@@ -64,7 +66,7 @@ test('D1_RESTORE_DATA_ORDER covers every fundraising table plus the five true ro
   // STAGING_RESET_TABLE_ORDER exactly -- proves insertion order really is
   // the deletion order run backwards, not a separately hand-maintained
   // list that could quietly drift from it.
-  const tail = D1_RESTORE_DATA_ORDER.slice(5);
+  const tail = D1_RESTORE_DATA_ORDER.slice(6);
   assert.deepEqual([...tail].reverse(), [...STAGING_RESET_TABLE_ORDER]);
 });
 
@@ -78,6 +80,98 @@ test('agenda_send_log is positioned after "users", its own real foreign key targ
   const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
   const agendaSendLogIndex = D1_RESTORE_DATA_ORDER.indexOf('agenda_send_log');
   assert.ok(usersIndex >= 0 && agendaSendLogIndex > usersIndex, 'agenda_send_log must be inserted after users');
+});
+
+// agenda_manual_test_send_log (temporary Gmail OAuth verification
+// mechanism, migration 0044 on feature/independent-cloudflare-sandbox,
+// ported here 2026-10-15) -- its only foreign key is user_id ->
+// users.id, confirmed directly from migration 0044's own CREATE TABLE
+// statement, same shape as backup_alert_state/agenda_send_log above.
+test('agenda_manual_test_send_log is positioned after "users", its own real foreign key target', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const testSendLogIndex = D1_RESTORE_DATA_ORDER.indexOf('agenda_manual_test_send_log');
+  assert.ok(usersIndex >= 0 && testSendLogIndex > usersIndex, 'agenda_manual_test_send_log must be inserted after users');
+});
+
+// Trip-Based Meeting Planning (migration 0045 on feature/independent-
+// cloudflare-sandbox, ported here 2026-10-15) and the Trip Fundraising
+// Results Dashboard (migration 0046, same branch, ported here the same
+// day) -- three real fundraising/relationship tables, confirmed directly
+// from each migration's own CREATE TABLE statement, not inferred from
+// names:
+//   - trips: references only users.id (owner_user_id).
+//   - trip_prospects: references trips.id, donors.id, AND (nullable)
+//     interactions.id (linked_interaction_id).
+//   - trip_financial_attributions: references trips.id, donors.id,
+//     users.id, AND giving_activities.id.
+// This sync could not be handled by the automated prepare-sync job (it
+// refuses any migration introducing a new table) and was prepared by
+// hand, following the same narrow pattern as every prior new-table sync.
+test('trips is present in D1_RESTORE_DATA_ORDER, positioned after "users" (its only real foreign key target)', () => {
+  const usersIndex = D1_RESTORE_DATA_ORDER.indexOf('users');
+  const tripsIndex = D1_RESTORE_DATA_ORDER.indexOf('trips');
+  assert.ok(tripsIndex >= 0, 'trips must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(usersIndex >= 0 && tripsIndex > usersIndex, 'trips must be inserted after users (trips.owner_user_id references users.id)');
+});
+
+test('trip_prospects is present in D1_RESTORE_DATA_ORDER, positioned after "trips" AND "donors" (both real foreign key targets)', () => {
+  const tripsIndex = D1_RESTORE_DATA_ORDER.indexOf('trips');
+  const donorsIndex = D1_RESTORE_DATA_ORDER.indexOf('donors');
+  const prospectsIndex = D1_RESTORE_DATA_ORDER.indexOf('trip_prospects');
+  assert.ok(prospectsIndex >= 0, 'trip_prospects must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(tripsIndex >= 0 && prospectsIndex > tripsIndex, 'trip_prospects must be inserted after trips (trip_prospects.trip_id references trips.id)');
+  assert.ok(donorsIndex >= 0 && prospectsIndex > donorsIndex, 'trip_prospects must be inserted after donors (trip_prospects.donor_id references donors.id)');
+});
+
+test('trip_financial_attributions is present in D1_RESTORE_DATA_ORDER, positioned after "trips", "donors", AND "giving_activities" (all three real foreign key targets)', () => {
+  const tripsIndex = D1_RESTORE_DATA_ORDER.indexOf('trips');
+  const donorsIndex = D1_RESTORE_DATA_ORDER.indexOf('donors');
+  const givingActivitiesIndex = D1_RESTORE_DATA_ORDER.indexOf('giving_activities');
+  const attributionsIndex = D1_RESTORE_DATA_ORDER.indexOf('trip_financial_attributions');
+  assert.ok(attributionsIndex >= 0, 'trip_financial_attributions must be present in D1_RESTORE_DATA_ORDER');
+  assert.ok(tripsIndex >= 0 && attributionsIndex > tripsIndex, 'trip_financial_attributions must be inserted after trips (its trip_id references trips.id)');
+  assert.ok(donorsIndex >= 0 && attributionsIndex > donorsIndex, 'trip_financial_attributions must be inserted after donors (its donor_id references donors.id)');
+  assert.ok(givingActivitiesIndex >= 0 && attributionsIndex > givingActivitiesIndex, 'trip_financial_attributions must be inserted after giving_activities (its giving_activity_id references giving_activities.id)');
+});
+
+test('planD1Restore accepts real INSERTs for trips, trip_prospects, and trip_financial_attributions, ordering each after all of its real foreign key targets', () => {
+  const exported = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE `trip_financial_attributions` (`id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL);',
+    'CREATE TABLE `trip_prospects` (`id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL);',
+    'CREATE TABLE `trips` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL);',
+    'CREATE TABLE `giving_activities` (`id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL);',
+    'CREATE TABLE `donors` (`id` text PRIMARY KEY NOT NULL);',
+    'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);',
+    // Deliberately exported in the "wrong" (pre-dependency-order)
+    // sequence, matching how `wrangler d1 export` actually orders real
+    // tables (by sqlite_master position, not by FK dependency).
+    'INSERT INTO "trip_financial_attributions" ("id","user_id","trip_id","donor_id","giving_activity_id") VALUES(\'attr-1\',\'user-1\',\'trip-1\',\'donor-1\',\'ga-1\');',
+    'INSERT INTO "trip_prospects" ("id","trip_id","donor_id") VALUES(\'prospect-1\',\'trip-1\',\'donor-1\');',
+    'INSERT INTO "trips" ("id","owner_user_id") VALUES(\'trip-1\',\'user-1\');',
+    'INSERT INTO "giving_activities" ("id","owner_user_id") VALUES(\'ga-1\',\'user-1\');',
+    'INSERT INTO "donors" ("id") VALUES(\'donor-1\');',
+    'INSERT INTO "users" ("id") VALUES(\'user-1\');',
+  ].join('\n') + '\n';
+  assert.doesNotThrow(() => planD1Restore(exported), 'planD1Restore must accept INSERTs for all three new tables, not reject any as an unrecognized table');
+  const plan = planD1Restore(exported);
+  const tableOrder = plan.steps.map((step) => step.table);
+  assert.ok(tableOrder.indexOf('users') < tableOrder.indexOf('trips'), 'users must be restored before trips');
+  assert.ok(tableOrder.indexOf('trips') < tableOrder.indexOf('trip_prospects'), 'trips must be restored before trip_prospects');
+  assert.ok(tableOrder.indexOf('donors') < tableOrder.indexOf('trip_prospects'), 'donors must be restored before trip_prospects');
+  assert.ok(tableOrder.indexOf('trips') < tableOrder.indexOf('trip_financial_attributions'), 'trips must be restored before trip_financial_attributions');
+  assert.ok(tableOrder.indexOf('donors') < tableOrder.indexOf('trip_financial_attributions'), 'donors must be restored before trip_financial_attributions');
+  assert.ok(tableOrder.indexOf('giving_activities') < tableOrder.indexOf('trip_financial_attributions'), 'giving_activities must be restored before trip_financial_attributions');
+  const reordered = reorderD1ExportForRestore(exported);
+  const usersAt = reordered.indexOf('INSERT INTO "users"');
+  const donorsAt = reordered.indexOf('INSERT INTO "donors"');
+  const givingActivitiesAt = reordered.indexOf('INSERT INTO "giving_activities"');
+  const tripsAt = reordered.indexOf('INSERT INTO "trips"');
+  const prospectsAt = reordered.indexOf('INSERT INTO "trip_prospects"');
+  const attributionsAt = reordered.indexOf('INSERT INTO "trip_financial_attributions"');
+  assert.ok(usersAt < tripsAt, 'users must precede trips in the reordered output');
+  assert.ok(tripsAt < prospectsAt && donorsAt < prospectsAt, 'trips and donors must both precede trip_prospects in the reordered output');
+  assert.ok(tripsAt < attributionsAt && donorsAt < attributionsAt && givingActivitiesAt < attributionsAt, 'trips, donors, and giving_activities must all precede trip_financial_attributions in the reordered output');
 });
 
 // donor_source_attributions (Giving Import Third-Party Source Attribution,

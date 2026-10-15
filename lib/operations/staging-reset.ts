@@ -65,6 +65,27 @@ export const STAGING_RESET_TABLE_ORDER = [
   "gifts",
   "recommendations",
   "relationship_queue_dismissals",
+  // trip_prospects references trip_id (trips.id) and donor_id (donors.id)
+  // -- and optionally interactions.id via linked_interaction_id -- so it
+  // is deleted before all three, further down. trips references only
+  // users.id (kept), so it has no ordering requirement of its own beyond
+  // following trip_prospects (its own child, deleted here immediately
+  // before it, same locality convention as every other parent/child pair
+  // in this list). Added by migration 0045 (Trip-Based Meeting Planning)
+  // on feature/independent-cloudflare-sandbox, ported here 2026-10-15 --
+  // see docs/AI-HANDOFF.md.
+  //
+  // trip_financial_attributions references trip_id (trips.id), donor_id
+  // (donors.id), and giving_activity_id (giving_activities.id) -- all
+  // three are deleted later in this list (trips immediately below;
+  // giving_activities/donors much further down) -- so it must be deleted
+  // before all of them, hence immediately before trip_prospects here.
+  // Added by migration 0046 (Trip Fundraising Results Dashboard) on
+  // feature/independent-cloudflare-sandbox, ported here 2026-10-15 -- see
+  // docs/AI-HANDOFF.md.
+  "trip_financial_attributions",
+  "trip_prospects",
+  "trips",
   // yahrtzeit_changes references yahrtzeit_id (not FK-enforced, so a
   // deletion's audit row can outlive it), so it's deleted first.
   "yahrtzeit_changes",
