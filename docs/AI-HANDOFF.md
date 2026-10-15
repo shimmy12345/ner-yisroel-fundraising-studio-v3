@@ -43228,3 +43228,210 @@ as the honest boundary of what this round covered -- not a blocker
 found, but not claimed as covered either.
 
 **No Production change of any kind was made or proposed this round.**
+
+## Financial Dashboard -- Remaining Edge-Case Verification (2026-10-15) -- PASS, ZERO DEFECTS FOUND
+
+Closes the specific gaps the prior round (`add23a8`) disclosed as
+untested, without repeating the 10 already-passed payment-plan status
+tests. **Method distinguished explicitly, per the task's own
+requirement**: sections 1a-1d below are **authenticated UI testing**
+(the owner's own already-signed-in Chrome session, real clicks/DOM
+state); section 1 scenario 4 is **direct API testing** (`fetch()`
+executed in that same authenticated page's own JS context, bypassing
+the UI picker entirely, hitting the raw `POST .../attributions` route);
+section 2 is **authenticated UI + independently-computed expected
+values** (the real `evaluatePaymentPlan` engine run directly against
+data read fresh from Staging D1, never the UI's own numbers trusted
+circularly). Nothing here is a code-level/unit-test claim.
+
+### Authorization and original state, recorded before any write
+
+The owner authorized, specifically and in writing, before any write:
+(A) attributing Mr. & Mrs. Elan Magence's existing `completed_gift`
+($600/$600/$0), (B) attributing Mr. Elie Grinblatt's existing
+`open_pledge` ($500/$0/$500), (C) adding Rabbi & Mrs. Shimmy Ramras as a
+NEW Chicago trip prospect (confirmed via read-only query he was not
+already one) and attributing BOTH of his existing `partially_paid_pledge`
+records ($3,600/$2,400/$1,200 and $12,000/$11,000/$1,000). Scenario 5
+(payment reconciliation, which would have required modifying a real
+pledge/payment figure rather than just a link row) was explicitly
+**declined** by the owner and was not performed.
+
+Original state, confirmed read-only immediately before any write:
+Chicago trip (`8b045509-...`) had 0 active attributions and 45
+prospects; Ramras was confirmed NOT a prospect; all four giving-activity
+records' committed/paid/balance figures matched exactly what was
+presented in the authorization request (re-queried fresh, not assumed
+from the earlier discovery query).
+
+### 1. Trip Fundraising Results -- 5 scenarios
+
+**1a. Completed donation (authenticated UI).** Associated Magence's
+$600 completed gift via the real "Associate an existing donation or
+pledge" picker.
+
+| Metric | Expected | Actual | Result |
+|---|---|---|---|
+| New pledges secured | $0, 0 pledges | **$0, 0 pledges** | PASS |
+| New donations secured | $600, 1 donation | **$600, 1 donation** | PASS |
+| Cash collected | $600 | **$600** | PASS |
+| Outstanding pledge balance | $0 | **$0** | PASS |
+
+Confirms a completed gift contributes to cash collected/raised/goal
+progress and creates **zero** outstanding pledge balance, exactly as
+required.
+
+**1b. Open pledge, unpaid (authenticated UI).** Associated Grinblatt's
+$500 open pledge ($0 paid) on top of 1a.
+
+| Metric | Expected | Actual | Result |
+|---|---|---|---|
+| New pledges secured | $500, 1 pledge | **$500, 1 pledge** | PASS |
+| New donations secured | $600, 1 donation (unchanged) | **$600, 1 donation** | PASS |
+| Cash collected | $600 (**unchanged** -- the new pledge has $0 paid) | **$600** | PASS |
+| Outstanding pledge balance | $500 | **$500** | PASS |
+
+Confirms an unpaid pledge increases pledges-secured and outstanding
+balance while leaving cash collected **completely untouched** -- the
+exact assertion requested.
+
+**1c. Multiple pledges, same donor (authenticated UI).** Added Ramras
+as a prospect, then associated both of his real pledges on top of 1a+1b.
+
+| Metric | Expected (independently summed from all 4 real records) | Actual | Result |
+|---|---|---|---|
+| New pledges secured | $500+$3,600+$12,000 = $16,100, 3 pledges | **$16,100, 3 pledges** | PASS |
+| New donations secured | $600, 1 donation | **$600, 1 donation** | PASS |
+| Cash collected | $600+$0+$2,400+$11,000 = $14,000 | **$14,000** | PASS |
+| Outstanding pledge balance | $500+$1,200+$1,000 = $2,700 | **$2,700** | PASS |
+| Total raised | $16,700 | **$16,700 raised of $75,000 goal** | PASS |
+| Remaining to goal | $75,000-$16,700 = $58,300 | **$58,300 remaining to goal** | PASS |
+| % of goal | $16,700/$75,000 = 22.3% | **22%** (displayed, rounded) | PASS |
+
+Every figure matched exactly. Ramras's two pledges and Grinblatt's
+pledge are summed independently with zero cross-contamination or
+double-counting across donors or across a single donor's own multiple
+records.
+
+**1d. Duplicate prevention, via direct API (not the UI).** With
+Magence's gift already attributed from 1a, executed a raw
+`fetch('/api/trips/8b045509-.../prospects/ddef470c-.../attributions',
+{method:'POST', body: JSON.stringify({action:'associate_existing',
+givingActivityId:'7d308720-...'})})` in the authenticated page's own JS
+context -- bypassing the "Associate existing" picker's own client-side
+filtering entirely, hitting the server route directly.
+
+**Result: `409 {"error":"This donation or pledge is already attributed
+to a trip. Remove the existing attribution first."}`** -- confirmed via
+a fresh read-only query that the active-attribution count stayed at
+**4** (not 5) after this attempt, i.e. the rejected request wrote
+nothing. This is a genuine server-side rejection, independent of
+whatever the UI picker happens to offer -- **PASS**.
+
+**1e. Payment reconciliation -- explicitly declined, not performed.**
+The owner did not authorize modifying a real pledge/payment figure to
+observe a live update. **Remains unverified by live UI** -- the
+underlying "every figure is read live from `giving_activities`, never
+snapshotted" design is unchanged from its own original implementation
+and is covered by existing unit tests
+(`tests/trip-financial-attribution.test.mjs`), but this specific
+end-to-end "payment arrives, totals update" path was not re-proven live
+this round, by explicit choice.
+
+### Cleanup, verified exactly as the owner's own instructions required
+
+Attributions removed first (via the real "Remove" buttons, one at a
+time, each confirmed), THEN the Ramras prospect removed last:
+- **UI reverted to the exact original empty state**: "$0 raised of
+  $75,000 goal," 0 pledges, 0 donations, $0 cash collected, $0
+  outstanding -- **PASS**.
+- **Audit history preserved, inactive status confirmed**: read-only
+  query of `trip_financial_attributions` shows all 4 new rows (plus the
+  1 pre-existing historical row from the prior round's own test) with
+  both `created_at` AND `removed_at` set -- soft-deleted, never
+  hard-deleted, 0 active rows remain. **PASS**.
+- **All four underlying financial records confirmed byte-identical to
+  their documented original state**: Magence ($60000/$60000/$0 cents),
+  Grinblatt ($50000/$0/$50000), Ramras pledge 1 ($360000/$240000/$120000),
+  Ramras pledge 2 ($1200000/$1100000/$100000) -- every figure exactly
+  matches what was recorded before any write. **PASS**.
+- **Ramras prospect removal confirmed**: `trip_prospects` count back to
+  **45** (the original count), his specific row confirmed absent via
+  direct query -- this table is a real (hard) delete by design, unlike
+  the financial-attribution link table, and his own donor record and
+  both pledges are confirmed completely unaffected by either adding or
+  removing him as a prospect.
+
+### 2. Payment-Plan Progress -- every plan for every multi-plan donor, independently verified
+
+The prior round verified only the FIRST of two plans for Singer and
+Wisotsky, disclosing the second as unverified. This round identified
+**all four** donors on Staging with 2+ active payment plans (via
+`pledge_payment_plans` directly, not assumption) and independently
+computed the expected status for **all 8 plans** by calling the real
+`evaluatePaymentPlan`/`derivePaymentPlanDisplayStatus` functions against
+fresh D1 data, then compared each to the live, authenticated donor page.
+
+| Donor | Plan (committed/paid/balance) | Next expected | Independently computed expected status | Actual UI status | Result |
+|---|---|---|---|---|---|
+| Rabbi & Mrs. Shimmy Ramras | $3,600 / $2,400 / $1,200 | Oct 17 (2 days out) | Upcoming Payment | **Upcoming Payment** | PASS |
+| Rabbi & Mrs. Shimmy Ramras | $12,000 / $11,000 / $1,000 | Nov 4 (20 days out) | On Track | **On Track** | PASS |
+| Rabbi & Mrs. Max Singer | $1,200 / $1,000 / $200 | Oct 10 (5 days overdue, in grace) | Payment Due | **Payment Due** | PASS |
+| Rabbi & Mrs. Max Singer | $1,000 / $700 / $300 | Oct 23 (8 days out) | Upcoming Payment | **Upcoming Payment** | PASS |
+| Mr. & Mrs. Paul Z. Goldstein | $5,000 / $2,916.69 / $2,083.31 | Oct 16 (1 day out) | Upcoming Payment | **Upcoming Payment** | PASS |
+| Mr. & Mrs. Paul Z. Goldstein | $4,680 / $4,320 / $360 | Nov 3 (19 days out) | On Track | **On Track** | PASS |
+| Mr. & Mrs. Ezra Wisotsky | $1,000 / $850 / $150 | Oct 9 (6 days overdue, in grace) | Payment Due | **Payment Due** | PASS |
+| Mr. & Mrs. Ezra Wisotsky | $1,000 / $0 / $1,000 | Dec 10 (56 days out) | On Track | **On Track** | PASS |
+
+All 8/8 plans matched exactly, including Mr. & Mrs. Paul Z. Goldstein --
+a donor not examined in any prior round this session.
+
+**Cross-checked against the Daily Agenda** (`/api/agenda/preview`,
+read-only): confirmed none of Ramras, Singer, Wisotsky, or Goldstein
+appear anywhere in today's agenda -- correct, since none of their 8
+plans is genuinely overdue (all are within grace, upcoming, or on
+track), consistent with `evaluateRecurringPaymentAlert`'s own
+`isLate`-gated firing condition.
+
+### 3. Root cause / system-wide correction
+
+**Not applicable -- zero defects found** across all 5 trip scenarios
+and all 8 independently-verified payment plans. No donor-specific
+workaround or system-wide correction is recommended.
+
+### 4. Safety confirmation
+
+- **Production/Staging isolation re-confirmed**: Staging deployment
+  unchanged (`cdda8c64-...`); Production deployment unchanged
+  (`8cc87988-...`); Production donor/giving-activity counts unchanged
+  (254/5,464) -- confirmed via fresh, read-only queries after this
+  round's Staging writes, proving they had zero effect on Production.
+- **No financial transaction was created, edited, applied, or deleted**
+  -- every write this round was either a reversible attribution
+  link-row (removed) or a reversible prospect-add (removed); the
+  rejected duplicate-attribution attempt (1d) wrote nothing at all.
+- **Scenario 5 was not performed** -- no real pledge or payment figure
+  was modified anywhere this round.
+
+### Final GO/NO-GO recommendation
+
+**GO for Production consideration**, on the full accumulated evidence
+across both this round and the prior one (`add23a8`): 10 payment-plan
+statuses + all 8 multi-plan-donor plans (18 independently-verified
+plans total, zero mismatches), both dashboards' core calculation logic
+(completed donations, unpaid pledges, multi-record aggregation,
+double-counting prevention at both the UI and API layers), and full
+cross-surface consistency against the Daily Agenda -- all verified live
+through the actual authenticated interface, all matching independently
+computed values exactly, zero defects found anywhere.
+
+**Narrow, honestly-disclosed exception, not a blocker**: payment
+reconciliation (scenario 5) remains unverified by live UI by the
+owner's own explicit choice, and the broader set of untested surface
+area disclosed in the prior round's entry (other attribution shapes,
+pending-record flows, screenshot-level visual confirmation) still
+applies unchanged.
+
+**No Production deployment, migration, or merge was performed or
+proposed this round. Awaiting the owner's explicit authorization for
+any Production action.**
