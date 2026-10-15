@@ -42124,3 +42124,241 @@ through the normal process.
   Noted again, not changed, per the task's own instruction to present
   (not silently implement) anything that touches repository-level
   security posture.
+
+## D1 restore/schema sync check -- Final Verification After PR #18 Merge (2026-10-15)
+
+PR #18 (`fix/d1-restore-sync-0044-0045-0046-metadata` -> `main`) was
+reviewed and merged by the owner -- confirmed directly via the public
+GitHub API (`GET /pulls/18`: `"merged": true`, `"merge_commit_sha":
+"600e46016f7ad4ea55871873c9888419eff20caa"`, `"merged_at":
+"2026-10-15T13:15:53Z"`). This entry is an independent, from-scratch
+re-verification against that real, now-merged state -- not a restatement
+of the prior entry's own claims.
+
+### 1. Synchronization verified
+
+- `git fetch origin main feature/independent-cloudflare-sandbox`:
+  `origin/main` advanced `4580eaf..600e460`, exactly the merge commit.
+- `node scripts/check-main-restore-sync.mjs` (default `MAIN_REF=origin/main`,
+  completely unmodified -- confirmed its last touching commit is still
+  `b929319`, from before this entire incident): **"No drift detected...
+  main's restore/baseline tracking is current."**
+- Independently re-read `main`'s own committed
+  `production-baseline/schema-manifest.json` directly (not inferred from
+  the check's summary): `sourceMigrations.length` is **47**, tail is
+  `[..., 0044_agenda_manual_test_send_log.sql, 0045_trips.sql,
+  0046_trip_financial_attributions.sql]`, and all four new tables
+  (`agenda_manual_test_send_log`, `trips`, `trip_prospects`,
+  `trip_financial_attributions`) are present in `ddlTopology`.
+- Independently re-derived `main`'s own `D1_RESTORE_DATA_ORDER` in a
+  throwaway script (extracting `main`'s real committed files the same
+  way `check-main-restore-sync.mjs` itself does) and checked each new
+  table's index directly: `agenda_manual_test_send_log` (idx 4) and
+  `trips` (idx 31) both after `users` (idx 1); `trip_prospects` (idx 32)
+  after both `trips` and `donors` (idx 6); `trip_financial_attributions`
+  (idx 33) after `trips`, `donors`, AND `giving_activities` (idx 8). No
+  duplicate entries in the 59-entry order.
+- `node scripts/prepare-main-restore-sync-patch.mjs` against the real
+  current `origin/main`: `{"safe": true, "alreadySynced": true}`.
+- **The checker itself was not modified to produce any of this** --
+  confirmed via `GET /pulls/18/files`: exactly 5 files changed
+  (`lib/data-health/production-baseline.ts`,
+  `lib/operations/d1-restore-order.ts`,
+  `lib/operations/staging-reset.ts`,
+  `production-baseline/schema-manifest.json`,
+  `test/d1-restore-order.test.mjs`) -- `lib/operations/restore-drift-guard.ts`
+  and `scripts/check-main-restore-sync.mjs` were untouched by this or
+  any prior round in this incident.
+
+### 2. Permanent prevention verified
+
+- `scripts/run-tests.mjs` confirmed (by direct code read) to still spawn
+  the unmodified `scripts/check-main-restore-sync.mjs` as a step after
+  the full test suite and fold a real failure into the command's own
+  exit code.
+- **Drift detection proven genuine, not a rubber stamp**, using the same
+  `MAIN_REF` override mechanism this automation's own author established
+  for exactly this purpose (no file was modified to run either check):
+  - `MAIN_REF=4580eaf node scripts/check-main-restore-sync.mjs` (main's
+    real pre-merge commit) -> reproduces the EXACT original failure
+    report (all four missing tables, six missing indexes, three missing
+    migrations) and exits 1.
+  - `MAIN_REF=4580eaf node scripts/run-tests.mjs` -> the full command
+    correctly exits 1, with `FAILED: scripts/check-main-restore-sync.mjs`
+    in its summary -- proving the `npm test` wiring itself (not just the
+    underlying script in isolation) propagates a real failure end to
+    end.
+  - Against the real, current `origin/main` (no override): both exit 0.
+  This is direct proof the safeguard distinguishes drift from no-drift;
+  it does not just always pass.
+- **Human review for new tables still required, unchanged**: confirmed
+  `lib/operations/restore-sync-generator.ts` was not among the 5 files
+  PR #18 touched, and `tests/restore-sync-generator.test.mjs` (which
+  includes a dedicated "brand-new table (refused)" scenario) passed
+  cleanly as part of the full suite below -- the refusal rule that
+  caused `prepare-sync` to correctly fail on migrations 0044/0045/0046
+  is untouched and still in force for the next one.
+- **Existing GitHub Actions safeguards confirmed unchanged and enabled**:
+  `git log --oneline -- .github/workflows/d1-restore-sync-check.yml`
+  shows its last touching commit is still `b929319` -- neither this
+  round nor the Phase 1/Phase 2 rounds modified it. `GET
+  /repos/.../actions/workflows` confirms "D1 restore/schema sync check"
+  is still listed `"state": "active"`, alongside all four other D1/R2
+  workflows, none disabled.
+- **Remaining gaps, stated plainly (none newly introduced by this
+  round -- carried over and re-confirmed, not hidden)**:
+  1. No GitHub Actions workflow runs `npm test`/`scripts/run-tests.mjs`
+     automatically for the canonical branch -- confirmed again this
+     round (`grep` across every `.github/workflows/*.yml` for `npm test`/
+     `pnpm test`/`run-tests.mjs` matches nothing but a doc comment). The
+     new local safeguard only has teeth if a session/developer actually
+     runs it before pushing -- the exact same class of dependency as the
+     original documented-but-unenforced rule, just now attached to a
+     command that is already mandatory for an unrelated reason.
+  2. `main` still has no branch protection and no required status
+     checks (re-confirmed, unchanged from the prior round's own note) --
+     nothing GitHub-enforced stops a PR from being merged, or a direct
+     push from landing, without the `check` job ever having run or
+     passed. This automation itself never pushes directly to `main`
+     (PR-only by construction), but that is a workflow convention, not a
+     platform rule, for every other actor.
+  3. The `check`/`prepare-sync` jobs are scoped (by `on: push/pull_request:
+     branches:`) to ONLY fire for events on
+     `feature/independent-cloudflare-sandbox` -- they never fire for a
+     push or PR targeting `main` itself (confirmed directly this round --
+     see Phase 3 below, neither PR #18's source commits nor its merge
+     commit triggered any check-run from this workflow). This is
+     intentional and correct (the check's whole job is "does main match
+     the feature branch," which only makes sense evaluated FROM the
+     feature branch) but is worth stating explicitly so a future session
+     does not expect a merge-into-main PR to show this workflow's status
+     at all.
+  4. A safe, auto-opened `prepare-sync` PR still depends on the owner
+     noticing and merging it in reasonable time -- nothing escalates or
+     re-alerts if one sits open and unmerged. Lower risk than the
+     new-table case (the PR link is always sitting right there in the
+     failing `check` job's own context), but not zero.
+  None of these are weakenings introduced by this round; all are
+  pre-existing, structural properties of the system being accurately
+  disclosed, consistent with the task's own instruction to identify
+  remaining gaps rather than claim a perfect close.
+
+### 3. Validation run
+
+- **Full local test suite** (`node scripts/run-tests.mjs`, on
+  `feature/independent-cloudflare-sandbox`, against the real, current,
+  now-synced `origin/main`): **199/199 test files passed**, PLUS the
+  migration-sync step now also reports **"No drift detected"** and the
+  whole command exits **0** -- the FIRST time this exact command has
+  gone fully green since the safeguard was added two rounds ago (it was
+  correctly red in the intervening round because `main` genuinely still
+  had the drift at that time).
+- **TypeScript**: `npx tsc --noEmit` -- clean, 0 errors.
+- **Targeted restore/schema tests**, run individually for direct
+  evidence beyond the aggregate tally: `tests/restore-sync-generator.test.mjs`,
+  `tests/restore-sync-branch-policy.test.mjs`,
+  `tests/restore-drift-guard.test.mjs`, `tests/staging-reset.test.mjs`
+  (this branch's own copies), `tests/verify-build-manifest.test.mjs`,
+  `tests/staging-write-guard.test.mjs` -- all pass individually.
+- **Lint**: `npm run lint` -- 94 errors / 43 warnings, the exact
+  unchanged baseline from every prior round this session; nothing new.
+- **Local results above are explicitly NOT the same as a GitHub Actions
+  result**, and are reported as such rather than conflated:
+  - `GET /repos/.../commits/600e460/check-runs` (the merge commit on
+    `main`): `total_count: 1`, a single unrelated `backup` check
+    (Netlify's own deploy-preview infrastructure for this Supabase/
+    Netlify application that lives on `main` -- nothing to do with D1).
+  - `GET /repos/.../commits/cd86bdf.../check-runs` (the PR's own source
+    commit): `total_count: 3`, all three Netlify deploy-preview checks
+    (`Redirect rules`, `Header rules`, `Pages changed`) -- again nothing
+    related to D1.
+  - `GET /repos/.../actions/workflows/372454517/runs?per_page=5` (the D1
+    restore/schema sync check workflow's own run history): the latest
+    run is still **`38678941234`** -- the SAME original failing run from
+    before this entire incident. **No fresh GitHub Actions run of this
+    workflow has executed against the now-synced state.** This is
+    exactly the gap #3 above explains: the workflow's trigger is scoped
+    to the feature branch only, so merging into `main` was never going
+    to produce one.
+
+**Attempting to trigger a fresh run (task section 3.5).** The workflow
+supports `workflow_dispatch: {}` and is safe to run manually with zero
+data or deployment impact: `check` is read-only (`git
+show`/`git fetch` only); `prepare-sync` would be a pure no-op right now
+(already independently confirmed `alreadySynced: true` above) since
+there is nothing left to sync. **This session could not dispatch it**:
+doing so requires an authenticated GitHub API call (`POST
+.../actions/workflows/372454517/dispatches` with an `actions: write`
+token) and this sandboxed session has no `gh`/`hub` CLI and no
+`GITHUB_TOKEN`/`GH_TOKEN`. Per the exact boundary this same incident's
+own history already established (the `donor_source_attributions` round,
+documented above): using git's own push mechanism for its one sanctioned
+purpose is different from extracting that same stored credential for
+arbitrary reuse, and this session did not attempt to do so.
+
+**Appropriate next step, for the owner:** either (a) open the "Actions"
+tab, select "D1 restore/schema sync check," click "Run workflow,"
+choose `feature/independent-cloudflare-sandbox` as the branch, and run
+it -- expected result: `check` succeeds ("No drift detected"),
+`prepare-sync` succeeds as a no-op (nothing to sync); or (b) simply wait
+for the next real push to the canonical branch that touches one of this
+workflow's own trigger paths, which will exercise it naturally. Either
+is sufficient to obtain the first genuine GitHub Actions confirmation of
+the fix; neither is required before relying on the independent local
+verification above, which already directly re-derived the same
+conclusion the workflow's own `check` job would reach.
+
+### 4. Production/Staging protection confirmed
+
+No `wrangler deploy` command of any kind was run this round. No D1
+migration was applied anywhere. No donor, pledge, payment, or backup
+data was read or touched (every verification above was against `main`'s
+own restore-TRACKING METADATA files and the public GitHub API, never
+against `fundraising-os-production-db`/`fundraising-os-staging-db`
+directly). No file that decides what counts as "safe" automation
+behavior was modified. No additional branch or PR was merged -- this
+entry is read-only verification of an already-merged PR, nothing more.
+No repository security setting (branch protection, workflow permissions,
+Actions settings) was changed; gap #2 above is disclosed, not acted on,
+per this round's own explicit instruction not to change those without
+authorization.
+
+### Summary
+
+- **Is the original synchronization issue fully resolved?** Yes, on the
+  only authority that matters for this question: the unmodified
+  `check-main-restore-sync.mjs`, run fresh against the real merged
+  `main`, reports zero drift, and every underlying fact (migration
+  count, table presence, restore-order placement) was independently
+  re-derived and confirmed directly, not inferred from that one report
+  alone.
+- **Is the permanent prevention safeguard working?** Yes -- proven with
+  a real pass/fail contrast (`MAIN_REF` pointed at the real pre-merge
+  commit vs. the real current one), not merely observed to currently
+  read green.
+- **Do all relevant local tests pass?** Yes -- 199/199 plus the
+  migration-sync step, `tsc` clean, lint at the unchanged baseline.
+- **Is GitHub Actions confirmed green, or still awaiting a fresh run?**
+  **Still awaiting a fresh run.** The workflow's own run history has not
+  advanced past the original failing run; this session could not
+  dispatch a new one without credentials it does not have and should
+  not acquire by extracting a stored token. This is the one piece of
+  the task's own verification checklist this entry cannot close, and it
+  is reported as open rather than assumed.
+- **Remaining risks / recommended improvements**: the four gaps listed
+  in section 2 above (no CI-run test suite for the feature branch, no
+  `main` branch protection, the sync-check workflow's intentional
+  feature-branch-only scope, no staleness alert for an unmerged
+  `prepare-sync` PR) -- all pre-existing, all disclosed, none requiring
+  immediate action, all left to the owner's discretion per this round's
+  explicit instruction not to change repository security settings
+  unilaterally.
+
+**The D1 restore/schema synchronization incident is resolved at the code
+and metadata level, independently verified from scratch against the
+real merged state.** The one remaining step -- a fresh GitHub Actions
+run actually exercising the now-synced `main` -- has not yet happened
+and requires either the owner's manual `workflow_dispatch` or the next
+natural push; until then, "resolved" rests on this session's own
+independent, from-scratch re-derivation of the same facts that workflow
+would confirm, not on the workflow's own (still-stale) recorded history.
