@@ -44931,3 +44931,262 @@ the secret on Staging only) and Phase 3 (real AI testing with
 synthetic donor conversations) from the originating request. Neither
 has started. No Production action, no paid Anthropic usage, and no
 branch merge has occurred.
+
+## Evaluate Cloudflare Workers AI as an Alternative to Anthropic for AI Meeting Notes (2026-10-15) -- EVALUATION ONLY, NOTHING ACTIVATED
+
+Before committing to the Anthropic path above, the owner asked for an
+evidence-based evaluation of whether Cloudflare Workers AI -- already
+part of the same Cloudflare account that runs Staging/Production --
+could replace or complement it, since avoiding a brand-new Anthropic
+account/credential entirely would be preferable if quality, privacy,
+and cost are acceptable. This round is pure evaluation: **no
+application code, wrangler config, or Staging/Production deployment
+was touched.** `git status --short` on this branch is clean after
+this entire round.
+
+### How this was tested safely, without cost or config changes
+
+Real, live inference was run against the actual Cloudflare account
+behind this project (`sgoldstein@nirc.edu`'s account,
+`2f34086b78ac8643498a1a600b846757` -- same account as Staging/
+Production) with **zero new credentials, zero billing setup, and zero
+changes to any committed file**:
+
+- `wrangler ai models` (just the existing, already-authenticated
+  `wrangler` OAuth session used all session for Staging/Production)
+  listed the full Workers AI model catalog -- proving Workers AI is
+  already available on this account today, with no separate signup,
+  API key, or subscription.
+- A throwaway sandbox Worker (`scratchpad/workers-ai-eval/`, outside
+  the app repo entirely, deleted/never committed) declared a single
+  `[ai]` binding and nothing else -- no D1, no routes, no Access. Run
+  via `wrangler dev --remote`, it proxies real requests to Cloudflare's
+  actual Workers AI backend on the free daily Neuron allowance, while
+  creating no deployed Worker, no dashboard resource, and no config
+  change anywhere in the real project.
+- The sandbox worker was driven by a Node test script that imported
+  the **real, unmodified** `buildSystemPrompt()`, `buildUserMessage()`,
+  and `parseOrganizedResponse()` from `lib/meeting-notes/organize.ts`
+  (read-only import -- the exact same prompt and validation already
+  built and tested for the Anthropic path), so model outputs were
+  graded against this app's actual rules, not a simplified stand-in.
+- Only the six synthetic, fictional transcripts already used in
+  `tests/meeting-notes-fundraising-scenarios.test.mjs` were sent (no
+  real donor data, ever).
+- After testing, the sandbox worker's `workerd` process was located by
+  its listening port and force-stopped (`Stop-Process`); connectivity
+  to it afterward confirmed refused. Nothing from this evaluation
+  persists anywhere in Cloudflare or in this repository.
+
+### 1. Cloudflare Workers AI -- findings
+
+- **Account/billing**: confirmed empirically (above) -- Workers AI is
+  already available on the existing account, no separate API key,
+  account, or paid subscription required for any model tested. A
+  short list of specific flagship/reasoning models (`kimi-k2.6`,
+  `kimi-k2.7-code`, `glm-5.2`, `glm-5.3`, `glm-5.3-flash`,
+  `deepseek-v4-flash-0731`, `deepseek-v4-pro-0813`) requires a paid
+  billing method (Workers Paid or prepaid AI Gateway credits) per
+  Cloudflare's own pricing page -- none of those are recommended below.
+- **How it's called**: fundamentally different integration shape than
+  Anthropic. Anthropic is a `fetch()` call to an external HTTPS API
+  with a secret `x-api-key` header (what `organize.ts` already does).
+  Workers AI is a **binding** (`env.AI.run(model, input)`), declared
+  directly in `wrangler.staging.jsonc`/`wrangler.jsonc` as a plain
+  `[ai]` block -- like the existing D1 binding, not like a secret. This
+  means **no `wrangler secret put` at all** for this path; there is no
+  API key to create, store, rotate, or ever risk leaking. Because the
+  models run on Cloudflare's own infrastructure, a donor transcript
+  stays inside the account boundary already trusted with D1 -- it
+  never leaves to a third-party model provider.
+- **Structured JSON output**: confirmed live. Passing
+  `response_format: {type: "json_schema", json_schema: {...}}` with
+  the app's own `OrganizedMeetingNotes` shape produced valid,
+  schema-conforming JSON on the first try for both top candidate
+  models, with no markdown fences and no coercion needed -- genuinely
+  more reliable than the current Anthropic path, which only prompts
+  for JSON and relies entirely on `parseOrganizedResponse`'s
+  after-the-fact validation. Both modes (plain-prompt and
+  schema-constrained) were tested; either works.
+- **Pricing (from `developers.cloudflare.com/workers-ai/platform/
+  pricing/`)**: 10,000 Neurons/day free, resetting daily at 00:00 UTC;
+  $0.011 per 1,000 Neurons beyond that, billed only on Workers Paid.
+  Measured/estimated cost per meeting note (system prompt + typical
+  transcript + structured output) is roughly 50-150 Neurons depending
+  on model -- **every realistic volume this app will ever see (25,
+  100, even 500 notes/month) fits inside a single day's free
+  allowance**, let alone a month's. Cost is $0.00/month under any
+  normal usage pattern for the recommended models.
+- **Privacy** (from `developers.cloudflare.com/workers-ai/platform/
+  privacy/`, read directly): "Cloudflare does not use your Customer
+  Content to train any AI models made available on Workers AI... and
+  would not do so unless we received your explicit consent." Cloudflare
+  does not make Customer Content available to other customers. The
+  models run on Cloudflare's own infrastructure, so a donor's dictated
+  transcript would stay inside the same Cloudflare account/infra
+  boundary already trusted with donor records in D1 -- it would never
+  be transmitted to a new third party at all, which is a stronger
+  privacy posture than Anthropic (where the transcript does leave to
+  Anthropic's systems, even under Anthropic's no-training/30-day-
+  deletion policy). **Gap, honestly flagged**: the privacy page states
+  no explicit retention period for inputs/outputs the way Anthropic's
+  docs explicitly state "30 days" -- it only says content "may be
+  stored... if you specifically use a storage service" (R2/KV/D1/
+  Vectorize), which this feature would not. No independently-verified
+  retention number exists for Workers AI inference inputs themselves;
+  this is a real gap relative to Anthropic's explicit commitment, not
+  a reason to disqualify Workers AI, but worth knowing.
+- **Limitations observed directly, not just from docs**: reasoning-
+  style models (`@cf/zai-org/glm-4.7-flash` was tested) spend an
+  unpredictable share of their output-token budget on hidden
+  chain-of-thought before producing the final answer -- one real call
+  returned `content: null` entirely (reasoning consumed the full
+  1024-token budget with no final JSON produced at all), while an
+  identical retry succeeded after 19-29 seconds. This is a genuine
+  reliability problem for a user-facing "Organize Notes" button, not a
+  theoretical one -- **reasoning-heavy catalog models are not
+  recommended for this feature.** Plain instruct models were
+  consistently fast and reliable (see below). Workers' own CPU-time
+  limit (30s default, configurable) does not count time spent waiting
+  on the AI binding, so slow models don't risk hitting that unrelated
+  limit, but they do make the UI feel sluggish.
+
+### 2. Live test results -- six synthetic scenarios, five models, real inference
+
+All six scenarios from `tests/meeting-notes-fundraising-scenarios.test.mjs`
+("$100k dinner, no commitment," "$150k discussed, not accepted,"
+Rav Kulefsky/shiur/kuntres relationship content, the conditional
+next-week follow-up, the explicit $18k commitment, and the
+multi-option discussion) were sent verbatim to each model, through the
+app's real system prompt, and the raw response was run through the
+app's real `parseOrganizedResponse()`.
+
+| Model | Shape-valid JSON (6/6) | Confirmed-vs-possible correct (6/6) | Typical latency | Notes |
+|---|---|---|---|---|
+| `@cf/mistralai/mistral-small-3.1-24b-instruct` | Yes | Yes | 1.8-4.3s | Best overall: fastest, most precise -- correctly narrowed "possible" to just the specific option the donor asked to hear more about, never blurred it across all options discussed. |
+| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Yes | Yes | 1.5-12s (one slow outlier) | Equally precise; slightly more verbose summaries; highest per-output-token Neuron cost of the four. |
+| `@cf/openai/gpt-oss-120b` | Yes | Yes | 9-14s (consistently slow) | Most detailed `relationshipContext` prose; reasoning overhead makes every call 3-4x slower than Mistral/Qwen for no accuracy gain in this task. |
+| `@cf/qwen/qwen2.5-coder-32b-instruct` | Yes | Yes (never produced a confirmed/possible conflict) | 3.1-5.6s | Never violated the hard safety rule, but was less sharp on the soft distinction: for the multi-option scenario it marked *all three* discussed amounts as "possible commitments" rather than narrowing to the one the donor actually asked to hear more about -- a real, observed quality gap versus the top two. |
+| `@cf/zai-org/glm-4.7-flash` | 5/6 in testing (one `content: null` failure, reproduced) | N/A for the failed call | 19-29s | Not recommended -- see reliability finding above. |
+
+Every model tested, including the weakest, **never once promoted a
+discussed-but-not-accepted ask into `confirmedCommitments`** -- the
+one hard safety rule the task cared most about held across the board.
+Hebrew/Yiddish terminology and proper names (Rosenbaum, Rav Kulefsky,
+shiur, kuntres, Yom Tov, beis medrash, Sukkos) were preserved
+correctly and spelled correctly by every model, with no
+transliteration errors observed. Relationship content (the Rav
+Kulefsky/shiur scenario) was correctly kept out of
+`fundraisingOpportunities` by every model -- no model manufactured an
+ask out of a purely relational conversation.
+
+### 3. Comparison -- Cloudflare Workers AI vs. Anthropic Claude API
+
+| Dimension | Cloudflare Workers AI (Mistral Small 3.1 24B) | Anthropic (`claude-haiku-5-5`) |
+|---|---|---|
+| Accuracy / instruction-following | Strong in live testing above | Not yet tested live (blocked on account setup); expected strong based on model class |
+| Confirmed vs. possible | Correct in all 6 live tests | Verified structurally only (mocked), not yet live |
+| Structured JSON reliability | Native `json_schema` mode confirmed working live, in addition to plain-prompt mode | Plain-prompt + after-the-fact validation only; Anthropic's native tool-use/structured-output mode was never wired in |
+| Yeshivish/Hebrew terminology | Correct in all live tests | Expected fine (same system prompt), not yet live-verified |
+| Privacy/security | Data never leaves the existing Cloudflare account; no official retention-period statement found | Data leaves to Anthropic; explicit no-training + 30-day auto-deletion policy, independently verified against Anthropic's own docs |
+| Cost (25/100/500 notes/mo) | $0.00 in all three cases -- inside daily free allowance | ~$0.001-$0.03/$0.10/$0.50 estimated -- also negligible, but not $0 and requires prepaid credits |
+| Account/credential overhead | None -- already available on the existing account, binding only, no secret | New Console account, new API key as a `wrangler secret`, credit purchase, spend-alert setup -- all the owner's own separate actions |
+| Implementation complexity | New binding + new provider module reusing all existing prompt/parsing/UI code | Already fully built and tested (rounds 2-3) |
+| Long-term maintenance | Cloudflare periodically retires/replaces catalog model ids (same class of risk as an Anthropic model being deprecated) -- model id is already a configurable var either way | Same risk class; Anthropic's model-deprecation cadence is externally documented, Cloudflare's catalog-level deprecation cadence was not independently verified this round |
+
+### 4. Proposed architecture (not implemented this round)
+
+A thin provider seam keeps the already-built, already-tested pieces
+(`buildSystemPrompt`, `buildUserMessage`, `parseOrganizedResponse`,
+the entire save/idempotency/follow-up/UI layer) completely unchanged
+and shared by both providers:
+
+- `lib/meeting-notes/providers/anthropic.ts` -- today's
+  `organizeMeetingNotes()` body, moved as-is (fetch + `x-api-key`).
+- `lib/meeting-notes/providers/workers-ai.ts` -- new, thin: calls
+  `env.AI.run(model, {messages: [...], response_format: {...}})`,
+  extracts the text from whichever response shape that model family
+  returns (`result.response` for most catalog models,
+  `result.choices[0].message.content` for OpenAI-compatible ones --
+  both shapes were observed live this round and would need handling),
+  then hands the text to the same `parseOrganizedResponse()`.
+- `app/api/meeting-notes/organize/route.ts` -- branches once, on a new
+  non-secret var (e.g. `env.AI_PROVIDER`, default to whichever is
+  chosen), to call one provider or the other. The donor-ownership
+  check, auth, and logging stay exactly as they are today.
+- `cloudflare-env.d.ts` -- adds `AI?: Ai` (the binding type) and
+  `AI_PROVIDER?: string` alongside the existing `ANTHROPIC_API_KEY`/
+  `ANTHROPIC_MODEL` doc comments, explaining both are optional and the
+  feature reports "unavailable" if neither is configured, exactly as
+  it does today for the Anthropic-only case.
+
+This supports **Option C** (configurable provider) at low cost because
+most of the feature's logic is already provider-agnostic by
+construction (the save route, idempotency, follow-up safeguards, and
+UI never talk to any AI provider directly -- only the stateless
+`/organize` endpoint does). No provider switch was implemented this
+round, per the task's own instruction -- the live testing above used a
+fully separate, throwaway sandbox Worker instead.
+
+### 5. Existing functionality -- confirmed untouched
+
+No donor records, pledge/payment data, follow-up safeguards, save/
+idempotency behavior, Daily Agenda recommendations, or Production
+configuration were touched this round. No Staging or Production
+deployment occurred. No Anthropic account, key, or credential was
+created. `git status --short` is clean on this branch as of the end of
+this round. The only artifacts from this evaluation live outside the
+repository, in this session's scratchpad, and the sandbox Worker's
+local dev process was confirmed stopped.
+
+### 6. Recommendation
+
+**Option C: support both providers, with Cloudflare Workers AI
+(`@cf/mistralai/mistral-small-3.1-24b-instruct`) as the default/
+primary, and the already-built Anthropic path kept available but
+inert as a configurable fallback.**
+
+Reasoning: cost is a non-issue for either option at this
+organization's realistic volume, so the deciding factors are
+credential/account overhead and privacy. Workers AI wins decisively on
+both -- it is already available on the existing Cloudflare account
+with no new account, key, or billing to create and maintain, and it
+keeps a donor's dictated meeting content entirely inside the
+infrastructure already trusted with the donor database, rather than
+sending it to a new third party. Live testing confirmed it meets the
+same accuracy bar on every hard safety rule that mattered (never
+promoting a possible ask into a confirmed commitment, never
+fabricating a fundraising ask out of relationship content, correctly
+pulling a conditional relative due date). The one real gap is that
+Cloudflare does not publish an explicit retention period for
+inference inputs/outputs the way Anthropic does -- worth knowing, not
+disqualifying.
+
+Keeping the Anthropic path (Option B's work, already fully built and
+tested) behind the same provider seam costs nothing to maintain while
+dormant and preserves the option to compare against a frontier
+hosted model later, or to switch if a specific note's quality ever
+warrants it -- hence Option C rather than deleting that work in favor
+of a pure Option A.
+
+**If this recommendation is approved, the next steps would be:**
+1. Confirm the specific default model (`mistral-small-3.1-24b-instruct`
+   recommended) and provider-selection approach above.
+2. Implement the provider seam described in section 4 (new files only;
+   no change to the save/idempotency/UI layer).
+3. Add an `[ai]` binding to `wrangler.staging.jsonc` only -- **this is
+   a configuration change and would be deployed to Staging only after
+   separate explicit authorization**, per this task's own instruction,
+   exactly like every prior Staging change in this project.
+4. Add mocked unit tests for the new provider module (same pattern as
+   `lib/meeting-notes/organize.ts`'s existing tests), plus structural
+   coverage reusing `tests/meeting-notes-fundraising-scenarios.test.mjs`.
+5. Re-run the full live Staging verification workflow (write-guard
+   on/off, synthetic `[TEST...]`-prefixed donor interactions, cleanup)
+   exactly as was done for the Anthropic round, this time exercising
+   the real Workers AI binding end-to-end through the actual UI.
+6. Update this file with the outcome.
+
+**No Production deployment, Staging configuration change, or new
+credential has occurred. Awaiting the owner's decision on the
+recommendation above before any implementation begins.**
