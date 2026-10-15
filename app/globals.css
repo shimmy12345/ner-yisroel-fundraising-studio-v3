@@ -1371,3 +1371,88 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .pledge-review-save-status--error { color:#a3402c; font-weight:600; }
 @media (max-width:700px) { .pledge-review-facts { grid-template-columns:1fr 1fr; } }
 .rebbeim-import-row p:last-child { margin-bottom:0; }
+
+/* Trip-Based Meeting Planning -- Phase 2 (2026-10-15, docs/AI-HANDOFF.md). */
+.travel-planning-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; flex-wrap:wrap; }
+.travel-planning-trip-notes { margin-top:8px; color:#56665e; font-size:14px; line-height:1.55; white-space:pre-line; }
+.travel-planning-trip-status-select { min-height:40px; padding:8px 12px; border:1px solid #d9ddd8; border-radius:8px; background:#fbfcfa; color:var(--ink); font-size:13px; font-weight:650; }
+.travel-planning-status-badge { display:inline-block; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700; text-transform:capitalize; background:#edf3ef; color:#315f4b; }
+.travel-planning-status-badge.status-active { background:#e4f0e8; color:#1f6a44; }
+.travel-planning-status-badge.status-completed { background:#e9edf3; color:#394f7a; }
+.travel-planning-status-badge.status-cancelled { background:#f3e8e6; color:#8a4940; }
+
+.travel-planning-toolbar { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; flex-wrap:wrap; }
+.travel-planning-new-trip { min-height:40px; padding:0 16px; border:0; border-radius:9px; background:var(--green); color:#fff; font-size:13px; font-weight:700; cursor:pointer; }
+.travel-planning-new-trip-form { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:10px 0 22px; padding:20px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); }
+.travel-planning-new-trip-form label { display:flex; flex-direction:column; gap:6px; color:#66736d; font-size:12px; font-weight:650; }
+.travel-planning-new-trip-form input, .travel-planning-new-trip-form select, .travel-planning-new-trip-form textarea { min-height:42px; padding:9px 11px; border:1px solid #d8dfda; border-radius:8px; background:#fff; color:var(--ink); font:inherit; font-size:14px; }
+.travel-planning-new-trip-form textarea { min-height:80px; resize:vertical; }
+.travel-planning-notes-field { grid-column:1 / -1; }
+.travel-planning-form-error { grid-column:1 / -1; margin:0; color:#a3402c; font-size:13px; font-weight:650; }
+.travel-planning-form-actions { grid-column:1 / -1; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.travel-planning-form-actions button { min-height:42px; padding:0 18px; border:0; border-radius:9px; background:var(--green); color:#fff; font-size:13px; font-weight:700; cursor:pointer; }
+.travel-planning-form-actions button:disabled { opacity:.6; cursor:wait; }
+.travel-planning-form-hint { margin:0; color:var(--muted); font-size:12px; line-height:1.5; max-width:420px; }
+
+.travel-planning-list { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:14px; }
+.travel-planning-trip-card { display:block; padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); text-decoration:none; color:inherit; }
+.travel-planning-trip-card:hover { border-color:#c6d6cc; background:#f8faf8; }
+.travel-planning-trip-card-heading { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
+.travel-planning-trip-card-heading strong { font-size:16px; }
+.travel-planning-trip-card-meta { margin:0 0 4px; color:#56665e; font-size:13px; }
+.travel-planning-trip-card-count { margin:0; color:var(--muted); font-size:12px; }
+.travel-planning-empty, .travel-planning-empty-inline { padding:36px 24px; border:1px dashed #ccd5cf; border-radius:14px; text-align:center; background:#fff; color:var(--muted); }
+.travel-planning-empty-inline { padding:18px; text-align:left; }
+
+.travel-planning-dashboard { margin:22px 0; padding:20px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); }
+.travel-planning-dashboard-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:1px; border:1px solid #e5e9e5; border-radius:10px; background:#e5e9e5; overflow:hidden; }
+.travel-planning-dashboard-grid article { padding:14px; background:#fafbf9; text-align:center; }
+.travel-planning-dashboard-grid strong { display:block; font-family:Georgia,serif; font-size:22px; font-weight:500; }
+.travel-planning-dashboard-grid span { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
+.travel-planning-attention strong { color:#a3402c; }
+.travel-planning-financial-note { margin:14px 0 0; color:var(--muted); font-size:12px; line-height:1.5; }
+
+.travel-planning-new-prospects, .travel-planning-add-prospect { margin-bottom:22px; padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); }
+.travel-planning-new-prospects h2, .travel-planning-add-prospect h2, .travel-planning-prospects h2 { margin:0 0 8px; font-family:Georgia,serif; font-size:18px; font-weight:500; }
+.travel-planning-new-prospects p { margin:0 0 12px; color:var(--muted); font-size:13px; }
+.travel-planning-new-prospects ul { display:grid; gap:8px; margin:0; padding:0; list-style:none; }
+.travel-planning-new-prospects li { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #eceee9; border-radius:9px; background:#fbfcfa; font-size:13px; }
+.travel-planning-new-prospects li button { min-height:34px; padding:0 12px; border:1px solid #d3ded7; border-radius:7px; background:#edf3ef; color:#315f4b; font-size:12px; font-weight:700; cursor:pointer; }
+
+.travel-planning-prospects { display:grid; gap:14px; }
+.travel-planning-prospect-row { padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); }
+.travel-planning-prospect-row.busy { opacity:.65; }
+.travel-planning-prospect-heading { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+.travel-planning-prospect-heading a { color:var(--ink); text-decoration:none; }
+.travel-planning-prospect-heading a:hover { text-decoration:underline; }
+.travel-planning-prospect-heading select { min-height:36px; padding:6px 9px; border:1px solid #d8dfda; border-radius:7px; background:#fff; font-size:12px; font-weight:650; }
+.travel-planning-added-method { padding:2px 8px; border-radius:20px; background:#edf1ee; color:#5a6a61; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
+.travel-planning-added-method.auto_region { background:#e7f0ea; color:#285942; }
+.travel-planning-prepare-link { margin-left:auto; color:#315f4b; font-size:12px; font-weight:700; text-decoration:none; }
+.travel-planning-remove { min-height:32px; padding:0 10px; border:1px solid #e3d3cd; border-radius:7px; background:#fff; color:#8a4940; font-size:11px; font-weight:700; cursor:pointer; }
+.travel-planning-conflict-caution { margin:0 0 8px; padding:8px 10px; border-radius:8px; background:#fbf2e8; color:#7a5a24; font-size:12px; line-height:1.5; }
+.travel-planning-suggested-reason { margin:0 0 8px; color:#45544c; font-size:13px; line-height:1.55; }
+.travel-planning-suggested-reason small { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
+.travel-planning-meeting-time { margin:0 0 8px; color:#315f4b; font-size:13px; font-weight:650; }
+.travel-planning-confirm-panel { display:grid; gap:10px; margin-bottom:12px; padding:14px; border-radius:10px; background:#f5f8f6; }
+.travel-planning-confirm-panel label { display:flex; flex-direction:column; gap:5px; color:#52625a; font-size:12px; font-weight:700; }
+.travel-planning-confirm-panel input, .travel-planning-confirm-panel textarea { min-height:40px; padding:8px 10px; border:1px solid #d8dfda; border-radius:7px; background:#fff; font:inherit; font-size:13px; }
+.travel-planning-confirm-panel textarea { min-height:70px; resize:vertical; }
+.travel-planning-confirm-hint { margin:0; color:var(--muted); font-size:11px; }
+.travel-planning-confirm-actions { display:flex; gap:8px; }
+.travel-planning-confirm-actions button { min-height:38px; padding:0 14px; border-radius:8px; font-size:12px; font-weight:700; cursor:pointer; }
+.travel-planning-confirm-actions button:first-child { border:0; background:var(--green); color:#fff; }
+.travel-planning-confirm-actions button:first-child:disabled { opacity:.6; cursor:not-allowed; }
+.travel-planning-confirm-actions button:last-child { border:1px solid #d5ddd8; background:#fff; color:#405c4e; }
+.travel-planning-prospect-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.travel-planning-prospect-fields label { display:flex; flex-direction:column; gap:5px; color:#66736d; font-size:11px; font-weight:650; }
+.travel-planning-prospect-fields input, .travel-planning-prospect-fields textarea { min-height:38px; padding:8px 10px; border:1px solid #e3e7e2; border-radius:7px; background:#fbfcfa; font:inherit; font-size:13px; }
+.travel-planning-prospect-fields textarea { min-height:60px; resize:vertical; }
+.travel-planning-error { padding:10px 14px; border-radius:8px; background:#fbf0ee; color:#8a4940; font-size:13px; font-weight:650; }
+
+@media (max-width:760px) {
+  .travel-planning-new-trip-form, .travel-planning-prospect-fields { grid-template-columns:1fr; }
+  .travel-planning-prospect-heading { flex-direction:column; align-items:flex-start; }
+  .travel-planning-prepare-link { margin-left:0; }
+  .travel-planning-list { grid-template-columns:1fr; }
+}

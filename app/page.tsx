@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { AppShell } from "./components/AppShell";
 import { BriefExperience } from "./components/BriefExperience";
 import { RelationshipQueueExperience } from "./components/RelationshipQueueExperience";
@@ -179,6 +180,7 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
         <a href="/capture?returnTo=%2F"><span>＋</span><strong>Add Interaction</strong><small>Log a call, email, or note</small></a>
         <a href="/capture?returnTo=%2F"><span>✓</span><strong>Create Reminder</strong><small>Add it with an interaction</small></a>
         <a href="/settings#data-health"><span>◇</span><strong>Workspace Health</strong><small>Check data integrity</small></a>
+        <Link href="/travel-planning" prefetch={false}><span>✈</span><strong>Travel Planning</strong><small>Plan a fundraising trip</small></Link>
       </nav>
     </section>
 
