@@ -40409,3 +40409,321 @@ No verification failed; no rollback was needed or performed.
 6. **Unresolved issues**: none introduced by this deployment. No further
    feature work or data correction was performed, per this
    authorization's own explicit scope.
+
+## Trip-Based Meeting Planning -- Phase 1 Audit & Architecture Proposal (2026-10-15)
+
+**Read-only audit and design only. No code, migrations, deploys, trips,
+or meeting records were created. No existing recommendation logic was
+changed.** This section is the proposal awaiting independent review and
+explicit authorization before any implementation begins.
+
+### 1. What already exists and can be reused
+
+| Capability | Existing building block | Reuse plan |
+|---|---|---|
+| Geographic region/city filtering | `lib/relationships/travel-regions.ts` (`TRAVEL_REGIONS`, `regionsForCityState`), `lib/relationships/donor-geo-filter.ts` (`filterByGeo`, `cityOptionsForRegion`, `searchCityOptions`), `app/donors/CityComboBox.tsx` | Call directly to populate a trip's destination region and auto-suggest prospects. Zero changes needed. |
+| Donor-level evidence/scoring | `lib/relationships/recommendation-evidence.ts` (`buildRecommendationEvidence`), `recommendation-candidates.ts` (`generateCandidates`), `recommendation-rank.ts` (`buildDonorRecommendation`/`score`) | Call the SAME functions Today's page and Portfolio Focus already use to generate each prospect's "why meet them" evidence. This is the single most important reuse decision -- see Section 5. |
+| Completed-outreach/stale-recommendation protection | `lib/relationships/fact-classification.ts`'s `isUnambiguousCompletedOutreachAction()`, `fact-synthesis.ts`'s `scoreFact()` | Already governs the evidence functions above -- inherited for free, never reimplemented. |
+| Payment-plan overdue logic | `lib/relationships/pledge-payment-plan.ts`'s `evaluatePaymentPlan`/`evaluateOpenPledgePlanStatus`/`isOpenPledgeActionable` (shared by the donor page and Portfolio Focus already -- no second definition exists anywhere today) | MUST be the only source trip prioritization consults for "is this pledge actually overdue." A plan is only late `MONTHLY_PAYMENT_PLAN_GRACE_DAYS` (7 days) past an actual unsatisfied cycle date, using the fundraiser's own local calendar date, never raw UTC `now`. Reimplementing any part of this risks reintroducing the exact bug this session already fixed once. |
+| Open asks | `lib/capture/ask.ts`, `openAskCandidate()` (already checks `hasFutureFollowUp` and cross-references gifts/pledge activity dated after the ask) | Reuse as-is for "outstanding asks and potential opportunities." |
+| Donor meeting preparation content | `lib/relationships/meeting-brief.ts`'s `loadMeetingBrief(userId, donorId, timezone, now)` | A single, self-contained, already-reusable async function (own queries, no page/routing entanglement) that already assembles relationship summary, last meaningful interaction, open reminders, open asks, recent gift/lifetime paid/open pledge, family/important dates, and suggested discussion topics. Section E's "donor meeting preparation" requirement is **already fully met by calling this once per trip prospect** -- no new evidence-assembly code is needed. |
+| Scheduled vs. completed meetings | No real `scheduled_activities` table exists -- it is derived at query time from `interactions` rows where `source LIKE 'capture-scheduled:%'` or a future `occurred_at`. | A trip meeting's "Meeting Scheduled" -> "Meeting Completed" lifecycle should map directly onto this existing mechanism (see Section 4B) rather than inventing a parallel one. |
+| Reminders/tasks | The `recommendations` table (donor-scoped, `id, donor_id, user_id, action, reason, score, status, due_at, due_at_date_only, created_at, updated_at` -- confirmed via migration read; no `kind`/discriminator column exists) | Reuse directly for any trip-born follow-up reminder; see Section 4C for the one additive, backward-compatible schema change this implies. |
+| Timezone-safe local date/time handling | `lib/workspace/local-time.ts`'s `zonedTimeToUtc(year, month, day, hour, minute, timezone)` (DST-safe), `lib/agenda/timezone.ts` | Already built for exactly "a local wall-clock date/time in some city -> UTC epoch" -- directly reusable for a meeting scheduled in a city other than the fundraiser's home timezone. |
+| UI patterns | `app/donors/DonorDirectoryExperience.tsx`'s filter-row/combobox pattern, `app/donors/CityComboBox.tsx`, `DonorOriginLink`/donor navigation helpers, Portfolio Focus's filter-button pattern | Reuse directly for the trip list/dashboard UI -- see Section 3. |
+
+**Confirmed definitively absent**: no existing trip, itinerary, visit-
+planning, or calendar/ICS-integration concept anywhere in the codebase
+(every "trip" grep hit was a false positive -- "round-trip", "won't
+trip"; `.ics`/"calendar"/"icalendar" all returned zero hits). This is a
+genuinely new feature area, not a duplicate of anything existing.
+
+### 2. What new functionality and data structures are required
+
+Two new tables, both additive (no existing table's schema changes):
+
+**`trips`**
+```
+id (text, PK)
+owner_user_id (FK users.id)
+name (text)                         -- "Chicago -- November 2026"
+destination_region_id (text, nullable)   -- a TravelRegionId string, e.g. "chicago-suburbs" -- NOT a FK, since
+                                          -- regions are a code-defined list (travel-regions.ts), not a DB table
+destination_region_label (text, nullable) -- a SNAPSHOT of the region's label at creation time, so a trip's
+                                          -- display never breaks even if the region is later renamed/removed
+start_date, end_date (epoch seconds)     -- the LOCAL calendar date boundary, time-of-day not meaningful
+fundraising_goal_cents (integer, nullable)
+notes (text, nullable)
+status (text: 'planning'|'active'|'completed'|'cancelled')
+created_at, updated_at (epoch seconds)
+```
+
+**`trip_prospects`** (one row per donor being tracked for a trip)
+```
+id (text, PK)
+trip_id (FK trips.id)
+donor_id (FK donors.id)
+added_method (text: 'auto_region'|'manual')   -- Section 3C's explicit distinction
+status (text: 'not_contacted'|'contacted'|'meeting_requested'|'meeting_scheduled'|
+              'meeting_completed'|'declined'|'unable_to_schedule')
+suggested_reason (text, nullable)    -- a SNAPSHOT of the evidence-based "why", captured once at add time --
+                                      -- never silently rewritten later if underlying evidence changes (see Section 5)
+manual_rank (integer, nullable)      -- an optional fundraiser override of display order; the system-computed
+                                      -- score is never overwritten, only sorted alongside this when present
+meeting_at (epoch seconds, nullable) -- the specific scheduled/completed meeting's real instant
+meeting_location (text, nullable)
+next_action (text, nullable)
+trip_notes (text, nullable)          -- prospect-specific notes scoped to THIS trip only, never the donor's
+                                      -- own relationship_summary/institutional_memory
+linked_interaction_id (FK interactions.id, nullable)  -- see Section 4B
+created_at, updated_at
+UNIQUE(trip_id, donor_id)
+```
+
+One additive, backward-compatible column on an EXISTING table:
+
+**`recommendations.trip_id`** (nullable FK to `trips.id`, default NULL
+for every existing and future non-trip row) -- purely for traceability
+("this reminder came from the Chicago trip"); every existing read path
+(Today page, Daily Agenda) is completely unaffected since none of them
+filter by this column.
+
+No other existing table changes. Donor records, giving_activities,
+pledge_payment_plans, asks, interactions, and donor_relationship_facts
+are never written to by trip creation itself (see Section 4B for the
+one, explicit, fundraiser-triggered exception: marking a meeting
+completed).
+
+### 3. Proposed user experience
+
+A new, secondary page area at `app/travel-planning/` (not a new primary
+nav slot -- `AppShell`'s primary nav is a fixed 4-item union type with
+no 5th-item precedent; Portfolio Focus and Fundraising Intelligence are
+both reached via a link while borrowing `active="today"`. A Travel
+Planning link from Today/Donors, following that exact precedent, is
+the lower-risk default -- flagged as an open decision in Section 6):
+
+- **`/travel-planning`** -- trip list, filterable by status
+  (Planning/Active/Completed/Cancelled), "New Trip" action. Reuses the
+  directory filter-row pattern already built for Travel Region/City.
+- **New Trip form** -- name, destination region (the existing
+  `TRAVEL_REGIONS` select), start/end dates, optional goal, notes.
+  "Additional cities" is flagged as a likely simplification -- see
+  Section 6, question 1.
+- **`/travel-planning/[id]`** -- the Trip Dashboard (Section 3F's
+  counts, with historical giving / open pledges / outstanding asks /
+  projected opportunities kept as four clearly separate figures, never
+  summed into one blended "fundraising total," per the explicit
+  requirement) plus the prospect list, each row showing: donor name
+  (linked via the existing `DonorOriginLink` navigation), auto/manual
+  badge, status, the snapshotted suggested reason, and inline
+  status/notes/meeting-time editing. A separate, clearly-labeled "New
+  donors in this region since the trip was created" panel (Section 4,
+  "region membership" row) lets the fundraiser opt a newly-matching
+  donor in -- never auto-inserted.
+- **Per-prospect meeting prep** -- a panel or linked view that is
+  `loadMeetingBrief()`'s existing output, literally reused, not
+  re-rendered from scratch.
+
+### 4. Data-safety and integration considerations
+
+**A. Trip-to-donor linkage.** `trip_prospects.donor_id` is a plain FK
+to `donors.id` -- the real, existing donor record, never copied or
+duplicated. Removing a prospect from a trip deletes only the
+`trip_prospects` row; the donor record is never touched.
+
+**B. Meeting records: reuse `interactions`, never a parallel system.**
+When a prospect's status moves to `meeting_scheduled`, the trip feature
+writes a real, future-dated `interactions` row (`type: "meeting"`,
+`occurred_at` = the meeting's real instant via `zonedTimeToUtc()`,
+`source: "capture-scheduled:trip"`) through the SAME creation path
+`app/api/interactions/route.ts` already uses -- this is what makes the
+meeting show up in the donor's own timeline and in the existing
+"scheduled activities" view for free, with no new mechanism. When the
+fundraiser marks the meeting `meeting_completed` (with real notes), the
+SAME interaction is updated through the existing outcome-capture flow
+(matching `app/interactions/[id]/outcome`'s own established pattern) --
+never a second, trip-only record of what was discussed.
+`trip_prospects.linked_interaction_id` stores the one FK back to it.
+Pre-meeting statuses (`not_contacted`/`contacted`/`meeting_requested`/
+`declined`/`unable_to_schedule`) do not require an interaction at all
+-- those are trip-workflow states, not completed donor touches, though
+the fundraiser may optionally log a quick interaction for `contacted`
+the same way Capture already allows today. This is also exactly why
+a completed trip meeting correctly, automatically feeds the rest of the
+CRM's own "time since meaningful contact"/"last substantive contact"
+signals for every future recommendation and future trip -- there is
+only ever one real record of what happened.
+
+**C. Tasks/reminders: reuse `recommendations`, add one nullable column.**
+A trip-born follow-up reminder is still fundamentally "a reminder about
+this donor" and should keep appearing in the Today page/Daily Agenda
+exactly as any other reminder does -- the owner should see it whether
+or not he opens the Travel Planning page. `recommendations.trip_id`
+(nullable, additive) is purely for the Trip Dashboard's own "reminders
+tied to this trip" display; it changes no existing read path's
+behavior.
+
+**D. Trip-specific status vs. the CRM's own interaction/task systems.**
+`trip_prospects.status` is a deliberately separate, trip-scoped
+workflow ("have I made progress on THIS trip's visit"), answering a
+different question than "what is my overall relationship with this
+donor." The mapping in Section B above is what lets the two coexist
+without duplication: trip status drives WHEN a real interaction/
+reminder gets written, but the CONTENT of what happened always lives in
+the one shared `interactions`/`recommendations` system.
+
+**E. One trip's history never affects another.** Each `(trip_id,
+donor_id)` pair is its own row (enforced by the `UNIQUE` constraint);
+if the same donor is visited on two different trips, each trip gets its
+own, independent `trip_prospects` row, its own status, its own
+`linked_interaction_id`. Nothing about Trip A's prospect row is ever
+read or written while updating Trip B's.
+
+**F. Region membership stays dynamic without silently mutating a
+finalized trip.** `trip_prospects` rows are a point-in-time snapshot,
+inserted once when the trip is created (or when the fundraiser
+explicitly clicks "refresh suggestions") -- never re-run automatically.
+A donor who starts matching the trip's region AFTER creation (a new
+import, a new manual donor, an edited address) is surfaced only in the
+separate, always-live "newly matching donors" panel (computed fresh,
+every page load, via the same `regionsForCityState()`/
+`cityOptionsForRegion()` already used everywhere else), and only added
+to the frozen trip snapshot by an explicit fundraiser action. This is
+the same principle this session's own Baltimore/Silver Spring round
+already established: region membership itself is always a live
+computation, never a stored assignment -- a trip just decides, once,
+which of today's matches to keep.
+
+**G. Avoiding stale recommendations, duplicate outreach, and incorrect
+payment-plan warnings.** The prioritization step calls
+`buildRecommendationEvidence()`/`generateCandidates()`/
+`isOpenPledgeActionable()`/`evaluatePaymentPlan()` directly -- the exact
+same functions, not reimplementations -- so every protection already
+built this session (payment-plan grace-period logic, completed-outreach
+suppression, the October 14 Completed Outreach Action fixes) is
+inherited automatically, with zero risk of reintroducing a previously-
+fixed bug. `suggested_reason` is captured once, at add time, as an
+honest historical snapshot rather than silently rewritten later if the
+underlying evidence changes -- the Trip Dashboard can show a separately-
+labeled "current status" alongside it, but the two are never conflated.
+Duplicate outreach is structurally prevented by `trip_prospects.status`
+itself: once a donor is `contacted` or further along for THIS trip,
+that is the one place that fact is recorded.
+
+**H. Production/Staging isolation.** Identical to every existing
+table: the same migration file applies to both `fundraising-os-
+staging-db` and `fundraising-os-production-db` via the existing,
+explicit, manual `wrangler d1 migrations apply` step per environment
+(confirmed: no automated migration-on-deploy exists in this repo
+today -- migrations are always a separate, reviewed step). Two
+concrete, already-enforced checklist items for whoever implements this:
+(1) `trips` and `trip_prospects` must be added to `lib/operations/
+staging-reset.ts`'s `STAGING_RESET_TABLE_ORDER` in correct FK-dependency
+position -- `tests/staging-reset.test.mjs` already asserts this list
+equals every fundraising-data table, so a missed addition fails the
+test suite automatically, not silently; (2) the production schema
+baseline manifest (`lib/data-health/production-baseline.ts`,
+`production-baseline/schema-manifest.json`) needs regenerating, exactly
+as it already was for `agenda_manual_test_send_log` in a prior round.
+
+**I. Future calendar integration, without requiring it now.**
+`trip_prospects.meeting_at` (a real epoch timestamp) and
+`meeting_location` (plain text) are already everything a future ICS-
+export or Google Calendar sync would need to consume -- an event start
+time, title (from the donor's name), and location. No calendar
+dependency or OAuth scope is needed for the first release; the data
+shape is simply never vague-text-only from day one.
+
+### 5. Recommended MVP scope
+
+**Phase 2a (MVP):**
+- The two new tables, `STAGING_RESET_TABLE_ORDER` + schema-baseline
+  updates, applied to Staging only until explicitly authorized further.
+- Create/edit/list trips; trip status.
+- One-time auto-populate of prospects from the destination region at
+  creation, each with a `suggested_reason` computed via the EXISTING
+  recommendation-evidence functions (Section 1/5) -- never a new
+  scoring model, per the explicit "do not introduce a new donor-priority
+  scoring model" instruction already given in the prior round and
+  repeated in spirit here.
+- Manual add/remove prospect; auto-vs-manual badge.
+- Inline status/notes/meeting-time/location/next-action editing.
+- Meeting-completed status write-through to a real `interactions` row
+  (Section 4B).
+- Trip Dashboard counts, with the four financial categories kept
+  explicitly separate (never summed).
+- The "newly matching donors since trip creation" live panel.
+- Per-prospect meeting prep via `loadMeetingBrief()`, reused as-is.
+
+**Deferred (Phase 2b/3, explicitly optional, not required for a useful
+first release):**
+- ICS/calendar export or external sync.
+- Drag-and-drop manual reprioritization (the MVP's simple optional
+  `manual_rank` override, sorted alongside the existing evidence score,
+  is enough to start).
+- Surfacing `recommendations.trip_id` inside the Today page UI itself
+  ("From your Chicago trip") -- the column exists from Phase 2a, but
+  nothing reads it there yet.
+- Trip templates/recurring trips, multi-fundraiser/shared trips (this
+  app is single-owner-scoped throughout today; no change is proposed).
+
+### 6. Open questions requiring owner decisions
+
+1. **"Additional cities" field** -- is a separate `trip_cities` list
+   actually needed, given that manually adding any donor from anywhere
+   in the CRM (already required) and the existing City combobox already
+   cover "I also want to see donors in this one other nearby city"?
+   Recommend simplifying to drop a separate additional-cities concept
+   for MVP unless the owner specifically wants it.
+2. **Status transitions** -- should the seven trip-prospect statuses be
+   enforced as a strict linear state machine, or freely changeable in
+   either direction? Recommend free changes for simplicity; flagging
+   for owner input.
+3. **Cross-trip awareness** -- when suggesting/prioritizing, should the
+   system check whether a donor already has a `meeting_requested`/
+   `meeting_scheduled` row on a DIFFERENT trip and surface that as a
+   caution (not a hard block)? Recommend yes, lightly.
+4. **Primary navigation** -- does Travel Planning deserve a 5th primary
+   nav slot (a real `AppShell` change, a first for this app), or should
+   it follow the existing Portfolio Focus/Fundraising Intelligence
+   precedent of a secondary, linked-to page? Recommend the latter for
+   MVP.
+5. **Trip-prioritization weighting** -- reuse the existing
+   `recommendation-rank.ts` scoring unchanged for sort order within a
+   trip (recommended), or should "time since meaningful contact" be
+   weighted more heavily specifically for in-person trip planning?
+   Recommend starting unchanged and revisiting only if real usage shows
+   a need.
+6. **Single vs. multi-region trips** -- recommend one primary
+   destination region per trip (matching the given example) plus manual
+   adds for anything else, rather than supporting multiple regions on
+   one trip, for MVP simplicity.
+
+### 7. Proposed implementation and verification phases
+
+Each phase follows this session's own established workflow exactly:
+implement on this branch -> add regression tests -> `tsc`/full test
+suite -> Staging deploy via the protected script and verification ->
+owner review -> explicit, separate authorization before Production.
+
+1. **Schema phase**: the two new tables + `recommendations.trip_id`,
+   `STAGING_RESET_TABLE_ORDER`/baseline updates, migration applied to
+   Staging only, with regression tests proving the restore-order and
+   backup-classification checklist items above are satisfied.
+2. **Core trip CRUD + auto-suggestion phase**: create/edit/list trips,
+   one-time region-based prospect population calling the existing
+   evidence functions verbatim, manual add/remove, with regression
+   tests proving no payment-plan/completed-outreach/stale-recommendation
+   regression and no existing donor/financial data mutation.
+3. **Status/notes/meeting-tracking phase**: inline editing, the
+   interactions/recommendations write-through described in Section 4B/C,
+   with regression tests proving a trip-completed meeting correctly
+   updates the donor's own relationship history and that one trip's
+   data never leaks into another's.
+4. **Dashboard + meeting-prep phase**: the counts dashboard (financial
+   figures kept separate), the "newly matching donors" live panel, and
+   `loadMeetingBrief()` reuse for per-prospect prep.
+5. Each phase deployed to Staging only until the owner has reviewed and
+   explicitly authorized Production for that phase, exactly matching
+   every prior round's gating in this session.
