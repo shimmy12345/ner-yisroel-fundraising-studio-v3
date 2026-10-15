@@ -42362,3 +42362,183 @@ and requires either the owner's manual `workflow_dispatch` or the next
 natural push; until then, "resolved" rests on this session's own
 independent, from-scratch re-derivation of the same facts that workflow
 would confirm, not on the workflow's own (still-stale) recorded history.
+
+## "Run workflow" Button Missing for D1 restore/schema sync check -- Root Cause and Safer Alternative (2026-10-15)
+
+The owner reported the "Run workflow" (`workflow_dispatch`) button does
+not appear for "D1 restore/schema sync check" in the GitHub Actions UI.
+Investigated directly, read-only, via the public GitHub API.
+
+**Root cause, confirmed.** `GET /repos/.../` reports
+`"default_branch": "main"`. GitHub's Actions UI only shows the manual
+"Run workflow" dispatch control for a workflow whose file -- AS IT
+EXISTS ON THE DEFAULT BRANCH -- declares a `workflow_dispatch:`
+trigger. `.github/workflows/d1-restore-sync-check.yml` has only ever
+lived on `feature/independent-cloudflare-sandbox` -- confirmed again
+this round (`git log --oneline -- .github/workflows/d1-restore-sync-check.yml`
+on that branch still shows `b929319` as the last touch; the file simply
+does not exist in `main`'s own tree at all, by original design -- its
+`on:` trigger is scoped to `branches: feature/independent-cloudflare-sandbox`
+only, since the whole point of the `check` job is comparing THAT branch
+against `main`, not running something meaningful if evaluated from
+`main` itself). GitHub still lists it as `"state": "active"` in
+`/actions/workflows` (it has run before, from the feature branch), but
+without the file present on the default branch, the dispatch button
+has nothing to attach to in the UI. This is standard, documented
+GitHub platform behavior, not a misconfiguration introduced by this
+automation and not something broken by any round in this incident.
+
+**Safer alternative, identified and recommended instead of touching
+workflow configuration** (matching the task's own explicit preference):
+GitHub's **"Re-run all jobs"** control exists on the page for ANY
+already-completed workflow run -- including the original failing run,
+`38678941234` -- regardless of whether `workflow_dispatch` is
+configured or visible anywhere. It requires no file change, no
+default-branch change, and no new permission. Re-running that run would
+re-execute the exact same, unmodified `check`/`prepare-sync` job
+definitions from commit `e9a40f2`'s tree, but `check-main-restore-sync.mjs`
+resolves `origin/main` LIVE at run time (`git fetch origin main`, not a
+value frozen at the original run) -- so a re-run today would correctly
+fetch the NOW-synced `main` (`600e460`) and report "No drift detected,"
+exactly like this session's own local re-verification already found.
+`prepare-sync` would independently reach the same `alreadySynced: true`
+conclusion and no-op, writing nothing. **Recommended next step for the
+owner:** open run `38678941234`
+(`https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/38678941234`)
+and click "Re-run all jobs."
+
+**Alternative NOT recommended without separate authorization**: porting
+`d1-restore-sync-check.yml` onto `main` so the dispatch button becomes
+visible there going forward. Technically safe in isolation (the file
+itself is inert until triggered, and would not change what the `check`
+job verifies), but it is still a change to workflow configuration on
+the default branch -- exactly the category of change the task asked to
+avoid if a safer path exists, and one this round deliberately did not
+implement. Flagged as an option for the owner's own future decision,
+not acted on.
+
+**This session could not click either control itself** (no `gh` CLI, no
+`GITHUB_TOKEN`, and this session will not extract or reuse a stored git
+credential for an API write call -- the same established boundary as
+every prior round in this incident). Both of the above remain the
+owner's own action.
+
+## October 14 2026 Email Incident -- BOTH CLOSING CRITERIA CONFIRMED, INCIDENT CLOSED (2026-10-15)
+
+**Owner confirmation, recorded as the closing evidence (2026-10-15):**
+the owner reports that the real, naturally scheduled 9:00 AM
+America/New_York Daily Fundraising Agenda email for October 15, 2026
+arrived from **Production** (not Staging), and that the recommendations
+it contained were **accurate**. This is the exact, specific evidence
+"October 14 2026 Email Incident -- PRODUCTION DEPLOYMENT"'s own Phase 4
+("Next scheduled email -- explicitly pending, not triggered") said was
+required before that entry's "This incident remains open until that
+verification is performed against an actual scheduled execution" could
+be lifted. It has now occurred, and the owner has verified it directly
+-- this session did not and could not observe the send itself (no
+Observability/dashboard access, as disclosed in that entry), so the
+owner's own confirmation is the evidence of record, exactly as that
+entry anticipated it would need to be.
+
+Formally closing both of the named sub-criteria that entry's own Phase 4
+checklist tracked:
+
+- **Production Daily Agenda email scheduling -- RESOLVED.** The email
+  arrived from Production (confirmed by the owner), satisfying Phase
+  4's items 1-3 and 6-7 in substance (a real scheduled execution fired,
+  sent exactly one email, and it was Production's own, not Staging's) --
+  this session cannot independently confirm the underlying Cloudflare
+  Observability/`agenda_send_log` row directly (same access limitation
+  disclosed in the original entry), so this closure rests on the
+  owner's direct, first-hand confirmation of the actually-received
+  email's source, which is the strongest evidence actually available
+  for this question.
+- **Daily Agenda recommendation accuracy -- RESOLVED.** The
+  recommendations in that email were accurate (confirmed by the owner),
+  satisfying Phase 4's item 4 (content must match Production's own live
+  state at send time) in substance. This is distinct from, and should
+  not be confused with, the separate, already-closed "Daily Fundraising
+  Agenda Quality Corrections" investigation from 2026-08-26 (advance-
+  notice window and suggested-actions root cause) -- that round fixed a
+  different, structural quality issue months earlier; this
+  confirmation is specifically that *this* real send's content was
+  correct, verified against *today's* live Production data.
+
+**Both incidents now move to routine monitoring**, not active
+investigation: no further action is required unless a future send is
+reported as missing, duplicated, mis-sourced (Staging instead of
+Production), or materially inaccurate, in which case a NEW incident
+entry should be opened rather than reopening this one.
+
+**What remains explicitly unresolved and unrelated to this closure**
+(carried over from the original entry, not affected by today's
+confirmation): the "stale baseline stamp" cosmetic state on Production's
+own `/health` page, and the `shimmydonors.org` → workers.dev domain-
+routing redirect (owner action required, outside this repository).
+
+## Temporary Test-Send Endpoint Removal (2026-10-15)
+
+With the Daily Agenda incident closed above, `app/api/agenda/test-send/route.ts`'s
+own header comment ("Remove or disable this route once that
+verification is complete") now applies. Reviewed and removed on
+`feature/independent-cloudflare-sandbox`.
+
+**Safety analysis performed before removing anything:**
+- `grep`-confirmed the real scheduled path
+  (`lib/agenda/send-agenda.ts`, `lib/agenda/send-log.ts`,
+  `worker/index.ts`'s `scheduled()` handler) contains zero references
+  to `test-send-log` or the removed route -- the route's own header
+  comment's claim ("never reads, writes, or even references the real
+  scheduled send's own idempotency table") independently re-confirmed
+  by source inspection, not just trusted.
+- `grep -rln "test-send"` across the whole repo, before removing
+  anything, found exactly the expected set: the route itself, its one
+  dedicated lib file (`lib/agenda/test-send-log.ts`, no other caller
+  anywhere), two dedicated test files that exist ONLY to test this
+  route/lib (`tests/agenda-test-send-safety.test.mjs`,
+  `tests/agenda-test-send-idempotency-e2e.test.mjs`), `db/schema.ts`'s
+  table definition, and three restore/baseline-tracking files
+  (`lib/data-health/production-baseline.ts`,
+  `lib/operations/d1-restore-order.ts`,
+  `lib/operations/restore-drift-guard.ts`) that classify the TABLE
+  (never the route) for restore-order purposes.
+- **Deliberately scoped to the route only, never the table or
+  migration**: removing a table requires a destructive migration,
+  explicitly out of scope for this round (and for this task's own
+  safety constraints). `agenda_manual_test_send_log`
+  (`drizzle/0044_agenda_manual_test_send_log.sql`), its
+  `ACCOUNT_CONFIGURATION_TABLES` classification, and its restore-order
+  placement are all left completely untouched -- the table remains,
+  unmigrated, as the permanent audit record of the test attempts
+  already made against it, exactly as its own original design intended
+  ("Rows are kept permanently after the route is removed/disabled, as
+  the audit record of the test and its outcome").
+
+**Files removed:**
+- `app/api/agenda/test-send/route.ts`
+- `lib/agenda/test-send-log.ts`
+- `tests/agenda-test-send-safety.test.mjs`
+- `tests/agenda-test-send-idempotency-e2e.test.mjs`
+
+**Files edited:**
+- `scripts/run-tests.mjs`: removed the two deleted test files from
+  `TEST_FILES`.
+- `db/schema.ts`: updated `agendaManualTestSendLog`'s own doc comment to
+  past tense, recording that the route was removed 2026-10-15 and why
+  the table itself was deliberately kept.
+
+**Validation**: `node scripts/run-tests.mjs` -- **197/197 passed** (199
+prior minus the 2 removed files, zero new failures), PLUS the
+migration-sync step still reports "No drift detected" (removing
+application code never touches schema/restore tracking, confirmed, not
+assumed). `npx tsc --noEmit` -- clean (confirms no dangling import of
+either removed file anywhere). `npm run lint` -- 94 errors / 43
+warnings, the exact unchanged baseline. A final `grep` for
+`test-send-log`/`TEST_SEND_CLAIM_ID`/`buildTestSendClaimQuery` across
+the whole repo after removal found only `db/schema.ts`'s own updated
+historical comment -- no dangling reference anywhere else.
+
+**Not deployed anywhere.** This change exists only on
+`feature/independent-cloudflare-sandbox`; no Staging or Production
+deploy was performed as part of this round, per the task's own explicit
+instruction that any deploy requires separate authorization.
