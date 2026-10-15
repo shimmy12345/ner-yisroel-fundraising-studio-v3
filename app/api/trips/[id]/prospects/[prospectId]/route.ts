@@ -1,7 +1,7 @@
 import { getChatGPTUser } from "../../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../../lib/auth/profile";
 import { getTrip, removeProspect, setSimpleProspectStatus, scheduleProspectMeeting, completeProspectMeeting, updateProspectFields } from "../../../../../../lib/relationships/trips-data";
-import { isValidProspectStatus, statusRequiresInteraction, validateMeetingScheduling, validateMeetingCompletion, validateMeetingLocation, validateNextAction, validateNotes } from "../../../../../../lib/relationships/trip-model";
+import { isValidProspectStatus, statusRequiresInteraction, validateMeetingLocation, validateNextAction, validateNotes } from "../../../../../../lib/relationships/trip-model";
 import { logger } from "../../../../../../lib/logger";
 
 // Trip-specific status/notes/meeting tracking (Section D). The two
@@ -13,9 +13,19 @@ import { logger } from "../../../../../../lib/logger";
 // checked here, before lib/relationships/trips-data.ts's own functions
 // (which also refuse without it, so this is deliberately defense in
 // depth, not the only gate).
+//
+// `meetingAtLocal` is the raw, untrusted `<input type="datetime-local">`
+// text (e.g. "2026-11-05T14:00") -- NEVER pre-parsed into an epoch here.
+// trips-data.ts's scheduleProspectMeeting()/completeProspectMeeting()
+// resolve it using the PROSPECT'S OWN donor state to pick the real
+// destination timezone (independent-review correction, 2026-10-15 --
+// see trip-model.ts's parseLocalDateTimeInput()/timezoneForState() and
+// lib/workspace/local-time.ts's zonedTimeToUtc()); parsing it against
+// the fundraiser's own browser timezone here would silently mis-record
+// a meeting scheduled for a donor in a different timezone.
 type UpdateProspectBody = {
   status?: string;
-  meetingAt?: number;
+  meetingAtLocal?: string;
   meetingLocation?: string | null;
   completionNotes?: string;
   confirmScheduling?: boolean;
@@ -44,19 +54,15 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!isValidProspectStatus(body.status)) return Response.json({ error: "Choose a valid prospect status" }, { status: 422 });
 
     if (body.status === "meeting_scheduled") {
-      const meetingResult = validateMeetingScheduling(body.meetingAt, now);
-      if (!meetingResult.ok) return Response.json({ error: "Choose a future meeting date and time" }, { status: 422 });
       const locationResult = validateMeetingLocation(body.meetingLocation);
       if (!locationResult.ok) return Response.json({ error: "Meeting location is too long" }, { status: 422 });
       if (body.confirmScheduling !== true) return Response.json({ error: "Confirm the meeting time before scheduling it" }, { status: 422 });
-      const result = await scheduleProspectMeeting(profile.id, id, prospectId, meetingResult.meetingAt, locationResult.location, true, now);
+      const result = await scheduleProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, locationResult.location, true, profile.timezone, now);
       if (!result.ok) return statusErrorResponse(result.reason);
       logger.info("trip_prospect_meeting_scheduled", { userId: profile.id, tripId: id, prospectId });
     } else if (body.status === "meeting_completed") {
-      const completionResult = validateMeetingCompletion(body.meetingAt, body.completionNotes, now);
-      if (!completionResult.ok) return Response.json({ error: "Record an actual meeting date and meaningful notes before marking this meeting completed" }, { status: 422 });
       if (body.confirmCompletion !== true) return Response.json({ error: "Confirm the meeting outcome before marking it completed" }, { status: 422 });
-      const result = await completeProspectMeeting(profile.id, id, prospectId, completionResult.meetingAt, completionResult.notes, true, now);
+      const result = await completeProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, body.completionNotes ?? "", true, profile.timezone, now);
       if (!result.ok) return statusErrorResponse(result.reason);
       logger.info("trip_prospect_meeting_completed", { userId: profile.id, tripId: id, prospectId });
     } else {
@@ -96,9 +102,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   return Response.json({ ok: true });
 }
 
-function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_required") {
+function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time") {
   if (reason === "not_found") return Response.json({ error: "Prospect not found" }, { status: 404 });
   if (reason === "confirmation_required") return Response.json({ error: "Confirmation is required for this change" }, { status: 422 });
+  if (reason === "already_completed") return Response.json({ error: "This meeting is already marked completed. Remove and re-add this prospect for a separate, later meeting." }, { status: 409 });
+  if (reason === "invalid_meeting_time") return Response.json({ error: "Choose a valid meeting date and time (a future time to schedule, or an actual past time -- with meaningful notes -- to mark completed)" }, { status: 422 });
   return Response.json({ error: "This prospect was updated elsewhere. Refresh and try again." }, { status: 409 });
 }
 

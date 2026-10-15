@@ -6,7 +6,7 @@ import { DonorAutocomplete } from "../../capture/DonorAutocomplete";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../../../lib/navigation/donor-navigation";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 import type { TripRecord, TripProspectRecord } from "../../../lib/relationships/trips-data";
-import { TRIP_PROSPECT_STATUSES, type TripProspectStatus, type RegionCandidateDonor } from "../../../lib/relationships/trip-model";
+import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus, type RegionCandidateDonor } from "../../../lib/relationships/trip-model";
 
 const STATUS_LABELS: Record<TripProspectStatus, string> = {
   not_contacted: "Not Contacted", contacted: "Contacted", meeting_requested: "Meeting Requested",
@@ -15,10 +15,33 @@ const STATUS_LABELS: Record<TripProspectStatus, string> = {
 const SUMMARY_STATUSES: readonly TripProspectStatus[] = ["not_contacted", "contacted", "meeting_requested", "meeting_scheduled", "meeting_completed", "declined", "unable_to_schedule"];
 const NEEDING_ATTENTION: ReadonlySet<TripProspectStatus> = new Set(["not_contacted", "meeting_requested"]);
 
+// Trip start/end are plain calendar dates (no meaningful time-of-day or
+// destination timezone -- see the trips schema's own header comment),
+// so these two stay UTC-anchored exactly as before.
 const dateLabel = (epoch: number) => new Date(epoch * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
-const dateTimeLabel = (epoch: number) => new Date(epoch * 1000).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
-const toDateTimeInputValue = (epoch: number) => { const d = new Date(epoch * 1000); const pad = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const fromDateTimeInputValue = (value: string) => Math.floor(new Date(value).getTime() / 1000);
+
+// Independent-review correction (2026-10-15): a specific meeting time IS
+// a real instant, and MUST be displayed/edited in the donor's own
+// destination timezone (timezoneForState(), resolved per-prospect from
+// the donor's own state) -- never the browser's ambient zone, which is
+// what `new Date(...).toLocaleString()`/`.getHours()` etc. would silently
+// use instead. `Intl.DateTimeFormat`'s own explicit `timeZone` option is
+// what makes this correct, matching the exact pattern lib/workspace/
+// scheduled-activity.ts's own `localDay()` already uses elsewhere in
+// this codebase.
+function dateTimeLabelInZone(epoch: number, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(epoch * 1000));
+}
+// Builds a `<input type="datetime-local">` value (`YYYY-MM-DDTHH:mm`)
+// representing `epoch` as WALL-CLOCK TIME IN `timezone`, via
+// Intl.DateTimeFormat's own part extraction -- never a Date object's
+// own local getters, which read the browser's zone instead.
+function toDateTimeInputValueInZone(epoch: number, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(epoch * 1000));
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
+  const hour = part("hour") === "24" ? "00" : part("hour");
+  return `${part("year")}-${part("month")}-${part("day")}T${hour}:${part("minute")}`;
+}
 
 async function patchProspect(tripId: string, prospectId: string, body: Record<string, unknown>) {
   const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -26,8 +49,8 @@ async function patchProspect(tripId: string, prospectId: string, body: Record<st
   if (!response.ok) throw new Error(payload.error ?? "That change could not be saved.");
 }
 
-export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, allDonors }: {
-  trip: TripRecord; prospects: TripProspectRecord[]; newlyMatchingDonors: RegionCandidateDonor[]; allDonors: DonorSearchRecord[];
+export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, allDonors, fundraiserTimezone }: {
+  trip: TripRecord; prospects: TripProspectRecord[]; newlyMatchingDonors: RegionCandidateDonor[]; allDonors: DonorSearchRecord[]; fundraiserTimezone: string;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +137,7 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
     <section className="travel-planning-prospects" aria-label="Trip prospects">
       <h2>Prospects ({prospects.length})</h2>
       {prospects.length === 0 && <p className="travel-planning-empty-inline">No prospects yet. {trip.destinationRegionId ? "" : "This trip has no destination region, so add donors manually above."}</p>}
-      {prospects.map((prospect) => <ProspectRow key={prospect.id} tripId={trip.id} prospect={prospect} busy={busyProspectId === prospect.id} onBusyAction={(action) => withBusy(prospect.id, action)} onRemove={() => removeDonor(prospect.id, prospect.donorDisplayName)} />)}
+      {prospects.map((prospect) => <ProspectRow key={prospect.id} tripId={trip.id} prospect={prospect} busy={busyProspectId === prospect.id} fundraiserTimezone={fundraiserTimezone} onBusyAction={(action) => withBusy(prospect.id, action)} onRemove={() => removeDonor(prospect.id, prospect.donorDisplayName)} />)}
     </section>
   </>;
 }
@@ -136,14 +159,18 @@ function TripStatusControl({ tripId, currentStatus, onChanged }: { tripId: strin
   </select>;
 }
 
-function ProspectRow({ tripId, prospect, busy, onBusyAction, onRemove }: {
-  tripId: string; prospect: TripProspectRecord; busy: boolean; onBusyAction: (action: () => Promise<void>) => void; onRemove: () => void;
+function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction, onRemove }: {
+  tripId: string; prospect: TripProspectRecord; busy: boolean; fundraiserTimezone: string; onBusyAction: (action: () => Promise<void>) => void; onRemove: () => void;
 }) {
+  // The donor's OWN destination timezone (independent-review correction,
+  // 2026-10-15) -- never the browser's. Falls back to the fundraiser's
+  // own home timezone only when this donor has no state on file.
+  const timezone = timezoneForState(prospect.donorState, fundraiserTimezone);
   const [notesDraft, setNotesDraft] = useState(prospect.trip_notes ?? "");
   const [nextActionDraft, setNextActionDraft] = useState(prospect.nextAction ?? "");
   const [scheduling, setScheduling] = useState(false);
   const [completing, setCompleting] = useState(false);
-  const [meetingAtDraft, setMeetingAtDraft] = useState(prospect.meetingAt ? toDateTimeInputValue(prospect.meetingAt) : "");
+  const [meetingAtDraft, setMeetingAtDraft] = useState(prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "");
   const [locationDraft, setLocationDraft] = useState(prospect.meetingLocation ?? "");
   const [completionNotesDraft, setCompletionNotesDraft] = useState("");
   const returnTo = typeof window !== "undefined" ? `${window.location.pathname}${window.location.search}${window.location.hash}` : `/travel-planning/${tripId}`;
@@ -154,16 +181,26 @@ function ProspectRow({ tripId, prospect, busy, onBusyAction, onRemove }: {
     onBusyAction(() => patchProspect(tripId, prospect.id, { status }));
   }
 
+  // Sends the RAW `datetime-local` text as `meetingAtLocal` -- the
+  // server resolves it to a real UTC epoch using this exact donor's
+  // destination timezone (trips-data.ts's resolveMeetingEpoch()), never
+  // a client-side Date() parse in the browser's own zone.
   function confirmScheduling() {
-    const meetingAt = fromDateTimeInputValue(meetingAtDraft);
-    if (!Number.isFinite(meetingAt)) return;
-    onBusyAction(async () => { await patchProspect(tripId, prospect.id, { status: "meeting_scheduled", meetingAt, meetingLocation: locationDraft || null, confirmScheduling: true }); setScheduling(false); });
+    if (!meetingAtDraft) return;
+    onBusyAction(async () => { await patchProspect(tripId, prospect.id, { status: "meeting_scheduled", meetingAtLocal: meetingAtDraft, meetingLocation: locationDraft || null, confirmScheduling: true }); setScheduling(false); });
   }
 
+  // Requires an explicit, non-empty date -- never silently defaults to
+  // "right now" on the fundraiser's behalf. The input is pre-filled from
+  // an existing scheduled meeting (if any) via the `meetingAtDraft`
+  // state initializer above; a prospect jumping straight to "Meeting
+  // Completed" with no prior scheduled meeting sees a genuinely empty
+  // field and must enter the real date themselves, matching "must
+  // require ... an actual meeting date" literally rather than guessing
+  // one when the field is left blank.
   function confirmCompletion() {
-    const meetingAt = fromDateTimeInputValue(meetingAtDraft || toDateTimeInputValue(prospect.meetingAt ?? Math.floor(Date.now() / 1000)));
-    if (!Number.isFinite(meetingAt) || completionNotesDraft.trim().length < 2) return;
-    onBusyAction(async () => { await patchProspect(tripId, prospect.id, { status: "meeting_completed", meetingAt, completionNotes: completionNotesDraft, confirmCompletion: true }); setCompleting(false); });
+    if (!meetingAtDraft || completionNotesDraft.trim().length < 2) return;
+    onBusyAction(async () => { await patchProspect(tripId, prospect.id, { status: "meeting_completed", meetingAtLocal: meetingAtDraft, completionNotes: completionNotesDraft, confirmCompletion: true }); setCompleting(false); });
   }
 
   function saveFields() {
@@ -181,27 +218,27 @@ function ProspectRow({ tripId, prospect, busy, onBusyAction, onRemove }: {
       <button type="button" className="travel-planning-remove" disabled={busy} onClick={onRemove}>Remove</button>
     </div>
 
-    {prospect.crossTripConflicts.length > 0 && <p className="travel-planning-conflict-caution">⚠ Also {prospect.crossTripConflicts[0].status === "meeting_scheduled" ? "has a meeting scheduled" : "has a meeting requested"} on &ldquo;{prospect.crossTripConflicts[0].tripName}&rdquo;{prospect.crossTripConflicts[0].meetingAt ? ` (${dateTimeLabel(prospect.crossTripConflicts[0].meetingAt)})` : ""}. This does not block adding them here.</p>}
+    {prospect.crossTripConflicts.length > 0 && <p className="travel-planning-conflict-caution">⚠ Also {prospect.crossTripConflicts[0].status === "meeting_scheduled" ? "has a meeting scheduled" : "has a meeting requested"} on &ldquo;{prospect.crossTripConflicts[0].tripName}&rdquo;{prospect.crossTripConflicts[0].meetingAt ? ` (${dateTimeLabelInZone(prospect.crossTripConflicts[0].meetingAt, timezone)})` : ""}. This does not block adding them here.</p>}
 
     <p className="travel-planning-suggested-reason">
       {prospect.suggestedReason ?? "No specific evidence on file."}
       {prospect.suggestedGeneratedAt && <small> — suggested {dateLabel(prospect.suggestedGeneratedAt)}{prospect.suggestedScore != null ? `, evidence score ${prospect.suggestedScore.toFixed(2)}` : ""}. Current CRM status may have changed since -- see Prepare for Meeting for up-to-date detail.</small>}
     </p>
 
-    {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">{prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabel(prospect.meetingAt)}{prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.</p>}
+    {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">{prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.</p>}
 
     {scheduling && <div className="travel-planning-confirm-panel">
-      <label>Meeting date &amp; time<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
+      <label>Meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
       <label>Location (optional)<input type="text" value={locationDraft} onChange={(event) => setLocationDraft(event.target.value)} maxLength={300} /></label>
       <p className="travel-planning-confirm-hint">This creates a real scheduled interaction on this donor&rsquo;s timeline.</p>
       <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmScheduling} disabled={!meetingAtDraft}>Confirm scheduled meeting</button><button type="button" onClick={() => setScheduling(false)}>Cancel</button></div>
     </div>}
 
     {completing && <div className="travel-planning-confirm-panel">
-      <label>Actual meeting date &amp; time<input type="datetime-local" value={meetingAtDraft || (prospect.meetingAt ? toDateTimeInputValue(prospect.meetingAt) : "")} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
+      <label>Actual meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft || (prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "")} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
       <label>Meeting notes (required)<textarea value={completionNotesDraft} onChange={(event) => setCompletionNotesDraft(event.target.value)} maxLength={5000} placeholder="What happened, decisions made, any commitments" /></label>
       <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives.</p>
-      <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmCompletion} disabled={completionNotesDraft.trim().length < 2}>Confirm meeting completed</button><button type="button" onClick={() => setCompleting(false)}>Cancel</button></div>
+      <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmCompletion} disabled={!meetingAtDraft || completionNotesDraft.trim().length < 2}>Confirm meeting completed</button><button type="button" onClick={() => setCompleting(false)}>Cancel</button></div>
     </div>}
 
     <div className="travel-planning-prospect-fields">

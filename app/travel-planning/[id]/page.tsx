@@ -37,6 +37,6 @@ export default async function TripPage({ params }: { params: Promise<{ id: strin
   }));
 
   return <AppShell active="today">
-    <TripDashboardExperience trip={trip} prospects={prospects} newlyMatchingDonors={newlyMatchingDonors} allDonors={allDonors} />
+    <TripDashboardExperience trip={trip} prospects={prospects} newlyMatchingDonors={newlyMatchingDonors} allDonors={allDonors} fundraiserTimezone={profile.timezone} />
   </AppShell>;
 }

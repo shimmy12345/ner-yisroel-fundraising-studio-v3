@@ -9,12 +9,32 @@
 import { env } from "cloudflare:workers";
 import { loadMeetingBrief } from "./meeting-brief.ts";
 import { regionsForCityState, travelRegionById, type TravelRegionId } from "./travel-regions.ts";
+import { zonedTimeToUtc } from "../workspace/local-time.ts";
 import {
-  buildSuggestionSnapshot, findCrossTripConflicts, findNewlyMatchingDonors,
+  buildSuggestionSnapshot, findCrossTripConflicts, findNewlyMatchingDonors, parseLocalDateTimeInput,
   statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
-  tripMeetingInteractionId, tripScheduledInteractionSource,
+  tripMeetingInteractionId, tripScheduledInteractionSource, validateMeetingCompletion, validateMeetingScheduling,
   type AddedMethod, type CrossTripConflict, type RegionCandidateDonor, type TripProspectStatus, type TripStatus,
 } from "./trip-model.ts";
+
+// Independent-review correction (2026-10-15): resolves a `datetime-local`
+// input value into a real UTC epoch using the PROSPECT'S OWN donor state
+// to pick the destination timezone (timezoneForState()), falling back to
+// the fundraiser's own home timezone only when the donor has none on
+// file -- never the browser's ambient timezone. Returns null for a
+// malformed input string; the caller turns that into a clear validation
+// error rather than guessing. See trip-model.ts's own header comment on
+// parseLocalDateTimeInput() for why a strict regex parse (never `new
+// Date()`) is what makes this safe to call with untrusted request-body
+// text at all.
+async function resolveMeetingEpoch(donorId: string, localDateTime: unknown, fallbackTimezone: string): Promise<number | null> {
+  const fields = parseLocalDateTimeInput(localDateTime);
+  if (!fields) return null;
+  const donor = await env.DB.prepare("SELECT state FROM donors WHERE id = ?").bind(donorId).first<{ state: string | null }>();
+  const timezone = timezoneForState(donor?.state ?? null, fallbackTimezone);
+  const utc = zonedTimeToUtc(fields.year, fields.month, fields.day, fields.hour, fields.minute, timezone);
+  return Math.floor(utc.getTime() / 1000);
+}
 
 // A deliberately small, fixed concurrency limit for the one-time,
 // trip-creation auto-suggestion fan-out (Section B): the largest single
@@ -225,7 +245,7 @@ async function ownedProspect(userId: string, tripId: string, prospectId: string)
   return row ? { id: row.id, donorId: row.donor_id, status: row.status, linkedInteractionId: row.linked_interaction_id } : null;
 }
 
-export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" };
+export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" };
 
 // A simple status move -- not_contacted/contacted/meeting_requested/
 // declined/unable_to_schedule. Never writes to `interactions` (Section
@@ -261,10 +281,32 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
 // to proceed without it; the real write is idempotent (deterministic
 // interaction id, ON CONFLICT DO UPDATE) so a retried request can never
 // create a second interaction for the same prospect.
-export async function scheduleProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAt: number, location: string | null, confirmed: boolean, now: number): Promise<StatusUpdateResult> {
+//
+// Independent-review correction (2026-10-15): refuses once the prospect
+// is already `meeting_completed`. Without this, re-selecting "Meeting
+// Scheduled" on an already-completed prospect (reachable through the
+// ordinary status dropdown, not just a crafted request) would silently
+// overwrite the SAME linked interaction's `summary`/`source` back to a
+// generic "scheduled" placeholder -- erasing the real completed
+// meeting's own notes, not merely relabeling a status. Rescheduling
+// before completion (declined -> scheduled, or scheduled -> a new time)
+// is unaffected; only the completed -> scheduled direction is blocked.
+// A fundraiser who genuinely needs a second, later meeting with the
+// same donor on the same trip must remove and re-add the prospect
+// (documented as a known MVP limitation, not silently worked around
+// here) rather than risk this function ever discarding a real record
+// of what already happened.
+// `meetingAtLocal` is the exact, untrusted `<input type="datetime-local">`
+// string from the request body -- resolved to a real UTC epoch via
+// resolveMeetingEpoch() (the donor's own destination timezone, DST-safe,
+// never the browser's ambient zone) before anything else runs.
+export async function scheduleProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, location: string | null, confirmed: boolean, fallbackTimezone: string, now: number): Promise<StatusUpdateResult> {
   if (!confirmed) return { ok: false, reason: "confirmation_required" };
   const existing = await ownedProspect(userId, tripId, prospectId);
   if (!existing) return { ok: false, reason: "not_found" };
+  if (existing.status === "meeting_completed") return { ok: false, reason: "already_completed" };
+  const meetingAt = await resolveMeetingEpoch(existing.donorId, meetingAtLocal, fallbackTimezone);
+  if (meetingAt === null || !validateMeetingScheduling(meetingAt, now).ok) return { ok: false, reason: "invalid_meeting_time" };
   const interactionId = tripMeetingInteractionId(prospectId);
   const source = tripScheduledInteractionSource(tripId);
   const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
@@ -291,10 +333,12 @@ export async function scheduleProspectMeeting(userId: string, tripId: string, pr
 // Scheduled" step; creates one directly in the completed state when the
 // fundraiser jumps straight to "Meeting Completed" without having
 // scheduled it first (a real, legitimate case -- an impromptu meeting).
-export async function completeProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAt: number, notes: string, confirmed: boolean, now: number): Promise<StatusUpdateResult> {
+export async function completeProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, notes: string, confirmed: boolean, fallbackTimezone: string, now: number): Promise<StatusUpdateResult> {
   if (!confirmed) return { ok: false, reason: "confirmation_required" };
   const existing = await ownedProspect(userId, tripId, prospectId);
   if (!existing) return { ok: false, reason: "not_found" };
+  const meetingAt = await resolveMeetingEpoch(existing.donorId, meetingAtLocal, fallbackTimezone);
+  if (meetingAt === null || !validateMeetingCompletion(meetingAt, notes, now).ok) return { ok: false, reason: "invalid_meeting_time" };
   const interactionId = existing.linkedInteractionId ?? tripMeetingInteractionId(prospectId);
   const originalSource = tripScheduledInteractionSource(tripId);
   const completedSource = tripCompletedInteractionSource(meetingAt, originalSource);

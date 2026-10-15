@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import {
   TRIP_STATUSES, isValidTripStatus, TRIP_PROSPECT_STATUSES, isValidProspectStatus,
   statusRequiresInteraction, isConflictingProspectStatus, findCrossTripConflicts,
-  buildSuggestionSnapshot, timezoneForState,
+  buildSuggestionSnapshot, timezoneForState, parseLocalDateTimeInput,
   tripScheduledInteractionSource, tripCompletedInteractionSource, tripCancelledInteractionSource, tripMeetingInteractionId,
   findNewlyMatchingDonors,
   validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, validateMeetingLocation, validateNextAction,
   validateMeetingCompletion, validateMeetingScheduling,
 } from "../lib/relationships/trip-model.ts";
 import { activityStatus, completedPlannedAt, originalActivitySource, isScheduledActivity, isCancelledActivity } from "../lib/workspace/scheduled-activity.ts";
+import { zonedTimeToUtc } from "../lib/workspace/local-time.ts";
 
 // Trip-Based Meeting Planning -- Phase 2 (2026-10-15, see docs/AI-HANDOFF.md).
 // Exercises the pure logic directly -- lib/relationships/trips-data.ts's
@@ -86,6 +87,47 @@ async function run() {
   assert.equal(timezoneForState("il", "America/New_York"), "America/Chicago", "case-insensitive");
   assert.equal(timezoneForState("ZZ", "America/New_York"), "America/New_York", "unrecognized state falls back, never guesses");
   assert.equal(timezoneForState(null, "America/New_York"), "America/New_York");
+
+  // --- parseLocalDateTimeInput: strict parsing of exactly the format an
+  // <input type="datetime-local"> always produces (independent-review
+  // correction, 2026-10-15 -- the live scheduling flow originally parsed
+  // this text with the browser's own `Date()` constructor, which reads
+  // the DEVICE's ambient timezone, not the destination's). Never `new
+  // Date()` -- a strict regex, so malformed or unexpected input is
+  // rejected rather than silently misinterpreted. ---
+  assert.deepEqual(parseLocalDateTimeInput("2026-11-05T14:30"), { year: 2026, month: 11, day: 5, hour: 14, minute: 30 });
+  assert.equal(parseLocalDateTimeInput("not-a-date"), null);
+  assert.equal(parseLocalDateTimeInput("2026-11-05"), null, "a bare date with no time must be rejected, never silently treated as midnight");
+  assert.equal(parseLocalDateTimeInput("2026-13-05T14:30"), null, "month 13 is invalid");
+  assert.equal(parseLocalDateTimeInput("2026-11-05T25:30"), null, "hour 25 is invalid");
+  assert.equal(parseLocalDateTimeInput(null), null);
+  assert.equal(parseLocalDateTimeInput(undefined), null);
+  assert.equal(parseLocalDateTimeInput(1760400000), null, "a raw epoch number must never be accepted as if it were the local-datetime text format");
+
+  // --- Real end-to-end composition: parseLocalDateTimeInput() +
+  // timezoneForState() + the REAL, unmodified zonedTimeToUtc()
+  // (lib/workspace/local-time.ts) -- proving DST is actually handled
+  // correctly, not merely that each piece works in isolation. The same
+  // wall-clock time (2:00 PM) at the same destination (a Chicago-area
+  // donor) must resolve to a DIFFERENT UTC instant in winter (CST,
+  // UTC-6) than in summer (CDT, UTC-5) -- if DST were not genuinely
+  // applied, both would incorrectly share one fixed offset. This is the
+  // actual proof the live scheduling flow (trips-data.ts's
+  // resolveMeetingEpoch(), which composes these same three pieces) gets
+  // a destination meeting time right across the year, not just that
+  // timezoneForState() returns the right zone NAME in isolation. ---
+  {
+    const timezone = timezoneForState("IL", "America/New_York");
+    assert.equal(timezone, "America/Chicago");
+
+    const winterFields = parseLocalDateTimeInput("2026-01-15T14:00");
+    const winterUtc = zonedTimeToUtc(winterFields.year, winterFields.month, winterFields.day, winterFields.hour, winterFields.minute, timezone);
+    assert.equal(winterUtc.getUTCHours(), 20, "2:00 PM CST (winter, UTC-6) must resolve to 8:00 PM UTC");
+
+    const summerFields = parseLocalDateTimeInput("2026-07-15T14:00");
+    const summerUtc = zonedTimeToUtc(summerFields.year, summerFields.month, summerFields.day, summerFields.hour, summerFields.minute, timezone);
+    assert.equal(summerUtc.getUTCHours(), 19, "2:00 PM CDT (summer, UTC-5) must resolve to 7:00 PM UTC -- a full hour different from winter, proving DST is actually applied");
+  }
 
   // --- Interaction source-string builders: verified against the REAL,
   // unmodified lib/workspace/scheduled-activity.ts functions that the

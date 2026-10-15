@@ -113,6 +113,38 @@ export function timezoneForState(state: string | null | undefined, fallback: str
   return STATE_TIMEZONES[state.trim().toUpperCase()] ?? fallback;
 }
 
+// Independent-review correction (2026-10-15): `timezoneForState` above
+// was defined and unit-tested but never actually wired into the live
+// scheduling flow -- the UI was parsing the `<input type="datetime-
+// local">` value with the BROWSER's own `Date()` constructor, which
+// resolves wall-clock text in the DEVICE's local timezone, not the
+// donor's destination timezone. A fundraiser in Baltimore scheduling a
+// Chicago meeting would have had it recorded an hour off; this is
+// exactly the class of bug the owner's explicit "handle DST transitions
+// correctly" requirement exists to prevent, and a browser-Date parse
+// cannot be trusted to get either the base offset or a DST boundary
+// right for a city the browser itself knows nothing about.
+//
+// A `datetime-local` input's value is always exactly `YYYY-MM-DDTHH:mm`
+// (the HTML spec guarantees this format) -- parsed here with a strict
+// regex, never `new Date()`, so the five numeric fields are extracted
+// with zero implicit timezone interpretation at all. The caller then
+// feeds them to the REAL `zonedTimeToUtc()` (lib/workspace/local-time.ts,
+// already DST-safe and already used elsewhere in this codebase) together
+// with the correct destination timezone from `timezoneForState()` above
+// -- never a second date-parsing/conversion implementation.
+const LOCAL_DATETIME_INPUT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
+export type LocalDateTimeFields = { year: number; month: number; day: number; hour: number; minute: number };
+export function parseLocalDateTimeInput(value: unknown): LocalDateTimeFields | null {
+  if (typeof value !== "string") return null;
+  const match = LOCAL_DATETIME_INPUT_PATTERN.exec(value.trim());
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText] = match;
+  const year = Number(yearText), month = Number(monthText), day = Number(dayText), hour = Number(hourText), minute = Number(minuteText);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return null;
+  return { year, month, day, hour, minute };
+}
+
 // Interaction source-string builders -- deliberately produce EXACTLY the
 // shapes lib/workspace/scheduled-activity.ts's existing, UNMODIFIED
 // activityStatus()/completedPlannedAt()/originalActivitySource()/
