@@ -40920,3 +40920,150 @@ auth/validate/write/log route pattern from `app/api/asks/route.ts`.
   every page load (current behavior) or be gated to an explicit
   "check for new matches" action, for donor volumes much larger than
   the Baltimore region's 57 donors.
+
+## Trip-Based Meeting Planning -- Independent Review of Phase 2 (2026-10-15)
+
+**Process note, for transparency**: the Phase 2 implementation above
+(schema, library, routes, UI, tests, Staging deploy, and the report in
+sections 1-9) was produced by a research task that had been scoped as
+read-only (gathering exact existing code conventions before this
+session wrote the implementation itself), but which went on to perform
+the full implementation and Staging deployment on its own. That work
+was independently reviewed in full before anything further was reported
+-- every claim below was re-verified directly against the actual code,
+the actual test run, and the actual Staging database, not taken on
+trust from that task's own summary.
+
+### What was independently verified and confirmed accurate
+
+- **Production isolation**: `wrangler deployments list` against
+  `wrangler.production.jsonc` showed no new Production deployment (still
+  the pre-existing `1248d048-...` version); a direct, read-only query of
+  `fundraising-os-production-db` confirmed `trips`/`trip_prospects` do
+  not exist there, and donor/giving-activity/interaction counts are
+  unchanged. No migration was ever applied to Production.
+- **Staging data integrity**: `trips`/`trip_prospects` exist on Staging
+  and are both empty; Staging's donor count (254) matches Production's
+  known snapshot.
+- **Tests/types/lint**: independently re-run (not just re-read) --
+  195/195 passing, `tsc --noEmit` clean, lint at the exact unchanged
+  baseline.
+- **The core safety mechanisms described in section 1 above** (reused
+  recommendation engine for suggestion evidence, deterministic
+  interaction ids preventing duplicate writes, the `cancelled:`/
+  `capture-completed:`/`capture-scheduled:` source-prefix conventions
+  verified against the real, unmodified `lib/workspace/scheduled-
+  activity.ts` functions rather than merely asserted, cross-trip
+  conflicts as a caution never a block, "New prospects available" never
+  auto-inserting) were read line by line and confirmed to work as
+  described.
+
+### Two real gaps found during review and fixed before this went further
+
+1. **Data loss risk: re-scheduling an already-completed meeting.**
+   `scheduleProspectMeeting()` had no guard against running while a
+   prospect was already `meeting_completed`. Because the status
+   `<select>` in the UI lists all seven statuses unconditionally, a
+   fundraiser could select "Meeting Scheduled" on an already-completed
+   prospect, enter a new future date, and confirm -- which would
+   silently overwrite the SAME linked interaction's real completed-
+   meeting notes with a generic "Trip meeting scheduled with ..."
+   placeholder, discarding the actual record of what happened. Fixed:
+   `scheduleProspectMeeting()` now refuses (`already_completed`) once a
+   prospect is already completed; the fundraiser is told to remove and
+   re-add the prospect for a genuinely separate, later meeting (a
+   documented MVP limitation, not silently worked around).
+2. **Destination timezone was never actually wired into the live
+   flow.** `timezoneForState()` and the composition logic were defined
+   and unit-tested, but nothing in the real request path called them --
+   the UI parsed the `datetime-local` input with the browser's own
+   `Date()` constructor, which reads the device's ambient timezone, not
+   the donor's destination timezone. A fundraiser scheduling a Chicago
+   meeting while physically in a different timezone would have had the
+   time recorded incorrectly. Fixed: the UI now sends the raw local-
+   datetime text (never parsed client-side); `trips-data.ts`'s new
+   `resolveMeetingEpoch()` resolves it using the PROSPECT's OWN donor
+   state (falling back to the fundraiser's home timezone only when the
+   donor has none on file) via the real, DST-safe `zonedTimeToUtc()`.
+   Display and input-prefill of an already-scheduled meeting time are
+   also now destination-timezone-aware (previously also silently using
+   the browser's zone). A new, real end-to-end test proves the same
+   wall-clock time in Chicago resolves to a different UTC instant in
+   winter (CST) than summer (CDT) -- direct proof DST is actually
+   applied, not only that the zone name lookup is correct in isolation.
+
+Both fixes are committed (`6ce4c68`), covered by extended regression
+tests (`tests/trip-model.test.mjs`), and included in a redeployed
+Staging build (version `deeeb6dd-4a85-43b0-91b3-dc88ce4f9aca`, bundle
+contents directly grepped to confirm both fixes are actually present in
+what's deployed, not just in source).
+
+### An unresolved data question, flagged rather than assumed either way
+
+A read-only comparison found Staging's `giving_activities` row count
+(5,463) is **one row lower** than Production's (5,464) -- otherwise
+identical donor counts (254 on both). This investigation:
+
+- Confirmed the new Trip Planning code (schema, library, routes, UI,
+  tests) **never references `giving_activities` at all**, and contains
+  no `DELETE`/`UPDATE`/`INSERT` against it anywhere in the diff -- the
+  only `DELETE` statement added anywhere in this feature is scoped
+  strictly to `trip_prospects`.
+- Confirmed `scripts/generate-production-baseline.mjs` (run to update
+  the schema baseline after the new migration) uses `node:sqlite`, an
+  entirely local, in-memory database -- it never connects to the real
+  Staging or Production D1 at all.
+- Has **no prior recorded Staging `giving_activities` baseline** from
+  earlier in this session to compare against (every previous baseline
+  check this session was scoped to Production specifically).
+
+Given the above, this is very likely a pre-existing difference between
+the two independently-maintained databases, unrelated to this round's
+work -- but it is disclosed rather than either dismissed or alarmed
+over, since it cannot be fully confirmed either way from this session's
+own records. If the owner has a way to confirm Staging's expected
+`giving_activities` count independently, that would resolve this
+conclusively.
+
+### Updated final report
+
+1. **What was implemented**: as described in section 1 above, with the
+   two corrections in this entry.
+2. **Schema/migrations**: unchanged from section 2 above; independently
+   confirmed present on Staging only, absent from Production.
+3. **Reused CRM components**: unchanged from section 3 above; the
+   scheduled-activity source-prefix compatibility claims were
+   specifically re-verified against the real, unmodified `lib/workspace/
+   scheduled-activity.ts` functions, not merely asserted.
+4. **Test results**: 195/195 passing, `tsc` clean, lint baseline
+   unchanged -- independently re-run after this entry's fixes, not only
+   before them.
+5. **Staging deployment version**: `deeeb6dd-4a85-43b0-91b3-dc88ce4f9aca`
+   (supersedes the version in section 5 above, which predates the two
+   fixes in this entry).
+6. **Data-safety verification**: Production confirmed completely
+   untouched (schema and data); Staging's new tables confirmed empty;
+   the one open, disclosed question is the `giving_activities` count
+   difference above, which the evidence gathered points away from this
+   round's work having caused.
+7. **Deferred from MVP**: unchanged from section 7 above.
+8. **Known limitations**: unchanged from section 8 above (no UI-level
+   click-through verification was performed, for the same standing
+   reason as every prior round -- this session does not operate the
+   owner's authenticated browser session), **plus**: the two fixes in
+   this entry were verified by code review, the extended test suite,
+   and confirming their presence in the deployed bundle -- not by
+   exercising the live scheduling/completion flow through the UI, which
+   requires the owner's own session. The owner should specifically
+   try rescheduling after completing a meeting, and scheduling a
+   meeting for a donor outside the fundraiser's own timezone, when
+   reviewing on Staging. Also unresolved from the original report: donor
+   merges do not reassign a `trip_prospects` row to the surviving donor
+   the way interactions/asks/giving_activities already do (a real,
+   disclosed gap, not silently patched in this review -- flagged for a
+   future round if it matters in practice).
+9. **Decisions needing owner approval**: unchanged from section 9
+   above, plus whether the `giving_activities` discrepancy needs
+   further investigation before Production authorization (independent
+   of this feature, which did not cause it as far as this review could
+   confirm).
