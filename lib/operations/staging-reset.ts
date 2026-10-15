@@ -65,6 +65,16 @@ export const STAGING_RESET_TABLE_ORDER = [
   "gifts",
   "recommendations",
   "relationship_queue_dismissals",
+  // Trip-Based Meeting Planning (2026-10-15, docs/AI-HANDOFF.md).
+  // trip_prospects references trip_id (trips.id) and donor_id (donors.id)
+  // -- and optionally interactions.id via linked_interaction_id -- so it
+  // is deleted before all three, further down. trips references only
+  // users.id (kept), so it has no ordering requirement of its own beyond
+  // following trip_prospects (its own child, deleted here immediately
+  // before it, same locality convention as every other parent/child pair
+  // in this list).
+  "trip_prospects",
+  "trips",
   // yahrtzeit_changes references yahrtzeit_id (not FK-enforced, so a
   // deletion's audit row can outlive it), so it's deleted first.
   "yahrtzeit_changes",

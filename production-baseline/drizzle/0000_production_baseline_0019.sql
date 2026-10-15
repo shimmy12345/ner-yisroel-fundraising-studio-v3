@@ -720,6 +720,44 @@ CREATE TABLE `shared_activity_recipient_audits` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `trip_prospects` (
+	`id` text PRIMARY KEY NOT NULL,
+	`trip_id` text NOT NULL,
+	`donor_id` text NOT NULL,
+	`added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')),
+	`status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')),
+	`suggested_reason` text,
+	`suggested_score` real,
+	`suggested_generated_at` integer,
+	`manual_rank` integer,
+	`meeting_at` integer,
+	`meeting_location` text,
+	`next_action` text,
+	`trip_notes` text,
+	`linked_interaction_id` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
+);
+
+CREATE TABLE `trips` (
+	`id` text PRIMARY KEY NOT NULL,
+	`owner_user_id` text NOT NULL,
+	`name` text NOT NULL,
+	`destination_region_id` text,
+	`destination_region_label` text,
+	`start_date` integer NOT NULL,
+	`end_date` integer NOT NULL,
+	`fundraising_goal_cents` integer,
+	`notes` text,
+	`status` text NOT NULL DEFAULT 'planning' CHECK (`status` IN ('planning','active','completed','cancelled')),
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `users` (
   `id` text PRIMARY KEY NOT NULL,
   `email` text NOT NULL,
@@ -929,6 +967,12 @@ CREATE INDEX `shared_activities_user_date_idx` ON `shared_activities` (`user_id`
 
 CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`);
 
+CREATE INDEX `trip_prospects_donor_idx` ON `trip_prospects` (`donor_id`);
+
+CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`);
+
+CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`);
+
 CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
 
 CREATE INDEX `workspace_backup_audits_user_import_idx` ON `workspace_backup_audits` (`user_id`,`import_id`,`created_at`);
@@ -946,5 +990,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','7191186ae5af3495995c201e449842aa4b082b4454305168b64f7c3f897d304a',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a943970a3009f688ee994e6a2b6abb9e109a1f8db7fb44f0c316b418d89e97eb',1785944072);
 PRAGMA optimize;

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "7191186ae5af3495995c201e449842aa4b082b4454305168b64f7c3f897d304a",
+  "schemaHash": "a943970a3009f688ee994e6a2b6abb9e109a1f8db7fb44f0c316b418d89e97eb",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -46,7 +46,8 @@
     "0041_pledge_payment_plans_renewal_acknowledged_at.sql",
     "0042_pledge_balance_corrections.sql",
     "0043_agenda_send_log.sql",
-    "0044_agenda_manual_test_send_log.sql"
+    "0044_agenda_manual_test_send_log.sql",
+    "0045_trips.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6184,6 +6185,307 @@
         ]
       },
       {
+        "name": "trip_prospects",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "trip_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "added_method",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'not_contacted'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "suggested_reason",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "suggested_score",
+            "type": "REAL",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "suggested_generated_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "manual_rank",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "meeting_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "meeting_location",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_action",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "trip_notes",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "linked_interaction_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "linked_interaction_id",
+            "toTable": "interactions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "trip_id",
+            "toTable": "trips",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "trip_prospects_donor_idx",
+            "columns": [
+              "donor_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_prospects_donor_idx` ON `trip_prospects` (`donor_id`)"
+          },
+          {
+            "name": "trip_prospects_trip_donor_idx",
+            "columns": [
+              "trip_id",
+              "donor_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`added_method` IN ('auto_region','manual'))",
+          "CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule'))"
+        ]
+      },
+      {
+        "name": "trips",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "owner_user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "name",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "destination_region_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "destination_region_label",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "start_date",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "end_date",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "fundraising_goal_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "notes",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'planning'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "owner_user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "trips_owner_status_idx",
+            "columns": [
+              "owner_user_id",
+              "status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`status` IN ('planning','active','completed','cancelled'))"
+        ]
+      },
+      {
         "name": "users",
         "columns": [
           {
@@ -6899,6 +7201,16 @@
     },
     {
       "type": "table",
+      "name": "trip_prospects",
+      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
+      "name": "trips",
+      "sql": "CREATE TABLE `trips` ( `id` text PRIMARY KEY NOT NULL, `owner_user_id` text NOT NULL, `name` text NOT NULL, `destination_region_id` text, `destination_region_label` text, `start_date` integer NOT NULL, `end_date` integer NOT NULL, `fundraising_goal_cents` integer, `notes` text, `status` text NOT NULL DEFAULT 'planning' CHECK (`status` IN ('planning','active','completed','cancelled')), `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "users",
       "sql": "CREATE TABLE `users` ( `id` text PRIMARY KEY NOT NULL, `email` text NOT NULL, `name` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL , `preferred_first_name` text, `organization_name` text, `job_title` text, `timezone` text DEFAULT 'America/New_York' NOT NULL, `avatar_url` text, `household_import_review_mode` text NOT NULL DEFAULT 'auto_unchanged')"
     },
@@ -7296,6 +7608,21 @@
       "type": "index",
       "name": "shared_activity_recipient_audits_activity_date_idx",
       "sql": "CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_prospects_donor_idx",
+      "sql": "CREATE INDEX `trip_prospects_donor_idx` ON `trip_prospects` (`donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_prospects_trip_donor_idx",
+      "sql": "CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "trips_owner_status_idx",
+      "sql": "CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`)"
     },
     {
       "type": "index",

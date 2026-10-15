@@ -9,14 +9,12 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 45 as of 0044_agenda_manual_test_send_log.sql — adds one new table
-// (agenda_manual_test_send_log, the temporary Production Gmail OAuth
-// verification mechanism's one-time claim record; see
-// docs/AI-HANDOFF.md's "October 14 Email Incident" entry), not a rebuild
-// of anything existing, so PRODUCTION_BASELINE_HASH changed again
+// 46 as of 0045_trips.sql — adds two new tables (trips, trip_prospects;
+// see docs/AI-HANDOFF.md's "Trip-Based Meeting Planning" entries), not a
+// rebuild of anything existing, so PRODUCTION_BASELINE_HASH changed again
 // (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
 // single bootstrap file's origin, not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 45;
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 46;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

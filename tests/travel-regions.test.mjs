@@ -146,17 +146,26 @@ async function run() {
   }
 
   // --- Structural confirmation that no persisted "region" concept
-  // exists anywhere this donor's address could be written from: no
-  // migration ever added a region/travel-region column, and this
-  // module itself is read-only with respect to D1 (no env.DB, no SQL
-  // write verb) -- region membership can only ever be the live,
-  // recomputed result of regionsForCityState(), never a stored value
-  // that a backfill could leave stale. ---
+  // exists anywhere a DONOR's own address could be written from: no
+  // migration ever added a region column to `donors` itself, and this
+  // module is read-only with respect to D1 (no env.DB, no SQL write
+  // verb) -- a donor's region MEMBERSHIP can only ever be the live,
+  // recomputed result of regionsForCityState(), never a stored value a
+  // backfill could leave stale. This is deliberately narrower than "the
+  // word 'region' never appears in any migration": Trip-Based Meeting
+  // Planning (drizzle/0045_trips.sql, docs/AI-HANDOFF.md) legitimately
+  // stores a TRIP's own chosen destination region id/label -- a trip's
+  // intent, frozen by design -- which is a different concept entirely
+  // from a donor's membership and must not trip this guard. ---
   {
     const migrationFiles = (await readdir(new URL("../drizzle", import.meta.url))).filter((name) => name.endsWith(".sql"));
     const migrationContents = await Promise.all(migrationFiles.map((name) => read(`drizzle/${name}`)));
     for (const [index, sql] of migrationContents.entries()) {
-      assert.doesNotMatch(sql, /\bregion\b/i, `drizzle/${migrationFiles[index]} must not define any region/travel-region column -- region membership must stay a derived, live computation, never a stored assignment`);
+      const donorsTableMatch = /CREATE TABLE `donors` \(([\s\S]*?)\n\);/.exec(sql);
+      if (donorsTableMatch) assert.doesNotMatch(donorsTableMatch[1], /\bregion\b/i, `drizzle/${migrationFiles[index]} must not add a region column to the donors table itself -- a donor's region membership must stay a derived, live computation, never a stored assignment`);
+      for (const alterMatch of sql.matchAll(/ALTER TABLE `donors` ADD COLUMN `?(\w+)`?[^;]*;/gi)) {
+        assert.doesNotMatch(alterMatch[1], /region/i, `drizzle/${migrationFiles[index]} must not ALTER the donors table to add a region column -- a donor's region membership must stay a derived, live computation, never a stored assignment`);
+      }
     }
     const thisModuleSource = await read("lib/relationships/travel-regions.ts");
     assert.doesNotMatch(thisModuleSource, /env\.DB/);

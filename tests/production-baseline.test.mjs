@@ -341,13 +341,33 @@ test("baseline picks up the schema-adding 0044 agenda manual test send log migra
   // (agenda_manual_test_send_log, the temporary Production Gmail OAuth
   // verification mechanism's one-time claim record; see
   // docs/AI-HANDOFF.md's "October 14 Email Incident" entry) -- so the
-  // schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0044_agenda_manual_test_send_log.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 45);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // schema hash must change again. No longer the LAST migration (0045
+  // follows it below), so this only asserts inclusion, matching every
+  // earlier migration's own test in this file.
+  assert.ok(manifest.sourceMigrations.includes("0044_agenda_manual_test_send_log.sql"));
   const testSendLogTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "agenda_manual_test_send_log");
   assert.ok(testSendLogTable, "agenda_manual_test_send_log must be a real table in the baseline topology");
   assert.match(testSendLogTable.sql, /claimed_at/);
   assert.match(testSendLogTable.sql, /outcome/);
+});
+
+test("baseline picks up the schema-adding 0045 trips migration", () => {
+  // 0045_trips.sql adds two new tables (trips, trip_prospects --
+  // Trip-Based Meeting Planning, see docs/AI-HANDOFF.md) -- so the
+  // schema hash must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0045_trips.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 46);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const tripsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trips");
+  assert.ok(tripsTable, "trips must be a real table in the baseline topology");
+  assert.match(tripsTable.sql, /destination_region_id/);
+  assert.match(tripsTable.sql, /destination_region_label/);
+  const prospectsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospects");
+  assert.ok(prospectsTable, "trip_prospects must be a real table in the baseline topology");
+  assert.match(prospectsTable.sql, /suggested_reason/);
+  assert.match(prospectsTable.sql, /linked_interaction_id/);
+  const uniqueIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_prospects_trip_donor_idx");
+  assert.ok(uniqueIndex, "the UNIQUE(trip_id, donor_id) index enforcing one prospect row per donor per trip must be captured in the baseline");
+  assert.match(uniqueIndex.sql, /UNIQUE/i);
 });

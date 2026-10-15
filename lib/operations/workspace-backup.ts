@@ -90,6 +90,20 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // WORKSPACE_BACKUP_TABLES in this phase.
   "donor_relationship_facts",
   "donor_relationship_fact_changes",
+  // Trip-Based Meeting Planning (2026-10-15, docs/AI-HANDOFF.md) -- same
+  // reason as asks/pledge_payment_plans/donor_relationship_facts above:
+  // real new tables added after this route was written, holding trip
+  // planning data (never donor address, giving, pledge, or financial
+  // data itself -- trip_prospects only ever references existing rows by
+  // id). Deliberately not added to WORKSPACE_BACKUP_TABLES in this
+  // phase -- that would require its own correct owner-scoping work
+  // verified against real data, a separate decision from building the
+  // feature itself. Covered today only by the nightly whole-database R2
+  // backup, and by the restore-order/staging-reset coverage already
+  // enforced in lib/operations/staging-reset.ts and tests/
+  // staging-reset.test.mjs/d1-restore-order.test.mjs.
+  "trips",
+  "trip_prospects",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",
