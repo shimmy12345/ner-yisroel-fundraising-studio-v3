@@ -44586,3 +44586,269 @@ a valid type), and (2) real AI organization would need the separate
 approval described in Section 4, or the feature can go to Production
 first in its current AI-inert state (manual notes + follow-ups fully
 functional) with AI activation approved later as its own step.
+
+## Meeting Notes Final Safeguards and AI Readiness (2026-10-15) -- SAFEGUARDS IMPLEMENTED AND VERIFIED, AI STILL NOT ACTIVATED
+
+Two safeguards identified by an independent code review, plus an AI-
+activation readiness assessment. No Production action, no paid
+Anthropic usage, and no branch merge occurred this round.
+
+### 1. Changes made and commits
+
+- **`7ae4655`** (on top of `3a9ff1e`, the prior Meeting Notes round) --
+  both safeguards below, plus four new test files.
+
+**Safeguard 1 -- follow-up approval default**: `MeetingNotesExperience.tsx`
+previously defaulted every AI-proposed follow-up to `approved: true`
+(pre-checked). Now every follow-up -- AI-proposed or manually added --
+starts `approved: false`. The suggestion/empty-row/selection logic was
+extracted into a new `lib/meeting-notes/follow-ups.ts` (pure, UI-free,
+independently testable) so the component itself just calls
+`followUpFromSuggestion()`, `emptyFollowUp()`, and
+`selectApprovedFollowUps()`. Each follow-up row now visibly displays
+"Proposed" (amber) or "Approved" (green) next to its checkbox, not just
+an unlabeled checkbox -- a real, at-a-glance visual distinction, not
+only a tooltip/aria-label. Editing a row's description or due date
+works identically whether it is currently approved or not.
+
+**Safeguard 2 -- idempotency hardening**: `app/api/meeting-notes/route.ts`
+previously used `INSERT OR IGNORE` independently for the interaction
+row and for each follow-up's recommendation row. The gap: a retried
+request reusing the same idempotency key but with *additional or
+changed* follow-ups could have the interaction insert silently no-op
+(already existed) while a follow-up at a previously-unused index still
+inserted successfully -- letting a changed-payload retry add extra
+tasks. Fixed by replacing both with plain `INSERT` statements for the
+interaction and every follow-up in one batch, and handling the
+resulting `PRIMARY KEY` conflict explicitly: on conflict, the route
+re-reads what is actually stored under that key and compares it
+(via the new `lib/meeting-notes/idempotency.ts`'s
+`interactionContentMatches`/`followUpListsMatch`) against the incoming
+request --
+- **identical content** -> treated as a successful no-op replay
+  (`200`, nothing written again);
+- **different content under the same key** -> rejected outright
+  (`409`, nothing written at all, the original save is completely
+  unaffected).
+No new table or migration -- the already-saved `interactions`/
+`recommendations` rows are themselves the record of "what was actually
+completed" under a given key, so this reuses the existing schema
+exactly as the task asked.
+
+### 2. Idempotency and follow-up approval test results
+
+All verified both as automated unit/integration-style tests and live on
+Staging with real writes (Section 4).
+
+- **Follow-up approval** (`tests/meeting-notes-followups.test.mjs`):
+  an AI-proposed suggestion and a manually-added row both start
+  unapproved; `selectApprovedFollowUps` drops unapproved rows, drops
+  approved-but-blank rows, correctly nulls an empty due date (never an
+  empty string), and selects a row's *current, possibly fundraiser-
+  edited* content -- never the original AI suggestion text.
+- **Idempotency** (`tests/meeting-notes-idempotency.test.mjs`, using
+  the same `node:sqlite` real-migration-schema convention as
+  `tests/pledge-balance-correction-e2e.test.mjs`): a local mirror of
+  the route's exact control flow (interaction-insert-first, so a
+  conflict short-circuits before any follow-up statement even runs --
+  true cross-statement rollback is D1's own `batch()` transactional
+  guarantee, verified live on Staging below, not reprovable in a
+  single Node process, the same documented limitation as that
+  precedent test) --
+  - **identical retry** (including a *second* retry, proving it isn't
+    a one-shot fluke): `200`, zero new rows, zero follow-up statements
+    even attempted;
+  - **changed-payload retry** (different summary; an *added* follow-
+    up -- the exact vulnerability this task named; a changed due
+    date): every variant `409`, the original interaction/follow-up
+    rows provably byte-for-byte unchanged afterward;
+  - **"concurrent" retries** (three identical calls): exactly one
+    `201`, two safe `200` replays, exactly one interaction row;
+  - **partial-failure safety**: a shortened changed-payload retry
+    conflicts before the follow-up loop runs at all, so all three
+    original follow-ups survive completely untouched.
+
+### 3. Automated test results
+
+`node scripts/run-tests.mjs` -> **202/202 test files passed** (197
+pre-existing + 5 Meeting Notes files total across both rounds), plus
+the D1 restore/schema main-sync check reporting "No drift detected"
+(expected -- no migration in this round either). `npx tsc --noEmit` ->
+clean, 0 errors. `npm run lint` -> 94 errors / 43 warnings, the exact
+unchanged baseline.
+
+### 4. Staging deployment and verification results
+
+Deployed twice (`12934ce0-...` at the normal write-guard default, then
+`bea5f1d5-...` with `STAGING_WRITES_ENABLED` temporarily uncommented
+for the authorized testing window, same established mechanism as the
+prior Meeting Notes round) -- **all PASS**:
+- A new follow-up row, added live in the browser, rendered
+  `approved: false` / class `meeting-notes-followup-proposed` / label
+  "Proposed" immediately on creation; clicking its checkbox flipped it
+  to `meeting-notes-followup-approved` / "Approved" live.
+- **Idempotency, via direct `fetch` against the live route**: first
+  call `201`; an identical retry `200` with `followUpsCreated: 0`; a
+  retry with an added `"[TEST-SAFEGUARD] SHOULD NEVER BE CREATED"`
+  follow-up `409` -- confirmed via direct D1 query: exactly 1
+  interaction and exactly 1 recommendation exist for that key, the
+  "should never be created" row absent entirely.
+- **Full UI save with mixed approval**: one follow-up approved, one
+  left unapproved (both hand-typed via the real form) -- saved
+  correctly to the real interaction history with only the approved
+  follow-up's recommendation row created; the unapproved one's text
+  never reached the database at all.
+- **Cleanup**: all synthetic `[TEST...]`-prefixed interactions and
+  their linked recommendations deleted via direct D1 query immediately
+  after verification, confirmed back to 0.
+- **`STAGING_WRITES_ENABLED` reverted and redeployed**
+  (`bf568ea2-8635-4a24-8714-9eff7c7dd7e4`, the final state) -- `git
+  diff --stat wrangler.staging.jsonc` confirmed the file exactly
+  matched its committed state before this redeploy, and a live `POST
+  /api/meeting-notes` returned `403` again afterward. `git status
+  --short` is clean. Production (`c5f5279b-...`) re-confirmed
+  unchanged throughout.
+
+### 5. Anthropic model, pricing, and privacy findings
+
+Verified directly against Anthropic's own current documentation
+(`platform.claude.com`), not only third-party aggregators:
+
+- **Model id**: `claude-haiku-5-5` (already configured) is confirmed
+  valid and current -- released 2026-10-07, 1M-token context window,
+  128K max output. Matches `lib/meeting-notes/organize.ts`'s
+  `DEFAULT_ANTHROPIC_MODEL` and the `ANTHROPIC_MODEL` var already set
+  on Staging.
+- **Pricing** (from `platform.claude.com/docs/en/about-claude/pricing`
+  and the model's own overview page): **$0.10 per million input
+  tokens / $0.50 per million output tokens** for prompts up to 100K
+  tokens -- always true for this feature, since
+  `MAX_TRANSCRIPT_LENGTH` caps the transcript at 8,000 characters
+  (roughly 2,000 tokens) and the request caps `max_tokens` at 1,500.
+  (Prompts over 100K tokens cost $0.50/$2.50 -- never applicable here.)
+  A Batch API discount (50% off) and prompt caching ($0.01/M for
+  cached reads) exist but aren't relevant at this feature's low,
+  interactive-only call volume.
+- **Training**: Anthropic's Commercial Terms do not permit training on
+  API inputs/outputs by default, for direct API access specifically
+  (distinct from consumer Claude.ai plans, which have a separate,
+  opt-in consumer data policy that does not apply here).
+- **Retention**: the documented commercial-API default is automatic
+  deletion of prompts and outputs from Anthropic's backend within 30
+  days of receipt/generation, with narrow exceptions (abuse/safety
+  monitoring, legal requirements). A stricter Zero Data Retention
+  arrangement exists for qualified organizations on request to
+  Anthropic's account team -- almost certainly unnecessary at this
+  feature's volume, but available if ever wanted. **This retention
+  window should be re-confirmed directly against Anthropic's current
+  Commercial Terms/DPA at the moment of real activation** -- this
+  round's research is a reasonable-confidence snapshot from Anthropic's
+  own published pages, not a substitute for the owner's own read of the
+  binding legal terms before real donor content is ever sent.
+- **Exactly what would be transmitted**: only (a) the fixed system
+  prompt (contains no donor-specific information -- see
+  `buildSystemPrompt()`) and (b) the dictated/typed transcript text,
+  wrapped in delimiters, as the user message. No other donor-record
+  field (financial totals, pledge/payment history, contact
+  information) is ever included in the request -- the Anthropic call
+  has no access to the database at all, only the text the fundraiser
+  typed or dictated into the transcript field.
+
+### 6. Estimated monthly AI cost
+
+A typical dictated meeting note (a few hundred words in, a
+moderate structured JSON response out) costs on the order of
+**$0.0003-0.001 per note** at this pricing. Even at the absolute
+per-call ceiling this code enforces (8,000-character input, 1,500-
+token output), a single note costs under $0.001.
+
+| Notes/month | Estimated cost |
+|---|---|
+| 25 | under $0.03 |
+| 100 | under $0.10 |
+| 500 | under $0.50 |
+
+These are rough estimates from published per-token rates, not a quote
+-- and Anthropic API billing is prepaid-credit-based, so the practical
+first cost is whatever minimum credit purchase Anthropic requires at
+sign-up (not independently verified this round -- check at the time of
+account setup), not the per-note usage itself, which will draw down
+from that balance negligibly slowly at this feature's realistic
+volume.
+
+### 7. Spending limits, request limits, and abuse protection -- recommendations (not implemented this round, since only recommending was asked)
+
+- This app is already single-owner, Cloudflare-Access-gated -- the
+  realistic risk here is an accidental loop or bug driving up calls,
+  not third-party abuse (no one but the one authorized owner can reach
+  this route at all).
+- The existing per-call caps (8,000-char transcript input, 1,500-token
+  output, a 25-second request timeout) already bound worst-case
+  per-call cost tightly and don't need to change.
+- Recommend setting a spend/usage alert in the Anthropic console once
+  an account exists (rather than a hard cutoff that could silently
+  break the feature mid-use) -- a notification at some threshold like
+  $5 or $10/month would catch a runaway bug long before it became a
+  real cost, given the sub-dollar realistic usage above.
+- If stronger protection is ever wanted, a simple server-side daily
+  call-count ceiling could be added to `app/api/meeting-notes/
+  organize/route.ts` as a follow-up change (not implemented this round
+  -- not requested as a requirement, only as something to recommend,
+  and would be a deliberate small code change the owner can ask for
+  separately).
+
+### 8. Remaining concerns / confirmations
+
+- **Credentials**: confirmed (unchanged from the prior round, re-
+  verified) -- `ANTHROPIC_API_KEY` is documented in `cloudflare-env.d.ts`
+  as a Worker *secret* only, never a `vars` entry; no such secret exists
+  on Staging or Production today.
+- **Error/log safety**: confirmed by both code and test
+  (`tests/meeting-notes-organize.test.mjs`'s non-200-provider-response
+  case explicitly asserts the raw provider error body is never echoed
+  into the error message returned to the client); `app/api/meeting-
+  notes/organize/route.ts` and `.../route.ts` log only event names, the
+  donor id, and boolean/count outcomes -- never transcript or AI
+  response content.
+- **Scenario/terminology coverage**
+  (`tests/meeting-notes-fundraising-scenarios.test.mjs`): confirmed the
+  system prompt explicitly instructs the model to distinguish confirmed
+  from possible commitments, never invent pledge amounts, and preserve
+  uncertainty; confirmed yeshivish terms and proper names (Rosenbaum,
+  Rav Kulefsky, shiur, kuntres, Yom Tov) and realistic dollar-amount
+  scenarios (a $100,000/$150,000 sponsorship discussed but not
+  accepted; a $18,000 explicit commitment; multiple opportunities at
+  different amounts; a conditional follow-up) survive the delimiting
+  step unmangled, and that the validation pipeline correctly round-
+  trips a well-formed structured response preserving every required
+  distinction. **This verifies the prompt design and the pipeline, not
+  live model behavior** -- no real Anthropic call was made (none is
+  authorized yet); whether the actual Claude Haiku 5.5 model produces
+  output this disciplined in practice is a live-Staging question for
+  after real activation, with synthetic data, before any real donor
+  conversation is ever sent.
+- **No new security or functionality concern was found this round**
+  beyond the two safeguards just closed.
+
+### Final authorization needed before real AI activation
+
+Exactly three things, matching Section 3 of the prior round plus this
+round's pricing/terms confirmation:
+1. **Set the `ANTHROPIC_API_KEY` secret** (`wrangler secret put`) on
+   Staging first -- this is the action that actually starts billing.
+2. **The owner's own read of Anthropic's current Commercial Terms/DPA**
+   for the 30-day retention window and no-training default, since this
+   round's findings are sourced from Anthropic's published pages, not
+   a substitute for that direct review before real donor conversations
+   are ever sent.
+3. **A spend-alert threshold decision** (Section 7) -- optional, but
+   worth deciding before activation rather than after.
+
+No other infrastructure, schema, or code change is needed to activate
+real AI organization -- the integration is fully built, tested with
+synthetic/mocked data, and waiting only on the above.
+
+**No Production deployment, Production data change, paid Anthropic API
+usage, or branch merge occurred this round. Awaiting the owner's
+separate authorization for Production deployment and/or real AI
+activation.**
