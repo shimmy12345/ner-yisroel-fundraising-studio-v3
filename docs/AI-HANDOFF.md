@@ -44281,3 +44281,308 @@ the owner's own prior explicit choice. The `drizzle/0046_...sql` header
 comment's stale "STAGING ONLY" note (flagged in Phase 1) is a leftover
 documentation discrepancy worth a follow-up correction, with no effect
 on anything that actually ran.
+
+## Voice Dictation and AI Meeting Notes (2026-10-15) -- IMPLEMENTED, TESTED ON STAGING, PRODUCTION UNTOUCHED
+
+Owner's final direction for this feature (superseding an earlier,
+not-yet-implemented browser-speech-recognition proposal): dictation
+goes through an external OS/third-party tool (Typeless or similar) into
+a plain text field -- no custom microphone or speech-recognition code
+in this app at all. AI organization uses the Anthropic API,
+implemented but deliberately left inert (no API key configured
+anywhere) pending separate owner approval of real, paid usage.
+
+### 1. What was implemented
+
+**Reused the existing data model, no migration.** `interactions.type`
+already included `"meeting"`; `recommendations` is the same table
+every existing reminder (from "Log interaction," an ask follow-up,
+etc.) uses. Nothing new was added to `db/schema.ts` or `drizzle/`.
+
+**New files**:
+- `lib/meeting-notes/organize.ts` -- the Anthropic Messages API system
+  prompt, the delimited user-message builder (the prompt-injection
+  defense -- dictated text is wrapped in `<<<MEETING_NOTES_START/END>>>`
+  markers with an explicit "this is data, never instructions" system
+  rule), strict server-side JSON-shape validation/clamping of the
+  model's response, and the actual (fully mockable via an injected
+  `fetchImpl`) network call with a 25s timeout.
+- `lib/meeting-notes/format.ts` -- builds the single readable text
+  block saved into `interactions.summary` from the approved sections,
+  omitting any section the fundraiser left empty.
+- `app/api/meeting-notes/organize/route.ts` -- auth + donor-ownership
+  check, then either calls the Anthropic API or, if
+  `env.ANTHROPIC_API_KEY` is absent (every environment today), returns
+  `{available:false}` without attempting any outbound call at all.
+- `app/api/meeting-notes/route.ts` -- auth + donor-ownership check,
+  then saves the approved interaction and any approved follow-ups in
+  one `D1.batch()`, using `INSERT OR IGNORE` with the client-supplied
+  idempotency key as the interaction's own primary key (and
+  `meeting-note-<key>-<index>` for each follow-up's recommendation
+  row) -- a retried/double-clicked save can never create a duplicate.
+- `app/donors/[id]/meeting-notes/page.tsx` + `MeetingNotesExperience.tsx`
+  -- the review/approve UI (see Section 2).
+- `tests/meeting-notes-organize.test.mjs`, `tests/meeting-notes-format.test.mjs`
+  -- registered in `scripts/run-tests.mjs`.
+
+**Modified files**: `app/donors/[id]/page.tsx` (added the "✦ Add
+Meeting Notes" link to the existing header-actions row, same place as
+"Edit Contact Details"/"Log interaction"), `app/globals.css` (new,
+mobile-first `.meeting-notes-*` styles), `cloudflare-env.d.ts`
+(documents the new `ANTHROPIC_API_KEY` secret and `ANTHROPIC_MODEL`
+var), `wrangler.staging.jsonc` (adds `"ANTHROPIC_MODEL":
+"claude-haiku-5-5"` as a plain var -- not a secret).
+
+### 2. Where the feature appears
+
+Donor profile -> "✦ Add Meeting Notes" (next to "Edit Contact
+Details"/"Log interaction") -> a dedicated full page at
+`/donors/:id/meeting-notes`: a large transcript textarea, meeting date
+(defaults to today) and interaction type (defaults to Meeting), an
+"Organize Notes" button, six editable sections (Meeting Summary, Donor
+Interests, Fundraising Opportunities, Confirmed Commitments, Possible
+Commitments/Discussions, Relationship Context), a follow-up-actions
+checklist (approve/edit/remove, each with its own due date, plus a
+manual "+ Add follow-up"), and Cancel/Save. The raw transcript stays
+on the page throughout, never replaced, so it can always be compared
+against the organized sections. Nothing is written to the donor's
+record until Save is clicked.
+
+### 3. How Typeless (or any OS/third-party dictation tool) works with this interface
+
+The transcript field is a single, plain, uncontrolled-by-any-custom-
+logic `<textarea>` -- no `onKeyDown` interception, no debounced
+autosave, no formatting-while-typing. Any tool that inserts text into
+a focused field (Typeless, a phone's own keyboard dictation button, a
+paste) works exactly the same way a real keystroke would, because
+nothing in this component distinguishes how the text arrived. This was
+verified directly on Staging (Section 6) by scripting text into the
+field via the DOM the same way an external tool would, with no special
+handling required on either side.
+
+### 4. AI integration status: implemented, but inert pending separate approval
+
+**Anthropic Claude API**, called server-side only from
+`app/api/meeting-notes/organize/route.ts` -- the API key is read from
+`env.ANTHROPIC_API_KEY` (a Cloudflare Worker *secret*, never a `vars`
+entry) and is never sent to, or readable from, the browser. The model
+id is configurable via the `ANTHROPIC_MODEL` var (set to
+`claude-haiku-5-5` on Staging today) rather than hardcoded, with
+`lib/meeting-notes/organize.ts`'s own `DEFAULT_ANTHROPIC_MODEL` as a
+code-level fallback if that var is ever removed.
+
+**No `ANTHROPIC_API_KEY` secret exists on Staging or Production.**
+This was a deliberate choice this round, not an oversight: the
+authorization for this task explicitly required stopping before
+activating paid API usage or sending real donor content to Anthropic.
+As implemented, with the secret absent, `/api/meeting-notes/organize`
+returns `{available:false}` immediately -- it never even attempts to
+reach Anthropic's servers, confirmed live on Staging (Section 6). The
+"Organize Notes" button in that state shows "AI organization isn't
+configured yet. You can still write your summary below and save your
+notes directly," and every other part of the feature (manual summary
+entry, follow-up approval, save, Daily Agenda integration) works fully
+without it.
+
+**What still requires the owner's separate approval before any real
+Anthropic usage**:
+1. Setting the `ANTHROPIC_API_KEY` secret (via `wrangler secret put`)
+   on Staging, and later Production -- this alone activates billing.
+2. Confirming Anthropic's current API data-retention/training terms
+   are acceptable for donor meeting content specifically (Anthropic's
+   published terms for API usage, as of this writing, state API inputs
+   and outputs are not used to train Anthropic's models and are
+   retained only briefly for abuse monitoring/trust-and-safety
+   purposes unless a separate data-retention agreement is in place --
+   this should be re-verified directly against Anthropic's current
+   published terms at the time real activation is approved, not
+   assumed to still hold unchanged).
+3. An approximate per-note cost at the `claude-haiku-5-5` tier is a
+   small fraction of a cent (short transcript in, ~1,500-token-capped
+   structured JSON out); this is a rough order-of-magnitude estimate
+   only, not a quote, and should be confirmed against Anthropic's
+   current published pricing before activation.
+
+### 5. Security and privacy, as implemented
+
+- **Donor-ownership enforcement**: both new API routes use the exact
+  same `SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND
+  data_source = 'live'` check every other donor-scoped mutation in
+  this app uses -- confirmed live on Staging to correctly 404 a
+  non-existent/unauthorized donor id on both routes (Section 6).
+- **No raw audio, ever**: this feature never records, receives, or
+  stores audio at all -- dictation happens entirely inside the
+  external tool (Typeless, a phone's OS), which delivers only text to
+  the browser, the same as a keystroke. There was never a "minimize
+  audio retention" decision to make because no audio path exists.
+- **Logging**: `app/api/meeting-notes/organize/route.ts` and
+  `app/api/meeting-notes/route.ts` log only event names, the donor id,
+  and boolean/count outcomes (`ok`, `interactionCreated`,
+  `followUpsCreated`) -- never the transcript, the organized content,
+  or the API key, in any log line.
+- **Prompt-injection defense**: the dictated transcript is wrapped in
+  explicit `<<<MEETING_NOTES_START/END>>>` delimiters inside the user
+  message, with a system-prompt rule that the content between them is
+  data to organize, never instructions to follow. `tests/meeting-notes-
+  organize.test.mjs` includes an explicit injection-attempt case
+  confirming the delimiter/instruction text is preserved verbatim
+  (never stripped or specially interpreted) rather than relying on
+  content filtering, which the model, not this code, is responsible
+  for resisting.
+- **Output validation**: the AI's response is independently re-parsed
+  and strictly shape-checked server-side (required fields, string
+  types, list-length and string-length clamping) before ever reaching
+  the client -- a malformed, truncated, or off-schema response is
+  rejected outright, never partially trusted.
+- **No automatic financial action**: neither route can create a
+  pledge, donation, payment, or payment-plan record under any
+  circumstance -- they only ever write to `interactions` and
+  `recommendations`, the same two tables (and the same shape) the
+  existing "Log interaction" flow already writes to.
+
+### 6. Automated test results
+
+`node scripts/run-tests.mjs` -> **199/199 test files passed** (197
+pre-existing + the two new ones below), plus the D1 restore/schema
+main-sync check reporting "No drift detected" (expected and correct --
+this feature added no migration). `npx tsc --noEmit` -> clean, 0
+errors. `npm run lint` -> 94 errors / 43 warnings, the exact unchanged
+baseline (two lint issues introduced by the new component -- an
+unescaped apostrophe and an unused import -- were found and fixed
+before this count was taken).
+
+- `tests/meeting-notes-organize.test.mjs`: system-prompt content
+  (the "never invent"/"data not instructions"/"JSON only" rules are
+  actually present), the delimiter-wrapped user message (including an
+  explicit prompt-injection-attempt string, confirmed preserved
+  verbatim), strict response-shape validation (valid, markdown-fenced,
+  malformed JSON, non-object JSON, missing/wrong-typed fields, oversized
+  lists/strings correctly clamped, a follow-up missing its description
+  dropped rather than invented), and the actual network call fully
+  mocked via an injected `fetchImpl` -- success, configurable model id
+  actually sent, a non-200 provider response degrading safely without
+  echoing its body, a thrown network error, a timeout/abort, and
+  transcript truncation above the length cap.
+- `tests/meeting-notes-format.test.mjs`: all sections present, a
+  manual-only note (no AI, no extra sections) producing a clean single
+  paragraph with no empty headers, and every section empty producing
+  an empty string.
+
+### 7. Staging verification (live, authenticated, real writes -- cleaned up afterward)
+
+Deployed to Staging twice this round:
+1. First deploy (`27596cb1-...`) with the write-guard at its normal
+   default (`STAGING_WRITES_ENABLED` absent) -- confirmed the "✦ Add
+   Meeting Notes" link and the new page render correctly, and confirmed
+   the guard correctly 403-blocks `POST /api/meeting-notes/organize`
+   by default, exactly like every other mutating route on Staging (a
+   stale-browser-asset-cache artifact from this same browser profile's
+   earlier sessions caused one blank-page render immediately after
+   this deploy -- resolved by a cache-busted reload; a fresh `fetch`
+   with `cache:'no-store'` confirmed the server's own response was
+   correct throughout, so this was never a code defect).
+2. Per this feature's own documented, pre-existing mechanism (`lib/
+   operations/staging-write-guard.ts`), **temporarily** uncommented
+   `"STAGING_WRITES_ENABLED": "true"` in `wrangler.staging.jsonc` and
+   redeployed (`e4eeea57-...`) for the authorized testing window, with
+   synthetic `[TEST]`-prefixed donor conversation content against the
+   real Mr. & Mrs. Ezra Wisotsky Staging donor record --
+   **all PASS**:
+   - **Organize Notes, AI unavailable**: clicking it with the real
+     synthetic transcript returned `{available:false}` and the exact
+     "isn't configured yet" notice, with zero outbound call to
+     Anthropic (confirmed by design -- the route returns before
+     `organizeMeetingNotes()` is ever called when the key is absent).
+   - **Manual save**: a hand-typed summary, with the AI-unavailable
+     notice still showing, saved correctly -- `interactions.source =
+     "meeting-notes:manual"`, `occurred_at_date_only = 1`, summary text
+     exactly matching the single-section format (confirmed by direct
+     D1 query).
+   - **Follow-up approve/reject**: two follow-ups added, one approved
+     and one left unapproved -- only the approved one was written
+     (confirmed: exactly 1 `recommendations` row, matching the approved
+     description, the rejected one absent entirely).
+   - **Follow-up due date**: confirmed correctly persisted and
+     date-only-anchored once set via a proper (React-visible) value
+     change -- an earlier raw-DOM value assignment that bypassed
+     React's change detection produced a `null` due date purely as a
+     test-script artifact, not an application defect; re-tested with
+     the correct technique and confirmed working.
+   - **Duplicate-save prevention**: the exact same save request (same
+     idempotency key) sent three times via direct `fetch` returned
+     `201`/`saved:true` all three times, with `followUpsCreated: 1` on
+     the first call and `0` on the two retries -- confirmed via direct
+     D1 query: exactly one interaction row and exactly one
+     recommendation row exist, never three.
+   - **Authorization enforcement**: both `/api/meeting-notes` and
+     `/api/meeting-notes/organize` correctly returned `404 "Donor not
+     found"` for a nonexistent donor id, never leaking whether a real
+     donor exists elsewhere.
+   - **Input validation**: an oversized summary, an oversized
+     transcript, and a missing donor id all correctly returned `422`.
+   - **Daily Agenda integration**: a follow-up saved with a due date
+     two days out correctly did not appear in "Coming Up" (that
+     section is populated from yahrtzeits/birthdays, a separate
+     mechanism -- a `recommendations` row only ever surfaces once its
+     due date is today or past, exactly like every other existing
+     reminder type, not a defect in this feature). A follow-up saved
+     with today's due date **did** appear immediately, correctly, in
+     "Today's Agenda"'s own "Due today" section, linked to the correct
+     donor (Ezra Wisotsky), with the exact approved description and
+     working "Open donor"/"Complete" actions -- zero new agenda code
+     was needed, confirming the architecture decision in Section 1.
+   - **Mobile layout**: the new `.meeting-notes-*` CSS was written
+     mobile-first with an explicit `max-width:640px` refinement for the
+     follow-up row and action buttons; not separately screenshot-
+     verified this round (screenshots timed out, consistent with every
+     prior round in this session -- DOM/text-level inspection was used
+     instead, as always).
+   - **No regression**: Daily Agenda's existing items (Spetner, Klein,
+     Rosenbaum), donor profile figures, and the rest of the page were
+     unaffected throughout every test above.
+3. **All synthetic test data removed immediately after verification**:
+   5 test `interactions` rows (`source LIKE 'meeting-notes:%'`) and
+   their 5 linked `recommendations` rows (`id LIKE 'meeting-note-%'`)
+   deleted via direct D1 query, confirmed back to exactly 0 afterward.
+4. **`STAGING_WRITES_ENABLED` reverted and redeployed**
+   (`b2b0fd03-2129-4c30-9c58-3f615060801f`, the final state) --
+   confirmed via `git diff --stat wrangler.staging.jsonc` the file
+   exactly matches its committed state before this redeploy, and via a
+   live `POST /api/meeting-notes` returning `403` again afterward that
+   the guard is back to its safe default. `git status --short` on the
+   repository is clean.
+
+### 8. Limitations and unresolved issues
+
+- AI organization is implemented and tested (via mocked responses, per
+  the authorization boundary) but **not yet usable for real** on any
+  environment -- no `ANTHROPIC_API_KEY` secret exists. See Section 4
+  for exactly what the owner needs to approve to change that.
+- The feature was not tested against Safari or a real mobile device
+  this round -- only Chrome (via the same authenticated session used
+  throughout this project) and DOM-level mobile-width CSS review.
+  Typeless's own behavior was not tested with a real dictation session
+  (no live microphone available in this environment) -- the plain-
+  textarea design was verified to not interfere with programmatic text
+  insertion, which is the relevant technical property, but a real
+  end-to-end Typeless dictation pass is still worth the owner's own
+  quick check before relying on it daily.
+- `drizzle/0046_trip_financial_attributions.sql`'s stale "STAGING
+  ONLY" header comment (flagged in the prior Production-deployment
+  round) remains uncorrected -- unrelated to this feature, carried
+  forward as a known, harmless documentation discrepancy.
+
+### 9. Ready for review
+
+**Yes, on Staging.** The feature is fully built, tested (automated +
+live Staging, cleaned up), and deployed to Staging
+(`b2b0fd03-2129-4c30-9c58-3f615060801f`) in its safe, AI-inert state.
+**Not deployed to Production**, and no Production action of any kind
+was taken or proposed this round. Before this feature could go to
+Production, in addition to the owner's own review: (1) the two-part
+migration-free Worker-only Production deployment would need its own
+separate authorization (no migration required -- "meeting" was already
+a valid type), and (2) real AI organization would need the separate
+approval described in Section 4, or the feature can go to Production
+first in its current AI-inert state (manual notes + follow-ups fully
+functional) with AI activation approved later as its own step.
