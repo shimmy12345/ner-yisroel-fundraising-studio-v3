@@ -40727,3 +40727,196 @@ owner review -> explicit, separate authorization before Production.
 5. Each phase deployed to Staging only until the owner has reviewed and
    explicitly authorized Production for that phase, exactly matching
    every prior round's gating in this session.
+
+## Trip-Based Meeting Planning -- Phase 2 Implementation Report (2026-10-15, Staging only)
+
+Phase 2 is implemented and deployed to **Staging only**, per the owner's
+explicit authorization. **Production has not been touched** -- no
+Production deploy, no Production migration, no Production data read or
+written. Waiting on independent review and explicit Production
+authorization before any further step.
+
+### 1. What was implemented
+
+- Trip CRUD: create/list/edit a trip (name, one primary destination
+  Travel Region, start/end date, optional fundraising goal, notes,
+  status Planning/Active/Completed/Cancelled). Entry point is a 6th
+  Quick Actions tile on the homepage linking to `/travel-planning` --
+  `AppShell`'s primary nav union was deliberately left untouched, per
+  the "without restructuring primary nav" instruction.
+- Auto-population of prospects at trip creation: every live, owned
+  donor whose city/state matches the chosen region (via the existing
+  `regionsForCityState()`) gets a `trip_prospects` row with
+  `added_method = 'auto_region'`, a one-time `suggested_reason`/
+  `suggested_score` snapshot computed via `loadMeetingBrief()` ->
+  `buildRecommendationEvidence()` -> `buildDonorRecommendation()` --
+  the exact same, unmodified recommendation engine the rest of the CRM
+  already uses, never a separate trip-scoring model.
+- Manual prospect management: add any donor from anywhere in the CRM
+  (via the existing `DonorAutocomplete`); remove a prospect (deletes
+  only the `trip_prospects` row -- the donor's own CRM record and any
+  linked interaction are deliberately never touched); auto vs. manual
+  origin is visibly badged; a manual `manualRank` can be set.
+- "New prospects available" panel: donors who newly match the trip's
+  region (e.g. after an address correction) surface in a separate
+  panel for an explicit add decision -- never silently inserted into
+  the tracked list, and the tracked list is never auto-rewritten on
+  region/address changes.
+- 7 trip-specific statuses (Not Contacted / Contacted / Meeting
+  Requested / Meeting Scheduled / Meeting Completed / Declined /
+  Unable to Schedule) with free bidirectional transitions. Only
+  Meeting Scheduled and Meeting Completed ever touch a real
+  `interactions` row, and only after an explicit confirmation flag
+  (`confirmScheduling`/`confirmCompletion`) from the UI -- "Contacted"
+  and every other status never implies or creates one. Scheduling/
+  completion reuse a deterministic interaction id
+  (`trip-meeting-<prospectId>`) via `ON CONFLICT DO UPDATE`, so a
+  retried request cannot create a duplicate interaction. Cancelling or
+  reverting a scheduled meeting wraps its interaction's source with
+  the existing `cancelled:` prefix convention, so it stops appearing
+  as upcoming everywhere else in the CRM, exactly like any other
+  cancelled activity.
+- Cross-trip conflicts: a prospect who is `meeting_requested` or
+  `meeting_scheduled` on another trip shows as a caution line, never a
+  block, on the current trip's row.
+- "Prepare for Meeting" reuses `loadMeetingBrief()` verbatim -- no
+  fabricated or trip-specific donor history.
+- Trip dashboard: counts by status plus a "needing attention" count
+  (not_contacted/meeting_requested); financial figures (historical
+  giving, open pledges, open asks) are displayed in a clearly separate
+  section with an explicit note that they are never summed with trip
+  counts.
+- `recommendations.trip_id` was deliberately **NOT added** this phase,
+  per the owner's explicit instruction -- deferred to a later,
+  separately-reviewed phase. Trip-specific next actions live entirely
+  in `trip_prospects` for this MVP.
+
+### 2. Schema / migrations
+
+- `drizzle/0045_trips.sql`: new `trips` table (id, owner_user_id FK
+  users, name, destination_region_id [code-defined, not a FK],
+  destination_region_label [frozen label snapshot], start_date,
+  end_date, fundraising_goal_cents, notes, status CHECK, created_at,
+  updated_at) + `trips_owner_status_idx`; new `trip_prospects` table
+  (id, trip_id FK trips, donor_id FK donors, added_method CHECK,
+  status CHECK [7 values], suggested_reason, suggested_score,
+  suggested_generated_at, manual_rank, meeting_at, meeting_location,
+  next_action, trip_notes, linked_interaction_id FK interactions,
+  created_at, updated_at) + unique index `trip_prospects_trip_donor_idx`
+  (trip_id, donor_id) + `trip_prospects_donor_idx`.
+- Applied to **Staging only** via
+  `wrangler d1 execute fundraising-os-staging-db --remote --file=drizzle/0045_trips.sql`
+  (the same manual, per-environment pattern every prior migration in
+  this repo uses -- no automated migration-on-deploy exists). 5 DDL
+  statements executed, 9 rows written (table/index metadata only --
+  both new tables confirmed empty immediately after). Production's
+  database was never targeted.
+- `lib/operations/staging-reset.ts`: added `trips`, `trip_prospects` to
+  `STAGING_RESET_TABLE_ORDER` in FK-safe position.
+- `lib/operations/workspace-backup.ts`: added both tables to
+  `WORKSPACE_BACKUP_EXCLUDED_TABLES` (covered by the nightly whole-DB
+  R2 backup, same precedent as `asks`/`pledge_payment_plans`).
+- `lib/data-health/production-baseline.ts` +
+  `production-baseline/schema-manifest.json` +
+  `production-baseline/drizzle/0000_production_baseline_0019.sql`:
+  regenerated locally via `pnpm run db:baseline:generate` (local-only,
+  `node:sqlite`, no network/D1 touched); migration count bumped
+  45 -> 46.
+
+### 3. Reused CRM components (never reimplemented)
+
+`loadMeetingBrief()`, `buildRecommendationEvidence()`/
+`buildDonorRecommendation()` (payment-plan grace-period logic via
+`evaluatePaymentPlan()`, completed-outreach suppression via
+`isUnambiguousCompletedOutreachAction()`/`scoreFact()`, evidence-based
+scoring -- all inherited automatically), `regionsForCityState()`,
+`zonedTimeToUtc()`, the `interactions.source` prefix convention from
+`lib/workspace/scheduled-activity.ts` (`capture-scheduled:`/
+`capture-completed:`/`cancelled:`), `DonorAutocomplete`, and the
+auth/validate/write/log route pattern from `app/api/asks/route.ts`.
+
+### 4. Test results
+
+- Full suite: **195/195 test files passing** (193 pre-existing + 2 new:
+  `tests/trip-model.test.mjs`, `tests/trip-suggestion-evidence.test.mjs`).
+- `tsc --noEmit`: clean, no errors.
+- `pnpm run lint`: **94 errors / 43 warnings -- exact unchanged
+  baseline** (confirmed before and after this round's changes).
+- New coverage specifically proves: status/taxonomy validity; only
+  meeting_scheduled/meeting_completed ever require a real interaction;
+  cross-trip conflict detection excludes the current trip and declined/
+  completed statuses; the neutral, non-urgent suggestion fallback for a
+  donor with no evidence; destination-timezone resolution with a safe
+  fallback; interaction source-string builders verified against the
+  real, unmodified `scheduled-activity.ts` functions (scheduled ->
+  completed and scheduled -> cancelled round-trip correctly, including
+  idempotent double-cancel); deterministic interaction ids (duplicate-
+  retry prevention); `findNewlyMatchingDonors` excludes already-tracked
+  donors; every validator's edge cases; and, through the real
+  `buildRecommendationEvidence`/`buildDonorRecommendation` pipeline
+  (not a fixture standing in for it): an on-track payment plan is never
+  described as overdue, a genuinely late one correctly is; a fact that
+  is itself an unambiguous completed-outreach report never resurfaces
+  as the trip's suggested reason; a real open ask produces a
+  concretely higher, positive score than a donor with recent contact
+  and nothing outstanding (null score, not an invented one).
+
+### 5. Staging deployment
+
+- Deployed via `pnpm run deploy:staging-independent`; build manifest
+  self-verified as built for `"staging-independent"` before upload.
+- Worker: `fundraising-os-staging`, Version ID
+  `c90e1020-bd27-40c5-a37d-e0f724229054`, URL
+  `https://fundraising-os-staging.sgoldstein.workers.dev`.
+- Confirmed bindings on deploy: `env.DB` -> `fundraising-os-staging-db`
+  (Staging database, not Production).
+- New routes live: `/travel-planning`, `/travel-planning/:id`,
+  `/api/trips`, `/api/trips/:id`, `/api/trips/:id/prospects`,
+  `/api/trips/:id/prospects/:prospectId`.
+
+### 6. Data-safety verification
+
+- `trips`/`trip_prospects` confirmed present on Staging D1 immediately
+  after migration, and both confirmed **empty** (no trip/prospect rows
+  created by this round) -- no existing Staging data was reset,
+  deleted, or modified. No test trip, prospect, or donor record was
+  created on Staging or Production during this round; all verification
+  was schema-level (`sqlite_master` table listing) rather than through
+  the deployed UI, so no disposable data exists to document or clean
+  up.
+- Production database was never connected to, queried, or migrated at
+  any point this round.
+
+### 7. Deferred MVP items
+
+- `recommendations.trip_id` (explicitly deferred per owner instruction).
+- Calendar/ICS export or Google Calendar sync (the data shape --
+  `meeting_at` + `meeting_location` -- already supports this later
+  without a schema change).
+- Multi-region trips (one primary region per trip for MVP).
+
+### 8. Known limitations
+
+- No UI-level end-to-end verification was performed (this session does
+  not operate the owner's authenticated browser session) -- the
+  deployed routes were confirmed to exist in the build/deploy output
+  and the schema was confirmed live, but no actual page load, trip
+  creation, or prospect-status change was exercised through the
+  browser. The owner should click through `/travel-planning` on
+  Staging before authorizing Production.
+- `tests/trips-data.ts`'s D1-touching functions (`createTrip`,
+  `addManualProspect`, `scheduleProspectMeeting`, etc.) have no direct
+  unit test, matching this codebase's own existing convention for
+  Workers-only D1 code (exercised via Staging verification instead of
+  an in-process test).
+
+### 9. Decisions needing owner approval before Production
+
+- Whether to proceed to Production for this Phase 2 scope as-is, after
+  the owner's own click-through verification on Staging.
+- Whether `recommendations.trip_id` should be taken up as a Phase 3,
+  and if so, its own separate review/authorization.
+- Whether the "New prospects available" panel's matching should run on
+  every page load (current behavior) or be gated to an explicit
+  "check for new matches" action, for donor volumes much larger than
+  the Baltimore region's 57 donors.
