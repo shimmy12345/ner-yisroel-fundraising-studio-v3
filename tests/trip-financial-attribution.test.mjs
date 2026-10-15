@@ -124,8 +124,23 @@ const tripsData = await readFile(new URL("../lib/relationships/trips-data.ts", i
 assert.match(tripsData, /listEligibleGivingActivitiesForDonor[\s\S]{0,400}owner_user_id = \?/);
 assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,600}ownedProspect\(userId, tripId, prospectId\)/, "attribution must go through the same ownedProspect ownership check every other prospect mutation uses");
 assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,900}FROM giving_activities WHERE id = \? AND owner_user_id = \? AND donor_id = \?/, "the giving_activity being attributed must belong to both the authenticated owner AND the SAME donor as the trip prospect -- never an arbitrary record");
-assert.match(tripsData, /listTripFinancialAttributions[\s\S]{0,700}t\.owner_user_id = \?/, "listing a trip's attributions must be scoped to the trip's own owner");
+// Window widened to 1700 (2026-10-15, Pending-Gift Reconciliation Fix, see
+// docs/AI-HANDOFF.md) -- the query grew several CASE expressions longer to
+// resolve a merged pending_gift to its confirmed donation's own live
+// figures at read time; the owner-scoping clause itself is unchanged.
+assert.match(tripsData, /listTripFinancialAttributions[\s\S]{0,1700}t\.owner_user_id = \?/, "listing a trip's attributions must be scoped to the trip's own owner");
 assert.match(tripsData, /removeTripFinancialAttribution[\s\S]{0,500}trip_id IN \(SELECT id FROM trips WHERE owner_user_id = \?\)/, "removing an attribution must be scoped to the trip's own owner");
+
+// Pending-Gift Reconciliation Fix (2026-10-15, independent review, see
+// docs/AI-HANDOFF.md): the merge-resolution LEFT JOIN must stay scoped to
+// the SAME owner as the attribution itself -- it must never be able to
+// resolve to a giving_activities row outside this workspace.
+assert.match(tripsData, /LEFT JOIN giving_activities confirmed ON confirmed\.id = ga\.confirmed_by_activity_id AND confirmed\.owner_user_id = tfa\.user_id/, "the merged-pending-gift resolution join must stay scoped to the attribution's own owner");
+
+// The double-counting guard must be enforced at the actual write path
+// (attributeGivingActivityToTrip), never relying on the UI-filtered
+// eligibility list alone.
+assert.match(tripsData, /attributeGivingActivityToTrip[\s\S]{0,1500}pending\.confirmed_by_activity_id = \?[\s\S]{0,200}already_attributed/, "attributing a confirmed donation that is the resolution target of an already-attributed pending gift must be rejected, exactly like a direct duplicate attribution");
 
 // "Never modify the underlying financial transaction" -- the attribution
 // functions must never UPDATE giving_activities' own financial fields.

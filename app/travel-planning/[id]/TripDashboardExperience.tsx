@@ -352,7 +352,7 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
     {error && <p className="travel-planning-error" role="alert">{error}</p>}
     {attributions.length > 0 && <div className="trip-financial-attributed-list">
       {attributions.map((item) => <div key={item.attributionId} className="trip-financial-attributed-row">
-        <span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}{(item.paidCents ?? 0) > 0 ? ` (${money(item.paidCents ?? 0)} paid)` : ""}</span>
+        <span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}{(item.paidCents ?? 0) > 0 ? ` (${money(item.paidCents ?? 0)} paid)` : ""}{item.resolvedViaImportMatch ? <span className="trip-financial-confirmed-badge" title="This was recorded as a pending gift, then matched to a confirmed donation during a JL import -- these figures are the confirmed donation's own."> &middot; Confirmed via import</span> : null}</span>
         <button type="button" disabled={busy} onClick={() => removeAttribution(item.attributionId)}>Remove</button>
       </div>)}
     </div>}
@@ -414,7 +414,12 @@ function TripFinancialResultsSection({ summary, attributions }: { summary: TripF
     </FinancialSummaryGrid>
     {pending.length > 0 && <div className="trip-financial-pending-list" aria-label="Pending opportunities">
       <p className="payment-plan-eyebrow">Pending opportunities (not yet confirmed -- never counted above)</p>
-      {pending.map((item) => <div key={item.attributionId} className="trip-financial-pending-row"><span>{item.donorDisplayName}</span><span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}</span></div>)}
+      {pending.map((item) => <div key={item.attributionId} className="trip-financial-pending-row">
+        <span>{item.donorDisplayName}</span>
+        <span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}
+          {item.category === "pending_pledge" ? <span className="trip-financial-manual-note" title="A pending pledge never auto-confirms from a JL import -- once the real pledge is imported, use Associate an existing pledge above to link it here."> &middot; confirms manually once imported</span> : null}
+        </span>
+      </div>)}
     </div>}
   </section>;
 }

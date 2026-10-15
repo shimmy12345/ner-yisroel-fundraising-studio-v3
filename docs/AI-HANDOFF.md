@@ -41455,3 +41455,211 @@ entirely to a trip-local "pending opportunity" field -- was presented to
 the owner before any code was written; the owner chose the symmetrical
 `pending_pledge` category, implemented as described above with the
 import-pipeline-wiring scope limit disclosed in section 8.
+
+## Payment-Plan Progress / Trip Fundraising Results: Independent-Review Fixes (2026-10-15)
+
+Follow-up to the dashboards above, from the owner's own independent review
+of Staging version `dc7120b0-359d-4892-bc3a-bf81fa1f9617`. Two correctness
+concerns were raised; both were verified real. STAGING ONLY -- no
+Production deploy, no new migration, no change to the sensitive JL import/
+reconciliation pipeline (per the task's own explicit gate on that).
+
+### 1. Installment timeline ignored the grace period (fixed)
+
+**Finding, confirmed real.** `lib/relationships/payment-plan-display.ts`'s
+`buildInstallmentTimeline()` labeled an unsatisfied installment "overdue"
+the instant its due date arrived (`dueAt <= nowDateOnly`), with no
+awareness of `MONTHLY_PAYMENT_PLAN_GRACE_DAYS` (7 days) --
+`pledge-payment-plan.ts`'s own `evaluatePaymentPlan()`/`isLate` already
+draws that exact distinction (an installment due today or yesterday is
+not yet late), and `derivePaymentPlanDisplayStatus()` in the SAME file
+already respects it for the top-level status badge (`payment_due` vs.
+`overdue`). Only the per-tick timeline state disagreed with its own
+file's sibling function -- a donor paying on schedule, one day past the
+due date, would show a red "Overdue" tick days before the engine itself
+considered them late.
+
+**Fix** (`lib/relationships/payment-plan-display.ts`): added a new
+`InstallmentTimelineEntry` state, `"due"` -- the cycle's own date has
+arrived but `MONTHLY_PAYMENT_PLAN_GRACE_DAYS` has not yet elapsed. The
+boundary is computed the same way `evaluatePaymentPlan`'s own `daysLate`
+is (`nowDateOnly - dueAt > graceSeconds`), imported from
+`pledge-payment-plan.ts` rather than re-derived -- never a second,
+competing lateness rule. `"overdue"` is now reserved for a cycle
+genuinely past its grace period. Already-satisfied and not-yet-due cycles
+are completely unaffected.
+
+UI (`app/components/InstallmentTimeline.tsx`, `app/globals.css`): a new
+hollow-amber tick (`installment-tick-due`, distinct from "paid" green,
+solid-amber "upcoming," red "overdue," and hollow-grey "future") labeled
+"Payment due."
+
+**Tests** (`tests/payment-plan-display.test.mjs`): on the due date itself,
+every single day of the grace period, the day immediately after grace
+expires, and well past grace -- confirming "due" through the whole grace
+window and "overdue" only once it has genuinely elapsed and never
+reverting. Plus a check that an already-paid cycle and a not-yet-due
+cycle are both unaffected. All existing timeline tests (future-never-
+overdue, genuinely-missed-cycles-show-overdue, long-plan trimming) still
+pass unchanged.
+
+### 2. Trip-attributed pending gifts did not follow JL import confirmation (fixed, presentation-layer only)
+
+**Finding, confirmed real, traced through the full pipeline.** A pending
+gift recorded from a trip (`category='pending_gift'`) and attributed via
+`trip_financial_attributions` can later be matched by the JL import's own
+reconciliation (`CONFIRM_PENDING_GIFT_SQL`, `lib/giving/management.ts`,
+run from `app/api/import/route.ts`'s `pendingMergeStatements`). That
+reconciliation NEVER rewrites or deletes the original pending row -- it
+flips that SAME row to `workspace_status='merged'` and stamps
+`confirmed_by_activity_id` with a brand-new, separate `giving_activities`
+row holding the real confirmed donation. The `trip_financial_attributions`
+row keeps pointing at the original (now-merged) id, unchanged.
+
+Before this fix, `listTripFinancialAttributions()` joined directly on
+that unchanged id, so a confirmed gift would display FOREVER as a stale
+"pending opportunity" at its old pending amount
+(`countsInGivingTotals({workspace_status:'merged', category:'pending_gift'})`
+is false), while the real confirmed donation -- a completely separate row
+-- was never linked to the trip at all and never counted toward the
+trip's goal. Exactly the "attribution does not follow the confirmed
+record" failure the task asked to verify.
+
+**Why a read-time fix, not a write.** Two options were considered:
+rewrite the attribution's own `giving_activity_id` to point at the new
+confirmed row, or resolve the link at read time. Rewriting was rejected:
+`app/api/import/rollback/route.ts` DELETES the newly-inserted row and
+restores the original pending row to `workspace_status='active'` if that
+import is ever rolled back -- a rewritten attribution would dangle
+(pointing at a row rollback just deleted) or need its own extra rollback-
+awareness inside the sensitive import pipeline, which this task's own
+gate explicitly puts off-limits without separate approval. A pure read-
+time resolution has no such failure mode: if the import is rolled back,
+the `LEFT JOIN` simply stops matching and the original pending figures
+reappear automatically, with nothing to detect or undo.
+
+**Fix, entirely in this feature's own isolated files -- zero changes to
+`app/api/import/route.ts`, `lib/giving/management.ts`, or any other part
+of the import/reconciliation pipeline:**
+- `lib/relationships/trips-data.ts`'s `listTripFinancialAttributions()`:
+  the query now `LEFT JOIN`s `giving_activities` a second time on
+  `confirmed.id = ga.confirmed_by_activity_id` (scoped defensively to
+  `confirmed.owner_user_id = tfa.user_id`), and resolves
+  category/workspace_status/committed_/paid_/balance_cents to the
+  CONFIRMED row's own live figures whenever `ga.workspace_status =
+  'merged'` and a confirmation target still exists -- otherwise unchanged.
+  A new `resolvedViaImportMatch` boolean flag is exposed for the UI. The
+  attribution row's own `giving_activity_id` is never rewritten.
+- **Double-counting guard this fix itself needed to add**: once a
+  pending gift resolves to its confirmed donation this way, that SAME
+  confirmed row must never ALSO be offered through "Associate an existing
+  donation or pledge" -- that would double-attribute the identical real
+  dollars under two attribution rows. Added to both layers (never trust
+  the UI-filtered list alone):
+  - `listEligibleGivingActivitiesForDonor()`: excludes any record that is
+    itself the `confirmed_by_activity_id` target of an already-(actively-)
+    attributed pending record.
+  - `attributeGivingActivityToTrip()`: the SAME check enforced again at
+    the actual write path, rejected with the existing `already_attributed`
+    reason -- so a direct API call bypassing the eligibility list is
+    blocked too, not just the picker UI.
+- `lib/relationships/trip-financial-attribution.ts`: `AttributedGivingRecord`
+  gained the matching `resolvedViaImportMatch` field (presentation-only;
+  `summarizeTripFinancials`'s own pure summation logic is completely
+  unchanged -- it already worked correctly off whatever category/
+  workspace_status it was handed, the bug was entirely in what got handed
+  to it).
+- UI (`app/travel-planning/[id]/TripDashboardExperience.tsx`,
+  `app/globals.css`): a "Confirmed via import" badge on an attributed row
+  once `resolvedViaImportMatch` is true, so the fundraiser understands
+  why a record they recorded as pending now shows as confirmed. A
+  `pending_pledge` row (which never auto-resolves this way -- see below)
+  now also shows an inline "confirms manually once imported" hint in the
+  Pending Opportunities list.
+
+**Tests** (`tests/trip-financial-attribution-schema.test.mjs`, built
+against a real SQLite database from every migration, reproducing the
+exact SQL `trips-data.ts` runs since that file itself imports
+`cloudflare:workers` and cannot execute in plain Node -- same established
+constraint as this file's existing blocks):
+- Before any import match: attribution reads the pending gift's own
+  figures.
+- After reproducing the import's own merge (new confirmed row inserted,
+  original row flipped to `merged` + `confirmed_by_activity_id`): the
+  SAME attribution row (never duplicated, `giving_activity_id` never
+  rewritten) now resolves to the confirmed row's category/status/cents,
+  flagged `resolved_via_import_match`.
+- The confirmed row is excluded from the eligibility query once its
+  pending predecessor is attributed, and a direct attribute attempt
+  against it is detected and would be rejected.
+- Rollback scenario (confirmed row deleted, pending row restored to
+  `active`/`confirmed_by_activity_id=NULL`): the attribution row survives
+  untouched and reverts cleanly to the pending figures -- nothing left
+  dangling.
+
+Also added two structural assertions to `tests/trip-financial-attribution.test.mjs`
+(owner-scoping of the new `LEFT JOIN`; the new write-path double-counting
+guard) and widened one pre-existing structural regex window (700 ->
+1700 chars) that the longer, now-correct query's owner-scoping clause had
+simply outgrown -- the underlying property it checks (owner scoping) is
+unchanged and still verified.
+
+### Pending-pledge manual-reconciliation limitation (documented, by design -- not a bug)
+
+Re-verified against the actual code, not just the prior round's own
+doc comment: `pending_pledge` is, and remains, deliberately **narrower**
+than `pending_gift`. The fix above gives `pending_gift` an automatic
+path to "confirmed" (because the import's own pending-gift reconciliation
+already exists and already stamps `confirmed_by_activity_id` -- this
+round only taught the TRIP dashboard to follow that existing link).
+`pending_pledge` has no equivalent import-side reconciliation at all (by
+the same prior, disclosed scope decision -- extending JL import logic to
+pledges is a materially bigger, separately-reviewable change). A pending
+pledge recorded from a trip stays `pending_pledge` and shows under
+"Pending opportunities" INDEFINITELY until the fundraiser manually runs
+"Associate an existing pledge" once the real pledge is JL-imported --
+never auto-merged, never silently superseded. This is now called out
+directly in the UI (see above), not just in this document.
+
+### UI clarity: pending vs. confirmed (re-verified)
+
+The Trip Fundraising Results card's four summary figures (new pledges
+secured, new donations secured, cash collected, outstanding pledge
+balance) only ever include `countsInGivingTotals`-passing records; a
+separate "Pending opportunities (not yet confirmed -- never counted
+above)" list, with its own explicit eyebrow text, is the only place a
+pending record's amount appears. The fix above makes this distinction
+MORE accurate than before (a gift that genuinely got confirmed no longer
+sits mislabeled as pending), and the new "Confirmed via import" / "confirms
+manually once imported" inline text makes the mechanism legible to the
+fundraiser rather than just the end state.
+
+### Verification performed
+
+- `node tests/payment-plan-display.test.mjs`,
+  `node tests/trip-financial-attribution-schema.test.mjs`,
+  `node tests/trip-financial-attribution.test.mjs`, and the full suite
+  (`node scripts/run-tests.mjs`): 199/199 test files pass.
+- `npx tsc --noEmit`: clean, 0 errors.
+- `npm run lint`: 94 errors / 43 warnings -- the exact unchanged baseline
+  from the prior round; nothing new in any file this round touched.
+- `git diff --name-only -- wrangler.production.jsonc wrangler.staging.jsonc
+  cloudflare-env.d.ts worker/index.ts drizzle/`: empty -- no config,
+  entrypoint, or migration touched. This round is pure application-code
+  and test changes; no new Staging D1 migration was needed.
+- No change was made to `app/api/import/route.ts`, `lib/giving/management.ts`,
+  or any other file in the JL import/reconciliation pipeline -- per the
+  task's own explicit gate, that pipeline was investigated and reasoned
+  about, never edited.
+
+### Issues requiring owner decisions
+
+None required to deploy this round's fixes to Staging -- both were
+scoped, isolated presentation-layer corrections the task's own
+instructions pre-authorized ("for safe, isolated presentation-layer
+corrections, implement and test on Staging"). If a FUTURE round ever
+wants the attribution to be rewritten onto the confirmed row itself
+(rather than resolved at read time), or wants `pending_pledge` wired into
+the import's own reconciliation, either is a change to logic this task
+explicitly asked to keep separately reviewable -- bring a proposal back
+before touching either.

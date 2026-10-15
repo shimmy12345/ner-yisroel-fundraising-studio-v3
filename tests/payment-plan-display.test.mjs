@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { derivePaymentPlanDisplayStatus, buildInstallmentTimeline } from "../lib/relationships/payment-plan-display.ts";
-import { evaluatePaymentPlan, enumerateExpectedCycles } from "../lib/relationships/pledge-payment-plan.ts";
+import { evaluatePaymentPlan, enumerateExpectedCycles, MONTHLY_PAYMENT_PLAN_GRACE_DAYS } from "../lib/relationships/pledge-payment-plan.ts";
 
 const TZ = "America/New_York";
 const anchor = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d) / 1000);
@@ -91,6 +91,58 @@ const anchor = (y, m, d) => Math.floor(Date.UTC(y, m - 1, d) / 1000);
   const { entries } = buildInstallmentTimeline({ cycles, satisfied }, nowDateOnly, 6);
   const overdue = entries.filter((e) => e.state === "overdue");
   assert.equal(overdue.length, 2, "both missed cycles must show as overdue, never merged into one or dropped");
+}
+
+// Grace-period consistency fix (2026-10-15, independent review): an
+// unsatisfied installment must never be labeled "overdue" in the timeline
+// while it is still within MONTHLY_PAYMENT_PLAN_GRACE_DAYS of its own due
+// date -- the exact same boundary evaluation.isLate/daysLate uses. On the
+// due date itself and through every day of the grace window, the tick
+// must read "due," never "overdue"; only once the grace period has
+// genuinely elapsed does it flip to "overdue."
+{
+  const cycles = [anchor(2026, 1, 15)];
+  const satisfied = [false];
+
+  // The due date itself.
+  {
+    const nowDateOnly = anchor(2026, 1, 15);
+    const { entries } = buildInstallmentTimeline({ cycles, satisfied }, nowDateOnly, 6);
+    assert.equal(entries[0].state, "due", "on the due date itself, an unsatisfied installment must read 'due,' not 'overdue'");
+  }
+
+  // Every single day of the grace period (day 1 through
+  // MONTHLY_PAYMENT_PLAN_GRACE_DAYS, inclusive) must still read "due."
+  for (let daysAfterDue = 1; daysAfterDue <= MONTHLY_PAYMENT_PLAN_GRACE_DAYS; daysAfterDue++) {
+    const nowDateOnly = cycles[0] + daysAfterDue * 86400;
+    const { entries } = buildInstallmentTimeline({ cycles, satisfied }, nowDateOnly, 6);
+    assert.equal(entries[0].state, "due", `day ${daysAfterDue} of the grace period must still read 'due,' not 'overdue'`);
+  }
+
+  // The day immediately after the grace period expires: genuinely late.
+  {
+    const nowDateOnly = cycles[0] + (MONTHLY_PAYMENT_PLAN_GRACE_DAYS + 1) * 86400;
+    const { entries } = buildInstallmentTimeline({ cycles, satisfied }, nowDateOnly, 6);
+    assert.equal(entries[0].state, "overdue", "the day after the grace period expires, an unsatisfied installment must read 'overdue'");
+  }
+
+  // Well past the grace period: still overdue, never reverts.
+  {
+    const nowDateOnly = cycles[0] + 30 * 86400;
+    const { entries } = buildInstallmentTimeline({ cycles, satisfied }, nowDateOnly, 6);
+    assert.equal(entries[0].state, "overdue", "well past the grace period, the installment must remain 'overdue'");
+  }
+}
+
+// The grace-period fix must never relabel an already-satisfied cycle, and
+// must never affect a cycle that is not yet due at all.
+{
+  const cycles = [anchor(2026, 1, 15), anchor(2026, 2, 15)];
+  const satisfied = [true, false];
+  const nowDateOnly = anchor(2026, 1, 16); // one day after Jan 15 (paid); Feb 15 not yet due
+  const { entries } = buildInstallmentTimeline({ cycles, satisfied }, nowDateOnly, 6);
+  assert.equal(entries[0].state, "paid");
+  assert.equal(entries[1].state, "upcoming");
 }
 
 // Long plan (60-cycle cap): the timeline stays capped, but no unsatisfied

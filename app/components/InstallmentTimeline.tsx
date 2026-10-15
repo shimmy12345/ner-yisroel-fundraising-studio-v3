@@ -8,12 +8,14 @@ const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { month: "
 
 const STATE_CLASS: Record<InstallmentTimelineEntry["state"], string> = {
   paid: "installment-tick-paid",
+  due: "installment-tick-due",
   overdue: "installment-tick-overdue",
   upcoming: "installment-tick-upcoming",
   future: "installment-tick-future",
 };
 const STATE_LABEL: Record<InstallmentTimelineEntry["state"], string> = {
   paid: "Paid",
+  due: "Payment due",
   overdue: "Overdue",
   upcoming: "Next expected",
   future: "Scheduled",

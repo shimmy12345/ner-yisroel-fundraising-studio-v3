@@ -8,7 +8,9 @@
 // "pure derivation over evaluatePaymentPlan's OWN output" discipline in
 // that same file.
 
-import type { PaymentPlanEvaluation } from "./pledge-payment-plan.ts";
+import { MONTHLY_PAYMENT_PLAN_GRACE_DAYS, type PaymentPlanEvaluation } from "./pledge-payment-plan.ts";
+
+const DAY_SECONDS = 86400;
 
 export const PAYMENT_PLAN_DISPLAY_STATUSES = ["on_track", "upcoming_payment", "payment_due", "overdue", "completed", "needs_review"] as const;
 export type PaymentPlanDisplayStatus = typeof PAYMENT_PLAN_DISPLAY_STATUSES[number];
@@ -66,7 +68,13 @@ export const PAYMENT_PLAN_DISPLAY_STATUS_LABELS: Record<PaymentPlanDisplayStatus
 
 export type InstallmentTimelineEntry = {
   dueAt: number;
-  state: "paid" | "overdue" | "upcoming" | "future";
+  // "due" -- the cycle's own date has arrived but the
+  // MONTHLY_PAYMENT_PLAN_GRACE_DAYS grace period has not yet expired. Must
+  // never be labeled "overdue" -- see this file's own
+  // derivePaymentPlanDisplayStatus, which draws the exact same distinction
+  // (payment_due vs overdue) from evaluation.isLate. "overdue" is reserved
+  // for a cycle genuinely past its grace period.
+  state: "paid" | "due" | "overdue" | "upcoming" | "future";
 };
 
 export type InstallmentTimelineSummary = {
@@ -81,9 +89,9 @@ export type InstallmentTimelineSummary = {
 
 // Caps a potentially long (up to PLEDGE_PAYMENT_CYCLE_ENUMERATION_CAP = 60)
 // cycle list down to a visually manageable strip: every unsatisfied cycle
-// (overdue or upcoming/future) is always kept -- a real missed or pending
-// installment must never be the one trimmed away -- and satisfied (paid)
-// cycles are trimmed from the earliest end first, keeping at most
+// (due, overdue, or upcoming/future) is always kept -- a real missed or
+// pending installment must never be the one trimmed away -- and satisfied
+// (paid) cycles are trimmed from the earliest end first, keeping at most
 // `maxPaidToShow` of the most recent paid cycles. Order is preserved
 // (ascending by date, matching cycles/satisfied's own order).
 export function buildInstallmentTimeline(
@@ -97,11 +105,18 @@ export function buildInstallmentTimeline(
   // "future" -- purely a presentational distinction between "the very
   // next one" and "later ones," never a financial-status difference.
   const firstFutureUnsatisfiedIndex = cycles.findIndex((cycle, index) => !satisfied[index] && cycle > nowDateOnly);
+  const graceSeconds = MONTHLY_PAYMENT_PLAN_GRACE_DAYS * DAY_SECONDS;
 
   const all: InstallmentTimelineEntry[] = cycles.map((dueAt, index) => {
     if (satisfied[index]) return { dueAt, state: "paid" as const };
-    if (dueAt <= nowDateOnly) return { dueAt, state: "overdue" as const };
-    return { dueAt, state: index === firstFutureUnsatisfiedIndex ? ("upcoming" as const) : ("future" as const) };
+    if (dueAt > nowDateOnly) return { dueAt, state: index === firstFutureUnsatisfiedIndex ? ("upcoming" as const) : ("future" as const) };
+    // dueAt <= nowDateOnly and unsatisfied: the same grace-period boundary
+    // evaluation.isLate/daysLate uses (see pledge-payment-plan.ts) -- an
+    // installment within MONTHLY_PAYMENT_PLAN_GRACE_DAYS of its own due
+    // date is "due," never "overdue." Both operands are already date-only
+    // (UTC-midnight) epochs, so this subtraction is always an exact whole-
+    // day count.
+    return { dueAt, state: nowDateOnly - dueAt > graceSeconds ? ("overdue" as const) : ("due" as const) };
   });
 
   const paidIndexes = all.flatMap((entry, index) => (entry.state === "paid" ? [index] : []));

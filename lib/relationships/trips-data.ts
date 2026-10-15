@@ -421,6 +421,15 @@ export async function listEligibleGivingActivitiesForDonor(userId: string, donor
       WHERE ga.owner_user_id = ? AND ga.donor_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active'
         AND ga.category IN ('open_pledge','partially_paid_pledge','completed_gift','pending_gift','pending_pledge')
         AND NOT EXISTS (SELECT 1 FROM trip_financial_attributions tfa WHERE tfa.giving_activity_id = ga.id AND tfa.removed_at IS NULL)
+        -- Pending-Gift Reconciliation Fix (2026-10-15, see docs/AI-HANDOFF.md):
+        -- never offer a record that is the JL-import confirmation target
+        -- (confirmed_by_activity_id) of an ALREADY-attributed pending gift
+        -- as if it were a separate, unattributed opportunity. Without this,
+        -- "Associate existing" could double-attribute the same real dollars
+        -- under two attribution rows -- one via the merged pending_gift
+        -- record (resolved at read time to this same confirmed activity's
+        -- figures, see listTripFinancialAttributions below), one directly.
+        AND NOT EXISTS (SELECT 1 FROM trip_financial_attributions tfa JOIN giving_activities pending ON pending.id = tfa.giving_activity_id WHERE pending.confirmed_by_activity_id = ga.id AND tfa.removed_at IS NULL)
       ORDER BY ga.activity_date DESC`).bind(userId, donorId)
     .all<{ id: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null }>();
   return result.results.map((row) => ({ id: row.id, category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents, activityDate: row.activity_date, description: row.description }));
@@ -441,6 +450,13 @@ export async function attributeGivingActivityToTrip(userId: string, tripId: stri
   if (!prospect) return { ok: false, reason: "prospect_not_found" };
   const givingActivity = await env.DB.prepare("SELECT id FROM giving_activities WHERE id = ? AND owner_user_id = ? AND donor_id = ?").bind(givingActivityId, userId, prospect.donorId).first<{ id: string }>();
   if (!givingActivity) return { ok: false, reason: "giving_activity_not_found" };
+  // Pending-Gift Reconciliation Fix (2026-10-15, see docs/AI-HANDOFF.md):
+  // the real structural guard against double-attributing one confirmed
+  // record under two rows -- never rely on listEligibleGivingActivitiesForDonor's
+  // exclusion alone, since this endpoint can be called directly with any
+  // givingActivityId. Rejected exactly like an already-attributed record.
+  const shadowOfAttributedPending = await env.DB.prepare(`SELECT 1 FROM trip_financial_attributions tfa JOIN giving_activities pending ON pending.id = tfa.giving_activity_id WHERE pending.confirmed_by_activity_id = ? AND tfa.removed_at IS NULL LIMIT 1`).bind(givingActivityId).first();
+  if (shadowOfAttributedPending) return { ok: false, reason: "already_attributed" };
   const id = crypto.randomUUID();
   try {
     await env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, created_at)
@@ -455,25 +471,67 @@ export type TripFinancialAttributionRow = {
   attributionId: string; givingActivityId: string; donorId: string; donorDisplayName: string;
   category: string; workspaceStatus: string; committedCents: number | null; paidCents: number | null; balanceCents: number | null;
   note: string | null; createdAt: number;
+  // Pending-Gift Reconciliation Fix (2026-10-15, see docs/AI-HANDOFF.md):
+  // true when the attributed record was itself a pending_gift that the JL
+  // import's own reconciliation (CONFIRM_PENDING_GIFT_SQL, lib/giving/
+  // management.ts) has since matched to a confirmed donation -- every
+  // other field above is already the CONFIRMED record's own live figures
+  // in that case (see the function below that fills this type), never the
+  // stale pending snapshot. Presentation-only -- summarizeTripFinancials
+  // never reads this flag.
+  resolvedViaImportMatch: boolean;
 };
 
 // Every ACTIVE (removed_at IS NULL) attribution for this trip, with every
 // financial field read LIVE from giving_activities at query time -- never
 // a snapshot, so a later payment, correction, or category change on the
 // underlying record is reflected automatically with zero extra code.
+//
+// Pending-Gift Reconciliation Fix (2026-10-15, independent review, see
+// docs/AI-HANDOFF.md): a pending_gift this feature attributed to a trip
+// can later be matched by the JL import's own pending-gift reconciliation
+// (lib/giving/management.ts's CONFIRM_PENDING_GIFT_SQL) to a brand-new,
+// separate giving_activities row -- the import NEVER rewrites or deletes
+// the original pending_gift row; it only flips that SAME row to
+// workspace_status='merged' and stamps confirmed_by_activity_id with the
+// new row's id (see app/api/import/route.ts's pendingMergeStatements).
+// The trip_financial_attributions row keeps pointing at the original
+// (now-merged) id -- deliberately NEVER rewritten here, since that would
+// be an unnecessary write against a record the sensitive import pipeline
+// also manages, and would dangle if the import were later rolled back
+// (app/api/import/rollback/route.ts deletes the new row and restores the
+// old one to active). Instead this LEFT JOIN resolves, AT READ TIME ONLY,
+// to the confirmed row's own live category/workspace_status/committed_
+// paid_/balance_cents whenever the attributed row has been merged and its
+// confirmation target still exists -- so a trip's results reflect the
+// real, now-confirmed gift automatically, with zero writes and nothing to
+// go wrong if that import is ever rolled back (the LEFT JOIN simply stops
+// matching and the original pending figures reappear, exactly as the
+// rollback itself restores them). `confirmed.owner_user_id = tfa.user_id`
+// defends against ever resolving to a record outside this same owner's
+// workspace, even though CONFIRM_PENDING_GIFT_SQL can only ever stamp a
+// same-owner, same-donor id by construction.
 export async function listTripFinancialAttributions(userId: string, tripId: string): Promise<TripFinancialAttributionRow[]> {
   const result = await env.DB.prepare(`SELECT tfa.id AS attribution_id, tfa.giving_activity_id, tfa.donor_id, d.display_name AS donor_display_name,
-        ga.category, ga.workspace_status, ga.committed_cents, ga.paid_cents, ga.balance_cents, tfa.note, tfa.created_at
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.workspace_status ELSE ga.workspace_status END AS workspace_status,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.committed_cents ELSE ga.committed_cents END AS committed_cents,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.paid_cents ELSE ga.paid_cents END AS paid_cents,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.balance_cents ELSE ga.balance_cents END AS balance_cents,
+        (ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL) AS resolved_via_import_match,
+        tfa.note, tfa.created_at
       FROM trip_financial_attributions tfa
       JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+      LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
       JOIN donors d ON d.id = tfa.donor_id
       JOIN trips t ON t.id = tfa.trip_id
       WHERE tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?
       ORDER BY tfa.created_at DESC`).bind(tripId, userId)
-    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; note: string | null; created_at: number }>();
+    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; resolved_via_import_match: number; note: string | null; created_at: number }>();
   return result.results.map((row) => ({
     attributionId: row.attribution_id, givingActivityId: row.giving_activity_id, donorId: row.donor_id, donorDisplayName: row.donor_display_name,
     category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents,
+    resolvedViaImportMatch: Boolean(row.resolved_via_import_match),
     note: row.note, createdAt: row.created_at,
   }));
 }

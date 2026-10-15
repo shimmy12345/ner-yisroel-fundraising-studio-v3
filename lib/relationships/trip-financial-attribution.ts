@@ -37,6 +37,11 @@ export type AttributedGivingRecord = {
   balanceCents: number | null;
   note: string | null;
   createdAt: number;
+  // See lib/relationships/trips-data.ts's listTripFinancialAttributions --
+  // category/workspaceStatus/*Cents above are already resolved to the
+  // confirmed donation's own live figures when this is true. Never read
+  // by summarizeTripFinancials itself; presentation-only.
+  resolvedViaImportMatch: boolean;
 };
 
 export type TripFinancialSummary = {

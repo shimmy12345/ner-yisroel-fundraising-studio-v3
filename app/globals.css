@@ -1490,6 +1490,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .installment-timeline { display:flex; align-items:center; gap:4px; flex-wrap:wrap; margin-top:8px; }
 .installment-tick { width:9px; height:9px; border-radius:50%; display:inline-block; cursor:default; box-sizing:border-box; }
 .installment-tick-paid { background:var(--green); }
+.installment-tick-due { background:#fff; border:2px solid #b8863a; }
 .installment-tick-overdue { background:#a3402c; }
 .installment-tick-upcoming { background:#b8863a; border:2px solid #b8863a; }
 .installment-tick-future { background:#fff; border:1px solid #c7cdc8; }
@@ -1504,6 +1505,8 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .trip-financial-attributed-list { display:grid; gap:6px; margin-top:8px; }
 .trip-financial-attributed-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:12px; }
 .trip-financial-attributed-row button { border:0; background:transparent; color:#8a4940; font-size:10px; cursor:pointer; padding:2px 4px; }
+.trip-financial-confirmed-badge { color:var(--green); font-weight:700; }
+.trip-financial-manual-note { color:var(--muted); font-style:italic; }
 
 @media (max-width:760px) {
   .financial-summary-grid { grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); }
