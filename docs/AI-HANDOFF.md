@@ -41911,7 +41911,7 @@ comments on faith:
   `giving_activities.id`.
 
 **PR opened against `main`, NOT merged, awaiting the owner's review:**
-branch `fix/d1-restore-sync-0044-0045-0046-metadata`, commit `4f75bf3`,
+branch `fix/d1-restore-sync-0044-0045-0046-metadata`, commit `cd86bdf`,
 pushed to `origin`. Create-PR link (this sandboxed session has no `gh`
 CLI and deliberately did not attempt to extract or reuse the git
 credential helper's stored token for a direct GitHub API call --
@@ -42101,7 +42101,7 @@ task's full Phase 2 wishlist that did not already exist from the prior
 
 **PR links requiring approval.**
 `https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/pull/new/fix/d1-restore-sync-0044-0045-0046-metadata`
-(branch `fix/d1-restore-sync-0044-0045-0046-metadata`, commit `4f75bf3`)
+(branch `fix/d1-restore-sync-0044-0045-0046-metadata`, commit `cd86bdf`)
 -- metadata-only, 5 files, described in full above. This session could
 not open the PR itself (no `gh`/API credential); the owner needs to open
 it via that link or the GitHub UI, then review and merge (or decline)
