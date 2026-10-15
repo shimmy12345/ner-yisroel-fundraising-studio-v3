@@ -218,4 +218,84 @@ assert.equal(followUpListsMatch([], []), true);
   assert.equal(countRecommendations(db), baseRecommendations + 3, "all three original follow-ups must survive a rejected, shortened retry untouched");
 }
 
+// --- Retry after a saved follow-up has since been completed or edited
+// elsewhere (docs/AI-HANDOFF.md, "Activate and Test AI Meeting Notes on
+// Staging" -- the nuance an independent review raised). The two UPDATE
+// statements below mirror app/api/recommendations/[id]/complete/route.ts
+// and .../reschedule/route.ts's own exact SQL verbatim, not a
+// reimplementation: complete() sets only status/updated_at; reschedule()
+// sets only due_at/due_at_date_only/updated_at -- confirmed by reading
+// both files directly before writing these mirrors. ---
+
+function completeFollowUp(db, recommendationId, userId = "u1") {
+  return db.prepare("UPDATE recommendations SET status = 'completed', updated_at = ? WHERE id = ? AND user_id = ? AND status = 'open'").run(NOW, recommendationId, userId);
+}
+function rescheduleFollowUp(db, recommendationId, newDueAtEpoch, userId = "u1") {
+  return db.prepare("UPDATE recommendations SET due_at = ?, due_at_date_only = 1, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'open'").run(newDueAtEpoch, NOW, recommendationId, userId);
+}
+
+{
+  const db = freshDatabase();
+  const baseInteractions = countInteractions(db);
+  const baseRecommendations = countRecommendations(db);
+  seedUser(db);
+  seedDonor(db, { id: "donor-1", displayName: "Test Donor" });
+  const key = "idem-key-completed-then-retried";
+  const payload = { interactionId: key, donorId: "donor-1", type: "meeting", occurredAtEpoch: 2000, occurredAtDateOnly: true, summary: "Note.", followUps: [f(0, "Call back", 3000)] };
+  attemptSave(db, payload);
+
+  // The fundraiser (correctly) marks the follow-up complete via the
+  // existing Daily Agenda action before the original save's response
+  // ever arrives (e.g. it was lost in transit) -- status changes, but
+  // the follow-up's own content (description/due date) does not.
+  const recommendationId = `meeting-note-${key}-0`;
+  const completeResult = completeFollowUp(db, recommendationId);
+  assert.equal(completeResult.changes, 1, "sanity check: completion must have actually applied");
+
+  // A later retry of the EXACT ORIGINAL request (the client, unaware it
+  // already succeeded, resubmits) must still be recognized as a safe,
+  // content-identical replay -- status is never part of the comparison,
+  // so completing a task must never cause a legitimate retry to be
+  // rejected, and must never reactivate (reopen) the completed task.
+  const retry = attemptSave(db, payload);
+  assert.equal(retry.status, 200, "a retry after the follow-up was completed elsewhere must still succeed as a safe replay, not be rejected");
+  assert.equal(countInteractions(db), baseInteractions + 1);
+  assert.equal(countRecommendations(db), baseRecommendations + 1, "no duplicate or reactivated row");
+  assert.equal(db.prepare("SELECT status FROM recommendations WHERE id = ?").get(recommendationId).status, "completed", "the retry must never reopen/revert the completion");
+}
+
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "donor-1", displayName: "Test Donor" });
+  const key = "idem-key-rescheduled-then-retried";
+  const payload = { interactionId: key, donorId: "donor-1", type: "meeting", occurredAtEpoch: 2000, occurredAtDateOnly: true, summary: "Note.", followUps: [f(0, "Call back", 3000)] };
+  attemptSave(db, payload);
+
+  // The fundraiser deliberately reschedules the follow-up to a new date
+  // via the Daily Agenda before retrying the original save.
+  const recommendationId = `meeting-note-${key}-0`;
+  const rescheduleResult = rescheduleFollowUp(db, recommendationId, 9999);
+  assert.equal(rescheduleResult.changes, 1, "sanity check: reschedule must have actually applied");
+
+  // A retry of the ORIGINAL request (still carrying the OLD due date)
+  // must be rejected, NOT silently treated as a matching replay -- the
+  // deliberate reschedule is real content the stale retry does not
+  // reflect, so overwriting it back to the old date would be the actual
+  // bug. Rejecting here protects the edit; it is not a false rejection
+  // of a truly identical request, since the request is no longer
+  // identical to what is now genuinely on file.
+  const retry = attemptSave(db, payload);
+  assert.equal(retry.status, 409);
+  assert.equal(db.prepare("SELECT due_at FROM recommendations WHERE id = ?").get(recommendationId).due_at, 9999, "the reschedule must survive a stale retry completely untouched");
+
+  // The fundraiser then correctly retries with a payload that matches
+  // what is NOW on file (e.g. the page was reloaded, which mints a new
+  // idempotency key in the real app -- modeled here as the same key
+  // simply carrying the current due date, to isolate the comparison
+  // logic itself from key-generation) -- this must succeed as a replay.
+  const matchingRetry = attemptSave(db, { ...payload, followUps: [f(0, "Call back", 9999)] });
+  assert.equal(matchingRetry.status, 200, "a request whose content now matches what is actually on file must succeed as a replay");
+}
+
 console.log("meeting-notes-idempotency.test.mjs: all assertions passed");
