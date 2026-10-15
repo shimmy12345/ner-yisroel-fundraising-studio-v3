@@ -720,6 +720,22 @@ CREATE TABLE `shared_activity_recipient_audits` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `trip_financial_attributions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`user_id` text NOT NULL,
+	`trip_id` text NOT NULL,
+	`donor_id` text NOT NULL,
+	`giving_activity_id` text NOT NULL,
+	`note` text,
+	`created_at` integer NOT NULL,
+	`removed_at` integer,
+	`removed_reason` text,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action
+);
+
 CREATE TABLE `trip_prospects` (
 	`id` text PRIMARY KEY NOT NULL,
 	`trip_id` text NOT NULL,
@@ -967,6 +983,12 @@ CREATE INDEX `shared_activities_user_date_idx` ON `shared_activities` (`user_id`
 
 CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`);
 
+CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL;
+
+CREATE INDEX `trip_financial_attributions_donor_idx` ON `trip_financial_attributions` (`donor_id`);
+
+CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`);
+
 CREATE INDEX `trip_prospects_donor_idx` ON `trip_prospects` (`donor_id`);
 
 CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`);
@@ -990,5 +1012,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a943970a3009f688ee994e6a2b6abb9e109a1f8db7fb44f0c316b418d89e97eb',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a20d155cd5a1160d7d90eadcba04e0f6cedef7a718cb4c2f37f786155d8a6d25',1785944072);
 PRAGMA optimize;

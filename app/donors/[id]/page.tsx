@@ -25,6 +25,8 @@ import { DonorResearch, type IdentityCandidateView, type PendingEvidenceView, ty
 import { buildRecommendationEvidence, resolveOpenPledgeActivityDate } from "../../../lib/relationships/recommendation-evidence";
 import { resolveRelationshipSnapshot, type SynthesisFact } from "../../../lib/relationships/fact-synthesis";
 import { evaluatePaymentPlan, evaluatePledgeRenewal, shouldShowPaymentPlanCard, evaluateOpenPledgePlanStatus, isOpenPledgeActionable } from "../../../lib/relationships/pledge-payment-plan";
+import { derivePaymentPlanDisplayStatus, buildInstallmentTimeline } from "../../../lib/relationships/payment-plan-display";
+import { localDateOnlyEpoch } from "../../../lib/workspace/local-time";
 import { buildDonorRecommendation, summarizeRecommendationForSnapshot } from "../../../lib/relationships/recommendation-rank";
 import type { GiftAcknowledgmentStatus, GiftSource } from "../../../lib/giving/acknowledgment";
 import { GiftAcknowledgmentActions } from "./GivingManagement";
@@ -414,6 +416,17 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
     // live-data.ts), so this card can never disagree with those surfaces
     // about the same plan's renewal date.
     const pledgeRenewal = evaluatePledgeRenewal(planRow.original_pledge_date, planRow.commitment_duration_months, null, planRow.renewal_acknowledged_at, nowForPlanEvaluation, profile.timezone);
+    // Payment-Plan Progress Dashboard (2026-10-16, see docs/AI-HANDOFF.md)
+    // -- displayStatus/timeline are pure derivations over this SAME
+    // evaluation object (lib/relationships/payment-plan-display.ts),
+    // never a second financial calculation. nowDateOnly reuses the exact
+    // same localDateOnlyEpoch() normalization the engine itself applies
+    // internally, so the timeline's "is this cycle in the future" check
+    // can never disagree with the engine's own isLate/isOnTrack about
+    // what "today" means for this fundraiser's timezone.
+    const nowDateOnly = localDateOnlyEpoch(nowForPlanEvaluation, profile.timezone);
+    const displayStatus = derivePaymentPlanDisplayStatus(evaluation, pledge.balance_cents ?? 0);
+    const timeline = buildInstallmentTimeline(evaluation, nowDateOnly);
     const planState: PledgePlanState = {
       planId: planRow.id,
       installmentAmountCents: planRow.installment_amount_cents,
@@ -429,6 +442,12 @@ export default async function DonorPage({ params, searchParams }: { params: Prom
       renewalDate: pledgeRenewal.renewalDate,
       isRenewalFollowUpNeeded: pledgeRenewal.isRenewalFollowUpNeeded,
       renewalAcknowledgedAt: planRow.renewal_acknowledged_at,
+      committedCents: pledge.committed_cents ?? null,
+      paidCents: pledge.paid_cents ?? null,
+      balanceCents: pledge.balance_cents ?? null,
+      displayStatus,
+      daysLate: evaluation.daysLate,
+      timeline,
     };
     return { pledge, planState, correctionState };
   });

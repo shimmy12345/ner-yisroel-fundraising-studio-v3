@@ -2,6 +2,10 @@
 
 import { useState } from "react";
 import { validateCustomDurationInput, MIN_COMMITMENT_DURATION_MONTHS, MAX_COMMITMENT_DURATION_MONTHS } from "../../../lib/capture/pledge-payment-plan";
+import type { PaymentPlanDisplayStatus, InstallmentTimelineSummary } from "../../../lib/relationships/payment-plan-display";
+import { ProgressBar } from "../../components/ProgressBar";
+import { StatusBadge } from "../../components/StatusBadge";
+import { InstallmentTimeline } from "../../components/InstallmentTimeline";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 // timeZone: "UTC" is required here -- these are date-only epochs (UTC
@@ -61,6 +65,21 @@ export type PledgePlanState = {
   // is kept only to show a quiet confirmation once set.
   isRenewalFollowUpNeeded: boolean;
   renewalAcknowledgedAt: number | null;
+  // Payment-Plan Progress Dashboard (2026-10-16, see docs/AI-HANDOFF.md)
+  // -- committedCents/paidCents/balanceCents are the pledge's own
+  // giving_activities figures (the correction-aware effective balance,
+  // same values every other donor-page figure already uses -- never a
+  // second balance calculation). displayStatus/timeline are both pure
+  // derivations computed server-side via lib/relationships/
+  // payment-plan-display.ts over the SAME evaluation this card's other
+  // isOnTrack/isLate/etc. fields already come from -- this component
+  // only renders them, never recomputes a status or a cycle itself.
+  committedCents: number | null;
+  paidCents: number | null;
+  balanceCents: number | null;
+  displayStatus: PaymentPlanDisplayStatus;
+  daysLate: number;
+  timeline: InstallmentTimelineSummary;
 };
 
 function parseDollarsToCents(value: string): number | null {
@@ -246,10 +265,23 @@ export function OpenPledgePlanCard({ pledgeActivityId, plan }: { pledgeActivityI
     return <button type="button" className="payment-plan-set-button" onClick={() => setMode("create")}>Set payment plan</button>;
   }
 
+  const percentPaid = plan.committedCents !== null && plan.committedCents > 0 && plan.paidCents !== null ? plan.paidCents / plan.committedCents : null;
+
   return (
     <div className="payment-plan-card">
-      <p className="payment-plan-eyebrow">Payment plan</p>
-      <p className="payment-plan-cadence">Monthly{plan.isLate ? <span className="payment-plan-overdue"> · Expected payment overdue</span> : null}</p>
+      <div className="payment-plan-status-row">
+        <p className="payment-plan-eyebrow">Payment plan</p>
+        <StatusBadge status={plan.displayStatus} />
+      </div>
+      {percentPaid !== null && (
+        <ProgressBar
+          percent={percentPaid}
+          tone={plan.displayStatus === "overdue" || plan.displayStatus === "needs_review" ? "danger" : plan.displayStatus === "payment_due" ? "warning" : "default"}
+          caption={`${money(plan.paidCents ?? 0)} paid of ${money(plan.committedCents ?? 0)} pledged · ${money(plan.balanceCents ?? 0)} remaining`}
+        />
+      )}
+      <InstallmentTimeline entries={plan.timeline.entries} hiddenBeforeCount={plan.timeline.hiddenBeforeCount} />
+      <p className="payment-plan-cadence">Monthly{plan.isLate ? <span className="payment-plan-overdue"> · {plan.daysLate} day{plan.daysLate === 1 ? "" : "s"} past the grace period</span> : null}</p>
       {plan.nextExpectedPaymentAt !== null && !plan.isCompleted && <p>Next expected: {dateLabel(plan.nextExpectedPaymentAt)}</p>}
       <p>Final expected: {dateLabel(plan.finalExpectedPaymentAt)}</p>
       {plan.installmentAmountCents !== null && <p className="payment-plan-installment">Expected installment: {money(plan.installmentAmountCents)}</p>}

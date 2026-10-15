@@ -73,6 +73,13 @@ export const STAGING_RESET_TABLE_ORDER = [
   // following trip_prospects (its own child, deleted here immediately
   // before it, same locality convention as every other parent/child pair
   // in this list).
+  // Trip Fundraising Results Dashboard (2026-10-16, docs/AI-HANDOFF.md).
+  // trip_financial_attributions references trip_id (trips.id), donor_id
+  // (donors.id), and giving_activity_id (giving_activities.id) -- all
+  // three are deleted later in this list (trips immediately below;
+  // giving_activities/donors much further down) -- so it must be deleted
+  // before all of them, hence immediately before trip_prospects here.
+  "trip_financial_attributions",
   "trip_prospects",
   "trips",
   // yahrtzeit_changes references yahrtzeit_id (not FK-enforced, so a

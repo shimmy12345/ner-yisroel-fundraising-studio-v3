@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "a943970a3009f688ee994e6a2b6abb9e109a1f8db7fb44f0c316b418d89e97eb",
+  "schemaHash": "a20d155cd5a1160d7d90eadcba04e0f6cedef7a718cb4c2f37f786155d8a6d25",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -47,7 +47,8 @@
     "0042_pledge_balance_corrections.sql",
     "0043_agenda_send_log.sql",
     "0044_agenda_manual_test_send_log.sql",
-    "0045_trips.sql"
+    "0045_trips.sql",
+    "0046_trip_financial_attributions.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6185,6 +6186,148 @@
         ]
       },
       {
+        "name": "trip_financial_attributions",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "trip_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "giving_activity_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "note",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "removed_reason",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "donor_id",
+            "toTable": "donors",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "giving_activity_id",
+            "toTable": "giving_activities",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "trip_id",
+            "toTable": "trips",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "trip_financial_attributions_active_giving_activity_uidx",
+            "columns": [
+              "giving_activity_id"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
+          },
+          {
+            "name": "trip_financial_attributions_donor_idx",
+            "columns": [
+              "donor_id"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_financial_attributions_donor_idx` ON `trip_financial_attributions` (`donor_id`)"
+          },
+          {
+            "name": "trip_financial_attributions_trip_idx",
+            "columns": [
+              "trip_id",
+              "removed_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": []
+      },
+      {
         "name": "trip_prospects",
         "columns": [
           {
@@ -7201,6 +7344,11 @@
     },
     {
       "type": "table",
+      "name": "trip_financial_attributions",
+      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+    },
+    {
+      "type": "table",
       "name": "trip_prospects",
       "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -7608,6 +7756,21 @@
       "type": "index",
       "name": "shared_activity_recipient_audits_activity_date_idx",
       "sql": "CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_activity_recipient_audits` (`shared_activity_id`,`created_at`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_financial_attributions_active_giving_activity_uidx",
+      "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "trip_financial_attributions_donor_idx",
+      "sql": "CREATE INDEX `trip_financial_attributions_donor_idx` ON `trip_financial_attributions` (`donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_financial_attributions_trip_idx",
+      "sql": "CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`)"
     },
     {
       "type": "index",

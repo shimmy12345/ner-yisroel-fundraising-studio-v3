@@ -747,6 +747,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .open-pledge-summary span { color: var(--muted); font-size: 12px; text-align: right; }
 .payment-plan-card { padding-top: 10px; border-top: 1px dashed #e4dcc4; }
 .payment-plan-eyebrow { margin: 0; color: #8a7a44; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.payment-plan-status-row { display: flex; justify-content: space-between; align-items: center; }
 .payment-plan-cadence { margin: 4px 0 0; font-weight: 700; color: #3a3320; }
 .payment-plan-overdue { color: #a3402c; font-weight: 700; }
 .payment-plan-card p { margin: 4px 0 0; color: #52625a; font-size: 13px; }
@@ -1455,4 +1456,55 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
   .travel-planning-prospect-heading { flex-direction:column; align-items:flex-start; }
   .travel-planning-prepare-link { margin-left:0; }
   .travel-planning-list { grid-template-columns:1fr; }
+}
+
+/* Shared financial dashboard components (Payment-Plan Progress Dashboard
+   + Trip Fundraising Results Dashboard, see docs/AI-HANDOFF.md). Used
+   consistently across app/donors/[id]/PledgePaymentPlanManagement.tsx
+   and app/travel-planning/[id]/TripDashboardExperience.tsx -- never a
+   second, competing visual style for the same kind of figure. */
+.financial-summary-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:1px; border:1px solid var(--line); background:var(--line); border-radius:12px; overflow:hidden; margin:14px 0; }
+.financial-summary-card { padding:14px 16px; background:#fff; }
+.financial-summary-card-muted { background:var(--cream); }
+.financial-summary-label { margin:0 0 6px; color:var(--muted); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
+.financial-summary-value { margin:0; font-family:Georgia, serif; font-size:21px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; }
+.financial-summary-sublabel { margin:4px 0 0; color:var(--muted); font-size:11px; }
+
+.progress-bar-block { display:grid; gap:6px; margin:10px 0; }
+.progress-bar-heading { display:flex; justify-content:space-between; align-items:baseline; font-size:12px; color:var(--ink); font-weight:650; }
+.progress-bar-percent { color:var(--muted); font-variant-numeric:tabular-nums; }
+.progress-bar-track { height:9px; border-radius:6px; background:var(--sage); overflow:hidden; }
+.progress-bar-fill { height:100%; border-radius:6px; transition:width .3s ease; }
+.progress-bar-fill-default { background:var(--green); }
+.progress-bar-fill-warning { background:#b8863a; }
+.progress-bar-fill-danger { background:#a3402c; }
+.progress-bar-caption { margin:0; color:var(--muted); font-size:11px; }
+
+.status-badge { display:inline-flex; align-items:center; padding:3px 9px; border-radius:20px; font-size:10px; font-weight:750; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; }
+.status-badge-good { background:var(--green-soft); color:var(--green); }
+.status-badge-info { background:#e5eef6; color:#2f5e86; }
+.status-badge-warning { background:#f7ecd9; color:#8a6420; }
+.status-badge-danger { background:#fbeae6; color:#a3402c; }
+.status-badge-neutral { background:#edeeec; color:#5e6b65; }
+
+.installment-timeline { display:flex; align-items:center; gap:4px; flex-wrap:wrap; margin-top:8px; }
+.installment-tick { width:9px; height:9px; border-radius:50%; display:inline-block; cursor:default; box-sizing:border-box; }
+.installment-tick-paid { background:var(--green); }
+.installment-tick-overdue { background:#a3402c; }
+.installment-tick-upcoming { background:#b8863a; border:2px solid #b8863a; }
+.installment-tick-future { background:#fff; border:1px solid #c7cdc8; }
+.installment-tick-hidden-count { color:var(--muted); font-size:10px; margin-right:2px; }
+
+.trip-financial-section { padding-top:14px; border-top:1px dashed #e4dcc4; }
+.trip-financial-pending-list { display:grid; gap:8px; margin-top:10px; }
+.trip-financial-pending-row { display:flex; justify-content:space-between; align-items:baseline; padding:9px 12px; border:1px solid var(--line); border-radius:9px; background:var(--cream); font-size:12px; }
+.trip-financial-attribution-actions { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
+.trip-financial-attribution-actions button { padding:7px 11px; border:1px solid #cbd8d0; border-radius:8px; background:#fff; color:#365648; font-size:11px; font-weight:700; cursor:pointer; }
+.trip-financial-attribution-actions button:disabled { cursor:not-allowed; opacity:.5; }
+.trip-financial-attributed-list { display:grid; gap:6px; margin-top:8px; }
+.trip-financial-attributed-row { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:12px; }
+.trip-financial-attributed-row button { border:0; background:transparent; color:#8a4940; font-size:10px; cursor:pointer; padding:2px 4px; }
+
+@media (max-width:760px) {
+  .financial-summary-grid { grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); }
 }

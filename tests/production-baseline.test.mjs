@@ -353,12 +353,11 @@ test("baseline picks up the schema-adding 0044 agenda manual test send log migra
 
 test("baseline picks up the schema-adding 0045 trips migration", () => {
   // 0045_trips.sql adds two new tables (trips, trip_prospects --
-  // Trip-Based Meeting Planning, see docs/AI-HANDOFF.md) -- so the
-  // schema hash must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0045_trips.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 46);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // Trip-Based Meeting Planning, see docs/AI-HANDOFF.md). It is no longer
+  // the LATEST migration (see the 0046 test below, added 2026-10-16) --
+  // this test keeps proving its own tables/index are still correctly
+  // captured in the baseline topology, regardless of what migration is
+  // added after it.
   const tripsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trips");
   assert.ok(tripsTable, "trips must be a real table in the baseline topology");
   assert.match(tripsTable.sql, /destination_region_id/);
@@ -370,4 +369,23 @@ test("baseline picks up the schema-adding 0045 trips migration", () => {
   const uniqueIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_prospects_trip_donor_idx");
   assert.ok(uniqueIndex, "the UNIQUE(trip_id, donor_id) index enforcing one prospect row per donor per trip must be captured in the baseline");
   assert.match(uniqueIndex.sql, /UNIQUE/i);
+});
+
+test("baseline picks up the schema-adding 0046 trip financial attributions migration", () => {
+  // 0046_trip_financial_attributions.sql adds one new table (Trip
+  // Fundraising Results Dashboard, see docs/AI-HANDOFF.md) -- the
+  // current LATEST migration as of this round -- so the schema hash
+  // must change again.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0046_trip_financial_attributions.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 47);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const attributionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_financial_attributions");
+  assert.ok(attributionsTable, "trip_financial_attributions must be a real table in the baseline topology");
+  assert.match(attributionsTable.sql, /giving_activity_id/);
+  assert.match(attributionsTable.sql, /removed_at/);
+  const uniqueIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_financial_attributions_active_giving_activity_uidx");
+  assert.ok(uniqueIndex, "the partial UNIQUE(giving_activity_id) WHERE removed_at IS NULL index -- the real double-counting guard -- must be captured in the baseline");
+  assert.match(uniqueIndex.sql, /UNIQUE/i);
+  assert.match(uniqueIndex.sql, /WHERE/i);
 });

@@ -280,6 +280,25 @@ export type PaymentPlanEvaluation = {
   // the three day counts can never coincide for one plan, so order is
   // cosmetic.
   milestoneDaysBefore: 15 | 10 | 5 | null;
+  // Payment-Plan Progress Dashboard (2026-10-16, see docs/AI-HANDOFF.md)
+  // -- the exact enumerated cycles and their satisfied/unsatisfied state
+  // this function already computes internally, exposed so the dashboard's
+  // installment timeline never re-derives or guesses at this from scratch
+  // (the same "expose this so callers never recompute it themselves"
+  // discipline daysUntilFinal below already follows). Same order/length,
+  // parallel arrays. Never consulted for lateness/status decisions
+  // outside this file -- isLate/isOnTrack/etc. above remain the only
+  // source of truth for those; this is display data only.
+  cycles: number[];
+  satisfied: boolean[];
+  // Signed day count from nowDateOnly to nextUnsatisfiedExpectedPaymentAt
+  // (negative = already past, i.e. due) -- null only when there is no
+  // next unsatisfied cycle at all (nextUnsatisfiedExpectedPaymentAt is
+  // itself null, which only happens once PLEDGE_PAYMENT_CYCLE_ENUMERATION_CAP
+  // is exhausted on a corrupted/absurd anchor). Exposed for the same
+  // reason daysUntilFinal is -- so a caller distinguishing "upcoming" from
+  // "due soon" never recomputes nowDateOnly or re-derives this itself.
+  daysUntilNextUnsatisfiedPayment: number | null;
   // The plan's final expected date has been reached or passed AND the
   // pledge is fully paid (balanceCents <= 0) -- the "existing commitment
   // fulfilled, consider the next one" signal. Deliberately independent
@@ -372,6 +391,9 @@ export function evaluatePaymentPlan(
   // immediately, not one day later. Independent of isActive/endedAt by
   // design (see the type's own doc comment).
   const isFulfilledAfterFinal = nowDateOnly >= plan.finalExpectedPaymentAt && isCompleted;
+  const daysUntilNextUnsatisfiedPayment = nextUnsatisfiedExpectedPaymentAt !== null
+    ? Math.floor((nextUnsatisfiedExpectedPaymentAt - nowDateOnly) / DAY_SECONDS)
+    : null;
 
   return {
     nextUnsatisfiedExpectedPaymentAt,
@@ -379,6 +401,9 @@ export function evaluatePaymentPlan(
     isOnTrack,
     isLate,
     daysLate,
+    cycles,
+    satisfied,
+    daysUntilNextUnsatisfiedPayment,
     finalDatePassed,
     isPlanEndedWithBalance,
     isCompleted,
@@ -682,7 +707,7 @@ export type FulfilledCultivationSourceRow = {
 export type FulfilledCultivationPlanRow = { pledge_activity_id: string; final_expected_payment_at: number };
 export type FulfilledCultivationOpportunity = { pledgeActivityId: string; campaign: string | null; description: string | null; finalExpectedPaymentAt: number };
 
-const REAL_COMMITMENT_CATEGORIES = new Set(["open_pledge", "partially_paid_pledge", "completed_gift"]);
+export const REAL_COMMITMENT_CATEGORIES = new Set(["open_pledge", "partially_paid_pledge", "completed_gift"]);
 
 // "Existing commitment fulfilled, consider the next one" -- pure derivation,
 // no D1 access (the caller, lib/workspace/live-data.ts, already has both

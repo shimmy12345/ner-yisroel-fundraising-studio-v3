@@ -5,8 +5,17 @@ import { useRouter } from "next/navigation";
 import { DonorAutocomplete } from "../../capture/DonorAutocomplete";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../../../lib/navigation/donor-navigation";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
-import type { TripRecord, TripProspectRecord } from "../../../lib/relationships/trips-data";
+import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity } from "../../../lib/relationships/trips-data";
+import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
 import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus, type RegionCandidateDonor } from "../../../lib/relationships/trip-model";
+import { FinancialSummaryCard, FinancialSummaryGrid } from "../../components/FinancialSummaryCard";
+import { ProgressBar } from "../../components/ProgressBar";
+
+const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
+const CATEGORY_LABELS: Record<string, string> = {
+  open_pledge: "Pledge", partially_paid_pledge: "Pledge (partially paid)", completed_gift: "Donation",
+  pending_gift: "Pending donation", pending_pledge: "Pending pledge",
+};
 
 const STATUS_LABELS: Record<TripProspectStatus, string> = {
   not_contacted: "Not Contacted", contacted: "Contacted", meeting_requested: "Meeting Requested",
@@ -49,8 +58,9 @@ async function patchProspect(tripId: string, prospectId: string, body: Record<st
   if (!response.ok) throw new Error(payload.error ?? "That change could not be saved.");
 }
 
-export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, allDonors, fundraiserTimezone }: {
+export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, allDonors, fundraiserTimezone, financialAttributions, financialSummary }: {
   trip: TripRecord; prospects: TripProspectRecord[]; newlyMatchingDonors: RegionCandidateDonor[]; allDonors: DonorSearchRecord[]; fundraiserTimezone: string;
+  financialAttributions: TripFinancialAttributionRow[]; financialSummary: TripFinancialSummary;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +128,8 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
       <p className="travel-planning-financial-note">Financial figures below are kept separate by design -- historical giving, open pledges, outstanding asks, and projected opportunities are never added together into one total.</p>
     </section>
 
+    <TripFinancialResultsSection summary={financialSummary} attributions={financialAttributions} />
+
     {newlyMatchingDonors.length > 0 && <section className="travel-planning-new-prospects" aria-label="New prospects available">
       <h2>New prospects available</h2>
       <p>These donors now match {trip.destinationRegionLabel} but were not on this trip when it was created. Add them if you&rsquo;d like -- they are never inserted automatically.</p>
@@ -137,7 +149,7 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
     <section className="travel-planning-prospects" aria-label="Trip prospects">
       <h2>Prospects ({prospects.length})</h2>
       {prospects.length === 0 && <p className="travel-planning-empty-inline">No prospects yet. {trip.destinationRegionId ? "" : "This trip has no destination region, so add donors manually above."}</p>}
-      {prospects.map((prospect) => <ProspectRow key={prospect.id} tripId={trip.id} prospect={prospect} busy={busyProspectId === prospect.id} fundraiserTimezone={fundraiserTimezone} onBusyAction={(action) => withBusy(prospect.id, action)} onRemove={() => removeDonor(prospect.id, prospect.donorDisplayName)} />)}
+      {prospects.map((prospect) => <ProspectRow key={prospect.id} tripId={trip.id} prospect={prospect} busy={busyProspectId === prospect.id} fundraiserTimezone={fundraiserTimezone} onBusyAction={(action) => withBusy(prospect.id, action)} onRemove={() => removeDonor(prospect.id, prospect.donorDisplayName)} attributions={financialAttributions.filter((a) => a.donorId === prospect.donorId)} onRefresh={refresh} />)}
     </section>
   </>;
 }
@@ -159,8 +171,9 @@ function TripStatusControl({ tripId, currentStatus, onChanged }: { tripId: strin
   </select>;
 }
 
-function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction, onRemove }: {
+function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction, onRemove, attributions, onRefresh }: {
   tripId: string; prospect: TripProspectRecord; busy: boolean; fundraiserTimezone: string; onBusyAction: (action: () => Promise<void>) => void; onRemove: () => void;
+  attributions: TripFinancialAttributionRow[]; onRefresh: () => void;
 }) {
   // The donor's OWN destination timezone (independent-review correction,
   // 2026-10-15) -- never the browser's. Falls back to the fundraiser's
@@ -245,5 +258,163 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       <label>Trip notes<textarea value={notesDraft} onChange={(event) => setNotesDraft(event.target.value)} onBlur={saveFields} maxLength={5000} placeholder="Notes specific to this trip" /></label>
       <label>Next action<input type="text" value={nextActionDraft} onChange={(event) => setNextActionDraft(event.target.value)} onBlur={saveFields} maxLength={500} placeholder="e.g. Call to confirm Tuesday" /></label>
     </div>
+
+    <ProspectFinancialPanel tripId={tripId} prospectId={prospect.id} attributions={attributions} onRefresh={onRefresh} />
   </article>;
+}
+
+// Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).
+// Shows every record currently attributed to this prospect (figures read
+// live from the server -- this component never computes a financial
+// total itself) and the three actions the task calls for: record a new
+// donation/pledge (via the existing pending-gift/pending-pledge CRM
+// workflow, then attributed), or associate an already-real donation or
+// pledge. Removing an attribution never touches the underlying financial
+// record -- only this link.
+function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }: {
+  tripId: string; prospectId: string; attributions: TripFinancialAttributionRow[]; onRefresh: () => void;
+}) {
+  const [mode, setMode] = useState<"closed" | "record_donation" | "record_pledge" | "associate_existing">("closed");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState("");
+  const [designation, setDesignation] = useState("");
+  const [note, setNote] = useState("");
+  const [eligible, setEligible] = useState<EligibleGivingActivity[] | null>(null);
+  const [selectedGivingActivityId, setSelectedGivingActivityId] = useState("");
+
+  function openPanel(next: "record_donation" | "record_pledge" | "associate_existing") {
+    setMode(next); setError(null); setAmount(""); setDate(""); setDesignation(""); setNote(""); setSelectedGivingActivityId("");
+    if (next === "associate_existing") {
+      setEligible(null);
+      fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions`)
+        .then((response) => response.json())
+        .then((payload: { eligible?: EligibleGivingActivity[] }) => setEligible(payload.eligible ?? []))
+        .catch(() => setEligible([]));
+    }
+  }
+
+  async function submitRecord(action: "record_donation" | "record_pledge") {
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action, amount, date, designation: designation || undefined, note: note || undefined }),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string; ok?: boolean };
+      if (!response.ok && response.status !== 207) throw new Error(payload.error ?? "That could not be recorded.");
+      if (response.status === 207) { setError(payload.error ?? "Recorded, but not automatically linked."); }
+      setMode("closed");
+      onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "That could not be recorded.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitAssociate() {
+    if (!selectedGivingActivityId) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "associate_existing", givingActivityId: selectedGivingActivityId, note: note || undefined }),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "That could not be associated.");
+      setMode("closed");
+      onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "That could not be associated.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeAttribution(attributionId: string) {
+    if (!window.confirm("Remove this attribution? The underlying donation or pledge record is never changed -- only its link to this trip.")) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions/${encodeURIComponent(attributionId)}`, { method: "DELETE" });
+      if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? "Could not remove this attribution."); }
+      onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not remove this attribution.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <div className="trip-financial-section">
+    <p className="payment-plan-eyebrow">Fundraising for this donor on this trip</p>
+    {error && <p className="travel-planning-error" role="alert">{error}</p>}
+    {attributions.length > 0 && <div className="trip-financial-attributed-list">
+      {attributions.map((item) => <div key={item.attributionId} className="trip-financial-attributed-row">
+        <span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}{(item.paidCents ?? 0) > 0 ? ` (${money(item.paidCents ?? 0)} paid)` : ""}</span>
+        <button type="button" disabled={busy} onClick={() => removeAttribution(item.attributionId)}>Remove</button>
+      </div>)}
+    </div>}
+    {mode === "closed" && <div className="trip-financial-attribution-actions">
+      <button type="button" disabled={busy} onClick={() => openPanel("record_donation")}>Record a new donation</button>
+      <button type="button" disabled={busy} onClick={() => openPanel("record_pledge")}>Record a new pledge</button>
+      <button type="button" disabled={busy} onClick={() => openPanel("associate_existing")}>Associate an existing donation or pledge</button>
+    </div>}
+    {(mode === "record_donation" || mode === "record_pledge") && <div className="travel-planning-confirm-panel">
+      <label>Amount<input type="text" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="$0" /></label>
+      <label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+      <label>Designation (optional)<input type="text" value={designation} onChange={(event) => setDesignation(event.target.value)} maxLength={160} /></label>
+      <label>Note (optional)<textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} /></label>
+      <p className="travel-planning-confirm-hint">Recorded as an unconfirmed {mode === "record_donation" ? "gift" : "pledge"} using the same workflow as the rest of the CRM -- it will not count toward any total until confirmed.</p>
+      <div className="travel-planning-confirm-actions">
+        <button type="button" onClick={() => submitRecord(mode)} disabled={busy || !amount || !date}>Save</button>
+        <button type="button" onClick={() => setMode("closed")}>Cancel</button>
+      </div>
+    </div>}
+    {mode === "associate_existing" && <div className="travel-planning-confirm-panel">
+      {eligible === null && <p>Loading this donor&rsquo;s eligible donations and pledges&hellip;</p>}
+      {eligible !== null && eligible.length === 0 && <p>No eligible, unattributed donation or pledge was found for this donor.</p>}
+      {eligible !== null && eligible.length > 0 && <label>Choose a donation or pledge
+        <select value={selectedGivingActivityId} onChange={(event) => setSelectedGivingActivityId(event.target.value)}>
+          <option value="">Select one&hellip;</option>
+          {eligible.map((item) => <option key={item.id} value={item.id}>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}{item.description ? ` -- ${item.description}` : ""}</option>)}
+        </select>
+      </label>}
+      <label>Note (optional)<textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} /></label>
+      <div className="travel-planning-confirm-actions">
+        <button type="button" onClick={submitAssociate} disabled={busy || !selectedGivingActivityId}>Associate</button>
+        <button type="button" onClick={() => setMode("closed")}>Cancel</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+// Trip-level financial summary -- goal progress and confirmed/pending
+// figures. Every figure here comes directly from `summary`
+// (lib/relationships/trip-financial-attribution.ts's summarizeTripFinancials),
+// a pure derivation of the trip's OWN attributed records; this component
+// only renders it.
+function TripFinancialResultsSection({ summary, attributions }: { summary: TripFinancialSummary; attributions: TripFinancialAttributionRow[] }) {
+  const pending = attributions.filter((item) => item.category === "pending_gift" || item.category === "pending_pledge");
+  return <section className="story-card" aria-label="Trip fundraising results">
+    <div className="card-heading"><div><p className="eyebrow">FUNDRAISING RESULTS</p><h2>Results against this trip&rsquo;s goal</h2></div></div>
+    {summary.goalCents !== null ? (
+      <ProgressBar
+        label={`${money(summary.totalNewCommitmentsCents)} raised of ${money(summary.goalCents)} goal`}
+        percent={summary.percentOfGoal ?? 0}
+        caption={summary.amountRemainingToGoalCents !== null && summary.amountRemainingToGoalCents > 0 ? `${money(summary.amountRemainingToGoalCents)} remaining to goal` : "Goal reached"}
+      />
+    ) : <p className="payment-plan-note-inline">This trip has no fundraising goal set.</p>}
+    <FinancialSummaryGrid>
+      <FinancialSummaryCard label="New pledges secured" value={money(summary.newPledgesSecuredCents)} sublabel={`${summary.pledgeCount} pledge${summary.pledgeCount === 1 ? "" : "s"}`} />
+      <FinancialSummaryCard label="New donations secured" value={money(summary.newDonationsSecuredCents)} sublabel={`${summary.donationCount} donation${summary.donationCount === 1 ? "" : "s"}`} />
+      <FinancialSummaryCard label="Cash collected" value={money(summary.cashCollectedCents)} />
+      <FinancialSummaryCard label="Outstanding pledge balance" value={money(summary.outstandingCommittedBalanceCents)} tone="muted" />
+    </FinancialSummaryGrid>
+    {pending.length > 0 && <div className="trip-financial-pending-list" aria-label="Pending opportunities">
+      <p className="payment-plan-eyebrow">Pending opportunities (not yet confirmed -- never counted above)</p>
+      {pending.map((item) => <div key={item.attributionId} className="trip-financial-pending-row"><span>{item.donorDisplayName}</span><span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}</span></div>)}
+    </div>}
+  </section>;
 }

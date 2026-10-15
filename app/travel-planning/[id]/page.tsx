@@ -4,7 +4,8 @@ import { notFound } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
 import { requireChatGPTUser } from "../../chatgpt-auth";
 import { ensureUserProfile } from "../../../lib/auth/profile";
-import { getTrip, listTripProspects, findNewlyMatchingProspects } from "../../../lib/relationships/trips-data";
+import { getTrip, listTripProspects, findNewlyMatchingProspects, listTripFinancialAttributions } from "../../../lib/relationships/trips-data";
+import { summarizeTripFinancials } from "../../../lib/relationships/trip-financial-attribution";
 import { TripDashboardExperience } from "./TripDashboardExperience";
 import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
 
@@ -25,18 +26,24 @@ export default async function TripPage({ params }: { params: Promise<{ id: strin
   // from anywhere in the CRM" search below, reusing DonorAutocomplete
   // (app/capture/DonorAutocomplete.tsx) exactly as the donor directory
   // and Capture already do, never a second search index.
-  const [prospects, newlyMatchingDonors, donorRows] = await Promise.all([
+  const [prospects, newlyMatchingDonors, donorRows, financialAttributions] = await Promise.all([
     listTripProspects(profile.id, id),
     findNewlyMatchingProspects(profile.id, id),
     env.DB.prepare("SELECT id, display_name, primary_first_name, last_name, spouse, spouse_first_name, donor_code, external_id, email, phone FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL ORDER BY display_name")
       .bind(profile.id).all<DonorRow>(),
+    // Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).
+    listTripFinancialAttributions(profile.id, id),
   ]);
   const allDonors: DonorSearchRecord[] = donorRows.results.map((row) => ({
     id: row.id, name: row.display_name, primaryFirstName: row.primary_first_name, lastName: row.last_name,
     spouse: row.spouse || row.spouse_first_name, code: row.external_id || row.donor_code, email: row.email, phone: row.phone,
   }));
+  // Pure summarization (lib/relationships/trip-financial-attribution.ts)
+  // over the SAME, already-fetched attribution rows -- no second query,
+  // no parallel ledger.
+  const financialSummary = summarizeTripFinancials(financialAttributions, trip.goalCents);
 
   return <AppShell active="today">
-    <TripDashboardExperience trip={trip} prospects={prospects} newlyMatchingDonors={newlyMatchingDonors} allDonors={allDonors} fundraiserTimezone={profile.timezone} />
+    <TripDashboardExperience trip={trip} prospects={prospects} newlyMatchingDonors={newlyMatchingDonors} allDonors={allDonors} fundraiserTimezone={profile.timezone} financialAttributions={financialAttributions} financialSummary={financialSummary} />
   </AppShell>;
 }

@@ -10,6 +10,7 @@ import { env } from "cloudflare:workers";
 import { loadMeetingBrief } from "./meeting-brief.ts";
 import { regionsForCityState, travelRegionById, type TravelRegionId } from "./travel-regions.ts";
 import { zonedTimeToUtc } from "../workspace/local-time.ts";
+import { insertPendingGift, insertPendingPledge } from "../giving/pending-records.ts";
 import {
   buildSuggestionSnapshot, findCrossTripConflicts, findNewlyMatchingDonors, parseLocalDateTimeInput,
   statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
@@ -390,6 +391,142 @@ export async function updateTrip(userId: string, tripId: string, update: { name?
   values.push(now);
   await env.DB.prepare(`UPDATE trips SET ${sets.join(", ")} WHERE id = ? AND owner_user_id = ?`).bind(...values, tripId, userId).run();
   return true;
+}
+
+// Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).
+// This section is the only place this file writes to giving_activities
+// (via the shared lib/giving/pending-records.ts helpers, reused
+// verbatim, never a parallel insert) or to the new, additive
+// trip_financial_attributions link table (drizzle/0046) -- it NEVER
+// writes to committed_cents/paid_cents/balance_cents on an EXISTING
+// giving_activities row; attributing/removing only changes which trip a
+// record is linked to, never the financial record itself.
+
+export type EligibleGivingActivity = {
+  id: string; category: string; workspaceStatus: string;
+  committedCents: number | null; paidCents: number | null; balanceCents: number | null;
+  activityDate: number | null; description: string | null;
+};
+
+// A donor's own giving_activities rows that are real financial records
+// (REAL_COMMITMENT_CATEGORIES) or an unconfirmed pending gift/pledge, and
+// are NOT already actively attributed to any trip (the trip_financial_
+// attributions unique-partial-index is the actual structural guard; this
+// query exists only so the "associate existing" picker never even offers
+// an already-attributed record). owner_user_id-scoped, matching every
+// other donor-financial query in this codebase.
+export async function listEligibleGivingActivitiesForDonor(userId: string, donorId: string): Promise<EligibleGivingActivity[]> {
+  const result = await env.DB.prepare(`SELECT ga.id, ga.category, ga.workspace_status, ga.committed_cents, ga.paid_cents, ga.balance_cents, ga.activity_date, ga.description
+      FROM giving_activities ga
+      WHERE ga.owner_user_id = ? AND ga.donor_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active'
+        AND ga.category IN ('open_pledge','partially_paid_pledge','completed_gift','pending_gift','pending_pledge')
+        AND NOT EXISTS (SELECT 1 FROM trip_financial_attributions tfa WHERE tfa.giving_activity_id = ga.id AND tfa.removed_at IS NULL)
+      ORDER BY ga.activity_date DESC`).bind(userId, donorId)
+    .all<{ id: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; activity_date: number | null; description: string | null }>();
+  return result.results.map((row) => ({ id: row.id, category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents, activityDate: row.activity_date, description: row.description }));
+}
+
+export type AttributeResult = { ok: true; attributionId: string } | { ok: false; reason: "prospect_not_found" | "giving_activity_not_found" | "already_attributed" };
+
+// Attributes an EXISTING giving_activities row to a trip, scoped to one
+// trip_prospects row (so the donor must already be a tracked prospect on
+// this trip -- the "ownership checks" the task asks for). The giving
+// activity must belong to the SAME donor and the SAME owner. The unique
+// partial index on trip_financial_attributions (giving_activity_id WHERE
+// removed_at IS NULL) is the real double-counting guard -- caught here
+// as `already_attributed` rather than a raw constraint error surfacing
+// to the caller.
+export async function attributeGivingActivityToTrip(userId: string, tripId: string, prospectId: string, givingActivityId: string, note: string | null, now: number): Promise<AttributeResult> {
+  const prospect = await ownedProspect(userId, tripId, prospectId);
+  if (!prospect) return { ok: false, reason: "prospect_not_found" };
+  const givingActivity = await env.DB.prepare("SELECT id FROM giving_activities WHERE id = ? AND owner_user_id = ? AND donor_id = ?").bind(givingActivityId, userId, prospect.donorId).first<{ id: string }>();
+  if (!givingActivity) return { ok: false, reason: "giving_activity_not_found" };
+  const id = crypto.randomUUID();
+  try {
+    await env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, tripId, prospect.donorId, givingActivityId, note, now).run();
+    return { ok: true, attributionId: id };
+  } catch {
+    return { ok: false, reason: "already_attributed" };
+  }
+}
+
+export type TripFinancialAttributionRow = {
+  attributionId: string; givingActivityId: string; donorId: string; donorDisplayName: string;
+  category: string; workspaceStatus: string; committedCents: number | null; paidCents: number | null; balanceCents: number | null;
+  note: string | null; createdAt: number;
+};
+
+// Every ACTIVE (removed_at IS NULL) attribution for this trip, with every
+// financial field read LIVE from giving_activities at query time -- never
+// a snapshot, so a later payment, correction, or category change on the
+// underlying record is reflected automatically with zero extra code.
+export async function listTripFinancialAttributions(userId: string, tripId: string): Promise<TripFinancialAttributionRow[]> {
+  const result = await env.DB.prepare(`SELECT tfa.id AS attribution_id, tfa.giving_activity_id, tfa.donor_id, d.display_name AS donor_display_name,
+        ga.category, ga.workspace_status, ga.committed_cents, ga.paid_cents, ga.balance_cents, tfa.note, tfa.created_at
+      FROM trip_financial_attributions tfa
+      JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+      JOIN donors d ON d.id = tfa.donor_id
+      JOIN trips t ON t.id = tfa.trip_id
+      WHERE tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?
+      ORDER BY tfa.created_at DESC`).bind(tripId, userId)
+    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; note: string | null; created_at: number }>();
+  return result.results.map((row) => ({
+    attributionId: row.attribution_id, givingActivityId: row.giving_activity_id, donorId: row.donor_id, donorDisplayName: row.donor_display_name,
+    category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents,
+    note: row.note, createdAt: row.created_at,
+  }));
+}
+
+// Removes (soft) an attribution -- the task's own "view and correct trip
+// attribution without modifying the underlying financial transaction":
+// this NEVER touches the giving_activities row, only this link table.
+// Scoped by trip ownership, never a bare attributionId lookup.
+export async function removeTripFinancialAttribution(userId: string, tripId: string, attributionId: string, reason: string | null, now: number): Promise<boolean> {
+  const result = await env.DB.prepare(`UPDATE trip_financial_attributions SET removed_at = ?, removed_reason = ?
+      WHERE id = ? AND trip_id = ? AND removed_at IS NULL
+        AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(now, reason, attributionId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export type RecordAndAttributeResult =
+  | { ok: true; activityId: string; attributionId: string }
+  // The gift/pledge WAS recorded (a real giving_activities row exists)
+  // but the automatic attribution step failed -- never silently dropped.
+  // The caller shows this as "recorded, but use Associate Existing to
+  // link it to this trip" rather than a bare failure, since
+  // listEligibleGivingActivitiesForDonor will already offer it.
+  | { ok: false; reason: "prospect_not_found"; activityId: null }
+  | { ok: false; reason: "input_invalid"; error: string; activityId: null }
+  | { ok: false; reason: "recorded_but_not_attributed"; activityId: string };
+
+// "Record a new donation/pledge using the existing CRM financial
+// workflow" (the task's own wording), from a trip prospect. Validates
+// the prospect BEFORE recording anything, so an invalid trip/prospect
+// never leaves an orphaned giving_activities row. Delegates the actual
+// insert to lib/giving/pending-records.ts's insertPendingGift/
+// insertPendingPledge -- the exact same code path the standalone
+// app/api/giving/pending[-pledge] endpoints use -- then attributes the
+// resulting record to this trip.
+export async function recordPendingGiftAndAttribute(userId: string, tripId: string, prospectId: string, rawInput: unknown, now: number): Promise<RecordAndAttributeResult> {
+  const prospect = await ownedProspect(userId, tripId, prospectId);
+  if (!prospect) return { ok: false, reason: "prospect_not_found", activityId: null };
+  const inserted = await insertPendingGift(userId, { ...(rawInput as Record<string, unknown>), donorId: prospect.donorId });
+  if (!inserted.ok) return { ok: false, reason: "input_invalid", error: inserted.error, activityId: null };
+  const attribution = await attributeGivingActivityToTrip(userId, tripId, prospectId, inserted.activityId, null, now);
+  if (!attribution.ok) return { ok: false, reason: "recorded_but_not_attributed", activityId: inserted.activityId };
+  return { ok: true, activityId: inserted.activityId, attributionId: attribution.attributionId };
+}
+
+export async function recordPendingPledgeAndAttribute(userId: string, tripId: string, prospectId: string, rawInput: unknown, now: number): Promise<RecordAndAttributeResult> {
+  const prospect = await ownedProspect(userId, tripId, prospectId);
+  if (!prospect) return { ok: false, reason: "prospect_not_found", activityId: null };
+  const inserted = await insertPendingPledge(userId, { ...(rawInput as Record<string, unknown>), donorId: prospect.donorId });
+  if (!inserted.ok) return { ok: false, reason: "input_invalid", error: inserted.error, activityId: null };
+  const attribution = await attributeGivingActivityToTrip(userId, tripId, prospectId, inserted.activityId, null, now);
+  if (!attribution.ok) return { ok: false, reason: "recorded_but_not_attributed", activityId: inserted.activityId };
+  return { ok: true, activityId: inserted.activityId, attributionId: attribution.attributionId };
 }
 
 export { statusRequiresInteraction, timezoneForState };

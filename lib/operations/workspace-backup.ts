@@ -104,6 +104,14 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // staging-reset.test.mjs/d1-restore-order.test.mjs.
   "trips",
   "trip_prospects",
+  // Trip Fundraising Results Dashboard (2026-10-16, docs/AI-HANDOFF.md) --
+  // same reasoning and same deliberate deferral as trips/trip_prospects
+  // immediately above. trip_financial_attributions never stores a
+  // financial figure of its own (it only links a trip to an EXISTING
+  // giving_activities row), so losing this link table in a disaster-
+  // recovery scenario loses only which trip a record was attributed to,
+  // never the underlying financial record itself.
+  "trip_financial_attributions",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",
