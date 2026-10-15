@@ -42057,14 +42057,25 @@ errors. `npm run lint`: 94 errors / 43 warnings -- the exact unchanged
 baseline from every prior round in this session; nothing new in any
 file this round touched.
 
-**GitHub Actions status.** Not independently re-checked after this
-round's changes, by design: this round pushed nothing to the canonical
-branch yet (the `scripts/run-tests.mjs`/docs changes below are queued
-for the next push, and the Phase 1 sync lives entirely on its own
+**GitHub Actions status.** The Phase 2 commit (`9788e07`, pushed to
+`feature/independent-cloudflare-sandbox`) was confirmed via the public
+GitHub API (`GET /commits/9788e07/check-runs`) to have triggered **zero**
+check runs -- `total_count: 0`. This is the EXPECTED, correct outcome,
+not a gap: `.github/workflows/d1-restore-sync-check.yml`'s own `paths:`
+filter deliberately lists only the files that affect real schema/restore
+state (`drizzle/**`, the restore-order/baseline libs, the sync scripts
+themselves) -- `scripts/run-tests.mjs` and `docs/**` are correctly
+outside that filter, so this specific CI job has nothing to re-verify
+from a change that never touches what it checks. No other workflow in
+this repository triggers on a plain push (the remaining four are all
+`schedule`/`workflow_dispatch` only), so there is no other signal to
+check either. The Phase 1 sync, by contrast, lives entirely on its own
 separate `fix/...` branch/PR, which this session cannot dispatch or poll
-CI for without a `gh`/API credential). Per the task's own explicit
-instruction not to assume a passing local check means GitHub Actions is
-green, this is stated as an open item, not inferred.
+CI for without a `gh`/API credential -- that PR's own fresh CI run (once
+the owner opens it) is the real outstanding verification gap, not this
+commit. Per the task's own explicit instruction not to assume a passing
+local check means GitHub Actions is green, this distinction is stated
+explicitly rather than inferred.
 
 **What was corrected.** The exact 5-file, metadata-only drift described
 in Phase 1, prepared on a separate branch/PR, not merged.
@@ -42103,10 +42114,10 @@ through the normal process.
   exposed to the same class of failure the check now also warns about on
   every local test run.
 - This session's own `scripts/run-tests.mjs`/docs changes (Phase 2) are
-  committed to this branch locally but not yet pushed as of this
-  writing -- pushing them is the next step, separate from the Phase 1
-  PR, and will itself trigger a fresh `d1-restore-sync-check.yml` run
-  this session should watch.
+  pushed to the canonical branch as commit `9788e07` -- confirmed via
+  the public API to have triggered no CI run at all (see GitHub Actions
+  status above), which is expected given this workflow's own path
+  filter, not an open item to chase further.
 - `main` still has no branch protection -- the "a human must review
   before `main` changes" guarantee remains a workflow-level convention,
   not a GitHub-enforced rule, for every actor including this automation.
