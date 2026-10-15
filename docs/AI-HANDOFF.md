@@ -42847,3 +42847,20 @@ executed:**
   narrow-branch review process, and deploy ONLY that to Production once
   reviewed -- never the full working branch. Nothing was deployed,
   migrated, merged, or sent as part of this review.
+
+## Isolated Cleanup-Only Deployment Candidate Prepared (2026-10-15) -- see its own branch for full detail
+
+The Section-4 plan above has been prepared for real (not executed):
+branch **`cleanup/remove-agenda-test-send-endpoint`**, commit
+**`21b42ec`**, branched directly from Production's own deployed commit
+(`cf36599`) -- never from this branch's own HEAD. Pushed to `origin`;
+**not merged anywhere, not deployed.** Full verification (191/191
+tests, `tsc` clean, lint at the unchanged baseline, a
+`production-independent` build confirmed free of
+`travel-planning`/`trips`/test-send code in the compiled output) and
+the complete rationale live in that branch's OWN `docs/AI-HANDOFF.md`
+entry ("Isolated Cleanup-Only Deployment Candidate -- Remove Temporary
+Test-Send Endpoint") -- deliberately not duplicated here in full, to
+keep that candidate's own history self-contained and reviewable
+without pulling in this branch's much larger, unrelated history. Still
+awaiting the owner's explicit authorization before any deployment.
