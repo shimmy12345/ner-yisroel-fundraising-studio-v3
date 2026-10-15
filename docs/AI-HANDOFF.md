@@ -43435,3 +43435,338 @@ applies unchanged.
 **No Production deployment, migration, or merge was performed or
 proposed this round. Awaiting the owner's explicit authorization for
 any Production action.**
+
+## Financial Dashboard / Trip Fundraising -- Comprehensive Production Deployment Preflight (2026-10-15) -- READ-ONLY, NOTHING CHANGED
+
+Requested after verification rounds `add23a8` and `bfa19e0`: determine
+whether the tested functionality can safely be deployed, without
+deploying it. Everything below was re-verified fresh this round (live
+`wrangler`/GitHub API calls, fresh `git diff`, a fresh local test/build
+run) -- nothing is recycled from memory without re-checking.
+
+### 1. Exact deployment scope
+
+- **Production**: Worker version **`8cc87988-32de-43b3-8dcd-c1a660176850`**
+  (created 2026-10-15T14:58:55Z), source commit **`54be993`** (the agenda
+  test-send cleanup, on top of Production's prior commit `cf36599`).
+- **Staging**: Worker version **`cdda8c64-64d4-4284-b332-3fe9520f5a16`**
+  (created 2026-10-15T12:25:48Z), source commit equivalent to
+  **`2ef7633`**/`cf9b322` (the grace-period and trip-attribution-
+  reconciliation fixes) -- confirmed via `git diff --name-only cf9b322
+  HEAD` touching nothing but docs and the later test-send cleanup, so
+  Staging's currently-running DASHBOARD code is unchanged from what was
+  tested in every round through `bfa19e0`.
+- **Important nuance, newly surfaced this round, not previously
+  disclosed**: `023e847` (the test-send route removal, committed
+  directly onto this branch) is a DESCENDANT of `cf9b322`
+  (`git log --oneline cf9b322..HEAD` lists it). **Staging's own
+  currently-deployed build (`cdda8c64`) therefore still contains the
+  `/api/agenda/test-send` route** -- it predates that commit. This is
+  low-risk in practice (the route is permanently inert, per the
+  Production-deployment-readiness entries above -- its one-time claim
+  is already terminally consumed, and Staging's own outer write-guard
+  blocks all mutating `/api/**` paths except `/api/trips/**` regardless)
+  but is a real, concrete difference between "what was tested on
+  Staging" and "current feature-branch HEAD" that a future redeploy of
+  Staging should account for -- not a blocker, a disclosure.
+- **Full diff, Production's commit to current HEAD**: `git diff --stat
+  54be993 bfa19e0` -> **49 files changed, 7,852 insertions(+), 333
+  deletions(-)**. Every file re-listed and re-categorized fresh this
+  round:
+  - **New routes** (7): `app/api/trips/route.ts`,
+    `app/api/trips/[id]/route.ts`,
+    `app/api/trips/[id]/prospects/route.ts`,
+    `app/api/trips/[id]/prospects/[prospectId]/route.ts`,
+    `app/api/trips/[id]/prospects/[prospectId]/attributions/route.ts`,
+    `app/api/trips/[id]/prospects/[prospectId]/attributions/[attributionId]/route.ts`,
+    `app/api/giving/pending-pledge/route.ts`.
+  - **New UI** (4 pages/components): `app/travel-planning/page.tsx`,
+    `app/travel-planning/[id]/page.tsx`,
+    `app/travel-planning/TravelPlanningExperience.tsx`,
+    `app/travel-planning/[id]/TripDashboardExperience.tsx`, plus 4 new
+    shared components (`FinancialSummaryCard`, `InstallmentTimeline`,
+    `ProgressBar`, `StatusBadge`).
+  - **Database migrations** (2, both purely additive -- see Section 2):
+    `drizzle/0045_trips.sql`, `drizzle/0046_trip_financial_attributions.sql`.
+  - **Modified, existing, live Production files** (3): `app/donors/[id]/page.tsx`,
+    `app/donors/[id]/PledgePaymentPlanManagement.tsx` (both additive --
+    the Payment-Plan Progress Dashboard UI), `lib/giving/management.ts`
+    (adds `pending_pledge` to the shared `COUNTED_GIVING_SQL`/
+    `countsInGivingTotals` exclusion list -- see Section 2 for why this
+    is safe today).
+  - **Navigation**: `app/layout.tsx`, `app/page.tsx`,
+    `lib/navigation/donor-navigation.ts` (surface "Travel Planning" in
+    the main nav).
+  - **D1 sync tooling** (this session's own safeguard work, CI/local-
+    dev only, zero app-facing behavior): `scripts/run-tests.mjs`,
+    `lib/data-health/production-baseline.ts`,
+    `production-baseline/schema-manifest.json`,
+    `production-baseline/drizzle/0000_production_baseline_0019.sql`,
+    `lib/operations/staging-reset.ts`, `lib/operations/staging-write-guard.ts`
+    (Trip Planning carve-out -- inert on Production, see Section 2),
+    `lib/operations/workspace-backup.ts` (classification-list addition
+    only -- see Section 4).
+  - **Docs only**: `docs/AI-HANDOFF.md`, `docs/D1-MIGRATION-SYNC-PROCESS.md`,
+    `docs/FUNDRAISING_OS_PRINCIPLES.md`.
+  - **Tests**: 8 new/modified test files, all additive coverage.
+- **Zero config/infrastructure changes**: `git diff --name-only 54be993
+  bfa19e0 -- wrangler.production.jsonc wrangler.staging.jsonc
+  cloudflare-env.d.ts worker/index.ts` -- empty.
+- **Unrelated changes, and whether they can be excluded**: the D1 sync
+  tooling and docs changes are genuinely unrelated to the Financial
+  Dashboard/Trip Fundraising feature itself, but they are CI/local-dev-
+  only (zero Worker runtime behavior) -- excluding them from a
+  Production deploy would gain nothing (they do not run in Production
+  at all) and would cost real effort to carve out cleanly. They are
+  not a safety concern either way. The genuinely consequential
+  "unrelated-to-the-feature-but-touches-shared-logic" item is
+  `lib/giving/management.ts`'s `pending_pledge` exclusion -- see
+  Section 2 for why it is safe to include as-is.
+- **Confirmed: the proposed deployment (current HEAD) DOES include both
+  verified fixes.** `pnpm run build:production-independent` against
+  current HEAD, fresh this round: the route manifest lists
+  `/travel-planning`, `/travel-planning/:id`, and all 6 `/api/trips/**`
+  routes as real routes; `/api/agenda/test-send` is correctly absent
+  (the test-send cleanup, committed separately as `023e847`, IS part of
+  current HEAD, even though it is NOT yet part of Staging's own
+  deployed build per the nuance above).
+
+### 2. Database and financial safety
+
+- **Required migrations**: exactly **0045** and **0046** (4 new
+  tables: `trips`, `trip_prospects`, `trip_financial_attributions`, plus
+  `agenda_manual_test_send_log` from 0044 which Production already
+  has). Confirmed via `git merge-base --is-ancestor` that neither 0045
+  nor 0046 is an ancestor of Production's deployed commit, AND via a
+  direct, fresh, read-only Production query
+  (`SELECT name FROM sqlite_master WHERE type='table' AND name IN
+  ('trips','trip_prospects','trip_financial_attributions')` -> **empty
+  result**) that none of the three new tables exist on Production D1
+  right now.
+- **Additive vs. destructive, verified by direct inspection of the SQL
+  text**, not inferred: `grep -iE "ALTER|DROP|UPDATE|DELETE"` against
+  both migration files matches only FK-clause boilerplate (`ON UPDATE
+  no action ON DELETE no action`) and a column literally named
+  `updated_at` -- zero actual `ALTER TABLE`, `DROP TABLE`, `UPDATE`, or
+  `DELETE` statements. **Both migrations are pure `CREATE TABLE`/
+  `CREATE INDEX`, nothing else.**
+- **Foreign-key dependencies and ordering, independently re-verified**
+  from each migration's own `CREATE TABLE` statement: `trips` ->
+  `users.id` only; `trip_prospects` -> `trips.id`, `donors.id`, and
+  (nullable) `interactions.id`; `trip_financial_attributions` ->
+  `users.id`, `trips.id`, `donors.id`, `giving_activities.id`. This
+  exact dependency chain is already correctly reflected in `main`'s own
+  restore-order tracking (PR #18, merged and GitHub-Actions-confirmed
+  green -- see the earlier D1 sync entries above) -- a Production
+  migration apply would use these same migration files directly, not
+  that tracking (which only governs restore/backup, not live
+  migration), but the independent FK verification is the same either
+  way.
+- **Existing donor/financial data confirmed intact**: fresh, read-only
+  Production query this round -> 254 donors, 5,464 giving activities --
+  byte-identical to every prior check this entire session. Neither
+  migration touches any existing table's schema or any existing row.
+- **The one shared-logic change, re-examined for safety**:
+  `lib/giving/management.ts` ADDS `pending_pledge` to
+  `COUNTED_GIVING_SQL`/`countsInGivingTotals`'s EXCLUSION list (never
+  removes anything from it). An exclusion-list ADDITION can only ever
+  cause something to stop being counted that previously was -- and
+  since no row anywhere currently has `category = 'pending_pledge'`
+  (confirmed: nothing on Production, and on this branch the only write
+  path for that category is the new, not-yet-deployed Trip feature
+  itself), this change is **provably a no-op against all existing data**,
+  on Production or anywhere else, until and unless the new feature's own
+  code is also live to write that category.
+- **Staging-only test records and temporary attributions confirmed NOT
+  present anywhere that could reach Production**: by construction, no
+  mechanism in this codebase copies data between D1 databases on
+  deploy -- a Worker deploy ships CODE only. Independently re-confirmed
+  this round anyway, read-only: Staging's own trip data is back to its
+  exact baseline (1 trip, 45 prospects, **0** active financial
+  attributions) -- every temporary attribution and the temporary
+  prospect created and removed in the `bfa19e0` verification round left
+  no trace.
+- **Production/Staging resource isolation, re-confirmed fresh**: `env.DB`
+  on Production's current version resolves to D1 database id
+  `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`; on Staging's current version,
+  `6c18396c-0a8f-4f2c-ba83-ea809ec10289` -- different databases, and
+  `env.STATUS_WORKER` similarly resolves to
+  `fundraising-os-production-backup-status` vs. `fundraising-os-backup-status`
+  respectively. Zero config file changes anywhere in the 49-file diff.
+
+**No migration was applied, and no database was modified, as part of
+this review.**
+
+### 3. Backup and rollback readiness
+
+- **Most recent successful Production backup**: GitHub Actions "D1
+  nightly backup (Production)," run `38742060377`, `completed`/`success`,
+  **2026-10-15T13:21:54Z** (today).
+- **Most recent successful restore-verification test**: "D1 monthly
+  restore verification (Production)," run `38200144876`,
+  `completed`/`success`, **2026-10-12T03:32:23Z** -- the full
+  download -> decrypt -> decompress -> scratch-restore -> schema/
+  baseline/integrity -> row-count-validation chain, against a real
+  Production backup.
+- **One unresolved-sounding but actually fully closed prior failure,
+  re-examined, not just cited**: run `38109498404` (2026-10-11) failed
+  with `403 Forbidden`/`SignatureDoesNotMatch` on the R2 read
+  credential -- an infrastructure-access issue, never reached the
+  actual restore/integrity logic at all. Fixed the same day; the very
+  next run (`38139854757`) succeeded end-to-end, and the most recent
+  run (`38200144876`, above) also succeeded. **Zero outstanding
+  restore-verification failures.**
+- **Exact rollback target, re-confirmed fresh**: `wrangler deployments
+  list` shows `1248d048-b21f-4157-b208-7f6bcc3082a9` immediately before
+  the current `8cc87988-...`. **Rollback command**:
+  `wrangler rollback 1248d048-b21f-4157-b208-7f6bcc3082a9 --config wrangler.production.jsonc`.
+  Zero active `backup_alert_state` rows (no outstanding stale-backup
+  incident).
+- **Would Worker rollback alone be sufficient if migrations 0045/0046
+  were applied?** **Yes, for data safety -- with one disclosed
+  limitation for feature continuity, not safety.** Because both
+  migrations are purely additive new tables with no foreign key FROM
+  any existing table INTO them, the OLD (rolled-back) Worker code
+  simply never references `trips`/`trip_prospects`/
+  `trip_financial_attributions` at all -- their continued existence
+  after a Worker-only rollback is completely inert and harmless to
+  every existing donor/pledge/payment/payment-plan table. **The one
+  real consequence**: if real Trip Planning data had already been
+  created by fundraisers using the new code before a rollback, that
+  data would become temporarily INACCESSIBLE through the UI (no route
+  to view it) until the fix is redeployed -- but it would not be LOST,
+  corrupted, or at risk, since nothing reads or writes it from the old
+  code path either. **The established, correct procedure if a rollback
+  is ever needed**: roll back the Worker only, via `wrangler rollback`;
+  **never** drop or revert the migration itself -- this matches this
+  codebase's own precedent from the October 14 email-incident round
+  ("preserve the additive table and roll back only the Worker... never
+  a destructive database rollback").
+- **Outstanding risks to financial data from this specific deployment**:
+  **none identified.** The migrations create no financial columns on
+  any table; the one shared-logic change is a provable no-op against
+  existing data (Section 2); no existing route, cron, or scheduled job
+  is modified (Section 4).
+
+### 4. System-wide regression protection
+
+Checked each named system by direct `git diff` against the exact file(s)
+that implement it, not by category name alone:
+
+- **Daily Fundraising Agenda recommendations**: `git diff --name-only
+  54be993 bfa19e0 -- lib/agenda/` -> **empty**. The one file the Agenda's
+  own lateness logic reads from, `lib/relationships/pledge-payment-plan.ts`,
+  IS touched -- but confirmed by direct diff inspection to be **purely
+  additive** (new `cycles`/`satisfied`/`daysUntilNextUnsatisfiedPayment`
+  fields exposed on the return type; every EXISTING field's own
+  computation, and every existing exported function's own logic, is
+  byte-for-byte unchanged). Independently reconfirmed live, twice, in
+  the `add23a8` and `bfa19e0` verification rounds: real overdue donors
+  on Staging appear in the real Agenda preview with exactly the right
+  day-counts.
+- **Production email scheduling and delivery**: `git diff --name-only
+  54be993 bfa19e0 -- lib/agenda/ worker/index.ts wrangler.production.jsonc` ->
+  **empty**. Zero changes to the cron trigger, the scheduled handler,
+  the Gmail-sending chokepoint, or the idempotency/duplicate-send
+  logic -- all already independently re-confirmed in the `11a5dd1`
+  Production deployment round.
+- **Payment uploads and pledge reconciliation**: `git diff --name-only
+  54be993 bfa19e0 -- lib/import/ app/api/import/` -> **empty**. The
+  entire JL import pipeline -- explicitly treated as sensitive,
+  incident-prone logic throughout this codebase's own history -- is
+  completely untouched by this feature.
+- **Donor profiles and giving history**: two files ARE touched
+  (`app/donors/[id]/page.tsx`, `app/donors/[id]/PledgePaymentPlanManagement.tsx`)
+  -- by design, this IS the Payment-Plan Progress Dashboard feature,
+  additively rendering new UI on the existing donor page. Already
+  independently verified against 18 real Staging payment plans across
+  10+ donors (`add23a8`/`bfa19e0`) with zero mismatches.
+- **Production backups and restore workflows**: one file touched
+  (`lib/operations/workspace-backup.ts`) -- confirmed by direct diff
+  to be a pure CLASSIFICATION-LIST addition (adding `trips`/
+  `trip_prospects`/`trip_financial_attributions` to the set of tables
+  the narrower, owner-scoped backup feature excludes), never a change
+  to the actual nightly whole-database R2 backup mechanism or the
+  restore-verification scripts, which back up and restore every table
+  regardless of this list.
+- **Existing CRM functionality, generally**: zero changes to
+  `worker/index.ts`, either `wrangler.*.jsonc`, `lib/auth/`,
+  `lib/operations/staging-write-guard.ts`'s actual blocking logic (only
+  its own pre-existing `/api/trips` carve-out, already in place and
+  inert on Production since that check only ever fires for
+  `staging-independent`), or any donor-data route outside the two
+  dashboard files already covered above.
+- **One concrete, newly-identified regression risk if code and
+  migrations are ever deployed OUT OF ORDER**: `lib/data-health/
+  production-baseline.ts` and `production-baseline/schema-manifest.json`
+  ARE part of this diff, and bundle the NEW, 47-migration baseline
+  (expecting the 3 new tables to exist). **If the new Worker CODE were
+  deployed to Production before the two migrations are applied, the
+  live `/health` page's "Production <-> baseline schema" check would
+  flip from "Match" to a real, non-cosmetic MISMATCH** (missing-table
+  differences, not the already-accepted "stale baseline stamp" cosmetic
+  state from the October 14 round) -- a genuine, if non-data-destructive,
+  regression to Production's own health-reporting visibility. **This is
+  why, if this deployment is ever authorized, the migrations must be
+  applied BEFORE or atomically with the Worker deploy, never after** --
+  the same ordering this codebase has followed for every prior new-table
+  Production migration this session.
+
+**Local tests/build, run fresh this round**: `node scripts/run-tests.mjs`
+-> **197/197 test files passed**, plus the D1 restore/schema main-sync
+step reporting "No drift detected" (unaffected by this review, which
+made no commits). `npx tsc --noEmit` -> clean, 0 errors. `npm run lint`
+-> 94 errors / 43 warnings, the exact unchanged baseline. `pnpm run
+build:production-independent` against current HEAD -> succeeds; route
+manifest and `/api/agenda/test-send` absence independently confirmed as
+described in Section 1.
+
+### 5. Final recommendation
+
+**NO-GO for deploying current HEAD as a single, undifferentiated unit.
+GO for a correctly-sequenced, two-part deployment, once separately
+authorized.**
+
+1. **Exact deployment commit and scope**: current feature-branch HEAD
+   is `bfa19e0`, 49 files ahead of Production's `54be993`. It correctly
+   includes both verified fixes (grace-period labeling, trip-attribution
+   reconciliation) and the full Trip Planning/Dashboard feature set --
+   but deploying it as one unit would make `/travel-planning` and
+   `/api/trips/**` live on Production while their backing tables do not
+   exist there, which would error on first use.
+2. **Required database migrations**: exactly `0045_trips.sql` and
+   `0046_trip_financial_attributions.sql` -- both purely additive
+   (new tables only), confirmed by direct SQL inspection, with FK
+   dependencies independently re-verified. Neither is applied to
+   Production yet.
+3. **Backup and restore readiness**: current. Backup succeeded today;
+   restore verification last succeeded 2026-10-12, with its one prior
+   failure (2026-10-11, R2 credential, since fixed) fully closed, zero
+   outstanding failures.
+4. **Rollback plan**: `wrangler rollback 1248d048-b21f-4157-b208-7f6bcc3082a9
+   --config wrangler.production.jsonc`. Sufficient for full data safety
+   even if the migrations have already been applied; the one disclosed,
+   non-safety consequence is temporary inaccessibility (never loss) of
+   any real Trip Planning data created in the interim.
+5. **Remaining risks/blockers**: (a) the migration-before-code ordering
+   requirement in Section 4, now explicit rather than merely implied;
+   (b) Staging's own currently-deployed build still contains the inert
+   test-send route (Section 1's nuance) -- worth a fresh Staging
+   redeploy from current HEAD before any Production action, simply to
+   test the EXACT bits that would ship, not a blocker on its own; (c)
+   every previously-disclosed untested-surface item from `add23a8`/
+   `bfa19e0` (other attribution shapes, pending-record flows, payment
+   reconciliation, screenshot-level visual confirmation) still applies
+   unchanged.
+6. **Specific steps requiring the owner's explicit authorization,
+   listed separately because they are separable decisions**: (i)
+   applying migrations 0045 and 0046 to Production D1; (ii) deploying
+   the new Worker code to Production; (iii) whether to do a fresh
+   Staging redeploy from current HEAD first (recommended, not required)
+   to close the nuance in (b) above before treating Production as
+   next.
+
+**No Production or Staging deployment, database migration, data
+correction, merge, or financial-record modification was performed.
+This entire review was read-only. Awaiting the owner's explicit
+authorization before any of the steps in item 6 above.**
