@@ -40284,3 +40284,91 @@ migration was introduced.
 
 **This candidate is prepared and verified, awaiting the owner's
 explicit authorization before any deployment.**
+
+### Addendum (2026-10-15): "No common ancestor" against `main` explained, plus a full independent re-verification
+
+The owner reported GitHub's compare view cannot diff this branch
+against `main` ("histories have no common ancestor"). **Confirmed,
+and this is a pre-existing, repository-wide structural fact, not a
+defect introduced by this branch**: `git merge-base origin/main
+origin/cleanup/remove-agenda-test-send-endpoint` returns nothing
+(exit 1). The SAME is true of `main` against the canonical branch
+itself -- `git merge-base origin/main
+origin/feature/independent-cloudflare-sandbox` also returns nothing.
+`main`'s own root commit is `2b8f94c` ("Initial commit"); the
+Fundraising OS application's own root commit (an ancestor of both
+this branch and the canonical branch) is `fdd6783` ("feat: establish
+Fundraising OS application foundation") -- two entirely disjoint git
+histories sharing one repository. (`main` carries a completely
+different, unrelated Netlify/Supabase application --
+`package.json`'s own `name: "ner-yisroel-fundraising-studio"` with
+`@supabase/supabase-js`/`openai`/`papaparse` dependencies, no
+Cloudflare/D1/Next.js anywhere in it.) **This means NO branch of the
+real Fundraising OS application can ever be meaningfully compared
+against `main` on GitHub's compare UI** -- not this one, not the
+canonical branch, not any other narrow-sync branch in this repository's
+history. The correct, working comparison for this candidate is against
+its OWN real base commit:
+
+**https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/compare/cf36599e239070822716540d9fde01d1d3dfb65f...cleanup/remove-agenda-test-send-endpoint**
+
+**Exact commit SHA (re-confirmed fresh from `origin`, not assumed)**:
+`21b42ec532be195eaf5b0b2184f56186887ec0dc`. Its immediate parent --
+the candidate's actual Production baseline -- is
+`cf36599e239070822716540d9fde01d1d3dfb65f`, confirmed directly via
+`git log` (not inferred): `2026-10-14 19:34:51 -0400 Improve
+geographic filtering UI: alphabetical city sort, searchable combobox`.
+Cross-checked against Production's own deployment record:
+`wrangler deployments list` shows the currently-live Worker version
+`1248d048-b21f-4157-b208-7f6bcc3082a9` was created
+`2026-10-14T23:41:05Z`, ~6 minutes after this commit's own authored
+timestamp -- consistent with the "Production deployment of Geographic
+Filtering feature" entry's own recorded mapping between this exact
+commit and that exact Worker version.
+
+**Full independent re-verification performed fresh this round**
+(a brand-new worktree checked out directly from `origin/cleanup/remove-agenda-test-send-endpoint`,
+a fresh `pnpm install`, not reusing any prior run's output):
+
+- `git diff --stat cf36599 21b42ec`: **7 files changed, 116
+  insertions(+), 408 deletions(-)** -- `app/api/agenda/test-send/route.ts`
+  deleted, `lib/agenda/test-send-log.ts` deleted,
+  `tests/agenda-test-send-idempotency-e2e.test.mjs` deleted,
+  `tests/agenda-test-send-safety.test.mjs` deleted, `db/schema.ts`
+  edited (comment only), `scripts/run-tests.mjs` edited (2-line
+  removal), `docs/AI-HANDOFF.md` edited (this candidate's own entry).
+- **Endpoint removal, re-confirmed**: `git show
+  21b42ec:app/api/agenda/test-send/route.ts` fails (absent); `git show
+  cf36599:app/api/agenda/test-send/route.ts` succeeds (confirming it
+  really is currently live on the Production baseline, and this
+  candidate is what retires it).
+- **Scheduled email functionality, re-confirmed unchanged**: `git diff
+  --name-only cf36599 21b42ec -- lib/agenda/email-send-guard.ts
+  lib/agenda/gmail-client.ts lib/agenda/send-agenda.ts
+  lib/agenda/send-log.ts worker/index.ts wrangler.production.jsonc` --
+  empty. Zero changes to any real email-sending code, the scheduled
+  handler, or the Production Worker config.
+- **No Trip Planning code, re-confirmed**: `git log --oneline
+  cf36599..21b42ec` contains exactly one commit (this one); `git diff
+  --name-only cf36599 21b42ec` contains no `trip`/`travel` path
+  anywhere.
+- **Tests**: `node scripts/run-tests.mjs` -> **191/191 test files
+  passed.**
+- **TypeScript**: `npx tsc --noEmit` -> clean, 0 errors.
+- **Lint**: `pnpm run lint` -> 94 errors / 43 warnings -- the same
+  pre-existing baseline as every prior round, nothing new.
+- **Production build**: `pnpm run build:production-independent` ->
+  succeeds. Route manifest contains no `test-send`/`travel-planning`/
+  `/api/trips` entry. Compiled `dist/server/index.js` re-checked for
+  five distinct markers -- `TEST_SEND_CLAIM_ID`, `buildTestSendClaimQuery`,
+  `/api/agenda/test-send`, `travel-planning`, `trip_prospects` -- **all
+  five return zero matches.**
+- **Current deployment status**: unchanged throughout this
+  verification -- `wrangler deployments list` still shows
+  `1248d048-b21f-4157-b208-7f6bcc3082a9` as the sole, 100%-traffic
+  Production deployment. This branch has NOT been deployed, merged, or
+  pushed anywhere beyond its own `origin/cleanup/remove-agenda-test-send-endpoint`
+  ref.
+
+**Still prepared, still verified, still awaiting the owner's explicit
+authorization before any deployment or merge.**
