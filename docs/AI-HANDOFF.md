@@ -40372,3 +40372,112 @@ a fresh `pnpm install`, not reusing any prior run's output):
 
 **Still prepared, still verified, still awaiting the owner's explicit
 authorization before any deployment or merge.**
+
+### Final Pre-Deployment Verification (2026-10-15) -- GO
+
+The owner requested one more pass before any deployment decision,
+specifically asking to confirm Production compatibility against the
+ACTUAL currently-deployed version (not merely the Git baseline this
+candidate happens to be built from), re-verify every safety claim, and
+run scheduled-email regression tests explicitly.
+
+**Two commits reviewed**: `21b42ec` (the removal) and `dc63dcc` (the
+earlier addendum, docs-only). Aggregate diff against `cf36599` is still
+exactly **7 files, 204 insertions(+), 408 deletions(-)**:
+`app/api/agenda/test-send/route.ts` (deleted),
+`lib/agenda/test-send-log.ts` (deleted),
+`tests/agenda-test-send-idempotency-e2e.test.mjs` (deleted),
+`tests/agenda-test-send-safety.test.mjs` (deleted), `db/schema.ts`
+(comment only), `scripts/run-tests.mjs` (2-line removal),
+`docs/AI-HANDOFF.md`.
+
+**Production compatibility, re-verified against the ACTUAL live
+deployment, not just the Git baseline**: fresh `wrangler deployments
+list` confirms the current, 100%-traffic Production Worker is still
+**`1248d048-b21f-4157-b208-7f6bcc3082a9`**, created
+`2026-10-14T23:41:05Z`, with `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`
+immediately before it in the deployment history. `wrangler` itself
+records no source-commit metadata for a CLI-deployed version
+("Source: Unknown"), so the commit mapping rests on the strongest
+available independent corroboration: the "Geographic Filtering UI
+Usability Fixes -- Production Deployment" entry (written AT THE TIME
+of that exact deployment) recorded the deployed commit as
+`cf36599e239070822716540d9fde01d1d3dfb65f` (confirmed then via
+`git rev-parse` against the owner's own stated reference), recorded
+the pre-deploy rollback target as `bf60c39b-af8d-42ad-8ce7-09a62a607c1c`,
+and recorded the resulting new version as `1248d048-b21f-4157-b208-7f6bcc3082a9`
+immediately after running the deploy command -- and the live deployment
+history fetched fresh THIS round reproduces that exact same
+`bf60c39b` -> `1248d048` sequence with nothing after it. **This
+candidate's base commit (`cf36599`) IS the actual currently-deployed
+commit, not an outdated one -- no correction or rebasing onto a
+different baseline is needed.**
+
+**Verification results, this exact round, fresh worktree + fresh
+`pnpm install`, not reused from any prior run**:
+- `node scripts/run-tests.mjs` -> **191/191 test files passed.**
+- Scheduled-email regression tests, run individually by name (every
+  `agenda-*` test file present on this branch, confirming the two
+  removed test-send-only files are correctly absent from this list and
+  everything else still passes on its own):
+  `agenda-email-send-guard`, `agenda-mime-message`, `agenda-model`,
+  `agenda-oauth-error-code`, `agenda-render`, `agenda-safety`,
+  `agenda-send-idempotency-e2e`, `agenda-timezone` -- **all 8 pass
+  individually.**
+- `npx tsc --noEmit` -> clean, 0 errors.
+- `pnpm run lint` -> 94 errors / 43 warnings, unchanged baseline.
+- `pnpm run build:production-independent` -> succeeds. Route manifest
+  contains exactly one `/api/agenda/*` route, `/api/agenda/preview`
+  (pre-existing, unrelated) -- `/api/agenda/test-send` is absent.
+- Compiled `dist/server/index.js`: `TEST_SEND_CLAIM_ID`,
+  `buildTestSendClaimQuery`, `/api/agenda/test-send`,
+  `travel-planning`, `trip_prospects` all return **zero** matches;
+  `sendDailyAgenda`/`runScheduledAgendaSend`/`scheduled` together
+  return **69** matches, confirming the real scheduled-send machinery
+  is fully intact and bundled, not accidentally stripped alongside the
+  removed code.
+- `wrangler.production.jsonc`'s own `"triggers": { "crons": ["0 * * * *"] }`
+  re-confirmed byte-identical -- the cron schedule is untouched by this
+  candidate (and was never part of its diff in the first place).
+- **No Production database change required**: zero `drizzle/**` files
+  in the diff; `db/schema.ts`'s only change is inside a `//` comment
+  block -- the `agendaManualTestSendLog` table definition itself
+  (`sqliteTable(...)` call and every column) is byte-identical to the
+  Production baseline.
+- **Live Production snapshot, read-only, taken this round**: 254
+  donors, 5,464 giving activities, exactly 1 `agenda_send_log` row for
+  `2026-10-15` (today's real scheduled send, still the only one), 0
+  active `backup_alert_state` rows. Unchanged from every prior check
+  this session.
+
+### Final safety report
+
+1. **Cleanup branch and commit**: `cleanup/remove-agenda-test-send-endpoint`,
+   tip `dc63dcc` (code change in `21b42ec`).
+2. **Production Worker version and source commit**: `1248d048-b21f-4157-b208-7f6bcc3082a9`,
+   source commit `cf36599e239070822716540d9fde01d1d3dfb65f` -- exactly
+   this candidate's own base, re-confirmed this round, not outdated.
+3. **Complete list of changed files**: the 7 files listed above.
+4. **Test and build results**: 191/191 tests (including all 8
+   scheduled-email regression tests individually), `tsc` clean, lint
+   at the unchanged 94/43 baseline, production build succeeds with the
+   removed endpoint absent and the real scheduled-send code intact.
+5. **No unrelated features included**: confirmed again this round --
+   zero `trip`/`travel`/`payment-plan`/`financial` paths anywhere in
+   the diff; the branch is exactly Production's own commit plus one
+   code change.
+6. **Unresolved deployment risks**: none new. Carried over, unchanged:
+   no GitHub Actions run has exercised this specific branch (this
+   repository's CI for the Fundraising OS app runs only against
+   `feature/independent-cloudflare-sandbox`); this session has no
+   authenticated/Observability access to directly watch a live
+   Production request against this candidate post-deploy, the same
+   limitation disclosed throughout this incident's history.
+7. **Recommendation: GO.** This candidate is a minimal, verified,
+   isolated removal of dead code with no migration, no email-path
+   change, and no unrelated feature content, built from and matching
+   the exact commit currently live on Production.
+
+**No deployment was performed. No branch was merged. No Production
+data, secret, cron schedule, or database configuration was modified.
+Awaiting the owner's explicit authorization before any deployment.**
