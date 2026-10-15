@@ -43770,3 +43770,225 @@ authorized.**
 correction, merge, or financial-record modification was performed.
 This entire review was read-only. Awaiting the owner's explicit
 authorization before any of the steps in item 6 above.**
+
+## Staging Redeployment and Smoke-Test Verification (2026-10-15) -- STAGING DEPLOYED, PRODUCTION UNCHANGED
+
+Owner-authorized: deploy current feature-branch HEAD to Staging only,
+then run authenticated smoke tests, to close the nuance identified in
+the prior preflight entry (Staging's previously-running build still
+contained the inert `/api/agenda/test-send` route) before any
+Production action. Production deployment, migrations, and financial-
+data modification were explicitly NOT authorized this round and were
+not performed.
+
+### 1. Git commit and deployed Staging Worker version
+
+- **Deployed source commit**: `167bd2b` (feature/independent-cloudflare-
+  sandbox, pushed to origin). Working tree was clean at deploy time.
+  `167bd2b` is docs-only on top of `bfa19e0` (confirmed via
+  `git diff --stat bfa19e0 167bd2b` -- exactly one file,
+  `docs/AI-HANDOFF.md`, zero application-code changes) -- so this
+  deployment ships the exact application code already verified in
+  rounds `add23a8` and `bfa19e0`.
+- **New Staging Worker version**: **`b159572d-2ca2-4bb2-8490-5be1cadfa72e`**,
+  created **2026-10-15T17:25:24.524Z**, deployed via the established
+  `pnpm run deploy:staging-independent` script (`build:staging-
+  independent` -> `verify-build-manifest.mjs` -> `wrangler deploy
+  --config wrangler.staging.jsonc`). `verify-build-manifest` confirmed
+  the deployed `dist/` output was built 0 seconds before the deploy
+  step ran, so the uploaded bundle is guaranteed to match the exact
+  commit above, not a stale build.
+- **Previous Staging version (rollback target if ever needed)**:
+  `cdda8c64-64d4-4284-b332-3fe9520f5a16` (created 2026-10-15T12:25:48Z,
+  source ~`2ef7633`/`cf9b322`).
+- **`/api/agenda/test-send` absence confirmed two ways**: (a) zero
+  occurrences of the string `test-send` anywhere in the compiled
+  `dist/` bundle (`grep -r` across the full build output); (b) the
+  route is not in the build's printed route manifest (only
+  `/api/trips/**`, `/api/pledge-payment-plans`, etc. appear).
+
+### 2. Pre-deployment safety-check results (all PASS)
+
+- **Working-branch HEAD / clean tree**: PASS -- `167bd2b`, `git status
+  --short` empty, branch in sync with `origin/feature/independent-
+  cloudflare-sandbox` (fetched and confirmed before deploying).
+- **Currently deployed Staging Worker version and rollback target**:
+  PASS -- confirmed `cdda8c64-...` (12:25:48Z) was the live version
+  immediately before this deploy, with `95702c6d-b705-4334-be14-
+  ef304d7e8b68` (12:15:30Z) as its own immediate predecessor.
+- **Staging D1 binding isolation from Production**: PASS -- Staging
+  binds `fundraising-os-staging-db` (`6c18396c-0a8f-4f2c-ba83-
+  ea809ec10289`); Production binds `fundraising-os-production-db`
+  (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`) -- different names, different
+  IDs, confirmed by reading both `wrangler.*.jsonc` files directly.
+- **Required migrations already applied to Staging**: PASS -- direct
+  `sqlite_master` query confirmed all 5 tables introduced by migrations
+  0044-0046 exist on Staging D1: `agenda_manual_test_send_log`,
+  `pledge_payment_plans`, `trip_financial_attributions`,
+  `trip_prospects`, `trips`.
+- **No unreviewed application-code changes since the tested commit**:
+  PASS -- `git diff --stat bfa19e0 167bd2b` touches only
+  `docs/AI-HANDOFF.md`.
+- **Temporary test attributions inactive / Chicago trip at original
+  baseline**: PASS -- direct D1 queries (before deploying) confirmed:
+  Chicago trip row's `updated_at` unchanged since creation
+  (`1792032403`); `trip_financial_attributions` active (non-removed)
+  count for the Chicago trip = **0**; `trip_prospects` count for
+  Chicago = **45** (back to baseline); Shimmy Ramras's test prospect
+  row confirmed absent (`donor_id='3a926b62-...'` -> 0 rows).
+
+No check failed and no unexpected database modification was required,
+so the deploy proceeded per the owner's authorization.
+
+### 3. Authenticated Staging smoke-test results (via owner's already-
+authenticated Chrome session; screenshots timed out as in prior
+rounds, so DOM/text inspection via `javascript_tool`/`get_page_text`/
+`find` was used instead -- consistent with the established method)
+
+**Payment-Plan Progress -- PASS**
+- Donor profiles load correctly (tested Mr. & Mrs. Ezra Wisotsky and
+  Mr. & Mrs. Yaakov Yisroel Klein).
+- Installment-tick DOM classes render with the correct grace-period-
+  aware states: Wisotsky's recently-late cycle (6 days late) shows
+  `installment-tick-due` (not `-overdue`); upcoming cycles show
+  `-upcoming`/`-future`. Confirms the grace-period fix is live on the
+  new build, matching round `add23a8`'s original finding.
+- Klein's plan independently shows **OVERDUE -- 5 days past the grace
+  period, $400 expected** -- exact match to the live Daily Agenda entry
+  for Klein (below) and to the figure verified in round `add23a8`.
+- **Multiple payment plans per donor display independently**: Wisotsky
+  has 2 active plans (DIN2025: `PAYMENT DUE`, $850/$1,000, $150
+  remaining; DIN2026: `ON TRACK`, $0/$1,000, $1,000 remaining). Both
+  figures cross-checked exactly against a direct `pledge_payment_plans`
+  JOIN `giving_activities` query. Donor-level "Open Commitments" total
+  ($1,150) correctly sums both plans' remaining balances ($150 +
+  $1,000).
+
+**Trip Planning and Financial Dashboard -- PASS**
+- Trip Planning list loads: exactly 1 trip ("Chicago", status
+  Planning, 45 prospects) -- matches the D1 baseline exactly, confirms
+  no leftover prospects from the removed Ramras test case.
+- Chicago trip detail loads. Financial Dashboard shows the exact
+  original baseline: **$0 raised of $75,000 goal (0%), $0 new pledges,
+  $0 new donations, $0 cash collected, $0 outstanding pledge balance**.
+  No previously removed test attribution (Amster, Magence, Grinblatt,
+  Ramras) has become active again.
+- Donation/pledge/payment totals remain consistent with the underlying
+  Staging records (all independently re-queried, not just read from the
+  UI).
+
+**Existing Production-critical functionality, tested on Staging -- PASS**
+- **Daily Agenda** loads on the home page ("Today's Agenda", 3 items)
+  and recommendations remain accurate: Klein ($400.00 expected, 5 days
+  behind) and Rabbi & Mrs. Moshe Aharon Rosenbaum ($150.00 expected, 4
+  days behind) match exactly, cross-checked against both donor profiles
+  independently.
+- **Donor profiles and giving history** load correctly (tested above).
+- **Payment upload / pledge-reconciliation code paths** remain
+  available without submitting: `/onboarding/import` (Import Center)
+  loads its full Upload/Review/Preview/Import flow; `/pledge-review`
+  loads its cleanup-review list (15 open/partially-paid pledges, $56,875
+  outstanding) -- no upload or submission was triggered.
+- **Email scheduling configuration remains unchanged**: `wrangler.
+  staging.jsonc` explicitly sets `"triggers": { "crons": [] }`
+  (Staging's cron intentionally disabled, per the documented historical
+  incident where Staging kept sending a live daily email after a prior
+  cutover). `git diff --stat 2ef7633 167bd2b -- wrangler.*.jsonc
+  worker/index.ts` returns empty -- zero changes to any wrangler config
+  or the Worker entrypoint since the previously-deployed Staging build.
+- **Backup and health-status pages load correctly**: `/health` and
+  Settings > Data Health both load. A fresh (not cached) "Run health
+  check" click, executed against the new build, returned "Health check
+  complete. Everything is healthy." Most recent Staging backup
+  succeeded (`2026-10-15T12:58:03Z`); most recent monthly restore test
+  succeeded (2026-10-09); database connection healthy; live schema
+  version reporting 0022/0022 (the check's own independently-detectable
+  cap, a pre-existing, unrelated characteristic, not a new defect).
+
+No test email was sent, no payment was uploaded, no donation was
+created, and no pledge was edited at any point during this round.
+
+### 4. Deployment-integrity verification
+
+- **Running Staging Worker corresponds to the intended commit**:
+  confirmed via the build-freshness guarantee in Section 1 (`verify-
+  build-manifest` 0-seconds-old check) plus the direct `dist/` bundle
+  scan (test-send absent, trips routes present) -- there is no commit-
+  identification string embedded in the running app itself to check
+  independently, so this is the project's own established integrity
+  mechanism for this exact purpose.
+- **Deployed Staging D1 binding remains correct**: confirmed in the
+  deploy output itself -- `env.DB (fundraising-os-staging-db)`.
+- **Deployment errors / runtime exceptions / missing-table errors**:
+  none found. Browser console (`read_console_messages`, pattern
+  matching all messages and errors-only) returned zero messages across
+  the `/health` and Chicago trip pages after a fresh navigation: no
+  errors were suppressed by stale tracking. Every page visited rendered
+  real, correct data with no error boundaries or broken states.
+- **Production Worker version unchanged**: re-confirmed via `wrangler
+  deployments list --config wrangler.production.jsonc` run *after* the
+  Staging deploy -- still **`8cc87988-32de-43b3-8dcd-c1a660176850`**
+  (created 2026-10-15T14:58:55.030Z), unchanged.
+- **Production database records and financial data unmodified**:
+  re-confirmed via fresh, read-only queries run *after* the Staging
+  deploy -- donor count **254**, giving-activity count **5,464** --
+  byte-identical to every prior round's baseline.
+- **Production scheduled jobs / email delivery unaffected**: this was a
+  Staging-only `wrangler deploy` against `wrangler.staging.jsonc`; it
+  cannot touch Production's own Worker, cron trigger, or config by
+  construction, and the pre/post Production version-ID check above
+  independently confirms no side effect occurred.
+
+### 5. Defects and remaining risks
+
+**No defects found.** Every smoke-test area returned PASS with no
+investigation required.
+
+**Remaining risks, carried forward unchanged from prior rounds (not new,
+not blockers)**: payment reconciliation (scenario 5) remains unverified
+by live UI, by the owner's own prior explicit choice not to test it;
+other attribution shapes and pending-record flows beyond the ones
+already tested remain untested; no screenshot-level visual confirmation
+was possible this round either (screenshots timed out, consistent with
+every prior round -- DOM/text-level inspection was used instead, which
+independently cross-checked every figure shown).
+
+### 6. Production/Staging isolation -- confirmed
+
+Staging and Production use different D1 databases (different names and
+different database IDs), different Worker deployments, and different
+Cron Trigger configurations (Staging's explicitly empty; Production's
+confirmed unchanged in the prior preflight round). This Staging-only
+deploy had zero measurable effect on Production by every check run
+above, both before and after the deploy.
+
+### 7. Current Production Worker version -- preserve as rollback target
+
+**`8cc87988-32de-43b3-8dcd-c1a660176850`** (created
+2026-10-15T14:58:55.030Z, source commit `54be993`). This is the exact
+version any future Production deployment of the Trips/Financial
+Dashboard feature set must be able to roll back to via `wrangler
+rollback 8cc87988-32de-43b3-8dcd-c1a660176850 --config
+wrangler.production.jsonc`.
+
+### Final GO/NO-GO recommendation
+
+**GO for proceeding to the separately authorized Production migration
+and Worker deployment steps**, once the owner explicitly authorizes
+them. This round closes the one open nuance from the prior preflight
+(Staging's build no longer contains the inert test-send route) and
+adds a fresh, full authenticated smoke-test pass on the *exact* Staging
+build that would be promoted, with zero defects found anywhere.
+
+The two Production steps remain separable and still require their own
+explicit authorization, exactly as listed in the prior preflight entry:
+(i) applying migrations `0045_trips.sql` and
+`0046_trip_financial_attributions.sql` to Production D1, applied before
+or atomically with (ii) deploying the new Worker code to Production.
+Neither was performed, proposed as ready-to-execute, nor authorized
+this round.
+
+**No Production deployment, database migration, data correction,
+merge, or financial-record modification was performed. Staging was the
+only environment changed. Awaiting the owner's explicit authorization
+before any Production action.**
