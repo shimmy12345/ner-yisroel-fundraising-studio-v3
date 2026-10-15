@@ -42896,3 +42896,128 @@ real, authenticated, end-to-end click-through on Staging with genuine
 transaction data, only code-level/unit-test verification and read-only
 D1 checks -- disclosed throughout this session's own dashboard entries
 as a standing limitation, not newly discovered here).
+
+## Isolated Cleanup-Only Deployment -- PRODUCTION, DEPLOYED, VERIFIED, PASS (2026-10-15)
+
+The owner explicitly authorized Production deployment of commit
+`54be993` from `cleanup/remove-agenda-test-send-endpoint`, subject to
+pre-deployment checks that must stop the whole operation if any failed,
+and a specific post-deployment verification checklist with an
+immediate-rollback instruction if a critical regression appeared.
+
+### Pre-deployment checks (all passed; proceeded)
+
+1. **Currently deployed Production Worker reconfirmed**: fresh
+   `wrangler deployments list` showed `1248d048-b21f-4157-b208-7f6bcc3082a9`
+   (100% traffic, created `2026-10-14T23:41:05Z`) as current, with
+   `bf60c39b-af8d-42ad-8ce7-09a62a607c1c` immediately before it --
+   exactly as expected from every prior check this session. **PASS.**
+2. **Deployment scope reconfirmed**: `git diff --name-status cf36599 54be993`
+   -- the same exact 7 files as every prior review (`app/api/agenda/test-send/route.ts`
+   deleted, `lib/agenda/test-send-log.ts` deleted, both dedicated test
+   files deleted, `db/schema.ts` comment-only, `scripts/run-tests.mjs`
+   2-line removal, `docs/AI-HANDOFF.md`). Zero `trip`/`travel`/
+   `payment-plan`/`financial` paths, zero `drizzle/**` files. **PASS.**
+3. **Rollback path confirmed working**: `1248d048-b21f-4157-b208-7f6bcc3082a9`
+   is a real, currently-listed Worker version;
+   `wrangler rollback <version-id>` is this project's own supported
+   command for exactly this version-id shape. **PASS.**
+4. **Fresh final gate re-run** in a clean worktree checked out at
+   `54be993` (not reused from any prior round): `pnpm install` clean,
+   `node scripts/run-tests.mjs` -> **191/191 passed**, `npx tsc --noEmit`
+   -> clean. Pre-deploy Production data baseline recorded: **254
+   donors, 5,464 giving activities, 45 pledge payment plans.**
+
+No condition failed; proceeded to deployment.
+
+### Deployment
+
+`pnpm run deploy:production-independent` (the full protected
+build -> verify-build-manifest -> `wrangler deploy` chain, no bypass).
+
+**New Production Worker version: `8cc87988-32de-43b3-8dcd-c1a660176850`**
+(created `2026-10-15T14:58:55.030Z`). Deploy output bindings:
+`env.DB` -> `fundraising-os-production-db`, `env.STATUS_WORKER` ->
+`fundraising-os-production-backup-status`, `env.APP_BASE_URL` ->
+`"https://shimmydonors.org"`, `schedule: 0 * * * *` -- no Staging
+binding anywhere in the output.
+
+### Post-deployment verification (all read-only; every check from the
+owner's own checklist)
+
+1. **New version serving 100% of traffic**: fresh `wrangler deployments
+   list` immediately after -> `(100%) 8cc87988-32de-43b3-8dcd-c1a660176850`,
+   confirmed. **PASS.**
+2. **`/api/agenda/test-send` no longer accessible**: confirmed against
+   the EXACT `dist/server/index.js` wrangler just uploaded (not a
+   separate rebuild) -- `TEST_SEND_CLAIM_ID`, `buildTestSendClaimQuery`,
+   and the literal path `/api/agenda/test-send` all return **zero**
+   matches. An unauthenticated `curl` to the live path returned `HTTP
+   301` (the same generic Cloudflare Access redirect every path on
+   this app returns when unauthenticated, including `/` itself --
+   disclosed honestly as NOT meaningful evidence of route-specific
+   removal on its own, since Access intercepts uniformly at the edge
+   before the Worker; the bundle-level check above is the real proof).
+   **PASS.**
+3. **Scheduled agenda email / cron intact**: `wrangler versions view`
+   on the new version shows `Handlers: fetch, scheduled` (unchanged);
+   the deploy output itself reprinted `schedule: 0 * * * *` unchanged;
+   Gmail secrets (`GMAIL_OAUTH_CLIENT_ID`/`_CLIENT_SECRET`/
+   `_REFRESH_TOKEN`) still present by name. **PASS.**
+4. **Logs/errors checked for unexpected failures**: **disclosed
+   limitation, not claimed as verified** -- this session has no
+   Cloudflare Observability/dashboard access (the same standing
+   limitation disclosed throughout this incident's entire history).
+   The only available read-only proxy -- an unauthenticated request to
+   the live site returning its normal `301` redirect rather than a
+   `500`/`502`/connection failure -- was checked and is normal, but
+   this is weak evidence, not a substitute for a real log review. If
+   the owner can check Cloudflare's dashboard directly, that remains
+   the stronger confirmation.
+5. **Donor records / pledge balances / payment history unchanged**:
+   read-only Production query immediately post-deploy ->
+   **254 donors, 5,464 giving activities, 45 pledge payment plans** --
+   byte-identical to the pre-deploy baseline recorded above.
+   `agenda_send_log` still exactly **1** row for `2026-10-15` (today's
+   real send, not duplicated or disturbed by this deploy).
+   `backup_alert_state` still **0** active rows. **PASS.**
+6. **Production/Staging isolation confirmed**: this deploy's own
+   binding output names only Production resources (no Staging binding
+   anywhere); `wrangler deployments list --config wrangler.staging.jsonc`
+   shows Staging's own last deployment (`cdda8c64-...`, from earlier
+   today, unrelated to this round) completely unchanged. **PASS.**
+7. **No critical regression detected -- rollback was not needed and
+   was not performed.**
+
+### Rollback information (for the record, not exercised)
+
+- **Rollback target**: `1248d048-b21f-4157-b208-7f6bcc3082a9` (the
+  version live immediately before this deployment).
+- **Rollback command**: `wrangler rollback 1248d048-b21f-4157-b208-7f6bcc3082a9 --config wrangler.production.jsonc`.
+- Not exercised this round -- recorded here per the owner's own
+  requirement, since every post-deployment check passed.
+
+### Scope discipline
+
+No database migration was run (none existed in this deployment's own
+diff). No donor, pledge, payment, or financial balance was read for
+any purpose other than the byte-identical before/after comparison
+above. No unrelated feature (Trip Planning, the financial dashboards,
+or anything else) was part of this deployment -- reconfirmed fresh
+immediately before deploying, not merely assumed from the prior
+review. No Production secret, cron schedule, or database configuration
+was changed.
+
+### PASS/FAIL: **PASS**
+
+Every pre-deployment check passed; the deployment succeeded; every
+post-deployment check in the owner's own list passed, with one
+honestly-disclosed limitation (no direct Observability/log access,
+item 4 above) rather than a false claim of full verification. No
+rollback was necessary.
+
+**Next priority, per the owner's own explicit instruction**:
+authenticated, end-to-end testing of the financial dashboards
+(Payment-Plan Progress, Trip Fundraising Results) using actual Staging
+transactions -- see the "Next Priority" entry immediately above this
+one. Not started yet, as instructed.
