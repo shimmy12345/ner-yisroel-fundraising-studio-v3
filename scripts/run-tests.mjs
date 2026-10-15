@@ -234,6 +234,8 @@ const TEST_FILES = [
   "tests/unified-timeline-balance-correction.test.mjs",
   "tests/migration-upgrade-0041-0042.test.mjs",
   "tests/workspace-backup-restore-corrections.test.mjs",
+  "tests/meeting-notes-organize.test.mjs",
+  "tests/meeting-notes-format.test.mjs",
 ];
 
 function runOne(file) {

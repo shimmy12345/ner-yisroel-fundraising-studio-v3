@@ -210,6 +210,45 @@ h1 { margin-bottom: 7px; font-family: Georgia, serif; font-size: clamp(30px, 3vw
 .trust-note { display:flex; gap:8px; padding:11px; border-radius:9px; background:rgba(255,255,255,.65); }.trust-note > span { color:#347054; }.trust-note p { margin:0; color:#64736b; font-size:8px; line-height:1.5; }.trust-note strong { color:#455a50; }
 .capture-success { max-width:720px; padding-top:48px; text-align:center; }.success-mark { width:46px; height:46px; display:grid; place-items:center; margin:0 auto 17px; border-radius:50%; color:white; background:#42765f; font-size:20px; }.capture-success .capture-lede { margin:0 auto; }.update-receipt { margin:27px 0 18px; text-align:left; background:white; border:1px solid var(--line); border-radius:14px; overflow:hidden; box-shadow:var(--shadow); }.update-receipt article { display:grid; grid-template-columns:31px 1fr auto; align-items:center; gap:11px; padding:14px 17px; border-bottom:1px solid #eceeeb; }.update-receipt article:last-child { border-bottom:0; }.update-receipt article > span { width:29px; height:29px; display:grid; place-items:center; border-radius:8px; background:#e8f0eb; color:#3e6b57; }.update-receipt strong { font-size:9px; }.update-receipt p { margin:3px 0 0; color:#7f8984; font-size:8px; }.update-receipt b { padding:4px 7px; border-radius:20px; background:#e4f1e9; color:#347054; font-size:7px; }.success-actions { display:flex; justify-content:center; gap:8px; }.success-actions a, .success-actions button { padding:10px 13px; border:1px solid #dbe0dc; border-radius:9px; background:white; font-size:9px; cursor:pointer; }.success-actions .capture-primary { background:var(--green); border-color:var(--green); color:white; }
 
+/* AI Meeting Notes (docs/AI-HANDOFF.md, "Voice Dictation and AI Meeting
+   Notes"). Sized in rem/standard px from the start (not this file's older
+   7-10px mobile-first + desktop-media-query pattern used above) since this
+   page is new and mobile-first dictation usability is the explicit
+   priority -- large, legible fields and controls at every width without
+   needing a separate breakpoint override. */
+.meeting-notes-page { max-width:760px; margin:0 auto; padding-bottom:40px; }
+.meeting-notes-header h1 { margin:10px 0 6px; font-family:Georgia, serif; }
+.meeting-notes-card { margin-bottom:18px; padding:20px; background:white; border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); }
+.meeting-notes-card h2 { margin:0 0 6px; font-size:16px; color:var(--ink); }
+.meeting-notes-hint { margin:0 0 12px; color:var(--muted); font-size:13px; }
+.meeting-notes-card label { margin-top:14px; }
+.meeting-notes-card label:first-of-type { margin-top:0; }
+.meeting-notes-card textarea, .meeting-notes-card input[type="text"], .meeting-notes-card input[type="date"], .meeting-notes-card select {
+  width:100%; margin-top:5px; padding:11px 12px; border:1px solid #d8dfda; border-radius:9px; background:#fff; color:var(--ink); font:inherit; font-size:15px; outline:0;
+}
+.meeting-notes-card textarea { resize:vertical; line-height:1.55; }
+.meeting-notes-card textarea:focus, .meeting-notes-card input:focus, .meeting-notes-card select:focus { border-color:#7f9f8f; box-shadow:0 0 0 3px rgba(93,138,116,.12); }
+.meeting-notes-transcript { font-size:17px; line-height:1.65; }
+.meeting-notes-meta-row { display:flex; gap:16px; margin-top:16px; flex-wrap:wrap; }
+.meeting-notes-meta-row > div { flex:1 1 180px; }
+.meeting-notes-organize-button { margin-top:16px; width:100%; min-height:48px; border:0; border-radius:10px; background:var(--green); color:white; font-size:15px; font-weight:650; cursor:pointer; }
+.meeting-notes-organize-button:disabled { background:#c8d1cc; cursor:not-allowed; }
+.meeting-notes-notice { margin:10px 0 0; padding:10px 12px; border-radius:9px; background:var(--green-soft); color:#2d5544; font-size:13px; }
+.meeting-notes-followups { list-style:none; margin:0 0 10px; padding:0; display:grid; gap:8px; }
+.meeting-notes-followup-row { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; }
+.meeting-notes-followup-row input[type="checkbox"] { width:20px; height:20px; }
+.meeting-notes-followup-row input[type="date"] { width:150px; }
+.meeting-notes-followup-row button { border:0; background:transparent; color:#a1533a; font-size:16px; cursor:pointer; padding:6px; }
+.meeting-notes-actions { display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-top:6px; }
+.meeting-notes-cancel { color:var(--muted); font-size:14px; }
+.meeting-notes-actions .capture-save { width:auto; min-height:48px; padding:0 24px; margin-top:0; }
+@media (max-width: 640px) {
+  .meeting-notes-followup-row { grid-template-columns:auto 1fr; }
+  .meeting-notes-followup-row input[type="date"] { width:100%; grid-column:2; }
+  .meeting-notes-actions { flex-direction:column-reverse; align-items:stretch; }
+  .meeting-notes-actions .capture-save { width:100%; }
+}
+
 .assistant-page { min-height: calc(100vh - 120px); display: grid; grid-template-rows: auto auto auto 1fr auto; }
 .assistant-hero { text-align: center; padding: 54px 20px 25px; }.assistant-hero .ai-orb { margin: auto auto 17px; width: 44px; height: 44px; }.assistant-hero h1 { margin-bottom: 8px; }.assistant-hero p { color: var(--muted); font-size: 13px; }
 .assistant-experience { display:contents; }

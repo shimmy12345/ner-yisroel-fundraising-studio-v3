@@ -85,5 +85,19 @@ declare module "cloudflare:workers" {
     // local dev) -- callers must treat that as "unavailable", never
     // "healthy".
     STATUS_WORKER?: Fetcher;
+    // AI Meeting Notes "Organize Notes" (docs/AI-HANDOFF.md, "Voice
+    // Dictation and AI Meeting Notes"). A Cloudflare Worker *secret*
+    // (`wrangler secret put`), never a `vars` entry -- must never appear
+    // in this repo, a wrangler config file, or any log line. Absent means
+    // AI organization is simply unavailable (callers must treat that as
+    // "unavailable", never attempt a call, and let the fundraiser save
+    // notes manually instead) -- this is the deliberate state on every
+    // environment until the owner separately approves activating real,
+    // paid Anthropic API usage.
+    ANTHROPIC_API_KEY?: string;
+    // A `vars` entry (not a secret) -- the Claude model id to use for
+    // Organize Notes, configurable without a code change. Absent falls
+    // back to lib/meeting-notes/organize.ts's own DEFAULT_ANTHROPIC_MODEL.
+    ANTHROPIC_MODEL?: string;
   };
 }
