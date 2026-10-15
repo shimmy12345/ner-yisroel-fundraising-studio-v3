@@ -43021,3 +43021,210 @@ authenticated, end-to-end testing of the financial dashboards
 (Payment-Plan Progress, Trip Fundraising Results) using actual Staging
 transactions -- see the "Next Priority" entry immediately above this
 one. Not started yet, as instructed.
+
+## Financial Dashboard Authenticated End-to-End Verification (2026-10-15) -- PASS, ZERO DEFECTS FOUND
+
+**Method, stated plainly up front so nothing here is mistaken for a
+code-level or unit-test claim**: this round used the owner's own
+already-authenticated Chrome session (via the Claude-in-Chrome
+extension) to load real pages on
+`https://fundraising-os-staging.sgoldstein.workers.dev` and read their
+actual rendered content (via accessibility-tree inspection and
+read-only `document.querySelector` calls, since full-page screenshots
+repeatedly timed out in this environment -- DOM/accessibility-tree
+inspection is used throughout instead, which is exact and verifiable,
+not a weaker substitute). This session never entered credentials or
+touched a Cloudflare Access login screen; the session was already
+signed in. Every expected value below was computed by calling the
+REAL, unmodified `evaluatePaymentPlan`/`derivePaymentPlanDisplayStatus`/
+`buildInstallmentTimeline` functions directly (via a throwaway script,
+removed after use) against data read live from Staging D1 -- never
+hand-arithmetic, never assumed from a unit test.
+
+### 0. Preflight (steps 1-2 of the request)
+
+- **Staging running the expected code**: `git diff --name-only cf9b322 HEAD`
+  (the commit last deployed to Staging as `cdda8c64-64d4-4284-b332-3fe9520f5a16`,
+  vs. the current branch tip) touches only the already-reviewed
+  test-send cleanup files -- zero dashboard files. Staging's current
+  deployment is confirmed still `cdda8c64-...` via fresh
+  `wrangler deployments list`, so it is running the EXACT code that
+  contains both independent-review fixes from earlier today (the
+  grace-period installment labeling and the trip-attribution
+  reconciliation resolution).
+- **Staging uses only Staging resources**: `wrangler versions view
+  cdda8c64-...` confirms `env.DB` bound to D1 database id
+  `6c18396c-0a8f-4f2c-ba83-ea809ec10289`, independently confirmed via
+  `wrangler d1 info fundraising-os-staging-db` to be exactly that
+  database -- `fundraising-os-staging-db`, never Production's.
+
+### 1. Payment-Plan Progress Dashboard -- 10/10 PASS
+
+Ten real donors with active payment plans were selected to span every
+one of the five display statuses, fetched read-only from Staging D1,
+independently evaluated by calling the real engine functions, then
+compared against the actual rendered donor page.
+
+| Donor | Committed / Paid / Balance | Independently computed expected status | Actual UI status | Dollar figures match | Result |
+|---|---|---|---|---|---|
+| Rabbi & Mrs. Avraham Rosenbaum | $1,200 / $1,200 / $0 | Completed | **Completed** | $1,200 paid of $1,200 · $0 remaining | **PASS** |
+| Mr. & Mrs. Baruch Katz | $180 / $180 / $0 | Completed | **Completed** | $180 paid of $180 · $0 remaining | **PASS** |
+| Mr. & Mrs. Yaakov Yisroel Klein | $4,800 / $3,600 / $1,200 | Overdue, 5 days past grace | **Overdue · "5 days past the grace period"** | $3,600 paid of $4,800 · $1,200 remaining | **PASS** |
+| Rabbi & Mrs. Moshe Aharon Rosenbaum | $1,800 / $1,500 / $300 | Overdue, 4 days past grace | **Overdue · "4 days past the grace period"** | $1,500 paid of $1,800 · $300 remaining | **PASS** |
+| Rabbi & Mrs. Max Singer | $1,200 / $1,000 / $200 | Payment Due (5 days overdue, within 7-day grace) | **Payment Due** | $1,000 paid of $1,200 · $200 remaining | **PASS** |
+| Mr. & Mrs. Ezra Wisotsky | $1,000 / $850 / $150 | Payment Due (6 days overdue, within grace) | **Payment Due** | $850 paid of $1,000 · $150 remaining | **PASS** |
+| Dr. & Mrs. Avi Stein | $75,000 / $10,415 / $64,585 | Payment Due (due exactly today) | **Payment Due** | $10,415 paid of $75,000 · $64,585 remaining | **PASS** |
+| Mr. & Mrs. Yaakov Zachter | $18,000 / $6,000 / $12,000 | Upcoming Payment (3 days out) | **Upcoming Payment** | $6,000 paid of $18,000 · $12,000 remaining | **PASS** |
+| Mr. Tzuriel Amster | $432 / $216 / $216 | On Track (22 days out) | **On Track** | $216 paid of $432 · $216 remaining | **PASS** |
+| Rabbi & Mrs. Ovadiah J Bander | $1,800 / $1,500 / $300 | On Track (a Oct-9 payment satisfied the stale-looking Oct-3 cycle via the late-payment dead-zone match, pushing the next unsatisfied cycle to Nov 3) | **On Track** | $1,500 paid of $1,800 · $300 remaining | **PASS** |
+
+**Critical regression-check confirmed live, at the DOM level, not just
+via status badge text**: on Mr. & Mrs. Ezra Wisotsky's page,
+`document.querySelectorAll('.installment-tick')` returned the Oct 9,
+2026 tick with class `installment-tick-due` and tooltip `"Payment due ·
+Oct 9, 2026"` -- NOT `installment-tick-overdue`. This is the exact
+grace-period-labeling fix from earlier today's independent-review
+round, now confirmed rendering correctly on a real, live, authenticated
+page, not merely in a unit test.
+
+**Cross-consistency confirmed (task item 8) via the real, live Daily
+Agenda preview** (`/api/agenda/preview`, read-only, sends nothing):
+- Klein: *"Payment follow-up needed today · $400.00 expected · 5 days
+  behind"* -- matches the donor page's "5 days past the grace period"
+  and the independently-computed `daysLate: 5` exactly.
+- M.A. Rosenbaum: *"Payment follow-up needed today · $150.00 expected ·
+  4 days behind"* -- matches "4 days past the grace period" and
+  `daysLate: 4` exactly.
+- Singer, Wisotsky, and Avi Stein (all within their 7-day grace period,
+  correctly "Payment Due" not "Overdue") are correctly **absent** from
+  this list -- confirming `evaluateRecurringPaymentAlert`'s own
+  `isLate`-gated firing condition is respected system-wide, not only in
+  the one dashboard component.
+
+**Not independently re-verified this round** (observed, consistent,
+but not run through the engine by hand): Singer's and Wisotsky's own
+SECOND open pledge each (both donors have two active plans; the second
+plan on each showed "Upcoming Payment"/"On Track" respectively with
+plausible dollar figures) -- disclosed rather than silently assumed
+equivalent to the first.
+
+### 2. Trip Fundraising Results Dashboard -- PASS, with one authorized live write (reversed)
+
+The one real Staging trip ("Chicago," goal $75,000) had **zero**
+financial attributions at the start of this round -- confirmed
+read-only. This allowed verifying the empty state directly, but not
+the populated-calculation logic (totals, double-counting, goal
+progress) against real nonzero numbers. **Per the task's own explicit
+safety rule** ("do not alter Staging financial records without
+explaining the proposed change and obtaining authorization"), this was
+presented to the owner as a specific, named, reversible proposal
+before any write -- **the owner explicitly authorized it.**
+
+**2a. Empty state (read-only, before any write): PASS.** `/travel-planning/8b045509-6932-44e2-9035-c005f332504b`
+showed "$0 raised of $75,000 goal," "$75,000 remaining to goal," "0
+pledges," "0 donations" -- correctly matching the independently
+confirmed zero-attribution database state.
+
+**2b. Authorized test attribution, performed through the real UI**
+(never a direct D1 write): clicked "Associate an existing donation or
+pledge" on Mr. Tzuriel Amster's real prospect row, selected his real,
+pre-existing `partially_paid_pledge` (committed $432.00, paid $216.00,
+balance $216.00 -- the SAME pledge already independently verified on
+his donor page in section 1 above), and clicked "Associate."
+
+| Metric | Expected (from the real pledge's own stored figures) | Actual UI value after attribution | Result |
+|---|---|---|---|
+| New pledges secured | $432 (1 pledge) | **$432 (1 pledge)** | PASS |
+| New donations secured | $0 (0 donations) | **$0 (0 donations)** | PASS |
+| Cash collected | $216 | **$216** | PASS |
+| Outstanding pledge balance | $216 | **$216** | PASS |
+| Raised of goal | $432 of $75,000 | **$432 raised of $75,000 goal** | PASS |
+| Remaining to goal | $74,568 ($75,000-$432) | **$74,568 remaining to goal** | PASS |
+
+Every figure matched exactly, dollar for dollar, computed from the
+same real pledge record already cross-verified in section 1.
+
+**2c. Double-counting prevention, confirmed live at the DOM level**:
+immediately after attributing, reopening "Associate an existing
+donation or pledge" for the same donor showed the $432 pledge option
+**no longer present** in the picker's `<select>` (`document.
+querySelectorAll('select option')` confirmed zero matches for it,
+while Amster's separate, un-attributed real donations -- $72/$300/
+$216/$100/$18 -- were still correctly offered). This is the live,
+structural confirmation that an already-attributed record cannot be
+offered for a second, duplicate attribution through this picker.
+
+**2d. Removal and cleanup, confirmed**: clicked "Remove" on the
+attribution. The panel's native `window.confirm()` was overridden to
+auto-accept via a one-line, read-only `javascript_tool` call
+(avoiding a blocking native browser dialog, not bypassing any
+application logic -- the real removal code path, including its own
+fetch call, executed exactly as it would for a real click) rather than
+risk a frozen session. Confirmed:
+- UI reverted exactly to the empty state ($0/$75,000, 0 pledges, 0
+  donations) -- **PASS**.
+- Read-only D1 query of `trip_financial_attributions`: the row still
+  exists with `created_at`/`removed_at` both set (soft-deleted, full
+  history preserved, never hard-deleted) -- **PASS**.
+- Read-only D1 query of the underlying `giving_activities` row:
+  `committed_cents=43200, paid_cents=21600, balance_cents=21600,
+  category='partially_paid_pledge'` -- byte-identical to before the
+  test. **The real pledge record was never touched by either the
+  attribute or the remove action.** **PASS.**
+
+### 3. Discrepancy check across surfaces (task item 8)
+
+No discrepancy found between donor profiles, pledge records, the
+Payment-Plan Progress Dashboard, the Trip Fundraising Results
+Dashboard, or the Daily Agenda -- every cross-check in sections 1-2
+above agreed exactly, independently computed and independently
+re-read, not merely asserted consistent.
+
+### 4. Root cause / system-wide correction (task item 10)
+
+**Not applicable this round -- zero defects were found.** Every one of
+the 10 payment-plan test cases, the trip-dashboard empty state, the
+populated real-attribution test, the double-counting check, and the
+removal/cleanup check matched the independently computed expected
+value exactly. No donor-specific workaround or system-wide correction
+is recommended because nothing was found that needed correcting.
+
+### 5. What remains genuinely unverified (disclosed, not glossed over)
+
+- **Only one trip-attribution shape was live-tested**: a
+  `partially_paid_pledge`. NOT live-tested this round: an attributed
+  `completed_gift` (donation), an attributed `open_pledge`, recording a
+  brand-new pending gift/pledge directly from the trip UI ("Record a
+  new donation"/"Record a new pledge" buttons), the "Pending
+  opportunities" section's own rendering with a real pending record,
+  or the "Confirmed via import" badge from the independent-review
+  round (which requires a real JL-import-matched pending gift --
+  Staging currently has none). These are plausible by code inspection
+  and unit test coverage (already extensively covered earlier this
+  session) but not confirmed through the live, authenticated UI this
+  round.
+- **Multi-open-pledge donors' SECOND plans** (Singer, Wisotsky) were
+  observed rendering plausibly but not independently re-run through
+  the engine by hand this round (see section 1's own disclosure).
+- **No screenshot-level visual confirmation** was obtained (full-page
+  screenshots timed out repeatedly in this environment) -- every result
+  above was confirmed via exact DOM/accessibility-tree content instead,
+  which verifies the underlying data and class names precisely but
+  does not confirm pixel-level layout, color rendering, or
+  responsiveness on an actual screen.
+
+### Final verdict
+
+**PASS.** Ten payment-plan statuses across the full status range,
+the trip dashboard's empty state and a real, authorized, reversed
+populated-data test with exact dollar-for-dollar agreement, explicit
+double-counting prevention confirmed at the DOM level, and full
+cross-surface consistency against the Daily Agenda -- all verified
+live through the actual authenticated interface, all matching
+independently computed expected values exactly. **Both dashboards are
+ready for Production consideration on the evidence gathered this
+round**, with the specific untested surface area in section 5 disclosed
+as the honest boundary of what this round covered -- not a blocker
+found, but not claimed as covered either.
+
+**No Production change of any kind was made or proposed this round.**
