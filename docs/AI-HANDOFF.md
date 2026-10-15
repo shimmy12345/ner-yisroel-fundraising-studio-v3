@@ -44852,3 +44852,82 @@ synthetic/mocked data, and waiting only on the above.
 usage, or branch merge occurred this round. Awaiting the owner's
 separate authorization for Production deployment and/or real AI
 activation.**
+
+## Activate and Test AI Meeting Notes on Staging (2026-10-15) -- IN PROGRESS, STOPPED FOR OWNER AUTHORIZATION BEFORE ACTIVATION
+
+Two pieces of this round are complete and committed; real AI
+activation itself has not been authorized yet and nothing Anthropic-
+related has been created or configured.
+
+### Completed: the idempotency nuance an independent review raised
+
+**Question investigated**: could a retry of a meeting-notes save be
+incorrectly rejected if its follow-up had, in the meantime, been
+completed or edited (rescheduled) elsewhere via the existing Daily
+Agenda actions?
+
+**Finding, verified directly against the real route files (`app/api/
+recommendations/[id]/complete/route.ts`, `.../reschedule/route.ts`),
+not assumed**: **no code change is necessary.**
+- `complete()` only ever writes `status`/`updated_at` -- never `action`
+  or `due_at`, the only two fields the idempotency comparison
+  (`followUpListsMatch`) inspects. A retry of the original save after
+  the follow-up was completed elsewhere therefore still matches
+  exactly and correctly succeeds as a safe, no-op replay (`200`) --
+  and, just as important, never reopens/reactivates the completed
+  task, since a replay never writes anything at all.
+- `reschedule()` does change `due_at`. A stale retry carrying the
+  *old* due date after a deliberate reschedule correctly gets rejected
+  (`409`) rather than silently overwriting the reschedule back to the
+  old value -- which is the protective behavior this design is
+  supposed to have, not a false rejection of anything genuinely
+  identical. A request whose content has been updated to match what
+  is now actually on file (the normal case in the real app, since
+  reloading the Meeting Notes page mints a fresh idempotency key)
+  correctly succeeds as a replay.
+
+**Commit `4966678`**: added two regression tests to `tests/meeting-
+notes-idempotency.test.mjs` proving both outcomes exactly, using local
+mirrors of each real route's own `UPDATE` statement (copied verbatim
+from the actual files, not reimplemented, before writing the mirror).
+`node scripts/run-tests.mjs` -> 202/202 passed (same count as before --
+tests added to an already-registered file); `npx tsc --noEmit` ->
+clean. No Staging deployment was needed for this piece (pure test
+addition, no application code changed).
+
+### Completed: Anthropic model/pricing/privacy re-verification
+
+Re-confirmed directly against `platform.claude.com` (same findings as
+the prior round, re-checked): model id `claude-haiku-5-5` valid and
+current; pricing $0.10/$0.50 per million input/output tokens for
+prompts under 100K tokens (always true for this feature's capped
+input); no training on API inputs/outputs by default; standard 30-day
+backend auto-deletion of prompts/outputs, narrow exceptions for abuse
+monitoring and legal requirements. **Confirmed via `wrangler secret
+list --config wrangler.staging.jsonc` (names only, values are
+write-only and were never requested): no `ANTHROPIC_API_KEY` exists on
+Staging today** -- exactly the expected, unconfigured starting state.
+
+### Stopped here: Anthropic account setup is the owner's own action
+
+Per this round's explicit instruction, **no Anthropic account, API
+key, credit purchase, or usage alert was created or configured** --
+these are the owner's own actions, done personally, never by pasting a
+key into Claude Code, a chat, GitHub, or any file. The guidance for
+each is in the chat reply accompanying this entry, not duplicated here
+since it contains no secret or decision that needs to persist in this
+file. In summary: the Claude Console (`console.anthropic.com`) is a
+separate product/login from claude.ai and from however Claude Code
+itself is configured, with its own prepaid-credit billing; a new API
+key is created there, copied once, and only ever pasted directly into
+`wrangler secret put ANTHROPIC_API_KEY` run by the owner in their own
+terminal -- never relayed through this session.
+
+**Next step requires the owner's explicit authorization**: once the
+Anthropic account/key/credits/spend-alert are set up and the owner has
+reviewed Anthropic's current Commercial Terms/DPA personally, their
+separate "activate" confirmation is what starts Phase 2 (configuring
+the secret on Staging only) and Phase 3 (real AI testing with
+synthetic donor conversations) from the originating request. Neither
+has started. No Production action, no paid Anthropic usage, and no
+branch merge has occurred.
