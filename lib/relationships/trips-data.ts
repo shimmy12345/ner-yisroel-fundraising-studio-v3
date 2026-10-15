@@ -1,0 +1,351 @@
+// Trip-Based Meeting Planning -- Phase 2 (2026-10-15, see docs/AI-HANDOFF.md).
+// The one D1-touching module for this feature, matching the established
+// split (lib/relationships/meeting-brief.ts vs. meeting-brief-model.ts):
+// every rule/validation/status-string decision lives in the pure
+// trip-model.ts; this file only ever reads/writes D1 and calls that pure
+// logic, same convention app/api/asks/route.ts and meeting-brief.ts both
+// already follow.
+
+import { env } from "cloudflare:workers";
+import { loadMeetingBrief } from "./meeting-brief.ts";
+import { regionsForCityState, travelRegionById, type TravelRegionId } from "./travel-regions.ts";
+import {
+  buildSuggestionSnapshot, findCrossTripConflicts, findNewlyMatchingDonors,
+  statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
+  tripMeetingInteractionId, tripScheduledInteractionSource,
+  type AddedMethod, type CrossTripConflict, type RegionCandidateDonor, type TripProspectStatus, type TripStatus,
+} from "./trip-model.ts";
+
+// A deliberately small, fixed concurrency limit for the one-time,
+// trip-creation auto-suggestion fan-out (Section B): the largest single
+// approved region today (Baltimore & Maryland suburbs, 57 real donors --
+// see docs/AI-HANDOFF.md's Phase 1 audit) would otherwise issue ~57
+// concurrent loadMeetingBrief() calls, each itself ~14 parallel D1
+// queries -- conservative batching avoids relying on D1's own concurrent-
+// connection ceiling for a single Worker invocation. This is the only
+// place in this module that needs it; every other operation here touches
+// at most one donor.
+async function mapWithConcurrencyLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+type DonorRow = { id: string; display_name: string; city: string | null; state: string | null };
+
+async function liveOwnedDonors(userId: string): Promise<DonorRow[]> {
+  const result = await env.DB.prepare("SELECT id, display_name, city, state FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(userId).all<DonorRow>();
+  return result.results;
+}
+
+export type TripListItem = { id: string; name: string; destinationRegionLabel: string | null; startDate: number; endDate: number; status: TripStatus; prospectCount: number };
+
+export async function listTrips(userId: string): Promise<TripListItem[]> {
+  const result = await env.DB.prepare(`SELECT t.id, t.name, t.destination_region_label, t.start_date, t.end_date, t.status,
+      (SELECT COUNT(*) FROM trip_prospects WHERE trip_id = t.id) AS prospect_count
+    FROM trips t WHERE t.owner_user_id = ? ORDER BY t.start_date DESC`).bind(userId).all<{ id: string; name: string; destination_region_label: string | null; start_date: number; end_date: number; status: TripStatus; prospect_count: number }>();
+  return result.results.map((row) => ({ id: row.id, name: row.name, destinationRegionLabel: row.destination_region_label, startDate: row.start_date, endDate: row.end_date, status: row.status, prospectCount: row.prospect_count }));
+}
+
+export type CreateTripInput = { name: string; destinationRegionId: TravelRegionId | null; startDate: number; endDate: number; goalCents: number | null; notes: string | null };
+
+// Creates the trip row, then (when a destination region was chosen)
+// auto-populates trip_prospects for every live, owned, non-archived
+// donor currently matching it -- via regionsForCityState(), the EXACT
+// same function the donor directory's own Travel Region filter uses,
+// never a reimplementation. Each prospect's suggested_reason/
+// suggested_score/suggested_generated_at is a snapshot of the real,
+// unmodified loadMeetingBrief()'s own `.recommendation` at this exact
+// moment -- never a separate trip-prioritization score. This is the
+// ONLY place this auto-population ever runs; a donor added to the region
+// afterward is surfaced only via findNewlyMatchingProspects() below,
+// never inserted here automatically.
+export async function createTrip(userId: string, input: CreateTripInput, timezone: string, now: number): Promise<{ tripId: string; autoAddedCount: number }> {
+  const tripId = crypto.randomUUID();
+  const region = input.destinationRegionId ? travelRegionById(input.destinationRegionId) : null;
+  await env.DB.prepare(`INSERT INTO trips (id, owner_user_id, name, destination_region_id, destination_region_label, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planning', ?, ?)`)
+    .bind(tripId, userId, input.name, region?.id ?? null, region?.label ?? null, input.startDate, input.endDate, input.goalCents, input.notes, now, now).run();
+
+  if (!region) return { tripId, autoAddedCount: 0 };
+
+  const donors = await liveOwnedDonors(userId);
+  const matching = donors.filter((donor) => regionsForCityState(donor.city, donor.state).includes(region.id));
+  if (matching.length === 0) return { tripId, autoAddedCount: 0 };
+
+  const briefs = await mapWithConcurrencyLimit(matching, 8, (donor) => loadMeetingBrief(userId, donor.id, timezone, now));
+  const statements = matching.map((donor, index) => {
+    const snapshot = buildSuggestionSnapshot(briefs[index]?.recommendation ?? null, now);
+    return env.DB.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, suggested_reason, suggested_score, suggested_generated_at, created_at, updated_at)
+        VALUES (?, ?, ?, 'auto_region', 'not_contacted', ?, ?, ?, ?, ?)`)
+      .bind(crypto.randomUUID(), tripId, donor.id, snapshot.reason, snapshot.score, snapshot.generatedAt, now, now);
+  });
+  await env.DB.batch(statements);
+  return { tripId, autoAddedCount: matching.length };
+}
+
+export type TripRecord = { id: string; name: string; destinationRegionId: TravelRegionId | null; destinationRegionLabel: string | null; startDate: number; endDate: number; goalCents: number | null; notes: string | null; status: TripStatus; createdAt: number; updatedAt: number };
+
+export async function getTrip(userId: string, tripId: string): Promise<TripRecord | null> {
+  const row = await env.DB.prepare(`SELECT id, name, destination_region_id, destination_region_label, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at
+      FROM trips WHERE id = ? AND owner_user_id = ?`).bind(tripId, userId)
+    .first<{ id: string; name: string; destination_region_id: string | null; destination_region_label: string | null; start_date: number; end_date: number; fundraising_goal_cents: number | null; notes: string | null; status: TripStatus; created_at: number; updated_at: number }>();
+  if (!row) return null;
+  return { id: row.id, name: row.name, destinationRegionId: row.destination_region_id as TravelRegionId | null, destinationRegionLabel: row.destination_region_label, startDate: row.start_date, endDate: row.end_date, goalCents: row.fundraising_goal_cents, notes: row.notes, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+
+export type TripProspectRecord = {
+  id: string; donorId: string; donorDisplayName: string; donorCity: string | null; donorState: string | null;
+  addedMethod: AddedMethod; status: TripProspectStatus;
+  suggestedReason: string | null; suggestedScore: number | null; suggestedGeneratedAt: number | null;
+  manualRank: number | null; meetingAt: number | null; meetingLocation: string | null; nextAction: string | null; trip_notes: string | null;
+  linkedInteractionId: string | null; crossTripConflicts: CrossTripConflict[];
+};
+
+export async function listTripProspects(userId: string, tripId: string): Promise<TripProspectRecord[]> {
+  const prospectRows = await env.DB.prepare(`SELECT tp.id, tp.donor_id, d.display_name AS donor_display_name, d.city AS donor_city, d.state AS donor_state,
+        tp.added_method, tp.status, tp.suggested_reason, tp.suggested_score, tp.suggested_generated_at, tp.manual_rank,
+        tp.meeting_at, tp.meeting_location, tp.next_action, tp.trip_notes, tp.linked_interaction_id
+      FROM trip_prospects tp JOIN donors d ON d.id = tp.donor_id
+      WHERE tp.trip_id = ? AND d.owner_user_id = ?
+      ORDER BY (tp.manual_rank IS NULL), tp.manual_rank, tp.suggested_score IS NULL, tp.suggested_score DESC, d.display_name`)
+    .bind(tripId, userId).all<{
+      id: string; donor_id: string; donor_display_name: string; donor_city: string | null; donor_state: string | null;
+      added_method: AddedMethod; status: TripProspectStatus; suggested_reason: string | null; suggested_score: number | null; suggested_generated_at: number | null;
+      manual_rank: number | null; meeting_at: number | null; meeting_location: string | null; next_action: string | null; trip_notes: string | null; linked_interaction_id: string | null;
+    }>();
+  if (prospectRows.results.length === 0) return [];
+
+  const donorIds = [...new Set(prospectRows.results.map((row) => row.donor_id))];
+  // Cross-trip conflicts (Section C): every OTHER trip's prospect row for
+  // any donor on THIS trip, across every one of this owner's trips --
+  // one query, not one per prospect.
+  const conflictRows = await env.DB.prepare(`SELECT tp.donor_id, tp.trip_id, t.name AS trip_name, tp.status, tp.meeting_at
+      FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
+      WHERE t.owner_user_id = ? AND tp.trip_id != ? AND tp.donor_id IN (${donorIds.map(() => "?").join(",")})`)
+    .bind(userId, tripId, ...donorIds).all<{ donor_id: string; trip_id: string; trip_name: string; status: TripProspectStatus; meeting_at: number | null }>();
+  const rowsByDonor = new Map<string, Array<{ tripId: string; tripName: string; status: TripProspectStatus; meetingAt: number | null }>>();
+  for (const row of conflictRows.results) {
+    const list = rowsByDonor.get(row.donor_id) ?? [];
+    list.push({ tripId: row.trip_id, tripName: row.trip_name, status: row.status, meetingAt: row.meeting_at });
+    rowsByDonor.set(row.donor_id, list);
+  }
+  // The SQL above already excludes this trip's own rows (`tp.trip_id !=
+  // ?`), but findCrossTripConflicts() still takes `excludeTripId`
+  // explicitly -- the one real filtering decision (which STATUSES count
+  // as a conflict) stays in the pure, unit-tested function, never
+  // duplicated here.
+  const conflictsByDonor = new Map<string, CrossTripConflict[]>([...rowsByDonor.entries()].map(([donorId, rows]) => [donorId, findCrossTripConflicts(rows, tripId)]));
+
+  return prospectRows.results.map((row) => ({
+    id: row.id, donorId: row.donor_id, donorDisplayName: row.donor_display_name, donorCity: row.donor_city, donorState: row.donor_state,
+    addedMethod: row.added_method, status: row.status, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
+    manualRank: row.manual_rank, meetingAt: row.meeting_at, meetingLocation: row.meeting_location, nextAction: row.next_action, trip_notes: row.trip_notes,
+    linkedInteractionId: row.linked_interaction_id, crossTripConflicts: conflictsByDonor.get(row.donor_id) ?? [],
+  }));
+}
+
+// Section C's "new prospects available" panel -- always computed live,
+// never cached/materialized, and NEVER inserted into trip_prospects on
+// its own. A donor is offered here the moment they exist in `donors`
+// and match the trip's region AND are not already tracked on this trip
+// -- whether they are brand new, just imported, or just had their
+// address corrected, with no backfill or migration step of any kind.
+export async function findNewlyMatchingProspects(userId: string, tripId: string): Promise<RegionCandidateDonor[]> {
+  const trip = await getTrip(userId, tripId);
+  if (!trip?.destinationRegionId) return [];
+  const [donors, trackedRows] = await Promise.all([
+    liveOwnedDonors(userId),
+    env.DB.prepare("SELECT donor_id FROM trip_prospects WHERE trip_id = ?").bind(tripId).all<{ donor_id: string }>(),
+  ]);
+  const tracked = new Set(trackedRows.results.map((row) => row.donor_id));
+  const candidates: RegionCandidateDonor[] = donors.map((donor) => ({ id: donor.id, displayName: donor.display_name, city: donor.city, state: donor.state }));
+  return findNewlyMatchingDonors(candidates, trip.destinationRegionId, tracked);
+}
+
+export type AddProspectResult = { ok: true; prospectId: string } | { ok: false; reason: "donor_not_found" | "already_on_trip" };
+
+// Manual add (Section C) -- also used to pull a donor in from the
+// "newly matching" panel above, via the SAME explicit, one-at-a-time
+// action; never auto-inserted. Computes the SAME suggestion snapshot a
+// freshly-added donor would get via loadMeetingBrief() regardless of
+// addedMethod -- it is still real, current CRM evidence either way; only
+// `added_method` itself records how the donor was added.
+export async function addManualProspect(userId: string, tripId: string, donorId: string, addedMethod: AddedMethod, timezone: string, now: number): Promise<AddProspectResult> {
+  const donor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(donorId, userId).first<{ id: string }>();
+  if (!donor) return { ok: false, reason: "donor_not_found" };
+  const existing = await env.DB.prepare("SELECT id FROM trip_prospects WHERE trip_id = ? AND donor_id = ?").bind(tripId, donorId).first<{ id: string }>();
+  if (existing) return { ok: false, reason: "already_on_trip" };
+
+  const brief = await loadMeetingBrief(userId, donorId, timezone, now);
+  const snapshot = buildSuggestionSnapshot(brief?.recommendation ?? null, now);
+  const prospectId = crypto.randomUUID();
+  try {
+    await env.DB.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, suggested_reason, suggested_score, suggested_generated_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'not_contacted', ?, ?, ?, ?, ?)`)
+      .bind(prospectId, tripId, donorId, addedMethod, snapshot.reason, snapshot.score, snapshot.generatedAt, now, now).run();
+  } catch {
+    // UNIQUE(trip_id, donor_id) caught a race (two concurrent adds for
+    // the same donor) that the pre-check above missed -- structurally
+    // impossible to double-insert, matching every other UNIQUE-
+    // constraint-as-the-real-guarantee pattern in this app.
+    return { ok: false, reason: "already_on_trip" };
+  }
+  return { ok: true, prospectId };
+}
+
+// Removal (Section C): deletes only the trip_prospects row. Deliberately
+// never touches the donor record, interactions, or any other trip's own
+// prospect rows -- the owner's own explicit "without changing their CRM
+// records" instruction. If the removed prospect had a real scheduled
+// meeting (linked_interaction_id set, not yet completed), that
+// interaction is left exactly as it is; cancelling an actual meeting is
+// a status decision (see updateProspectStatus below), never an implicit
+// side effect of removing it from this trip's list.
+export async function removeProspect(userId: string, tripId: string, prospectId: string): Promise<boolean> {
+  const result = await env.DB.prepare(`DELETE FROM trip_prospects WHERE id = ? AND trip_id = ? AND trip_id IN (SELECT id FROM trips WHERE owner_user_id = ?)`)
+    .bind(prospectId, tripId, userId).run() as unknown as { meta: { changes?: number } };
+  return (result.meta.changes ?? 0) > 0;
+}
+
+type ExistingProspect = { id: string; donorId: string; status: TripProspectStatus; linkedInteractionId: string | null };
+
+async function ownedProspect(userId: string, tripId: string, prospectId: string): Promise<ExistingProspect | null> {
+  const row = await env.DB.prepare(`SELECT tp.id, tp.donor_id, tp.status, tp.linked_interaction_id
+      FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
+      WHERE tp.id = ? AND tp.trip_id = ? AND t.owner_user_id = ?`).bind(prospectId, tripId, userId)
+    .first<{ id: string; donor_id: string; status: TripProspectStatus; linked_interaction_id: string | null }>();
+  return row ? { id: row.id, donorId: row.donor_id, status: row.status, linkedInteractionId: row.linked_interaction_id } : null;
+}
+
+export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" };
+
+// A simple status move -- not_contacted/contacted/meeting_requested/
+// declined/unable_to_schedule. Never writes to `interactions` (Section
+// D's explicit "must not automatically create false donor interactions"
+// / "Contacted must not claim a completed interaction occurred"). If the
+// prospect is moving AWAY from meeting_scheduled (to any status other
+// than meeting_completed) and has a linked interaction still in its
+// scheduled state, that interaction is cancelled (wrapped with the same
+// `cancelled:` prefix the existing outcome route already uses) so it
+// stops appearing as an upcoming meeting anywhere else in the CRM --
+// directly satisfies "do not allow a cancelled or declined meeting to
+// remain incorrectly represented as upcoming".
+export async function setSimpleProspectStatus(userId: string, tripId: string, prospectId: string, nextStatus: TripProspectStatus, now: number): Promise<StatusUpdateResult> {
+  const existing = await ownedProspect(userId, tripId, prospectId);
+  if (!existing) return { ok: false, reason: "not_found" };
+  const statements = [];
+  if (existing.status === "meeting_scheduled" && nextStatus !== "meeting_completed" && existing.linkedInteractionId) {
+    const interaction = await env.DB.prepare("SELECT source FROM interactions WHERE id = ? AND user_id = ?").bind(existing.linkedInteractionId, userId).first<{ source: string }>();
+    if (interaction && !interaction.source.startsWith("capture-completed:") && !interaction.source.startsWith("cancelled:")) {
+      statements.push(env.DB.prepare("UPDATE interactions SET source = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId));
+    }
+  }
+  statements.push(env.DB.prepare("UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ?").bind(nextStatus, now, prospectId, existing.status));
+  const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
+  if ((results.at(-1)?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
+  return { ok: true };
+}
+
+// "Scheduling a meeting may create a real scheduled interaction ...
+// but only after explicit user confirmation" -- `confirmed` is the
+// caller's own explicit flag from the request body, checked by the
+// route before this is ever called; this function itself still refuses
+// to proceed without it; the real write is idempotent (deterministic
+// interaction id, ON CONFLICT DO UPDATE) so a retried request can never
+// create a second interaction for the same prospect.
+export async function scheduleProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAt: number, location: string | null, confirmed: boolean, now: number): Promise<StatusUpdateResult> {
+  if (!confirmed) return { ok: false, reason: "confirmation_required" };
+  const existing = await ownedProspect(userId, tripId, prospectId);
+  if (!existing) return { ok: false, reason: "not_found" };
+  const interactionId = tripMeetingInteractionId(prospectId);
+  const source = tripScheduledInteractionSource(tripId);
+  const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
+  const summary = `Trip meeting scheduled with ${donor?.display_name ?? "donor"}.`;
+  const statements = [
+    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at)
+        VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at`)
+      .bind(interactionId, existing.donorId, userId, meetingAt, summary, source, now, now),
+    env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
+      .bind(meetingAt, location, interactionId, now, prospectId),
+  ];
+  await env.DB.batch(statements);
+  return { ok: true };
+}
+
+// "Marking a meeting Completed must require explicit confirmation of the
+// outcome, including an actual meeting date and meaningful notes" --
+// `meetingAt`/`notes` are already validated by the caller
+// (trip-model.ts's validateMeetingCompletion) before this runs; this
+// function additionally requires the same explicit `confirmed` flag as
+// scheduling. Reuses the SAME linked interaction (upserted by id, exactly
+// like scheduling above) when one already exists from a prior "Meeting
+// Scheduled" step; creates one directly in the completed state when the
+// fundraiser jumps straight to "Meeting Completed" without having
+// scheduled it first (a real, legitimate case -- an impromptu meeting).
+export async function completeProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAt: number, notes: string, confirmed: boolean, now: number): Promise<StatusUpdateResult> {
+  if (!confirmed) return { ok: false, reason: "confirmation_required" };
+  const existing = await ownedProspect(userId, tripId, prospectId);
+  if (!existing) return { ok: false, reason: "not_found" };
+  const interactionId = existing.linkedInteractionId ?? tripMeetingInteractionId(prospectId);
+  const originalSource = tripScheduledInteractionSource(tripId);
+  const completedSource = tripCompletedInteractionSource(meetingAt, originalSource);
+  const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
+  const summary = `Trip meeting with ${donor?.display_name ?? "donor"}.\n${notes}`;
+  const statements = [
+    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at)
+        VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at`)
+      .bind(interactionId, existing.donorId, userId, meetingAt, summary, completedSource, now, now),
+    env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
+      .bind(meetingAt, interactionId, now, prospectId),
+  ];
+  await env.DB.batch(statements);
+  return { ok: true };
+}
+
+export type ProspectFieldUpdate = { tripNotes?: string | null; nextAction?: string | null; manualRank?: number | null; meetingLocation?: string | null };
+
+export async function updateProspectFields(userId: string, tripId: string, prospectId: string, update: ProspectFieldUpdate, now: number): Promise<boolean> {
+  const existing = await ownedProspect(userId, tripId, prospectId);
+  if (!existing) return false;
+  const sets: string[] = [];
+  const values: (string | number | null)[] = [];
+  if ("tripNotes" in update) { sets.push("trip_notes = ?"); values.push(update.tripNotes ?? null); }
+  if ("nextAction" in update) { sets.push("next_action = ?"); values.push(update.nextAction ?? null); }
+  if ("manualRank" in update) { sets.push("manual_rank = ?"); values.push(update.manualRank ?? null); }
+  if ("meetingLocation" in update) { sets.push("meeting_location = ?"); values.push(update.meetingLocation ?? null); }
+  if (sets.length === 0) return true;
+  sets.push("updated_at = ?");
+  values.push(now);
+  await env.DB.prepare(`UPDATE trip_prospects SET ${sets.join(", ")} WHERE id = ?`).bind(...values, prospectId).run();
+  return true;
+}
+
+export async function updateTrip(userId: string, tripId: string, update: { name?: string; status?: TripStatus; goalCents?: number | null; notes?: string | null; startDate?: number; endDate?: number }, now: number): Promise<boolean> {
+  const existing = await getTrip(userId, tripId);
+  if (!existing) return false;
+  const sets: string[] = [];
+  const values: (string | number | null)[] = [];
+  if (update.name !== undefined) { sets.push("name = ?"); values.push(update.name); }
+  if (update.status !== undefined) { sets.push("status = ?"); values.push(update.status); }
+  if (update.goalCents !== undefined) { sets.push("fundraising_goal_cents = ?"); values.push(update.goalCents); }
+  if (update.notes !== undefined) { sets.push("notes = ?"); values.push(update.notes); }
+  if (update.startDate !== undefined) { sets.push("start_date = ?"); values.push(update.startDate); }
+  if (update.endDate !== undefined) { sets.push("end_date = ?"); values.push(update.endDate); }
+  if (sets.length === 0) return true;
+  sets.push("updated_at = ?");
+  values.push(now);
+  await env.DB.prepare(`UPDATE trips SET ${sets.join(", ")} WHERE id = ? AND owner_user_id = ?`).bind(...values, tripId, userId).run();
+  return true;
+}
+
+export { statusRequiresInteraction, timezoneForState };
