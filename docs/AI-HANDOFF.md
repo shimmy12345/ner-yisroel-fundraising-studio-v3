@@ -40181,3 +40181,106 @@ No verification failed; no rollback was needed or performed.
    Focus integration remains unbuilt by design. No further feature work
    or data correction was performed under this authorization, per its
    own explicit scope.
+
+## Isolated Cleanup-Only Deployment Candidate -- Remove Temporary Test-Send Endpoint (2026-10-15) -- PREPARED, NOT MERGED, NOT DEPLOYED
+
+Prepared on a dedicated branch, `cleanup/remove-agenda-test-send-endpoint`,
+branched directly from THIS commit -- Production's own currently-deployed
+code (`cf36599e239070822716540d9fde01d1d3dfb65f`, Worker version
+`1248d048-b21f-4157-b208-7f6bcc3082a9` at the time this was prepared) --
+not from `feature/independent-cloudflare-sandbox`'s own HEAD, which
+carries unfinished Trip-Based Meeting Planning and Trip Fundraising
+Results Dashboard work that must never reach Production through this
+candidate. This file (`docs/AI-HANDOFF.md`) is deliberately this
+branch's OWN copy (Production baseline's history, unchanged by this
+entry except for this one addition) -- never merged with the much
+longer feature-branch version, so this candidate's own history stays
+self-contained and reviewable on its own.
+
+### What this removes, and why it is exclusive to the removed endpoint
+
+`app/api/agenda/test-send/route.ts`'s own header comment ("remove or
+disable this route once that verification is complete") now applies --
+the owner confirmed on 2026-10-15 that the real, naturally scheduled
+Daily Fundraising Agenda send works correctly on Production (see the
+"October 14 2026 Email Incident" entries on the canonical branch).
+Before removing anything, confirmed by direct inspection which code is
+EXCLUSIVE to this one temporary mechanism (never shared with the real
+scheduled path):
+
+- `app/api/agenda/test-send/route.ts` -- the endpoint itself.
+- `lib/agenda/test-send-log.ts` -- its one dedicated support module
+  (`TEST_SEND_CLAIM_ID`, `buildTestSendClaimQuery`/`buildTestSendCommitQuery`/
+  `buildTestSendFailureQuery`); no other file imports from it.
+- `tests/agenda-test-send-safety.test.mjs` and
+  `tests/agenda-test-send-idempotency-e2e.test.mjs` -- exist only to
+  test the two files above; once they are gone, these tests have
+  nothing left to cover.
+
+**Deliberately NOT removed, and why**: `agenda_manual_test_send_log`
+(the table itself, `drizzle/0044_agenda_manual_test_send_log.sql`,
+already applied to Production D1) is kept completely unmigrated and
+untouched -- dropping it would be a schema change, explicitly out of
+scope for this candidate, and the table is the permanent audit record
+of the mechanism's three real attempts (two 401 failures, one
+successful send) that resolved the underlying Gmail OAuth credential
+issue. `db/schema.ts`'s own comment for that table was updated to past
+tense only -- a comment edit, not a DDL change.
+
+### Verification, in this exact worktree (never pushed until this point)
+
+- `git cherry-pick --no-commit 023e847` (the exact removal commit,
+  already reviewed and merged on the canonical branch) applied onto
+  this branch's `cf36599` base with **zero conflict** on every real
+  code file; only this doc file conflicted (expected, resolved by
+  keeping this branch's own copy, as described above).
+- **Exact diff, 6 files, pure removal**: `app/api/agenda/test-send/route.ts`
+  deleted (-85), `lib/agenda/test-send-log.ts` deleted (-81),
+  `tests/agenda-test-send-idempotency-e2e.test.mjs` deleted (-162),
+  `tests/agenda-test-send-safety.test.mjs` deleted (-70),
+  `scripts/run-tests.mjs` edited (-2, the two now-deleted test files
+  removed from `TEST_FILES`), `db/schema.ts` edited (comment only,
+  +13/-8). **6 files changed, 13 insertions(+), 408 deletions(-).**
+- `pnpm install` -> clean. `node scripts/run-tests.mjs` ->
+  **191/191 test files passed.** `npx tsc --noEmit` -> clean, 0 errors.
+  `pnpm run lint` -> 94 errors / 43 warnings, the same pre-existing
+  baseline as the canonical branch and every prior round -- nothing
+  new. `pnpm run build:production-independent` -> succeeds.
+- **Endpoint removal confirmed in the actual compiled output, not just
+  the source diff**: the build's own route manifest contains no
+  `/api/agenda/test-send` entry; `grep` of `dist/server/index.js` for
+  `TEST_SEND_CLAIM_ID`, `buildTestSendClaimQuery`, and
+  `/api/agenda/test-send` each return **zero** matches. The only
+  related string still present, `agenda_manual_test_send_log` (5
+  occurrences), is exactly the preserved TABLE name/type references
+  this entry's own "deliberately not removed" section above explains --
+  not a residual trace of the removed code.
+- **Normal scheduled email functionality confirmed intact**: `git diff
+  --name-only` against this candidate's own base shows zero changes to
+  `lib/agenda/email-send-guard.ts`, `lib/agenda/gmail-client.ts`,
+  `lib/agenda/send-agenda.ts`, `lib/agenda/send-log.ts`, or
+  `worker/index.ts` (the candidate touches exactly the 6 files listed
+  above, nothing else). `wrangler.production.jsonc`'s
+  `"triggers": {"crons": ["0 * * * *"]}` and `database_name:
+  "fundraising-os-production-db"` are untouched -- this candidate does
+  not modify either `wrangler.*.jsonc` file at all.
+- **No Trip Planning or unrelated work present, confirmed structurally,
+  not just by base-commit choice**: the branch's own commit history is
+  `cf36599` (Production's own commit) plus exactly one new commit (this
+  cleanup); `/travel-planning` and every `/api/trips/**` route are
+  absent from the build's own route manifest (they were never on this
+  branch to begin with, since it branches from `cf36599`, which
+  predates all of that work).
+
+### Safety restrictions observed
+
+No Production or Staging deployment was performed. No Production data
+was read or modified beyond what the prior read-only review already
+recorded. No branch was merged -- `cleanup/remove-agenda-test-send-endpoint`
+was pushed as its own ref only, never merged into `main`,
+`feature/independent-cloudflare-sandbox`, or anywhere else. No
+Production secret or scheduled trigger was changed. No database
+migration was introduced.
+
+**This candidate is prepared and verified, awaiting the owner's
+explicit authorization before any deployment.**

@@ -1119,14 +1119,19 @@ export const agendaSendLog = sqliteTable("agenda_send_log", {
 
 // Temporary Production Gmail OAuth verification mechanism (October 14
 // 2026 incident -- docs/AI-HANDOFF.md, drizzle/0044_agenda_manual_test_
-// send_log.sql). Backs POST /api/agenda/test-send's one-time, atomic,
-// persistent claim -- a single fixed `id` row (see lib/agenda/test-send-
-// log.ts's TEST_SEND_CLAIM_ID), never per-day or per-user, since this is
-// a true one-time-ever action, not a recurring one. Deliberately a
-// separate table from agendaSendLog above so this mechanism can never
-// interfere with the real scheduled send's own idempotency record.
-// Same category as backupAlertState/agendaSendLog: operational dedupe
-// state, never donor or fundraising data.
+// send_log.sql). Backed POST /api/agenda/test-send's one-time, atomic,
+// persistent claim -- a single fixed `id` row (the route and its
+// dedicated lib/agenda/test-send-log.ts were both removed 2026-10-15
+// once the owner confirmed the real scheduled send worked correctly,
+// per that route's own "remove once verification is complete" header
+// comment; see docs/AI-HANDOFF.md's cleanup entry). This table is kept,
+// unchanged and unmigrated -- deliberately never dropped -- as the
+// permanent audit record of the test and its outcomes; removing the
+// route never implied removing the table or its history. Deliberately
+// a separate table from agendaSendLog above so this mechanism could
+// never interfere with the real scheduled send's own idempotency
+// record. Same category as backupAlertState/agendaSendLog: operational
+// dedupe state, never donor or fundraising data.
 export const agendaManualTestSendLog = sqliteTable("agenda_manual_test_send_log", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
