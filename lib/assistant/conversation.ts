@@ -18,6 +18,7 @@
 import { env } from "cloudflare:workers";
 import { searchDonors, type AssistantContext, type DonorRef } from "./capabilities.ts";
 import { boundConversationState, donorHref, type ConversationState, type ConversationTurn, type DonorReference, MAX_HISTORY_TURNS, MAX_HISTORY_CHARS, MAX_QUESTION_LENGTH } from "./conversation-state.ts";
+import { DONOR_OWNERSHIP_CHECK_SQL } from "./donor-authorization.ts";
 
 export { boundConversationState, donorHref, MAX_HISTORY_TURNS, MAX_HISTORY_CHARS, MAX_QUESTION_LENGTH };
 export type { ConversationState, ConversationTurn, DonorReference, DonorRef };
@@ -46,7 +47,7 @@ export async function resolveDonorReference(reference: DonorReference, state: Co
     const candidate = state.lastDonorRefs[reference.value - 1];
     if (!candidate) return { kind: "not_found" };
     if (ctx.mode !== "live") return { kind: "not_found" };
-    const owned = await env.DB.prepare("SELECT id, display_name FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(candidate.donorId, ctx.userId).first<{ id: string; display_name: string }>();
+    const owned = await env.DB.prepare(DONOR_OWNERSHIP_CHECK_SQL).bind(candidate.donorId, ctx.userId).first<{ id: string; display_name: string }>();
     if (!owned) return { kind: "not_found" };
     // Never trust candidate.href, even though it was client-supplied
     // conversation state -- the canonical link is always rebuilt here

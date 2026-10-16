@@ -21,13 +21,14 @@ const conversationSrc = await readFile(new URL("../lib/assistant/conversation.ts
 const orchestratorSrc = await readFile(new URL("../lib/assistant/orchestrator.ts", import.meta.url), "utf8");
 const routeSrc = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
 const fundraisingProgressSrc = await readFile(new URL("../lib/assistant/fundraising-progress.ts", import.meta.url), "utf8");
+const donorAuthSrc = await readFile(new URL("../lib/assistant/donor-authorization.ts", import.meta.url), "utf8");
 
 // --- No database writes anywhere in this feature's code. Ask Fundraising
 // OS is read-only by requirement -- this must be true by construction,
 // not just by the Staging write guard's own independent enforcement. ---
 
 const WRITE_PATTERN = /\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b|\.run\(\)/i;
-for (const [name, src] of [["capabilities.ts", capabilitiesSrc], ["conversation.ts", conversationSrc], ["orchestrator.ts", orchestratorSrc], ["route.ts", routeSrc], ["fundraising-progress.ts", fundraisingProgressSrc]]) {
+for (const [name, src] of [["capabilities.ts", capabilitiesSrc], ["conversation.ts", conversationSrc], ["orchestrator.ts", orchestratorSrc], ["route.ts", routeSrc], ["fundraising-progress.ts", fundraisingProgressSrc], ["donor-authorization.ts", donorAuthSrc]]) {
   assert.doesNotMatch(src, WRITE_PATTERN, `${name} must contain no SQL write statement and no D1 .run() write call`);
 }
 
@@ -88,7 +89,17 @@ assert.match(orchestratorSrc, /search_donors.*no standalone data output/is, "sea
 
 assert.match(routeSrc, /getChatGPTUser\(\)/);
 assert.match(routeSrc, /if \(!identity\)[\s\S]{0,80}401/);
-assert.match(conversationSrc, /owner_user_id\s*=\s*\?/, "ordinal donor-reference resolution must re-verify ownership, never trust client-supplied conversation state");
+// conversation.ts's ordinal re-check and capabilities.ts's searchDonors now
+// import their literal SQL from donor-authorization.ts (pulled out so a
+// Node test can run these exact statements against a real synthetic
+// multi-user database -- see tests/assistant-donor-privacy.test.mjs) rather
+// than inlining it, so the ownership guarantee is checked in two parts:
+// the constant itself still filters by owner, and both call sites still
+// import and use that same constant rather than any inlined substitute.
+assert.match(donorAuthSrc, /export const DONOR_OWNERSHIP_CHECK_SQL\s*=\s*"[^"]*owner_user_id\s*=\s*\?/, "ordinal donor-reference resolution must re-verify ownership, never trust client-supplied conversation state");
+assert.match(donorAuthSrc, /export const DONOR_SEARCH_SQL\s*=\s*"[^"]*owner_user_id\s*=\s*\?/, "donor name search must be owner-scoped");
+assert.match(conversationSrc, /import\s*\{[^}]*DONOR_OWNERSHIP_CHECK_SQL[^}]*\}\s*from\s*"\.\/donor-authorization\.ts"/, "conversation.ts must reuse the shared ownership-check constant, never inline its own copy");
+assert.match(capabilitiesSrc, /import\s*\{[^}]*DONOR_SEARCH_SQL[^}]*\}\s*from\s*"\.\/donor-authorization\.ts"/, "capabilities.ts must reuse the shared donor-search constant, never inline its own copy");
 
 // --- Confidential content is never logged -- the route logs that a turn
 // happened, not the question or the answer. ---

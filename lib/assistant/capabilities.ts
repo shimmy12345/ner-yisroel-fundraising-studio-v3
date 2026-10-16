@@ -38,6 +38,7 @@ import {
   type PaymentAssignmentAuditRow,
 } from "./fundraising-progress.ts";
 import { donorHref, type DonorRef } from "./conversation-state.ts";
+import { DONOR_SEARCH_SQL } from "./donor-authorization.ts";
 
 export const MAX_RESULT_ITEMS = 8;
 export const MAX_SEARCH_RESULTS = 6;
@@ -319,11 +320,7 @@ export async function getFundraisingProgress(ctx: AssistantContext): Promise<Fun
 export async function searchDonors(ctx: AssistantContext, query: string): Promise<DonorRef[]> {
   const trimmed = query.trim();
   if (trimmed.length === 0 || ctx.mode !== "live") return [];
-  const rows = await env.DB.prepare(`
-    SELECT id, display_name FROM donors
-    WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND display_name LIKE ?
-    ORDER BY display_name LIMIT ?
-  `).bind(ctx.userId, `%${trimmed}%`, MAX_SEARCH_RESULTS).all<{ id: string; display_name: string }>();
+  const rows = await env.DB.prepare(DONOR_SEARCH_SQL).bind(ctx.userId, `%${trimmed}%`, MAX_SEARCH_RESULTS).all<{ id: string; display_name: string }>();
   return rows.results.map((row) => ({ donorId: row.id, name: row.display_name, href: donorHref(row.id) }));
 }
 

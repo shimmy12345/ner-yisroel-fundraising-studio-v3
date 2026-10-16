@@ -273,21 +273,114 @@ async function run() {
   // =====================================================================
   // appendFinancialLimitations -- the deterministic-layer enforcement of
   // the financial disclosure, independent of whether the model's own
-  // answer mentioned it.
+  // answer mentioned it. Rewritten ("Final Production Safety Review for
+  // Ask AI", 2026-10-16) after finding the ORIGINAL implementation
+  // joined the answer and every limitation together and only THEN
+  // sliced to MAX_ANSWER_LENGTH -- since the limitation was appended
+  // LAST, a sufficiently long model answer could push some or all of
+  // the mandatory disclosure past the cutoff, silently dropping or
+  // mangling the exact text this function exists to guarantee. The
+  // OLD test below (now replaced) only ever asserted the final length,
+  // never that the disclosure text actually survived -- which is why it
+  // never caught this.
   // =====================================================================
   {
+    // Baseline: short answer, no limitations -- unchanged pass-through.
     assert.equal(appendFinancialLimitations("Answer text.", []), "Answer text.", "no limitations -- answer passes through unchanged");
+
+    // Baseline: short answer, one limitation -- both present in full.
     const withLimitation = appendFinancialLimitations("Answer text.", ["Disclosure one."]);
     assert.match(withLimitation, /Answer text\./);
     assert.match(withLimitation, /Disclosure one\./, "the limitation must be present even though the model's own text never mentioned it");
+
+    // Multiple disclosures -- both present in full, in order.
     const withTwo = appendFinancialLimitations("Answer.", ["First.", "Second."]);
     assert.match(withTwo, /First\./);
     assert.match(withTwo, /Second\./);
+    assert.ok(withTwo.indexOf("First.") < withTwo.indexOf("Second."), "disclosures must appear in the order supplied");
+
+    // Redundancy with the model's own text is accepted on purpose.
     const alreadyMentioned = appendFinancialLimitations("I did mention the limitation already.", ["The limitation, restated."]);
     assert.match(alreadyMentioned, /restated/);
-    const longAnswer = "x".repeat(MAX_ANSWER_LENGTH - 10);
-    const truncated = appendFinancialLimitations(longAnswer, ["A fairly long disclosure sentence that will not fully fit."]);
-    assert.ok(truncated.length <= MAX_ANSWER_LENGTH);
+
+    // THE DEFECT ITSELF: an answer near the length limit must never
+    // cause the disclosure to be dropped or cut -- the disclosure must
+    // survive in full, verbatim, and the ANSWER is what gets shortened
+    // instead.
+    {
+      const nearLimitAnswer = "x".repeat(MAX_ANSWER_LENGTH - 10); // leaves only 10 chars of "room" under the old, broken logic
+      const disclosure = "A fairly long disclosure sentence that will not fully fit in ten characters of leftover room.";
+      const result = appendFinancialLimitations(nearLimitAnswer, [disclosure]);
+      assert.ok(result.length <= MAX_ANSWER_LENGTH, "must never exceed the response-length limit");
+      assert.ok(result.includes(disclosure), "the mandatory disclosure must survive in full and verbatim, never truncated, even when the model's own answer alone already fills almost the entire budget");
+      assert.ok(result.length < nearLimitAnswer.length + disclosure.length + 2, "the ANSWER must be the part that got shortened to make room, not the disclosure");
+    }
+
+    // Multiple disclosures against a near-limit answer -- both must
+    // survive in full.
+    {
+      const nearLimitAnswer = "y".repeat(MAX_ANSWER_LENGTH - 50);
+      const disclosures = [
+        "First mandatory financial disclosure sentence that must survive completely.",
+        "Second mandatory financial disclosure sentence that must also survive completely.",
+      ];
+      const result = appendFinancialLimitations(nearLimitAnswer, disclosures);
+      assert.ok(result.length <= MAX_ANSWER_LENGTH);
+      assert.ok(result.includes(disclosures[0]), "the first disclosure must survive in full");
+      assert.ok(result.includes(disclosures[1]), "the second disclosure must also survive in full, not just the first");
+    }
+
+    // An answer that is ALREADY at the absolute maximum length (the
+    // most extreme version of the defect -- zero room left under the
+    // old logic) -- the disclosure must still appear, in full.
+    {
+      const maxLengthAnswer = "z".repeat(MAX_ANSWER_LENGTH);
+      const disclosure = "This disclosure must still appear even though the answer alone already consumed the entire limit.";
+      const result = appendFinancialLimitations(maxLengthAnswer, [disclosure]);
+      assert.ok(result.length <= MAX_ANSWER_LENGTH);
+      assert.ok(result.includes(disclosure), "the disclosure must survive even when the answer alone already equals the maximum length");
+    }
+
+    // Unusually long disclosure -- by itself already longer than the
+    // entire response budget. The pathological-case path: the
+    // disclosure (truncated at a safe word boundary, with an explicit,
+    // visible notice) takes the ENTIRE budget; the model's own prose
+    // gets nothing, since the disclosure is mandatory and the prose is
+    // optional. Never silently drop the disclosure to make room for
+    // conversational text.
+    {
+      const hugeDisclosure = "Word ".repeat(2000); // ~10,000 chars, well over MAX_ANSWER_LENGTH
+      const result = appendFinancialLimitations("A short answer.", [hugeDisclosure]);
+      assert.ok(result.length <= MAX_ANSWER_LENGTH, "must never exceed the response-length limit even for a single oversized disclosure");
+      assert.match(result, /cut off due to length/i, "when even the disclosure alone cannot fit, the cut must be explicit and visible, never silent");
+      const noticeIndex = result.indexOf(" [Additional financial disclosures");
+      assert.ok(noticeIndex > -1);
+      const truncatedContent = result.slice(0, noticeIndex);
+      assert.ok(truncatedContent.length === 0 || /\bWord$/.test(truncatedContent), "a mid-word cut must never happen -- the truncated content must end on a complete occurrence of the repeated word, never a partial fragment like 'Wor'");
+    }
+
+    // Multiple disclosures whose COMBINED length exceeds the budget,
+    // even though no single one does on its own -- same pathological
+    // path, same guarantees.
+    {
+      const disclosureA = "Disclosure A: ".repeat(150); // ~2,100 chars
+      const disclosureB = "Disclosure B: ".repeat(150); // ~2,100 chars -- combined > MAX_ANSWER_LENGTH
+      const result = appendFinancialLimitations("Answer.", [disclosureA, disclosureB]);
+      assert.ok(result.length <= MAX_ANSWER_LENGTH);
+      assert.match(result, /cut off due to length/i, "a combined-length overflow across multiple disclosures must also be disclosed explicitly, not silently resolved");
+    }
+
+    // Empty answer -- the model returned (or, after some future change,
+    // could return) nothing usable; the disclosure must still appear on
+    // its own, with no leading blank separator.
+    {
+      const result = appendFinancialLimitations("", ["The only content in this response is this disclosure."]);
+      assert.equal(result, "The only content in this response is this disclosure.", "an empty answer must not leave a stray leading separator before the disclosure");
+    }
+
+    // Empty answer, no limitations -- still just an empty string back,
+    // never a crash.
+    assert.equal(appendFinancialLimitations("", []), "");
   }
   console.log("appendFinancialLimitations checks passed.");
 

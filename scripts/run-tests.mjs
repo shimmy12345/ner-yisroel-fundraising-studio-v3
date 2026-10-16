@@ -248,6 +248,7 @@ const TEST_FILES = [
   "tests/assistant-conversation-state.test.mjs",
   "tests/assistant-capabilities-safety.test.mjs",
   "tests/fundraising-progress.test.mjs",
+  "tests/assistant-donor-privacy.test.mjs",
 ];
 
 function runOne(file) {

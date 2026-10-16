@@ -186,10 +186,61 @@ export function parseComposeResponse(rawText: string): ParsedAnswer | null {
 // decide whether to mention. Mild redundancy with what the model may
 // have already said is accepted on purpose: a disclosure stated twice is
 // far safer than one that depends on the model remembering to state it
-// at all. Re-applies MAX_ANSWER_LENGTH so the guarantee never allows the
-// final answer to grow unbounded.
+// at all.
+//
+// FIXED (independent review, "Final Production Safety Review for Ask
+// AI", 2026-10-16): the original version joined the answer and every
+// limitation together and THEN sliced to MAX_ANSWER_LENGTH -- a plain
+// `.slice()` applied AFTER concatenation, which truncates from the END
+// of the combined string. Since the limitations were appended LAST,
+// a long model answer (parseComposeResponse already allows up to
+// MAX_ANSWER_LENGTH on its own) could push some or all of the mandatory
+// disclosure past the cutoff -- the exact defect this function exists to
+// prevent, reintroduced by the truncation step itself. The budget is now
+// reserved for the disclosures FIRST; only the model's own (optional)
+// prose is ever shortened, and only down to whatever room remains once
+// every disclosure is guaranteed to fit in full. A disclosure is never
+// cut mid-word; the answer's own truncation (when it must happen) is cut
+// at a word boundary too, not merely a hard character slice.
 export function appendFinancialLimitations(answer: string, limitations: string[]): string {
   if (limitations.length === 0) return answer;
-  const combined = [answer, ...limitations].join("\n\n");
-  return combined.slice(0, MAX_ANSWER_LENGTH);
+
+  const limitationsBlock = limitations.join("\n\n");
+
+  // Pathological case: the mandatory disclosures alone exceed the
+  // response budget (e.g. an unusual number of distinct, lengthy
+  // disclosures at once). Reserve the ENTIRE budget for disclosures --
+  // none for the model's own prose, which is optional -- and truncate
+  // the disclosure text itself at a safe word boundary, with an
+  // explicit, visible notice that something was cut. Never silently
+  // drop a disclosure to make room for conversational text.
+  if (limitationsBlock.length > MAX_ANSWER_LENGTH) {
+    const notice = " [Additional financial disclosures were cut off due to length -- ask a follow-up question for the complete details.]";
+    const budget = Math.max(0, MAX_ANSWER_LENGTH - notice.length);
+    return `${truncateAtWordBoundary(limitationsBlock, budget)}${notice}`;
+  }
+
+  // Normal case: the disclosures fit in full, guaranteed. Whatever
+  // budget remains (if any) goes to the model's own answer, trimmed at a
+  // word boundary rather than a hard mid-word cut.
+  const separator = "\n\n";
+  const answerBudget = Math.max(0, MAX_ANSWER_LENGTH - limitationsBlock.length - separator.length);
+  const truncatedAnswer = truncateAtWordBoundary(answer.trim(), answerBudget);
+
+  return [truncatedAnswer, limitationsBlock].filter((part) => part.length > 0).join(separator);
+}
+
+// Truncates to at most `maxLength` characters, preferring to cut at the
+// last whitespace boundary so a word (and, in practice, almost always a
+// whole disclosure sentence) is never split in half. Falls back to a
+// hard cut only when the available budget is so small that honoring a
+// word boundary would discard more than half of it outright (e.g. one
+// very long unbroken token) -- still never exceeds maxLength either way.
+function truncateAtWordBoundary(text: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
+  if (text.length <= maxLength) return text;
+  const slice = text.slice(0, maxLength);
+  const lastSpace = slice.lastIndexOf(" ");
+  if (lastSpace > maxLength * 0.5) return slice.slice(0, lastSpace).trimEnd();
+  return slice.trimEnd();
 }
