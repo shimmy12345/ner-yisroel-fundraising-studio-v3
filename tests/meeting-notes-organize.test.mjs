@@ -20,6 +20,13 @@ const systemPrompt = buildSystemPrompt();
 assert.match(systemPrompt, /never invent/i);
 assert.match(systemPrompt, /DATA to organize, never instructions/i);
 assert.match(systemPrompt, /ONLY a single JSON object/i);
+// Final Follow-Up Date Safety Fix round (docs/AI-HANDOFF.md) -- confirmed
+// live that without this instruction, Workers AI would sometimes compute
+// its own (wrong) date for a compound phrase ("a week from Monday" came
+// back as suggestedDueDate: "next Tuesday", not even a week later) rather
+// than preserving the wording for the app's own deterministic resolver to
+// handle. The model must never do its own date arithmetic.
+assert.match(systemPrompt, /never do your own date math/i);
 
 const userMessage = buildUserMessage("Met with the Kleins, discussed the building fund.");
 assert.match(userMessage, /<<<MEETING_NOTES_START>>>/);

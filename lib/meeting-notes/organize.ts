@@ -90,6 +90,7 @@ export function buildSystemPrompt(): string {
     "- Never invent facts: no donor names, pledge amounts, dates, intentions, or commitments beyond what the text actually states.",
     "- Distinguish confirmed commitments (explicitly agreed/promised) from possible commitments or discussions (mentioned, considered, or hinted at but not agreed). When in doubt, treat it as possible, never confirmed.",
     "- Only include a suggestedDueDate for a follow-up action if the text states or clearly implies a specific date or relative timeframe (e.g. \"after Yom Tov\", \"next week\"); otherwise it must be null. Never invent a date.",
+    "- Copy the due-date wording into suggestedDueDate as close to verbatim as reasonably possible. NEVER do your own date math or convert it to a different day name, weekday, or calendar date yourself -- for example, if the text says \"a week from Monday\", write exactly that, never a computed guess like \"next Tuesday\". A separate, deterministic system computes the actual date from your wording; your only job is to capture what was said accurately.",
     "- If a section has nothing genuinely supported by the text, return an empty array (or empty string for summary/relationshipContext) for it rather than guessing or padding it with generic filler.",
     "- Preserve uncertainty expressed in the text (e.g. \"might\", \"considering\", \"not sure yet\") rather than resolving it into a firm statement.",
     "",
