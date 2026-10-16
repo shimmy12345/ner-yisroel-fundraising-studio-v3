@@ -40,15 +40,31 @@
 // THE FIX, reusing fundraising-progress.ts's own proven primitive
 // (jl_payment_assignment_audits.payment_date -- a genuinely dated, per-
 // payment-event record, see that file's Category A): every
-// giving_activities row's annual-trend contribution is now one of three
+// giving_activities row's annual-trend contribution is now one of four
 // honest outcomes, decided per row:
 //   1. RELIABLE -- the row was never touched by a payment-assignment
 //      audit (lib/import/jl-payment-assignment.ts's apply_to_pledge path
-//      never ran against it) and never bumped by a plain reimport update
+//      never ran against it), never bumped by a plain reimport update
 //      (giving_activity_import_changes has no 'update' row for its
-//      fingerprint) -- its own activity_date is the only evidence that
-//      has ever existed for this row, so it is used as-is, exactly like
-//      the original version did for every row.
+//      fingerprint), AND its own activity_date is CONFIRMED to be a
+//      genuine transaction date rather than a pledge due date -- its own
+//      activity_date is then the only evidence that has ever existed for
+//      this row, so it is used as-is.
+//   1b. DUE DATE / UNCONFIRMED PROVENANCE ("Final Giving-Date Provenance
+//      Fix Before Production," 2026-10-16, independent review): an
+//      untouched row whose provenance CANNOT be confirmed as a genuine
+//      transaction date -- almost always a full JL export pledge
+//      (lib/import/jl-donations.ts's classifyJlDonation:
+//      `row["Due Date"] || row.Date`), whose activity_date is the JL
+//      export's "Due Date" column, a commitment date, never a receipt
+//      date. The absence of an audit row or a reimport bump is NOT proof
+//      that this date represents a payment -- it only proves the pledge
+//      has never been *touched* since import, which says nothing about
+//      when (or across how many years) it was actually paid off. Treated
+//      identically to case 3 below: excluded from the annual trend,
+//      donor marked UNRELIABLE, lifetime total unaffected. See
+//      "Confirming genuine-transaction-date provenance" below for how
+//      case 1 is distinguished from case 1b.
 //   2. VERIFIED VIA AUDIT TRAIL -- the row DOES have linked
 //      jl_payment_assignment_audits rows (decision_type='apply_to_pledge',
 //      keyed by pledge_activity_id, never a content-hash fingerprint, so
@@ -67,6 +83,34 @@
 //      payment-review decision behind it, exactly fundraising-progress.ts's
 //      own disclosed gap) -- its entire paid_cents is excluded from the
 //      annual trend and the donor is marked UNRELIABLE.
+//
+// Confirming genuine-transaction-date provenance (case 1 vs. 1b): traced
+// the full import/storage schema (app/api/import/route.ts's INSERT,
+// lib/import/jl-donations.ts's classifyJlDonation/sourceValues) to find
+// that `giving_activities.source_snapshot` is `JSON.stringify` of the
+// EXACT raw source row, under its ORIGINAL column headers, for every row
+// this query can ever see paid_cents > 0 for (the only two insert sites,
+// confirmed by exhaustive grep: app/api/import/route.ts's JL import,
+// always external_source = 'JL Solutions'; and the Fundraising-OS-native
+// pending-gift/pledge inserts, which hardcode paid_cents = 0 and can
+// never later gain a paid_cents update outside that same JL import path
+// -- so they never reach this query at all). JL_DONATION_COLUMNS (the
+// full/pledge export) always includes a "Due Date" header and never a
+// "Date" header; JL_COMPACT_DONATION_COLUMNS (the payment-only export)
+// always includes a "Date" header and never "Due Date" -- the two
+// formats are mutually exclusive by their own defining column sets, so a
+// raw-text search for the literal JSON key `"Due Date":` vs. `"Date":`
+// in source_snapshot reliably recovers which export produced the row,
+// with no inference about donor behavior and no reliance on
+// paid_cents > 0 ever meaning anything about the date. This is
+// genuinely the only persisted field that can answer the question --
+// activity_date itself cannot (it already lost the distinction by the
+// time either format reaches it), and record_origin/category/
+// workspace_status carry no format information at all. A row whose
+// source_snapshot is null, empty, or contains neither marker (data that
+// predates this field, or any future import path this review did not
+// anticipate) is conservatively treated exactly like case 1b -- never
+// assumed to be a genuine date for lack of evidence otherwise.
 // A donor's LIFETIME total (and therefore their ranking/high_value
 // status) is completely unaffected by any of this -- it is still the sum
 // of every qualifying row's CURRENT paid_cents, exactly matching the
@@ -112,10 +156,21 @@ export type GivingRecordRow = {
   // documented convention) -- the row's own activity_date (a JL "Due
   // Date"/record date, see this file's header) or the legacy gifts
   // table's received_at. Only trustworthy as a YEAR of giving when
-  // audit_row_count = 0 AND unaudited_update_count = 0 -- see
-  // aggregateDonors below.
+  // audit_row_count = 0 AND unaudited_update_count = 0 AND
+  // genuine_transaction_date = 1 -- see aggregateDonors below.
   activity_date: number;
   paid_cents: number;
+  // 1 when this row's activity_date is CONFIRMED to be a genuine
+  // transaction/payment date rather than a pledge due date -- a compact
+  // JL export's own "Date" column, or a legacy gifts row's received_at
+  // (always 1, hardcoded in the second UNION ALL branch below). 0 for a
+  // full JL export (the "Due Date" column) or any row whose
+  // source_snapshot provenance cannot be confirmed either way -- see
+  // this file's header, "Confirming genuine-transaction-date
+  // provenance." Consulted ONLY when audit_row_count = 0 AND
+  // unaudited_update_count = 0; an audited or reimport-bumped row is
+  // already judged by its own evidence instead.
+  genuine_transaction_date: number;
   // How many jl_payment_assignment_audits rows (decision_type =
   // 'apply_to_pledge') point at this giving_activities row via
   // pledge_activity_id -- a real foreign key, not a content hash, so no
@@ -161,17 +216,26 @@ export type OpenCommitmentRow = { donor_id: string; balance_cents: number; commi
 // always audit_row_count = 0, unaudited_update_count = 0 -- received_at
 // is simply trusted, exactly as every other part of this app (e.g.
 // meeting-brief.ts) already trusts it.
+// genuine_transaction_date: a plain substring search on the raw JSON
+// text, not json_extract -- robust across SQLite/D1 versions and avoids
+// any JSON-path quoting ambiguity over the space in "Due Date", and the
+// two literal key markers ('"Due Date":' and '"Date":') can never
+// collide (the former is not a substring occurrence of the latter --
+// "Date\":" only appears preceded by a '"', never by "Due "). NULL/empty
+// source_snapshot makes both LIKEs false, landing on 0 (unconfirmed),
+// exactly the documented conservative default.
 export const GIVING_RECORDS_SQL = `
   SELECT ga.donor_id AS donor_id, ga.activity_date AS activity_date, ga.paid_cents AS paid_cents,
     (SELECT COUNT(*) FROM jl_payment_assignment_audits a WHERE a.pledge_activity_id = ga.id AND a.decision_type = 'apply_to_pledge') AS audit_row_count,
     (SELECT COALESCE(SUM(a.applied_cents), 0) FROM jl_payment_assignment_audits a WHERE a.pledge_activity_id = ga.id AND a.decision_type = 'apply_to_pledge') AS audited_applied_cents,
-    (SELECT COUNT(*) FROM giving_activity_import_changes c JOIN data_imports di ON di.id = c.import_id WHERE c.source_fingerprint = ga.source_fingerprint AND di.user_id = ga.owner_user_id AND c.change_type = 'update') AS unaudited_update_count
+    (SELECT COUNT(*) FROM giving_activity_import_changes c JOIN data_imports di ON di.id = c.import_id WHERE c.source_fingerprint = ga.source_fingerprint AND di.user_id = ga.owner_user_id AND c.change_type = 'update') AS unaudited_update_count,
+    (CASE WHEN ga.source_snapshot LIKE '%"Date":%' AND ga.source_snapshot NOT LIKE '%"Due Date":%' THEN 1 ELSE 0 END) AS genuine_transaction_date
   FROM giving_activities ga
   WHERE ga.owner_user_id = ? AND ga.record_origin = 'live' AND ga.workspace_status = 'active'
     AND ga.category NOT IN ('needs_review','nonfinancial_entry','pending_gift')
     AND ga.paid_cents > 0 AND ga.activity_date IS NOT NULL
   UNION ALL
-  SELECT g.donor_id AS donor_id, g.received_at AS activity_date, g.amount_cents AS paid_cents, 0 AS audit_row_count, 0 AS audited_applied_cents, 0 AS unaudited_update_count
+  SELECT g.donor_id AS donor_id, g.received_at AS activity_date, g.amount_cents AS paid_cents, 0 AS audit_row_count, 0 AS audited_applied_cents, 0 AS unaudited_update_count, 1 AS genuine_transaction_date
   FROM gifts g JOIN donors d ON d.id = g.donor_id
   WHERE d.owner_user_id = ? AND d.data_source = 'live' AND g.amount_cents > 0 AND g.received_at IS NOT NULL
 `;
@@ -325,8 +389,14 @@ function addToYear(entry: DonorAggregate, year: number, cents: number, dateEpoch
 // each giving_activities/legacy-gift row always contributes its full
 // paid_cents to lifetime giving, unconditionally. Only its contribution
 // to the YEAR-BY-YEAR trend differs by how it was paid:
-//   - never touched by payment-assignment or a plain reimport -> its own
-//     activity_date year, exactly as before.
+//   - never touched by payment-assignment or a plain reimport, AND
+//     confirmed to be a genuine transaction date (not a pledge due date)
+//     -> its own activity_date year.
+//   - never touched by either, but its date provenance is a due date or
+//     cannot be confirmed -> excluded from the trend, donor marked
+//     UNRELIABLE (case 1b, "Final Giving-Date Provenance Fix Before
+//     Production," 2026-10-16 -- an untouched pledge is not evidence
+//     that its due date is a payment date).
 //   - has an audit trail that fully explains its paid_cents -> excluded
 //     here (the dated VerifiedPledgePaymentRow events below cover it
 //     instead), reliability untouched.
@@ -353,8 +423,15 @@ function aggregateDonors(records: GivingRecordRow[], verifiedEvents: VerifiedPle
       // No audit trail AND no reliable creation-time date for however
       // much of paid_cents arrived after that reimport -- excluded
       // entirely, never approximated from the row's own due date.
-    } else {
+    } else if (row.genuine_transaction_date) {
       addToYear(entry, utcYear(row.activity_date), row.paid_cents, row.activity_date);
+    } else {
+      entry.annualTrendReliable = false;
+      // Untouched since import, but its own date is a pledge due date
+      // (or its provenance cannot be confirmed) -- the absence of an
+      // audit row or a reimport bump proves only that nobody has
+      // recorded a payment event against it, never that its due date IS
+      // a payment date. Never bucketed by activity_date.
     }
   }
 

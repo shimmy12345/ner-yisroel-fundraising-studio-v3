@@ -17,17 +17,26 @@ import {
 
 // "Fix AI Donor Prioritization and Giving-History Intelligence"
 // (2026-10-16), REWRITTEN for "Final Historical Giving Accuracy and AI
-// Ranking Fix" (2026-10-16, independent review). The root cause this
-// file now proves fixed, on top of the original: the first version
-// bucketed every dollar by giving_activities.activity_date -- the JL
-// export's "Due Date," never updated once a payment is later applied to
-// that row (see lib/assistant/giving-history.ts's own header). A pledge
-// due in 2020 but paid off across 2021-2025 would have had its entire
-// cumulative paid_cents attributed to 2020, fabricating a false
-// "lapsed since 2020" claim about a donor who in reality kept paying for
-// years.
+// Ranking Fix" (2026-10-16, independent review), REWRITTEN AGAIN for
+// "Final Giving-Date Provenance Fix Before Production" (2026-10-16,
+// second independent review). The root cause this file now proves
+// fixed, on top of both prior rounds: an UNTOUCHED giving_activities row
+// (no payment-assignment audit, no plain-reimport bump) was still
+// trusted as a genuine payment date purely because nothing had changed
+// it since import -- but the previous round's own investigation already
+// established that a full JL export's activity_date is the "Due Date"
+// column, a commitment date, not a receipt date. The absence of a
+// later change proves only that nobody has recorded a payment event
+// against the pledge, never that its due date IS when it was paid.
+// GIVING_RECORDS_SQL now also computes genuine_transaction_date per row
+// -- 1 only for a compact JL export's own genuine "Date" column or a
+// legacy gifts row's received_at, 0 for a full JL export's due date or
+// any row whose source_snapshot provenance cannot be confirmed -- and
+// aggregateDonors only trusts an untouched row's activity_date for the
+// annual trend when that flag is 1 (see giving-history.ts's own header
+// for the full reasoning and the exhaustive insert-site grep behind it).
 //
-// Three parts:
+// Four parts:
 //   A. summarizeGivingHistory -- pure, synchronous, no database -- every
 //      synthetic donor type the task's own test list asks for,
 //      including the NEW accuracy scenarios: a 2020 pledge paid in
@@ -47,6 +56,15 @@ import {
 //      compose model that omits the top-ranked donor from its own
 //      narrative must never cause that donor to be dropped from the
 //      final answer.
+//   D. THE NEW due-date-provenance fix, both at the pure-function level
+//      (a mixed donor with one genuinely-dated row and one due-date row
+//      must still end up unreliable overall) and at the real-SQL level
+//      (a full JL export's own "Due Date" source_snapshot marker must
+//      compute genuine_transaction_date=0; a compact export's own
+//      "Date" marker must compute 1; an ambiguous/empty snapshot must
+//      conservatively compute 0) -- proving GIVING_RECORDS_SQL and
+//      aggregateDonors compose correctly end to end against a real
+//      synthetic database, not just mocked row shapes.
 
 const read = (path) => fs.readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -74,8 +92,22 @@ function insertGivingActivity(database, row) {
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     row.id, row.donorId, row.ownerUserId, "JL Solutions", "CODE1", row.sourceFingerprint ?? row.id,
     row.activityDate, row.committedCents, row.paidCents, row.committedCents - row.paidCents,
-    row.category, row.recordOrigin ?? "live", row.workspaceStatus ?? "active", "{}", row.activityDate, row.activityDate,
+    row.category, row.recordOrigin ?? "live", row.workspaceStatus ?? "active", row.sourceSnapshot ?? "{}", row.activityDate, row.activityDate,
   );
+}
+
+// Realistic raw-row JSON exactly as lib/import/jl-donations.ts's
+// classifyJlDonation/sourceValues would produce it, under the ORIGINAL
+// column headers -- what GIVING_RECORDS_SQL's genuine_transaction_date
+// CASE actually searches for in a real source_snapshot. Mirrors
+// JL_DONATION_COLUMNS (full/pledge export, has "Due Date", never "Date")
+// and JL_COMPACT_DONATION_COLUMNS (payment-only export, has "Date",
+// never "Due Date") from that file exactly.
+function fullExportSnapshot(dueDate) {
+  return JSON.stringify({ Code: "C1", Name: "Test Donor", "Total Due": "750.00", "Item Num": "", Desc: "Pledge", Campaign: "Annual", "Due Date": dueDate, Amount: "750.00", Paid: "750.00", "Balance Due": "0.00", Company: "" });
+}
+function compactExportSnapshot(date) {
+  return JSON.stringify({ Code: "C2", "First Name": "Test", "Last Name": "Donor", Date: date, Campaign: "Annual", Amount: "500.00" });
 }
 
 function insertLegacyGift(database, row) {
@@ -124,9 +156,14 @@ function reimportBumpsPaid(database, id, newPaidCents, newBalanceCents, newCateg
 const YEAR = (y, m = 6, d = 1) => Math.floor(Date.UTC(y, m - 1, d) / 1000);
 
 // Builds one GivingRecordRow exactly the shape GIVING_RECORDS_SQL
-// produces, for Part A's pure-function tests.
+// produces, for Part A's pure-function tests. genuine_transaction_date
+// defaults to 1 (a confirmed real transaction date) so Part A/A2's own
+// signal-classification scenarios keep testing exactly what they always
+// tested -- whether a reliable row's trend is classified correctly --
+// independent of the due-date-provenance detection mechanism itself,
+// which Part D tests directly and exhaustively.
 function record(donorId, year, paidCents, overrides = {}) {
-  return { donor_id: donorId, activity_date: YEAR(year), paid_cents: paidCents, audit_row_count: 0, audited_applied_cents: 0, unaudited_update_count: 0, ...overrides };
+  return { donor_id: donorId, activity_date: YEAR(year), paid_cents: paidCents, audit_row_count: 0, audited_applied_cents: 0, unaudited_update_count: 0, genuine_transaction_date: 1, ...overrides };
 }
 
 function event(donorId, year, appliedCents) {
@@ -317,6 +354,61 @@ async function run() {
     assert.equal(byId["plainly-dated-donor"].distinctGivingYears, 3);
   }
 
+  // ===========================================================================
+  // Part D (pure-function half) -- THE DUE-DATE-PROVENANCE FIX itself
+  // ("Final Giving-Date Provenance Fix Before Production," 2026-10-16):
+  // an untouched row (no audit, no reimport bump) must now ALSO be a
+  // confirmed genuine transaction date before it is trusted for the
+  // annual trend -- never merely because nothing has changed it since
+  // import. Covers the task's own required scenario 7 (a donor with a
+  // MIXTURE of verified and unverified historical giving) and scenario 8
+  // (a historically significant donor with no reliable annual timeline
+  // at all, via the due-date mechanism specifically, distinct from the
+  // reimport-bump mechanism Part A2 already covers).
+  // ===========================================================================
+  {
+    const CURRENT_YEAR = 2026;
+    const records = [];
+
+    // Scenario 7: a MIXTURE -- one genuinely-dated row (2023, confirmed)
+    // and one full-export due-date row (2019, unconfirmed) for the SAME
+    // donor. The donor's real paid total must still count in full, but
+    // the trend must be unreliable overall: a single confirmed row can
+    // never "outvote" an unconfirmed one into a false trend, and an
+    // unconfirmed one can never be silently dropped from lifetime
+    // giving either.
+    records.push(record("mixed-provenance-donor", 2023, 400000, { genuine_transaction_date: 1 }));
+    records.push(record("mixed-provenance-donor", 2019, 350000, { genuine_transaction_date: 0 }));
+
+    // Scenario 8: a historically significant donor ($85,000) whose
+    // ONLY giving record is an untouched full-export pledge due in
+    // 2016 -- no audit trail, no reimport bump, so under the OLD logic
+    // this would have been trusted as-is and wrongly flagged "lapsed
+    // since 2016." Under the fix, an untouched row with unconfirmed
+    // provenance is exactly as unreliable as an audited residual or an
+    // unaudited bump.
+    records.push(record("due-date-only-donor", 2016, 8500000, { genuine_transaction_date: 0 }));
+
+    // Filler so the high_value fraction has real competition.
+    records.push(record("filler-d", 2026, 50000));
+
+    const result = summarizeGivingHistory({ records, verifiedPledgePayments: [], currentYear: CURRENT_YEAR, limit: 20 });
+    const byId = Object.fromEntries(result.map((c) => [c.donorId, c]));
+
+    assert.equal(byId["mixed-provenance-donor"].lifetimePaidCents, 750000, "lifetime giving must include BOTH rows in full, regardless of which one is unconfirmed");
+    assert.equal(byId["mixed-provenance-donor"].annualTrendReliable, false, "one unconfirmed row poisons the donor's overall annual trend -- a single genuinely-dated row never overrides it");
+    assert.equal(byId["mixed-provenance-donor"].distinctGivingYears, null, "no year-level field may survive once the trend is unreliable, even though one of the two rows WAS confirmed");
+    assert.ok(!byId["mixed-provenance-donor"].signals.includes("lapsed") && !byId["mixed-provenance-donor"].signals.includes("declined") && !byId["mixed-provenance-donor"].signals.includes("consistent"), "a mixed-reliability donor must never receive a fabricated year-shaped signal");
+
+    assert.equal(byId["due-date-only-donor"].lifetimePaidCents, 8500000);
+    assert.equal(byId["due-date-only-donor"].annualTrendReliable, false, "an untouched full-export pledge's due date must never be trusted as a payment date merely because nothing has changed it since import");
+    assert.equal(byId["due-date-only-donor"].lastGivingYear, null, "never 2016 -- that is the pledge's due date, not a verified gift year");
+    assert.ok(byId["due-date-only-donor"].signals.includes("annual_trend_unknown"), "a historically significant donor with an unconfirmed-provenance-only record gets annual_trend_unknown, never a fabricated lapsed claim built from a due date");
+    assert.ok(!byId["due-date-only-donor"].signals.includes("lapsed"), "THE regression this round fixes: an unchanged pledge due years ago must never be labeled lapsed on that basis alone");
+  }
+
+  console.log("Part D (pure-function half): due-date-provenance fix checks passed.");
+
   // --- High-value threshold: relative to the portfolio, never a fixed
   // dollar figure -- with 4 donors, ceil(4*0.25)=1, so only the single
   // largest is flagged, regardless of how large or small that amount is
@@ -366,6 +458,9 @@ async function run() {
   insertDonor(db, { id: "alpha-legacy-donor", ownerUserId: "user-alpha", displayName: "Legacy Gift Donor", now: NOW });
   insertDonor(db, { id: "alpha-installment-donor", ownerUserId: "user-alpha", displayName: "Installment Donor", now: NOW });
   insertDonor(db, { id: "alpha-bumped-donor", ownerUserId: "user-alpha", displayName: "Bumped Donor", now: NOW });
+  insertDonor(db, { id: "alpha-full-export-donor", ownerUserId: "user-alpha", displayName: "Full Export Pledge Donor", now: NOW });
+  insertDonor(db, { id: "alpha-compact-export-donor", ownerUserId: "user-alpha", displayName: "Compact Export Donor", now: NOW });
+  insertDonor(db, { id: "alpha-ambiguous-donor", ownerUserId: "user-alpha", displayName: "Ambiguous Snapshot Donor", now: NOW });
   insertDonor(db, { id: "beta-donor", ownerUserId: "user-beta", displayName: "Multi-Year Donor", now: NOW }); // identical display_name to alpha-donor, different owner
   db.exec(`INSERT INTO data_imports (id,user_id,file_name,file_hash,status,report_json,created_at) VALUES ('import-alpha','user-alpha','export.csv','hash-alpha','completed','{}',${NOW})`);
 
@@ -409,6 +504,26 @@ async function run() {
 
     // Cross-user, identical display name.
     insertGivingActivity(db, { id: "ga-beta", donorId: "beta-donor", ownerUserId: "user-beta", activityDate: YEAR(2026), committedCents: 9000000, paidCents: 9000000, category: "completed_gift" });
+
+    // THE NEW due-date-provenance fix, at the real-SQL level (task
+    // scenarios 1 and 2): an untouched full JL export pledge, due in
+    // 2017 per its own real source_snapshot (the "Due Date" column) --
+    // GIVING_RECORDS_SQL must compute genuine_transaction_date=0 purely
+    // from that stored snapshot, never from whether the row happens to
+    // have an audit trail (it has none here on purpose).
+    insertGivingActivity(db, { id: "ga-full-export", donorId: "alpha-full-export-donor", ownerUserId: "user-alpha", activityDate: YEAR(2017), committedCents: 75000, paidCents: 75000, category: "completed_gift", sourceSnapshot: fullExportSnapshot("1/15/2017") });
+
+    // A compact JL export row -- its own "Date" column is a genuine
+    // transaction date; GIVING_RECORDS_SQL must compute
+    // genuine_transaction_date=1 for it.
+    insertGivingActivity(db, { id: "ga-compact-export", donorId: "alpha-compact-export-donor", ownerUserId: "user-alpha", activityDate: YEAR(2024), committedCents: 50000, paidCents: 50000, category: "completed_gift", sourceSnapshot: compactExportSnapshot("3/4/2024") });
+
+    // A row whose source_snapshot is empty/ambiguous (predates this
+    // field, or any import path this review did not anticipate) --
+    // must conservatively compute genuine_transaction_date=0, exactly
+    // like the full-export case, never silently trusted for lack of a
+    // "Due Date" marker to actively flag it.
+    insertGivingActivity(db, { id: "ga-ambiguous", donorId: "alpha-ambiguous-donor", ownerUserId: "user-alpha", activityDate: YEAR(2021), committedCents: 30000, paidCents: 30000, category: "completed_gift", sourceSnapshot: "{}" });
   }
 
   const alphaRecords = db.prepare(GIVING_RECORDS_SQL).all("user-alpha", "user-alpha");
@@ -431,6 +546,17 @@ async function run() {
   assert.equal(bumpedRecord.paid_cents, 350000);
   assert.equal(bumpedRecord.audit_row_count, 0, "a plain reimport bump must never be mistaken for a payment-review decision");
   assert.ok(bumpedRecord.unaudited_update_count >= 1, "a plain reimport that changed paid_cents must be detected via giving_activity_import_changes");
+
+  const fullExportRecord = alphaRecords.find((r) => r.donor_id === "alpha-full-export-donor");
+  assert.equal(fullExportRecord.audit_row_count, 0, "this scenario is deliberately untouched -- no audit trail at all");
+  assert.equal(fullExportRecord.unaudited_update_count, 0, "and no reimport bump either -- the OLD logic would have trusted this row's due date purely because of these two zeros");
+  assert.equal(fullExportRecord.genuine_transaction_date, 0, "GIVING_RECORDS_SQL must recognize a real full-JL-export source_snapshot's own \"Due Date\" marker and refuse to call it a genuine transaction date");
+
+  const compactExportRecord = alphaRecords.find((r) => r.donor_id === "alpha-compact-export-donor");
+  assert.equal(compactExportRecord.genuine_transaction_date, 1, "a real compact-JL-export source_snapshot's own \"Date\" marker (with no \"Due Date\" at all) must be recognized as a genuine transaction date");
+
+  const ambiguousRecord = alphaRecords.find((r) => r.donor_id === "alpha-ambiguous-donor");
+  assert.equal(ambiguousRecord.genuine_transaction_date, 0, "a source_snapshot with neither marker must conservatively compute 0, never assumed genuine for lack of a \"Due Date\" flag to actively catch");
 
   const betaRecords = db.prepare(GIVING_RECORDS_SQL).all("user-beta", "user-beta");
   assert.equal(betaRecords.length, 1);
@@ -462,6 +588,15 @@ async function run() {
     assert.equal(byId["alpha-installment-donor"].lastGivingYear, 2024, "the real audited payment year, never 2020 (the row's own due date)");
     assert.equal(byId["alpha-bumped-donor"].annualTrendReliable, false, "a plain reimport bump with no payment date must mark the trend unreliable end-to-end");
     assert.ok(byId["alpha-bumped-donor"].signals.includes("annual_trend_unknown") || byId["alpha-bumped-donor"].signals.includes("insufficient_history"));
+
+    assert.equal(byId["alpha-full-export-donor"].annualTrendReliable, false, "end-to-end: a real full-export source_snapshot's due date must never seed the annual trend, even with zero audit rows and zero reimport bumps");
+    assert.equal(byId["alpha-full-export-donor"].lifetimePaidCents, 75000, "lifetime giving is unaffected -- only the YEAR-level claim is withheld");
+    assert.equal(byId["alpha-full-export-donor"].lastGivingYear, null, "never 2017, the pledge's own due date");
+
+    assert.equal(byId["alpha-compact-export-donor"].annualTrendReliable, true, "end-to-end: a real compact-export source_snapshot's own genuine Date column must be trusted for the annual trend");
+    assert.equal(byId["alpha-compact-export-donor"].lastGivingYear, 2024);
+
+    assert.equal(byId["alpha-ambiguous-donor"].annualTrendReliable, false, "end-to-end: an ambiguous/empty source_snapshot must be treated exactly as conservatively as a confirmed due date");
   }
 
   console.log("Part B (real SQL against a synthetic multi-year, multi-user database) checks passed.");
