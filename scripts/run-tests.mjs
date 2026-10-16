@@ -242,6 +242,7 @@ const TEST_FILES = [
   "tests/meeting-notes-anthropic-provider.test.mjs",
   "tests/meeting-notes-workers-ai-provider.test.mjs",
   "tests/meeting-notes-provider-selection.test.mjs",
+  "tests/meeting-notes-due-date-resolver.test.mjs",
 ];
 
 function runOne(file) {

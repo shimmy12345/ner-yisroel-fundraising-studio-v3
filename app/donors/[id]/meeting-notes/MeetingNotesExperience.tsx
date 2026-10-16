@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { InteractionKind } from "../../../../lib/capture/interaction";
 import { buildMeetingNotesSummaryText } from "../../../../lib/meeting-notes/format";
 import type { OrganizedMeetingNotes } from "../../../../lib/meeting-notes/organize";
-import { followUpFromSuggestion, emptyFollowUp, selectApprovedFollowUps, type FollowUpRow } from "../../../../lib/meeting-notes/follow-ups";
+import { followUpFromSuggestion, emptyFollowUp, selectApprovedFollowUps, findUnresolvedApprovedFollowUps, type FollowUpRow } from "../../../../lib/meeting-notes/follow-ups";
 
 const TYPE_OPTIONS: Array<{ value: InteractionKind; label: string }> = [
   { value: "meeting", label: "Meeting" },
@@ -54,6 +54,9 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState("");
+  // Follow-up ids Save just blocked on (approved, no date, not confirmed
+  // unscheduled) -- drives an inline highlight on exactly those rows.
+  const [unresolvedFollowUpIds, setUnresolvedFollowUpIds] = useState<string[]>([]);
 
   // One save key per review session, stable across repeated Save clicks
   // or a retried request -- the server uses it as the interaction's own
@@ -104,7 +107,7 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
       // never a pre-checked default the fundraiser could save by
       // accident. Explicit approval is required for every one, the same
       // as a manually-added row (see addFollowUp below).
-      setFollowUps(data.followUpActions.map((action) => followUpFromSuggestion(action, nextFollowUpId())));
+      setFollowUps(data.followUpActions.map((action) => followUpFromSuggestion(action, nextFollowUpId(), meetingDate)));
       setAiOrganized(true);
       setOrganizeStatus("done");
     } catch (error) {
@@ -120,6 +123,11 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
   }
   function updateFollowUp(id: string, patch: Partial<FollowUpRow>) {
     setFollowUps((current) => current.map((row) => row.id === id ? { ...row, ...patch } : row));
+    // Clear a stale "needs a date" highlight the moment the fundraiser
+    // addresses it, rather than leaving it until the next Save attempt.
+    if ("dueAt" in patch || "confirmedUnscheduled" in patch) {
+      setUnresolvedFollowUpIds((current) => current.filter((existingId) => existingId !== id));
+    }
   }
   function removeFollowUp(id: string) {
     setFollowUps((current) => current.filter((row) => row.id !== id));
@@ -127,6 +135,20 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
 
   async function handleSave() {
     if (!canSave) return;
+    // Never silently save an approved follow-up that was intended to be
+    // scheduled but has no date -- the fundraiser must either pick a
+    // date or explicitly check "No specific date needed" for each one
+    // first. Blocks before building the request at all.
+    const unresolved = findUnresolvedApprovedFollowUps(followUps);
+    if (unresolved.length > 0) {
+      setUnresolvedFollowUpIds(unresolved);
+      setSaveStatus("error");
+      setSaveError(unresolved.length === 1
+        ? "One approved follow-up has no due date. Choose a date or check \"No specific date needed\" for it below."
+        : `${unresolved.length} approved follow-ups have no due date. Choose a date or check "No specific date needed" for each below.`);
+      return;
+    }
+    setUnresolvedFollowUpIds([]);
     setSaveStatus("saving");
     setSaveError("");
     const finalSummary = summaryText.trim().length > 0
@@ -232,15 +254,49 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
       <p className="meeting-notes-hint">Every follow-up below is only a proposal until you check Approve. Unapproved and removed items are never saved.</p>
       {followUps.length === 0 && <p className="meeting-notes-hint">No follow-up actions yet.</p>}
       <ul className="meeting-notes-followups">
-        {followUps.map((row) => <li key={row.id} className={row.approved ? "meeting-notes-followup-row meeting-notes-followup-approved" : "meeting-notes-followup-row meeting-notes-followup-proposed"}>
-          <label className="meeting-notes-followup-approve">
-            <input type="checkbox" checked={row.approved} onChange={(event) => updateFollowUp(row.id, { approved: event.target.checked })} />
-            <span>{row.approved ? "Approved" : "Proposed"}</span>
-          </label>
-          <input type="text" value={row.description} onChange={(event) => updateFollowUp(row.id, { description: event.target.value })} placeholder="e.g. Call donor after Yom Tov to discuss Kollel sponsorship" />
-          <input type="date" value={row.dueAt} onChange={(event) => updateFollowUp(row.id, { dueAt: event.target.value })} />
-          <button type="button" onClick={() => removeFollowUp(row.id)} aria-label="Remove this follow-up">✕</button>
-        </li>)}
+        {followUps.map((row) => {
+          const needsAttention = unresolvedFollowUpIds.includes(row.id);
+          const sourceLabel = row.dueDateSource === "explicit" ? "Stated in conversation"
+            : row.dueDateSource === "ai-resolved" ? "AI-suggested date"
+            : row.dueDateSource === "manual" ? "Set by you"
+            : null;
+          return <li key={row.id} className={[
+            "meeting-notes-followup-row",
+            row.approved ? "meeting-notes-followup-approved" : "meeting-notes-followup-proposed",
+            needsAttention ? "meeting-notes-followup-needs-date" : "",
+          ].filter(Boolean).join(" ")}>
+            <div className="meeting-notes-followup-main">
+              <label className="meeting-notes-followup-approve">
+                <input type="checkbox" checked={row.approved} onChange={(event) => updateFollowUp(row.id, { approved: event.target.checked })} />
+                <span>{row.approved ? "Approved" : "Proposed"}</span>
+              </label>
+              <input type="text" value={row.description} onChange={(event) => updateFollowUp(row.id, { description: event.target.value })} placeholder="e.g. Call donor after Yom Tov to discuss Kollel sponsorship" />
+              <input
+                type="date"
+                value={row.dueAt}
+                onChange={(event) => updateFollowUp(row.id, {
+                  dueAt: event.target.value,
+                  dueDateSource: event.target.value ? "manual" : row.dueDateSource,
+                })}
+              />
+              <button type="button" onClick={() => removeFollowUp(row.id)} aria-label="Remove this follow-up">✕</button>
+            </div>
+            {(row.aiPhrase || row.dueAt.trim().length === 0) && <div className="meeting-notes-followup-meta">
+              {row.aiPhrase && <span className="meeting-notes-followup-phrase">
+                {sourceLabel ? `${sourceLabel}: ` : "AI noted: "}&ldquo;{row.aiPhrase}&rdquo;
+                {row.dueDateSource === "unset" && " -- couldn't be turned into an exact date automatically."}
+              </span>}
+              {row.dueAt.trim().length === 0 && <label className={needsAttention ? "meeting-notes-followup-unscheduled meeting-notes-followup-unscheduled-warning" : "meeting-notes-followup-unscheduled"}>
+                <input
+                  type="checkbox"
+                  checked={row.confirmedUnscheduled}
+                  onChange={(event) => updateFollowUp(row.id, { confirmedUnscheduled: event.target.checked })}
+                />
+                <span>No specific date needed</span>
+              </label>}
+            </div>}
+          </li>;
+        })}
       </ul>
       <button type="button" className="example-button" onClick={addFollowUp}>+ Add follow-up</button>
     </section>

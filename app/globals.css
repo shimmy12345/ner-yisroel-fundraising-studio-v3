@@ -235,20 +235,27 @@ h1 { margin-bottom: 7px; font-family: Georgia, serif; font-size: clamp(30px, 3vw
 .meeting-notes-organize-button:disabled { background:#c8d1cc; cursor:not-allowed; }
 .meeting-notes-notice { margin:10px 0 0; padding:10px 12px; border-radius:9px; background:var(--green-soft); color:#2d5544; font-size:13px; }
 .meeting-notes-followups { list-style:none; margin:0 0 10px; padding:0; display:grid; gap:8px; }
-.meeting-notes-followup-row { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; border:1px solid transparent; }
+.meeting-notes-followup-row { display:flex; flex-direction:column; gap:6px; padding:6px 8px; border-radius:8px; border:1px solid transparent; }
+.meeting-notes-followup-main { display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; }
 .meeting-notes-followup-proposed { background:#fdf6e9; border-color:#edddb3; }
 .meeting-notes-followup-approved { background:var(--green-soft); border-color:#bfe0cf; }
+.meeting-notes-followup-needs-date { border-color:#c0462f; box-shadow:0 0 0 2px rgba(192,70,47,.12); }
 .meeting-notes-followup-approve { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; white-space:nowrap; color:#8a6d23; }
 .meeting-notes-followup-approved .meeting-notes-followup-approve { color:#2d5544; }
 .meeting-notes-followup-row input[type="checkbox"] { width:20px; height:20px; }
 .meeting-notes-followup-row input[type="date"] { width:150px; }
 .meeting-notes-followup-row button { border:0; background:transparent; color:#a1533a; font-size:16px; cursor:pointer; padding:6px; }
+.meeting-notes-followup-meta { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding-left:4px; font-size:12px; color:var(--muted); }
+.meeting-notes-followup-phrase { font-style:italic; }
+.meeting-notes-followup-unscheduled { display:flex; align-items:center; gap:6px; white-space:nowrap; cursor:pointer; }
+.meeting-notes-followup-unscheduled input[type="checkbox"] { width:14px; height:14px; }
+.meeting-notes-followup-unscheduled-warning { color:#a1533a; font-weight:650; }
 .meeting-notes-actions { display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-top:6px; }
 .meeting-notes-cancel { color:var(--muted); font-size:14px; }
 .meeting-notes-actions .capture-save { width:auto; min-height:48px; padding:0 24px; margin-top:0; }
 @media (max-width: 640px) {
-  .meeting-notes-followup-row { grid-template-columns:auto 1fr; }
-  .meeting-notes-followup-row input[type="date"] { width:100%; grid-column:2; }
+  .meeting-notes-followup-main { grid-template-columns:auto 1fr; }
+  .meeting-notes-followup-main input[type="date"] { width:100%; grid-column:2; }
   .meeting-notes-actions { flex-direction:column-reverse; align-items:stretch; }
   .meeting-notes-actions .capture-save { width:100%; }
 }
