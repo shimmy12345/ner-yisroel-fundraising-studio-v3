@@ -20,6 +20,15 @@
       "database_id": "6c18396c-0a8f-4f2c-ba83-ea809ec10289"
     }
   ],
+  // Cloudflare Workers AI binding -- AI Meeting Notes "Organize Notes"
+  // (docs/AI-HANDOFF.md, "Implement Cloudflare AI Meeting Notes on
+  // Staging"), the DEFAULT provider. Declared directly here, like DB
+  // above -- NOT a secret, nothing to create/rotate/leak. Already
+  // available on this same Cloudflare account with no separate signup or
+  // billing (confirmed live during the 2026-10-15 evaluation).
+  "ai": {
+    "binding": "AI"
+  },
   // Worker-to-Worker binding only -- NOT an R2 binding. This Worker never
   // gains any R2 credential, binding, or code path to the backup pipeline's
   // storage; it can only call the dedicated status-worker's own fetch
@@ -57,14 +66,26 @@
     // origin from. See cloudflare-env.d.ts for why this lives here rather
     // than as a hardcoded string in application source.
     "APP_BASE_URL": "https://fundraising-os-staging.sgoldstein.workers.dev",
-    // AI Meeting Notes "Organize Notes" (docs/AI-HANDOFF.md, "Voice
-    // Dictation and AI Meeting Notes") -- the Claude model id, configurable
-    // here without a code change. NOT a secret; the API key itself
-    // (ANTHROPIC_API_KEY) is a `wrangler secret put` value and deliberately
-    // does not exist on this Worker yet -- see this feature's authorization
-    // boundary. Until the owner separately approves activating real, paid
-    // Anthropic usage, this var has no effect: Organize Notes always
-    // reports "unavailable" with no API key present, regardless of model.
+    // AI Meeting Notes "Organize Notes" (docs/AI-HANDOFF.md, "Implement
+    // Cloudflare AI Meeting Notes on Staging"). AI_PROVIDER picks which
+    // provider app/api/meeting-notes/organize/route.ts calls -- "workers-ai"
+    // (the default, used if this is absent or any other value) or
+    // "anthropic". Set here explicitly, though the default would apply
+    // either way, so the active provider is visible in this file at a
+    // glance.
+    "AI_PROVIDER": "workers-ai",
+    // The Workers AI model id for the default provider, configurable here
+    // without a code change. NOT a secret -- the binding above is the only
+    // credential this provider needs. See lib/meeting-notes/providers/
+    // workers-ai.ts's DEFAULT_WORKERS_AI_MODEL for what this falls back to
+    // if absent.
+    "WORKERS_AI_MODEL": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+    // The Claude model id for the Anthropic provider, used only if
+    // AI_PROVIDER is switched to "anthropic" above. NOT a secret; the API
+    // key itself (ANTHROPIC_API_KEY) is a `wrangler secret put` value and
+    // deliberately does not exist on this Worker -- this app does not
+    // require a separate Anthropic account. With AI_PROVIDER="workers-ai"
+    // (the current setting), this var has no effect at all.
     "ANTHROPIC_MODEL": "claude-haiku-5-5"
     // Independent Staging read-only write guard (lib/operations/
     // staging-write-guard.ts, Production Operational Transition round,
