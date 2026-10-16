@@ -49602,3 +49602,343 @@ before doing so.
 
 **No Production file was read or written this round. No Production
 deployment, configuration change, or data change occurred.**
+
+## Authorized Production Deployment -- Ask Fundraising OS AI Upgrade (2026-10-16) -- SUCCESSFUL
+
+Owner explicitly authorized a controlled Production deployment of the
+reviewed Ask Fundraising OS AI upgrade and its associated financial-
+accuracy, donor-privacy, and disclosure safeguards -- the full feature
+arc covered by this file's "Upgrade Ask Fundraising OS to a Real AI
+Assistant" entry and the six independent-review rounds that followed
+it (`9789649`, `8431f49`, `36eddff`, `960ba6a`, `9bd0863`, `b3a96ce`).
+Scoped explicitly to that feature and its required shared
+infrastructure, not any other change. No database migration, no
+financial-record correction, and no donor-data reset/reseed/import
+occurred or was required.
+
+### 1. Deployment scope, confirmed before any change
+
+Reviewed commit: `ef62b4cd75a7f577ebd5c87be94bbf84a9557330` --
+confirmed as the exact, clean-tree HEAD of
+`feature/independent-cloudflare-sandbox` before proceeding, matching
+the owner's stated commit exactly.
+
+`git diff --stat fa60d61 HEAD -- . ':(exclude)docs/AI-HANDOFF.md'`
+(`fa60d61` being the commit live in Production immediately before this
+round) showed 27 files, all directly part of the reviewed feature or
+its required shared infrastructure: the Assistant's own route/UI/
+library files (`app/api/assistant/route.ts`,
+`app/assistant/AssistantExperience.tsx`, every file under
+`lib/assistant/`), the shared Workers AI client extracted to serve as
+the Assistant's second real caller (`lib/ai/workers-ai-client.ts`,
+with `lib/meeting-notes/providers/workers-ai.ts` refactored to
+delegate to it while preserving its own exact error wording -- a pure
+extraction, not a behavior change), the new local-month-boundary
+helper the financial-accuracy fixes depend on
+(`lib/workspace/local-time.ts`, purely additive), and every test file
+touched -- including peripheral tests (`personalization`,
+`recommendation-engine`, `relationship-snapshot-stage3`,
+`shared-activity-ux`, `text-message-type`) that only updated their own
+assertions to read from the Assistant's new file location
+(`lib/assistant/capabilities.ts` instead of the old inline route code)
+after the architecture moved, not new behavior. `git diff --stat`
+against `drizzle/`, `wrangler.production.jsonc`, and
+`wrangler.staging.jsonc` was empty -- zero schema, binding, secret, or
+cron change in scope. No unrelated feature or refactor was deployed.
+
+### 2. Mandatory Production safety checks (all PASS)
+
+1. **Exact Git commit vs. reviewed commit**: PASS -- HEAD
+   `ef62b4cd75a7f577ebd5c87be94bbf84a9557330`, byte-identical to the
+   commit named in the authorization, clean working tree.
+2. **Current Production Worker version / rollback identifier**: PASS
+   -- `wrangler deployments list --config wrangler.production.jsonc`
+   confirmed **`5401a86c-18de-4927-bc56-baed2fa39a67`** (created
+   2026-10-16T04:06:41.687Z, the "AI Meeting Notes Date Fix" round's
+   own deployment) was still current. Recorded as the rollback target.
+3. **Latest successful Production backup**: PASS -- read live from
+   `/api/health`: `automated-backup: healthy`, completed
+   `2026-10-16T13:12:37Z` (object
+   `daily/fundraising-os-production-db-20261016T131234Z.sql.gz.gpg`).
+4. **Latest successful restore test**: PASS -- `restore-verification:
+   healthy`, "Successfully restored and verified the Oct 12, 2026
+   backup. Restore testing runs monthly" (`2026-10-12T03:35:44Z`).
+5. **Production/Staging D1 isolation**: PASS -- `wrangler.production.jsonc`
+   binds `fundraising-os-production-db`
+   (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`), `wrangler.staging.jsonc`
+   binds the distinct `fundraising-os-staging-db`
+   (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`) -- confirmed by direct file
+   read, unchanged from every prior round.
+6. **Production authentication/access controls intact**: PASS --
+   `wrangler.production.jsonc`'s diff since `fa60d61` is empty, so
+   `TEAM_DOMAIN`/`POLICY_AUD` are untouched by construction; every
+   verification step in this round (health check, donor pages, the
+   Assistant itself) only succeeded through the existing authenticated
+   Cloudflare Access session, directly confirming enforcement still
+   works, not merely that the config file is unchanged.
+7. **Scheduled email / cron / Gmail secrets unchanged**: PASS --
+   `wrangler secret list --config wrangler.production.jsonc` returned
+   all three expected secrets (`GMAIL_OAUTH_CLIENT_ID`,
+   `GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_OAUTH_REFRESH_TOKEN`);
+   `wrangler.production.jsonc`'s `triggers` block is unchanged
+   (`"crons": ["0 * * * *"]`), confirmed both by the zero-diff check
+   above and by the live deploy output printing the identical schedule.
+8. **Tests / TypeScript / Production build**: PASS -- `node
+   scripts/run-tests.mjs`: **212/212 test files pass**. `npx tsc
+   --noEmit`: clean. `npm run lint`: **94 errors / 43 warnings**,
+   identical to the established baseline. `pnpm run
+   build:production-independent`: succeeded;
+   `node scripts/verify-build-manifest.mjs production-independent`
+   confirmed the `dist/` output was freshly built for this exact
+   target. **Build freshness confirmed directly**, not assumed: grepped
+   the just-built `dist/server/index.js` for this round's own
+   distinctive new strings -- the disclosure-truncation notice text
+   (`"Additional financial disclosures were cut off"`) and the
+   extracted donor-authorization SQL (`DONOR_OWNERSHIP_CHECK_SQL`'s own
+   `owner_user_id = ? AND data_source` text) -- both present.
+9. **No unexpected migrations, financial writes, or unrelated changes**:
+   PASS -- Section 1's diffstat review found no migration file, no
+   `wrangler.*.jsonc` change, and no file outside the reviewed feature
+   or its required shared infrastructure. `drizzle/0046_...sql` remains
+   the newest migration file in the repository; Production's own
+   `live-schema` check read `0022 / 0022` (Match) both before and after
+   deployment (Section 4).
+
+No check failed. Proceeded.
+
+### 3. Pre-deployment financial-integrity baseline (direct, read-only D1 queries)
+
+All queries used the same scoping every existing capability in this
+codebase uses (`record_origin = 'live'`, `workspace_status = 'active'`,
+`data_source = 'live' AND archived_at IS NULL` for donors, and the
+exact `pledge_balance_corrections` join `capabilities.ts`'s own
+`getOutstandingPledges` uses for the balance figure), confirmed to
+make zero writes (`changed_db: false` / `rows_written: 0` on every
+individual query):
+
+- Donors (live, non-archived): **297**
+- Giving activities (live): **5,935**
+- Open/partially-paid pledges (live, active): **91**
+- Active payment plans (`ended_at IS NULL`): **45**
+- Committed (open + partially-paid pledges only): **$286,599.00**
+- Paid (all live, active giving activities): **$4,020,638.60**
+- Outstanding balance (live, active, corrections-aware): **$179,214.15**
+- Interactions: **204**
+- Recommendations: **6**
+
+(One earlier, abandoned attempt ran these as a single batched
+`--file=` execution rather than individual `--command` calls; its
+summary line reported `"changes": 1` at the batch/session level, a
+D1/wrangler batch-bookkeeping artifact -- `"Rows written": 0` in that
+same summary already showed no data was touched. All figures actually
+used for this baseline came from the individual, single-statement
+`--command` queries above, each independently confirming
+`changed_db: false`.)
+
+### 4. Production deployment
+
+Deployed via the established `wrangler deploy --config
+wrangler.production.jsonc` (the `pnpm run
+deploy:production-independent` script's own final step; the build and
+manifest-verification steps were already run explicitly in Section 2
+Check 8).
+
+- **Deployed Git commit**: **`ef62b4cd75a7f577ebd5c87be94bbf84a9557330`**
+  (clean working tree, HEAD at deploy time -- no drift from Section 1's
+  scope review).
+- **Previous Production Worker version (rollback target)**:
+  **`5401a86c-18de-4927-bc56-baed2fa39a67`**.
+- **New Production Worker version**: **`4d855627-47b6-4c9d-a2d1-baf38076828f`**.
+- **Deployment timestamp**: **2026-10-16T15:38:03.653Z**.
+- Deploy output confirmed every binding unchanged: `env.DB
+  (fundraising-os-production-db)`, `env.STATUS_WORKER
+  (fundraising-os-production-backup-status)`, `env.AI`, `env.AI_PROVIDER
+  ("workers-ai")`, `env.WORKERS_AI_MODEL`, `env.TEAM_DOMAIN`,
+  `env.POLICY_AUD`, `env.APP_BASE_URL`,
+  `env.MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID` -- no new binding, no
+  `ANTHROPIC_*` var, no credential change. Cron printed as `schedule: 0
+  * * * *`, unchanged.
+
+### 5. Post-deployment verification (all PASS, observed live on Production)
+
+- **Health/schema**: PASS -- fresh `/api/health` immediately after
+  deploy: `status: healthy`, `automated-backup: healthy`,
+  `restore-verification: healthy`, `database: Connected`, `live-schema:
+  0022 / 0022`, `schema-comparison: Match`, `production-readiness:
+  Ready` -- identical to the pre-deploy read.
+- **Production loads normally / authentication works**: PASS --
+  observed directly: the authenticated session loaded the Today page
+  ("Good morning, Shimmy," Morning Brief, relationship priorities) with
+  no re-authentication required, confirming Cloudflare Access continues
+  to gate and recognize the owner's session.
+- **Existing donor profiles remain accessible**: PASS -- the Donors
+  list loaded with **297 relationships** (matching Section 3's
+  baseline exactly); opened one real donor's profile directly from
+  that list and confirmed the full profile (lifetime paid, most recent
+  gift, open commitments, suggested action, "+ Add Meeting Notes")
+  rendered correctly.
+- **Ask Fundraising OS AI responds successfully**: PASS -- asked a real
+  financial question on live Production ("How much money have we
+  received this month, and what are our open commitments?") and
+  received a grounded, complete response.
+- **Financial questions distinguish verified dated payments, recorded
+  paid balances, and new commitments**: PASS -- observed directly in
+  that same live response: a Category A ("verified dated payments")
+  figure, explicitly separated from new commitments (not yet money
+  received) and from the recorded-paid-balance figure (explicitly
+  described in the response itself as "a fact about the record, not a
+  claim about when that cash was actually received") -- the exact
+  three-way distinction from the "Final Financial Reporting Integrity"
+  round, now confirmed live on Production's own real data for the
+  first time.
+- **Mandatory financial limitations appear in responses**: PASS -- the
+  full limitations disclosure (Category A/B/C definitions, the
+  pre-existing-pledge undated-payment caveat, the payment-event-ledger
+  explanation) appeared in full and un-truncated directly beneath the
+  answer -- confirming this round's disclosure-truncation fix holds
+  through the real Production AI pipeline, not only the pure-function
+  test or the Staging smoke test.
+- **Donor search and summaries work**: PASS, verified narrowly to
+  avoid exposing real donor PII in this record -- a direct donor-code
+  lookup was attempted first but withheld by this session's own PII
+  safeguard before sending (the request was never submitted); the
+  capability was instead exercised through "Who haven't I spoken with
+  recently?" (one of the Assistant's own suggested prompts, naming no
+  specific donor), which returned a grounded, successful response
+  (confirmed structurally: a `GROUNDED IN YOUR CRM DATA` response block
+  with one real `/donors/...` link, no error text, no "I don't have"
+  fallback) -- proving the search/relationship-priority capability
+  works live on Production, without this report recording, or this
+  session ever displaying in a saved artifact, any individual donor's
+  name.
+- **AI Meeting Notes remains available**: PASS -- the real donor
+  profile opened above still shows its "+ Add Meeting Notes" action;
+  no meeting note was created (explicitly prohibited this round).
+- **Daily Agenda and existing recommendations continue working**: PASS
+  -- the Today page's Morning Brief rendered normally ("10 relationship
+  priorities, 0 scheduled activities, 8 recent gifts"), consistent in
+  shape with the pre-deploy view.
+- **Payment-plan and pledge views remain functional**: PASS -- `/pledge-review`
+  loaded its real heading ("Pledge payment-plan review") and content
+  with no error.
+- **Scheduled email configuration and cron triggers unchanged**: PASS
+  -- confirmed via Section 2 Check 7 (unchanged secrets/cron
+  configuration) and directly re-queried `agenda_send_log` after
+  deployment: 2 total rows, latest `claimed_at` =
+  `2026-10-16T13:00:44Z` -- more than two hours *before* this round's
+  15:38:03Z deployment, proving the deployment itself triggered no
+  send (the row count grew from the prior round's recorded "1" only
+  because of the hourly cron's own normal, pre-existing operation
+  earlier the same day, unrelated to this deployment).
+- **Production and Staging remain isolated**: PASS, reconfirmed live
+  *after* the Production deploy: an authenticated `POST
+  /api/assistant` against Staging still returns `403` with the
+  standard read-only message -- Staging's write guard and its separate
+  database are both untouched by this Production deployment.
+- **No donor record, payment, pledge, meeting note, or recommendation
+  was created in Production.** Every verification call above was
+  read-only (page loads, health checks, D1 `SELECT`-only queries, and
+  Assistant questions -- the Assistant route itself performs no
+  database write, confirmed structurally in the prior review round and
+  unchanged here).
+
+### 6. Financial-integrity verification: before vs. after (byte-identical)
+
+The exact same read-only queries from Section 3 were re-run
+immediately after deployment:
+
+| Metric | Before | After |
+|---|---|---|
+| Donors (live) | 297 | 297 |
+| Giving activities (live) | 5,935 | 5,935 |
+| Open/partially-paid pledges | 91 | 91 |
+| Active payment plans | 45 | 45 |
+| Committed | $286,599.00 | $286,599.00 |
+| Paid | $4,020,638.60 | $4,020,638.60 |
+| Outstanding balance | $179,214.15 | $179,214.15 |
+| Interactions | 204 | 204 |
+| Recommendations | 6 | 6 |
+
+**Zero difference across every metric.** No investigation was needed;
+no correction was performed or would have been performed automatically
+in any case.
+
+### 7. What was independently observed on Production vs. inferred from tests/docs
+
+- **Observed directly, live, on Production, this round**: the current
+  Worker version before deploy; `/api/health`'s backup/restore/schema
+  status before and after deploy; the deploy command's own binding and
+  cron output; the Donors list count; one real donor profile page; a
+  live Ask AI financial response showing the Category A/B/C
+  distinction and the full limitations disclosure; a live Ask AI
+  relationship-priority response (structurally, without reading its
+  donor-identifying content); `/pledge-review`; `/travel-planning`;
+  Staging's live `403` after the Production deploy; all nine baseline
+  financial metrics, before and after, via direct read-only D1 queries.
+- **Inferred from the automated test suite and prior rounds' Staging
+  verification, not re-observed live on Production this round**: the
+  full donor-privacy cross-user isolation proof (synthetic multi-user
+  database, from the immediately preceding round -- Production has
+  only one real user account, so true live cross-user testing remains
+  impossible here exactly as it was on Staging); the disclosure
+  pathological-truncation path (an answer plus disclosures together
+  exceeding `MAX_ANSWER_LENGTH`) was exercised only in the pure-
+  function unit tests, since no real Production question this round
+  was long enough to reach it; AI Meeting Notes' full dictate ->
+  organize -> approve -> save flow (not exercised this round, to avoid
+  creating a real Production record -- its underlying
+  `callWorkersAI`/response-parsing logic is unchanged aside from the
+  pure extraction described in Section 1, and was verified live on
+  Production in the "AI Meeting Notes Date Fix" deployment two rounds
+  prior using the same provider code now still in place).
+
+### 8. Rollback
+
+**Not needed.** No regression, authentication failure, financial
+discrepancy, data-isolation break, unauthorized donor-information
+disclosure, CRM functionality regression, unexpected email/cron
+change, or critical application error was detected at any point.
+The Worker was not rolled back. Rollback command preserved for any
+future need: `wrangler rollback 5401a86c-18de-4927-bc56-baed2fa39a67
+--config wrangler.production.jsonc`.
+
+### Remaining limitations (unchanged from, and consistent with, the prior review round)
+
+- True live cross-user donor-privacy isolation has still never been
+  observed in a live two-account request/response pair on either
+  environment -- Staging and Production both currently have exactly
+  one real user account. The authoritative proof remains the synthetic
+  multi-user database test (`tests/assistant-donor-privacy.test.mjs`)
+  run against the real, production-identical authorization SQL.
+- The disclosure block's own pathological-truncation path (disclosures
+  alone exceeding `MAX_ANSWER_LENGTH`) remains verified only by unit
+  test, not by a live Production question long enough to trigger it --
+  consistent with that path's own design intent (a defensive fallback
+  for a combination this feature's current limitation strings do not
+  realistically reach).
+- Data-entry free-text fields (relationship notes, institutional
+  memory) were not scanned for accidentally-entered sensitive content
+  -- a data-entry risk, not a code defect, out of scope for a
+  deployment-safety review.
+
+### Final Production deployment status: SUCCESSFUL
+
+The reviewed Ask Fundraising OS AI upgrade -- the real, context-aware
+Assistant architecture and all six rounds of independent financial-
+accuracy and donor-privacy fixes that followed it -- is now live on
+Production (`4d855627-47b6-4c9d-a2d1-baf38076828f`, commit
+`ef62b4cd75a7f577ebd5c87be94bbf84a9557330`, deployed
+2026-10-16T15:38:03.653Z). Every mandatory safety check passed. Every
+financial and record-count baseline is byte-identical before and
+after. The live Production smoke test confirmed Ask AI answers real
+financial questions with the correct Category A/B/C distinction and a
+complete, un-truncated mandatory disclosure, and confirmed existing
+donor, pledge/payment-plan, and relationship-priority functionality is
+unaffected. No rollback was needed.
+
+No parallel or forked agent was used for any part of this round's
+deployment, configuration review, database access, or verification --
+every step ran sequentially, directly. No unrelated feature,
+migration, or financial-data correction was deployed or attempted. No
+additional feature development was begun after deployment. Stopping
+here per this round's instruction.
