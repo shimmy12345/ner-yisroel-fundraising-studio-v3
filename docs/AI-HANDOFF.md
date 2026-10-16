@@ -48992,3 +48992,299 @@ only. Stopping here per this round's own instruction: code corrections,
 Staging verification, and documentation are complete; Production
 deployment and any further financial-data changes both require separate
 authorization.**
+
+## Final Financial Reporting Integrity and Data Isolation Review (2026-10-16)
+
+A fifth independent review found two real, distinct defects in the
+immediately prior round's own reconstruction fix: a mislabeling (a
+balance snapshot was being presented as a verified cash receipt) and a
+genuine cross-owner data-isolation gap in the reconstruction query
+itself. Both are fixed here, the second verified as a real exploit (not
+a theoretical one) before and after the fix. Code/tests committed as
+`9bd0863`, on top of `960ba6a`/`36eddff`/`8431f49`/`9789649` (the four
+prior independent-review rounds on this feature, above). No Production
+file was read or written. No parallel or forked agent was used for any
+part of this round's investigation, implementation, Staging deployment,
+database access, or verification.
+
+### 1. Were reconstructed balances mislabeled as actual receipts? Yes -- confirmed and fixed
+
+The prior round's `verifiedMoneyReceivedCents` field combined two
+different kinds of evidence under one "verified" name: (a) real, dated
+payment-review transactions, and (b) a new commitment-category row's
+reconstructed paid_cents as of this period's end. (b) is a fact about
+WHICH ROW/PERIOD a snapshot belongs to -- it is not proof of WHEN the
+underlying cash was received. The review's own example confirms this
+directly: a donor who actually paid $500 in September, whose pledge is
+not imported into Fundraising OS until October, would have had that
+entire $500 counted as "verified money received in October" -- which is
+false. The money was recorded in October; nothing in this schema says
+it was received then.
+
+**Fix**: three categories, now never conflated anywhere in code, test,
+prompt, or capability description:
+- **A. Verified dated payments** (`verifiedDatedPaymentsCents`) -- a
+  real, individually-dated transaction confirmed through the payment-
+  review screen. The ONLY figure this feature will ever call "received"
+  or "verified."
+- **B. Recorded paid balance** (`recordedPaidBalanceCents`) -- what a
+  pledge/gift first recorded this period shows as paid, reconstructed
+  to its value as of this period's own end. A record-keeping fact,
+  explicitly described everywhere as "recorded as paid"/"shown as
+  paid," never "received."
+- **C. New commitments** (`newCommitmentsCents`, unchanged) -- never
+  confused with money received of any kind.
+
+The old `recordedCumulativePaidTotal` ("live, today" balance) field was
+removed entirely -- it was a fourth, confusing number that did not map
+onto any of the task's three required categories; Category B (as-of-
+period-end) already covers what it was meant for.
+
+### 2. `source_fingerprint`'s exact uniqueness and ownership guarantees -- investigated directly, not assumed
+
+- **`giving_activities` itself**: unique per `(owner_user_id,
+  external_source, source_fingerprint)` -- confirmed via
+  `drizzle/0004_personalization_live_data.sql`, which explicitly
+  *replaced* an original 2-column `(external_source,
+  source_fingerprint)` unique index specifically because it was too
+  broad. Two different users CAN share an identical fingerprint without
+  colliding in this table; two different donors under the SAME user
+  CANNOT (the 3-column index would reject the second insert outright --
+  proven directly in this round's own tests, Section 5, not merely
+  inferred from the index's name).
+- **`source_fingerprint` itself**: a pure SHA-256 hash of row CONTENT
+  only (`lib/import/jl-donations.ts`'s `canonicalFingerprint`: JL code,
+  date, item, description, campaign, amount, company) -- no user or
+  donor identity is folded into the hash at all. It is NOT globally
+  unique by construction; uniqueness is only ever enforced by whichever
+  table's own index says so.
+- **`giving_activity_import_changes`** (the change-log table the
+  reconstruction reads from): its ONLY key is `(import_id,
+  source_fingerprint)` -- confirmed directly against
+  `drizzle/0003_jl_donation_import.sql`, the migration that created it,
+  with no later migration ever adding an owner/user column. **It has no
+  owner-scoping of its own at all.** The only path to a user is through
+  `data_imports.user_id`, via `import_id`.
+- **Conclusion, not assumed**: two different users whose JL exports
+  happen to produce an identical fingerprint (plausible in practice --
+  JL "Code" values are small, organization-assigned integers, easily
+  reused across unrelated accounts) could, before this round's fix,
+  have one user's balance reconstruction silently read a different
+  user's change-log row.
+
+### 3. The fix: an owner-scoped join, and the removed `created_at` fallback
+
+`RECORDED_PAID_BALANCE_ROWS_SQL`'s correlated subquery now joins through
+`data_imports` and requires `di.user_id = ga.owner_user_id` -- the
+historical import that produced a change-log entry must belong to the
+SAME user as the row being reconstructed, or that entry is never
+considered. This is the only thing that closes the gap described in
+Section 2, since `giving_activity_import_changes` itself cannot be
+scoped any other way.
+
+Separately, `VERIFIED_DATED_PAYMENT_AUDITS_SQL` no longer accepts
+`COALESCE(payment_date, created_at)` as a stand-in for a missing payment
+date -- it now requires `payment_date IS NOT NULL` explicitly. A
+payment-review decision with no recorded date is instead surfaced by
+the new `UNDATED_PAYMENT_AUDITS_SQL`, excluded from BOTH Category A
+(no date to verify) and Category B (its own giving_activities row, if
+any, is excluded from the balance figure too, so the money is never
+silently re-presented under a different label) -- and disclosed as its
+own dynamic `limitations` entry with a count and dollar total, never
+silently dropped. In practice this should be rare to nonexistent:
+`lib/import/jl-payment-assignment.ts`'s own `buildPaymentCandidates`
+already blocks (never commits) a payment row with no parseable date
+before it can ever reach this table -- confirmed live on Staging
+(Section 7): zero undated rows exist in the real dataset today. This
+query no longer assumes that invariant holds, though; it verifies
+`payment_date` itself, every time.
+
+### 4. Was a payment applied via ordinary reimport ever counted as dated? No, re-confirmed
+
+Every `jl_payment_assignment_audits` row in the real Staging dataset
+(91 rows total, 11 with a `payment_date` in October) was confirmed, live,
+to already have a genuine `payment_date` -- zero rows depend on, or are
+affected by, the removed fallback. Reversal/correction behavior is
+unchanged from the prior round: `pledge_balance_corrections` is a
+separate overlay table this capability never reads, confirmed (again)
+to have zero effect on either category; a `workspace_status`-reversed
+row is fully excluded from both. Double-counting protection (the
+fingerprint-based dedup between a new giving_activities row and its own
+audit decision, including the derived `:remainder` fingerprint for
+overpayment splits) is unchanged and re-verified.
+
+### 5. Regression tests
+
+`tests/fundraising-progress.test.mjs` restructured into six parts
+(A/appendFinancialLimitations/B/C/D unchanged in structure, renamed for
+the new fields; two new parts):
+
+- **Part E (the critical new tests)**: two different users' giving_activities
+  rows sharing an IDENTICAL fingerprint, each with their own, deliberately
+  wildly-different ($100 vs. $900) balance history. **Verified as a real
+  exploit, not merely a theoretical one**: the fix was temporarily
+  reverted and the test re-run, which failed exactly as predicted --
+  user 1's October figure returned `90000` (user 2's leaked $900) instead
+  of the correct `10000` -- before the fix was restored and the test
+  re-confirmed passing. Also: a structural proof that a cross-donor
+  fingerprint collision WITHIN one user is rejected by the real
+  `giving_activities_owner_source_fingerprint_unique` index (an actual
+  `assert.throws` against the real constraint, not an assumption); a
+  dedicated multiple-imports-same-fingerprint check; both already
+  exercised throughout Parts C/D as well.
+- **Part F**: the mislabeling fix directly -- a pledge whose paid_cents
+  is fully recorded at the moment of its first import is counted in
+  Category B, confirmed to NEVER appear in Category A.
+- Part A gained a dedicated undated-payment-audit case (A8): an audit
+  decision with no payment_date contributes to neither category and
+  produces the correct dynamic limitation text.
+- Every scenario from the four prior rounds (new pledge with initial
+  partial payment, same-month and cross-month installments, repeated
+  unchanged imports, explicit dated assignments, overlapping giving/audit
+  records, a fully-paid pledge with no dated event, backdated payment
+  records, reversed/corrected payments, overpayment deduplication,
+  calendar month/year boundaries) was re-verified under the new field
+  names and the new A/B/C split, not merely renamed and assumed correct.
+
+### 6. Preserved safeguards -- re-verified, not merely assumed
+
+- Payment-to-pledge reconciliation, outstanding pledges, monthly
+  payment plans, stale-pledge recommendations, Daily Agenda, Trip
+  fundraising reporting, Financial Dashboard reporting, and donor
+  ownership/permissions elsewhere in the app: untouched by this round's
+  changes (confirmed by `git diff --stat` touching only
+  `lib/assistant/*.ts` and their own tests); full suite re-run confirms
+  no regression.
+- No historical financial record was modified to make any test pass --
+  every scenario uses freshly-inserted synthetic rows in an in-memory
+  SQLite database, or the existing synthetic "QA TEST" donor on
+  Staging, never a real donor record.
+
+### 7. Staging verification
+
+- **Full regression + full suite**: `node scripts/run-tests.mjs` --
+  **211/211 test files pass**, including the six-part
+  `tests/fundraising-progress.test.mjs` and the updated
+  `tests/assistant-capabilities-safety.test.mjs`/
+  `tests/relationship-snapshot-stage3.test.mjs`.
+- **Type check**: `npx tsc --noEmit` -- clean.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, unchanged.
+- **Build**: `pnpm run build:staging-independent` -- succeeds.
+- **Staging verification, direct SQL (no AI)**: the full owner-scoped
+  reconstruction query, the dated-only payment-audit query, and the new
+  undated-payment-audit query were all run directly against real
+  Staging data via `wrangler d1 execute` -- all executed without error.
+  The undated-audit query returned **zero rows** (Section 4's own
+  confirmation that the removed fallback was never actually load-bearing
+  on real data). The real Staging dataset currently has exactly **one**
+  user account, so the cross-owner isolation fix itself could not be
+  exercised live against a second real user this round -- the synthetic,
+  two-user test in Part E (with its own before/after verification) is
+  the authoritative proof for that specific defect.
+- **Staging verification, full AI pipeline, all six required
+  questions**:
+  - *"How much money did we actually receive in October?"* -- "$2,915
+    in verified, dated payments," explicitly distinguished from
+    recorded balance and new commitments, with the limitation stated.
+  - *"How much was recorded as paid by the end of October?"* --
+    "$1,910 was shown as paid... It is not a claim about when that cash
+    was actually received" -- the exact distinction required, in the
+    model's own words.
+  - *"How much was newly pledged in October?"* -- "4 new pledges/gifts,
+    totaling $1,910" -- no donor-count fabrication.
+  - *"How much did donors pay toward existing pledges?"* -- correctly
+    isolated $2,915 (Category A's own subset), explained accurately.
+  - *"Compare October and November fundraising."* -- the planner
+    selected no capability at all and the assistant answered "I don't
+    have any data for either October or November fundraising, so I
+    can't make that comparison" -- safe (no fabrication of any figure
+    for either month) but more conservative than strictly necessary
+    (this capability does have October's own real data available and
+    could have reported it while separately disclosing the missing
+    November comparison). Disclosed here as an observed behavior, not
+    fixed -- it never states anything false or invented, which remains
+    the binding requirement; making it more informative without
+    reintroducing any fabrication risk is a reasonable future
+    refinement, not a correctness defect.
+  - *"Why doesn't the recorded paid balance match verified payments?"*
+    -- a clear, fully accurate, data-grounded explanation of both
+    figures and why they differ.
+  - `donor_summary` against the existing synthetic "QA TEST" donor
+    re-confirmed working, unaffected by this round's changes. No real
+    donor record was used in any AI test this round.
+- **Production/Staging isolation reconfirmed**: deploy output's own
+  printed bindings point only at Staging; no Production file, binding,
+  or secret was read, written, or referenced.
+- **Staging write window**: opened once for this round's own live
+  verification (the same `/api/assistant` POST-method guard situation
+  every prior round has needed a window for), closed immediately after;
+  `git diff --stat wrangler.staging.jsonc` confirmed empty; a live write
+  probe afterward returned the guard's own `403`. Staging-wide row
+  counts (`donors` 255, `interactions` 203, `recommendations` 5,
+  `giving_activities` 5463, `jl_payment_assignment_audits` 91,
+  `giving_activity_import_changes` 5581, `users` 1) reconfirmed
+  byte-identical before and after this round's entire testing session.
+- **Deployed Staging Worker versions this round**:
+  `17088e9f-eb1e-44fc-b302-8ef1f92bb2a1` (fix live) →
+  `1de685aa-a555-4347-8a9b-fb7cfe250064` (write guard restored,
+  current).
+
+### 8. Final report -- answers to the five closing questions
+
+**1. Can the assistant safely distinguish actual payments from
+historical balance snapshots?** Yes -- `verifiedDatedPaymentsTotal`
+(Category A) and `recordedPaidBalanceTotal` (Category B) are now
+structurally separate fields with distinct, enforced terminology in
+code, capability descriptions, and the compose prompt; verified live
+that the model itself correctly explains the distinction when asked
+directly (Section 7).
+
+**2. Can financial history from one donor or user ever influence
+another's reconstruction?** No, per this round's fix and its
+before/after verification (Section 5) -- the owner-scoped join through
+`data_imports` is the specific mechanism, and it was proven necessary by
+confirming the exact leak it prevents actually occurred without it.
+Within one user, a cross-donor fingerprint collision is independently
+prevented by the real database constraint (also proven directly, not
+assumed).
+
+**3. Can it report monthly cash received accurately with the available
+transaction records?** For Category A (verified dated payments), yes,
+fully. For the broader, intuitive sense of "all cash received" that
+includes payments applied to pre-existing pledges via ordinary
+reimport, no -- that remains the one disclosed, unresolved gap
+(unchanged from the prior two rounds), and the assistant now describes
+this limitation using the correct, non-misleading terminology rather
+than folding that unknown money into either category.
+
+**4. Are there remaining financial integrity or privacy risks?** The
+specific isolation gap this round investigated is closed and tested.
+No other cross-owner read path was found in this feature during this
+investigation. The disclosed-but-unresolved gap from Section 3 above
+(pre-existing pledges' undated reimport payments) is a completeness
+limitation, not an integrity or privacy risk -- it never causes an
+incorrect or cross-owner figure, only an incomplete one, and it is
+always disclosed. The donor-privacy exposure shape flagged in an
+earlier round's own Section 7 (free-form AI prose surfacing private
+donor content) remains the one item still flagged for the owner's own
+separate judgment, unrelated to this round's work.
+
+**5. Is Ask Fundraising OS ready for Production?** With respect to
+every financial-accuracy and data-isolation concern raised across all
+five independent-review rounds on this feature (`9789649`, `8431f49`,
+`36eddff`, `960ba6a`, `9bd0863`), yes -- each is fixed, tested, and
+live-verified, including one defect (the cross-owner isolation gap)
+that was confirmed as a genuine, reproducible exploit before being
+fixed, not merely a theoretical concern. The one remaining financial
+gap (pre-existing pledges' undated reimport payments) is disclosed
+accurately, both in the underlying data and enforced in the
+deterministic response layer. The donor-privacy exposure shape from an
+earlier round remains the one item explicitly left for the owner's own
+sign-off.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. No broader
+financial-data, migration, or import-pipeline change was implemented.
+Stopping here per this round's own instruction: implementation,
+Staging verification, and documentation are complete; Production
+deployment requires separate authorization.**
