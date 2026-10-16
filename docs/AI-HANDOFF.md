@@ -45881,3 +45881,91 @@ database migration was applied. No branch merge occurred. Staging
 write protection is confirmed restored. Stopping here per this
 round's instruction to stop after Staging deployment and
 verification.**
+
+## Owner-Controlled Typeless Testing Window (2026-10-16) -- WINDOW OPENED, OWNER TESTED, WINDOW CLOSED, WRITE PROTECTION RESTORED
+
+The owner ran their own supervised test of AI Meeting Notes with
+Typeless dictation on Staging, per their own explicit authorization
+and safety requirements (short window, no forked/parallel agents for
+any deployment/config/DB/cleanup step, no test content created by the
+model, Production untouched).
+
+**Before opening the window**: found the previously-live Staging
+bundle was stale -- it still predated this round's due-date-resolver
+work, even though the code had already been committed and a prior
+deploy's timestamp looked current. Caught by grepping the live
+`dist/server/index.js` for distinctive resolver strings (`"yom tov"`,
+`"shmini atzeres"`) and finding none. Ran `npm run
+build:staging-independent` fresh, then re-confirmed: the resolver's
+data (Jewish-calendar term list, etc.) is correctly in the **client**
+bundle (`dist/client/assets/MeetingNotesExperience-*.js`), and the
+Workers AI model id is correctly in the **server** bundle
+(`dist/server/index.js`) -- the first check had simply grepped the
+wrong artifact for a client-only module. The fresh build was what
+actually got deployed for the testing window, not the stale one.
+
+**Pre-window verification** (all read-only or additive-only, no
+owner-visible test data created):
+- Confirmed Production's own `wrangler.production.jsonc` D1 binding
+  (`fundraising-os-production-db`, `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`)
+  is a different database from Staging's
+  (`fundraising-os-staging-db`, `6c18396c-0a8f-4f2c-ba83-ea809ec10289`).
+  This was a read of the Production config file to compare the ID --
+  the file itself was never modified, and no Production deploy or data
+  change occurred.
+- Confirmed the synthetic donor `5894d764-c4ea-4b87-a595-7fcc4664ba0e`
+  still had 0 interactions, 0 recommendations, 0 giving_activities,
+  and a null `archived_at`.
+- Uncommented `STAGING_WRITES_ENABLED` in `wrangler.staging.jsonc`
+  (the only line in the diff), deployed the fresh build -- live
+  version `15791175-1a3b-420c-8dda-9d9c100e3c26`.
+- Verified `/api/meeting-notes/organize` itself with a direct,
+  authenticated `fetch` call from the owner's own persisted browser
+  session (not through the UI form, so nothing was typed into any
+  real input) using the synthetic donor and a throwaway transcript:
+  got back `200`, a real Workers AI-generated summary, and one
+  follow-up action -- confirming both the endpoint and Workers AI
+  inference work. Re-queried D1 immediately after: still 0/0/0,
+  exactly as `organize/route.ts`'s own code and comments guarantee
+  (Organize only reads the donor for the ownership check and calls
+  the AI binding; it never writes anything -- only Save does).
+- Told the owner explicitly they could begin, with the exact Staging
+  URL and step-by-step instructions.
+
+**Owner's own test**: the owner dictated with Typeless and saved
+through the UI themselves, producing 2 real interactions
+(`cad2a3fc-ccbc-4428-a48b-f632999c854a`,
+`0b88643f-5d82-4bdb-986e-8b2c54778a01`, both `type='meeting'`) and 2
+linked recommendations (`meeting-note-<interactionId>-0`), all tied to
+the synthetic donor. The model did not create any of this -- it was
+the owner's own save, as the instructions required.
+
+**Closing the window** (owner said "close the testing window, delete
+the test interactions and recommendations, and verify Staging write
+protection is restored"):
+- Listed, then deleted, the 2 interactions and 2 recommendations
+  above for the synthetic donor only (`DELETE ... WHERE donor_id=
+  '5894d764-...'` against both tables; each reported `changes: 2`).
+- Re-queried: interactions, recommendations, and giving_activities for
+  the donor are all back to 0; the donor record itself
+  (`display_name`, `archived_at`) is untouched -- kept as the
+  reusable fixture, exactly as instructed.
+- Re-commented `STAGING_WRITES_ENABLED` back out; `git diff --stat
+  wrangler.staging.jsonc` confirmed empty (back to the exact committed
+  baseline) before redeploying.
+- Redeployed. The bindings table in the deploy output no longer lists
+  `STAGING_WRITES_ENABLED` at all, confirming it's unset again --
+  **current live Staging Worker version: `9037ac22-6c12-4e2a-8a1b-90021beb2a18`**.
+- Verified live: an authenticated `POST /api/meeting-notes/organize`
+  against the same donor now returns **403**
+  (`"Staging is read-only. All live donor updates and imports must be
+  entered in Production. ..."`), confirming write protection is back
+  in effect for a real authenticated request, not just the config
+  diff.
+- No parallel or forked agents were used for any deployment,
+  configuration change, database write, or cleanup step in this round
+  -- every action above ran sequentially, directly, per the owner's
+  explicit instruction.
+
+**No Production file was read or written in the closing half of this
+round. No paid service was activated. No credential was created.**
