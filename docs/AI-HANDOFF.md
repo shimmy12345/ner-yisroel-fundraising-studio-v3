@@ -46949,3 +46949,189 @@ deployment, configuration change, or data change occurred. Staging
 write protection is confirmed restored. Stopping here per this round's
 instruction to stop after Staging verification, for independent review
 before any separately authorized Production deployment.**
+
+## Authorized Production Deployment -- AI Meeting Notes Date Fix (2026-10-16) -- SUCCESSFUL
+
+Owner explicitly authorized Production deployment of the completed,
+Staging-tested follow-up date fixes (the two prior rounds above) --
+scoped explicitly to exactly that, not the broader AI architecture.
+
+### 1. Deployment scope, confirmed before any change
+
+`git diff --stat 0fbf723 HEAD -- . ':(exclude)docs/AI-HANDOFF.md'`
+(`0fbf723` being the commit then-live in Production) showed exactly
+four files: `lib/meeting-notes/due-date-resolver.ts`,
+`lib/meeting-notes/organize.ts` (the one-line system-prompt addition),
+and their two test files. Three commits, each already reviewed in its
+own round above (`883d68f`, `cac1c21`, `7c0cd9c`). **Nothing else** --
+no unrelated feature, refactor, or configuration change was in scope,
+confirmed directly rather than assumed.
+
+### 2. Mandatory Production safety checks (all PASS)
+
+1. **Current Production Worker version, verified live, not assumed**:
+   `wrangler deployments list` confirmed **`4b82fd4f-a8c4-414b-bf7d-a2e9cea2f600`**
+   was still current -- exactly matching the owner's stated value.
+   Recorded as the rollback target.
+2. **Backup/restore**: `automated-backup: healthy` (`2026-10-15T13:22:30Z`),
+   `restore-verification: healthy` (`2026-10-12T03:35:44Z`), read live
+   from `/api/health`. No uncertainty; proceeded.
+3. **Pre-deployment baseline** (direct D1 query, read-only): donors
+   **254**; giving activities **5,464**; giving activities with
+   category `open_pledge`/`partially_paid_pledge` (raw count) **88**;
+   interactions **204**; recommendations **6**; active payment plans
+   **45**; total committed **$280,767.00**; total paid
+   **$3,849,770.65**; total outstanding balance **$175,536.15**. (Note:
+   interactions/recommendations are each 1 higher than the prior
+   deployment round's baseline of 203/5 -- this is the owner's own real
+   "this Monday" meeting note on Production that originally surfaced
+   the bug this and the prior round fixed, not test contamination; all
+   dollar figures are unchanged.)
+4. **D1 isolation**: Production `fundraising-os-production-db`
+   (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`), Staging
+   `fundraising-os-staging-db` (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`)
+   -- confirmed still two separate databases.
+5. **Staging write protection**: confirmed active with a live
+   authenticated `403` from `/api/meeting-notes/organize` before
+   deploying.
+6. **Cloudflare Access**: `TEAM_DOMAIN`/`POLICY_AUD` untouched by this
+   round's diff; every verification call in this round only succeeded
+   because of an authenticated Access session, confirming enforcement
+   is unchanged.
+7. **Gmail secrets / cron**: `wrangler secret list` confirmed all
+   three Gmail secrets present and unchanged; `wrangler.production.jsonc`'s
+   `triggers` block unchanged (`"crons": ["0 * * * *"]`), confirmed by
+   the file diff showing zero touch to that block.
+8. **No migration required**: PASS -- this fix touches zero database
+   schema (pure application logic -- a client-side date resolver and a
+   server-side prompt string); `/api/health` showed `live-schema: 0022
+   / 0022` and `schema-comparison: Match` both before and after the
+   deploy.
+
+No check failed. Proceeded.
+
+### 3. Tests and build
+
+- **Tests**: `npm test` -- **206/206 test files pass**.
+- **TypeScript**: `npx tsc --noEmit` -- clean.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, identical to
+  the established baseline.
+- **Build**: `pnpm run build:production-independent` -- succeeded.
+- **Build-freshness confirmed directly**, not assumed: grepped the
+  just-built bundles for distinctive new strings -- the client bundle
+  (`MeetingNotesExperience-Czss0_8n.js`) contains the compound-qualifier
+  guard's own labels (`"following <weekday>"`, `"negation or
+  correction"`, `"offset applied to a weekday"`); the server bundle
+  (`dist/server/index.js`) contains the new system-prompt text
+  (`"date math"`, `"a week from Monday"`). Both present -- not a stale
+  build.
+
+### 4. Production deployment
+
+Deployed via the established `pnpm run deploy:production-independent`
+script.
+
+- **Deployed Git commit**: **`fa60d61`** (clean working tree, HEAD at
+  deploy time -- no drift from the scope review above).
+- **New Production Worker version**: **`5401a86c-18de-4927-bc56-baed2fa39a67`**.
+- **Deployment timestamp**: **2026-10-16T04:06:41.687Z**.
+- **Previous Worker version retained for rollback**:
+  **`4b82fd4f-a8c4-414b-bf7d-a2e9cea2f600`**.
+- Deploy output confirmed every binding unchanged: `env.DB
+  (fundraising-os-production-db)`, `env.STATUS_WORKER
+  (fundraising-os-production-backup-status)`, `env.AI`,
+  `env.AI_PROVIDER ("workers-ai")`, `env.WORKERS_AI_MODEL`, and every
+  Access/Gmail-service var -- no new binding, no `ANTHROPIC_*` var, no
+  credential change. Cron printed as `schedule: 0 * * * *`, unchanged.
+
+### 5. Production verification (all PASS)
+
+- **Health/schema**: PASS -- fresh `/api/health` call immediately after
+  deploy: `status: healthy`, `live-schema: 0022 / 0022`,
+  `schema-comparison: Match`, identical to pre-deploy.
+- **Cloudflare Access**: PASS -- the health check and the smoke test
+  below both required and used the authenticated owner session;
+  authentication is unchanged and working.
+- **Workers AI availability**: PASS -- confirmed directly by the smoke
+  test below returning a real, successful AI response.
+- **Read-only authenticated AI organization smoke test**: used one
+  existing, real Production donor, selected by a plain `SELECT id FROM
+  donors ... LIMIT 1` (no other field read -- no name, email, or any
+  personal data was ever retrieved or seen), with transcripts composed
+  entirely of fictional names, fictional organizations, and an explicit
+  "this is a completely fictional Production smoke-test transcript, not
+  a real conversation" preamble. No real donor information was sent to
+  AI. Two calls:
+  - `"...this Monday to discuss a possible gift."` -> `200`,
+    `available: true`, `ok: true`, `suggestedDueDate: "this Monday"`.
+  - `"...a follow-up a week from Monday..."` -> `200`, `ok: true`,
+    `suggestedDueDate: "a week from Monday"`.
+- **AI date-phrase preservation confirmed live, on Production itself**:
+  both phrases came back **verbatim**, including the compound phrase --
+  the exact AI-level fix from the prior round (previously, `"a week
+  from Monday"` risked coming back as a fabricated `"next Tuesday"`)
+  is confirmed working on live Production inference, not only on
+  Staging.
+- **Resolver and regression-test coverage**: covered by Section 3's
+  206/206 test run (the exact same resolver code now live, confirmed
+  present in the deployed bundle in Section 3) -- correct automatic
+  scheduling for the simple phrases and unresolved-with-manual-
+  confirmation for every compound/negated phrase are both covered by
+  that suite, already passing before this deploy.
+- **No synthetic Production donor was created; no test meeting note was
+  saved.** Both smoke-test calls were to `/api/meeting-notes/organize`
+  only, which the route's own code never writes from (read of the
+  donor for the ownership check, then an AI call only) -- confirmed by
+  re-querying D1 immediately after.
+- **Record counts and financial balances re-checked, byte-identical**:
+  donors 254, giving_activities 5,464, open_pledges 88, interactions
+  204, recommendations 6, active_payment_plans 45, committed
+  $280,767.00, paid $3,849,770.65, balance $175,536.15 -- unchanged
+  from Section 2's baseline. The smoke-test donor's own interaction/
+  recommendation counts are also unchanged (4 / 0, both before and
+  after).
+- **Email cron / Gmail**: unchanged -- `agenda_send_log` still exactly
+  1 row total, same `claimed_at` as before the deploy; no new send was
+  triggered.
+- **Staging isolation**: reconfirmed after the Production deploy -- a
+  live authenticated `POST /api/meeting-notes/organize` against
+  Staging still returns `403`; nothing in this round touched Staging.
+
+**One explicit limitation, not performed by design**: a complete UI
+save flow (dictate -> Organize -> approve -> Save) was **not**
+exercised on Production itself this round, since that would require
+writing a real interaction/recommendation to Production data, which
+this round's own instruction explicitly prohibited ("do not save a
+test meeting note"). That exact flow -- including the date
+auto-populating in the UI, the approval gate blocking Save until
+confirmed, and the correct date landing in D1 and the donor's Suggested
+Action -- was already verified live, twice, on Staging in the two
+prior rounds, using the identical application code now deployed
+(confirmed via the build-freshness check in Section 3). This is the one
+piece of the feature not directly re-exercised against Production's
+own database.
+
+### 6. Rollback
+
+**Not needed.** No regression, error, authentication issue, financial
+discrepancy, or email-scheduling disruption was detected at any point.
+The Worker was not rolled back. Rollback command preserved for any
+future need: `wrangler rollback 4b82fd4f-a8c4-414b-bf7d-a2e9cea2f600
+--config wrangler.production.jsonc`.
+
+### Final Production deployment status: SUCCESSFUL
+
+The follow-up date fixes (simple weekday phrases, compound/negated
+phrase protection, and the AI-level verbatim-preservation fix) are now
+live on Production (`5401a86c-18de-4927-bc56-baed2fa39a67`, commit
+`fa60d61`). Every mandatory safety check passed. Financial and record
+data confirmed byte-identical before and after. The live smoke test
+confirmed Workers AI responds correctly and preserves both a simple and
+a compound date phrase verbatim on Production itself, with zero
+database writes. No rollback was needed.
+
+No parallel or forked agent was used for any part of this round's
+deployment, configuration review, database access, or verification --
+every step ran sequentially, directly. No unrelated feature, refactor,
+or broader AI improvement was deployed or begun. Stopping here per this
+round's instruction.
