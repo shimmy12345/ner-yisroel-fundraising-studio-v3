@@ -47410,22 +47410,26 @@ nothing to create or clean up afterward):
   recommendation data -- verified in the real rendered UI (not just
   the API), including the "Grounded in your CRM data" label, donor
   links, and suggested next questions.
-- **`donor_summary`**: asked to summarize a real donor by name
-  ("Shimmy Pianko") -- correctly resolved the name, returned an
-  accurate summary (lifetime paid, open pledge amount, last contact,
-  upcoming yahrtzeit/birthday, the canonical suggested action), and
-  clearly labeled unconfirmed historical context as unconfirmed in a
-  separate follow-up test on a different donor.
+- **`donor_summary`**: asked to summarize a real donor by name --
+  correctly resolved the name, returned an accurate summary (lifetime
+  paid, open pledge amount, last contact, upcoming yahrtzeit/birthday,
+  the canonical suggested action), and clearly labeled unconfirmed
+  historical context as unconfirmed in a separate follow-up test on a
+  different donor. **Redacted 2026-10-16**: this entry originally
+  named the specific real donor tested -- removed as part of the
+  donor-privacy correction below (Section 8); the donor's identity was
+  never load-bearing to what this test actually demonstrated.
 - **Multi-turn conversational follow-up**: asked "which donors have
   outstanding pledges," then, in a second request carrying the first
   response's own donor list as conversation state, asked "tell me more
   about the second one" -- correctly resolved to the actual second
   donor from the prior list (verified by matching donor id) and
   produced a full, accurate, grounded summary of that specific donor.
-- **Ambiguous donor name, correctly refused to guess**: asked "tell me
-  about Cohen" against a dataset with 4 distinct Cohen households --
-  got back a clarification response listing all 4 real candidates by
-  name and id, never a guess at which one was meant.
+- **Ambiguous donor name, correctly refused to guess**: asked about a
+  real surname shared by multiple real households in this account's
+  data -- got back a clarification response listing all of the real
+  candidates by name and id, never a guess at which one was meant.
+  (Surname redacted 2026-10-16, same correction as above.)
 - **Out-of-scope question, graceful degradation**: asked "which donors
   should I prioritize before my upcoming trip" (no dedicated
   capability exists) -- the planner fell back to the closest relevant
@@ -47513,3 +47517,371 @@ was used for any part of this round. Stopping here per this round's
 instruction to stop after implementation, Staging testing, and
 documentation -- not deploying to Production without separate
 authorization.**
+
+## Independent Code Review -- Pre-Production Corrections for Ask Fundraising OS (2026-10-16)
+
+An independent code review of the "Upgrade Ask Fundraising OS to a Real
+AI Assistant" round (above) raised three concerns before that feature
+could be considered for Production. All three were investigated and
+fixed this round. Code/tests committed as `9789649`; this entry as the
+follow-up docs commit. No Production file was read or written. No
+parallel or forked agent was used for any part of this round's
+research, implementation, Staging deployment, database access, or
+verification -- same discipline as every prior round.
+
+### 1. Donor profile URL security -- FIXED
+
+**What was wrong**: `lib/assistant/conversation-state.ts`'s
+`boundConversationState` accepted `lastDonorRefs[].href` from the
+client with no validation at all, and `lib/assistant/conversation.ts`'s
+ordinal-reference resolution (`resolveDonorReference`, the "tell me
+more about the second one" path) returned that client-supplied
+`candidate.href` verbatim on a resolved donor, after verifying only the
+donor id's ownership -- never rebuilding the link itself from the
+verified id. Every OTHER donor link in the feature (`capabilities.ts`'s
+`donorHref()`, used by every direct capability) was already
+server-generated and safe; this one path was not.
+
+**Investigated impact**: traced the full data flow from
+`AssistantExperience.tsx`'s client-held `lastDonorRefs` state, through
+the request body, `boundConversationState`, `resolveDonorReference`,
+`runCapabilities`, to the final `AssistantAnswer.referencedDonors`/
+`donorRefs`. In the current orchestrator (`orchestrator.ts`), the
+donor object `resolveDonorReference` returns is only ever consumed for
+its `donorId` (to call `getDonorSummary`, which always regenerates its
+own `href`) -- so the specific forged-href value could not yet reach a
+real response. This was a latent defect, not an exploited one: the
+`DonorRef` type conflates "a safe, server-verified donor reference" with
+"an untrusted bag of client-echoed strings," and any future capability
+that read `.href` off the resolved donor directly (rather than off a
+fresh capability call) would have reintroduced the leak silently. Fixed
+at the shared-infrastructure level rather than patched at the one
+current call site.
+
+**Fix**:
+- `donorHref(donorId)` is now the single canonical link builder, moved
+  to `conversation-state.ts` (pure, already shared by both
+  `capabilities.ts` and `conversation.ts`) and exported. `capabilities.ts`'s
+  own duplicate copy is removed.
+- `boundConversationState` now **regenerates** every `lastDonorRefs[].href`
+  from `donorId` unconditionally -- the client's own `href` string is
+  never read into the bounded state at all, regardless of what it
+  contains. `href` is no longer even a required field on the client
+  payload (only `donorId`/`name` are).
+- `resolveDonorReference`'s ordinal branch independently rebuilds the
+  href from the ownership-verified `owned.id` row, rather than the
+  `candidate` the client sent -- deliberate defense in depth on top of
+  the `boundConversationState` fix, so the "never return a donor
+  without verifying ownership first" guarantee holds even if that
+  upstream regeneration is ever changed.
+- `orchestrator.ts`'s `presetDonorId` synthetic-candidate construction
+  was switched to the same shared helper (it was already server-side
+  and safe, just a duplicated inline template string).
+
+**Regression tests added**:
+- `tests/assistant-conversation-state.test.mjs`: a real, owned donorId
+  paired with an external phishing URL, a protocol-relative URL, a
+  `javascript:` URL, and a path into a different donor's profile --
+  all four must come back as the canonical `/donors/<id>` link, never
+  the forged string; an already-canonical client href is unaffected
+  (proves the fix regenerates unconditionally, not via an allow/block
+  list); a row with `href` omitted entirely is still accepted.
+- `tests/assistant-capabilities-safety.test.mjs` (structural, since
+  `conversation.ts` imports `cloudflare:workers` and cannot be invoked
+  directly in Node): asserts `conversation.ts` never assigns
+  `candidate.href` to anything returned, always rebuilds from
+  `donorHref(owned.id)`, and imports the one shared helper rather than
+  defining its own; asserts `capabilities.ts` no longer defines its own
+  `donorHref`.
+
+**Live verification on Staging** (synthetic donor only -- see Section 3):
+sent a forged `conversation.lastDonorRefs` entry pairing the real,
+owned synthetic test donor's id with `href: "https://evil.example.com/phish"`,
+then asked an ordinal follow-up ("Tell me about the first one."). The
+live response's `referencedDonors`/`donorRefs` both came back with
+`href: "/donors/5894d764-c4ea-4b87-a595-7fcc4664ba0e"` -- the forged
+URL never appeared anywhere in the response. A second request with a
+non-owned/nonexistent donorId (also paired with a forged href) resolved
+to "not found," fell through to a different capability, and likewise
+never surfaced the forged URL or any unauthorized data.
+
+### 2. Monthly fundraising totals and timezone boundaries -- FIXED
+
+**What was wrong**: `lib/assistant/capabilities.ts`'s
+`getFundraisingProgress` (the `fundraising_progress` capability -- "how
+is this month going") computed its month-start boundary with
+`new Date(ctx.now * 1000); .setUTCDate(1); .setUTCHours(0,0,0,0)` --
+truncating straight to whatever month it currently is in **UTC**, not
+the fundraiser's own `America/New_York` calendar month. For roughly
+4-5 hours of every day (the UTC-ET offset), this boundary silently
+disagreed with the fundraiser's real local calendar: a gift entered, or
+a donor contacted, late at night local time but already "tomorrow" in
+UTC could be attributed to next month's totals a day early, and the
+reverse at each month's true start.
+
+**Scope of the search**: grepped the whole codebase for every
+month-boundary/monthly-aggregation computation
+(`setUTCDate`/`setUTCHours`/`strftime`/"this month"/"monthly" across
+`lib/` and `app/`). `getFundraisingProgress` is the **only** place in
+this codebase that computes a monthly reporting boundary from "now" --
+every other date-sensitive surface (Daily Agenda, reminders, the
+Morning Brief, payment-plan due dates) already reasons in terms of
+single calendar days via the existing, already-correct
+`lib/workspace/local-time.ts` helpers, not months. Individual
+transaction dates themselves
+(`giving_activities.activity_date`) were never affected -- they are
+deliberately stored as timezone-agnostic, UTC-midnight-anchored
+calendar days (`lib/financial-date.ts`), by design, specifically so a
+date never shifts with timezone. The bug was purely in the *boundary*
+compared against that value, not the stored dates.
+
+**Fix**: added `localMonthBoundaries(epochSeconds, timezone)` to
+`lib/workspace/local-time.ts` (pure, no `cloudflare:workers` import,
+reusing the module's existing `localDateParts`/`zonedTimeToUtc`
+helpers rather than inventing new date math). It returns the local
+month start in the TWO conventions this schema actually needs:
+- `dateOnlyStartEpoch` -- the 1st of the local month expressed as a
+  UTC-midnight date-only anchor, for comparison against
+  `giving_activities.activity_date` (itself date-only, never
+  DST-adjusted, because a calendar day is not an instant).
+- `instantStartEpoch` -- the real, DST-safe UTC instant that local
+  midnight on the 1st corresponds to (via the already-proven
+  `zonedTimeToUtc`), for comparison against `interactions.occurred_at`
+  (a true moment-in-time).
+- `periodLabel` -- the human-readable month/year, in the fundraiser's
+  own timezone (unchanged in behavior from before, just relocated).
+
+`getFundraisingProgress` now calls this once and uses
+`dateOnlyStartEpoch` for both `giving_activities` queries and
+`instantStartEpoch` for the `interactions` (donors-contacted) query --
+each value matched to the actual semantics of the column it is
+compared against, rather than reusing one UTC-truncated timestamp for
+both.
+
+Profile timezone policy: `lib/auth/profile.ts` already defaults every
+user's `timezone` to `"America/New_York"`, confirmed still the case --
+no change needed there; this fix makes `fundraising_progress` actually
+respect that stored value instead of silently falling back to UTC
+regardless of it.
+
+**Regression tests added** (`tests/local-time.test.mjs`, pure/unit,
+all against `America/New_York`):
+- A plain midday case (no boundary trickiness) confirms both epoch
+  conventions compute correctly and differ from each other as
+  expected.
+- **The exact bug this fix targets**: `now` = Nov 1, 2026 02:00 UTC,
+  which is still Oct 31, 2026 22:00 EDT -- asserts the boundary still
+  reports "October 2026," not "November," proving a late-UTC-night
+  moment no longer closes out the local month early.
+- The mirror case just after the real local rollover (Nov 1 06:00 UTC
+  = Nov 1 02:00 EDT) asserts the boundary HAS rolled over to November.
+- A year-rollover case (Jan 1, 2026 03:00 UTC = Dec 31, 2025 22:00 EST)
+  asserts it still reports December of the PRIOR year.
+- A DST-transition case: evaluated well after March's "spring forward,"
+  the month-start instant for March 1 itself must still use the
+  EARLIER (EST) offset, since DST does not begin until March 8.
+- Asserts `dateOnlyStartEpoch`/`instantStartEpoch` never collapse to the
+  same value for a real (non-UTC) timezone -- guards against a future
+  "simplification" silently reintroducing the single-boundary bug for
+  the `occurred_at`-based count.
+- `tests/assistant-capabilities-safety.test.mjs` (structural): asserts
+  `capabilities.ts` never reintroduces `setUTCDate(1)` and does call
+  the shared `localMonthBoundaries` helper.
+
+**Live verification on Staging**: asked "Summarize this month's
+fundraising progress for me" through the real live pipeline after
+deploying the fix -- correctly labeled the real current period
+"October 2026" (America/New_York) and returned real, internally
+consistent aggregate totals (gift count/total, new-pledge count/total,
+donors contacted) with no error. This round deliberately does not
+restate those aggregate figures here (see Section 3 below) -- the
+point verified is that the capability still functions correctly and
+reports the correct LOCAL month post-fix, not the specific numbers.
+Verifying the exact midnight-boundary edge case against a real
+transaction dated precisely at a month boundary was NOT additionally
+performed live, by design: doing so would have required either using
+real donor financial records (ruled out by Section 3) or fabricating a
+new backdated transaction on the synthetic test donor purely for this
+test, which risks looking like real financial activity in the data and
+was judged unnecessary -- the pure unit tests above already prove the
+boundary arithmetic itself is correct for exactly this scenario,
+deterministically and repeatably, which is the appropriate verification
+method for date arithmetic (the same method every other date-logic fix
+in this codebase, e.g. the due-date-resolver fixes, has used).
+
+### 3. Donor privacy during testing -- INVESTIGATED, CORRECTED, SAFEGUARD ESTABLISHED
+
+**What happened**: the "Upgrade Ask Fundraising OS to a Real AI
+Assistant" round's live Staging verification (Section 6 above) queried
+and displayed real donor records -- including one real donor named by
+name in this document, and real financial figures -- rather than using
+the project's own established synthetic-fixture convention for live AI
+testing.
+
+**How this happened, investigated directly**: this codebase has a
+clear, repeatedly-used precedent for exactly this situation, set during
+the earlier AI Meeting Notes rounds (see this document's "QA TEST"
+entries, e.g. "Implement Cloudflare AI Meeting Notes on Staging" and
+the Typeless-testing round): a dedicated, unambiguously-labeled
+synthetic donor record,
+**`5894d764-c4ea-4b87-a595-7fcc4664ba0e`** ("QA TEST -- AI Meeting Notes
+(safe synthetic donor, do not use for real data)"), adopted specifically
+so live AI verification never has to touch a real donor. That donor
+still exists on Staging, active, owned by this account (confirmed by a
+direct read-only query this round). The Assistant-upgrade round's own
+task instructions required synthetic scenarios for its **automated unit
+test suite** (and that part was followed correctly -- all of
+`tests/assistant-*.test.mjs` uses fabricated data), but did not
+explicitly re-state the separate, already-established precedent that
+**live** Staging verification must also use only that synthetic fixture.
+That round's live verification instead queried whatever real donor data
+already existed on Staging, reasoning (correctly, but insufficiently)
+that Staging itself is never Production -- without recognizing that
+Staging's donor records are real individuals' real data, not synthetic
+placeholders, and that the existing project convention already solved
+this exact problem. This was an oversight in that round, not an
+authorized decision.
+
+**Correction made this round**:
+- Redacted the one specific real donor name, and genericized the
+  "distinct Cohen households" surname reference, in this document's
+  "Upgrade Ask Fundraising OS" entry (Section 6 above) -- both edited
+  in place with an explicit `**Redacted 2026-10-16**` note, rather than
+  silently rewritten, so the correction itself is visible in the
+  historical record. No other real donor names, ids, or financial
+  figures tied to a named individual were found in that entry beyond
+  the one instance and the surname reference.
+- **No real donor record was deleted, modified, or otherwise touched**
+  this round -- the Assistant feature is read-only by construction
+  (confirmed again by this round's own structural tests), so the prior
+  round's real-data testing never wrote anything that needs undoing or
+  cleaning up. There was nothing to "clean up" on any real donor.
+- This chat session itself (not this document) also stated the one
+  real donor's name and some real figures directly to the owner while
+  narrating that round's results; that cannot be retroactively edited
+  out of the conversation transcript. Disclosed here rather than
+  omitted.
+
+**Safeguard established going forward**: this round's own live
+verification (Sections 1 and 2 above, plus the follow-up-persistence
+check immediately below) used **only** the existing synthetic
+`5894d764-c4ea-4b87-a595-7fcc4664ba0e` ("QA TEST") donor for every
+live Assistant and Meeting Notes check -- no real donor was queried,
+displayed, or named anywhere in this round's work or in this document.
+Any future round doing live AI verification on Staging (Assistant,
+Meeting Notes, or any new AI feature) should reuse this same donor
+record rather than real data, exactly as the Meeting Notes rounds
+already established -- this document's own search for "synthetic"/
+"QA TEST" across prior entries is sufficient to rediscover the
+convention, so no new code-level enforcement was added (there is
+nothing here to enforce in code; this is a testing-practice discipline,
+not an application behavior).
+
+**Verifying the original "does the follow-up actually get created"
+concern, safely**: as part of this correction, re-verified the
+natural-language follow-up scheduling pipeline end to end using
+*only* the synthetic donor -- confirming the original (already-fixed,
+per the "this/on/bare weekday" and compound-qualifier rounds above)
+behavior still holds after this round's unrelated changes:
+- Computed the real resolved date for the phrase "this Monday" said on
+  2026-10-16 (a Friday) using the actual `resolveDueDatePhrase`
+  function: **2026-10-19** (the upcoming Monday).
+- Called the real `POST /api/meeting-notes` save route live on Staging
+  (authenticated, through the real app) for the synthetic donor, with
+  a follow-up described as "[VERIFY] Follow up this Monday" and
+  `dueAt: "2026-10-19"` -- the exact value the real resolver computed,
+  not a hand-picked date.
+- **Read back the actual persisted row directly from D1** (not just the
+  save endpoint's own success response): `recommendations` row
+  `meeting-note-verify-roundtrip-*-0`, `due_at` = `1792411200` =
+  `2026-10-19 12:00:00 UTC` exactly, `status = 'open'`, scoped to the
+  synthetic donor. This confirms persistence, not merely an API
+  acknowledgement -- the distinction the original bug report was about.
+  Also re-confirms the Assistant's own `donor_summary` capability
+  (Section 1's live check above) still correctly surfaces this kind of
+  real, owned data end to end post-fix.
+- Deleted the one test interaction and one test recommendation row this
+  check created (both scoped by their exact ids, both only ever on the
+  synthetic donor) immediately after reading them back -- this is
+  test-created data being cleaned up by the same round that created it,
+  not a modification of any pre-existing record.
+
+### 4. Verification
+
+- **Full regression + full suite**: `node scripts/run-tests.mjs` --
+  **210/210 test files pass**, including all new/modified tests above.
+- **Type check**: `npx tsc --noEmit` -- clean.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, the
+  established baseline, unchanged.
+- **Build**: `pnpm run build:staging-independent` -- succeeds.
+- **AI follow-up functionality confirmed still working**: both the
+  Assistant's multi-capability pipeline (Section 1's live checks) and
+  Meeting Notes' natural-language date resolution + real persistence
+  (Section 3's live check) were exercised live on Staging after
+  deploying this round's fixes, against the synthetic donor only, and
+  both worked correctly.
+- **Production/Staging isolation reconfirmed**: `wrangler.staging.jsonc`'s
+  bindings (`fundraising-os-staging-db`, `fundraising-os-staging`
+  Worker name, `https://fundraising-os-staging.sgoldstein.workers.dev`
+  `APP_BASE_URL`) were printed in this round's own deploy output and
+  point only at Staging resources; no Production file, binding, or
+  secret was read, written, or referenced at any point this round.
+- **Regression scan of the fix itself**: the href fix only changes
+  *which* href value is returned, never which donor is resolved or
+  whether ownership is checked -- `donorId`-based resolution, ownership
+  re-verification, and ambiguous/not-found handling are byte-for-byte
+  unchanged and still fully covered by the existing tests. The
+  timezone fix only changes *which epoch* two queries are compared
+  against -- the query shapes, owner-scoping, and
+  `pledge_balance_corrections` handling in every OTHER capability are
+  untouched. Full-suite re-run (above) confirms no other feature
+  regressed.
+- **Staging write window**: opened once, for this round's own live
+  verification, for the same reason every prior AI-feature round has
+  needed one -- `/api/assistant` and `/api/meeting-notes` are POST
+  endpoints, and the independent write guard blocks every POST under
+  `/api/**` purely by HTTP method regardless of whether the specific
+  request is a write. Closed immediately after; `git diff --stat
+  wrangler.staging.jsonc` confirmed empty; a live unauthenticated-write
+  probe afterward returned the guard's own `403`. Staging-wide row
+  counts (`donors` 255, `interactions` 203, `recommendations` 5,
+  `giving_activities` 5463) were re-confirmed byte-identical to the
+  pre-existing baseline after this round's test interaction/
+  recommendation were created and then deleted -- net zero change to
+  any table.
+- **Deployed Staging Worker versions this round**:
+  `8b56c0e7-3824-4c06-a953-901535697792` (write window open, fixes
+  live) then `8ff33b74-d0fb-4dd3-a61c-cb514ec44c4b` (write guard
+  restored, current).
+
+### 5. Remaining open items / next recommended task
+
+- All three reviewed concerns are resolved in code, tested, and
+  verified live on Staging as described above.
+- Not performed, disclosed rather than silently skipped: a live
+  Staging test of the exact midnight/month-boundary edge case against
+  a real dated transaction (see Section 2's own note on why this was
+  judged unnecessary given the deterministic unit-test coverage).
+- Not performed: any change to Production. This round touched only
+  this feature branch's own files and Staging.
+- **Next recommended task**: with all three review concerns closed,
+  this feature is technically ready for a separately authorized
+  Production deployment -- subject to the same mandatory Production
+  safety checklist every prior round in this document has used
+  (current Worker version recorded as rollback target, financial/record
+  baseline before and after, D1 isolation, Staging write protection,
+  Access/Gmail/cron unchanged, build freshness), plus a brief live
+  Production smoke test using an existing real donor id with a
+  fictional question (the same pattern already used for Meeting Notes'
+  own Production smoke test), never a newly-created or synthetic
+  Production record. The donor-privacy exposure shape flagged in
+  Section 7 above (free-form AI prose surfacing private donor content)
+  remains the one item still explicitly flagged for the owner's own
+  judgment, separate from these three now-resolved concerns.
+
+**Is the system technically ready for a separately authorized
+Production deployment?** Yes, with respect to all three concerns this
+review raised -- each is fixed, tested, and live-verified on Staging.
+Production deployment itself still requires the owner's separate,
+explicit authorization, consistent with every prior round; it was not
+performed or attempted this round.
