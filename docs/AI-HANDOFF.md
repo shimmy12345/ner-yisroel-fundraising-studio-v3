@@ -47135,3 +47135,381 @@ deployment, configuration review, database access, or verification --
 every step ran sequentially, directly. No unrelated feature, refactor,
 or broader AI improvement was deployed or begun. Stopping here per this
 round's instruction.
+
+## Upgrade Ask Fundraising OS to a Real AI Assistant (2026-10-16) -- IMPLEMENTED, TESTED ON STAGING, PRODUCTION NOT TOUCHED
+
+Replaces the keyword-classified, fixed-template Assistant
+(`lib/ai/rule-based.ts`) with a genuinely natural-language, context-aware
+fundraising assistant powered by Cloudflare Workers AI -- grounded
+exclusively in real, authenticated, owner-scoped CRM data, with a fixed
+read-only capability registry instead of AI-generated SQL.
+
+### 1. Architecture
+
+**`lib/assistant/capabilities.ts`** -- the assistant's entire data-access
+surface. A fixed set of 8 named, read-only functions, each either
+reusing an existing loader or mirroring an already-reviewed query
+pattern:
+
+- `todays_priorities` / `this_week_priorities` -- `loadWorkspaceBrief`'s
+  own `relationshipQueue` buckets, the exact same data the home page's
+  Today's Agenda already shows.
+- `lapsed_relationships` -- the same contact-gap filter the prior
+  rule-based Assistant used, now applied over real priorities.
+- `outstanding_pledges` -- a bounded query mirroring
+  `app/pledge-review/page.tsx`'s own `pledge_balance_corrections` JOIN
+  verbatim, so a manually-corrected balance is never shown stale.
+- `payment_plans_attention` -- filters `loadWorkspaceBrief`'s
+  `"Open commitment"` priorities, which are only ever populated via
+  `isOpenPledgeActionable`/`evaluateOpenPledgePlanStatus`
+  (`lib/relationships/pledge-payment-plan.ts`). **This is the explicit
+  safeguard the task required preserved**: a donor with a valid,
+  on-track upcoming payment is already excluded by that function,
+  regardless of how old the original pledge date is -- this feature
+  never re-decides staleness itself (locked in by a structural test
+  asserting `capabilities.ts` never even imports `pledge-payment-
+  plan.ts` directly).
+- `donor_summary` -- one donor via `loadMeetingBrief`, the same loader
+  the donor page's "Prepare for Meeting" button uses. Covers
+  summarizing a relationship, meeting prep, recent history, and
+  gathering what's needed to draft a follow-up.
+- `fundraising_progress` -- real totals only (gifts received, new
+  pledges, donors contacted this month). There is no "goal"/target
+  concept anywhere in this schema, confirmed by the prior system-wide
+  audit, so this capability never fabricates a percent-of-goal figure.
+- `search_donors` -- a bounded, owner-scoped name search, used both
+  directly and by donor-reference resolution below.
+
+**`lib/assistant/conversation-state.ts` / `conversation.ts`** -- bounded,
+client-held conversation context (last 6 turns, 4,000-character budget,
+hard per-message and per-list caps) and donor-reference resolution. An
+ordinal reference ("the second one") indexes into the conversation's
+own donor list, but the id it names is **re-verified against the
+current request's authenticated userId on every single use** --
+conversation state is round-tripped through the client, so it is never
+trusted as proof of ownership, only as "what was discussed." A name
+reference resolves through the same bounded `search_donors` capability
+a fundraiser's own query would use; multiple matches are reported back
+as candidates for the fundraiser to pick from, never guessed between.
+
+**`lib/assistant/protocol.ts`** -- the pure plan/compose prompt
+construction and strict response parsing. No AI call, no database --
+the one module in this feature directly unit-testable with plain mock
+strings.
+
+**`lib/assistant/orchestrator.ts`** -- exactly **two** AI calls per
+user turn, never more (no agentic loop, no unbounded tool-call chain):
+
+1. **PLAN** -- given the question and conversation context, the model
+   selects up to 3 capability names from the fixed registry and a
+   donor reference, as structured JSON
+   (`response_format: json_schema`, the same native structured-output
+   mode already proven for Meeting Notes). The model never writes a
+   query and never produces a donor id itself.
+2. **COMPOSE** -- the selected capabilities are executed for real
+   (plain function calls), and their actual output is handed back to
+   the model as a clearly delimited `<<<VERIFIED_CRM_DATA_START>>>...
+   <<<VERIFIED_CRM_DATA_END>>>` block, with an explicit instruction to
+   use ONLY that data, never invent a name/amount/date not present in
+   it, never independently decide a pledge is stale, and to say so
+   plainly when the data is insufficient. The conversation history is
+   wrapped in the same "data not instructions" framing already proven
+   for Meeting Notes' dictated transcripts (the established
+   prompt-injection mitigation for free text originating from a
+   donor-adjacent source).
+
+If donor-reference resolution comes back ambiguous or not-found, this
+module answers directly from that resolution -- never a third AI call,
+never a guess at which donor was meant.
+
+**`lib/ai/workers-ai-client.ts`** -- the Workers AI binding call,
+dual response-shape handling, and timeout race extracted from Meeting
+Notes' own provider (`lib/meeting-notes/providers/workers-ai.ts`, now
+refactored to use this shared client with its public API and tests
+unchanged) into one shared, independently tested module -- exactly the
+"shared provider client once a second real AI feature exists"
+extraction the Meeting Notes round's own comments anticipated.
+
+### 2. Safety by construction
+
+- **Read-only, no exceptions**: no capability, the orchestrator, or
+  the route contains an `INSERT`/`UPDATE`/`DELETE` or a D1 write call
+  -- locked in by `tests/assistant-capabilities-safety.test.mjs`'s
+  structural guardrails (the same "no-write/no-R2-binding guardrail"
+  convention `tests/backup-automation.test.mjs` already uses for a
+  different feature), confirmed live by re-querying every affected
+  table's row count before and after an extensive Staging test
+  session (see Section 5) and finding it byte-identical.
+- **No dynamic dispatch**: capability execution is a fixed if/else
+  chain over known names (`tests/assistant-capabilities-safety.test.mjs`
+  asserts no bracket-indexed dynamic call exists) -- an unrecognized or
+  injected "capability name" from the model is silently dropped, never
+  reaches a function call.
+- **Authentication and ownership never bypassed**: the route's own
+  `getChatGPTUser()`/`ensureUserProfile()` gate is unchanged from
+  every other route; every donor-scoped query in `capabilities.ts`
+  filters by `owner_user_id`/`user_id` (structurally asserted); a
+  conversational donor reference is re-verified for ownership on every
+  use, never trusted from client-held state.
+- **Confidential content never logged**: the route logs only that a
+  turn happened, whether it succeeded, and which capabilities were
+  used -- never the question text or the AI's answer (structurally
+  asserted).
+- **Prompt injection**: retrieved data and conversation history are
+  always wrapped in the established delimiter/"data not instructions"
+  framing before reaching a prompt -- never concatenated in bare.
+- **Financial accuracy**: every dollar figure the assistant can ever
+  state comes from an already-correct, already-reconciled source
+  (`pledge_balance_corrections`-aware queries, the recommendation
+  engine's own safeguarded output) -- the AI only explains verified
+  numbers, never computes one.
+
+### 3. Supported capabilities and limitations
+
+Handles natural variation on all of the task's example questions:
+who to call today, lapsed relationships, this week's priorities,
+relationship summaries, outstanding pledges, payment plans needing
+attention, recent donor history, meeting preparation, this month's
+fundraising progress, and drafting a follow-up message grounded in
+real recent-interaction text. Multi-turn follow-ups ("tell me more
+about the second one," "prepare talking points for that call") work
+by resolving against the conversation's own donor list, re-verified
+for ownership each time.
+
+**Known limitations, disclosed rather than papered over**:
+
+- **No dedicated trip-prioritization capability.** Asked "which donors
+  should I prioritize before my trip," the planner falls back to the
+  closest relevant real capability (this week's priorities) rather
+  than a trip-specific one -- confirmed live this produces an honest,
+  grounded answer from real (if more general) data, never a fabricated
+  trip-specific detail, but it is not the dedicated capability the
+  task's example list suggested. Noted as a gap for a future round,
+  not built this round given the scope already covered.
+- **No persistent, cross-request rate limiting.** Per-turn limits are
+  solid (at most 2 AI calls, 3 capabilities, bounded result sizes,
+  bounded conversation context, bounded question/answer length -- all
+  enforced server-side regardless of what the model returns), but
+  there is no database-backed daily/per-user request counter the way
+  a production system might eventually want. Not needed at this
+  org's realistic volume (see cost estimate below), and adding one
+  would mean a new table/migration, which this round's scope did not
+  call for -- noted as a future addition if usage ever grows enough to
+  matter.
+- **Live prompt-injection testing was necessarily structural/unit-level
+  only** -- this is a read-only feature with no way to plant an
+  adversarial donor note to test against without a write this round
+  wasn't authorized to make. The mitigation itself (delimiters +
+  explicit "data not instructions" framing) is the same one already
+  proven in production use for Meeting Notes' dictated transcripts,
+  not a new, unproven mechanism.
+- **Transient Workers AI failures were observed live** (see Section 5)
+  -- an occasional empty/slow model response that the shared client
+  correctly caught and reported as "could not be reached" rather than
+  crashing, hanging, or showing a broken UI. Retrying the identical
+  request succeeded. This is an inherent Workers AI characteristic
+  (also seen occasionally during the original Meeting Notes
+  evaluation), not a defect in this feature's own code.
+
+### 4. Cloudflare AI model and estimated cost
+
+Same model and binding already live-tested and deployed for Meeting
+Notes: Workers AI, `@cf/mistralai/mistral-small-3.1-24b-instruct`, via
+the existing `env.AI` binding -- no new credential, no new paid
+service, no new Cloudflare resource. Each assistant turn costs two
+model calls (plan: ~300 max output tokens; compose: ~900 max output
+tokens) instead of Meeting Notes' one, so per-turn Neuron usage is
+roughly double a meeting note's (Meeting Notes measured at ~50-150
+Neurons/note) -- an estimated 100-300 Neurons per assistant turn. The
+free daily allowance (10,000 Neurons/day) comfortably covers hundreds
+of fundraiser turns a day, far beyond this organization's realistic
+volume; cost is $0.00/month under any normal usage pattern, same
+conclusion as the original Workers AI evaluation.
+
+### 5. Test results
+
+- **Complete automated suite**: `npm test` -- **210/210 test files
+  pass**, including 4 new files covering this feature:
+  `tests/ai-workers-ai-client.test.mjs` (the shared client against a
+  mocked binding -- both response shapes, timeout, malformed/thrown
+  errors), `tests/assistant-protocol.test.mjs` (prompt construction
+  contains every grounding/injection rule; plan/answer response
+  parsing and clamping against valid, malformed, oversized, and
+  adversarial-looking mock JSON), `tests/assistant-conversation-
+  state.test.mjs` (turn-count and character-budget bounding, malformed
+  client payloads degrade to empty rather than throwing), and
+  `tests/assistant-capabilities-safety.test.mjs` (the structural
+  no-write/ownership/bounded-result/no-dynamic-dispatch guardrails
+  described in Section 2).
+- **Why capabilities/conversation/orchestrator aren't directly unit-
+  tested**: all three import `cloudflare:workers`' `env`, and
+  `cloudflare:workers` has no Node-resolvable module specifier --
+  confirmed directly (`node -e "import('cloudflare:workers')"` fails
+  with `ERR_UNSUPPORTED_ESM_URL_SCHEME`), the same established
+  constraint every other D1-dependent route/lib file in this repo
+  already has (see `tests/ask-followup-and-meeting-brief.test.mjs`'s
+  own header comment). The pure logic those files depend on
+  (`protocol.ts`, `conversation-state.ts`) is tested directly instead;
+  their database/AI-calling behavior is verified live, below.
+- **Five pre-existing structural tests updated, not weakened**:
+  `tests/personalization.test.mjs`, `tests/recommendation-
+  engine.test.mjs`, `tests/shared-activity-ux.test.mjs`,
+  `tests/text-message-type.test.mjs`, and `tests/relationship-
+  snapshot-stage3.test.mjs` each asserted a specific guarantee against
+  the OLD single-file `app/api/assistant/route.ts` implementation
+  (owner-scoping, Meeting Brief reuse, the Relationship Snapshot
+  resolver, shared-activity summary preference, D1 query counts).
+  Each was repointed to the new file that actually carries that
+  guarantee now (`lib/assistant/capabilities.ts` in every case) --
+  the underlying guarantee itself is unchanged and still enforced,
+  confirmed by each test passing again after the repoint, not by
+  loosening what it checks.
+- **TypeScript**: `npx tsc --noEmit` -- clean.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, identical to
+  the established baseline (one new error surfaced during development
+  -- `react/no-unescaped-entities` on the chat empty-state copy's
+  straight quotes -- fixed by using curly quotes, consistent with the
+  rest of the page's typographic style).
+- **Build**: `pnpm run build:staging-independent` succeeded; confirmed
+  fresh, not stale, by grepping the just-built bundles for distinctive
+  new strings in both the client bundle
+  (`AssistantExperience-*.js`: `"Grounded in your CRM data"`) and the
+  server bundle (`dist/server/index.js`:
+  `"fundraising assistant for a nonprofit fundraiser"`,
+  `"todays_priorities"`).
+
+### 6. Staging verification (live, not just unit tests)
+
+One supervised write window, documented before opening why it was
+necessary: Ask Fundraising OS is read-only by construction (Section 2),
+but `/api/assistant` is a POST endpoint, and Staging's blanket write
+guard (`lib/operations/staging-write-guard.ts`) blocks every POST under
+`/api/**` purely by HTTP method, regardless of whether the specific
+route performs any write -- the exact same situation Meeting Notes'
+read-only Organize endpoint faced in an earlier round. The window
+existed solely to get past that guard for live testing, not because
+anything in this feature writes.
+
+Full Staging-wide baseline recorded before testing (`donors` 255,
+`interactions` 203, `recommendations` 5, `giving_activities` 5463,
+`donor_historical_context` 159) and re-confirmed **byte-identical**
+after an extensive live test session -- zero writes from any of the
+following, all run against real Staging data through the authenticated
+app, not a synthetic fixture (this feature never writes, so there was
+nothing to create or clean up afterward):
+
+- **`todays_priorities`**: real call returned an honest "no priorities
+  flagged for today" for this account's current data state, plus
+  genuinely relevant suggested follow-up questions.
+- **`outstanding_pledges`**: returned 8 real donors by name with
+  correct donor-profile links, grounded in the actual
+  `pledge_balance_corrections`-aware query.
+- **`payment_plans_attention`**: returned 4 real donors, correctly
+  distinguishing "no recent payment activity" from "overdue expected
+  monthly payment," both reusing the already-safeguarded
+  recommendation data -- verified in the real rendered UI (not just
+  the API), including the "Grounded in your CRM data" label, donor
+  links, and suggested next questions.
+- **`donor_summary`**: asked to summarize a real donor by name
+  ("Shimmy Pianko") -- correctly resolved the name, returned an
+  accurate summary (lifetime paid, open pledge amount, last contact,
+  upcoming yahrtzeit/birthday, the canonical suggested action), and
+  clearly labeled unconfirmed historical context as unconfirmed in a
+  separate follow-up test on a different donor.
+- **Multi-turn conversational follow-up**: asked "which donors have
+  outstanding pledges," then, in a second request carrying the first
+  response's own donor list as conversation state, asked "tell me more
+  about the second one" -- correctly resolved to the actual second
+  donor from the prior list (verified by matching donor id) and
+  produced a full, accurate, grounded summary of that specific donor.
+- **Ambiguous donor name, correctly refused to guess**: asked "tell me
+  about Cohen" against a dataset with 4 distinct Cohen households --
+  got back a clarification response listing all 4 real candidates by
+  name and id, never a guess at which one was meant.
+- **Out-of-scope question, graceful degradation**: asked "which donors
+  should I prioritize before my upcoming trip" (no dedicated
+  capability exists) -- the planner fell back to the closest relevant
+  real capability and produced an honest answer grounded in that real
+  (if more general) data, never a fabricated trip-specific detail.
+- **Legacy quick-tool button** ("Prepare me for my next donor
+  meeting"): still works, routed through the identical real pipeline,
+  correctly reflecting this account's actual current data state
+  (no primary donor currently flagged, same honest "nothing specific
+  right now" answer the prior rule-based version would also have
+  given in this exact data state).
+- **Transient AI failures, caught live**: two consecutive identical
+  requests for the same donor summary returned `available: false,
+  "The AI assistant could not be reached"` -- a real, observed Workers
+  AI hiccup, not a bug in this feature (confirmed by the identical
+  request succeeding cleanly on a third attempt, with a fully accurate
+  grounded answer). The UI showed a clear, labeled error message, never
+  a blank screen or a hang.
+- **Full round-trip through the real rendered UI**, not only direct API
+  calls: typed a question into the actual chat box, submitted with
+  Ctrl+Enter, and confirmed the live DOM showed the user's message, the
+  "Grounded in your CRM data" label, the real answer, real donor
+  profile links, and real suggested next questions.
+
+Staging write protection restored and reconfirmed afterward: `git diff
+--stat wrangler.staging.jsonc` empty; a live authenticated `POST
+/api/assistant` after the final redeploy returned `403`. Current
+Staging Worker version with this feature live:
+**`d2850d6c-fd5c-48ef-963a-47a78188f96b`**.
+
+No parallel or forked agent was used for any part of this round's
+research, implementation, deployment, database access, or
+verification -- every step ran sequentially, directly, the same
+discipline as every prior AI-feature round this session.
+
+### 7. Production readiness assessment
+
+**Notably, zero new Cloudflare configuration would be required.**
+Production already has the `ai` binding, `AI_PROVIDER=workers-ai`, and
+`WORKERS_AI_MODEL` configured (from the earlier "Authorized Production
+Deployment -- AI Meeting Notes" round this session) -- this feature
+reuses that exact same binding and model, so a Production deployment
+of Ask Fundraising OS would be a pure code deploy, not a configuration
+change. No new secret, no new paid service, no new database table or
+migration (this feature reads existing tables only).
+
+**What's ready**: the architecture, safety guardrails, and grounding
+behavior are all proven live on Staging (Section 6), on the same
+Workers AI model and binding Production already runs. The feature is
+read-only, so a Production deployment carries materially lower risk
+than a write-capable feature would -- there is no financial-data or
+donor-record change path to verify post-deploy, only that the
+assistant answers correctly, which Staging has now demonstrated across
+a representative range of real questions, a multi-turn conversation,
+an ambiguous-donor case, and a genuine live AI failure handled
+gracefully.
+
+**What a Production round should still do before deploying**: the
+same mandatory safety checks as every prior Production round
+(current Worker version recorded as rollback target, backup/restore
+status, financial/record baseline before and after, D1 isolation,
+Staging write protection, Access/Gmail/cron unchanged, build
+freshness) -- none of which are new to this feature, all of which the
+established procedure already covers. A brief live smoke test against
+Production itself (the same read-only pattern used for Meeting Notes'
+own Production smoke test -- an existing real donor id, a fictional
+question, confirmed zero writes) would close the loop the same way it
+did for that feature.
+
+**Remaining risk, disclosed for the owner's own judgment**: this is
+the first AI feature in this codebase that can surface a donor's
+*private* notes, interaction summaries, and unconfirmed historical
+context in free-form AI-composed prose, rather than fixed-template
+text. The grounding rules (Section 2-3) are designed to prevent
+fabrication, and the delimiter-based injection defense is the same
+one already proven for Meeting Notes -- but this is a genuinely new
+exposure shape (AI paraphrasing real private donor content) worth the
+owner's own explicit sign-off, separate from the purely mechanical
+"did the deploy succeed" checks.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. Staging
+write protection is confirmed restored. No parallel or forked agent
+was used for any part of this round. Stopping here per this round's
+instruction to stop after implementation, Staging testing, and
+documentation -- not deploying to Production without separate
+authorization.**
