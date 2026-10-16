@@ -45190,3 +45190,355 @@ of a pure Option A.
 **No Production deployment, Staging configuration change, or new
 credential has occurred. Awaiting the owner's decision on the
 recommendation above before any implementation begins.**
+
+## Implement Cloudflare AI Meeting Notes on Staging (2026-10-16) -- IMPLEMENTED, DEPLOYED, AND LIVE-TESTED ON STAGING ONLY
+
+The owner approved the Option C recommendation above and authorized
+implementing, deploying, and testing it on Staging. This entry covers
+that full round: the provider split, the Staging deploy, a real bug
+the live testing caught and fixed, and the complete authenticated
+end-to-end verification. **No Production deployment, Production
+config/data change, paid-service activation, or Anthropic credential
+was created. No branch merge occurred.**
+
+### 1. Implementation
+
+Split `lib/meeting-notes/organize.ts` into a provider-agnostic core
+and two providers, exactly as proposed in the evaluation above:
+
+- `lib/meeting-notes/organize.ts` -- now holds only `buildSystemPrompt`,
+  `buildUserMessage`, `parseOrganizedResponse`, the shared types, and a
+  new exported `MEETING_NOTES_JSON_SCHEMA` (a JSON Schema description
+  of `OrganizedMeetingNotes`, for providers with native structured
+  output). Unchanged in substance from before this round -- the prompt
+  itself was not touched, per the task's own instruction to reuse it.
+- `lib/meeting-notes/providers/workers-ai.ts` -- **new, the default
+  provider**. Calls the Workers AI binding (`env.AI.run(model, {...})`),
+  requests native structured output
+  (`response_format: {type:"json_schema", json_schema: MEETING_NOTES_JSON_SCHEMA}`),
+  and extracts the response text from whichever shape the model family
+  returns -- `{response: "..."}` for most catalog models,
+  `{choices:[{message:{content:"..."}}]}` for OpenAI-compatible ones
+  (both confirmed live, see section 4). Never throws; every failure
+  (missing/misconfigured model, empty/malformed response, a binding
+  error, or a timeout via a `Promise.race` against a timer, since the
+  binding call takes no `AbortSignal`) resolves to `{ok:false, error}`
+  with a generic message that never echoes the raw provider error
+  (which could include donor content).
+- `lib/meeting-notes/providers/anthropic.ts` -- the prior
+  `organizeMeetingNotes` function, moved as-is and renamed
+  `organizeWithAnthropic`. **Kept available but inactive** -- no
+  `ANTHROPIC_API_KEY` exists on any environment; this app does not
+  require a separate Anthropic account.
+- `lib/meeting-notes/provider-selection.ts` -- a new, pure
+  `selectMeetingNotesProvider(aiProviderVar)` function, so the
+  provider decision is unit-testable without mocking
+  `cloudflare:workers` (this repo's route.ts files otherwise stay
+  thin/untested at the unit level by established convention, verified
+  live on Staging instead -- this one line of logic is the exception,
+  pulled out specifically so it has real test coverage).
+- `app/api/meeting-notes/organize/route.ts` -- now a thin 3-way branch:
+  resolve the provider via the function above, call the matching
+  provider function, return the same response shape as before.
+  Auth, the donor-ownership check, request-size validation, and
+  logging (provider name + success boolean only, never transcript or
+  response content) are unchanged.
+- `cloudflare-env.d.ts` -- adds a hand-rolled `Ai` interface (matching
+  this file's existing `D1Database`/`Fetcher` convention rather than
+  pulling in `@cloudflare/workers-types`), `env.AI?: Ai`,
+  `env.AI_PROVIDER?: "workers-ai" | "anthropic"`, and
+  `env.WORKERS_AI_MODEL?: string`, alongside the existing
+  `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` (doc comments updated to say
+  Anthropic is the inactive alternative, not the only option).
+- `app/donors/[id]/meeting-notes/MeetingNotesExperience.tsx` -- added a
+  3-second client-side cooldown on repeated "Organize Notes" clicks
+  (the "request limits to prevent accidental repeated AI calls" item),
+  on top of the pre-existing disable-while-in-flight guard. No other
+  UI change -- the review/edit/approve/save experience is unchanged.
+- `lib/meeting-notes/follow-ups.ts` -- see the bug fix in section 3
+  below.
+
+**Commits** (branch `feature/independent-cloudflare-sandbox`):
+- `1d92041` -- the provider split itself (core + both providers +
+  selection function + route.ts + UI cooldown + new/updated tests).
+- `90587df` -- `wrangler.staging.jsonc`: adds the `[ai]` binding and
+  `AI_PROVIDER="workers-ai"` / `WORKERS_AI_MODEL` vars; deployed to
+  Staging in this commit's own round.
+- `a23338b` -- the follow-up due-date bug fix (section 3) found during
+  live testing, with a regression test.
+
+### 2. Cloudflare model and provider configuration
+
+`wrangler.staging.jsonc` now declares:
+```
+"ai": { "binding": "AI" },
+...
+"AI_PROVIDER": "workers-ai",
+"WORKERS_AI_MODEL": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+"ANTHROPIC_MODEL": "claude-haiku-5-5"   // inert -- AI_PROVIDER is "workers-ai"
+```
+No secret was added or needed for the default path -- the `[ai]`
+binding is the only credential Workers AI requires, and it was
+already available on the existing account (no new signup, key, or
+billing, confirmed again live this round). `ANTHROPIC_API_KEY` remains
+unset on every environment. Switching providers, or the Workers AI
+model id, is a `vars`-only change -- no code deploy required.
+
+### 3. A real bug live testing found and fixed
+
+**Found**: approving an AI-suggested follow-up and saving sometimes
+failed with "A follow-up action has an invalid date," blocking the
+*entire* note save, not just that follow-up. Root cause, confirmed by
+capturing the actual request payload from a live browser session: the
+system prompt (unchanged, and correctly followed) explicitly invites
+the model to express a due date as a relative phrase when that's what
+the transcript said -- its own example is `"after Yom Tov"`, `"next
+week"` -- and the real model returned exactly that
+(`suggestedDueDate: "early next week"`) for a transcript whose only
+due-date language was relative ("follow up... early next week"). The
+review screen's date field is a plain `<input type="date">`, which can
+only display a real calendar date, and the save route correctly
+rejects anything else as unparseable. The relative-phrase value was
+silently carried in React state (invisible in the date-picker, which
+just rendered blank) all the way to the save request, where it was
+correctly rejected -- but by then the fundraiser had already reviewed
+and approved it with no indication anything was wrong.
+
+**Fix** (`lib/meeting-notes/follow-ups.ts`, commit `a23338b`):
+`followUpFromSuggestion` now checks whether `suggestedDueDate` is a
+calendar date (`^\d{4}-\d{2}-\d{2}$`). If so, unchanged behavior. If
+not, the date field is left empty (as it already visually was) and the
+phrase is folded into the follow-up's description instead of silently
+discarded -- e.g. `"Follow up about the dinner sponsorship decision
+(early next week)"` -- so the fundraiser still sees what the AI
+understood and can pick an exact date themselves if they approve it.
+No change to the system prompt, the save route's date validation, or
+the organize response shape. A regression test
+(`tests/meeting-notes-followups.test.mjs`) covers both the
+relative-phrase and well-formed-ISO-date cases.
+
+This is not Workers-AI-specific -- the same prompt and the same UI
+code would have hit the same bug under Anthropic the first time a real
+(not mocked) call returned a relative phrase. It surfaced now because
+this is the first round with real, live inference against either
+provider.
+
+A second, unrelated lesson from this round, worth recording for next
+time: after editing application code, **the Staging bundle must be
+rebuilt (`npm run build:staging-independent`) before `wrangler deploy`**
+-- deploying without rebuilding silently redeploys the previous build's
+`dist/` output with no error. This cost one extra diagnostic cycle
+during testing (confirmed via the browser's own
+`performance.getEntriesByType("resource")`, which showed the OLD
+asset hash still loading after a "successful" deploy) before the
+rebuild-then-deploy sequence was corrected.
+
+### 4. Live AI test results
+
+All testing used **real Workers AI inference** (the actual
+`@cf/mistralai/mistral-small-3.1-24b-instruct` binding now configured
+on Staging), run through the real app -- not a sandbox, not mocked --
+with only fictional, `[TEST]`-prefixed synthetic data. The Staging
+write-guard (`lib/operations/staging-write-guard.ts`) blocks every
+mutating method under `/api/**`, including the non-writing `/organize`
+endpoint (it blocks by HTTP method, not by whether a route actually
+writes) -- confirmed this applies here too, so the established
+controlled-testing procedure (temporarily enable
+`STAGING_WRITES_ENABLED`, test, clean up, revert, redeploy, verify
+`403` again) was followed for this round as well.
+
+**Scenario tested** (one rich transcript covering nearly everything
+the task asked for): a $100,000 dinner sponsorship considered but not
+committed; a $150,000 beis medrash naming sponsorship discussed and
+explicitly not accepted; an explicit $18,000 commitment; two further
+discussed-but-uncommitted amounts ($5,000, $25,000); Yom Tov kuntres
+and Rav Kulefsky's shiur as relationship content; a follow-up needed
+"early next week"; the name Rosenbaum throughout.
+
+**Result, read directly from the real model's structured JSON output**:
+- `confirmedCommitments`: only the $18,000 building-fund gift -- every
+  other discussed amount ($100k, $150k, $5k, $25k) correctly stayed
+  out of this list across every run.
+- `possibleCommitments`/`fundraisingOpportunities`: the four
+  discussed-but-undecided amounts, correctly separated from the one
+  confirmed commitment.
+- `relationshipContext`/`donorInterests`: Rav Kulefsky's shiur and the
+  Yom Tov kuntres, correctly kept out of `fundraisingOpportunities` --
+  no model run manufactured a fundraising ask out of purely relational
+  content.
+- Terminology (Rosenbaum, Rav Kulefsky, beis medrash, Sukkos, kuntres,
+  shiur) was preserved correctly and spelled correctly in every run.
+- The relative due-date language ("early next week") was correctly
+  recognized as a timeframe worth a follow-up in every run -- see
+  section 3 for how that value is now handled once recognized.
+- **Minor, non-safety precision gap observed**: the model sometimes
+  repeats the $150,000 sponsorship under both `donorInterests` and
+  `fundraisingOpportunities`/`relationshipContext`, i.e. some redundant
+  overlap between sections rather than a clean single placement. This
+  never crossed the hard confirmed-vs-possible line and never invented
+  anything; it's a polish item, not a safety issue, and is left as-is
+  per this round's instruction not to touch the prompt.
+
+**Response times**: the isolated evaluation sandbox (2026-10-15,
+direct binding call, no app overhead) measured 1.8-4.3s for this
+model. The real end-to-end app call (auth, donor-ownership DB check,
+logging, plus the model call itself) measured roughly 6-14s per
+"Organize Notes" click in live browser testing -- noticeably slower
+than the raw binding number, consistent with the added application-
+layer overhead, still well within a tolerable wait for a human-
+triggered button click.
+
+### 5. Authenticated Staging end-to-end verification
+
+Performed via an authenticated browser session (Cloudflare Access
+session already established earlier in this engagement; no login was
+automated or performed on the owner's behalf) against two real donor
+records with entirely synthetic `[TEST]`-prefixed content:
+
+- Opened "Add meeting notes" from a donor profile; dictated-text
+  textarea remained visible and editable throughout review (never
+  cleared).
+- Clicked "Organize Notes"; real Workers AI response populated every
+  review field; AI-proposed follow-up started **unapproved** ("Proposed",
+  amber), never pre-checked.
+- Edited the AI-generated summary text directly (confirmed editable).
+- Approved the AI-proposed follow-up; added a second, manually-typed
+  follow-up and deliberately left it unapproved.
+- Saved: `201`, exactly one interaction row created
+  (`source: "meeting-notes:ai-organized"`), confirmed appearing
+  correctly on the donor's own timeline with the right content.
+- Confirmed via direct D1 query: **exactly one** recommendation row
+  was created (the approved follow-up); the unapproved/"rejected" one
+  was **never written at all** (`COUNT(*) = 0` for its would-be id).
+- **Duplicate-save protection**, tested directly against the real save
+  route with the real interaction's own idempotency key: an identical
+  retry returned `200`/`followUpsCreated: 0` (safe no-op replay, no
+  new rows); a retry with a changed summary under the same key
+  returned `409` with the original content confirmed byte-for-byte
+  unchanged in D1 afterward.
+- **No financial record was touched**: confirmed via D1 that
+  `giving_activities` for the test donor was unchanged (`changes: 0`,
+  `rows_written: 0`) throughout -- this feature's save path only ever
+  touches `interactions`/`recommendations`, never pledges, payments, or
+  payment plans, by construction (unchanged code).
+- **Daily Agenda / Portfolio Focus surfacing**: a second test note (on
+  a different donor, saved via the fully **manual** path -- no AI call
+  at all, confirming manual entry still works independent of AI
+  availability) with an approved follow-up and an explicit due date
+  was confirmed appearing live on the home page as a real, actionable
+  "Solicitation Opportunity" item with the exact follow-up text. It
+  surfaced under "Portfolio Focus" (this month) rather than strictly
+  "Today's Agenda" because the test used the following day's date
+  rather than the app's own "today" (confirmed from the page's own
+  "Thursday, October 15" header) -- a test-input slip, not a product
+  defect; the due-today/overdue bucketing logic itself is pre-existing
+  and unchanged by this round.
+- A native `<input type="date">` field could not be reliably filled
+  via this session's browser-automation keystroke simulation (a
+  tooling limitation of simulating typed input into a native date
+  picker widget, not a product bug) -- due-date persistence itself was
+  exercised instead via a direct authenticated call to the same save
+  route the UI calls, and manual date-picker entry was already
+  confirmed working in an earlier, Anthropic-era round against this
+  same, unchanged UI code.
+
+### 6. Test data removed; write protection restored
+
+- Deleted both test interactions and both associated recommendation
+  rows via direct D1 `DELETE` statements; confirmed `0` remaining rows
+  matching either test id or the `[TEST]`/`meeting-notes:%` markers
+  afterward.
+- `wrangler.staging.jsonc`'s `STAGING_WRITES_ENABLED` line was
+  re-commented and Staging redeployed; `git diff --stat
+  wrangler.staging.jsonc` confirmed empty; a live authenticated request
+  to `/api/meeting-notes/organize` afterward confirmed `403` again.
+
+### 7. Automated tests, type-check, build
+
+- `node scripts/run-tests.mjs`: **205/205 test files pass**, including
+  three new/updated files for this round
+  (`tests/meeting-notes-workers-ai-provider.test.mjs`,
+  `tests/meeting-notes-anthropic-provider.test.mjs`,
+  `tests/meeting-notes-provider-selection.test.mjs`) plus the
+  pre-existing `meeting-notes-organize.test.mjs` (trimmed to the
+  provider-agnostic pieces) and `meeting-notes-followups.test.mjs`
+  (extended with the due-date fix's regression case). All new provider
+  tests run against mocked `AiBinding`/`fetchImpl` -- zero real network
+  or binding calls in the automated suite.
+- `npx tsc --noEmit`: clean.
+- `npm run lint`: 94 errors / 43 warnings -- **identical to the
+  pre-existing baseline**, confirmed by an intermediate run that
+  briefly introduced one new unused-import warning (caught and fixed
+  before committing).
+- `npm run build:staging-independent`: succeeds, exit `0`, both
+  `/api/meeting-notes` and `/api/meeting-notes/organize` compiled.
+- No test failure, type error, or lint regression was introduced by
+  this round's work. The one test failure seen mid-round
+  (`tests/staging-write-guard.test.mjs`) was the guardrail correctly
+  detecting the deliberately-enabled testing window, not a regression
+  -- it passed again immediately after the write-guard was reverted.
+
+### 8. Estimated AI usage and cost
+
+This round's live testing made a small number of real Workers AI
+calls (organize attempts across both test donors, including retries
+during the bug diagnosis) -- comfortably inside the 10,000
+Neurons/day free allowance (estimated 50-150 Neurons per call for this
+model per the 2026-10-15 evaluation's pricing research), so **actual
+cost incurred this round: $0.00**. At any realistic ongoing volume (25,
+100, or 500 meeting notes/month), usage remains far inside the daily
+free allowance -- see the 2026-10-15 evaluation entry above for the
+full pricing table and reasoning.
+
+### 9. Remaining limitations and security concerns
+
+- **No stated Workers AI retention period** (carried over from the
+  evaluation): Cloudflare's own privacy page says Customer Content "may
+  be stored... if you specifically use a storage service" (not
+  applicable here) but does not state a retention window for inference
+  inputs/outputs themselves, unlike Anthropic's explicit 30-day policy.
+  Not independently resolved this round; still worth knowing.
+- **Minor section-overlap precision gap** (section 4): the model
+  occasionally repeats a discussed amount across `donorInterests` and
+  `fundraisingOpportunities`/`relationshipContext` rather than placing
+  it once. Never a safety issue (confirmed-vs-possible held every
+  time); a possible future polish item if the owner wants to tighten
+  the system prompt, out of scope for this round.
+- **Model response-shape variance**: different Workers AI model
+  families return different JSON envelopes (`{response}` vs. OpenAI-
+  style `{choices}`); the default model's shape is handled, and a
+  second shape is handled defensively, but a future model switch could
+  introduce a third shape -- would degrade safely (treated as an empty
+  response) rather than crash, per the existing never-throw contract,
+  but would need a code update to actually parse correctly.
+- **Browser-automation due-date-field limitation** (this session's
+  tooling only, not the app): noted in section 5.
+- **Latency**: 6-14s per live Organize Notes click in the full app
+  stack is acceptable for a human-triggered action but not instant;
+  no changes made to reduce it this round.
+
+### 10. Recommendation on Production readiness
+
+The Cloudflare Workers AI default path is working correctly on
+Staging: accuracy on every hard safety rule held across all live
+tests, structured output was reliable, the save/idempotency/follow-up-
+approval safeguards (all pre-existing, unchanged code) continue to
+work correctly with the new provider, and no financial data can be
+touched by this feature by construction. The one real bug this round's
+live testing found was root-caused, fixed, covered by a regression
+test, and re-verified live.
+
+**Before Production**: recommend the owner personally dictate a
+handful of real (not synthetic) meeting notes on Staging first --
+every test this round used synthetic, pre-written transcripts, never
+genuine dictation via Typeless or natural off-the-cuff phrasing, which
+could surface different edge cases than hand-crafted test prose did.
+Beyond that, this feature appears ready for Production deployment
+whenever the owner separately authorizes it -- including adding the
+`[ai]` binding to the Production wrangler config, which has not been
+touched this round.
+
+**No Production deployment, Production configuration or data change,
+paid-service activation, or Anthropic credential occurred this round.
+No branch merge has occurred. Stopping here per this round's
+instruction to stop after Staging verification.**
