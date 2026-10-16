@@ -45,6 +45,51 @@ const VAGUE_TERMS = [
 
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
+// Compound/qualified weekday phrases ("a week from Monday", "the Monday
+// after next", "the following Monday", "not this Monday, but next
+// Monday") -- found by independent review to risk being silently
+// mis-resolved by the plain weekday matchers below, which only ever look
+// for a bare weekday name and have no concept of an offset, an ordinal
+// qualifier, or a negated/corrected alternative. Checked FIRST, before
+// any weekday or explicit-date pattern, so a qualifying word always wins
+// over a coincidental weekday-name match rather than being silently
+// ignored (docs/AI-HANDOFF.md, "Final Follow-Up Date Safety Fix").
+//
+// Each pattern is deliberately narrow -- scoped to cases actually proven
+// unsafe (see that round's entry for the exact live-reproduced bugs) --
+// so it never blocks the plain phrases this resolver already handles
+// correctly ("in two weeks", "a week from now", "a few days from now" all
+// still resolve: none of them contain a weekday name at all, so the
+// weekday-scoped patterns below never match them).
+const COMPOUND_QUALIFIER_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
+  // "not this Monday, but next Monday" / "this Monday, not next Monday" --
+  // the plain matchers have no concept of negation and would otherwise
+  // match whichever weekday phrase happens to appear in the string
+  // (order-dependent, confirmed live to pick the WRONG side depending on
+  // phrasing) rather than the one actually meant.
+  { pattern: /\b(not|n't)\b/, label: "a negation or correction (\"not this Monday, but next Monday\")" },
+  // "the Monday after next" / "the Friday before last" -- an ordinal
+  // stacked on top of next/last, which next Monday's own "strictly after"
+  // arithmetic does not account for.
+  { pattern: /\b(after|before)\s+(next|last)\b/, label: "an ordinal qualifier (\"after next\"/\"before last\")" },
+  // "the following Monday" -- ambiguous relative to what prior date was
+  // meant, not the resolver's own meeting-date anchor.
+  { pattern: /\bfollowing\b/, label: "\"the following <weekday>\"" },
+  // "a week from Monday" / "two Mondays from now" -- an offset applied TO
+  // a weekday, not a plain weekday reference. Scoped to a weekday
+  // actually adjacent to "from" so it never catches the already-correct
+  // "a week from now"/"a few days from now" (no weekday name in either).
+  {
+    pattern: new RegExp(`\\bfrom\\s+(?:${WEEKDAYS.join("|")})\\b|\\b(?:${WEEKDAYS.join("|")})s?\\s+from\\b`),
+    label: "an offset applied to a weekday (\"a week from Monday\", \"two Mondays from now\")",
+  },
+];
+
+function findCompoundQualifier(lower: string): string | null {
+  const match = COMPOUND_QUALIFIER_PATTERNS.find(({ pattern }) => pattern.test(lower));
+  return match ? match.label : null;
+}
+
 const NUMBER_WORDS: Record<string, number> = {
   a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
   seven: 7, eight: 8, nine: 9, ten: 10, couple: 2, few: 3,
@@ -238,6 +283,21 @@ export function resolveDueDatePhrase(phrase: string | null | undefined, meetingD
   if (trimmed.length === 0) return { kind: "none" };
 
   const lower = trimmed.toLowerCase();
+
+  // Compound or qualified phrasing is checked before anything else --
+  // a qualifying word (a negation, an ordinal stack, an offset applied to
+  // a weekday) must always win over a coincidental weekday-name match,
+  // never be silently ignored by a pattern that only looks for the bare
+  // weekday. See COMPOUND_QUALIFIER_PATTERNS above for exactly which
+  // phrasings this covers and why.
+  const compoundQualifier = findCompoundQualifier(lower);
+  if (compoundQualifier) {
+    return {
+      kind: "unresolved",
+      phrase: trimmed,
+      reason: `Contains ${compoundQualifier} -- too easy to misread with a simple pattern match, so this must be set manually.`,
+    };
+  }
 
   // Hebrew-calendar references are never computed, regardless of how
   // specific the rest of the phrase sounds -- "two weeks after Pesach"

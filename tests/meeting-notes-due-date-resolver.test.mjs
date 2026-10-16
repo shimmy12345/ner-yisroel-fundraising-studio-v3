@@ -106,6 +106,89 @@ assert.deepEqual(resolveDueDatePhrase("   ", MEETING_DATE), { kind: "none" });
   const r = resolveDueDatePhrase("last Monday", MEETING_DATE);
   assert.equal(r.kind, "unresolved", "a past reference must never become a future due date");
 }
+
+// --- Compound/qualified weekday phrases -- Final Follow-Up Date Safety
+// Fix round (docs/AI-HANDOFF.md). Independent review found these could be
+// silently mis-resolved by the plain weekday matchers above (each one
+// confirmed live, pre-fix, to actually produce a wrong date rather than
+// an error -- the dangerous kind of bug). None of these may ever resolve
+// automatically; each must stay unresolved with the original wording
+// preserved verbatim, requiring explicit manual confirmation.
+
+{
+  // Pre-fix, this silently resolved to the nearest Monday, ignoring "a
+  // week from" entirely -- a full week off with no indication anything
+  // was wrong.
+  const r = resolveDueDatePhrase("a week from Monday", MEETING_DATE);
+  assert.equal(r.kind, "unresolved");
+  assert.equal(r.phrase, "a week from Monday", "original wording must be preserved verbatim");
+}
+{
+  // Pre-fix, this also silently resolved to the nearest Monday, ignoring
+  // "after next" -- one week early with no indication anything was wrong.
+  const r = resolveDueDatePhrase("the Monday after next", MEETING_DATE);
+  assert.equal(r.kind, "unresolved");
+}
+{
+  const r = resolveDueDatePhrase("the Friday before last", MEETING_DATE);
+  assert.equal(r.kind, "unresolved", "an ordinal stacked on next/last must never auto-resolve");
+}
+{
+  // Already correctly unresolved before this round (plural "Mondays"
+  // never matched the singular-weekday patterns) -- locked in here as a
+  // regression test, and now also matched explicitly by the new
+  // weekday-offset qualifier rather than by accident.
+  const r = resolveDueDatePhrase("two Mondays from now", MEETING_DATE);
+  assert.equal(r.kind, "unresolved");
+}
+{
+  const r = resolveDueDatePhrase("the following Monday", MEETING_DATE);
+  assert.equal(r.kind, "unresolved", "\"the following <weekday>\" must never auto-resolve");
+}
+{
+  // Negation -- the plain weekday matchers have no concept of "not," and
+  // pre-fix would match whichever weekday phrase happened to appear in
+  // the string regardless of which one was actually negated.
+  const r = resolveDueDatePhrase("not this Monday, but next Monday", MEETING_DATE);
+  assert.equal(r.kind, "unresolved");
+}
+{
+  // The critical case: said ON a Monday, "this Monday" and "next Monday"
+  // resolve to two DIFFERENT dates (today vs. a week later) -- so getting
+  // negation wrong here cannot coincidentally land on the right answer
+  // the way it might when the two phrases happen to agree.
+  const onMonday = resolveDueDatePhrase("this Monday, not next Monday", "2026-10-19");
+  assert.equal(onMonday.kind, "unresolved", "negation must block resolution even when the two weekday phrases would otherwise disagree");
+  const reversed = resolveDueDatePhrase("next Monday, not this Monday", "2026-10-19");
+  assert.equal(reversed.kind, "unresolved");
+}
+{
+  // A compound qualifier must stay unresolved even across a month/year
+  // boundary -- the qualifier check must run before, and independently
+  // of, any date arithmetic.
+  const r = resolveDueDatePhrase("the Monday after next", "2026-12-30");
+  assert.equal(r.kind, "unresolved", "a compound qualifier is never resolved, even near a year boundary");
+}
+
+// --- Simple phrases must still resolve automatically -- the compound-
+// qualifier guard must never over-match and block legitimate, unambiguous
+// phrasing that was already working. ---
+
+{
+  const r = resolveDueDatePhrase("a week from now", MEETING_DATE);
+  assert.equal(r.kind, "resolved", "no weekday name is present, so the new weekday-offset guard must not fire");
+  assert.equal(r.date, "2026-10-22");
+}
+{
+  const r = resolveDueDatePhrase("a few days from now", MEETING_DATE);
+  assert.equal(r.kind, "resolved");
+  assert.equal(r.date, "2026-10-18");
+}
+{
+  const r = resolveDueDatePhrase("this Monday", MEETING_DATE);
+  assert.equal(r.kind, "resolved", "a plain weekday phrase with no qualifier must still auto-resolve");
+  assert.equal(r.date, "2026-10-19");
+}
 {
   const r = resolveDueDatePhrase("in two weeks", MEETING_DATE);
   assert.equal(r.kind, "resolved");
