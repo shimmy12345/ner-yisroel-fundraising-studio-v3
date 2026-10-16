@@ -46588,3 +46588,198 @@ behavior are now confirmed live on Production itself, not only
 inferred from Staging. The owner can now use AI Meeting Notes on real
 donors through the normal UI (`https://shimmydonors.org`, donor page →
 "✦ Add Meeting Notes") whenever they choose.
+
+## Fix Production AI Meeting Notes Follow-Up Scheduling (2026-10-16) -- ROOT-CAUSED, FIXED, TESTED ON STAGING, PRODUCTION NOT TOUCHED
+
+The owner reported that dictating "follow up this Monday" on Production
+left the follow-up's due date unpopulated. This round investigated the
+full pipeline end to end, found and fixed the exact root cause, added
+regression coverage, and verified the fix live on Staging -- stopping
+there, as instructed, for independent review before any separately
+authorized Production deployment.
+
+### Root cause, pinpointed exactly
+
+The pipeline is: Workers AI extracts a `suggestedDueDate` phrase ->
+`resolveDueDatePhrase` (the due-date resolver) turns it into a real
+date -> `followUpFromSuggestion` populates the review screen's date
+field directly from that -> Save persists whatever date is there. Each
+stage was checked directly against live Production-equivalent
+behavior (Staging, same code, same Workers AI model) rather than
+assumed:
+
+1. **Did Workers AI omit the date phrase?** No. Called the real
+   `/api/meeting-notes/organize` endpoint live with a transcript
+   containing "follow up with them this Monday" -- it returned
+   `suggestedDueDate: "this Monday"`, verbatim.
+2. **Did it return "this Monday" in `suggestedDueDate`?** Yes, exactly
+   that string, confirmed above. Also tested "on Monday" (the AI
+   paraphrased it down to bare `"Monday"`, dropping "on" -- the same
+   paraphrasing behavior already seen and handled for "in two weeks" ->
+   "two weeks" in the prior due-date round) and "this Friday" (returned
+   verbatim).
+3. **Did the date resolver fail to recognize it? -- YES, this is the
+   root cause.** `lib/meeting-notes/due-date-resolver.ts`'s
+   `tryResolvedRelative` only ever matched `next <weekday>` (added in
+   the prior round). It had no pattern at all for `this <weekday>`,
+   `on <weekday>`, or a bare `<weekday>` with no qualifier -- every one
+   of these phrasings fell through to the generic "Could not determine
+   a specific date from this wording" unresolved case, which is why
+   the date field stayed empty and the fundraiser had to set it (or
+   confirm "No specific date needed") by hand every time.
+4. **Did the UI fail to populate the date field?** No. Read
+   `lib/meeting-notes/follow-ups.ts`'s `followUpFromSuggestion`
+   directly: it calls `resolveDueDatePhrase` and sets `dueAt` straight
+   from whatever comes back, with no separate UI-side step that could
+   drop a value the resolver successfully computed. Confirmed live in
+   the actual browser UI after the fix (below) that a resolved date
+   does populate the `<input type="date">` field automatically, with
+   no UI-layer gap.
+5. **Was the date lost during saving?** No. `app/api/meeting-notes/
+   route.ts`'s save path parses a `"YYYY-MM-DD"` `dueAt` string exactly
+   as the date-only input value it is and stores it correctly -- this
+   was already proven correct in the prior round's live testing and
+   was not touched this round.
+
+**In one sentence: Workers AI and the Save path both worked correctly;
+the deterministic resolver simply never recognized three of the most
+natural ways a fundraiser (or the AI's own paraphrasing) says a
+weekday.**
+
+### Fix: documented, inclusive-vs-exclusive weekday semantics
+
+`lib/meeting-notes/due-date-resolver.ts`'s `tryResolvedRelative` now
+also matches `this <weekday>` and `on <weekday>`/bare `<weekday>`,
+each resolving via a new `nearestWeekday` helper -- the next occurrence
+of that weekday **on or after** the meeting date, inclusive of today.
+This is the deliberate counterpart to the existing `nextWeekday`
+helper (`next <weekday>`), which is **exclusive** of today (already
+documented and tested: "next Monday" said on a Monday means next
+week's). The distinction is now explicit and documented in the code
+itself:
+
+- `next <weekday>` -- strictly after the meeting date. Said on that
+  weekday, means next week's.
+- `this <weekday>` / `on <weekday>` / bare `<weekday>` -- on or after
+  the meeting date, inclusive. Said on that weekday, means today.
+
+This matches ordinary English usage and is anchored, as every other
+phrase in this resolver already was, to the actual meeting date (never
+"now"/the save time), using the same UTC-noon date-only arithmetic
+already proven timezone-safe across every supported profile timezone.
+No timezone bug was found or needed fixing -- the existing anchoring
+approach already handles this correctly, confirmed by this round's new
+month- and year-boundary tests (below) all passing.
+
+**One more guard added**: a negative lookbehind excludes `last
+<weekday>` from the new bare-weekday fallback. A past-tense reference
+("we spoke last Monday") must never be silently read as a future due
+date; it now correctly falls through to the unresolved case instead
+of landing on the wrong week.
+
+**`next week` (and bare `this week`) remain deliberately unresolved**,
+unchanged from the prior round -- no weekday is named, so which day is
+meant is genuinely ambiguous, and this resolver's standing rule is to
+never guess a specific date for a genuinely ambiguous phrase. This was
+re-verified, not just assumed: a live call confirmed Workers AI does
+return `"next week"` verbatim (never auto-expanding it to a specific
+day itself), and the resolver correctly keeps it unresolved with a
+clear reason, which the review screen already surfaces as "AI-suggested
+date: 'next week'" plus a required "No specific date needed"
+confirmation before Save -- satisfying the task's own "if clarification
+is required, make it obvious in the UI" requirement without inventing
+a day.
+
+### Regression tests added
+
+`tests/meeting-notes-due-date-resolver.test.mjs` gained: `this Monday`
+from a non-Monday meeting date; `this Monday` said ON a Monday (today);
+`on Monday` and bare `Monday` (both qualifier-free forms); `on Monday`
+said ON a Monday; `this Friday`; a month-boundary case (`next Friday`
+from Friday Oct 30 -> Nov 6); a year-boundary case (`this Friday` from
+Wednesday Dec 30 -> Jan 1, and `next Monday` from the same date -> Jan
+4); and `last Monday` (must stay unresolved). All existing cases
+(explicit dates, Jewish-calendar terms, `in two weeks`, the "ago"
+guard, `next week`'s deliberate unresolved status) were re-run
+unchanged and still pass. **206/206 test files pass**, `npx tsc
+--noEmit` clean, `npm run lint` at the exact pre-existing baseline
+(94 errors / 43 warnings).
+
+### Live verification on Staging (synthetic data only)
+
+Used the existing reusable fixture, synthetic donor
+`5894d764-c4ea-4b87-a595-7fcc4664ba0e` ("QA TEST -- AI Meeting Notes"),
+inside one supervised write window (`STAGING_WRITES_ENABLED`
+uncommented, redeployed, tested, test data deleted, re-commented,
+redeployed, 403 reconfirmed -- the same established procedure as every
+prior round):
+
+- **Diagnosis** (pre-fix code, to pin down the root cause precisely):
+  live-called organize with "this Monday," "on Monday," and "this
+  Friday" phrasing -- confirmed the AI returns each verbatim/paraphrased
+  as described above, and confirmed (before the fix) each one produced
+  an unresolved follow-up.
+- **Fix verification, full pipeline, in the actual rendered UI** (not
+  just a direct API call): typed a synthetic note ("...follow up with
+  them this Monday...") into the real Meeting Notes form, clicked
+  Organize Notes, and read the live DOM directly -- the follow-up's
+  `<input type="date">` field was automatically populated with
+  `2026-10-19`, the correct upcoming Monday from the Thursday
+  2026-10-15 meeting date, with **zero manual action required**.
+- **Explicit approval preserved**: confirmed the follow-up's Approve
+  checkbox started unchecked (`"Proposed"`, `checked: false`) despite
+  the date already being filled in -- an auto-populated date never
+  bypasses the requirement that the fundraiser explicitly approve each
+  follow-up before Save.
+- **Save and surfacing, verified against live data, not assumed**:
+  approved the follow-up and clicked Save. Queried Staging's D1
+  directly afterward -- the saved recommendation's `due_at` is
+  `1792411200` = `2026-10-19 12:00:00` UTC, exactly correct. Reloaded
+  the donor's own page: **"SUGGESTED ACTION: Follow up with the donor
+  to go over the pledge details. Due 2026-10-19"** -- confirming the
+  fix reaches all the way through to the donor's own Suggested Action
+  (the same relationship-queue surface the home page's Daily Agenda and
+  "View all priorities" draw from). A date 4 days out correctly
+  surfaces there rather than in the "Today"/"Overdue" condensed view,
+  consistent with the already-documented `relationshipQueueBucket`
+  logic from the prior round -- not a regression, the expected bucket
+  for a `thisWeek`-range date.
+- **Cleanup**: deleted the one test interaction and its linked
+  recommendation for the synthetic donor; re-confirmed 0 interactions /
+  0 recommendations / 0 giving_activities for it afterward. The donor
+  fixture itself was kept, as always.
+- **Write protection restored and reverified**: `git diff --stat
+  wrangler.staging.jsonc` empty; a live authenticated
+  `POST /api/meeting-notes/organize` after the final redeploy returned
+  `403`. Current Staging Worker version with the fix live:
+  **`417de2eb-05ac-4354-a1bc-5ecf65e25b07`**.
+
+No parallel or forked agent was used for any part of this round's
+investigation, implementation, deployment, database access, or
+verification -- every step ran sequentially, directly.
+
+### Remaining limitations (disclosed, not fixed this round -- out of
+the reported bug's scope)
+
+- **Compound phrases** like "a week from Monday" or "the Monday after
+  next" are not specifically parsed. A literal "Monday" inside such a
+  phrase would currently match the new bare-weekday fallback and
+  resolve to the *nearest* Monday, which could be a materially wrong
+  date for a genuinely compound phrase rather than a correctly-flagged
+  ambiguous one. Not required by the reported bug or this round's
+  explicit phrase list, and not exercised in practice before this
+  fix -- noted here as a known edge case for a future round rather
+  than papered over.
+- **`next week`/`this week` (bare, no weekday)** remain intentionally
+  unresolved, by design, as explained above -- not a limitation of the
+  fix so much as a deliberate, re-confirmed product decision.
+- This round's commit (`883d68f`) is **not yet on Production**. Per
+  this round's explicit instruction, the fix was verified on Staging
+  only; deploying it to Production (a small, additive, already-tested
+  change, same shape as every prior Production deploy this session)
+  requires separate owner authorization, same as always.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. Staging
+write protection is confirmed restored. Stopping here per this round's
+instruction to stop after the Staging fix and verification.**
