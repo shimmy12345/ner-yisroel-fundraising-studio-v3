@@ -20,13 +20,14 @@ const capabilitiesSrc = await readFile(new URL("../lib/assistant/capabilities.ts
 const conversationSrc = await readFile(new URL("../lib/assistant/conversation.ts", import.meta.url), "utf8");
 const orchestratorSrc = await readFile(new URL("../lib/assistant/orchestrator.ts", import.meta.url), "utf8");
 const routeSrc = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
+const fundraisingProgressSrc = await readFile(new URL("../lib/assistant/fundraising-progress.ts", import.meta.url), "utf8");
 
 // --- No database writes anywhere in this feature's code. Ask Fundraising
 // OS is read-only by requirement -- this must be true by construction,
 // not just by the Staging write guard's own independent enforcement. ---
 
 const WRITE_PATTERN = /\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b|\.run\(\)/i;
-for (const [name, src] of [["capabilities.ts", capabilitiesSrc], ["conversation.ts", conversationSrc], ["orchestrator.ts", orchestratorSrc], ["route.ts", routeSrc]]) {
+for (const [name, src] of [["capabilities.ts", capabilitiesSrc], ["conversation.ts", conversationSrc], ["orchestrator.ts", orchestratorSrc], ["route.ts", routeSrc], ["fundraising-progress.ts", fundraisingProgressSrc]]) {
   assert.doesNotMatch(src, WRITE_PATTERN, `${name} must contain no SQL write statement and no D1 .run() write call`);
 }
 
@@ -46,10 +47,10 @@ assert.doesNotMatch(orchestratorSrc, /capabilities\[[^\]]*\]\s*\(/i, "capability
 // fundraiser's donors -- checked per-statement by splitting on the
 // module's own query boundaries. ---
 
-const sqlStatements = capabilitiesSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? [];
+const sqlStatements = [...(capabilitiesSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? []), ...(fundraisingProgressSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? [])];
 assert.ok(sqlStatements.length >= 3, "expected to find the module's real SQL template literals");
 for (const statement of sqlStatements) {
-  if (/\bFROM\s+(donors|giving_activities|interactions)\b/i.test(statement)) {
+  if (/\bFROM\s+(donors|giving_activities|interactions|jl_payment_assignment_audits)\b/i.test(statement)) {
     assert.match(statement, /owner_user_id\s*=\s*\?|user_id\s*=\s*\?/i, `every donor-scoped query must filter by owner: ${statement.slice(0, 120)}...`);
   }
 }
@@ -119,7 +120,7 @@ assert.doesNotMatch(capabilitiesSrc, /from\s+["'][^"']*pledge-payment-plan["']/,
 // -present note string a fundraiser-facing answer can actually explain --
 // never silently omitted or left for the AI to invent around. ---
 
-assert.match(capabilitiesSrc, /no\s*\n?\/\/\s*"goal"\s*or\s*target\s*concept/i, "fundraising_progress must document why no goal/percent figure is ever returned");
+assert.match(capabilitiesSrc, /no\s+["']goal["']\s+or\s+target\s+concept/i, "fundraising_progress must document why no goal/percent figure is ever returned");
 assert.match(orchestratorSrc, /No data could be found for this donor/);
 assert.match(orchestratorSrc, /No specific donor was identified for this question/);
 
@@ -157,5 +158,42 @@ assert.doesNotMatch(capabilitiesSrc, /function donorHref/, "capabilities.ts must
 assert.doesNotMatch(capabilitiesSrc, /setUTCDate\(1\)/, "capabilities.ts must never truncate the fundraising-progress month boundary straight to UTC");
 assert.match(capabilitiesSrc, /localMonthBoundaries\(/, "fundraising_progress must compute its month boundary via the shared, timezone-aware helper");
 assert.match(capabilitiesSrc, /import\s*\{\s*localMonthBoundaries\s*\}\s*from\s*"\.\.\/workspace\/local-time\.ts"/);
+
+// --- Final Financial Accuracy Fix for Ask Fundraising OS (independent
+// code review, 2026-10-16): every fundraising_progress query must have
+// an EXCLUSIVE upper bound (never a lower-bound-only query that silently
+// sweeps in every later month too), must gate "new commitments"/"new
+// gift rows" on created_at (immutable, set once at insert) rather than
+// activity_date (a pledge's "Due Date", never updated once paid --
+// lib/import/jl-refresh.ts), must reuse the exact same
+// REAL_COMMITMENT_CATEGORIES set the Trip Fundraising Results Dashboard
+// already uses, and must reconcile against jl_payment_assignment_audits
+// through the shared, independently-tested pure summarizer rather than
+// inventing its own ad hoc arithmetic inline. ---
+
+assert.match(capabilitiesSrc, /instantEndEpoch/, "every fundraising_progress query must use an exclusive upper month boundary, not a lower bound alone");
+assert.match(fundraisingProgressSrc, /created_at\s*>=\s*\?\s*AND\s*created_at\s*<\s*\?/i, "new-commitment/new-gift queries must gate on created_at with both an inclusive start and an exclusive end");
+assert.doesNotMatch(capabilitiesSrc, /activity_date\s*>=/, "fundraising_progress must never filter by activity_date -- it is a pledge due date, never a receipt date (see lib/import/jl-refresh.ts)");
+assert.doesNotMatch(fundraisingProgressSrc, /activity_date\s*>=/, "the exported SQL constants must never filter by activity_date -- it is a pledge due date, never a receipt date (see lib/import/jl-refresh.ts)");
+assert.match(fundraisingProgressSrc, /import\s*\{\s*REAL_COMMITMENT_CATEGORIES\s*\}\s*from\s*"\.\.\/relationships\/pledge-payment-plan\.ts"/, "new commitments must reuse the Trip Dashboard's own REAL_COMMITMENT_CATEGORIES, never a separately invented category list");
+assert.match(fundraisingProgressSrc, /jl_payment_assignment_audits/, "money received must reconcile against the one table that actually records a dated payment event applied to an existing pledge");
+assert.match(capabilitiesSrc, /summarizeFundraisingProgress\(/, "the actual reconciliation arithmetic must live in the shared, independently unit-tested pure module, not be re-implemented inline");
+assert.match(capabilitiesSrc, /limitations:/, "the capability's own return type must carry forward the disclosed limitation, never silently drop it");
+
+assert.doesNotMatch(fundraisingProgressSrc, /from\s*["']cloudflare:workers["']/, "the reconciliation arithmetic must stay a pure function with no database/env dependency, so it is directly unit-testable");
+assert.match(fundraisingProgressSrc, /auditedFingerprints\.has\(row\.sourceFingerprint\)/, "a new completed_gift row must be skipped when a payment-assignment audit already accounts for the same payment fingerprint, or its money is counted twice");
+
+// --- Live-observed defect, fixed at the source (Staging verification,
+// 2026-10-16): the model relabeled a transaction/row count as "N
+// donors" when the field was ambiguously named moneyReceivedCount.
+// Renamed everywhere so the field itself can never be misread, and the
+// compose prompt now explicitly forbids stating a donor/household/
+// people count the data never actually provided. ---
+
+assert.doesNotMatch(fundraisingProgressSrc, /\bmoneyReceivedCount\b/, "the ambiguous field name must not reappear in the pure module");
+assert.doesNotMatch(capabilitiesSrc, /\bmoneyReceivedCount\b/, "the ambiguous field name must not reappear in capabilities.ts");
+assert.match(fundraisingProgressSrc, /moneyReceivedTransactionCount/, "the field must be named unambiguously as a transaction count, never a donor count");
+const protocolSrc = await readFile(new URL("../lib/assistant/protocol.ts", import.meta.url), "utf8");
+assert.match(protocolSrc, /never state a number of donors/i, "the compose prompt must explicitly forbid inventing a donor/household count from a row/transaction count");
 
 console.log("assistant-capabilities-safety.test.mjs: all assertions passed");

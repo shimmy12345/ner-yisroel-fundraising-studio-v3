@@ -27,6 +27,15 @@ import { loadMeetingBrief } from "../relationships/meeting-brief.ts";
 import type { DataMode } from "../workspace/mode.ts";
 import { financialDateLabel } from "../financial-date.ts";
 import { localMonthBoundaries } from "../workspace/local-time.ts";
+import {
+  summarizeFundraisingProgress,
+  NEW_COMMITMENTS_SQL,
+  NEW_GIVING_ROWS_SQL,
+  PAYMENT_ASSIGNMENT_AUDITS_SQL,
+  DONORS_CONTACTED_SQL,
+  type NewGivingRow,
+  type PaymentAssignmentAuditRow,
+} from "./fundraising-progress.ts";
 import { donorHref, type DonorRef } from "./conversation-state.ts";
 
 export const MAX_RESULT_ITEMS = 8;
@@ -189,50 +198,98 @@ export async function getDonorSummary(ctx: AssistantContext, donorId: string): P
   };
 }
 
-// --- 8. Fundraising progress this month -- real totals only. There is no
-// "goal" or target concept anywhere in this schema (confirmed by review,
-// docs/AI-HANDOFF.md), so this capability reports what actually happened
-// (gifts received, pledges newly committed, donors contacted) and never
-// fabricates a percent-of-goal figure. ---
+// --- 8. Fundraising progress this month -- real, reconciled totals only.
+// There is no "goal" or target concept anywhere in this schema (confirmed
+// by review, docs/AI-HANDOFF.md).
+//
+// Rebuilt from first principles (independent code review, "Final
+// Financial Accuracy Fix for Ask Fundraising OS", 2026-10-16) after the
+// original version was found to: have no upper month boundary (so it
+// silently swept in every later month too); exclude only 'open_pledge'
+// (so needs_review/nonfinancial_entry/pending_gift/pending_pledge rows
+// could be counted as real donations); and filter by activity_date, which
+// lib/import/jl-refresh.ts's own doc comment establishes is a pledge's
+// DUE DATE, never updated once a payment is applied -- meaning the old
+// query could count an old pledge's entire historical paid_cents as
+// "this month's" money the instant any one new payment nudged it, or
+// miss a genuine same-month payment entirely, depending on where that
+// frozen date happened to fall.
+//
+// The fix: "new commitments" is now gated on created_at (set once at
+// insert, never touched by any payment update -- see
+// lib/assistant/fundraising-progress.ts's own header comment for the
+// full data-model investigation), using the exact same
+// REAL_COMMITMENT_CATEGORIES set the Trip Fundraising Results Dashboard
+// already uses for "what counts as a real commitment"
+// (lib/relationships/trip-financial-attribution.ts), so this capability
+// can never disagree with that dashboard about which categories count.
+// "Money received" is reconciled by lib/assistant/fundraising-progress.ts's
+// summarizeFundraisingProgress against jl_payment_assignment_audits -- the
+// one place a payment applied to a pre-existing pledge has an actual
+// recorded date -- with an explicit, always-disclosed limitation for the
+// payments that do not go through that audited path (see that module).
+// event_or_ad (event/ad revenue) is deliberately excluded from both
+// figures here, consistent with the Trip Dashboard's own existing
+// treatment of that category, not a new decision invented for this
+// capability.
 
 export type FundraisingProgress = {
   periodLabel: string;
-  giftsCount: number;
-  giftsTotal: string;
-  newPledgesCount: number;
-  newPledgesTotal: string;
+  moneyReceivedTotal: string;
+  // A count of giving/payment ROWS, never distinct donors -- deliberately
+  // named so neither this code nor the AI composing an answer from it can
+  // relabel it "N donors" (see fundraising-progress.ts's own header
+  // comment on this field for why that distinction is load-bearing).
+  moneyReceivedTransactionCount: number;
+  newGiftsReceivedTotal: string;
+  paymentsOnExistingPledgesTotal: string;
+  newCommitmentsTotal: string;
+  newCommitmentsCount: number;
   donorsContacted: number;
+  limitations: string[];
 };
+
+function emptyFundraisingProgress(periodLabel: string): FundraisingProgress {
+  return { periodLabel, moneyReceivedTotal: money(0), moneyReceivedTransactionCount: 0, newGiftsReceivedTotal: money(0), paymentsOnExistingPledgesTotal: money(0), newCommitmentsTotal: money(0), newCommitmentsCount: 0, donorsContacted: 0, limitations: [] };
+}
 
 export async function getFundraisingProgress(ctx: AssistantContext): Promise<FundraisingProgress> {
   // The month boundary must be the FUNDRAISER'S local calendar month, not
-  // whatever month it happens to be in UTC right now -- otherwise a gift
-  // entered, or a conversation held, near local midnight can be silently
-  // misattributed to the wrong reporting month (independent code review,
-  // monthly fundraising totals and timezone boundaries, 2026-10-16).
-  // giving_activities.activity_date is a date-only value (lib/
-  // financial-date.ts), so it is compared against dateOnlyStartEpoch;
-  // interactions.occurred_at is a true moment-in-time, so it is compared
-  // against the real UTC instant of local midnight, instantStartEpoch.
-  const { dateOnlyStartEpoch, instantStartEpoch, periodLabel } = localMonthBoundaries(ctx.now, ctx.timezone);
+  // whatever month it happens to be in UTC right now, and must have BOTH
+  // an inclusive start and an EXCLUSIVE end -- every column this
+  // capability now reads (created_at, payment_date, occurred_at) is a
+  // true moment-in-time, so every query uses the instant boundaries, not
+  // the date-only ones (independent code review, monthly fundraising
+  // totals and timezone boundaries, 2026-10-16).
+  const { instantStartEpoch, instantEndEpoch, periodLabel } = localMonthBoundaries(ctx.now, ctx.timezone);
 
-  if (ctx.mode !== "live") {
-    return { periodLabel, giftsCount: 0, giftsTotal: money(0), newPledgesCount: 0, newPledgesTotal: money(0), donorsContacted: 0 };
-  }
+  if (ctx.mode !== "live") return emptyFundraisingProgress(periodLabel);
 
-  const [gifts, pledges, contacts] = await Promise.all([
-    env.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(paid_cents),0) AS total FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category NOT IN ('open_pledge') AND activity_date >= ?`).bind(ctx.userId, dateOnlyStartEpoch).first<{ n: number; total: number }>(),
-    env.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(committed_cents),0) AS total FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category IN ('open_pledge','partially_paid_pledge') AND activity_date >= ?`).bind(ctx.userId, dateOnlyStartEpoch).first<{ n: number; total: number }>(),
-    env.DB.prepare(`SELECT COUNT(DISTINCT donor_id) AS n FROM interactions WHERE user_id = ? AND occurred_at >= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%'`).bind(ctx.userId, instantStartEpoch).first<{ n: number }>(),
+  const [commitments, newGivingRows, auditRows, contacts] = await Promise.all([
+    env.DB.prepare(NEW_COMMITMENTS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number; total: number }>(),
+    env.DB.prepare(NEW_GIVING_ROWS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
+    env.DB.prepare(PAYMENT_ASSIGNMENT_AUDITS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<PaymentAssignmentAuditRow>(),
+    env.DB.prepare(DONORS_CONTACTED_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number }>(),
   ]);
 
-  return {
+  const summary = summarizeFundraisingProgress({
     periodLabel,
-    giftsCount: gifts?.n ?? 0,
-    giftsTotal: money(gifts?.total ?? 0),
-    newPledgesCount: pledges?.n ?? 0,
-    newPledgesTotal: money(pledges?.total ?? 0),
+    newGivingRows: newGivingRows.results,
+    paymentAssignmentAuditRows: auditRows.results,
+    newCommitments: { count: commitments?.n ?? 0, committedCents: commitments?.total ?? 0 },
     donorsContacted: contacts?.n ?? 0,
+  });
+
+  return {
+    periodLabel: summary.periodLabel,
+    moneyReceivedTotal: money(summary.moneyReceivedCents),
+    moneyReceivedTransactionCount: summary.moneyReceivedTransactionCount,
+    newGiftsReceivedTotal: money(summary.newGiftsReceivedCents),
+    paymentsOnExistingPledgesTotal: money(summary.paymentsOnExistingPledgesCents),
+    newCommitmentsTotal: money(summary.newCommitmentsCents),
+    newCommitmentsCount: summary.newCommitmentsCount,
+    donorsContacted: summary.donorsContacted,
+    limitations: summary.limitations,
   };
 }
 
@@ -265,6 +322,6 @@ export const CAPABILITY_DESCRIPTIONS: Record<string, string> = {
   outstanding_pledges: "Every donor with a real, currently open or partially-paid pledge balance.",
   payment_plans_attention: "Donors whose payment plan is behind and genuinely needs attention right now (a plan with a valid upcoming payment is never included here).",
   donor_summary: "A full relationship summary for one specific named donor: giving history, recent contact, open asks, family dates, and the current suggested action. Also use this to prepare for a meeting with a donor, to summarize recent history with a donor, or to gather what's needed to draft a follow-up message.",
-  fundraising_progress: "Real totals for this month: gifts received, new pledges committed, and donors contacted. There is no fundraising goal/target tracked in this system.",
+  fundraising_progress: "Real, reconciled totals for this month: money actually received (split into new gifts vs. payments on existing pledges, counted once), new pledge/gift commitments created this month regardless of payment status, and donors contacted. Use this for 'how much did we raise', 'what's new this month', or 'how much came from existing pledges'. There is no fundraising goal/target tracked in this system. May include a disclosed limitation about payments that lack a recorded date -- always relay it if present.",
   search_donors: "Find donors by name when the fundraiser names someone and which specific donor they mean is not yet clear.",
 };

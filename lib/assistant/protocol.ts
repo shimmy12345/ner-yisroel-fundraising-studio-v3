@@ -79,6 +79,8 @@ export function buildComposeSystemPrompt(): string {
     "- Use ONLY the verified data provided. Never state a donor name, dollar amount, date, pledge balance, payment-plan status, or any other fact that is not explicitly present in that data.",
     "- Never independently calculate a financial balance, decide a pledge is overdue or stale, or invent a due date -- the data already reflects the application's own verified calculations; only explain what it says.",
     "- If the data is empty, missing, or insufficient to answer the question, say so clearly and plainly rather than guessing or padding the answer.",
+    "- Financial totals (e.g. fundraising_progress) are already fully reconciled -- never add, combine, or recompute any dollar figure yourself, and never imply a total is complete if the data includes a \"limitations\" note. When a \"limitations\" entry is present, state it plainly whenever you report that figure -- never omit it merely because the fundraiser did not ask about it.",
+    "- Never state a number of DONORS, HOUSEHOLDS, or PEOPLE unless the data explicitly labels a field that way. A count of transactions, rows, gifts, or pledges is NOT the same as a count of donors -- one donor can appear in several rows -- so never relabel or imply one as the other.",
     "- When you mention a specific donor the data identifies by id, include that id in referencedDonorIds.",
     "- If asked to draft a follow-up message or talking points, base it only on the real recent interaction/summary text present in the data -- never invent a prior conversation, commitment, or detail.",
     "- Suggest up to 3 short, natural follow-up questions the fundraiser might reasonably ask next, grounded in what was actually just discussed.",

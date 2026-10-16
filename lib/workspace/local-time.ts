@@ -103,6 +103,14 @@ export type LocalMonthBoundaries = {
   // zonedTimeToUtc, so a gift or contact made right around the real
   // local midnight boundary is never shifted into the wrong month.
   instantStartEpoch: number;
+  // EXCLUSIVE upper bounds -- the first instant of the FOLLOWING local
+  // month, in each of the same two conventions. A query must compare
+  // with `< dateOnlyEndEpoch` / `< instantEndEpoch`, never `<=`, and
+  // every monthly query needs one of these, not just a lower bound --
+  // a lower-bound-only query silently sweeps in every later month's
+  // data too (independent code review, financial accuracy, 2026-10-16).
+  dateOnlyEndEpoch: number;
+  instantEndEpoch: number;
   // Human-readable month label in the fundraiser's own timezone (e.g.
   // "October 2026"), for display -- never computed from the server's or
   // browser's own timezone.
@@ -113,8 +121,15 @@ export function localMonthBoundaries(epochSeconds: number, timezone: string): Lo
   const { year, month } = localDateParts(epochSeconds, timezone);
   const dateOnlyStartEpoch = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
   const instantStartEpoch = Math.floor(zonedTimeToUtc(year, month, 1, 0, 0, timezone).getTime() / 1000);
+  // December -> January rolls the YEAR too -- Date.UTC/zonedTimeToUtc
+  // both handle month=12 (JS month index 12, i.e. "January of year+1")
+  // correctly on their own; no separate year-rollover branch is needed.
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const dateOnlyEndEpoch = Math.floor(Date.UTC(nextYear, nextMonth - 1, 1) / 1000);
+  const instantEndEpoch = Math.floor(zonedTimeToUtc(nextYear, nextMonth, 1, 0, 0, timezone).getTime() / 1000);
   const periodLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: timezone }).format(new Date(epochSeconds * 1000));
-  return { dateOnlyStartEpoch, instantStartEpoch, periodLabel };
+  return { dateOnlyStartEpoch, instantStartEpoch, dateOnlyEndEpoch, instantEndEpoch, periodLabel };
 }
 
 // Converts a local wall-clock date/time (year, 1-indexed month, day, hour,

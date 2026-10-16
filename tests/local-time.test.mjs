@@ -110,6 +110,24 @@ async function run() {
     assert.equal(b.periodLabel, "October 2026");
     assert.equal(b.dateOnlyStartEpoch, Date.UTC(2026, 9, 1) / 1000, "date-only boundary is Oct 1 at UTC midnight -- the same convention activity_date itself uses");
     assert.equal(b.instantStartEpoch, Date.UTC(2026, 9, 1, 4, 0, 0) / 1000, "instant boundary is the real UTC moment of Oct 1 00:00 EDT (UTC-4)");
+    // Final Financial Accuracy Fix for Ask Fundraising OS (2026-10-16):
+    // every monthly query needs an EXCLUSIVE end too, not just a start --
+    // a lower-bound-only query silently sweeps in every later month.
+    assert.equal(b.dateOnlyEndEpoch, Date.UTC(2026, 10, 1) / 1000, "the exclusive end boundary is the 1st of NEXT month (Nov), date-only convention");
+    assert.equal(b.instantEndEpoch, Date.UTC(2026, 10, 1, 4, 0, 0) / 1000, "the exclusive end boundary is the real UTC instant of Nov 1 00:00 EDT (still UTC-4 in early November, before DST ends)");
+    assert.ok(b.dateOnlyEndEpoch > b.dateOnlyStartEpoch && b.instantEndEpoch > b.instantStartEpoch, "the end boundary must always be strictly after the start boundary");
+  }
+
+  // December -> January transition for the END boundary specifically --
+  // a pledge/gift dated in December must never leak into a query whose
+  // end boundary incorrectly stayed in December instead of rolling to
+  // January of the SAME year the month itself rolled into.
+  {
+    const nowInDecember = Date.UTC(2026, 11, 15, 12, 0, 0) / 1000;
+    const b = localMonthBoundaries(nowInDecember, ET);
+    assert.equal(b.periodLabel, "December 2026");
+    assert.equal(b.dateOnlyEndEpoch, Date.UTC(2027, 0, 1) / 1000, "December's exclusive end boundary must roll over to January of the FOLLOWING year");
+    assert.equal(b.instantEndEpoch, Date.UTC(2027, 0, 1, 5, 0, 0) / 1000, "Jan 1 2027 00:00 EST (winter, UTC-5)");
   }
 
   // THE regression this fix targets: it is already Nov 1 in UTC, but
