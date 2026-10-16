@@ -50924,3 +50924,314 @@ today -- itself still unreleased to Production as a whole (see
 "Fix AI Donor Prioritization and Giving-History Intelligence" and
 "Final Historical Giving Accuracy and AI Ranking Fix," both explicitly
 held back from Production pending this exact review chain).
+
+## Controlled Production Deployment -- Historical Giving AI (2026-10-16) -- SUCCESSFUL
+
+Owner explicitly authorized a controlled Production deployment of the
+reviewed historical-giving intelligence upgrade (`giving-history.ts`,
+its `capabilities.ts`/`orchestrator.ts`/`protocol.ts` integration, and
+every independent-review round that followed it), scoped explicitly to
+that feature, subject to the safety gates below. No database migration,
+no donor-data import, and no financial-record correction occurred or
+was required.
+
+### 1. Donor-account reconciliation (read-only, against Production directly)
+
+The owner's stated baseline, 297 Production donor accounts, and the
+254-real-donor figure from the Staging analysis are **not directly
+comparable** -- they measure different things on different databases:
+254 was Staging's own count of donors already qualifying for the
+historical-giving shortlist (297 Staging donor rows total, minus 11
+synthetic test fixtures, minus donors that don't qualify), never
+Staging's total account count. Comparing it against Production's total
+account count and subtracting to get "43" would have compared a
+filtered population against an unfiltered one on two different
+databases -- exactly the invalid assumption this round's instructions
+warned against.
+
+Reconciled directly against Production (`wrangler d1 execute --remote`,
+read-only):
+
+| Metric | Count |
+|---|---|
+| Total donor accounts (`data_source='live'`) | 297 |
+| Active (not archived) | 297 |
+| Archived/merged | 0 |
+| Non-`live` data source | 0 |
+| Donors owned by any user other than the sole owner | 0 |
+| Donors with >=1 `giving_activities` row | 296 |
+| Donors qualifying for historical-giving analysis (paid_cents > 0, eligible category/status) | 294 |
+| Donors with legacy `gifts`-table rows | 0 (table fully migrated into `giving_activities` at the 2026-10-12 cutover) |
+| Donors with pledges/commitments only, zero paid history | 2 |
+| Donors with zero financial activity at all | 1 |
+
+**The real Production-internal gap is 3 donors, not 43**, and every one
+is individually explained, read-only-verified, and benign:
+- **Atlys Distribution** (`88175bf1-...`) and **Mr. & Mrs. Avi Beren**
+  (`a3f95d72-...`): each has exactly one `open_pledge` row,
+  `paid_cents = 0`, a real `committed_cents`/`balance_cents` > 0. This is
+  correct exclusion by design -- `GIVING_RECORDS_SQL`'s own header
+  explicitly documents "never an open pledge's committed_cents counted
+  as if it were paid." Both still appear in the Assistant's separate
+  open-commitment context, just not in the paid-giving-history
+  shortlist, which is accurate: they have made a promise, not yet a
+  payment.
+- **Mr. & Mrs. Jordan Comet** (`701dba2a-...`): zero `giving_activities`
+  rows and zero legacy `gifts` rows -- a donor record with no recorded
+  financial activity of any kind yet.
+
+No unintended exclusion, incorrect ownership filter, missing giving
+record, or incomplete portfolio analysis was found. Every one of the
+297 accounts is owned by the single authorized user; none is archived,
+merged, or on a different data source.
+
+**Confirmed the capability ranks before truncating, not the reverse**:
+read `summarizeGivingHistory` (`lib/assistant/giving-history.ts`)
+directly -- it classifies and scores every donor in the input set,
+computes `HIGH_VALUE_TOP_FRACTION`'s cutoff from the FULL classified
+population, sorts the complete scored list, and only then
+`.slice(0, limit)`s the result. `getHistoricalGivingPriorities`
+(`capabilities.ts`) calls it with `limit: MAX_RESULT_ITEMS * 3` (24)
+specifically so a later archived-donor-name filter can never silently
+shrink the final 8-item shortlist below `MAX_RESULT_ITEMS`. `GIVING_RECORDS_SQL`
+itself carries no `LIMIT` clause -- every eligible row for the owner is
+fetched before any ranking happens. The full, authorized 294-donor
+eligible portfolio is considered on every turn.
+
+### 2. Exact release verified
+
+`git diff --stat` from the last Production-deployed commit
+(`ef62b4cd75a7f577ebd5c87be94bbf84a9557330`) to the authorized reviewed
+HEAD (`2451034be5c14a03aa0a695c767f5402538b8012`) touched exactly 10
+files, all part of the reviewed feature or its tests: `lib/assistant/giving-history.ts`
+(new module), `lib/assistant/capabilities.ts`, `lib/assistant/orchestrator.ts`,
+`lib/assistant/protocol.ts`, `scripts/run-tests.mjs` (one line,
+registering the new test file), and five test files
+(`giving-history.test.mjs`, `assistant-capabilities-safety.test.mjs`,
+`assistant-donor-privacy.test.mjs`, `assistant-protocol.test.mjs`,
+`relationship-snapshot-stage3.test.mjs`). `git diff --stat` against
+`drizzle/`, `wrangler.production.jsonc`, and `wrangler.staging.jsonc`
+was empty -- zero schema, binding, secret, or cron change in scope.
+Confirmed no commits exist on the remote branch beyond the reviewed
+HEAD (`git fetch` + `git log` range check, empty). All nine capabilities
+the authorization listed (portfolio-wide ranking, lifetime-paid
+ranking, verified payment-date handling, full-vs-compact export
+provenance detection, conservative annual-trend classification,
+no double-counted audits, deterministic shortlist, conversational
+clarification handling, owner-scoped retrieval/links) are present in
+this diff and were exercised live in section 6 below.
+
+### 3. Production safety gates (all PASS, read directly from Production)
+
+1. **Automated backup**: healthy -- `/api/health`: last success
+   `2026-10-16T13:12:37Z` (object `daily/fundraising-os-production-db-20261016T131234Z.sql.gz.gpg`), well within the expected 36h window.
+2. **Restore verification**: healthy -- last successful monthly test
+   `2026-10-12T03:35:44Z`.
+3. **Current Production Worker version (rollback target)**: `4d855627-47b6-4c9d-a2d1-baf38076828f`,
+   deployed `2026-10-16T15:38:03.653Z`, confirmed via `wrangler deployments list --config wrangler.production.jsonc` (100% traffic) -- recorded BEFORE this round's deploy.
+4. **Production vs. Staging D1 isolation**: confirmed distinct --
+   `fundraising-os-production-db` (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`) vs. `fundraising-os-staging-db` (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`), different sizes, via `wrangler d1 list`.
+5. **Cloudflare Access**: confirmed live and correctly gating Production
+   -- an unauthenticated request to `/api/health` returned the real
+   Cloudflare Access sign-in page; after SSO through the existing
+   Google Workspace session (no password entered), the app's own pages
+   loaded normally.
+6. **Gmail secrets / email scheduling**: `wrangler secret list --config
+   wrangler.production.jsonc` showed all three secrets present
+   (`GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`,
+   `GMAIL_OAUTH_REFRESH_TOKEN`), identical to Staging's own set.
+7. **Production cron schedule**: `wrangler.production.jsonc`'s
+   `triggers.crons` (`"0 * * * *"`) unchanged by this round's diff
+   (confirmed empty `git diff --stat` on that file) and re-confirmed
+   identical in the live `wrangler deploy` output after this round's
+   deploy.
+8. **No unexpected schema migrations pending**: this round's diff adds
+   zero files under `drizzle/`. Production's own health check already
+   reported `schema-comparison: Match` and `production-readiness: Ready`
+   before this deploy and continued to report the same after it --
+   this deployment carries no schema change at all.
+9. **Staging write protection**: confirmed `403` live, via an
+   authenticated in-page `fetch('/api/assistant', {method:'POST'})` on
+   Staging immediately before deploying to Production, body: "Staging
+   is read-only...". `git diff --stat` on `wrangler.staging.jsonc`
+   against HEAD was empty.
+
+**Test suite / typecheck / build / lint**: `npm test` -- 213/213 test
+files pass. `npx tsc --noEmit` -- clean, zero errors. `npm run lint` --
+94 errors / 43 warnings, byte-identical to the established baseline (no
+new relevant error). `npm run build:production-independent` succeeded;
+`node scripts/verify-build-manifest.mjs production-independent` --
+PASS; confirmed the built bundle actually contains this round's fix
+(`grep -c genuine_transaction_date dist/server/index.js` = 3,
+`formatHistoricalGivingShortlist` = 2) before deploying.
+
+### 4. Pre-deployment Production financial baselines (read-only)
+
+| Metric | Value |
+|---|---|
+| Total donor accounts | 297 |
+| Total giving activities | 5,935 |
+| Open pledges | 33 |
+| Partially-paid pledges | 58 |
+| Legacy `gifts` rows | 0 |
+| `pledge_payment_plans` rows (no status column exists in this schema -- every row is, by construction, the current plan for its pledge) | 46 |
+| Active (unreversed) `pledge_balance_corrections` | 2 |
+| Total committed amount | $4,201,862.75 |
+| Total recorded paid amount | $4,020,638.60 |
+| Total raw outstanding balance (`SUM(balance_cents)`) | $181,224.15 |
+| Total outstanding balance, corrections-adjusted (matches the app's own `OPEN_COMMITMENTS_BY_DONOR_SQL` join) | $179,214.15 |
+| Interactions | 204 |
+| Recommendations | 6 |
+
+### 5. Controlled Production deployment
+
+Deployed via `wrangler deploy --config wrangler.production.jsonc` at
+**2026-10-16T21:06Z**.
+
+- **Deployed Git commit**: **`2451034be5c14a03aa0a695c767f5402538b8012`**
+  (confirmed live afterward -- `/api/health`'s `release` check reported
+  `0.1.0 · 2451034`, matching exactly).
+- **New Production Worker version**: **`4ac568b8-1589-4252-8b8b-958829a1d341`**.
+- **Previous Production Worker version (rollback target)**: `4d855627-47b6-4c9d-a2d1-baf38076828f`.
+- Bindings confirmed unchanged in the deploy output: `env.DB`
+  (`fundraising-os-production-db`), `env.STATUS_WORKER`
+  (`fundraising-os-production-backup-status`), `env.AI`, `env.ASSETS`,
+  and every environment variable, identical to before. `schedule: 0 * * * *`
+  confirmed in the deploy output. No database migration, donor import,
+  or financial write occurred during or after this deploy.
+
+### 6. Post-deployment verification
+
+**Financial integrity -- repeated the exact pre-deployment queries,
+all byte-identical**: 297 donors, 5,935 giving activities, 33 open
+pledges, 58 partially-paid pledges, 0 legacy gifts, 46 payment plans, 2
+active corrections, $4,201,862.75 committed, $4,020,638.60 paid,
+$181,224.15 raw outstanding balance -- every figure unchanged.
+
+**Existing functionality** (verified via direct authenticated HTTP
+requests against `shimmydonors.org`, since full-browser navigation in
+this environment intermittently reports a stale/cached `/`-page
+snapshot immediately after a route change -- a known browser-automation
+artifact from prior rounds, not a server-side behavior; every check
+below reads the real HTTP response/body, not the automation tool's
+rendered snapshot):
+- **Donor profiles**: `GET /donors/a3f95d72-...` -> 200, correct donor
+  name present in the real HTML.
+- **Today's Agenda**: `GET /` -> 200, live relationship-queue/brief
+  content.
+- **Pledge Review**: `GET /pledge-review` -> 200; the real rendered HTML
+  contained "15 open/partially-paid pledges across 13 donors" --
+  genuine, plausible Production data (a subset of the 33+58=91 total
+  open/partially-paid pledges, further filtered to "no current payment
+  plan, dated within the last 2 years," exactly as that page's own
+  query specifies).
+- **AI Meeting Notes**: `GET /donors/.../meeting-notes` -> 200.
+- **Assistant**: `GET /assistant` -> 200; see section below for the
+  full conversational test.
+- **Settings / email-scheduling config**: `GET /settings` -> 200;
+  Gmail secrets and cron trigger independently confirmed intact in
+  section 3.
+- **Production/Staging isolation**: Production's data contains no
+  `SYNTHETIC TEST` donor (confirmed by this round's own real-donor
+  results, section 6 below, matching Production's real portfolio
+  exactly); the Staging write-guard's own code
+  (`shouldBlockStagingWrite`) checks `deploymentEnvironment !== "staging-independent"`
+  structurally, so it can never engage on Production regardless of any
+  Production environment variable.
+
+**Historical-giving AI -- the three-question test**, run as real,
+read-only `POST /api/assistant` requests against Production
+(authenticated in-page `fetch`, threading `conversation.history`/`lastDonorRefs`
+exactly as the Assistant UI itself does -- no synthetic donor created,
+no note/follow-up saved, the Assistant's own design is read-only end to
+end):
+
+1. *"Which donors should I prioritize today, and why?"* -> a real,
+   grounded recency-driven stewardship answer (four unacknowledged
+   recent gifts) -- the expected baseline behavior before correction.
+2. *"No, donors based on giving history."* -> correctly recognized as a
+   correction, switched to `historical_giving_priorities`. Answer text:
+   *"The system cannot verify the exact year each dollar arrived, so it
+   cannot show how many distinct years they have given... However,
+   their lifetime totals and the number of gifts they have made show
+   that they are all significant donors."* -- no unsupported lapsed or
+   declining claim anywhere. The deterministic shortlist was present in
+   full, headed *"Verified ranked shortlist by real giving history..."*,
+   led by **Mr. & Mrs. Shlomo Horowitz: $227,304 lifetime given**.
+3. *"No, which donors in general should I focus on based on their past
+   giving levels?"* -> correctly STAYED on `historical_giving_priorities`
+   (did not revert to the recency-driven list). Identical 8-donor
+   shortlist, identical honest `annual payment trend cannot be reliably
+   determined` labeling, verified donor-profile links (e.g.
+   `/donors/0d806ce6-5bbe-4d7b-b80a-7f568b48af8f` for Shlomo Horowitz).
+
+**Lifetime giving agreement, verified directly against the database**:
+queried `giving_activities` for Shlomo Horowitz
+(`0d806ce6-5bbe-4d7b-b80a-7f568b48af8f`) under the exact same
+eligibility filter the capability uses -- `SUM(paid_cents) = 22,730,400`
+cents = **$227,304.00**, byte-identical to the Assistant's own reported
+figure. Every other referenced donor's `href` matched a real Production
+donor id.
+
+### 7. Remaining limitations (unchanged, disclosed in the prior round)
+
+- An untouched full-export pledge's paid amount still contributes fully
+  to lifetime giving/ranking, but its annual timing stays unconfirmed
+  until either a real payment-assignment decision is recorded against
+  it or a compact (payment-only) export supplies a genuine date -- the
+  live Production test confirms this is the ACTIVE, common case for this
+  organization's real historical data (consistent with what the
+  Staging round already found), not a rare edge case. Fundraisers
+  should expect `annual_trend_unknown` far more often than a specific
+  lapsed/declined/consistent claim for this portfolio's older history.
+- The small Workers AI compose model's free-text narrative can still
+  phrase things loosely; the deterministic shortlist and forced
+  donor-link inclusion (prior round's safeguard) continue to guarantee
+  the verified, per-donor ranking and labels survive regardless.
+
+### 8. Rollback target and conditions
+
+**Rollback target, if ever needed**: `wrangler rollback 4d855627-47b6-4c9d-a2d1-baf38076828f --config wrangler.production.jsonc`
+(the Worker version live immediately before this deploy). Not
+exercised -- no rollback condition from section 7 of the authorization
+(donor-visibility/ownership problems, incorrect totals, financial
+discrepancies, missing/unauthorized donor references, assistant
+failure, broken profiles/pledge views, email-scheduling changes,
+isolation failures) was observed. The one apparent anomaly during
+verification (a full-browser navigation to `/pledge-review` visually
+showing stale `/` content) was traced to the browser-automation tool's
+own navigation/snapshot reporting, not the server: a direct, raw HTTP
+request to the same path returned the correct 200 page with real data
+every time, and Staging and Production behaved identically. Logged here
+for transparency, not as a rollback trigger.
+
+### What was verified directly against Production vs. established via Staging/tests
+
+**Directly against Production, this round**: the donor-account
+reconciliation (section 1), all Production safety gates (section 3),
+all financial baselines before and after deployment (sections 4 and
+6), existing-functionality HTTP checks (section 6), and the full live
+three-question Assistant test with a direct database cross-check of
+the top donor's lifetime total (section 6).
+**Established by the test suite and the prior Staging round**: the
+correctness of the date-provenance/reconciliation algorithm itself
+(`tests/giving-history.test.mjs`'s synthetic scenarios), and the
+deterministic-shortlist safeguard's behavior under a compose-model
+narrative omission (Staging's prior live finding) -- not re-induced
+live on Production, since that would require an artificial model
+failure this round had no reason to force.
+
+### Final deployment status: SUCCESSFUL
+
+All eight completion criteria from the authorization are met: the
+donor-account discrepancy is fully explained (3 Production-internal
+non-qualifying donors, not 43, with no unintended exclusion); the
+entire eligible 294-donor portfolio is ranked before any truncation;
+every Production financial baseline is byte-identical before and after;
+historical-giving recommendations work correctly end to end, verified
+against real data; every existing functionality check passed; backup,
+restore, and rollback safeguards are confirmed and recorded; and
+Production/Staging isolation plus email scheduling are unchanged.
+Production (`shimmydonors.org`) is now running commit
+`2451034be5c14a03aa0a695c767f5402538b8012`, Worker version
+`4ac568b8-1589-4252-8b8b-958829a1d341`, deployed 2026-10-16T21:06Z.
