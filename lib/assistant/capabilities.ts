@@ -29,10 +29,12 @@ import { financialDateLabel } from "../financial-date.ts";
 import { localMonthBoundaries, localDateParts } from "../workspace/local-time.ts";
 import {
   summarizeGivingHistory,
-  GIVING_BY_DONOR_YEAR_SQL,
+  GIVING_RECORDS_SQL,
+  VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL,
   OPEN_COMMITMENTS_BY_DONOR_SQL,
   LAPSED_YEARS_THRESHOLD,
-  type YearlyGivingRow,
+  type GivingRecordRow,
+  type VerifiedPledgePaymentRow,
   type OpenCommitmentRow,
 } from "./giving-history.ts";
 import {
@@ -175,6 +177,16 @@ const GIVING_SIGNAL_LABELS: Record<string, string> = {
   declined: "Giving has declined from this donor's own prior peak year",
   lapsed: `Lapsed -- no recorded gift in the last ${LAPSED_YEARS_THRESHOLD}+ years`,
   insufficient_history: "Not enough giving history yet to judge a trend (based on a single gift or single year)",
+  // Set when a donor's lifetime giving is real and substantial but this
+  // system cannot verify WHEN each dollar of it actually arrived (see
+  // lib/assistant/giving-history.ts's own header) -- a pledge's due date
+  // was never a payment date, and a plain reimport can bump a pledge's
+  // paid_cents with no payment-review decision, and therefore no date,
+  // behind it at all. Deliberately never phrased as "declined" or
+  // "lapsed" or "consistent" -- this module has no verified evidence for
+  // any of those claims about this donor, only that they have given
+  // significantly over time.
+  annual_trend_unknown: "Historically significant donor; annual payment trend cannot be reliably determined from available records",
 };
 
 export type HistoricalGivingItem = {
@@ -183,14 +195,15 @@ export type HistoricalGivingItem = {
   href: string;
   lifetimePaid: string;
   giftCount: number;
-  distinctGivingYears: number;
-  firstGivingYear: number;
-  lastGivingYear: number;
-  mostRecentPaidDateLabel: string;
-  peakYear: number;
-  peakYearAmount: string;
-  lastGivingYearAmount: string;
-  yearsSinceLastGift: number;
+  annualTrendReliable: boolean;
+  distinctGivingYears: number | null;
+  firstGivingYear: number | null;
+  lastGivingYear: number | null;
+  mostRecentPaidDateLabel: string | null;
+  peakYear: number | null;
+  peakYearAmount: string | null;
+  lastGivingYearAmount: string | null;
+  yearsSinceLastGift: number | null;
   signals: string[];
   openPledgeBalance: string | null;
   openPledgeCommitted: string | null;
@@ -200,8 +213,9 @@ export async function getHistoricalGivingPriorities(ctx: AssistantContext): Prom
   if (ctx.mode !== "live") return { items: [], donorRefs: [] };
   const currentYear = localDateParts(ctx.now, ctx.timezone).year;
 
-  const [givingRows, openCommitmentRows, donorRows] = await Promise.all([
-    env.DB.prepare(GIVING_BY_DONOR_YEAR_SQL).bind(ctx.userId, ctx.userId).all<YearlyGivingRow>(),
+  const [givingRecords, verifiedPledgePayments, openCommitmentRows, donorRows] = await Promise.all([
+    env.DB.prepare(GIVING_RECORDS_SQL).bind(ctx.userId, ctx.userId).all<GivingRecordRow>(),
+    env.DB.prepare(VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL).bind(ctx.userId).all<VerifiedPledgePaymentRow>(),
     env.DB.prepare(OPEN_COMMITMENTS_BY_DONOR_SQL).bind(ctx.userId).all<OpenCommitmentRow>(),
     // archived_at IS NULL: a merged/archived donor record is never a
     // valid cultivation recommendation target, even if their historical
@@ -215,7 +229,7 @@ export async function getHistoricalGivingPriorities(ctx: AssistantContext): Prom
   // Over-fetch before the archived-donor filter below so a few filtered-
   // out candidates never silently shrink the final shortlist below
   // MAX_RESULT_ITEMS.
-  const candidates = summarizeGivingHistory({ rows: givingRows.results, currentYear, limit: MAX_RESULT_ITEMS * 3 });
+  const candidates = summarizeGivingHistory({ records: givingRecords.results, verifiedPledgePayments: verifiedPledgePayments.results, currentYear, limit: MAX_RESULT_ITEMS * 3 });
 
   const nameById = new Map(donorRows.results.map((d) => [d.id, d.display_name]));
   const commitmentById = new Map(openCommitmentRows.results.map((r) => [r.donor_id, r]));
@@ -231,13 +245,14 @@ export async function getHistoricalGivingPriorities(ctx: AssistantContext): Prom
         href: donorHref(c.donorId),
         lifetimePaid: money(c.lifetimePaidCents),
         giftCount: c.giftCount,
+        annualTrendReliable: c.annualTrendReliable,
         distinctGivingYears: c.distinctGivingYears,
         firstGivingYear: c.firstGivingYear,
         lastGivingYear: c.lastGivingYear,
-        mostRecentPaidDateLabel: financialDateLabel(c.mostRecentPaidDateEpoch),
+        mostRecentPaidDateLabel: c.mostRecentPaidDateEpoch !== null ? financialDateLabel(c.mostRecentPaidDateEpoch) : null,
         peakYear: c.peakYear,
-        peakYearAmount: money(c.peakYearCents),
-        lastGivingYearAmount: money(c.lastGivingYearCents),
+        peakYearAmount: c.peakYearCents !== null ? money(c.peakYearCents) : null,
+        lastGivingYearAmount: c.lastGivingYearCents !== null ? money(c.lastGivingYearCents) : null,
         yearsSinceLastGift: c.yearsSinceLastGift,
         signals: c.signals.map((s) => GIVING_SIGNAL_LABELS[s]),
         openPledgeBalance: commitment && commitment.balance_cents > 0 ? money(commitment.balance_cents) : null,
@@ -246,6 +261,32 @@ export async function getHistoricalGivingPriorities(ctx: AssistantContext): Prom
     });
 
   return { items, donorRefs: items.map((i) => ({ donorId: i.donorId, name: i.name, href: i.href })) };
+}
+
+// The deterministic, server-rendered shortlist the final answer ALWAYS
+// shows verbatim, regardless of whether the compose model's own prose
+// happens to mention every donor ("Final Historical Giving Accuracy and
+// AI Ranking Fix," 2026-10-16: a prior Staging test found the ranking
+// engine correctly selected the highest-ranked donor, but the small
+// Workers AI compose model, working under a 900-token budget, omitted
+// that donor from its OWN narrative -- which, before this fix, meant
+// the donor's pill was dropped too, since orchestrator.ts only ever
+// showed pills for ids the model itself echoed back). Every name, rank,
+// lifetime amount, and signal here comes directly from this capability's
+// own already-verified, already-ranked `items` -- never re-derived or
+// re-worded by the AI. orchestrator.ts appends this (see
+// verifiedGivingShortlistFrom) through the same guaranteed-to-survive
+// appendFinancialLimitations budget reservation already used for
+// mandatory financial disclosures, and separately force-includes every
+// one of these donor ids into the turn's referencedDonors so their
+// profile-link pills can never be silently dropped either.
+export function formatHistoricalGivingShortlist(items: HistoricalGivingItem[]): string {
+  if (items.length === 0) return "";
+  const lines = items.map((item, index) => {
+    const signalText = item.signals.length > 0 ? ` -- ${item.signals.join("; ")}` : "";
+    return `${index + 1}. ${item.name}: ${item.lifetimePaid} lifetime given${signalText}`;
+  });
+  return ["Verified ranked shortlist by real giving history (complete, server-computed -- always shown in full regardless of the summary above):", ...lines].join("\n");
 }
 
 // --- 6/7. Donor summary -- one real, already-owner-scoped donor, using

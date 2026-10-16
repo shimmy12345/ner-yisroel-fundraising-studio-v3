@@ -202,8 +202,22 @@ async function run() {
   // =====================================================================
   {
     const orchestratorSrc = await readFile(new URL("../lib/assistant/orchestrator.ts", import.meta.url), "utf8");
-    assert.match(orchestratorSrc, /const referencedIds = new Set\(answer\.referencedDonorIds\)/, "the model's own reported ids must be read only as a filter key");
-    assert.match(orchestratorSrc, /donorRefs\.filter\(\(ref\) => referencedIds\.has\(ref\.donorId\)\)/, "the final referencedDonors sent to the client must be filtered FROM the server's own already-authorized donorRefs -- the model can name an id, but can never cause a donor outside that already-fetched, already-owned set to be returned");
+    // "Final Historical Giving Accuracy and AI Ranking Fix" (2026-10-16)
+    // added a deterministic force-include for historical_giving_priorities'
+    // own already-ranked donor ids (a defense against the compose model
+    // silently omitting the top-ranked donor from its narrative/JSON --
+    // see capabilities.ts's formatHistoricalGivingShortlist). This widens
+    // the ALLOW-SET the model's own ids are unioned into, but every one of
+    // those forced ids was already itself server-fetched, owner-verified
+    // CRM data (data.historical_giving_priorities, populated only from
+    // getHistoricalGivingPriorities's own owner-scoped query, and already
+    // folded into donorRefs via runCapabilities' own addRefs) -- never an
+    // AI-supplied id. The actual security property this test exists to
+    // prove -- the final referencedDonors can never exceed donorRefs, the
+    // server's own already-authorized set -- is unchanged below.
+    assert.match(orchestratorSrc, /const referencedIds = new Set\(\[\.\.\.answer\.referencedDonorIds, \.\.\.historicalGivingItems\.map\(\(item\) => item\.donorId\)\]\)/, "the model's own reported ids, and the deterministically-forced historical_giving_priorities ids (already server-verified, never AI-supplied), must be read only as a filter key");
+    assert.match(orchestratorSrc, /function historicalGivingItemsFrom\(data: Record<string, unknown>\): HistoricalGivingItem\[\] \{\s*\n\s*const items = data\.historical_giving_priorities;/, "the forced ids must be read back out of the already-retrieved VERIFIED_CRM_DATA, never independently re-fetched or AI-supplied");
+    assert.match(orchestratorSrc, /donorRefs\.filter\(\(ref\) => referencedIds\.has\(ref\.donorId\)\)/, "the final referencedDonors sent to the client must be filtered FROM the server's own already-authorized donorRefs -- the model (or the forced-include list) can name an id, but can never cause a donor outside that already-fetched, already-owned set to be returned");
     // donorHref is the ONLY place a donor link is ever built, and it is
     // always derived from a validated id, never an AI-supplied URL --
     // re-confirmed here (already proven in an earlier round's own

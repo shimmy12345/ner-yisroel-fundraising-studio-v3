@@ -45,8 +45,10 @@ import {
   getDonorSummary,
   getHistoricalGivingPriorities,
   getFundraisingProgress,
+  formatHistoricalGivingShortlist,
   type AssistantContext,
   type DonorRef,
+  type HistoricalGivingItem,
 } from "./capabilities.ts";
 import { resolveDonorReference, donorHref, type ConversationState } from "./conversation.ts";
 import {
@@ -95,6 +97,17 @@ function financialLimitationsFrom(data: Record<string, unknown>): string[] {
   if (!progress || typeof progress !== "object") return [];
   const limitations = (progress as { limitations?: unknown }).limitations;
   return Array.isArray(limitations) ? limitations.filter((l): l is string => typeof l === "string") : [];
+}
+
+// Reads historical_giving_priorities's own already-ranked, already-
+// verified items back out of the retrieved data (see
+// capabilities.ts's formatHistoricalGivingShortlist for the full
+// rationale: a deterministic safeguard against the compose model's own
+// narrative silently omitting the highest-ranked donor). Never throws on
+// an unexpected shape; simply finds nothing to enforce.
+function historicalGivingItemsFrom(data: Record<string, unknown>): HistoricalGivingItem[] {
+  const items = data.historical_giving_priorities;
+  return Array.isArray(items) ? (items as HistoricalGivingItem[]) : [];
 }
 
 // Executes exactly the capabilities the plan step named -- a fixed
@@ -261,7 +274,17 @@ export async function runAssistantTurn(params: {
   const answer = parseComposeResponse(composeResult.text);
   if (!answer) return { available: false, error: "The AI assistant returned an unexpected response." };
 
-  const referencedIds = new Set(answer.referencedDonorIds);
+  // The highest-ranked donors historical_giving_priorities selected must
+  // reach the fundraiser regardless of whether the compose model's own
+  // 900-token-budget narrative happened to mention each one -- force
+  // them into referencedDonors (so their profile-link pills can never be
+  // silently dropped) in addition to whatever the model itself echoed
+  // back (independent review, "Final Historical Giving Accuracy and AI
+  // Ranking Fix", 2026-10-16: a live Staging test found exactly this --
+  // the ranking engine correctly selected the top donor, but the model's
+  // own answer, and therefore its referencedDonorIds, omitted them).
+  const historicalGivingItems = historicalGivingItemsFrom(data);
+  const referencedIds = new Set([...answer.referencedDonorIds, ...historicalGivingItems.map((item) => item.donorId)]);
   const referencedDonors = donorRefs.filter((ref) => referencedIds.has(ref.donorId));
 
   // A critical financial disclosure (e.g. fundraising_progress's
@@ -269,9 +292,13 @@ export async function runAssistantTurn(params: {
   // here, deterministically, regardless of whether the model's own
   // answer already mentioned it -- never left to the prompt alone
   // (independent review, "Final Payment Accuracy and Financial Data
-  // Integrity Review", 2026-10-16).
+  // Integrity Review", 2026-10-16). The verified giving-history shortlist
+  // (same guarantee, same mechanism) is reserved ahead of it so neither
+  // ever gets silently truncated away by a long model answer.
+  const verifiedShortlist = formatHistoricalGivingShortlist(historicalGivingItems);
   const financialLimitations = financialLimitationsFrom(data);
-  const finalAnswer = appendFinancialLimitations(answer.answer, financialLimitations);
+  const mandatoryAppendedText = [verifiedShortlist, ...financialLimitations].filter((text) => text.length > 0);
+  const finalAnswer = appendFinancialLimitations(answer.answer, mandatoryAppendedText);
 
   return {
     available: true,

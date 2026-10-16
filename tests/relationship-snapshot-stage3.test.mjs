@@ -199,16 +199,20 @@ async function run() {
     assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 27, "Stage 3 must add zero new queries to the donor page beyond what Donor Rebbeim and Manual Pledge Balance Corrections separately added (27 = Stage 2's 24 + Donor Rebbeim's 2 + Balance Corrections' 1)");
     assert.equal((meetingBrief.match(/env\.DB\.prepare\(/g) ?? []).length, 15, "Stage 3 must add zero new queries to meeting-brief.ts -- the resolver reuses the already-fetched relationshipFactRows/openAskRows");
     assert.equal((assistantRoute.match(/env\.DB\.prepare\(/g) ?? []).length, 0, "the Assistant route itself must make no direct D1 query at all -- everything goes through lib/assistant/capabilities.ts");
-    // 10, not 7: "Fix AI Donor Prioritization and Giving-History
+    // 11, not 7: "Fix AI Donor Prioritization and Giving-History
     // Intelligence" (2026-10-16) added the UNRELATED
     // historical_giving_priorities capability, which needs its own 3
     // portfolio-wide queries (per-donor-year giving history, open
     // pledge/commitment context, and donor display names) -- 7 + 3 = 10.
-    // None of the 3 touch donor_summary or Meeting Brief in any way; this
+    // "Final Historical Giving Accuracy and AI Ranking Fix" (2026-10-16)
+    // then added a 4th query to that same capability (the verified,
+    // dated payment-event ledger used to re-attribute a pledge's annual
+    // trend away from its own unreliable due date) -- 10 + 1 = 11. None
+    // of these touch donor_summary or Meeting Brief in any way; this
     // ceiling's real intent (donor_summary must still reuse Meeting
     // Brief's already-resolved Snapshot, never add a second lookup for
     // it) is otherwise unchanged and still holds.
-    assert.ok((assistantCapabilities.match(/env\.DB\.prepare\(/g) ?? []).length <= 10, "the Assistant's donor-summary capability must still reuse Meeting Brief's already-resolved Snapshot, not add a second lookup for it");
+    assert.ok((assistantCapabilities.match(/env\.DB\.prepare\(/g) ?? []).length <= 11, "the Assistant's donor-summary capability must still reuse Meeting Brief's already-resolved Snapshot, not add a second lookup for it");
     // 21, not 19: live-data.ts's count has since grown by two queries for
     // reasons entirely unrelated to Stage 3 (same pattern as the donor-page
     // count's own comment above) -- Pledge Renewal Reminders (2026-10-08,
