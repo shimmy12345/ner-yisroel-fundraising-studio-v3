@@ -14,6 +14,27 @@ import { followUpFromSuggestion, emptyFollowUp, selectApprovedFollowUps } from "
   assert.equal(row.approved, false);
   assert.equal(row.dueAt, "", "a null suggestedDueDate becomes an empty editable date field, never invented");
 }
+
+// --- A relative-timeframe suggestion (not a calendar date) must never
+// silently ride through to the date picker, which can only display an
+// ISO date -- confirmed live, Workers AI returned exactly this shape
+// (suggestedDueDate: "early next week") for a transcript whose only due-
+// date language was relative. Folding it into the description preserves
+// the information instead of discarding it or sending an unparseable
+// value to the save route, which would otherwise reject the whole save. ---
+{
+  const row = followUpFromSuggestion({ description: "Follow up about the dinner sponsorship", suggestedDueDate: "early next week" }, "id-5");
+  assert.equal(row.dueAt, "", "a non-calendar suggestion must leave the date field empty, not an unparseable string");
+  assert.equal(row.description, "Follow up about the dinner sponsorship (early next week)", "the relative timeframe must still be visible to the fundraiser, not silently dropped");
+  assert.equal(row.approved, false);
+}
+{
+  // A well-formed ISO date must pass through untouched, not be treated as
+  // a relative phrase.
+  const row = followUpFromSuggestion({ description: "Call donor", suggestedDueDate: "2026-11-01" }, "id-6");
+  assert.equal(row.dueAt, "2026-11-01");
+  assert.equal(row.description, "Call donor");
+}
 {
   const row = emptyFollowUp("id-3");
   assert.equal(row.approved, false, "a manually-added follow-up must also start unapproved");
