@@ -50638,3 +50638,289 @@ deployed this round, per this round's own explicit instruction.
 **No Production file was read or written this round. No Production
 deployment, configuration change, or data change occurred. Stopping here
 for independent review, per this round's own instruction.**
+
+## Final Giving-Date Provenance Fix Before Production (2026-10-16) -- FIXED, TESTED, VERIFIED LIVE ON STAGING, PRODUCTION NOT TOUCHED
+
+Second independent review of `historical_giving_priorities`
+(`lib/assistant/giving-history.ts`), on top of "Final Historical Giving
+Accuracy and AI Ranking Fix" earlier the same day (commit `2c94e08`,
+docs commit `48c1796`). That round fixed the installment-pledge
+misattribution bug using `jl_payment_assignment_audits.payment_date` and
+`giving_activity_import_changes`, but still trusted an UNTOUCHED row's
+own `activity_date` whenever it had neither an audit trail nor a plain-
+reimport bump. This round closes that gap: the absence of a later
+change is not proof the original date is a payment date.
+
+### 1. Root cause, confirmed by tracing the import/storage schema
+
+`lib/import/jl-donations.ts`'s `classifyJlDonation` sets
+`activityDate = row["Due Date"] || row.Date || ""`. `JL_DONATION_COLUMNS`
+(the full/pledge export) always includes a `"Due Date"` header and never
+`"Date"`; `JL_COMPACT_DONATION_COLUMNS` (the payment-only export) always
+includes `"Date"` and never `"Due Date"`. A full-export pledge's
+`activity_date` is therefore a commitment date, never a receipt date --
+and a row that has never been touched by a payment-assignment audit or a
+plain reimport is NOT evidence either way about when (or whether, across
+how many years) it was actually paid. The previous round's own
+"RELIABLE" case (no audit, no bump -> trust `activity_date` as-is) was
+exactly this unproven assumption.
+
+### 2. Verified source-date provenance: what the schema CAN and CANNOT tell us
+
+Traced every insert site for `giving_activities` (exhaustive grep,
+confirmed only two exist): `app/api/import/route.ts`'s JL import insert
+(`external_source = 'JL Solutions'` always) and the Fundraising-OS-
+native pending-gift/pledge inserts (`lib/giving/pending-records.ts`,
+`app/api/giving/pending/route.ts`), which hardcode `paid_cents = 0` and
+have no code path that ever sets `paid_cents > 0` later outside the same
+JL import pipeline -- so they can never reach this query at all (already
+excluded by `paid_cents > 0`).
+
+`giving_activities.source_snapshot` is `JSON.stringify` of the raw
+source row under its ORIGINAL column headers
+(`lib/import/jl-donations.ts`: `sourceValues: Object.fromEntries(Object.entries(row)...)`,
+written verbatim by `app/api/import/route.ts`'s insert). This is the ONE
+persisted field that can answer the format question --
+`activity_date` itself already lost the distinction, and
+`record_origin`/`category`/`workspace_status` carry no format
+information. A literal substring search on the raw JSON text for
+`"Due Date":` vs. `"Date":` reliably recovers which export produced the
+row, with no inference about donor behavior and no reliance on
+`paid_cents > 0` meaning anything about the date -- confirmed the two
+markers can never collide (`"Date":` with a leading quote is not a
+substring of `"Due Date":`, since the character before `D` there is a
+space, not a quote).
+
+Rows whose `source_snapshot` is null, empty, or contains neither marker
+(data predating this field, or any future import path this review did
+not anticipate) are conservatively treated the same as a confirmed due
+date -- never assumed genuine for lack of evidence otherwise, per the
+task's own instruction.
+
+### 3. The fix
+
+`GIVING_RECORDS_SQL` (`lib/assistant/giving-history.ts`) now computes a
+fourth column, `genuine_transaction_date`:
+```sql
+(CASE WHEN ga.source_snapshot LIKE '%"Date":%' AND ga.source_snapshot NOT LIKE '%"Due Date":%' THEN 1 ELSE 0 END) AS genuine_transaction_date
+```
+-- `1` for a confirmed compact-JL-export row; the legacy `gifts` UNION
+branch hardcodes `1` (its `received_at` is already trusted by every
+other part of this app, e.g. `meeting-brief.ts`, independent of JL
+format). `0` for a full-export due date or unconfirmed provenance.
+
+`aggregateDonors`'s untouched-row branch (no audit, no reimport bump)
+now additionally requires `genuine_transaction_date` before trusting
+`activity_date` for the annual trend:
+```ts
+} else if (row.genuine_transaction_date) {
+  addToYear(entry, utcYear(row.activity_date), row.paid_cents, row.activity_date);
+} else {
+  entry.annualTrendReliable = false; // untouched, but a due date or unconfirmed provenance
+}
+```
+Lifetime giving (`lifetimePaidCents`) is completely unaffected -- every
+row's `paid_cents` still counts in full regardless of this flag; only
+the YEAR-level claim is withheld. No other file needed a change:
+`capabilities.ts`, `orchestrator.ts`, and `protocol.ts` from the prior
+round already route every `GivingRecordRow` generically through
+`summarizeGivingHistory` and already render `annual_trend_unknown`
+correctly for any row the trend withholds.
+
+No schema change was needed or made -- `source_snapshot` already existed
+and already carried the needed evidence; this fix only reads it more
+carefully.
+
+### 4. Tests (`tests/giving-history.test.mjs`, rewritten; 213/213 pass, `tsc` clean, lint 94/43 unchanged)
+
+Added a new Part D covering the task's required matrix:
+- Pure-function level: a donor with ONE genuinely-dated row and ONE
+  due-date row (mixed provenance) -- lifetime counts both in full, but
+  the trend is unreliable overall (one unconfirmed row poisons it, a
+  confirmed one never overrides it). A historically significant donor
+  whose ONLY record is an untouched full-export due-date pledge --
+  `annual_trend_unknown`, never `lapsed`, which is the exact regression
+  this round fixes.
+- Real-SQL level (`node:sqlite`, real `drizzle/*.sql` migrations): a
+  real full-export `source_snapshot` (`"Due Date"` marker) computes
+  `genuine_transaction_date = 0`; a real compact-export snapshot
+  (`"Date"` marker, no `"Due Date"`) computes `1`; an empty/ambiguous
+  snapshot conservatively computes `0`. Each proven both at the raw-SQL
+  level and end-to-end through `summarizeGivingHistory`.
+- Every scenario from the prior round (installment pledge, reimport
+  bump, double-count guard, cross-user isolation, deterministic
+  shortlist preservation) re-verified unchanged -- the `record()` test
+  helper's default `genuine_transaction_date: 1` keeps those scenarios
+  testing exactly what they always tested (signal classification),
+  independent of the provenance-detection mechanism this round adds.
+
+### 5. Staging verification
+
+Build (`npm run build:staging-independent`) succeeded; confirmed fresh
+via `grep -c genuine_transaction_date dist/server/index.js` (3 matches).
+Deployed to Staging (`fundraising-os-staging`), read-only, Worker
+version `71ac32b1-6bdd-494b-a69e-343b008432eb`.
+
+**Independent backend verification against real live Staging data**:
+extracted `GIVING_RECORDS_SQL`/`VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL`
+directly from the shipped module, ran both against the real Staging D1
+database (`wrangler d1 execute --remote`, read-only), then imported
+`lib/assistant/giving-history.ts` directly in Node and ran
+`summarizeGivingHistory` against the real rows (5,455 real giving
+records across the full live portfolio, after adding two new synthetic
+fixtures below).
+
+**The single most significant live finding of this round**: of the 254
+REAL (non-synthetic) donors with qualifying giving history on Staging,
+**zero** have a confirmed genuine transaction date on any untouched row
+-- every real row's `source_snapshot` sampled is a full JL export
+(`"Due Date"` present, e.g. `{"Code":"43436","Name":"Miller
+Yale",...,"Due Date":"7/19/1973",...}`). 51 real rows have a real
+payment-assignment audit trail, but only 5 are fully reconciled (zero
+residual, the pre-existing, separately-disclosed reconciliation gap);
+across the whole real portfolio, every one of those 5 donors still has
+at least one OTHER row whose provenance is unconfirmed, so the donor-
+level flag (poisoned by any single unreliable row, by design) ends up
+`false` for all 254 real donors. **This means nearly this organization's
+entire real historical-giving dataset was, until this fix, having its
+annual-trend claims (lapsed/declined/consistent) built on an unverified
+pledge due date, not a verified payment date** -- exactly the defect
+the task described, now confirmed to be the dominant case in the real
+data, not a rare edge case. Lifetime totals and `high_value` ranking are
+completely unaffected; the top-10 shortlist by real lifetime total is
+unchanged in order, now honestly labeled `annual_trend_unknown` instead
+of a claim this data never actually supported.
+
+**Created two new synthetic Staging donors** (owned by the real Staging
+user, same `SYNTHETIC TEST -- ... (safe, do not use for real data)`
+convention as prior rounds' fixtures, inserted via `wrangler d1 execute
+--remote`, which bypasses the HTTP write-guard entirely since it is not
+an app API call):
+- **Due-Date-Only Major Donor** (`7508be42-5c1c-44b0-ae8e-c95f44b21eed`):
+  one $85,000 row, `activity_date` = March 2017, a real full-export
+  `source_snapshot` containing `"Due Date":"3/10/2017"`, no audit trail,
+  no reimport bump. Confirmed live: `genuine_transaction_date: 0`,
+  `annualTrendReliable: false`, signals `["high_value",
+  "annual_trend_unknown"]`, `lastGivingYear: null` -- never `2017`, and
+  critically never `lapsed`, which is the exact false claim the OLD
+  logic would have produced for this donor (untouched, 9 years ago,
+  past `LAPSED_YEARS_THRESHOLD`).
+- **Compact Export Genuine Date Donor**
+  (`eba4dbeb-fd9e-498f-9a51-3985e08301af`): three $5,000 rows (2022,
+  2023, 2024), each with a real compact-export `source_snapshot`
+  containing `"Date":"5/1/202x"` and no `"Due Date"` key. Confirmed
+  live: `genuine_transaction_date: 1` for all three rows,
+  `annualTrendReliable: true`, `firstGivingYear: 2022`,
+  `lastGivingYear: 2024`, signals include `lapsed` (gap of 2 years from
+  2024 to the current year `2026`, meeting `LAPSED_YEARS_THRESHOLD`) --
+  a GENUINELY evidenced lapsed claim this time, proving the fix does not
+  over-correct into refusing every trend claim, only unverified ones.
+
+The prior round's two fixtures (Installment Pledge Donor, Unverifiable
+Reimport Donor) were re-verified unaffected (still `annualTrendReliable:
+true`/`false` exactly as before -- both are judged by their audit/
+reimport-bump evidence, never reaching the new provenance check at all).
+The earlier round's plain fixtures (Lapsed/Declined/Consistent synthetic
+donors, which only ever had placeholder `source_snapshot = '{}'`) now
+correctly fall to `annual_trend_unknown` under the same conservative
+rule as any other ambiguous-provenance row -- not a regression, but the
+intended effect of enforcing the task's "ambiguous provenance ->
+conservative" instruction against data that genuinely carries no format
+evidence.
+
+**Live AI conversation**, the task's own required retest, run through
+the real pipeline (write window opened via `STAGING_WRITES_ENABLED=true`,
+rebuilt, redeployed -- Worker version
+`862ceaf6-4982-43a9-9b4f-fecbc9405902` -- for this one time-boxed
+window):
+
+1. "Which donors should I prioritize today, and why?" -> "There are no
+   donors prioritized for today." (unchanged from prior rounds, confirms
+   this fix did not disturb the other priority capabilities).
+2. "No, donors based on giving history." -> correctly recognized as a
+   correction, switched to `historical_giving_priorities`. The model's
+   own prose explicitly said: *"They have all given significantly over
+   the years, but the exact annual pattern is not reliably known. There
+   are no donors marked as declined or lapsed in this list."* The
+   deterministic shortlist showed the SAME top-8 real/synthetic donors
+   this round's offline backend replay predicted, each labeled
+   "Historically significant donor; annual payment trend cannot be
+   reliably determined from available records" -- **`SYNTHETIC TEST --
+   Lapsed Major Donor` is no longer called lapsed anywhere in the
+   answer**, the exact regression this round fixes, confirmed live, not
+   just in a unit test.
+3. "No, which donors in general should I focus on based on their past
+   giving levels?" -> correctly STAYED on `historical_giving_priorities`
+   (did not revert to the recency-driven queue). The identical 8-donor
+   shortlist shown again, same honest labeling, meaningful next-step
+   suggestions grounded in real open-pledge data (largest commitment,
+   smallest balance).
+
+Write window closed immediately after (`STAGING_WRITES_ENABLED` line
+re-commented, redeployed -- Worker version
+`a32be8c3-293f-48f1-9155-d647f15c4284`). Confirmed `git diff --stat
+wrangler.staging.jsonc` empty (config identical to the committed state)
+and the live guard re-enabled via an authenticated in-page `fetch('/api/assistant',
+{method:'POST', cache:'no-store'})`, which returned `403` with the
+exact "Staging is read-only..." body.
+
+### 6. How incomplete historical giving is represented (unchanged design, now applied more broadly)
+
+Every donor still appears in the shortlist by their full, real lifetime
+total; `annual_trend_unknown` (not `insufficient_history`) is used
+whenever the donor is already `high_value` or has >= 2 qualifying
+records, exactly distinguishing "we have real evidence of significant
+giving, just not a verified timeline" from "we barely have evidence at
+all." No year, trend, or recency claim is ever fabricated. This round
+changes WHEN that honest label applies (now also for an untouched
+full-export row), never the label itself or the lifetime-giving
+guarantee.
+
+### 7. Remaining limitations (unchanged from, and consistent with, the prior two rounds)
+
+- A giving record with an unreliable annual trend still contributes
+  fully to lifetime giving/ranking by design, but the fundraiser never
+  learns exactly when that unreliable portion arrived -- the same
+  irreducible gap already disclosed by `fundraising-progress.ts` and the
+  prior round of this feature, which would require a new payment-event
+  ledger the task explicitly said not to build.
+- Given this round's live finding, the practical effect for THIS real
+  workspace is that almost no donor will show a verified annual trend
+  (lapsed/declined/consistent) until either more payment-review
+  decisions are recorded against open pledges, or future imports arrive
+  via the compact (payment-only) export format. This is the correct,
+  honest state of the evidence, not a defect -- but it does mean the
+  fundraiser will see `annual_trend_unknown` far more often than before
+  this fix, which is worth knowing going into independent review.
+- The small Workers AI compose model's own free-text narrative can still
+  phrase things loosely (e.g. referring to "the exact annual pattern" in
+  aggregate rather than per-donor); the deterministic shortlist/pill
+  safeguard (previous round) continues to guarantee the verified,
+  per-donor labels and ranking survive regardless of the model's prose.
+
+### 8. Exact Git commit and Staging Worker version
+
+- Code + tests: see the commit immediately following this entry in
+  `git log` (this docs entry is committed separately, same convention
+  as every prior round).
+- Staging Worker version (final, write-guard closed, the version live
+  at the time this entry was written): `a32be8c3-293f-48f1-9155-d647f15c4284`.
+
+### Production readiness recommendation
+
+Do not deploy to Production yet. Per this round's own explicit
+instruction: **stopping here for independent review.** The fix is
+correct, fully tested (213/213, `tsc` clean, lint baseline unchanged),
+and verified live on Staging against both synthetic fixtures and the
+real production-identical dataset -- including a live finding that this
+fix materially changes the honesty of almost every real donor's annual-
+trend label on this organization's actual data (section 5 above). That
+real-data impact, more than the code change itself, is exactly what an
+independent reviewer should weigh before authorizing a Production
+deployment: Production's donors will see far more `annual_trend_unknown`
+labels and far fewer (newly honest, but fewer) lapsed/declined claims
+than the currently-live `historical_giving_priorities` capability shows
+today -- itself still unreleased to Production as a whole (see
+"Fix AI Donor Prioritization and Giving-History Intelligence" and
+"Final Historical Giving Accuracy and AI Ranking Fix," both explicitly
+held back from Production pending this exact review chain).
