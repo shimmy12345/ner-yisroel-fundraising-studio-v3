@@ -80,6 +80,21 @@ function nextWeekday(iso: string, targetDow: number): string {
   return addDays(iso, delta);
 }
 
+// The nearest occurrence of targetDow ON OR AFTER the meeting date,
+// INCLUSIVE of the meeting date itself -- "this Monday" (or a bare/"on"
+// weekday, see tryResolvedRelative below) said on a Monday means today.
+// Deliberately the inclusive counterpart to nextWeekday above: "this
+// Monday"/"on Monday" and "next Monday" are documented to mean two
+// different things in this resolver precisely so a fundraiser dictating
+// either phrase gets the date they actually meant, not an off-by-one-week
+// guess.
+function nearestWeekday(iso: string, targetDow: number): string {
+  const date = parseDateOnly(iso);
+  const currentDow = date.getUTCDay();
+  const delta = (targetDow - currentDow + 7) % 7;
+  return addDays(iso, delta);
+}
+
 function matchNumberWord(text: string): number | null {
   if (/^\d+$/.test(text)) return parseInt(text, 10);
   return NUMBER_WORDS[text] ?? null;
@@ -141,15 +156,52 @@ function buildDateRollingYearForward(year: number, month: number, day: number, m
 }
 
 // A relative phrase that maps unambiguously to one exact date -- "today",
-// "tomorrow", "next <weekday>", "in N day(s)/week(s)". Deliberately does
-// NOT resolve a bare "next week"/"this week" (which day of that week is
-// not stated) -- that falls through to tryUnresolved below.
+// "tomorrow", "this/next/on/bare <weekday>", "in N day(s)/week(s)".
+// Deliberately does NOT resolve a bare "next week"/"this week" (no
+// weekday is named, so which day of that week is meant is genuinely
+// ambiguous) -- that falls through to tryUnresolved below, which
+// surfaces it clearly in the review UI (aiPhrase + reason) rather than
+// guessing a day.
+//
+// Documented weekday semantics (confirmed live against real Workers AI
+// phrasing -- see docs/AI-HANDOFF.md, "Fix Production AI Meeting Notes
+// Follow-Up Scheduling"):
+//   - "next <weekday>"        -- the next occurrence STRICTLY AFTER the
+//                                 meeting date. Said ON that weekday, it
+//                                 means next week's, never today.
+//   - "this <weekday>"        -- the next occurrence ON OR AFTER the
+//                                 meeting date, INCLUSIVE of today. Said
+//                                 ON that weekday, it means today.
+//   - "on <weekday>" / bare
+//     "<weekday>" (no "this"/
+//     "next" qualifier)       -- same inclusive semantics as "this
+//                                 <weekday>". Casual dictation and the AI
+//                                 organizer's own paraphrasing both drop
+//                                 "this"/"on" (confirmed live: "follow up
+//                                 on Monday" came back as
+//                                 suggestedDueDate: "Monday").
+// "next <weekday>" is checked first, before the inclusive patterns, so
+// it is never shadowed by the bare-weekday fallback.
 function tryResolvedRelative(lower: string, meetingDateISO: string): string | null {
   if (/\btoday\b/.test(lower)) return meetingDateISO;
   if (/\btomorrow\b/.test(lower)) return addDays(meetingDateISO, 1);
 
   const nextWeekdayMatch = lower.match(new RegExp(`\\bnext\\s+(${WEEKDAYS.join("|")})\\b`));
   if (nextWeekdayMatch) return nextWeekday(meetingDateISO, WEEKDAYS.indexOf(nextWeekdayMatch[1]));
+
+  const thisWeekdayMatch = lower.match(new RegExp(`\\bthis\\s+(${WEEKDAYS.join("|")})\\b`));
+  if (thisWeekdayMatch) return nearestWeekday(meetingDateISO, WEEKDAYS.indexOf(thisWeekdayMatch[1]));
+
+  // Bare or "on"-prefixed weekday -- e.g. "on Monday" or just "Monday",
+  // with no "this"/"next" qualifier stated at all. Checked last among the
+  // weekday patterns since it is the most generic (it would otherwise
+  // also match inside "next Monday"/"this Monday" text, but those are
+  // always matched and returned first above). Excludes "last <weekday>"
+  // (a negative lookbehind) -- a past-tense reference to when something
+  // already happened is never a future due date, and must never be
+  // silently read as one.
+  const bareWeekdayMatch = lower.match(new RegExp(`\\b(?<!last\\s)(?:on\\s+)?(${WEEKDAYS.join("|")})\\b`));
+  if (bareWeekdayMatch) return nearestWeekday(meetingDateISO, WEEKDAYS.indexOf(bareWeekdayMatch[1]));
 
   // "in" is optional -- the AI organizer paraphrases rather than quoting
   // verbatim (confirmed live: a transcript saying "check back in two
