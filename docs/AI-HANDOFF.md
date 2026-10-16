@@ -50231,3 +50231,410 @@ recency-driven stewardship list. The success criterion is met.
 **No Production file was read or written this round. No Production
 deployment, configuration change, or data change occurred. Stopping
 here for independent review, per this round's own instruction.**
+
+## Final Historical Giving Accuracy and AI Ranking Fix (2026-10-16) -- FIXED, TESTED, VERIFIED LIVE ON STAGING, PRODUCTION NOT TOUCHED
+
+Independent review of the new `historical_giving_priorities` capability
+(prior round, same day: "Fix AI Donor Prioritization and Giving-History
+Intelligence") before Production deployment, found two real defects and
+required one presentation-reliability safeguard. This round fixed all
+three, preserving the capability's own portfolio-wide analysis, owner
+scoping, ranking, and conversational correction handling exactly as
+reviewed. Production was not touched; the task explicitly required
+stopping for a further independent review before any deployment.
+
+### 1. Root cause: `activity_date` is a due date, not a payment date
+
+Traced every date source the prior round's `GIVING_BY_DONOR_YEAR_SQL`
+read, directly against the code that writes it:
+
+- `lib/import/jl-donations.ts`'s `classifyJlDonation`: for the FULL JL
+  export (columns `Code, Name, Total Due, Item Num, Desc, Campaign,
+  Due Date, Amount, Paid, Balance Due, Company`), `activityDate = row["Due
+  Date"]` -- literally the JL "Due Date" column, never a payment date.
+  For the COMPACT export (`Code, First Name, Last Name, Date, Campaign,
+  Amount`), `activityDate = row.Date`, which IS a real transaction date
+  (this format has no concept of a due date at all -- every row is a
+  payment).
+- `app/api/import/route.ts`'s `pledgeUpdateStatements` (the write path
+  for a payment applied to a pre-existing pledge via the payment-review
+  screen) updates `paid_cents, balance_cents, category, source_snapshot,
+  updated_at` -- **never** `activity_date`. A pledge's own `activity_date`
+  is therefore frozen at whatever its Due Date was when first imported,
+  for the rest of its life, no matter how many real payments are later
+  applied to it.
+- The SAME route's `proposedUpdates` path (a plain re-import of the full
+  export detecting the SAME pledge's Paid/Balance Due changed) writes the
+  identical set of columns through a different code path (`ON CONFLICT
+  DO UPDATE`) -- also never touching `activity_date`, and in this case
+  with **no payment-review decision and no audit row at all**, so there
+  is no date evidence of any kind for the increment.
+- `jl_payment_assignment_audits` (`lib/import/jl-payment-assignment.ts`,
+  `app/api/import/route.ts`'s `assignmentAuditStatements`): the ONE place
+  a real, individually-dated payment event is recorded --
+  `payment_date` comes from the compact export's own `Date` column (a
+  genuine transaction date), `applied_cents` is that specific payment's
+  own amount against a specific `pledge_activity_id` (a real foreign key
+  to `giving_activities.id`, never a content hash). This table already
+  has an established, independently-reviewed, correct-date discipline --
+  reused directly rather than re-invented (see
+  `lib/assistant/fundraising-progress.ts`'s own four-round history of
+  getting this exact distinction right, "THE THREE HONEST CATEGORIES").
+- `giving_activity_import_changes`: the change-log table a plain reimport
+  writes (`previous_json` holding the row's PRIOR `paid_cents` at the
+  moment of that reimport) -- has no `payment_date` of any kind, only
+  `created_at` (an import-processing timestamp, explicitly never usable
+  as a stand-in for a receipt date, per the same established discipline).
+- Legacy `gifts.received_at`: unconditionally trusted everywhere else in
+  the app already (e.g. `lib/relationships/meeting-brief.ts`), never
+  touched by any JL import/payment-assignment machinery -- left as-is,
+  always reliable.
+
+**Consequence confirmed exactly as the task described**: a pledge due in
+2020 but paid off via real installments through 2025 had its entire
+cumulative `paid_cents` previously attributed to 2020 by the prior
+round's own SQL -- capable of fabricating a false "lapsed since 2020"
+claim about a donor who in reality kept paying for years. A second,
+related gap: a plain reimport can bump an existing pledge's `paid_cents`
+with **no payment-review decision and no date evidence of any kind**.
+
+### 2. The fix
+
+Rewrote `lib/assistant/giving-history.ts` (full header comment there
+documents this in detail). Replaced the single pre-grouped-by-year SQL
+query with:
+
+- **`GIVING_RECORDS_SQL`** -- now row-level (not pre-grouped), unioning
+  `giving_activities` (same owner/category/paid-amount filters as
+  before) with legacy `gifts`, and adding three correlated-subquery
+  columns per `giving_activities` row: `audit_row_count` and
+  `audited_applied_cents` (how many `jl_payment_assignment_audits` rows
+  with `decision_type='apply_to_pledge'` point at this exact pledge via
+  its real `id`, and their summed `applied_cents`), and
+  `unaudited_update_count` (whether `giving_activity_import_changes` has
+  an `'update'` row for this exact `source_fingerprint`, owner-scoped via
+  a join through `data_imports` -- `giving_activity_import_changes` has
+  no `owner_user_id` column of its own and `source_fingerprint` is a
+  pure content hash, so this join is load-bearing, not incidental, the
+  exact same isolation `fundraising-progress.ts`'s own "Final Financial
+  Reporting Integrity and Data Isolation Review" already established and
+  proved with cross-user tests).
+- **`VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL`** -- the real, dated payment
+  ledger: every `apply_to_pledge` audit row with a non-null
+  `payment_date`, direct from `jl_payment_assignment_audits.donor_id`
+  (no join needed -- that table's own `user_id` already is the owner).
+- **`aggregateDonors`** (pure, in `giving-history.ts`): for each giving
+  record, decides per row, never per donor as a blanket assumption:
+  - No audit rows, never reimport-bumped -> reliable, bucketed by its
+    own `activity_date` year exactly as before (the common case,
+    unaffected).
+  - Has audit rows that FULLY explain `paid_cents` (zero residual) ->
+    excluded from its own due-date year entirely; the dated audit
+    events (bucketed separately, by their OWN `payment_date`) are what
+    actually populate the annual trend -- the exact fix for the
+    installment-pledge bug.
+  - Has audit rows with an unexplained residual, OR was bumped by a
+    plain reimport with no audit trail at all -> the donor's entire
+    annual trend is marked `annualTrendReliable: false`; every
+    year-level field (`distinctGivingYears`, `firstGivingYear`,
+    `lastGivingYear`, `mostRecentPaidDateEpoch`, `peakYear`,
+    `peakYearCents`, `lastGivingYearCents`, `yearsSinceLastGift`) is
+    `null`, never a guessed/partial value.
+  - `lifetimePaidCents` and `giftCount` are computed from ALL records
+    unconditionally, in a completely separate pass -- never affected by
+    annual-trend reliability. A donor's ranking and `high_value` status
+    (still relative to the portfolio, never a fixed dollar figure) are
+    therefore unaffected by whether their year-by-year shape is
+    verifiable.
+- **New signal `annual_trend_unknown`** (`capabilities.ts`'s
+  `GIVING_SIGNAL_LABELS`, using language close to the task's own
+  suggested wording): "Historically significant donor; annual payment
+  trend cannot be reliably determined from available records." Only
+  emitted for a donor who is either already `high_value` (so a single
+  large, unreliably-dated pledge is never dismissed as
+  `insufficient_history`) or has at least `MIN_GIFTS_FOR_TREND` records;
+  below both bars, `insufficient_history` still applies -- genuinely too
+  little evidence to call them significant at all, reliable or not.
+  `consistent`/`declined`/`lapsed` are now strictly gated on
+  `annualTrendReliable: true`; `priorityScoreFor` never applies the
+  lapsed/declined score boost to an unreliable donor (no verified basis
+  for either claim) -- they rank on their plain lifetime total.
+- Donor-privacy/correctness invariant, preserved and reconfirmed by test:
+  a payment represented in BOTH a `giving_activities` row and its own
+  `jl_payment_assignment_audits` row is counted exactly once in lifetime
+  giving (the row's own `paid_cents`, never summed a second time from the
+  audit trail) -- the audit trail is used ONLY to re-date money already
+  counted, never to add a second dollar.
+
+`OPEN_COMMITMENTS_BY_DONOR_SQL` (open/partially-paid pledge exposure,
+committed vs. balance) is unchanged -- it was never part of the date-
+accuracy defect and the task's own instructions said not to weaken it.
+
+### 3. Deterministic shortlist-preservation safeguard
+
+The task's own report: a prior live Staging test found the ranking
+engine correctly selected the top-ranked donor, but the Workers AI
+compose model's own narrative (and therefore its `referencedDonorIds`
+JSON field) omitted that donor from one response -- a presentation
+reliability gap, not a ranking defect, but one the fundraiser should
+never be exposed to.
+
+Fix, deliberately the smallest change compatible with the existing
+architecture (reusing the SAME proven, already-tested mechanism
+`appendFinancialLimitations` already uses to guarantee a mandatory
+financial disclosure survives the model's own output):
+
+- **`capabilities.ts`'s `formatHistoricalGivingShortlist`**: a new,
+  pure, exported function that renders `historical_giving_priorities`'s
+  own already-ranked `items` -- name, lifetime amount, and every signal
+  -- as a plain, numbered, deterministic text block. Every value in it
+  comes directly from server-verified data; nothing is re-derived or
+  re-worded by the AI.
+- **`orchestrator.ts`**: `historicalGivingItemsFrom(data)` reads this
+  capability's own output back out of the already-retrieved
+  `VERIFIED_CRM_DATA` (never re-fetched, never AI-supplied). The
+  formatted shortlist is appended to the final answer through the SAME
+  `appendFinancialLimitations` budget-reservation mechanism the
+  financial disclosure already uses (now called with
+  `[...verifiedShortlist, ...financialLimitations]`) -- so it is
+  guaranteed to survive in full, never truncated away by a long model
+  answer, exactly like the existing mandatory disclosure.
+- **The forced donor-pill inclusion**: `referencedIds` is now `new
+  Set([...answer.referencedDonorIds, ...historicalGivingItems.map((item)
+  => item.donorId)])` -- every donor this capability ranked is forced
+  into the allow-set regardless of what the compose model echoed back.
+  The actual security property `tests/assistant-donor-privacy.test.mjs`
+  exists to prove -- the final `referencedDonors` sent to the client can
+  never exceed `donorRefs`, the server's own already-authorized,
+  owner-scoped set -- is completely unchanged: every id forced in this
+  way was already a member of `donorRefs` too (populated via
+  `runCapabilities`' own `addRefs(r.donorRefs)` for this exact
+  capability), so this widens which ALREADY-AUTHORIZED donors get
+  through the existing `donorRefs.filter(...)` gate, never what can get
+  through it. That test's own structural assertions were updated to
+  match the new line and explicitly reconfirm this security property.
+- The compose prompt (`protocol.ts`) was updated to tell the model the
+  complete list will be shown separately, verbatim, so it should give a
+  brief synthesis and a concrete next step rather than re-listing every
+  donor and amount itself (reduces redundant prose under the model's own
+  900-token budget), and to never fabricate a year/trend for a donor
+  whose `annualTrendReliable` is `false`.
+
+### 4. Tests
+
+`tests/giving-history.test.mjs`, rewritten:
+
+- **Part A** (pure `summarizeGivingHistory`, no database): the original
+  8-donor regression scenario (small-recent-gifts-must-never-outrank-
+  real-history) kept intact and unperturbed. A SEPARATE, isolated
+  "Part A2" scenario covers every one of the task's own new accuracy
+  cases without their deliberately large dollar amounts contaminating
+  Part A's own tuned `HIGH_VALUE_TOP_FRACTION` math:
+  - A $75,000 pledge due 2020, paid via four real dated installments
+    2021-2025 (zero residual) -- asserted `annualTrendReliable: true`,
+    `lastGivingYear: 2025` (never 2020), `firstGivingYear: 2021` (2020
+    never appears as a giving year at all), never flagged `lapsed`.
+  - A $90,000 pledge bumped via a plain reimport with no payment-review
+    decision -- asserted `annualTrendReliable: false`, every year field
+    `null`, signals `["annual_trend_unknown", "high_value"]`, and the
+    plain-lifetime (unboosted) priority score.
+  - A payment represented in both a `giving_activities` row and its own
+    fully-matching audit row -- asserted lifetime counts it exactly once
+    (not double), dated to the audit's own year.
+  - A historically major donor with a GENUINE residual (audit trail only
+    explains part of `paid_cents`) -- asserted `annualTrendReliable:
+    false`, never a guessed partial trend.
+  - A plainly-dated, ordinary multi-year donor, for contrast -- asserted
+    unaffected, fully reliable.
+- **Part B** (real SQL against synthetic multi-year, multi-user SQLite,
+  same `node:sqlite` + real `drizzle/*.sql` harness as every other
+  `lib/assistant/*.ts` pure module): confirms `GIVING_RECORDS_SQL`'s
+  three new columns are computed correctly against real
+  `jl_payment_assignment_audits` and `giving_activity_import_changes`
+  rows (reusing the exact `insertAudit`/`reimportBumpsPaid` helper
+  patterns already proven in `tests/fundraising-progress.test.mjs`),
+  that `VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL` returns correctly owner-
+  scoped, individually-dated events, and an end-to-end run of the real
+  SQL output through the real pure function.
+- **Part C**: structural proof the deterministic shortlist-preservation
+  safeguard is actually wired into `orchestrator.ts` (not just present
+  in `capabilities.ts`), plus a direct simulation of the exact Staging
+  failure (an empty `referencedDonorIds` from the model) proving every
+  ranked donor still ends up in the final referenced set.
+
+`tests/assistant-donor-privacy.test.mjs`'s structural check for the
+`referencedIds` construction was updated to match the new line and
+extended with an explicit assertion that the forced ids are read back
+from already-retrieved `VERIFIED_CRM_DATA`, never independently
+fetched -- the security property itself (`referencedDonors` can never
+exceed `donorRefs`) is reconfirmed unchanged.
+
+`tests/relationship-snapshot-stage3.test.mjs`'s `env.DB.prepare(` ceiling
+for `capabilities.ts` bumped from 10 to 11 (the new
+`VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL` query), with a dated comment
+explaining the increment, matching the established convention from every
+prior round's own ceiling bumps.
+
+**Results**: 213/213 test files pass; `npx tsc --noEmit` clean; `npm run
+lint` exactly 94 errors / 43 warnings, unchanged; `pnpm run
+build:staging-independent` succeeded, confirmed fresh (not stale) by
+grepping `dist/server/index.js` for `annual_trend_unknown`,
+`unaudited_update_count`, and `formatHistoricalGivingShortlist`.
+
+### 5. Staging live verification
+
+Deployed to Staging (`fundraising-os-staging`, Worker version
+`2b03e9c6-54d3-4655-b63b-83232226dcb7`, after one transient Cloudflare
+API 504 on the asset-upload step that a retry resolved cleanly).
+
+**Independent backend verification against real live Staging data**
+(same technique as the prior round, extended): extracted the real
+`GIVING_RECORDS_SQL`/`VERIFIED_PLEDGE_PAYMENT_EVENTS_SQL` text directly
+from the shipped module, ran both against the real Staging D1 database
+(`wrangler d1 execute --remote`, read-only, `changed_db: false`) across
+the full live portfolio (5,451 giving records, 92 verified payment
+events, 263 distinct donors with qualifying history), then imported
+`lib/assistant/giving-history.ts` directly in Node (works because the
+module has no `cloudflare:workers` dependency) and ran
+`summarizeGivingHistory` against the real rows.
+
+**Created two new synthetic Staging donors** (owned by the real Staging
+user `user_sgoldstein@nirc.edu`, same "SYNTHETIC TEST --- ... (safe, do
+not use for real data)" convention as the prior round's fixture, left in
+place afterward as a reusable fixture alongside it), covering the task's
+own two new accuracy scenarios directly, via `wrangler d1 execute
+--remote` (bypasses the HTTP write-guard, used for data creation only):
+
+- **Installment Pledge Donor** (`c276e0a0-c801-476b-8e74-f9a5806cee00`):
+  a $75,000 pledge with `activity_date` = June 2020 (its Due Date), fully
+  reconciled via four real `jl_payment_assignment_audits` rows dated
+  2021/2022/2023/2025. Confirmed live: `audit_row_count: 4`,
+  `audited_applied_cents: 7500000` (exactly equal to `paid_cents` --
+  zero residual). Run through the real `summarizeGivingHistory`:
+  `annualTrendReliable: true`, `firstGivingYear: 2021`, `lastGivingYear:
+  2025`, `yearsSinceLastGift: 1`, signals `["high_value", "consistent"]`
+  -- the 2020 due date never appears as a giving year anywhere in the
+  output.
+- **Unverifiable Reimport Donor** (`84c0d718-15a4-42f8-bd3a-ff21e8649420`):
+  a $90,000 pledge with `activity_date` = June 2019, with a plain
+  `giving_activity_import_changes` `'update'` row (no audit trail at
+  all) recording its growth from a prior $20,000. Confirmed live:
+  `audit_row_count: 0`, `unaudited_update_count: 1`. Run through the real
+  function: `annualTrendReliable: false`, every year-level field `null`,
+  signals `["high_value", "annual_trend_unknown"]`, plain (unboosted)
+  priority score -- exactly the required outcome, verified against real
+  Staging infrastructure, not just the unit-test harness.
+
+**Live AI conversation**, the task's own required retest, run through
+the real pipeline on Staging (write window opened via
+`STAGING_WRITES_ENABLED=true`, rebuilt, redeployed -- Worker version
+`51a4d174-249f-4f22-bb2d-d795ae7872eb` -- for this one time-boxed
+window):
+
+1. "Which donors should I prioritize today, and why?" -> "There are no
+   donors to prioritize today." (honest, grounded in the genuinely-empty
+   relationship queue -- unchanged from the prior round, confirming this
+   round's changes did not disturb the other two priority capabilities).
+2. "No, donors based on giving history." -> correctly recognized as a
+   correction, switched to `historical_giving_priorities`. **The
+   deterministic shortlist was present in full, verbatim, in the
+   rendered answer text**, listing all 8 ranked donors with their real
+   lifetime amounts and signals, headed "Verified ranked shortlist by
+   real giving history (complete, server-computed -- always shown in
+   full regardless of the summary above)." **`SYNTHETIC TEST -- Lapsed
+   Major Donor` appeared at rank #1**, both in the deterministic text
+   block and as a donor-profile pill -- the EXACT donor the prior
+   round's own live test found the compose model's narrative had
+   omitted from this exact question. The model's own free-text summary
+   in this round's reply again did NOT individually name the Lapsed
+   Major Donor (the same small-model narrative-completeness variance
+   already disclosed, unrelated to ranking/retrieval) -- but this time
+   it made no difference to what the fundraiser actually saw, because
+   the deterministic block and the forced pill inclusion both carried it
+   through regardless. This is the safeguard working exactly as
+   designed, caught live, not merely in a unit test.
+3. "No, which donors in general should I focus on based on their past
+   giving levels?" -> correctly STAYED on `historical_giving_priorities`
+   (did not revert to the recency-driven queue). The identical
+   deterministic 8-donor shortlist was shown again, in full, with
+   `SYNTHETIC TEST -- Lapsed Major Donor` again at rank #1 with its pill
+   present.
+
+Neither of the two NEW accuracy-fix synthetic donors (Installment Pledge
+Donor at $75,000, Unverifiable Reimport Donor at $90,000) placed within
+the live portfolio's real top-8 shortlist in this conversation -- the
+real Staging portfolio's top donors (Mr. & Mrs. Shlomo Horowitz and
+similar long-tenured real donors) are each well over $90,000-$227,000
+lifetime, genuinely outranking both. This is correct, expected ranking
+behavior, not a gap in verification -- both donors' correctness was
+already independently proven directly against the real backend function
+and real Staging data above, which is a stricter check than requiring
+them to happen to clear the portfolio's own real top-8 cutoff.
+
+Closed the write window (reverted `wrangler.staging.jsonc`, rebuilt,
+redeployed -- Worker version `0cf991b7-ab8f-4b05-8df2-85b4aca43f2b`),
+confirmed `git diff --stat wrangler.staging.jsonc` empty, and confirmed
+(via an authenticated in-page `fetch`, since the write-guard sits behind
+Cloudflare Access) a live `POST /api/assistant` now returns 403 with the
+standard read-only message.
+
+### What was verified how
+
+- **Verified by automated test, against real SQL/real migrations**:
+  every date-reliability classification rule (reliable / fully-
+  reconciled-by-audit / residual / unaudited-bump), the installment-
+  pledge accuracy fix, the double-count guard, the relative high-value
+  threshold, the original regression scenario (unperturbed), and the
+  deterministic shortlist-preservation construction.
+- **Verified live on Staging, through the real AI pipeline AND
+  independently against the raw backend data**: the exact three-question
+  conversation from the task; the deterministic shortlist and forced-
+  pill safeguard, caught actually correcting a real compose-model
+  omission live, not just in a simulated test; both new accuracy-fix
+  synthetic donors' real classification, read directly off the real
+  Staging database and the real shipped module.
+
+### Remaining limitations (disclosed, not silently hidden)
+
+- A giving record whose annual trend is unreliable still contributes its
+  full amount to lifetime giving and ranking (by design, per the task's
+  own instruction to "retain useful lifetime-giving prioritization even
+  when annual payment history is incomplete") -- but the fundraiser never
+  learns WHEN any of that unreliable portion arrived, only that it did.
+  This is the same category of disclosed, irreducible gap
+  `fundraising-progress.ts` already discloses for the identical
+  underlying data limitation (a payment-event ledger recording every
+  individual payment's own date, not just each pledge's current
+  cumulative balance, would be needed to close it) -- not something this
+  round's architecture can further resolve without that same
+  structural change, which the task explicitly said not to build this
+  round.
+- The small Workers AI compose model's own free-text narrative can still
+  omit a specific donor by name from its prose, as observed live again
+  this round -- no longer a defect, since the deterministic shortlist and
+  forced pill inclusion both guarantee the fundraiser sees every ranked
+  donor regardless, but the prose itself remains uneven. Not fixed
+  further this round, since over-constraining the model's own synthesis
+  risks working against the capability's "concise, useful commentary"
+  design intent, and the actual guarantee the task asked for (the
+  highest-ranked donors reliably reach the fundraiser) is already met
+  through the deterministic layer, independent of the prose.
+
+### Production readiness recommendation
+
+Both defects named in the independent review are fixed and verified --
+by automated test against real SQL, and live against real Staging
+infrastructure and real Staging data, including catching the exact
+presentation-reliability failure the review described happening live a
+second time and confirming the new safeguard corrected it in real time.
+The capability's previously-reviewed portfolio-wide analysis, owner
+scoping, and conversational correction handling are all unperturbed. No
+new migration, payment-event ledger, or schema change was introduced, in
+line with the task's own explicit scope limit. This capability appears
+ready for a future authorized Production deployment round, subject to
+whatever independent review that round's own owner requires -- not
+deployed this round, per this round's own explicit instruction.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. Stopping here
+for independent review, per this round's own instruction.**
