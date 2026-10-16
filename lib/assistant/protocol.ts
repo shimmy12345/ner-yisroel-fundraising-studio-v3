@@ -171,3 +171,23 @@ export function parseComposeResponse(rawText: string): ParsedAnswer | null {
 
   return { answer: parsed.answer.trim().slice(0, MAX_ANSWER_LENGTH), suggestedNextQuestions, referencedDonorIds };
 }
+
+// Enforces a critical financial disclosure in the DETERMINISTIC response
+// layer, not solely through a prompt instruction (independent review,
+// "Final Payment Accuracy and Financial Data Integrity Review",
+// 2026-10-16: the compose prompt already told the model to relay a
+// financial "limitations" entry, but a prompt instruction is a request,
+// not a guarantee -- a future model, a future prompt edit, or a model
+// that simply forgets could silently drop it). Every limitation string
+// the capability layer attached to this turn's data is appended to the
+// model's own answer, unconditionally -- never left to the model to
+// decide whether to mention. Mild redundancy with what the model may
+// have already said is accepted on purpose: a disclosure stated twice is
+// far safer than one that depends on the model remembering to state it
+// at all. Re-applies MAX_ANSWER_LENGTH so the guarantee never allows the
+// final answer to grow unbounded.
+export function appendFinancialLimitations(answer: string, limitations: string[]): string {
+  if (limitations.length === 0) return answer;
+  const combined = [answer, ...limitations].join("\n\n");
+  return combined.slice(0, MAX_ANSWER_LENGTH);
+}

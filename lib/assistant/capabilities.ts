@@ -30,7 +30,7 @@ import { localMonthBoundaries } from "../workspace/local-time.ts";
 import {
   summarizeFundraisingProgress,
   NEW_COMMITMENTS_SQL,
-  NEW_GIVING_ROWS_SQL,
+  VERIFIED_NEW_GIVING_ROWS_SQL,
   PAYMENT_ASSIGNMENT_AUDITS_SQL,
   DONORS_CONTACTED_SQL,
   type NewGivingRow,
@@ -223,26 +223,41 @@ export async function getDonorSummary(ctx: AssistantContext, donorId: string): P
 // already uses for "what counts as a real commitment"
 // (lib/relationships/trip-financial-attribution.ts), so this capability
 // can never disagree with that dashboard about which categories count.
-// "Money received" is reconciled by lib/assistant/fundraising-progress.ts's
-// summarizeFundraisingProgress against jl_payment_assignment_audits -- the
-// one place a payment applied to a pre-existing pledge has an actual
-// recorded date -- with an explicit, always-disclosed limitation for the
-// payments that do not go through that audited path (see that module).
-// event_or_ad (event/ad revenue) is deliberately excluded from both
-// figures here, consistent with the Trip Dashboard's own existing
-// treatment of that category, not a new decision invented for this
-// capability.
+// "Verified money received" is reconciled by lib/assistant/
+// fundraising-progress.ts's summarizeFundraisingProgress against
+// jl_payment_assignment_audits -- the one place a payment applied to a
+// pre-existing pledge has an actual recorded date -- with an explicit,
+// always-disclosed limitation for the payments that do not go through
+// that audited path (see that module). event_or_ad (event/ad revenue)
+// is deliberately excluded from both figures here, consistent with the
+// Trip Dashboard's own existing treatment of that category, not a new
+// decision invented for this capability.
+//
+// SECOND fix (independent review, "Final Payment Accuracy and Financial
+// Data Integrity Review", 2026-10-16): a new giving_activities row's
+// CURRENT paid_cents is only trusted as "verified received this period"
+// when VERIFIED_NEW_GIVING_ROWS_SQL's own updated_at=created_at
+// condition holds -- otherwise a later, undated reimport against an
+// in-period pledge could silently inflate that period's own total every
+// time it is re-queried. recordedCumulativePaidTotal exposes the
+// CURRENT balance on these same new rows separately, explicitly never
+// labeled "received."
 
 export type FundraisingProgress = {
   periodLabel: string;
-  moneyReceivedTotal: string;
+  verifiedMoneyReceivedTotal: string;
   // A count of giving/payment ROWS, never distinct donors -- deliberately
   // named so neither this code nor the AI composing an answer from it can
   // relabel it "N donors" (see fundraising-progress.ts's own header
   // comment on this field for why that distinction is load-bearing).
-  moneyReceivedTransactionCount: number;
+  verifiedMoneyReceivedTransactionCount: number;
   newGiftsReceivedTotal: string;
   paymentsOnExistingPledgesTotal: string;
+  // CURRENT cumulative paid balance on commitments created this period --
+  // may include money added by a later, undated reimport. Never claimed
+  // as "received"; shown for visibility only (see this capability's own
+  // header comment and fundraising-progress.ts's RECONCILIATION_LIMITATION).
+  recordedCumulativePaidTotal: string;
   newCommitmentsTotal: string;
   newCommitmentsCount: number;
   donorsContacted: number;
@@ -250,7 +265,7 @@ export type FundraisingProgress = {
 };
 
 function emptyFundraisingProgress(periodLabel: string): FundraisingProgress {
-  return { periodLabel, moneyReceivedTotal: money(0), moneyReceivedTransactionCount: 0, newGiftsReceivedTotal: money(0), paymentsOnExistingPledgesTotal: money(0), newCommitmentsTotal: money(0), newCommitmentsCount: 0, donorsContacted: 0, limitations: [] };
+  return { periodLabel, verifiedMoneyReceivedTotal: money(0), verifiedMoneyReceivedTransactionCount: 0, newGiftsReceivedTotal: money(0), paymentsOnExistingPledgesTotal: money(0), recordedCumulativePaidTotal: money(0), newCommitmentsTotal: money(0), newCommitmentsCount: 0, donorsContacted: 0, limitations: [] };
 }
 
 export async function getFundraisingProgress(ctx: AssistantContext): Promise<FundraisingProgress> {
@@ -265,27 +280,28 @@ export async function getFundraisingProgress(ctx: AssistantContext): Promise<Fun
 
   if (ctx.mode !== "live") return emptyFundraisingProgress(periodLabel);
 
-  const [commitments, newGivingRows, auditRows, contacts] = await Promise.all([
-    env.DB.prepare(NEW_COMMITMENTS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number; total: number }>(),
-    env.DB.prepare(NEW_GIVING_ROWS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
+  const [commitments, verifiedNewGivingRows, auditRows, contacts] = await Promise.all([
+    env.DB.prepare(NEW_COMMITMENTS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number; total: number; cumulativePaidTotal: number }>(),
+    env.DB.prepare(VERIFIED_NEW_GIVING_ROWS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
     env.DB.prepare(PAYMENT_ASSIGNMENT_AUDITS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<PaymentAssignmentAuditRow>(),
     env.DB.prepare(DONORS_CONTACTED_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number }>(),
   ]);
 
   const summary = summarizeFundraisingProgress({
     periodLabel,
-    newGivingRows: newGivingRows.results,
+    newGivingRows: verifiedNewGivingRows.results,
     paymentAssignmentAuditRows: auditRows.results,
-    newCommitments: { count: commitments?.n ?? 0, committedCents: commitments?.total ?? 0 },
+    newCommitments: { count: commitments?.n ?? 0, committedCents: commitments?.total ?? 0, cumulativePaidCents: commitments?.cumulativePaidTotal ?? 0 },
     donorsContacted: contacts?.n ?? 0,
   });
 
   return {
     periodLabel: summary.periodLabel,
-    moneyReceivedTotal: money(summary.moneyReceivedCents),
-    moneyReceivedTransactionCount: summary.moneyReceivedTransactionCount,
+    verifiedMoneyReceivedTotal: money(summary.verifiedMoneyReceivedCents),
+    verifiedMoneyReceivedTransactionCount: summary.verifiedMoneyReceivedTransactionCount,
     newGiftsReceivedTotal: money(summary.newGiftsReceivedCents),
     paymentsOnExistingPledgesTotal: money(summary.paymentsOnExistingPledgesCents),
+    recordedCumulativePaidTotal: money(summary.recordedCumulativePaidCents),
     newCommitmentsTotal: money(summary.newCommitmentsCents),
     newCommitmentsCount: summary.newCommitmentsCount,
     donorsContacted: summary.donorsContacted,
@@ -322,6 +338,6 @@ export const CAPABILITY_DESCRIPTIONS: Record<string, string> = {
   outstanding_pledges: "Every donor with a real, currently open or partially-paid pledge balance.",
   payment_plans_attention: "Donors whose payment plan is behind and genuinely needs attention right now (a plan with a valid upcoming payment is never included here).",
   donor_summary: "A full relationship summary for one specific named donor: giving history, recent contact, open asks, family dates, and the current suggested action. Also use this to prepare for a meeting with a donor, to summarize recent history with a donor, or to gather what's needed to draft a follow-up message.",
-  fundraising_progress: "Real, reconciled totals for this month: money actually received (split into new gifts vs. payments on existing pledges, counted once), new pledge/gift commitments created this month regardless of payment status, and donors contacted. Use this for 'how much did we raise', 'what's new this month', or 'how much came from existing pledges'. There is no fundraising goal/target tracked in this system. May include a disclosed limitation about payments that lack a recorded date -- always relay it if present.",
+  fundraising_progress: "Reconciled totals for this month: VERIFIED money received (dated payments only, split into new gifts vs. payments on existing pledges, counted once), a separate recorded-cumulative-paid figure that may be incomplete-by-date and must never be called 'received', new pledge/gift commitments created this month regardless of payment status, and donors contacted. Use this for 'how much did we raise', 'what's new this month', or 'how much came from existing pledges'. There is no fundraising goal/target tracked in this system. Always relay the disclosed limitation about payments that cannot be dated -- never imply the verified total is complete.",
   search_donors: "Find donors by name when the fundraiser names someone and which specific donor they mean is not yet clear.",
 };

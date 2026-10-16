@@ -55,6 +55,7 @@ import {
   formatHistoryForPrompt,
   parsePlanResponse,
   parseComposeResponse,
+  appendFinancialLimitations,
   PLAN_JSON_SCHEMA,
   ANSWER_JSON_SCHEMA,
   type ParsedPlan,
@@ -81,6 +82,18 @@ async function planTurn(ai: AiBinding, model: string | undefined, question: stri
   });
   if (!result.ok) return null;
   return parsePlanResponse(result.text);
+}
+
+// Reads fundraising_progress's own disclosed `limitations` back out of
+// the retrieved data, defensively (this is the one capability whose
+// result is always treated as carrying a critical financial disclosure
+// -- see appendFinancialLimitations's own caller). Never throws on an
+// unexpected shape; simply finds nothing to enforce.
+function financialLimitationsFrom(data: Record<string, unknown>): string[] {
+  const progress = data.fundraising_progress;
+  if (!progress || typeof progress !== "object") return [];
+  const limitations = (progress as { limitations?: unknown }).limitations;
+  return Array.isArray(limitations) ? limitations.filter((l): l is string => typeof l === "string") : [];
 }
 
 // Executes exactly the capabilities the plan step named -- a fixed
@@ -246,9 +259,18 @@ export async function runAssistantTurn(params: {
   const referencedIds = new Set(answer.referencedDonorIds);
   const referencedDonors = donorRefs.filter((ref) => referencedIds.has(ref.donorId));
 
+  // A critical financial disclosure (e.g. fundraising_progress's
+  // "payments without a recorded date are not included") is enforced
+  // here, deterministically, regardless of whether the model's own
+  // answer already mentioned it -- never left to the prompt alone
+  // (independent review, "Final Payment Accuracy and Financial Data
+  // Integrity Review", 2026-10-16).
+  const financialLimitations = financialLimitationsFrom(data);
+  const finalAnswer = appendFinancialLimitations(answer.answer, financialLimitations);
+
   return {
     available: true,
-    answer: answer.answer,
+    answer: finalAnswer,
     suggestedNextQuestions: answer.suggestedNextQuestions,
     referencedDonors,
     donorRefs,

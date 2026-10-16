@@ -192,8 +192,28 @@ assert.match(fundraisingProgressSrc, /auditedFingerprints\.has\(row\.sourceFinge
 
 assert.doesNotMatch(fundraisingProgressSrc, /\bmoneyReceivedCount\b/, "the ambiguous field name must not reappear in the pure module");
 assert.doesNotMatch(capabilitiesSrc, /\bmoneyReceivedCount\b/, "the ambiguous field name must not reappear in capabilities.ts");
-assert.match(fundraisingProgressSrc, /moneyReceivedTransactionCount/, "the field must be named unambiguously as a transaction count, never a donor count");
+assert.match(fundraisingProgressSrc, /verifiedMoneyReceivedTransactionCount/, "the field must be named unambiguously as a VERIFIED transaction count, never a donor count");
 const protocolSrc = await readFile(new URL("../lib/assistant/protocol.ts", import.meta.url), "utf8");
 assert.match(protocolSrc, /never state a number of donors/i, "the compose prompt must explicitly forbid inventing a donor/household count from a row/transaction count");
+
+// --- Final Payment Accuracy and Financial Data Integrity Review
+// (2026-10-16): a new giving row's CURRENT paid_cents may only be
+// treated as verified money received if it has never been touched
+// since the single import that created it -- otherwise a LATER, undated
+// reimport against an in-period pledge could retroactively inflate a
+// previously-reported month's own total on a later re-query. The old
+// limitation wording ("will be reflected once that pledge is fully
+// paid") was false -- this capability never retroactively attributes an
+// undated payment to any month -- and must not reappear. The disclosure
+// is also enforced in the deterministic response layer
+// (orchestrator.ts's appendFinancialLimitations call), not solely
+// through a prompt instruction. ---
+
+assert.match(fundraisingProgressSrc, /updated_at\s*=\s*created_at/, "a new giving row must only count as verified when it has never been touched since creation");
+assert.match(fundraisingProgressSrc, /VERIFIED_NEW_GIVING_ROWS_SQL/, "the verified-new-giving query must be named to make clear it is the dated, trustworthy subset, not every new row");
+assert.match(fundraisingProgressSrc, /recordedCumulativePaidCents/, "the current cumulative balance must be exposed as its own, separately-labeled figure, never folded into the verified total");
+assert.doesNotMatch(fundraisingProgressSrc, /will be reflected once that pledge is fully paid/i, "the limitation wording must never claim an omitted payment will eventually be reflected -- it never is, retroactively");
+assert.match(orchestratorSrc, /appendFinancialLimitations\(/, "the financial disclosure must be enforced in the deterministic response layer, not left to the prompt alone");
+assert.match(protocolSrc, /export function appendFinancialLimitations/, "the deterministic disclosure helper must exist and be exported for orchestrator.ts and tests to use");
 
 console.log("assistant-capabilities-safety.test.mjs: all assertions passed");
