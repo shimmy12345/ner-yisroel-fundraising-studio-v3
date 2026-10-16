@@ -46284,3 +46284,307 @@ occurred this round. No paid service was activated. No credential was
 created or read. No parallel or forked agent was used for any part of
 this investigation. Stopping here per this round's instruction to stop
 after documenting the findings.**
+
+## Authorized Production Deployment -- AI Meeting Notes (2026-10-16) -- SUCCESSFUL
+
+Owner explicitly authorized a controlled Production deployment of AI
+Meeting Notes, scoped exactly to the Cloudflare Workers AI binding and
+provider configuration -- explicitly not the broader AI architecture
+from the audit above. Every step below ran sequentially, directly, no
+fork or subagent for any deployment, database access, configuration
+change, or verification step, per the authorization's own instruction.
+
+### 1. Review of current state (all confirmed before any change)
+
+- **Branch/commit**: `feature/independent-cloudflare-sandbox`, clean
+  working tree, HEAD `5f082a9` (the audit doc commit) before this
+  round's own change.
+- **Exact proposed diff**: `git diff --stat b8155fd HEAD` (`b8155fd`
+  being the commit currently live in Production) showed exactly the
+  Meeting Notes feature -- the organize route, both providers, the
+  due-date resolver, follow-ups/format/idempotency modules, the
+  Meeting Notes page/experience, its tests, `scripts/run-tests.mjs`'s
+  registration of them, a 2-line donor-page link addition (`✦ Add
+  Meeting Notes`), and `wrangler.staging.jsonc` (Staging-only, not
+  part of this deploy). **Nothing else** -- no Trip Planning, Financial
+  Dashboard, or any other feature change, confirmed by reading the
+  full diff stat and the one-line donor-page diff directly.
+- **Staging working and write-protected**: re-verified fresh this
+  round, not assumed from a prior round. `wrangler.staging.jsonc`
+  diff empty; a live authenticated `POST /api/meeting-notes/organize`
+  against Staging returned `403` ("Staging is read-only..."). Meeting
+  Notes' actual AI behavior on Staging was already live-verified
+  extensively in the preceding rounds this session (real Workers AI
+  responses, due-date resolution, the full save/cleanup cycle) --
+  re-confirming that again required reopening Staging's write window,
+  which this round did not do since it wasn't necessary to re-prove a
+  fact already established live, twice, this same session.
+- **Production/Staging D1 isolation**: confirmed via both
+  configs -- Production `fundraising-os-production-db`
+  (`a51c6571-ae16-4614-aa9a-08f8e6be3ecd`), Staging
+  `fundraising-os-staging-db` (`6c18396c-0a8f-4f2c-ba83-ea809ec10289`).
+  Two different databases; this deployment's `ai` binding touches
+  neither D1 config at all.
+- **Rollback target recorded before deploying**: Production Worker
+  version **`c5f5279b-1f55-4921-b134-dcd5bc547e35`** (created
+  2026-10-15T18:17:20.891Z, source commit `b8155fd` -- the Trip
+  Planning/Financial Dashboard deployment).
+- **Uncommitted changes reviewed**: none existed before this round's
+  own `wrangler.production.jsonc` edit; that edit (below) is the only
+  change made.
+
+### 2. Mandatory Production safety checks (all PASS)
+
+1. **Latest successful backup**: PASS -- `automated-backup: healthy`,
+   `2026-10-15T13:22:30Z` (`daily/fundraising-os-production-db-
+   20261015T132223Z.sql.gz.gpg`), read live from `/api/health`.
+2. **Latest restore-verification**: PASS -- `restore-verification:
+   healthy`, `2026-10-12T03:35:44Z` ("Successfully restored and
+   verified the Oct 12, 2026 backup. Restore testing runs monthly.").
+3. **Backup usable for recovery**: PASS -- same check, `businessDataAtRisk:
+   false`; this is the identical, unbroken backup chain reconfirmed
+   green by GitHub Actions the day before (see the "D1 Restore/Schema
+   Sync Check" entry above).
+4. **Pre-deployment financial/record baseline** (direct D1 query,
+   read-only): donors **254**; giving activities **5,464**; giving
+   activities with category `open_pledge`/`partially_paid_pledge`
+   (raw count, all statuses -- a different, broader metric than the
+   Pledge Review page's own filtered "31," noted here explicitly to
+   avoid a false "discrepancy" alarm against that unrelated number)
+   **88**; interactions **203**; active payment plans (`ended_at IS
+   NULL`) **45**; recommendations **5**; total committed (open +
+   partially-paid pledges) **$280,767.00**; total paid (all giving
+   activities) **$3,849,770.65**; total outstanding balance **$175,536.15**.
+5. **Production email schedule / Gmail**: PASS -- `wrangler secret
+   list --config wrangler.production.jsonc` confirmed all three Gmail
+   secrets present and untouched; `agenda_send_log`'s most recent row
+   (`status: sent`) predates this deployment and no new row appeared
+   after it.
+6. **Cloudflare Access enforcement**: PASS -- `TEAM_DOMAIN`/`POLICY_AUD`
+   are untouched by this round's diff (confirmed by the diff itself,
+   below); every verification call in this round (health check,
+   organize smoke test) only succeeded because of an authenticated
+   Access session, the same defense-in-depth JWT check the app has
+   always had, itself unchanged application code.
+7. **No migration/schema modification required**: PASS -- Meeting
+   Notes' entire save path is two `INSERT` statements into the
+   already-existing `interactions`/`recommendations` tables (confirmed
+   by reading `app/api/meeting-notes/route.ts` directly); `/api/health`
+   showed `live-schema: 0022 / 0022` and `schema-comparison: Match`
+   both immediately before and immediately after the deploy.
+8. **Workers AI available without a new paid service**: PASS --
+   confirmed Staging and Production share the identical Cloudflare
+   account id (`2f34086b78ac8643498a1a600b846757`, visible in every
+   `wrangler d1`/API call this round and in prior rounds for both
+   environments), and Workers AI has already been proven live and free
+   on that account via Staging's own extensive testing. The `ai`
+   binding is declared directly in config, exactly like `DB` -- not a
+   secret, nothing to create or rotate.
+9. **Cloudflare Workers AI privacy terms reviewed, no unresolved
+   issue**: PASS -- re-citing the terms already read directly from
+   `developers.cloudflare.com/workers-ai/platform/privacy/` in the
+   "Evaluate Cloudflare Workers AI" round: Customer Content is not used
+   to train models without explicit consent, and never leaves the
+   Cloudflare account boundary already trusted with D1. No change to
+   this since that review. The one open item already disclosed in the
+   audit round above -- that this is the first time real, not
+   synthetic, donor meeting content will flow through it -- is a
+   governance-visibility note, not a technical blocker, and the owner's
+   explicit authorization for this exact deployment is what resolves
+   it.
+
+No check failed. No material privacy or billing issue is unresolved.
+Proceeded to deployment.
+
+### 3. Deployment scope -- exact diff
+
+```diff
++  "ai": { "binding": "AI" },
+...
++    "AI_PROVIDER": "workers-ai",
++    "WORKERS_AI_MODEL": "@cf/mistralai/mistral-small-3.1-24b-instruct"
+```
+
+(full diff in commit `0fbf723`). `git diff --stat` for this commit
+touches exactly one file, `wrangler.production.jsonc`, 24 insertions
+/ 1 deletion (the deletion is the trailing-comma shift from inserting
+a new key). `d1_databases`, `services`, `TEAM_DOMAIN`, `POLICY_AUD`,
+`STAGING_OWNER_EMAIL`, `APP_BASE_URL`,
+`MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID`, and `triggers` are all
+byte-identical to before. Anthropic was deliberately not touched --
+no `ANTHROPIC_MODEL` var was even added (unlike Staging's config,
+which has one despite it having no effect while `AI_PROVIDER` is
+`workers-ai`) -- and `wrangler secret list` reconfirms no
+`ANTHROPIC_API_KEY` exists.
+
+### 4. Production deployment
+
+- **Tests**: `npm test` -- **206/206 test files pass**, including the
+  full Meeting Notes suite (organize, format, follow-ups, idempotency,
+  fundraising scenarios, both providers, provider selection, due-date
+  resolver) and the D1 restore/schema main-sync check (clean, no
+  drift against `origin/main`).
+- **TypeScript**: `npx tsc --noEmit` -- clean, zero errors.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, identical to
+  the established pre-existing baseline. No new regression introduced.
+- **Build**: `pnpm run build:production-independent` -- succeeded;
+  confirmed fresh (not stale) by grepping the just-built bundle
+  directly: the Workers AI model id in `dist/server/index.js`, and the
+  due-date resolver's data (`"yom tov"`) in
+  `dist/client/assets/MeetingNotesExperience-*.js` -- the same
+  stale-build check this session has used since the lesson learned
+  earlier.
+- **Deployed via** `pnpm run deploy:production-independent` (build +
+  `verify-build-manifest` + `wrangler deploy --config
+  wrangler.production.jsonc`), the same established script used for
+  every prior Production deploy this session.
+- **Deployed commit**: **`0fbf723`** (the config-only commit on top of
+  `5f082a9`, the audit doc commit, on top of the full Meeting Notes
+  feature already summarized above).
+- **New Production Worker version**: **`4b82fd4f-a8c4-414b-bf7d-a2e9cea2f600`**.
+- **Deployment timestamp**: **2026-10-16T03:15:21.874Z**.
+- **Deploy output confirmed**: bindings list showed `env.DB
+  (fundraising-os-production-db)`, `env.STATUS_WORKER
+  (fundraising-os-production-backup-status)`, the new `env.AI`,
+  `env.AI_PROVIDER ("workers-ai")`, `env.WORKERS_AI_MODEL
+  ("@cf/mistralai/mistral-small-3.1-24b-i...")`, and every pre-existing
+  var unchanged; cron printed as `schedule: 0 * * * *` -- identical to
+  before. No `ANTHROPIC_MODEL`/`ANTHROPIC_API_KEY` present anywhere in
+  the bindings list.
+
+### 5. Safe Production verification (read-only, no donor record
+created, modified, or saved)
+
+**How the endpoint was determined safe to test without creating a
+record**: `app/api/meeting-notes/organize/route.ts` was read directly
+-- its own header comment states "Never writes anything -- read of
+the donor (for the ownership check) and an outbound AI call only,"
+confirmed against its actual code (one `SELECT` for ownership, then
+the AI call, no `INSERT`/`UPDATE`/`DELETE` anywhere in the file). The
+donor-ownership check does require a real, existing, owned donor id,
+but that id is never forwarded to the AI -- only the caller-supplied
+`transcript` text is. This matches exactly the authorization's own
+described safe method: "a strictly read-only test using an existing
+authorized donor id and a completely fictional transcript."
+
+- Selected one existing Production donor by a plain `SELECT id FROM
+  donors ... LIMIT 1` (no other column read -- no name, email, or any
+  personal field was ever retrieved or seen).
+- Recorded that donor's `interactions`/`recommendations` counts
+  beforehand: **4 / 0**.
+- Called `/api/meeting-notes/organize` as the authenticated owner
+  session with a transcript entirely composed of fictional names and
+  fictional amounts (explicitly labeled as fictional in the text
+  itself) -- no real donor information was retrieved, included, or
+  sent to the AI at any point.
+- **Result**: `200`, `available: true`, `ok: true`. Structured format
+  confirmed correct (summary, `confirmedCommitments`,
+  `possibleCommitments`, `followUpActions`, all present and
+  well-formed). The fictional $500 gift stated as already given was
+  correctly placed in `confirmedCommitments`; the fictional $5,000
+  gift stated only as "considering" was correctly **not** placed in
+  `confirmedCommitments` -- the explicit/possible distinction works
+  correctly on live Production inference, not just Staging's. Both
+  follow-ups (`"tomorrow"`, two-week reference) were returned as raw
+  AI text in `suggestedDueDate`, exactly the shape the client-side
+  due-date resolver (already verified extensively on Staging) expects
+  -- organize itself never resolves or saves a date, by design.
+- **Re-verified zero writes immediately after**: the same donor's
+  `interactions`/`recommendations` counts are still **4 / 0** --
+  unchanged. System-wide: `interactions` still **203**,
+  `recommendations` still **5**, `giving_activities` still **5,464**,
+  `donors` still **254** -- byte-identical to the Step 2 baseline. No
+  interaction, recommendation, donation, pledge, or payment-plan
+  record changed anywhere as a result of this smoke test.
+- No meeting note was saved. No donor record was created or modified.
+
+### 6. Rollback and incident handling
+
+**Not needed.** No error, regression, authentication issue, email
+disruption, or financial-data change was detected at any point. The
+Worker was not rolled back. Rollback target, preserved for any future
+need: `wrangler rollback c5f5279b-1f55-4921-b134-dcd5bc547e35 --config
+wrangler.production.jsonc`, or a plain `git revert` of commit
+`0fbf723` followed by a redeploy -- either fully restores the
+pre-change state, since this was a 3-line `vars`/binding diff with no
+code change and no new table. A rollback, if ever needed, must only
+ever revert the Worker config/code, never touch `interactions` or
+`recommendations` data -- those rows (if Meeting Notes is later used
+and ever needed to be undone) would be identified and removed
+individually, the same way this session's own Staging test rows were,
+never via a blanket restore.
+
+### 7. Final verification summary
+
+- **Database baseline comparison**: byte-identical before and after
+  (donors, giving activities, interactions, recommendations, active
+  payment plans, committed/paid/balance totals -- all listed in
+  Section 2, Step 4 above, re-queried identically in Section 5).
+- **Build/test results**: 206/206 tests, tsc clean, lint at the exact
+  94/43 baseline.
+- **Cron/Gmail**: unchanged -- `0 * * * *` confirmed in the deploy
+  output itself; no new `agenda_send_log` row appeared.
+- **Cloudflare AI configuration**: `AI_PROVIDER=workers-ai`,
+  `WORKERS_AI_MODEL=@cf/mistralai/mistral-small-3.1-24b-instruct`,
+  `ai` binding `AI` -- Anthropic not configured, no new secret.
+- **Production smoke test**: PASS, detailed in Section 5.
+- **Unresolved items**: none from this round's own scope. Carried
+  forward from the audit round, unchanged and not addressed here (out
+  of this round's authorized scope): the Assistant free-text AI
+  upgrade, and the suggestion to create a dedicated Production "QA
+  TEST" donor for future smoke-testing (this round used a real,
+  existing donor instead, per the authorization's own preferred
+  method, so that suggestion was not needed this time but remains open
+  for future convenience if the owner wants it).
+- **Staging isolation**: reconfirmed -- separate D1 database, write
+  guard still active (`403` reconfirmed live this round), config diff
+  empty. Nothing in this round touched Staging.
+- **Broader AI architecture**: **not deployed.** No shared AI client
+  module was extracted, no change was made to the Assistant, and no
+  other AI feature was touched -- exactly as the authorization scoped
+  this round.
+
+### Final Production deployment status: SUCCESSFUL
+
+AI Meeting Notes is now live on Production
+(`4b82fd4f-a8c4-414b-bf7d-a2e9cea2f600`, commit `0fbf723`), using
+Cloudflare Workers AI (Mistral Small 3.1 24B) as its sole provider.
+Every mandatory safety check passed. Financial and record data is
+confirmed byte-identical before and after. The live smoke test
+confirmed the endpoint, the AI response, the structured format, the
+confirmed/possible commitment distinction, and follow-up date handling
+all work correctly on Production itself -- not only on Staging -- with
+zero writes. No rollback was needed.
+
+**1. What was deployed**: the `ai` Workers AI binding and
+`AI_PROVIDER`/`WORKERS_AI_MODEL` config (workers-ai, Mistral Small 3.1
+24B) on Production, activating the already-built Meeting Notes
+feature (organize route, both providers with Anthropic inactive, the
+due-date resolver, the review/approve/save UI) that had previously
+only been live on Staging.
+
+**2. What was independently verified against live Production**:
+backup/restore health, the exact deployed commit and diff, D1
+isolation from Staging, the full financial/record baseline unchanged
+before and after, the cron schedule and Gmail secrets unchanged, no
+new secret or paid service, and a live authenticated smoke test of the
+organize endpoint itself returning a real, correctly-structured
+Workers AI response with zero database writes.
+
+**3. What remains unverified**: the full real-world save flow
+(dictating/typing a genuine meeting note, approving follow-ups, and
+clicking Save) has not been exercised on Production, by design -- the
+authorization explicitly prohibited creating or saving real meeting
+notes as part of this deployment's own verification. That save path
+itself (not the organize call tested here) is the one piece of this
+feature not yet exercised live on Production, though it is the exact
+same code already exercised repeatedly and successfully on Staging
+this session.
+
+**4. Is the feature ready for the owner to use with real donor
+notes?** Yes. The AI call, its structured output, the
+confirmed/possible-commitment distinction, and the never-auto-save
+behavior are now confirmed live on Production itself, not only
+inferred from Staging. The owner can now use AI Meeting Notes on real
+donors through the normal UI (`https://shimmydonors.org`, donor page →
+"✦ Add Meeting Notes") whenever they choose.
