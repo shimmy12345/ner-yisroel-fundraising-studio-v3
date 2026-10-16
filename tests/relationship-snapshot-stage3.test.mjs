@@ -199,17 +199,16 @@ async function run() {
     assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 27, "Stage 3 must add zero new queries to the donor page beyond what Donor Rebbeim and Manual Pledge Balance Corrections separately added (27 = Stage 2's 24 + Donor Rebbeim's 2 + Balance Corrections' 1)");
     assert.equal((meetingBrief.match(/env\.DB\.prepare\(/g) ?? []).length, 15, "Stage 3 must add zero new queries to meeting-brief.ts -- the resolver reuses the already-fetched relationshipFactRows/openAskRows");
     assert.equal((assistantRoute.match(/env\.DB\.prepare\(/g) ?? []).length, 0, "the Assistant route itself must make no direct D1 query at all -- everything goes through lib/assistant/capabilities.ts");
-    // 7, not 6: the "Final Financial Reporting Integrity and Data
-    // Isolation Review" round (2026-10-16) split the UNRELATED
-    // fundraising_progress capability's payment-audit query into two
-    // (dated payments, plus a separate undated-payment-audit disclosure
-    // query, for the fix that stopped a missing payment_date from being
-    // silently treated as a verified date) -- 5 queries total for that
-    // one capability now (new commitments, recorded-paid-balance rows,
-    // verified-dated audits, undated audits, donors contacted), not a
-    // second Snapshot lookup in donor_summary -- this ceiling's real
-    // intent is otherwise unchanged and still holds.
-    assert.ok((assistantCapabilities.match(/env\.DB\.prepare\(/g) ?? []).length <= 7, "the Assistant's donor-summary capability must still reuse Meeting Brief's already-resolved Snapshot, not add a second lookup for it");
+    // 10, not 7: "Fix AI Donor Prioritization and Giving-History
+    // Intelligence" (2026-10-16) added the UNRELATED
+    // historical_giving_priorities capability, which needs its own 3
+    // portfolio-wide queries (per-donor-year giving history, open
+    // pledge/commitment context, and donor display names) -- 7 + 3 = 10.
+    // None of the 3 touch donor_summary or Meeting Brief in any way; this
+    // ceiling's real intent (donor_summary must still reuse Meeting
+    // Brief's already-resolved Snapshot, never add a second lookup for
+    // it) is otherwise unchanged and still holds.
+    assert.ok((assistantCapabilities.match(/env\.DB\.prepare\(/g) ?? []).length <= 10, "the Assistant's donor-summary capability must still reuse Meeting Brief's already-resolved Snapshot, not add a second lookup for it");
     // 21, not 19: live-data.ts's count has since grown by two queries for
     // reasons entirely unrelated to Stage 3 (same pattern as the donor-page
     // count's own comment above) -- Pledge Renewal Reminders (2026-10-08,

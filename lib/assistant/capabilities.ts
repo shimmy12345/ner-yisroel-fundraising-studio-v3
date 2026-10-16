@@ -26,7 +26,15 @@ import { loadWorkspaceBrief, type WorkspacePriority } from "../workspace/live-da
 import { loadMeetingBrief } from "../relationships/meeting-brief.ts";
 import type { DataMode } from "../workspace/mode.ts";
 import { financialDateLabel } from "../financial-date.ts";
-import { localMonthBoundaries } from "../workspace/local-time.ts";
+import { localMonthBoundaries, localDateParts } from "../workspace/local-time.ts";
+import {
+  summarizeGivingHistory,
+  GIVING_BY_DONOR_YEAR_SQL,
+  OPEN_COMMITMENTS_BY_DONOR_SQL,
+  LAPSED_YEARS_THRESHOLD,
+  type YearlyGivingRow,
+  type OpenCommitmentRow,
+} from "./giving-history.ts";
 import {
   summarizeFundraisingProgress,
   NEW_COMMITMENTS_SQL,
@@ -149,6 +157,94 @@ export async function getOutstandingPledges(ctx: AssistantContext): Promise<{ it
 export async function getPaymentPlansAttention(ctx: AssistantContext): Promise<{ items: PriorityItem[]; donorRefs: DonorRef[] }> {
   const brief = await loadWorkspaceBrief(ctx.userId, ctx.timezone, ctx.mode, ctx.now, undefined, "assistant_capability");
   const items = brief.priorities.filter((p) => p.label === "Open commitment").slice(0, MAX_RESULT_ITEMS).map(toPriorityItem);
+  return { items, donorRefs: items.map((i) => ({ donorId: i.donorId, name: i.name, href: i.href })) };
+}
+
+// --- 5b. Historical giving priorities -- portfolio-wide ranking by real
+// lifetime/annual giving history, not the relationship/reminder queue
+// (see lib/assistant/giving-history.ts's own header comment for the full
+// root-cause story -- "Fix AI Donor Prioritization and Giving-History
+// Intelligence," 2026-10-16). Two portfolio-wide, owner-scoped queries
+// (never N+1 per donor), then a pure, fully-tested ranking function does
+// the actual trend/signal/shortlist work with no AI and no further
+// database access. ---
+
+const GIVING_SIGNAL_LABELS: Record<string, string> = {
+  high_value: "Historically high-value donor (top quarter of this portfolio by lifetime giving)",
+  consistent: "Consistent annual supporter",
+  declined: "Giving has declined from this donor's own prior peak year",
+  lapsed: `Lapsed -- no recorded gift in the last ${LAPSED_YEARS_THRESHOLD}+ years`,
+  insufficient_history: "Not enough giving history yet to judge a trend (based on a single gift or single year)",
+};
+
+export type HistoricalGivingItem = {
+  donorId: string;
+  name: string;
+  href: string;
+  lifetimePaid: string;
+  giftCount: number;
+  distinctGivingYears: number;
+  firstGivingYear: number;
+  lastGivingYear: number;
+  mostRecentPaidDateLabel: string;
+  peakYear: number;
+  peakYearAmount: string;
+  lastGivingYearAmount: string;
+  yearsSinceLastGift: number;
+  signals: string[];
+  openPledgeBalance: string | null;
+  openPledgeCommitted: string | null;
+};
+
+export async function getHistoricalGivingPriorities(ctx: AssistantContext): Promise<{ items: HistoricalGivingItem[]; donorRefs: DonorRef[] }> {
+  if (ctx.mode !== "live") return { items: [], donorRefs: [] };
+  const currentYear = localDateParts(ctx.now, ctx.timezone).year;
+
+  const [givingRows, openCommitmentRows, donorRows] = await Promise.all([
+    env.DB.prepare(GIVING_BY_DONOR_YEAR_SQL).bind(ctx.userId, ctx.userId).all<YearlyGivingRow>(),
+    env.DB.prepare(OPEN_COMMITMENTS_BY_DONOR_SQL).bind(ctx.userId).all<OpenCommitmentRow>(),
+    // archived_at IS NULL: a merged/archived donor record is never a
+    // valid cultivation recommendation target, even if their historical
+    // giving rows still exist under that id -- this is a deliberately
+    // tighter scope than getOutstandingPledges' own name lookup, which
+    // has no reason to exclude one (that capability isn't recommending
+    // anyone, only explaining an existing balance).
+    env.DB.prepare(`SELECT id, display_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL`).bind(ctx.userId).all<{ id: string; display_name: string }>(),
+  ]);
+
+  // Over-fetch before the archived-donor filter below so a few filtered-
+  // out candidates never silently shrink the final shortlist below
+  // MAX_RESULT_ITEMS.
+  const candidates = summarizeGivingHistory({ rows: givingRows.results, currentYear, limit: MAX_RESULT_ITEMS * 3 });
+
+  const nameById = new Map(donorRows.results.map((d) => [d.id, d.display_name]));
+  const commitmentById = new Map(openCommitmentRows.results.map((r) => [r.donor_id, r]));
+
+  const items: HistoricalGivingItem[] = candidates
+    .filter((c) => nameById.has(c.donorId))
+    .slice(0, MAX_RESULT_ITEMS)
+    .map((c) => {
+      const commitment = commitmentById.get(c.donorId);
+      return {
+        donorId: c.donorId,
+        name: nameById.get(c.donorId)!,
+        href: donorHref(c.donorId),
+        lifetimePaid: money(c.lifetimePaidCents),
+        giftCount: c.giftCount,
+        distinctGivingYears: c.distinctGivingYears,
+        firstGivingYear: c.firstGivingYear,
+        lastGivingYear: c.lastGivingYear,
+        mostRecentPaidDateLabel: financialDateLabel(c.mostRecentPaidDateEpoch),
+        peakYear: c.peakYear,
+        peakYearAmount: money(c.peakYearCents),
+        lastGivingYearAmount: money(c.lastGivingYearCents),
+        yearsSinceLastGift: c.yearsSinceLastGift,
+        signals: c.signals.map((s) => GIVING_SIGNAL_LABELS[s]),
+        openPledgeBalance: commitment && commitment.balance_cents > 0 ? money(commitment.balance_cents) : null,
+        openPledgeCommitted: commitment && commitment.committed_cents > 0 ? money(commitment.committed_cents) : null,
+      };
+    });
+
   return { items, donorRefs: items.map((i) => ({ donorId: i.donorId, name: i.name, href: i.href })) };
 }
 
@@ -330,12 +426,13 @@ export async function searchDonors(ctx: AssistantContext, query: string): Promis
 // elsewhere. The model selects names from here; it is never shown, and
 // can never construct, anything else.
 export const CAPABILITY_DESCRIPTIONS: Record<string, string> = {
-  todays_priorities: "Who to contact today or that is overdue -- the exact same list as the home page's Today's Agenda.",
-  this_week_priorities: "The most important follow-ups and priorities for this week, including anything overdue or due today.",
-  lapsed_relationships: "Donors who have not been contacted in a while and have a relationship contact gap.",
+  todays_priorities: "Who to contact today or that is overdue -- the exact same list as the home page's Today's Agenda. This is about overdue FOLLOW-UPS and reminders, never about giving amounts or giving history -- do NOT use this for 'which donors should I focus on' or 'prioritize' questions that mention past giving, giving levels, giving history, or donor significance; use historical_giving_priorities for those instead.",
+  this_week_priorities: "The most important follow-ups and priorities for this week, including anything overdue or due today. Same scope as todays_priorities, just a wider time window -- never a giving-history ranking. Do NOT use for a question about past giving amounts, giving levels, or which donors are historically significant.",
+  lapsed_relationships: "Donors who have not been contacted in a while and have a relationship CONTACT gap (no recent phone call, meeting, or email) -- this is about communication recency, never about giving amounts. A donor who gives generously every year but hasn't been personally contacted belongs here; a donor who used to give a lot but has stopped giving belongs in historical_giving_priorities instead (its own 'lapsed' signal), not here.",
   outstanding_pledges: "Every donor with a real, currently open or partially-paid pledge balance.",
   payment_plans_attention: "Donors whose payment plan is behind and genuinely needs attention right now (a plan with a valid upcoming payment is never included here).",
   donor_summary: "A full relationship summary for one specific named donor: giving history, recent contact, open asks, family dates, and the current suggested action. Also use this to prepare for a meeting with a donor, to summarize recent history with a donor, or to gather what's needed to draft a follow-up message.",
-  fundraising_progress: "Reconciled totals for this month, kept as THREE SEPARATE categories, never summed into one 'total raised' figure: (A) verifiedDatedPaymentsTotal -- real, individually-dated payments only, split into new gifts vs. payments on existing pledges; (B) recordedPaidBalanceTotal -- what pledges/gifts first recorded this month show as paid, as of month-end, which is a fact about the RECORD, not proof of when that cash was actually received (always describe it as 'recorded as paid,' never as 'received'); (C) new pledge/gift commitments created this month regardless of payment status. Also donors contacted. Use this for 'how much did we raise' (answer with A, and mention B separately as a recorded balance, not a receipt), 'what's new this month' (C), or 'how much came from existing pledges' (A's paymentsOnExistingPledgesTotal). There is no fundraising goal/target tracked in this system. Always relay every disclosed limitation -- never imply any total is complete, and never describe a historical comparison (e.g. a different month) this capability was not actually asked to retrieve.",
+  historical_giving_priorities: "Portfolio-WIDE ranking of donors by their REAL, ACTUAL past giving -- lifetime total given, how many years they have given, their single best year, and whether their giving has stayed consistent, declined from their own prior peak, or lapsed entirely (no gift in 2+ years). THIS is the right capability whenever the fundraiser's question is about giving history, giving levels, giving amounts, lifetime giving, biggest/most significant/major donors, donors whose support has dropped off, previously-generous donors who have gone quiet, or general cultivation priorities based on past support -- including a correction like 'no, based on giving history' or 'based on what they've given, not recent activity.' Every donor it returns comes with real evidence (lifetime total, years giving, trend) -- it never estimates a donor's wealth, capacity, or likelihood to give, only what they have actually, historically given. Never confuse this with todays_priorities/this_week_priorities (those are about overdue follow-ups, not giving amounts) or lapsed_relationships (that is about contact recency, not giving).",
+  fundraising_progress: "Reconciled totals for this month, kept as THREE SEPARATE categories, never summed into one 'total raised' figure: (A) verifiedDatedPaymentsTotal -- real, individually-dated payments only, split into new gifts vs. payments on existing pledges; (B) recordedPaidBalanceTotal -- what pledges/gifts first recorded this month show as paid, as of month-end, which is a fact about the RECORD, not proof of when that cash was actually received (always describe it as 'recorded as paid,' never as 'received'); (C) new pledge/gift commitments created this month regardless of payment status. Also donors contacted. Use this for 'how much did we raise' (answer with A, and mention B separately as a recorded balance, not a receipt), 'what's new this month' (C), or 'how much came from existing pledges' (A's paymentsOnExistingPledgesTotal). There is no fundraising goal/target tracked in this system. This is a MONTHLY total, never a donor-level lifetime-giving ranking -- for 'which donors have given the most' use historical_giving_priorities instead. Always relay every disclosed limitation -- never imply any total is complete, and never describe a historical comparison (e.g. a different month) this capability was not actually asked to retrieve.",
   search_donors: "Find donors by name when the fundraiser names someone and which specific donor they mean is not yet clear.",
 };

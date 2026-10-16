@@ -249,6 +249,7 @@ const TEST_FILES = [
   "tests/assistant-capabilities-safety.test.mjs",
   "tests/fundraising-progress.test.mjs",
   "tests/assistant-donor-privacy.test.mjs",
+  "tests/giving-history.test.mjs",
 ];
 
 function runOne(file) {

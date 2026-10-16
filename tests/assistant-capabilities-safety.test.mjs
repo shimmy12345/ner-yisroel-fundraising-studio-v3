@@ -22,13 +22,14 @@ const orchestratorSrc = await readFile(new URL("../lib/assistant/orchestrator.ts
 const routeSrc = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
 const fundraisingProgressSrc = await readFile(new URL("../lib/assistant/fundraising-progress.ts", import.meta.url), "utf8");
 const donorAuthSrc = await readFile(new URL("../lib/assistant/donor-authorization.ts", import.meta.url), "utf8");
+const givingHistorySrc = await readFile(new URL("../lib/assistant/giving-history.ts", import.meta.url), "utf8");
 
 // --- No database writes anywhere in this feature's code. Ask Fundraising
 // OS is read-only by requirement -- this must be true by construction,
 // not just by the Staging write guard's own independent enforcement. ---
 
 const WRITE_PATTERN = /\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b|\.run\(\)/i;
-for (const [name, src] of [["capabilities.ts", capabilitiesSrc], ["conversation.ts", conversationSrc], ["orchestrator.ts", orchestratorSrc], ["route.ts", routeSrc], ["fundraising-progress.ts", fundraisingProgressSrc], ["donor-authorization.ts", donorAuthSrc]]) {
+for (const [name, src] of [["capabilities.ts", capabilitiesSrc], ["conversation.ts", conversationSrc], ["orchestrator.ts", orchestratorSrc], ["route.ts", routeSrc], ["fundraising-progress.ts", fundraisingProgressSrc], ["donor-authorization.ts", donorAuthSrc], ["giving-history.ts", givingHistorySrc]]) {
   assert.doesNotMatch(src, WRITE_PATTERN, `${name} must contain no SQL write statement and no D1 .run() write call`);
 }
 
@@ -48,7 +49,7 @@ assert.doesNotMatch(orchestratorSrc, /capabilities\[[^\]]*\]\s*\(/i, "capability
 // fundraiser's donors -- checked per-statement by splitting on the
 // module's own query boundaries. ---
 
-const sqlStatements = [...(capabilitiesSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? []), ...(fundraisingProgressSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? [])];
+const sqlStatements = [...(capabilitiesSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? []), ...(fundraisingProgressSrc.match(/`[^`]*SELECT[^`]*`/gis) ?? []), ...(givingHistorySrc.match(/`[^`]*SELECT[^`]*`/gis) ?? [])];
 assert.ok(sqlStatements.length >= 3, "expected to find the module's real SQL template literals");
 for (const statement of sqlStatements) {
   if (/\bFROM\s+(donors|giving_activities|interactions|jl_payment_assignment_audits)\b/i.test(statement)) {
@@ -168,7 +169,7 @@ assert.doesNotMatch(capabilitiesSrc, /function donorHref/, "capabilities.ts must
 
 assert.doesNotMatch(capabilitiesSrc, /setUTCDate\(1\)/, "capabilities.ts must never truncate the fundraising-progress month boundary straight to UTC");
 assert.match(capabilitiesSrc, /localMonthBoundaries\(/, "fundraising_progress must compute its month boundary via the shared, timezone-aware helper");
-assert.match(capabilitiesSrc, /import\s*\{\s*localMonthBoundaries\s*\}\s*from\s*"\.\.\/workspace\/local-time\.ts"/);
+assert.match(capabilitiesSrc, /import\s*\{\s*localMonthBoundaries,\s*localDateParts\s*\}\s*from\s*"\.\.\/workspace\/local-time\.ts"/, "capabilities.ts must import the shared local-time helpers, not reimplement its own date math (localDateParts added for historical_giving_priorities' currentYear)");
 
 // --- Final Financial Accuracy Fix for Ask Fundraising OS (independent
 // code review, 2026-10-16): every fundraising_progress query must have

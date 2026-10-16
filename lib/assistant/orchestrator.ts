@@ -43,6 +43,7 @@ import {
   getOutstandingPledges,
   getPaymentPlansAttention,
   getDonorSummary,
+  getHistoricalGivingPriorities,
   getFundraisingProgress,
   type AssistantContext,
   type DonorRef,
@@ -133,6 +134,10 @@ async function runCapabilities(names: string[], ctx: AssistantContext, donor: Do
     } else if (name === "payment_plans_attention") {
       const r = await getPaymentPlansAttention(ctx);
       data.payment_plans_attention = r.items;
+      addRefs(r.donorRefs);
+    } else if (name === "historical_giving_priorities") {
+      const r = await getHistoricalGivingPriorities(ctx);
+      data.historical_giving_priorities = r.items;
       addRefs(r.donorRefs);
     } else if (name === "fundraising_progress") {
       data.fundraising_progress = await getFundraisingProgress(ctx);
