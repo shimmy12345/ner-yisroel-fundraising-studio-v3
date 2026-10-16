@@ -46,6 +46,24 @@ assert.deepEqual(resolveDueDatePhrase("   ", MEETING_DATE), { kind: "none" });
   assert.equal(r.date, "2026-10-18");
 }
 {
+  // The AI organizer paraphrases rather than quoting verbatim -- confirmed
+  // live, a transcript saying "check back in two weeks" came back as
+  // suggestedDueDate: "two weeks", with "in" dropped. Must still resolve.
+  const r = resolveDueDatePhrase("two weeks", MEETING_DATE);
+  assert.equal(r.kind, "resolved");
+  assert.equal(r.date, "2026-10-29");
+}
+{
+  const r = resolveDueDatePhrase("a week", MEETING_DATE);
+  assert.equal(r.kind, "resolved");
+  assert.equal(r.date, "2026-10-22");
+}
+{
+  // A past-tense "ago" must never be read as a future due date.
+  const r = resolveDueDatePhrase("two weeks ago", MEETING_DATE);
+  assert.equal(r.kind, "unresolved", "a past reference must never become a future due date");
+}
+{
   const r = resolveDueDatePhrase("today", MEETING_DATE);
   assert.equal(r.kind, "resolved");
   assert.equal(r.date, MEETING_DATE);

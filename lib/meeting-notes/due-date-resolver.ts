@@ -151,13 +151,17 @@ function tryResolvedRelative(lower: string, meetingDateISO: string): string | nu
   const nextWeekdayMatch = lower.match(new RegExp(`\\bnext\\s+(${WEEKDAYS.join("|")})\\b`));
   if (nextWeekdayMatch) return nextWeekday(meetingDateISO, WEEKDAYS.indexOf(nextWeekdayMatch[1]));
 
-  const inDays = lower.match(/\bin\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|couple|few|\d+)\s+day(s)?\b/);
+  // "in" is optional -- the AI organizer paraphrases rather than quoting
+  // verbatim (confirmed live: a transcript saying "check back in two
+  // weeks" came back as suggestedDueDate: "two weeks", with "in"
+  // dropped). A trailing "ago" rules out the past-tense reading.
+  const inDays = lower.match(/\b(?:in\s+)?(a|an|one|two|three|four|five|six|seven|eight|nine|ten|couple|few|\d+)\s+day(s)?\b(?!\s+ago)/);
   if (inDays) {
     const n = matchNumberWord(inDays[1]);
     if (n !== null) return addDays(meetingDateISO, n);
   }
 
-  const inWeeks = lower.match(/\bin\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|couple|few|\d+)\s+week(s)?\b/);
+  const inWeeks = lower.match(/\b(?:in\s+)?(a|an|one|two|three|four|five|six|seven|eight|nine|ten|couple|few|\d+)\s+week(s)?\b(?!\s+ago)/);
   if (inWeeks) {
     const n = matchNumberWord(inWeeks[1]);
     if (n !== null) return addDays(meetingDateISO, n * 7);
