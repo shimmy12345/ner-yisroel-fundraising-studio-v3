@@ -195,6 +195,15 @@ assert.doesNotMatch(capabilitiesSrc, /\bmoneyReceivedCount\b/, "the ambiguous fi
 assert.match(fundraisingProgressSrc, /verifiedMoneyReceivedTransactionCount/, "the field must be named unambiguously as a VERIFIED transaction count, never a donor count");
 const protocolSrc = await readFile(new URL("../lib/assistant/protocol.ts", import.meta.url), "utf8");
 assert.match(protocolSrc, /never state a number of donors/i, "the compose prompt must explicitly forbid inventing a donor/household count from a row/transaction count");
+// Live-observed AGAIN (Staging, "Resolve Historical Payment Totals
+// Before Production" round, 2026-10-16): the model said "$1,910 was
+// newly pledged by 4 donors" where 4 was newCommitmentsCount -- a row
+// count, not a distinct-donor count (the same donor can make more than
+// one pledge). The rule above alone did not stop this the first time it
+// was tried against this specific field; strengthened with a concrete
+// named-field example so it cannot be read as applying only to
+// moneyReceivedTransactionCount.
+assert.match(protocolSrc, /newCommitmentsCount/, "the donor-count rule must name newCommitmentsCount specifically, not just speak in the abstract -- a generic rule already failed to stop this live");
 
 // --- Final Payment Accuracy and Financial Data Integrity Review
 // (2026-10-16): a new giving row's CURRENT paid_cents may only be
@@ -209,11 +218,23 @@ assert.match(protocolSrc, /never state a number of donors/i, "the compose prompt
 // (orchestrator.ts's appendFinancialLimitations call), not solely
 // through a prompt instruction. ---
 
-assert.match(fundraisingProgressSrc, /updated_at\s*=\s*created_at/, "a new giving row must only count as verified when it has never been touched since creation");
 assert.match(fundraisingProgressSrc, /VERIFIED_NEW_GIVING_ROWS_SQL/, "the verified-new-giving query must be named to make clear it is the dated, trustworthy subset, not every new row");
 assert.match(fundraisingProgressSrc, /recordedCumulativePaidCents/, "the current cumulative balance must be exposed as its own, separately-labeled figure, never folded into the verified total");
 assert.doesNotMatch(fundraisingProgressSrc, /will be reflected once that pledge is fully paid/i, "the limitation wording must never claim an omitted payment will eventually be reflected -- it never is, retroactively");
 assert.match(orchestratorSrc, /appendFinancialLimitations\(/, "the financial disclosure must be enforced in the deterministic response layer, not left to the prompt alone");
 assert.match(protocolSrc, /export function appendFinancialLimitations/, "the deterministic disclosure helper must exist and be exported for orchestrator.ts and tests to use");
+
+// --- "Resolve Historical Payment Totals Before Production" (2026-10-16):
+// an earlier blunt "exclude the whole row once touched" rule
+// (updated_at = created_at) could retroactively ZERO a previously-
+// reported total just as wrongly as the original bug could inflate
+// one. The correct fix reconstructs paid_cents "as of this period's own
+// end" from giving_activity_import_changes -- data this app already
+// writes, atomically, on every update -- rather than treating a touched
+// row as all-or-nothing. ---
+
+assert.match(fundraisingProgressSrc, /giving_activity_import_changes/, "verified money received must reconstruct a touched row's as-of-period-end value from the existing import change log, never simply exclude it");
+assert.match(fundraisingProgressSrc, /json_extract\(c\.previous_json/, "the reconstruction must read the prior paid_cents from the change log's own previous_json, not invent or estimate a value");
+assert.doesNotMatch(fundraisingProgressSrc, /AND\s+updated_at\s*=\s*created_at/i, "the blunt all-or-nothing exclusion must not reappear as an actual WHERE-clause condition (mentioning it in a historical comment is fine; using it as a live filter is not)");
 
 console.log("assistant-capabilities-safety.test.mjs: all assertions passed");

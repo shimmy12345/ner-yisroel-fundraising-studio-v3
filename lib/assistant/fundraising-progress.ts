@@ -37,35 +37,69 @@
 // absorbed into a total.
 //
 // SECOND DEFECT, found by a later independent review ("Final Payment
-// Accuracy and Financial Data Integrity Review", 2026-10-16) and fixed
-// here: a brand-new giving_activities row's CURRENT paid_cents is only
-// safe to call "verified money received this period" if that row has
-// never been touched since the single import that created it. A row
-// created this period but later bumped by a DIFFERENT, later reimport
-// (e.g. created Oct 5 with $200 paid, bumped to $500 on Oct 20, bumped
-// again to $800 on Nov 10) would otherwise have its CURRENT value
-// (whatever it happens to be at query time) misattributed wholesale to
-// its creation month -- overstating that month, and, worse, making a
-// CLOSED month's own previously-reported total silently grow every time
-// a later reimport touches an old pledge, purely because of when the
-// query happened to run. updated_at is set to created_at exactly once,
-// at insert, and to a LATER value by either payment-processing path on
-// any subsequent touch (confirmed directly against app/api/import/
-// route.ts's own UPDATE/UPSERT statements) -- so `updated_at =
-// created_at` is the one available, already-populated signal that a
-// row's current paid_cents is still exactly what was recorded at
-// creation, with nothing added since. VERIFIED_NEW_GIVING_ROWS_SQL below
-// requires this explicitly: the instant a later import touches an
-// in-period row, its contribution to "verified money received" drops to
-// zero (never partially estimated), and it can only re-enter a reported
-// total through the dated jl_payment_assignment_audits path. This is
-// deliberately conservative -- it can under-report, never over-report --
-// and it is STABLE: a verified total for a closed month, once computed,
-// cannot change on a later re-query, because every row that could still
-// change has already been excluded. The separate, explicitly-labeled
-// "recorded cumulative paid" figure below still surfaces the CURRENT
-// balance on these same new rows for visibility, without ever calling it
-// "received this period."
+// Accuracy and Financial Data Integrity Review", 2026-10-16): the fix
+// that round shipped required `updated_at = created_at` -- a row
+// touched by ANY later reimport dropped OUT of the verified figure
+// entirely, for every period, forever. That stopped the figure from
+// ever INFLATING, but introduced the opposite problem: it could DEFLATE
+// a previously-reported total back to zero. A pledge created Oct 5 with
+// $200 already paid, reported honestly as $200 on Oct 20, would report
+// **$0** for October if asked again on Dec 1, merely because a Nov 10
+// reimport had since touched the same row -- even though the original
+// $200 was never contradicted, reduced, or shown to be wrong. A figure
+// that can retroactively DROP is not meaningfully more "stable" than
+// one that can retroactively RISE; both change a previously-reported
+// number for a reason that has nothing to do with October.
+//
+// THIRD, CORRECT FIX (a later independent review, "Resolve Historical
+// Payment Totals Before Production", 2026-10-16): rather than treating
+// a touched row as all-trustworthy or all-untrustworthy, reconstruct
+// what paid_cents actually WAS at the end of the requested period, from
+// data this app already records on every single update --
+// giving_activity_import_changes. That table exists since the very
+// first migration that created giving_activities itself (drizzle/
+// 0003_jl_donation_import.sql -- confirmed directly, not assumed, so
+// there is no historical gap to worry about for any row this app has
+// ever stored) and is written, atomically, in the SAME D1 batch as
+// every single UPDATE this app ever makes to a giving_activities row
+// (both the ordinary reimport upsert and the payment-review pledge
+// update -- confirmed against app/api/import/route.ts's own statements
+// array, never two separate writes that could drift apart). Its
+// `previous_json` column is the row's own prior state -- including
+// paid_cents -- immediately BEFORE that specific update was applied.
+//
+// This means: for any row, "what was paid_cents at the end of period P"
+// is well-defined and fully reconstructable: find the EARLIEST update
+// to that row whose own created_at falls ON OR AFTER period P's end,
+// and read paid_cents from THAT update's own previous_json (the value
+// that was true immediately before that later update happened, which
+// is exactly the value that was true for the entire remainder of period
+// P). If no such later update exists yet (the row has never been
+// touched since, or period P itself has not ended yet), the row's
+// CURRENT paid_cents already IS that value.
+//
+// Critically, this is genuinely, provably STABLE once period P has
+// closed: a change-log row's created_at is always the real wall-clock
+// time it was written, which can never retroactively become earlier --
+// so no future import can ever insert a NEW change-log entry timestamped
+// before period P's own end. Every entry that could ever affect "what
+// was true as of P's end" already exists the moment P ends, and never
+// changes again. Re-querying October in December therefore reconstructs
+// exactly the same $500 -- not $200 (the first fix's inflation bug) and
+// not $0 (the second fix's deflation bug) -- because the Oct 20 update
+// (which happened BEFORE November started) already fixed "$500 as of
+// Oct 31" as a permanent historical fact the moment October ended.
+//
+// This is still not a true PAYMENT date (Section 4 of docs/AI-HANDOFF.md
+// still applies: the exact calendar day within the period that money was
+// actually received remains unknown for this path) -- it is the
+// CORRECT cumulative balance AS OF A SPECIFIC PERIOD BOUNDARY, reusing
+// only data this app already writes on every update, with no backfill,
+// no new table, and no import-pipeline change. The separate, explicitly
+// -labeled "recorded cumulative paid" figure still surfaces the row's
+// CURRENT (live, today) balance for visibility, which is a different,
+// still-moving number whenever the period being asked about is the
+// current, still-open one.
 
 import { REAL_COMMITMENT_CATEGORIES } from "../relationships/pledge-payment-plan.ts";
 import { remainderGiftFingerprint } from "../import/jl-payment-assignment.ts";
@@ -100,21 +134,46 @@ const REAL_COMMITMENT_CATEGORIES_SQL = Array.from(REAL_COMMITMENT_CATEGORIES).ma
 export const NEW_COMMITMENTS_SQL = `SELECT COUNT(*) AS n, COALESCE(SUM(committed_cents),0) AS total, COALESCE(SUM(paid_cents),0) AS cumulativePaidTotal FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category IN (${REAL_COMMITMENT_CATEGORIES_SQL}) AND created_at >= ? AND created_at < ?`;
 
 // Candidate VERIFIED "new money" rows: every commitment-category row
-// first recorded this period, whose paid_cents has NOT been touched
-// since (updated_at = created_at -- see this file's header comment for
-// why that is the one reliable signal available). A row created this
-// period but bumped by a LATER reimport is excluded here entirely, not
-// partially estimated -- its current paid_cents could include money
-// added at any later time, including a future period relative to this
-// one. Deliberately NOT restricted to category='completed_gift' -- a
-// brand-new partially-paid pledge's initial paid amount (if still
-// untouched) is just as reliably "received this period" as a brand-new
-// fully-paid gift's. May overlap with PAYMENT_ASSIGNMENT_AUDITS_SQL's
-// own rows (a "new_gift" reconciliation decision creates both a
-// giving_activities row AND an audit row sharing the same
-// source_fingerprint/payment_fingerprint) -- summarizeFundraisingProgress
-// below is what reconciles that overlap, never this query.
-export const VERIFIED_NEW_GIVING_ROWS_SQL = `SELECT source_fingerprint AS sourceFingerprint, COALESCE(paid_cents,0) AS paidCents FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category IN (${REAL_COMMITMENT_CATEGORIES_SQL}) AND created_at >= ? AND created_at < ? AND updated_at = created_at`;
+// first recorded this period, with its paid_cents reconstructed to
+// "as of this period's own end" (see this file's header comment) rather
+// than its possibly-later-touched current value. The correlated
+// subquery finds the EARLIEST update to this row (by source_fingerprint)
+// that happened ON OR AFTER periodEnd, and reads that update's own
+// previous_json.paid_cents -- the value this row held immediately before
+// that later update, i.e. for the entire remainder of this period. When
+// no such later update exists (untouched since creation, or this period
+// has not ended yet), COALESCE falls through to the row's own CURRENT
+// paid_cents, which at that point already IS the correct value.
+//
+// Bind order matters -- periodEnd is bound FIRST (it is the first `?`
+// in the SQL text, inside the subquery), then userId, then periodStart,
+// then periodEnd again for the outer created_at < periodEnd bound.
+//
+// Deliberately NOT restricted to category='completed_gift' -- a
+// brand-new partially-paid pledge's initial paid amount is just as
+// reliably "received this period" as a brand-new fully-paid gift's. May
+// overlap with PAYMENT_ASSIGNMENT_AUDITS_SQL's own rows (a "new_gift"
+// reconciliation decision creates both a giving_activities row AND an
+// audit row sharing the same source_fingerprint/payment_fingerprint) --
+// summarizeFundraisingProgress below is what reconciles that overlap,
+// never this query.
+export const VERIFIED_NEW_GIVING_ROWS_SQL = `
+  SELECT ga.source_fingerprint AS sourceFingerprint,
+    COALESCE(
+      (SELECT json_extract(c.previous_json, '$.paid_cents')
+         FROM giving_activity_import_changes c
+         WHERE c.source_fingerprint = ga.source_fingerprint
+           AND c.change_type = 'update'
+           AND c.created_at >= ?
+         ORDER BY c.created_at ASC
+         LIMIT 1),
+      ga.paid_cents
+    ) AS paidCents
+  FROM giving_activities ga
+  WHERE ga.owner_user_id = ? AND ga.workspace_status = 'active' AND ga.record_origin = 'live'
+    AND ga.category IN (${REAL_COMMITMENT_CATEGORIES_SQL})
+    AND ga.created_at >= ? AND ga.created_at < ?
+`;
 
 // The one place a payment applied to a PRE-EXISTING pledge has an actual
 // recorded date (this file's header comment). COALESCE(payment_date,
@@ -228,8 +287,16 @@ export type FundraisingProgress = {
 // CANNOT be placed in a month and why, and what would actually close
 // the gap (see docs/AI-HANDOFF.md's recommended payment-event-ledger
 // design for the full system-wide proposal, not implemented here).
+// Updated once more (independent review, "Resolve Historical Payment
+// Totals Before Production", 2026-10-16) to stop describing new rows as
+// "whose balance has not changed since" -- that was true of the SECOND
+// round's fix, not the current one, which reconstructs a new row's
+// value as of this period's own end rather than excluding it the moment
+// it is ever touched. The remaining, still-real gap is narrower and
+// specifically about PRE-EXISTING (older) pledges' payments that arrive
+// via the ordinary reimport path, not newly-created ones.
 const RECONCILIATION_LIMITATION =
-  "Verified dated payments above include only: (1) new pledges or gifts first recorded this period whose balance has not changed since, and (2) payments confirmed through the payment-review screen with a known date. They do NOT include a later increase to an existing pledge's paid balance that arrived through a routine data refresh with no payment-review decision -- this system has no record of which date that money arrived, cannot place it in any specific month, and will never retroactively add it to a later total even once that pledge is fully paid. The actual total received this period may be understated as a result. A payment-event ledger recording the date and amount of every individual payment, not just each pledge's current cumulative balance, would be needed to close this gap.";
+  "Verified dated payments above include only: (1) new pledges or gifts first recorded this period, each correctly reflecting every change recorded for it BY THE END of this period, and (2) payments confirmed through the payment-review screen with a known date. They do NOT include a payment applied to a PRE-EXISTING pledge (one created in an earlier period) through a routine data refresh with no payment-review decision -- this system has no record of which specific date that money arrived, cannot place it in any specific month, and will never retroactively add it to a later total even once that pledge is fully paid. The actual total received this period may be understated as a result. A payment-event ledger recording the date and amount of every individual payment, not just each pledge's current cumulative balance, would be needed to close this gap.";
 
 // The core reconciliation: a "new_gift" decision from the payment-review
 // screen inserts its own new giving_activities row under the SAME

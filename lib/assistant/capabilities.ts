@@ -233,15 +233,18 @@ export async function getDonorSummary(ctx: AssistantContext, donorId: string): P
 // Trip Dashboard's own existing treatment of that category, not a new
 // decision invented for this capability.
 //
-// SECOND fix (independent review, "Final Payment Accuracy and Financial
-// Data Integrity Review", 2026-10-16): a new giving_activities row's
-// CURRENT paid_cents is only trusted as "verified received this period"
-// when VERIFIED_NEW_GIVING_ROWS_SQL's own updated_at=created_at
-// condition holds -- otherwise a later, undated reimport against an
-// in-period pledge could silently inflate that period's own total every
-// time it is re-queried. recordedCumulativePaidTotal exposes the
-// CURRENT balance on these same new rows separately, explicitly never
-// labeled "received."
+// SECOND and THIRD fixes (two later independent reviews, both
+// 2026-10-16 -- see fundraising-progress.ts's own header comment for
+// the full history): a new giving_activities row's paid_cents, for a
+// period this capability is asked about, is reconstructed to its value
+// "as of that period's own end" via VERIFIED_NEW_GIVING_ROWS_SQL's
+// correlated subquery against giving_activity_import_changes -- never
+// simply the row's raw CURRENT value, which a later reimport could
+// otherwise move and retroactively change a previously-reported total,
+// and never an all-or-nothing "touched since creation" exclusion
+// either, which could retroactively ZERO a previously-reported total
+// instead. recordedCumulativePaidTotal exposes the row's truly CURRENT,
+// live balance separately, explicitly never labeled "received."
 
 export type FundraisingProgress = {
   periodLabel: string;
@@ -282,7 +285,12 @@ export async function getFundraisingProgress(ctx: AssistantContext): Promise<Fun
 
   const [commitments, verifiedNewGivingRows, auditRows, contacts] = await Promise.all([
     env.DB.prepare(NEW_COMMITMENTS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number; total: number; cumulativePaidTotal: number }>(),
-    env.DB.prepare(VERIFIED_NEW_GIVING_ROWS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
+    // Bind order matches the SQL's own `?` order: periodEnd (the
+    // subquery's "first update at/after period end" threshold) first,
+    // then userId, then periodStart, then periodEnd again for the
+    // outer created_at upper bound -- see VERIFIED_NEW_GIVING_ROWS_SQL's
+    // own comment in fundraising-progress.ts.
+    env.DB.prepare(VERIFIED_NEW_GIVING_ROWS_SQL).bind(instantEndEpoch, ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
     env.DB.prepare(PAYMENT_ASSIGNMENT_AUDITS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<PaymentAssignmentAuditRow>(),
     env.DB.prepare(DONORS_CONTACTED_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number }>(),
   ]);

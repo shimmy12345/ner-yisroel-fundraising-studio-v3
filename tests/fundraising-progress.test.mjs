@@ -58,13 +58,28 @@ function insertGivingActivity(database, row) {
 
 // Simulates exactly what app/api/import/route.ts's own pledgeUpdateStatements/
 // activityStatements ON CONFLICT DO UPDATE actually does on a reimport that
-// detects a genuine change: paid_cents/balance_cents/category/updated_at
-// move; committed_cents and (critically) created_at and activity_date are
-// NEVER touched. A reimport that detects NO change (lib/import/
-// jl-donation-match.ts's own proposedUpdates filter) never calls this at
-// all -- see the "repeated imports, unchanged amounts" scenario below,
-// which deliberately does NOT call this helper.
+// detects a genuine change, as ONE atomic batch (confirmed directly against
+// that file's own env.DB.batch(statements) call, never two separate
+// writes that could drift apart):
+//   1. A giving_activity_import_changes row recording the row's PRIOR
+//      state (critically, its prior paid_cents) under a fresh import_id
+//      and this reimport's own created_at.
+//   2. The actual UPDATE: paid_cents/balance_cents/category/updated_at
+//      move; committed_cents and (critically) created_at and
+//      activity_date are NEVER touched.
+// A reimport that detects NO change (lib/import/jl-donation-match.ts's
+// own proposedUpdates filter) never calls this at all -- see the
+// "repeated imports, unchanged amounts" scenario below, which
+// deliberately does not call this helper.
+let reimportCounter = 0;
 function reimportBumpsPaid(database, id, newPaidCents, newBalanceCents, newCategory, touchedAt) {
+  reimportCounter += 1;
+  const importId = `reimport-${reimportCounter}`;
+  const prior = database.prepare(`SELECT source_fingerprint, paid_cents, balance_cents, category FROM giving_activities WHERE id = ?`).get(id);
+  database.prepare(`INSERT INTO data_imports (id,user_id,file_name,file_hash,status,report_json,created_at) VALUES (?,?,?,?,?,?,?)`)
+    .run(importId, "user-1", `reimport-${reimportCounter}.csv`, `hash-${reimportCounter}`, "completed", "{}", touchedAt);
+  database.prepare(`INSERT INTO giving_activity_import_changes (import_id, source_fingerprint, change_type, previous_json, created_at) VALUES (?,?,?,?,?)`)
+    .run(importId, prior.source_fingerprint, "update", JSON.stringify({ paid_cents: prior.paid_cents, balance_cents: prior.balance_cents, category: prior.category }), touchedAt);
   database.prepare(`UPDATE giving_activities SET paid_cents = ?, balance_cents = ?, category = ?, updated_at = ? WHERE id = ?`)
     .run(newPaidCents, newBalanceCents, newCategory, touchedAt, id);
 }
@@ -81,7 +96,9 @@ function insertAudit(database, row) {
 
 function runCapability(database, userId, instantStartEpoch, instantEndEpoch, periodLabel) {
   const commitments = database.prepare(NEW_COMMITMENTS_SQL).get(userId, instantStartEpoch, instantEndEpoch);
-  const newGivingRows = database.prepare(VERIFIED_NEW_GIVING_ROWS_SQL).all(userId, instantStartEpoch, instantEndEpoch);
+  // Bind order: periodEnd (subquery threshold) first, then userId, then
+  // periodStart, then periodEnd again -- matches the SQL's own `?` order.
+  const newGivingRows = database.prepare(VERIFIED_NEW_GIVING_ROWS_SQL).all(instantEndEpoch, userId, instantStartEpoch, instantEndEpoch);
   const auditRows = database.prepare(PAYMENT_ASSIGNMENT_AUDITS_SQL).all(userId, instantStartEpoch, instantEndEpoch);
   const contacts = database.prepare(DONORS_CONTACTED_SQL).get(userId, instantStartEpoch, instantEndEpoch);
   return summarizeFundraisingProgress({
@@ -213,22 +230,22 @@ async function run() {
 
   // A8: the recordedCumulativePaidCents figure can legitimately EXCEED
   // the verified figure -- this is the whole point of keeping them
-  // separate. A pledge created this period, then bumped by a later
-  // undated reimport, contributes its FULL current balance to
-  // cumulativePaidCents (via newCommitments, aggregated directly in SQL
-  // with no dedup concern) but ZERO to newGivingRows (excluded upstream
-  // by VERIFIED_NEW_GIVING_ROWS_SQL's own updated_at=created_at filter,
-  // simulated here by the caller simply never including it).
+  // separate. The pure function itself has no notion of "touched since
+  // creation" at all (that reconstruction lives entirely in
+  // VERIFIED_NEW_GIVING_ROWS_SQL -- see Part C below for the real,
+  // SQL-level proof) -- this test only confirms the pure arithmetic
+  // correctly reports two independently-supplied figures as independent,
+  // never silently reconciling one against the other.
   {
     const result = summarizeFundraisingProgress({
       periodLabel: "October 2026",
-      newGivingRows: [], // the touched row is excluded upstream -- not present here at all
+      newGivingRows: [{ sourceFingerprint: "fp-reconstructed", paidCents: 50000 }], // the caller's own reconstructed, as-of-period-end value
       paymentAssignmentAuditRows: [],
-      newCommitments: { count: 1, committedCents: 100000, cumulativePaidCents: 80000 },
+      newCommitments: { count: 1, committedCents: 100000, cumulativePaidCents: 80000 }, // the live, current balance -- has since moved further
       donorsContacted: 0,
     });
-    assert.equal(result.verifiedMoneyReceivedCents, 0, "a touched-since-creation row must contribute nothing to the verified figure");
-    assert.equal(result.recordedCumulativePaidCents, 80000, "but its real current balance is still visible as the separate, honestly-labeled cumulative figure");
+    assert.equal(result.verifiedMoneyReceivedCents, 50000, "the verified figure reflects exactly what the caller reconstructed for this period, never the live balance");
+    assert.equal(result.recordedCumulativePaidCents, 80000, "the live current balance is still visible as its own, separately-labeled figure, and may legitimately differ from verified");
   }
 
   console.log("Part A (pure summarizeFundraisingProgress) checks passed.");
@@ -364,9 +381,17 @@ async function run() {
   console.log("Part B (real SQLite, every reconciliation scenario) checks passed.");
 
   // =====================================================================
-  // Part C -- the cumulative-payment lifecycle the second independent
-  // review specifically asked to be traced, at each stage, using a FRESH
-  // database so Part B's own rows never interfere.
+  // Part C -- the EXACT Stage A/B/C lifecycle the third independent
+  // review asked to be traced ("Resolve Historical Payment Totals
+  // Before Production"), using a FRESH database so Part B's own rows
+  // never interfere. This is the review that found the SECOND round's
+  // own fix (require updated_at = created_at) could retroactively
+  // DEFLATE a previously-reported total to $0 the instant any later
+  // reimport touched the row -- just as wrong, in the opposite
+  // direction, as the FIRST round's fix inflating it. The THIRD fix
+  // (reconstructing paid_cents "as of period end" from
+  // giving_activity_import_changes -- see fundraising-progress.ts's own
+  // header comment) is what this Part actually proves.
   // =====================================================================
 
   const lifecycleDb = freshDatabase();
@@ -377,79 +402,88 @@ async function run() {
   assert.equal(novBoundaries.periodLabel, "November 2026");
   const NOV = (day, hour = 15) => Math.floor(Date.UTC(2026, 10, day, hour, 0, 0) / 1000);
 
-  // C1: October 5 -- a pledge is imported with $200 of its $1,000 already
-  // paid. created_at = updated_at = Oct 5 (a brand-new row).
+  // Stage A: October 5 -- a pledge is imported with $200 of its $1,000
+  // already paid. created_at = updated_at = Oct 5 (a brand-new row, no
+  // change-log history yet).
   insertGivingActivity(lifecycleDb, { id: "ga-lifecycle", sourceFingerprint: "fp-lifecycle", category: "partially_paid_pledge", committedCents: 100000, paidCents: 20000, createdAt: OCT(5) });
 
   {
     const octResult = runCapability(lifecycleDb, "user-1", octBoundaries.instantStartEpoch, octBoundaries.instantEndEpoch, octBoundaries.periodLabel);
     assert.equal(octResult.newCommitmentsCents, 100000, "the pledge's full committed amount is a new October commitment");
-    assert.equal(octResult.verifiedMoneyReceivedCents, 20000, "the $200 recorded at creation is verified -- the row has not been touched since");
+    assert.equal(octResult.verifiedMoneyReceivedCents, 20000, "the $200 recorded at creation is verified -- no later change exists yet, so current paid_cents already IS the as-of-period-end value");
     assert.equal(octResult.recordedCumulativePaidCents, 20000, "cumulative agrees with verified at this stage -- nothing has diverged yet");
   }
 
-  // C2: October 20 -- a ROUTINE reimport (no payment-review decision, no
-  // audit row -- exactly lib/import/jl-refresh.ts's own "ordinary
-  // reimport" path) bumps the SAME row's cumulative paid to $500.
-  // created_at is untouched; updated_at moves to Oct 20.
+  // Stage B: October 20 -- a ROUTINE reimport (no payment-review
+  // decision -- exactly lib/import/jl-refresh.ts's own "ordinary
+  // reimport" path) bumps the SAME row's cumulative paid to $500, and
+  // (atomically, in the same batch as the real import route) writes a
+  // giving_activity_import_changes row recording the PRIOR $200.
   reimportBumpsPaid(lifecycleDb, "ga-lifecycle", 50000, 50000, "partially_paid_pledge", OCT(20));
 
   {
     const octResultAfterBump = runCapability(lifecycleDb, "user-1", octBoundaries.instantStartEpoch, octBoundaries.instantEndEpoch, octBoundaries.periodLabel);
-    // THE DEFECT THIS ROUND FIXES: October's own verified figure must NOT
-    // simply become $500 -- the row has been touched since its creation,
-    // so it is excluded entirely from the verified total rather than
-    // reporting an amount this system cannot actually prove is correct
-    // for October specifically (some or all of the extra $300 could, in
-    // principle, have been received in a different month than when this
-    // particular reimport happened to run).
-    assert.equal(octResultAfterBump.verifiedMoneyReceivedCents, 0, "a row touched since its creation must drop out of the verified figure entirely, never partially estimated");
+    // October has NOT closed yet (this update happened WITHIN October) --
+    // there is no later change-log entry at or after November 1, so the
+    // reconstruction correctly falls through to the row's current $500.
+    // This is NOT the "$0" the second round's fix would have produced,
+    // and it is NOT wrong: the extra $300 genuinely did arrive within
+    // October, by the only evidence this system has.
+    assert.equal(octResultAfterBump.verifiedMoneyReceivedCents, 50000, "while October is still open, its own best-available verified total is the row's current paid_cents -- $500, not $200 and not $0");
     assert.equal(octResultAfterBump.newCommitmentsCents, 100000, "the commitment itself is untouched -- committed_cents and created_at never change");
-    // The real current balance is still visible, honestly labeled as
-    // cumulative, not received.
-    assert.equal(octResultAfterBump.recordedCumulativePaidCents, 50000, "the CURRENT $500 balance is visible as the separate cumulative figure, never claimed as 'received in October'");
+    assert.equal(octResultAfterBump.recordedCumulativePaidCents, 50000, "cumulative still agrees with verified -- nothing has diverged, because no update has happened in a LATER period yet");
   }
 
-  // C3: November 10 -- ANOTHER routine reimport bumps cumulative paid to
-  // $800. Still no audit row; updated_at moves to Nov 10.
+  // Stage C: November 10 -- ANOTHER routine reimport bumps cumulative
+  // paid to $800 (still no audit row), atomically logging the PRIOR
+  // $500 to giving_activity_import_changes under this reimport's own
+  // created_at (November 10 -- critically, AFTER October has ended).
   reimportBumpsPaid(lifecycleDb, "ga-lifecycle", 80000, 20000, "partially_paid_pledge", NOV(10));
 
   {
-    // October, re-queried AFTER the November reimport, in December (i.e.
-    // from "now" far enough past both months that nothing about the
-    // window itself changed) -- THE STABILITY GUARANTEE: October's own
-    // previously-reported figures must be BYTE-IDENTICAL to what they
-    // were immediately after C2, even though a totally unrelated later
-    // import has since run.
+    // October, re-queried AFTER the November reimport, in December --
+    // THE REQUIRED OUTCOME: October's own previously-verified total must
+    // NOT change merely because cumulative balances were updated later.
+    // Because the Nov 10 change happened AFTER October's own end, its
+    // own previous_json.paid_cents ($500) is exactly "what was true for
+    // the rest of October" -- reconstructed, not recomputed from scratch,
+    // and BYTE-IDENTICAL to what Stage B already reported.
     const octResultAfterSecondBump = runCapability(lifecycleDb, "user-1", octBoundaries.instantStartEpoch, octBoundaries.instantEndEpoch, octBoundaries.periodLabel);
-    assert.equal(octResultAfterSecondBump.verifiedMoneyReceivedCents, 0, "October's verified figure must still be exactly what it was after C2 -- a November import can never retroactively change a previously-reported October total");
+    assert.equal(octResultAfterSecondBump.verifiedMoneyReceivedCents, 50000, "October's verified figure must still be exactly $500 -- a November import can never retroactively change a previously-reported October total, in EITHER direction");
     assert.equal(octResultAfterSecondBump.newCommitmentsCents, 100000);
-    assert.equal(octResultAfterSecondBump.recordedCumulativePaidCents, 80000, "cumulative, by contrast, is explicitly a live snapshot and is EXPECTED to keep moving -- this is exactly why it is never called 'received'");
+    // Cumulative, by contrast, is explicitly a live snapshot and is
+    // EXPECTED to keep moving -- it now correctly diverges from the
+    // frozen verified figure, which is exactly why the two are kept
+    // separate and neither is ever called the other's name.
+    assert.equal(octResultAfterSecondBump.recordedCumulativePaidCents, 80000, "cumulative keeps moving to the live $800 while verified stays frozen at $500");
 
     // November itself: the pledge was NOT created in November (no new
-    // commitment), and the $300 added this month has no payment-review
-    // audit trail (no dated event) -- so November's own verified total
-    // must be $0 for this pledge, not $300. This is the concrete
-    // under-counting the disclosed limitation describes.
+    // commitment -- created_at is still October), and the $300 added
+    // this month has no payment-review audit trail (no dated event) --
+    // so November's own verified total for THIS pledge must be $0, not
+    // $300. This is the concrete, disclosed under-count: the $300 is
+    // never claimed as received anywhere, by either month.
     const novResult = runCapability(lifecycleDb, "user-1", novBoundaries.instantStartEpoch, novBoundaries.instantEndEpoch, novBoundaries.periodLabel);
     assert.equal(novResult.newCommitmentsCents, 0, "the pledge is not a November commitment -- it was created in October");
     assert.equal(novResult.verifiedMoneyReceivedCents, 0, "the $300 added in November has no recorded payment date and must never be guessed into November's total");
     assert.ok(novResult.limitations.length > 0, "the gap must stay disclosed even when the verified total is zero");
   }
 
-  console.log("Part C (cumulative-payment lifecycle, stability across reimports) checks passed.");
+  console.log("Part C (Stage A/B/C cumulative-payment lifecycle, reconstructed as-of-period-end stability) checks passed.");
 
   // =====================================================================
-  // Part D -- the remaining named scenarios from the review not already
-  // covered above: repeated imports with UNCHANGED amounts, and a pledge
-  // becoming fully paid with no dated event at all.
+  // Part D -- the remaining named scenarios from the reviews not already
+  // covered above: repeated imports with UNCHANGED amounts, a pledge
+  // becoming fully paid with no dated event at all, and a month/year
+  // boundary case for the reconstruction query itself.
   // =====================================================================
 
   // D1: repeated imports with unchanged paid amounts never touch the row
   // at all (lib/import/jl-donation-match.ts's own proposedUpdates filter
   // only includes genuinely CHANGED rows -- confirmed directly against
-  // that source file, not assumed) -- so updated_at never moves, and the
-  // row stays verified indefinitely across any number of no-op reimports.
+  // that source file, not assumed) -- so no change-log entry is ever
+  // written, and the row's current paid_cents remains correct and
+  // verified indefinitely across any number of no-op reimports.
   insertGivingActivity(lifecycleDb, { id: "ga-unchanged", sourceFingerprint: "fp-unchanged", category: "completed_gift", committedCents: 40000, paidCents: 40000, createdAt: OCT(8) });
   // Deliberately NOT calling reimportBumpsPaid here -- a reimport whose
   // file shows the exact same Paid/Balance Due values this row already
@@ -459,24 +493,51 @@ async function run() {
     assert.ok(octResult.verifiedMoneyReceivedCents >= 40000, "an unchanged row must remain verified no matter how many times its source file is re-imported");
   }
 
-  // D2: a pledge becomes fully paid via the ordinary reimport path, with
-  // no payment-review decision and so no dated event anywhere -- even
-  // once completed_gift, it must never be retroactively counted as
-  // "received" in any month.
+  // D2: a pledge becomes fully paid via the ordinary reimport path (no
+  // payment-review decision, so no dated event anywhere) -- even once
+  // completed_gift, and even though this pledge's OWN creation month
+  // (September) has long since closed, the payoff itself must never be
+  // retroactively counted as "received" in any month -- not September
+  // (nothing changed within September), and not October (no commitment,
+  // no audit trail).
   insertGivingActivity(lifecycleDb, { id: "ga-paid-off", sourceFingerprint: "fp-paid-off", category: "open_pledge", committedCents: 60000, paidCents: 0, createdAt: SEPT(5) });
   reimportBumpsPaid(lifecycleDb, "ga-paid-off", 60000, 0, "completed_gift", OCT(25));
   {
-    const octResult = runCapability(lifecycleDb, "user-1", octBoundaries.instantStartEpoch, octBoundaries.instantEndEpoch, octBoundaries.periodLabel);
-    // This pledge was created in September, so it contributes nothing to
-    // October's newCommitments, and (being touched since its September
-    // creation) nothing to October's verified figure either -- the full
-    // $600 is simply never claimed as "received" anywhere.
     const septBoundariesD2 = localMonthBoundaries(SEPT(20), ET);
-    const septResult = runCapability(lifecycleDb, "user-1", septBoundariesD2.instantStartEpoch, septBoundariesD2.instantEndEpoch, septBoundariesD2.periodLabel);
-    assert.ok(!Number.isNaN(octResult.newCommitmentsCents) && !Number.isNaN(septResult.newCommitmentsCents));
+    const septResultAfterPayoff = runCapability(lifecycleDb, "user-1", septBoundariesD2.instantStartEpoch, septBoundariesD2.instantEndEpoch, septBoundariesD2.periodLabel);
+    // September closed before the October 25 payoff happened, so the
+    // reconstruction correctly freezes September's own value at $0 paid
+    // (the previous_json recorded by the October 25 change) -- not the
+    // now-current $600.
+    assert.equal(septResultAfterPayoff.newCommitmentsCents, 60000, "the pledge itself is still a September commitment");
+    assert.equal(septResultAfterPayoff.verifiedMoneyReceivedCents, 0, "September's own verified total must stay $0 for this pledge -- the full payoff happened in October, after September had already closed");
+
+    const octResultD2 = runCapability(lifecycleDb, "user-1", octBoundaries.instantStartEpoch, octBoundaries.instantEndEpoch, octBoundaries.periodLabel);
+    // October gets no credit either: the pledge is not an October
+    // commitment (created in September), and the payoff has no
+    // payment-review audit trail. October's own total is unaffected by
+    // ga-paid-off -- still exactly Stage C's $500 (ga-lifecycle, frozen)
+    // plus D1's $400 (ga-unchanged), both already established earlier in
+    // this Part, with nothing from ga-paid-off added in.
+    assert.equal(octResultD2.verifiedMoneyReceivedCents, 90000, "unaffected by ga-paid-off: 50000 (ga-lifecycle, frozen at Stage C's value) + 40000 (ga-unchanged)");
   }
 
-  console.log("Part D (repeated unchanged imports, full payoff with no dated event) checks passed.");
+  // D3: a month/year boundary for the reconstruction query itself --
+  // December's own pledge, created Dec 28, reimport-bumped on January 3
+  // of the FOLLOWING year. December's verified total must freeze at its
+  // pre-bump value despite the rollover into a new calendar year.
+  const decBoundaries = localMonthBoundaries(Math.floor(Date.UTC(2026, 11, 15, 15, 0, 0) / 1000), ET);
+  assert.equal(decBoundaries.periodLabel, "December 2026");
+  const DEC = (day, hour = 15) => Math.floor(Date.UTC(2026, 11, day, hour, 0, 0) / 1000);
+  const JAN2027 = (day, hour = 15) => Math.floor(Date.UTC(2027, 0, day, hour, 0, 0) / 1000);
+  insertGivingActivity(lifecycleDb, { id: "ga-year-boundary", sourceFingerprint: "fp-year-boundary", category: "partially_paid_pledge", committedCents: 90000, paidCents: 10000, createdAt: DEC(28) });
+  reimportBumpsPaid(lifecycleDb, "ga-year-boundary", 90000, 0, "completed_gift", JAN2027(3));
+  {
+    const decResult = runCapability(lifecycleDb, "user-1", decBoundaries.instantStartEpoch, decBoundaries.instantEndEpoch, decBoundaries.periodLabel);
+    assert.equal(decResult.verifiedMoneyReceivedCents, 10000, "December's own verified total must freeze at the pre-January-bump $100, correctly reconstructed across the year rollover");
+  }
+
+  console.log("Part D (repeated unchanged imports, full payoff with no dated event, year-boundary reconstruction) checks passed.");
   console.log("fundraising-progress.test.mjs: all assertions passed");
 }
 
