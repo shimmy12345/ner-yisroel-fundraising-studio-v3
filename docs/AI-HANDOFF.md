@@ -45969,3 +45969,318 @@ protection is restored"):
 
 **No Production file was read or written in the closing half of this
 round. No paid service was activated. No credential was created.**
+
+## System-Wide AI Audit and Production Readiness (2026-10-16) -- INVESTIGATION AND PLANNING ONLY, NOTHING DEPLOYED, NOTHING ACTIVATED
+
+Requested: a complete inventory of every AI-branded feature in the app,
+whether Cloudflare Workers AI could reasonably power more of them, a
+recommended shared architecture, and a Production deployment plan for
+Meeting Notes -- investigation and planning only, no implementation, no
+deployment.
+
+**Method note, stated up front because of what happened earlier this
+session**: this entire audit was done directly, by reading the actual
+source files myself (Grep/Glob/Read only) -- no fork, no subagent, no
+Bash command capable of deploying, writing to D1, or touching git, for
+any part of it. The task's own instruction ("do not permit parallel
+agents to modify files, configurations, deployments, or databases")
+plus this session's earlier incident (a fork sent to do read-only
+research instead deployed a config change and called a live write API)
+made that the only acceptable way to run this round. A handful of
+read-only `wrangler` lookups (Staging/Production D1 database IDs,
+Production's secret *names* only, Production's cron trigger config)
+were run directly by me, never by a subagent, and nothing was deployed,
+written, or changed.
+
+### Part 1 -- Complete AI feature inventory
+
+A repo-wide search for every real AI-provider signature (`env.AI`,
+`ANTHROPIC_API_KEY`, `organizeWith`, `openai`, `gpt-`, `anthropic.com`,
+`gemini`, `cohere`, `huggingface`, `replicate`) turns up exactly **four
+files**: the two Meeting Notes provider modules, the Meeting Notes
+route, and the Workers AI binding type declaration. (A few unrelated
+hits on the literal string "openai" are false positives from this
+app's `.openai/hosting.json` legacy ChatGPT-Apps-SDK scaffolding
+directory name -- not an API call.) That one fact drives this whole
+inventory: **Meeting Notes is the only feature in the entire codebase
+that calls a real language model.** Every other AI-branded or
+"Intelligence"-branded feature below was individually opened and
+traced to its actual data source to confirm this -- none of them are
+mocked or placeholder; they are all real, working features over live
+D1 data, just not generative.
+
+| Feature | Where the user finds it | What it does | Prod / Staging | Real AI, deterministic, or manual? |
+|---|---|---|---|---|
+| **AI Meeting Notes ("Organize Notes")** | Donor page → "Add Meeting Notes" | Turns a dictated/typed transcript into a structured summary, interests, opportunities, confirmed/possible commitments, and follow-ups with due dates | Staging: live-tested extensively, working. **Production: not configured at all** -- no `ai` binding, no `AI_PROVIDER`/`WORKERS_AI_MODEL` vars (confirmed by grepping `wrangler.production.jsonc`, zero matches) | **Real generative AI** -- Cloudflare Workers AI, Mistral Small 3.1 24B, default; Anthropic Claude Haiku coded but inactive (no API key anywhere, by design) |
+| **Assistant ("Ask Fundraising OS")** | Left nav → Assistant; free-text box + 4 quick-prompt buttons | Answers "prepare me for my meeting," "draft a thank-you," "who haven't I spoken with," "summarize this month," or a free-typed question | Identical in both -- no AI call, so nothing to configure | **Deterministic.** `lib/ai/rule-based.ts`'s `RuleBasedAIService` assembles fixed-template text from real live data (recommendations, interactions, gifts, priorities, the same Relationship Snapshot and Meeting Brief every other page uses). Free text is routed by `classifyAssistantPrompt`, a plain keyword regex, into one of 6 fixed templates -- not a real classifier |
+| **Donor Research** | Donor page → Research workflow | Lets a fundraiser paste URLs/snippets as evidence, propose/confirm a donor's identity, and classify evidence into 6 categories | Identical in both | **Manual, not AI at all.** The route's own comment states it explicitly: "no outbound fetch, no search-provider API key, anywhere in this file." `classifyEvidenceCategory` is a deterministic categorizer over exactly the text the fundraiser typed |
+| **Recommendations** ("Suggested Action," Today's Agenda, Portfolio Focus feed) | Donor page, Today page, Portfolio Focus | Ranks what to do next per donor (follow up, acknowledge a gift, re-engage, etc.) | Identical in both | **Deterministic scoring/ranking** -- `lib/relationships/recommendation-rank.ts` + `recommendation-candidates.ts`, a hand-tuned scoring formula over real reminders, pledges, gifts, and contact gaps |
+| **Relationship Snapshot** (donor page "summary" / "institutional memory," also feeds Assistant and Meeting Brief) | Donor page | Synthesizes a short relationship summary and institutional memory from accepted facts | Identical in both | **Deterministic.** `lib/relationships/fact-synthesis.ts`'s own comment: "deterministic synthesis... Pure function, no D1 access, no generation -- only selection, scoring, capping, and verbatim sentence-join over already-accepted text" |
+| **Meeting Brief / "Prepare for Meeting"** (visit preparation) | Donor page → "Prepare for Meeting" | A pre-meeting brief: relationship context, latest interaction, suggested action, open asks, family dates | Identical in both | **Deterministic** -- `lib/relationships/meeting-brief.ts` reuses the same recommendation + snapshot + asks data as everything else, specifically so it can never disagree with the donor page or Assistant for the same donor |
+| **Daily Fundraising Agenda** (email + Today page) | Scheduled email; Today page | Buckets what's overdue/due today/this week/upcoming | Identical logic; Production cron `0 * * * *` active, Staging cron explicitly cleared (`triggers.crons: []`, a deliberate fix from a 2026-10-13 incident) | **Deterministic** -- `lib/workspace/live-data.ts`'s `loadWorkspaceBrief`, timezone-aware date-bucket math off the same Recommendations engine |
+| **Fundraising Intelligence** | Own nav-adjacent page | "What's changed and worth knowing right now" | Identical in both | **Deterministic** -- `lib/fundraising-intelligence/compute.ts`, explicitly "computed fresh from current Fundraising OS data" per its own page copy |
+| **Portfolio Focus** | Own nav-adjacent page | "Where your limited attention may matter most over 30 days" | Identical in both | **Deterministic** -- scored on financial significance, opportunity, stewardship, momentum, relationship context, and tactical signals; no AI |
+| **Pledge Review / pledge-related explanations** | `/pledge-review` (not in main nav; reached from pledge management) | Lists open/partially-paid pledges with balances | Identical in both | **Deterministic** -- a plain SQL listing; any "why" text a donor's recommendation shows for a pledge follow-up is the same fixed-template Recommendations text above, never AI-generated |
+| **Trip / Travel Planning** | `/travel-planning` | Trip dashboards, prospect tracking, attributions | Identical in both | **No AI anywhere in this code path** (zero hits in the provider-signature grep for any trip-related file) -- plain CRUD and deterministic prospect/attribution logic |
+
+**Why the Assistant's free-text box can feel unreliable (deliverable
+2's question, in full)**: it isn't broken, and it isn't mocked -- every
+one of its 4 quick-prompt buttons reliably produces real, data-grounded
+output every time, because they map directly to a fixed template. The
+one soft spot is the free-text box: `classifyAssistantPrompt` is six
+regex checks against the raw prompt text (e.g. "thank|acknowledge" →
+draft, "meeting|prepare" → meeting-brief), and anything that doesn't
+match one of those falls through to a generic "next action" response
+regardless of what was actually asked. A real LLM would understand
+intent; this regex can only recognize a few phrasings. That is the
+honest, complete explanation for why it can feel limited -- not a bug,
+not fake data, just the inherent ceiling of a keyword classifier
+standing in for the "chat" framing of the page.
+
+**Financial data exposure, system-wide**: Meeting Notes is also the
+only feature that sends anything to an external inference path at all,
+and it sends exactly one thing -- the free-text transcript the
+fundraiser typed or dictated (capped at 8,000 characters,
+`MAX_TRANSCRIPT_LENGTH` in `lib/meeting-notes/organize.ts`). No
+donor financial field (`committed_cents`, `paid_cents`,
+`balance_cents`, payment-plan amounts) is ever programmatically pulled
+from D1 and included in a prompt -- if a dollar figure reaches the AI
+today, it is only because the fundraiser said it out loud in their own
+dictation, exactly the same as a dollar figure in their typed notes
+already would be. Every other feature above never calls an AI
+provider at all, so the question doesn't apply to them.
+
+### Part 2 -- Shared Cloudflare AI architecture
+
+**Recommendation: build this only when a second real AI feature is
+actually being implemented, not speculatively now.** With exactly one
+AI consumer in the whole app, "shared architecture" mostly means not
+repeating Meeting Notes' own mistakes next time, which is a design
+discipline, not a library that needs writing today. That said, here is
+the architecture to use when that second feature arrives:
+
+- **One thin client module** (e.g. `lib/ai/workers-ai-client.ts`),
+  extracted from `lib/meeting-notes/providers/workers-ai.ts`'s existing
+  `env.AI.run(model, input)` call, the dual response-shape handling
+  (`{response}` vs. OpenAI-style `{choices:[...]}`, both confirmed to
+  occur live), and the `Promise.race` timeout (the binding has no
+  `AbortSignal`). This is the only piece that should ever be "shared"
+  -- a thin, provider-shape-normalizing wrapper, nothing more.
+- **Prompts and schemas stay feature-specific**, living next to each
+  feature exactly as `lib/meeting-notes/organize.ts` does today (its
+  own comment already states this is deliberate: "this module holds
+  only the provider-agnostic pieces... shared by every AI provider").
+  Never a shared mega-prompt or a generic "ask the AI" endpoint --
+  each feature defines its own `buildSystemPrompt`/`buildUserMessage`/
+  response validator, same as Meeting Notes' own
+  `parseOrganizedResponse`, which is always re-run against the raw
+  model output regardless of whether `response_format: json_schema`
+  was used, since schema-constrained generation is a provider best
+  effort, never a substitute for server-side validation.
+- **Authentication and donor-ownership checks never move into the
+  shared client.** Every route keeps doing exactly what
+  `organize/route.ts` does today: `getChatGPTUser()`, then an
+  `owner_user_id = ? AND data_source = 'live'` check on the specific
+  donor, before any AI call. The AI client should not even receive a
+  `donorId` -- only whatever already-authorized text/data the calling
+  route decides to hand it, the same separation the `env.DB` binding
+  already has from the app's own auth layer.
+- **Hard invariant: AI never invents financial facts.** No future
+  feature's prompt should include a donor's `committed_cents`,
+  `paid_cents`, `balance_cents`, or payment-plan figures with an
+  instruction to summarize or reason about them -- if a feature
+  legitimately needs that, the correct pattern is what Meeting Notes
+  already does for commitments: the AI organizes what a human
+  explicitly stated in free text, and the server-side validator
+  (`parseOrganizedResponse`'s equivalent) rejects or flags anything
+  that looks like a fabricated number not traceable to the input text.
+  Treating D1 as the sole source of truth for money, always, is a
+  line this architecture should never cross without a dedicated,
+  separately-authorized design review -- not something a shared client
+  should make easy to do by accident.
+- **AI output is always advisory, never auto-saved.** Meeting Notes'
+  own pattern -- "Nothing is saved until you review and approve it,"
+  the save-blocking gate on an unresolved due date
+  (`findUnresolvedApprovedFollowUps`) -- is the template for every
+  future AI feature: generate, show, let the fundraiser edit/approve,
+  write only on an explicit human Save. No feature should let an AI
+  response write to `donors`, `giving_activities`, or any financial
+  table directly. For any future write path, explicit approval -- a
+  dedicated, separately designed confirmation step -- is required
+  before any AI-assisted flow could ever touch a financial table;
+  none of today's code does, and this architecture should keep it
+  that way by default, not as an afterthought.
+- **Privacy minimization stays per-feature.** Pass only what the
+  specific task needs -- Meeting Notes' transcript-only input is the
+  model to copy, not a convenience "send the whole donor record" shared
+  helper.
+- **Error handling**: keep the existing fail-soft shape -- `{available:
+  false}` when the binding/API key is absent, `{ok: false, error}` on
+  a provider failure -- so the deterministic/manual path (typing notes
+  by hand, in Meeting Notes' case) always remains fully usable with AI
+  unavailable. Every future AI feature should degrade the same way.
+- **Usage controls / cost monitoring**: not needed yet. Measured Workers
+  AI cost per Meeting Note is roughly 50-150 Neurons; the free daily
+  allowance (10,000 Neurons/day) comfortably covers hundreds of notes a
+  day, let alone this org's realistic volume. If a second or third
+  feature is added later, a simple D1-logged per-user daily counter
+  (a new small table, no external service) would be the lightweight
+  option worth adding at that point -- not before.
+- **Tests**: the existing pattern -- provider module tested against a
+  stubbed `env.AI`, prompt builders tested as pure functions, output
+  validation tested against malformed/adversarial model responses
+  (`tests/meeting-notes-workers-ai-provider.test.mjs` and siblings) --
+  is the template for any new AI feature's test coverage.
+
+**Which features genuinely benefit from generative AI, and which
+should stay deterministic**: every deterministic feature in Part 1's
+table (Recommendations, Relationship Snapshot, Meeting Brief, Daily
+Agenda, Fundraising Intelligence, Portfolio Focus, Pledge Review) is
+solving a "what does the verified data already say" problem --
+exactly what deterministic ranking and synthesis is best at, with zero
+hallucination risk, and they are all already working well. Generative
+AI would add risk there for no real benefit and is **not
+recommended** for any of them. Meeting Notes is the one place in the
+app with a genuine unstructured-text problem (turning messy free-form
+dictation into structured notes) that deterministic logic cannot
+solve, which is exactly why it was built that way and is the only
+sound AI investment so far. The Assistant's free-text box is the one
+plausible future candidate -- real generation over the already-fetched
+real snapshot data, under the same non-invention constraint as Meeting
+Notes -- but it is a nice-to-have, not a gap blocking anything today,
+and should wait for separate authorization and design rather than
+riding along with the Meeting Notes Production deployment.
+
+### Part 3 -- Production readiness for AI Meeting Notes
+
+- **Backup/restore readiness**: already verified and current,
+  independent of this feature. Production's nightly D1 backup +
+  monthly restore-verification pipeline has been built out and
+  live-tested across multiple rounds (`docs/AI-HANDOFF.md`, "D1
+  Nightly Backup Scheduling Reliability," all three stages active;
+  "Production Restore-Verification," full restore+integrity pass
+  succeeded 2026-10-11). The most recent confirmation is from
+  **yesterday**: "D1 Restore/Schema Sync Check -- FRESH GITHUB ACTIONS
+  RUN CONFIRMED GREEN, INCIDENT FULLY CLOSED (2026-10-15)" -- GitHub
+  Actions run `38745537156`, both jobs `conclusion: success`. Meeting
+  Notes needs no new backup work of its own: it adds no new tables and
+  no migration (see data-preservation point below), so it is already
+  fully covered by this existing, just-reconfirmed pipeline.
+- **Exact code/config changes required**: **zero application code
+  changes.** Every Meeting Notes code path (the organize route, both
+  providers, the due-date resolver, the client UI) is already
+  provider-selected purely by environment variable
+  (`AI_PROVIDER`/`WORKERS_AI_MODEL`), not by any environment-specific
+  code branch -- the same build artifact already tested on Staging is
+  what a Production deploy would ship. The only change is to
+  `wrangler.production.jsonc`, adding the same three lines Staging
+  already has:
+  ```jsonc
+  "ai": { "binding": "AI" },
+  "AI_PROVIDER": "workers-ai",
+  "WORKERS_AI_MODEL": "@cf/mistralai/mistral-small-3.1-24b-instruct"
+  ```
+  **No new secret.** Confirmed directly: `wrangler secret list
+  --config wrangler.production.jsonc` returns exactly three secrets
+  today -- `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`,
+  `GMAIL_OAUTH_REFRESH_TOKEN` -- nothing AI-related, and nothing
+  AI-related needs to be added, since the `ai` binding (like `DB`) is
+  declared directly in the wrangler config, not a secret.
+- **Production/Staging isolation**: confirmed unaffected. Production's
+  D1 database (`fundraising-os-production-db`,
+  `a51c6571-ae16-4614-aa9a-08f8e6be3ecd`) and Staging's
+  (`fundraising-os-staging-db`, `6c18396c-0a8f-4f2c-ba83-ea809ec10289`)
+  are and remain two entirely separate databases; the `ai` binding is
+  a separate Cloudflare Workers AI account-level resource, not data
+  storage, and adding it touches no D1 configuration at all.
+- **Preservation of existing data**: confirmed by reading
+  `app/api/meeting-notes/route.ts` directly -- the save path contains
+  exactly two statements, both `INSERT INTO` (`interactions`, then
+  `recommendations`). There is no `UPDATE` or `DELETE` anywhere in
+  this feature's write path. It can only ever add new rows; it cannot
+  touch an existing donor, donation, pledge, payment-plan, or
+  interaction record. No migration is required -- no new table, no
+  schema change.
+- **Production email schedule must stay untouched**: Production's
+  `wrangler.production.jsonc` currently has `"triggers": { "crons":
+  ["0 * * * *"] }` for the Daily Fundraising Agenda email. The
+  Meeting Notes config change must land as a diff *only* inside the
+  `vars` block -- the exact mistake that broke Staging's own cron once
+  before (the 2026-10-13 incident, where omitting the `triggers` key
+  entirely was wrongly assumed to leave a prior cron alone) must not
+  be repeated in reverse on Production. The deploy diff should be
+  reviewed before running to confirm `triggers` is not touched at all.
+- **Authenticated smoke tests, using safe methods**: the same
+  two-step pattern already proven twice on Staging this session --
+  (1) as an authenticated owner session, call
+  `/api/meeting-notes/organize` directly with a throwaway transcript
+  against a dedicated, clearly-labeled synthetic test donor and
+  confirm a real `200` with AI-generated content; (2) immediately
+  re-query D1 to confirm zero new rows were written, since Organize
+  never writes regardless of which donor it's pointed at (confirmed
+  from the route's own code -- it only reads the donor for the
+  ownership check and calls the AI binding). This requires one
+  one-time, low-risk setup: a dedicated "QA TEST" synthetic donor
+  created in Production the same way the Staging one was, clearly
+  labeled, with the owner's authorization -- so a Production smoke
+  test never needs to touch a real donor record at all, mirroring
+  Staging's now-proven safe-testing pattern exactly.
+- **Rollback procedure**: trivial by design, because this is a 3-line
+  `vars` diff with no code change and no new table. Either `wrangler
+  rollback` to the prior Production Version ID, or a plain `git
+  revert` of the 3-line `wrangler.production.jsonc` diff followed by a
+  redeploy, fully restores the pre-change state. No data rollback is
+  ever needed: Organize never writes, and Save only ever inserts new
+  rows, which (if ever needed) can be identified and removed the same
+  way the Staging test rows were this session.
+
+### Decisions requiring owner authorization
+
+1. **Authorization to actually deploy** the 3-line `wrangler.production.jsonc`
+   change and run the Production smoke test above -- nothing in this
+   round did either.
+2. **Creating a dedicated "QA TEST" synthetic donor in Production**
+   (mirroring the Staging one) for safe, repeatable smoke-testing
+   without ever touching a real donor record.
+3. **Donor-privacy governance confirmation**: Cloudflare's own Workers
+   AI privacy terms (quoted verbatim in the "Evaluate Cloudflare
+   Workers AI" round) state Customer Content is not used to train
+   models without explicit consent, and stays inside the same
+   Cloudflare account boundary already trusted with D1. This is a
+   strong privacy posture, but since real (not synthetic) donor
+   meeting content would flow through it in Production for the first
+   time, the owner may want this explicitly minuted for the
+   organization's own donor-privacy governance, separate from the
+   technical readiness above.
+4. **Whether to pursue the Assistant free-text AI upgrade** identified
+   as the one plausible future candidate in Part 2 -- explicitly not
+   needed for Meeting Notes' own Production readiness, and would need
+   its own separate design and authorization round.
+5. Confirmed **not** needed, listed only to close the loop: no new
+   Anthropic account, no `ANTHROPIC_API_KEY`, no paid-service
+   activation of any kind is required for this deployment -- Workers
+   AI alone, already free-tier, is what Staging proved reliable.
+
+### Prioritized implementation roadmap
+
+1. **(Pending authorization)** Deploy Meeting Notes to Production per
+   Part 3 above -- lowest effort, already fully tested, zero code
+   change.
+2. **(Deferred, not urgent)** Extract a shared `lib/ai/workers-ai-client.ts`
+   from the existing Meeting Notes provider -- worth doing once a
+   second real AI feature is actually planned, not before.
+3. **(Deferred, needs its own authorization)** Assistant free-text
+   generation upgrade -- the only other feature in the app with a
+   genuine case for adding generative AI.
+4. **Not recommended at any priority**: adding generative AI to
+   Recommendations, Relationship Snapshot, Meeting Brief, Daily
+   Agenda, Fundraising Intelligence, Portfolio Focus, or Pledge
+   Review -- these are correctness-critical, already deterministic,
+   already reliable, and generative AI would only add hallucination
+   risk with no corresponding benefit.
+
+**No Production deployment, configuration change, or data change
+occurred this round. No paid service was activated. No credential was
+created or read. No parallel or forked agent was used for any part of
+this investigation. Stopping here per this round's instruction to stop
+after documenting the findings.**
