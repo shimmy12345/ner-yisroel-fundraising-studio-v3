@@ -48260,3 +48260,392 @@ before Production deployment authorization is requested -- no
 Production deployment was performed, and none will be requested from
 this session until that independent review has had a chance to weigh
 in on this entry.
+
+## Final Payment Accuracy and Financial Data Integrity Review (2026-10-16)
+
+A second, more targeted independent review of the prior round's own fix
+found that it could still misattribute money to the wrong month in one
+specific way, and that its disclosed-limitation wording made a claim
+the system cannot actually honor. Both are fixed here. Code/tests
+committed as `36eddff`, on top of `8431f49`/`9789649` (the two prior
+independent-review rounds, above). No Production file was read or
+written. No parallel or forked agent was used for any part of this
+round's investigation, implementation, Staging deployment, database
+access, or verification.
+
+### 1. The cumulative-payment problem, traced exactly as asked
+
+**The example traced, stage by stage, against a real giving_activities
+row and a real synthetic SQLite database** (`tests/fundraising-progress.test.mjs`'s
+own "Part C"): a pledge is imported October 5 with $200 of $1,000
+already paid (a brand-new row -- `created_at = updated_at` = Oct 5).
+October 20, a ROUTINE reimport (no payment-review decision -- JL's own
+re-export simply shows a higher cumulative Paid value for the SAME
+pledge line, matched by `source_fingerprint`) bumps the row's
+`paid_cents` to $500; `created_at` is untouched, `updated_at` moves to
+Oct 20. November 10, another routine reimport bumps it to $800;
+`updated_at` moves to Nov 10.
+
+**What the PRIOR round's fix would have reported, confirmed by
+re-running its own logic against this exact lifecycle**: querying
+"October's money received" immediately after the Oct 20 reimport (still
+in October) returned $500 -- defensible, since both $200 and the extra
+$300 happened within the same calendar month either way. But querying
+the SAME "October" figure again AFTER the Nov 10 reimport -- e.g. the
+fundraiser asking in December "how much did we actually raise in
+October" -- returned **$800**, silently including the $300 that was
+only discovered in November. A previously-reported, closed month's own
+total was changing purely because of when the query happened to run,
+with no real underlying change to what happened in October. Confirmed
+directly against the real SQL (not assumed): the prior round's
+`NEW_GIVING_ROWS_SQL` read `paid_cents` LIVE at query time for any row
+whose `created_at` fell in the requested window, with nothing
+distinguishing "what was paid at creation" from "what is currently
+paid, including everything added since by unrelated later imports."
+
+**Verified against the exact question list:**
+- **Attribute later payments to the original import month?** Yes --
+  confirmed this was happening (the $300 from November's reimport was
+  being reported as part of October's total when queried after the
+  fact). Fixed.
+- **Count the same payment twice?** No -- the existing fingerprint-based
+  dedup against `jl_payment_assignment_audits` was already correct and
+  remains unchanged; this defect was about mis-DATING money, not
+  double-counting it.
+- **Change historical monthly totals when a later import occurs?**
+  Yes, confirmed directly -- this was the core defect. Fixed; October's
+  own figure is now provably stable across any number of later imports
+  (Section 2).
+- **Confuse the date a record was imported with the date money was
+  received?** Yes, for this one path specifically (the ordinary reimport
+  refresh) -- confirmed there is no recorded payment date anywhere for
+  it, and the prior fix's `created_at` gate was not sufficient protection
+  once a row is touched again after its own creation.
+- **Overstate or understate cash received?** Both were possible
+  depending on when the query ran: overstated for a closed month
+  re-queried after a later reimport (as traced above); and, after this
+  round's fix, intentionally UNDERSTATED by design going forward --
+  Section 4 explains why understating, with a clear disclosure, is the
+  safer failure mode than overstating.
+
+### 2. The fix
+
+`VERIFIED_NEW_GIVING_ROWS_SQL` (renamed from the prior round's
+`NEW_GIVING_ROWS_SQL`) adds `AND updated_at = created_at` to its
+existing `created_at` window filter. `updated_at` is set once, at
+INSERT, to the exact same value as `created_at`; both payment-processing
+paths (the ordinary reimport upsert and the explicit payment-review
+screen's pledge update) bump `updated_at` to the import's own `now` on
+any GENUINE change -- confirmed directly against `app/api/import/route.ts`'s
+own `ON CONFLICT DO UPDATE`/`pledgeUpdateStatements` SQL, not assumed.
+`updated_at = created_at` is therefore the one already-populated,
+reliable signal that a row's current `paid_cents` is still exactly what
+it was at that single creation event -- nothing added since. The
+moment a later import touches an in-period row, its contribution to the
+VERIFIED figure drops to **zero**, not a partial or estimated amount --
+it can only re-enter a reported total through the dated
+`jl_payment_assignment_audits` path, which already has a real date.
+
+This makes the verified total provably **stable**: once computed for a
+closed month, nothing a later import does can change it, because every
+row that could still change has already been excluded from it. Traced
+and confirmed directly: re-querying October's figure after the November
+reimport in the test above returns the exact same value it did
+immediately after the October reimport -- not what it eventually
+becomes.
+
+**The explicit trade-off, by design**: this is more conservative than
+the prior round's fix, not less. It can now UNDER-report real money
+received (the $300 added in November is never counted as received
+anywhere, in any month, by this capability), but it can never again
+OVER-report, and it can never again change its mind about a closed
+month. Per this round's own stated priority ("trustworthy financial
+information, not making the AI appear more capable than the underlying
+records allow"), under-reporting with a clear, mandatory disclosure is
+the correct trade-off against over-reporting or an unstable figure.
+
+**The CURRENT cumulative balance is still visible**, just honestly
+relabeled: `NEW_COMMITMENTS_SQL` now also returns
+`cumulativePaidTotal` (`SUM(paid_cents)` across the same
+in-period commitment rows, with no `updated_at` filter -- a live
+snapshot, by design) surfaced as `recordedCumulativePaidTotal` in
+`capabilities.ts`'s own `FundraisingProgress` type. This is the second
+category the task asked to be distinguished: "recorded cumulative
+payments" vs. "verified money received." It is never labeled
+"received," and the capability description shown to the planning AI
+says so explicitly.
+
+### 3. The limitation wording, corrected
+
+The prior wording said an omitted payment "will be reflected once that
+pledge is fully paid or its payment is processed through the review
+screen" -- false, and now removed. This capability has no mechanism
+that EVER retroactively attributes a past, undated payment increase to
+any month, no matter what later happens to that pledge (including
+becoming fully paid). The revised text
+(`lib/assistant/fundraising-progress.ts`'s `RECONCILIATION_LIMITATION`):
+
+> "Verified dated payments above include only: (1) new pledges or gifts
+> first recorded this period whose balance has not changed since, and
+> (2) payments confirmed through the payment-review screen with a known
+> date. They do NOT include a later increase to an existing pledge's
+> paid balance that arrived through a routine data refresh with no
+> payment-review decision -- this system has no record of which date
+> that money arrived, cannot place it in any specific month, and will
+> never retroactively add it to a later total even once that pledge is
+> fully paid. The actual total received this period may be understated
+> as a result. A payment-event ledger recording the date and amount of
+> every individual payment, not just each pledge's current cumulative
+> balance, would be needed to close this gap."
+
+This states plainly which records ARE included, which CANNOT be placed
+in a month and why, that the total may be UNDERSTATED (not simply
+"incomplete" in some vaguer sense), and what would actually close the
+gap (Section 4's design).
+
+**Enforced in the deterministic response layer, not solely the
+prompt**: `lib/assistant/protocol.ts`'s new `appendFinancialLimitations(answer,
+limitations)` unconditionally appends every `fundraising_progress`
+limitation string to the final composed answer, called from
+`lib/assistant/orchestrator.ts` after the compose AI call returns --
+regardless of whether the model's own text already mentioned it. The
+compose prompt still separately instructs the model to relay it (belt
+and suspenders), but the actual guarantee no longer depends on the
+model remembering to. Verified live (Section 7): the real Staging
+response contained BOTH the model's own paraphrase of the limitation
+AND the literal, deterministically-appended text -- redundant on
+purpose, never dropped.
+
+### 4. Investigation: a reliable payment-event ledger
+
+**What already exists**: `jl_payment_assignment_audits` is, structurally,
+exactly the shape of a payment-event ledger already -- `payment_date`,
+`payment_cents`/`applied_cents`/`new_gift_cents`, `pledge_activity_id`
+(link to the original pledge), `import_id` (provenance), and a unique
+`(import_id, payment_fingerprint)` index that already makes repeated
+imports of the identical payment idempotent (confirmed: a re-imported
+file containing the same payment fingerprint is recognized via
+`jl_payment_assignments`' own "remembered decision" lookup and never
+re-processed). It is **immutable once written** -- confirmed no code
+path in this repository ever issues an `UPDATE` against this table, only
+`INSERT`. The one thing it does not have is a `reversed_at`/correction
+mechanism of its own (unlike `pledge_balance_corrections`, which does).
+
+**Why it does not cover every payment today**: it is populated ONLY
+when an incoming row is recognized as "payment-shaped" by
+`lib/import/jl-donations.ts`'s `isExplicitJlPayment` -- `Item Num`/`Desc`
+text matching `/\b(?:payment|pmt|pymt|installment)\b/i`, with a positive
+`Paid` value. A row that does not match this pattern, but whose
+Paid/Balance Due columns changed from the previously-stored value for
+the same pledge line item, is instead treated as an ordinary
+`proposedUpdates` row (`lib/import/jl-donation-match.ts`) and silently
+upserted with no audit trail at all.
+
+**A concrete, fixable finding (code-level, confirmed, not
+speculative)**: this repository's OWN test fixtures
+(`tests/payment-assignment.test.mjs`) model JL Solutions' full export
+format as carrying a SEPARATE line item per payment transaction (e.g.
+`Item Num: "PAYMENT", Desc: "Pledge payment"`) alongside the pledge's
+own line item (`Item Num: "PLEDGE"`) -- meaning JL's export format DOES
+appear to support genuine per-payment granularity with its own date, at
+least for payments recorded this way. The regex above, however, is
+narrower than the full space of plausible real-world payment
+descriptions -- it would miss, for example, "Check #1234," "ACH Debit,"
+"Auto-Pay," "Credit Card," or "CC" (none contain "payment," "pmt,"
+"pymt," or "installment" as a whole word). **It is plausible that some
+genuinely itemized payment rows in a real JL export are currently
+mis-routed to the ordinary, undated upsert path purely because of this
+text-matching gap** -- a real, narrow, fixable importer defect, not a
+schema limitation.
+
+**What remains genuinely uncertain, disclosed rather than guessed at**:
+whether JL Solutions' own export ALWAYS includes a dedicated transaction
+line for every payment, or whether some payment types (e.g. one
+recorded directly inside JL's own software without flowing back out as
+a distinct exported row) genuinely have no line-item representation at
+all in any export this importer could ever see. This cannot be resolved
+from this codebase alone -- it requires inspecting an actual recent JL
+Solutions export file's raw `Item Num`/`Desc` columns around a pledge
+whose Paid value is known to have changed via the ordinary reimport
+path, which was not available to check this round. **Recommended next
+step, not performed here**: the owner (or whoever runs the next JL
+export) checks one real file for this directly.
+
+**Recommended payment-event ledger design** (for a future,
+separately-authorized round -- not implemented here):
+- Extend the existing `jl_payment_assignment_audits` role (or a new,
+  equivalently-shaped table) to record a payment event for EVERY
+  detected `paid_cents` increase on reimport, not only text-pattern-
+  recognized "payment-shaped" rows -- i.e. route `proposedUpdates`'
+  paid-amount deltas through the same ledger `apply_to_pledge` already
+  uses.
+- Record the DELTA (new minus previously-stored paid_cents), never the
+  full cumulative value, so idempotency is preserved automatically by
+  the existing diffing in `lib/import/jl-donation-match.ts` (already
+  confirmed to only flag genuinely changed rows).
+- Add an explicit `date_confidence` field distinguishing an
+  EXPLICIT/CONFIRMED payment date (from a recognized payment-shaped row,
+  or a fundraiser's own confirmation) from a DISCOVERY date (the
+  import's own processing time, used only when no better date is
+  available) -- never silently blur the two.
+- Broaden `isExplicitJlPayment`'s text pattern per the finding above, as
+  its own small, separately-reviewable fix, independent of the larger
+  ledger work.
+- Decide, separately, whether to backfill historical rows with a
+  discovery-dated event derived from each row's own `updated_at` -- this
+  is a genuine historical-backfill decision requiring its own
+  authorization, not a mechanical migration.
+
+**What this round explicitly did NOT do, per the task's own
+restriction**: no new table, no migration, no change to
+`app/api/import/route.ts`'s actual import/payment-processing behavior,
+and no historical backfill. The design above is a recommendation for a
+separate, future, separately-authorized round.
+
+### 5. Regression tests
+
+All ten scenarios from this round's own task, plus two scenarios
+already covered by the prior round's own suite, verified against the
+real exported SQL and the real `summarizeFundraisingProgress`/
+`appendFinancialLimitations` functions (`tests/fundraising-progress.test.mjs`,
+restructured into four parts):
+
+| # | Scenario | Verified result |
+|---|---|---|
+| 1 | Newly imported pledge, initial partial payment | ✅ Counted as verified (Part C, stage 1) |
+| 2 | Same pledge, another payment later the SAME month (ordinary reimport) | ✅ Verified figure drops to $0 for this row; cumulative shows the new balance, clearly separate (Part C, stage 2) |
+| 3 | Same pledge, another payment the FOLLOWING month | ✅ That month's verified figure for this pledge is $0 (no commitment, no audit trail) -- the concrete under-count the limitation describes (Part C, stage 3) |
+| 4 | Repeated imports, unchanged paid amounts | ✅ Confirmed `lib/import/jl-donation-match.ts`'s own diffing never issues a write for a no-op reimport, so `updated_at` never moves and the row stays verified indefinitely (Part D1) |
+| 5 | Explicit payment-review assignments | ✅ Counted via `jl_payment_assignment_audits`, dated, stable (Part B, scenarios 4-5) |
+| 6 | Payment appearing in both giving records and audit records | ✅ Deduped exactly once, both the plain and the overpayment-remainder-derived-fingerprint cases (Part A3/A4) |
+| 7 | Pledge fully paid with no separate dated event | ✅ Never counted as received in any month, confirmed directly (Part D2) |
+| 8 | Backdated payment records | ✅ Attributed to the TRUE `payment_date`'s month, not the import month (Part B, scenario 6) |
+| 9 | Reversed or corrected payments | ✅ A `workspace_status`-reversed row fully excluded; a `pledge_balance_corrections` row has zero effect on either figure (Part B, scenarios 7-8) |
+| 10 | Monthly totals stable across later imports | ✅ The core stability assertion -- October's figure re-queried after the November reimport is byte-identical to its value immediately after the October reimport (Part C, stage 3) |
+
+Also added: direct unit tests of `appendFinancialLimitations` (no
+limitations passes through unchanged; limitations always appended even
+when the model's own answer already covered the substance; output never
+exceeds `MAX_ANSWER_LENGTH`).
+
+### 6. Preserved safeguards -- re-verified, not merely assumed
+
+- **Payment-to-pledge reconciliation, outstanding pledges, monthly
+  payment plans, stale-pledge recommendations**: untouched by this
+  round's changes (no file under `lib/relationships/pledge-payment-plan.ts`,
+  `lib/relationships/pledge-review.ts`, or the Daily Agenda path was
+  modified); full suite re-run confirms no regression.
+- **Trip fundraising reporting**: `lib/relationships/trip-financial-attribution.ts`
+  itself untouched; `fundraising-progress.ts` only ever IMPORTS its
+  `REAL_COMMITMENT_CATEGORIES` constant, read-only.
+- **Donor ownership and permissions**: every query this round touched
+  already carried, and still carries, its `owner_user_id = ?`/`user_id = ?`
+  filter -- re-confirmed by the existing structural safety test.
+- **Production/Staging isolation**: unchanged; reconfirmed by this
+  round's own deploy output and Staging-wide row-count check.
+- No historical financial data was modified to make any test pass --
+  every scenario above uses freshly-inserted synthetic rows in an
+  in-memory SQLite database or the existing synthetic "QA TEST" donor on
+  Staging, never a real donor record.
+
+### 7. Staging verification
+
+- **Full regression + full suite**: `node scripts/run-tests.mjs` --
+  **211/211 test files pass**, including the restructured
+  `tests/fundraising-progress.test.mjs` (Parts A-D) and the updated
+  `tests/assistant-capabilities-safety.test.mjs`.
+- **Type check**: `npx tsc --noEmit` -- clean.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, unchanged.
+- **Build**: `pnpm run build:staging-independent` -- succeeds.
+- **Staging verification, direct SQL (no AI)**: both the updated
+  `NEW_COMMITMENTS_SQL` (now also returning `cumulativePaidTotal`) and
+  the new `VERIFIED_NEW_GIVING_ROWS_SQL` (with its `updated_at = created_at`
+  condition) were run directly against real Staging data via
+  `wrangler d1 execute` -- both executed without error; the verified and
+  cumulative figures for Staging's existing new-this-period rows
+  matched exactly (4 rows, $1,910 both ways), confirming none of them
+  have been touched since creation, consistent with the unchanged
+  Staging dataset.
+- **Staging verification, full AI pipeline**: asked the real, live
+  assistant "How much money did we actually receive this month, and is
+  that figure complete?" -- the response correctly said "$4,825 from 15
+  transactions" (the prior round's donor-count fix still holds),
+  explained the breakdown, stated plainly that the figure "is not
+  complete" and may be "understated," and -- critically -- the response
+  contained BOTH the model's own paraphrase of the limitation AND the
+  exact, deterministically-appended `RECONCILIATION_LIMITATION` text
+  verbatim, confirming `appendFinancialLimitations` survives the full
+  pipeline exactly as designed. `donor_summary` against the existing
+  synthetic "QA TEST" donor was re-confirmed working, unaffected by this
+  round's changes.
+- **Production/Staging isolation reconfirmed**: deploy output's own
+  printed bindings point only at Staging; no Production file, binding,
+  or secret was read, written, or referenced.
+- **Staging write window**: opened once for this round's own live
+  verification (the same `/api/assistant` POST-method guard situation
+  every prior round has needed a window for), closed immediately after;
+  `git diff --stat wrangler.staging.jsonc` confirmed empty; a live write
+  probe afterward returned the guard's own `403`. Staging-wide row
+  counts (`donors` 255, `interactions` 203, `recommendations` 5,
+  `giving_activities` 5463, `jl_payment_assignment_audits` 91)
+  reconfirmed byte-identical before and after this round's entire
+  testing session.
+- **Deployed Staging Worker versions this round**:
+  `cb5e4474-2545-492e-8f83-e4eeca9c33b9` (write window open, fix live) →
+  `e5779ab2-f016-4963-99ba-fe79f048a911` (write guard restored,
+  current).
+
+### 8. Final report -- answers to the five closing questions
+
+**1. Can Ask Fundraising OS now report monthly money received without
+overstating what the records prove?** Yes. The verified figure is now
+provably stable (Section 2) and can only ever be equal to or less than
+what the underlying records can actually support -- it is explicitly
+designed to under-report rather than risk overstating, and always
+discloses that it may be incomplete.
+
+**2. Can the assistant distinguish verified dated payments from
+cumulative paid balances?** Yes -- `verifiedMoneyReceivedTotal` (and its
+`newGiftsReceivedTotal`/`paymentsOnExistingPledgesTotal` components) are
+now a structurally separate figure from `recordedCumulativePaidTotal`,
+both returned every time, both labeled plainly, and the compose prompt
+is instructed never to conflate them.
+
+**3. Can future imports change previously reported monthly totals?**
+No, for the verified figure -- this is the specific guarantee this
+round's fix establishes and the stability test (Section 5, scenario 10)
+directly proves. The separate cumulative figure is explicitly a live
+snapshot and is EXPECTED to keep moving; it is never presented as a
+"monthly total" in the first place.
+
+**4. What would be required to provide fully accurate monthly
+cash-received reporting?** A real payment-event ledger recording the
+date and amount of every individual payment -- not just each pledge's
+current cumulative balance -- along the lines of Section 4's
+recommended design: extending the existing, already-well-shaped
+`jl_payment_assignment_audits` pattern to cover every detected payment
+increase (not only text-pattern-recognized ones), with an explicit
+confidence distinction between a confirmed payment date and a mere
+discovery date. This requires a database migration and a change to the
+import route's behavior, and was correctly out of scope for this round.
+
+**5. Is the assistant safe to deploy with its current limitations
+clearly disclosed?** Yes, with respect to the financial-accuracy
+concerns raised across all three independent-review rounds on this
+feature (`9789649`, `8431f49`, `36eddff`) -- each is fixed, tested, and
+live-verified, and the one remaining gap (payments without a recorded
+date) is disclosed both in the underlying data and, now, enforced in
+the deterministic response layer rather than left to chance. The
+donor-privacy exposure shape flagged in an earlier round's Section 7
+(free-form AI prose surfacing private donor content) remains the one
+item still explicitly flagged for the owner's own separate judgment,
+unrelated to financial accuracy.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. No broader
+financial-data, migration, or import-behavior change was implemented --
+Section 4's design is a recommendation only. Stopping here per this
+round's own instruction: code corrections, Staging verification, and
+documentation are complete; Production deployment and any
+payment-event-ledger implementation both require separate
+authorization.**
