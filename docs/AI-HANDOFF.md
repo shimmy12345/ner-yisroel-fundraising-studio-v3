@@ -47885,3 +47885,378 @@ review raised -- each is fixed, tested, and live-verified on Staging.
 Production deployment itself still requires the owner's separate,
 explicit authorization, consistent with every prior round; it was not
 performed or attempted this round.
+
+## Final Financial Accuracy Fix for Ask Fundraising OS (2026-10-16)
+
+A second independent review, focused specifically on `getFundraisingProgress()`
+in `lib/assistant/capabilities.ts`, found that the query had no upper
+month boundary, excluded only `'open_pledge'` (letting
+needs_review/nonfinancial_entry/pending_gift/pending_pledge rows count
+as real donations), and could misrepresent a payment against an
+existing pledge as either a new commitment or money received in the
+wrong month. This entry documents the full investigation, the fix, the
+authoritative definitions adopted, reconciliation evidence, and Staging
+verification. Code/tests committed as `8431f49`, on top of `9789649`/
+`a2fba82` (the prior independent-review round, above). No Production
+file was read or written. No parallel or forked agent was used for any
+part of this round's investigation, implementation, Staging deployment,
+database access, or verification.
+
+### 1. Investigation: how the financial data model actually works
+
+Read in full: `lib/assistant/capabilities.ts`, `lib/financial-date.ts`,
+`lib/workspace/local-time.ts`, `db/schema.ts` (giving_activities,
+jl_payment_assignments, jl_payment_assignment_audits,
+pledge_balance_corrections), `lib/import/jl-donations.ts` (the category
+classifier), `lib/import/jl-refresh.ts`, `lib/import/jl-payment-assignment.ts`
+(the payment-to-pledge reconciliation planner), `app/api/import/route.ts`
+(the actual INSERT/UPDATE/UPSERT statements -- not assumed from the
+schema or the planner alone), `lib/giving/management.ts`
+(COUNTED_GIVING_SQL, the system-wide "what counts as real" filter), and
+`lib/relationships/trip-financial-attribution.ts` (the Trip Fundraising
+Results Dashboard's own `summarizeTripFinancials` -- the one other
+place in this codebase that computes "new commitments" and "cash
+collected").
+
+**The central, load-bearing fact, confirmed directly against the exact
+SQL this app runs (not inferred from the schema):**
+`giving_activities.activity_date` is the JL Solutions export's own "Due
+Date" column -- a forward-looking commitment/obligation date, explicitly
+documented as such by `lib/import/jl-refresh.ts`'s own comment ("An open
+or partially-paid pledge's stored date is the JL export's 'Due Date' for
+an UNRESOLVED balance -- a forward-looking commitment/obligation, not a
+record that money was actually received"). Critically, **it is never
+updated once a payment is applied to that row**: the real UPDATE
+statement (`app/api/import/route.ts`'s `pledgeUpdateStatements`) sets
+only `paid_cents, balance_cents, category, source_snapshot, updated_at`
+-- never `activity_date` -- and the ordinary re-import upsert path
+(`ON CONFLICT ... DO UPDATE SET paid_cents=excluded.paid_cents, ...`)
+likewise never touches it. A pledge paid off two years after its
+original due date still carries that original due date forever.
+`created_at`, by contrast, is set once at INSERT and is never touched by
+either update path -- it reliably means "when this specific row first
+entered the system."
+
+**How a payment actually gets applied, and where (if anywhere) its real
+date survives:** three distinct mechanisms exist.
+1. **Ordinary reimport refresh** (the common case for a periodic full
+   JL re-export): the SAME pledge line item (matched by
+   `source_fingerprint`, which does NOT include Paid/Balance Due) is
+   silently upserted with its new cumulative paid/balance figures. No
+   record of which date that increase happened on survives anywhere --
+   only that it had happened by the time of this particular import.
+   This is a genuine, disclosed gap in the data model, not something
+   this round invented a workaround for (see Section 6).
+2. **Explicit "apply to pledge" decision** (the payment-review screen,
+   triggered only for full-export rows recognized as payment-shaped by
+   Item/Desc text): creates a `jl_payment_assignment_audits` row with a
+   real `payment_date` (the source payment transaction's own date, not
+   the import's processing time) and `applied_cents`/`new_gift_cents` --
+   this is the one place a dated payment event against a pre-existing
+   pledge actually exists.
+3. **"New gift" decision** (same screen, when the payment doesn't match
+   any pledge, or as an overpayment's remainder): creates a NEW
+   `giving_activities` row (via `app/api/import/route.ts`'s
+   `manualNewActivities`) AND a `jl_payment_assignment_audits` row. For
+   a plain new-gift decision, the new row's `source_fingerprint` equals
+   the audit row's own `payment_fingerprint`. For an overpayment's
+   remainder specifically, the new row's fingerprint is instead
+   `remainderGiftFingerprint(paymentFingerprint)` (`lib/import/
+   jl-payment-assignment.ts`, exported and reused here rather than
+   re-implemented) -- a DIFFERENT string than the main audit row's own
+   fingerprint. Both cases must be excluded from "new money" sums to
+   avoid double-counting; only the first is obvious from the fingerprint
+   alone (see Section 3).
+
+**The Trip Fundraising Results Dashboard's own precedent**
+(`summarizeTripFinancials`) sidesteps this entire date-reliability
+problem by using explicit, fundraiser-confirmed ATTRIBUTION rather than
+date-range inference, and already treats `event_or_ad` (event/ad
+revenue) as excluded from both "new commitments" and "cash collected."
+This fix reuses that dashboard's exact `REAL_COMMITMENT_CATEGORIES` set
+(`open_pledge`, `partially_paid_pledge`, `completed_gift`) for "what
+counts as a real commitment," and deliberately excludes `event_or_ad`
+from `fundraising_progress` too -- a consistency choice with that
+existing dashboard, not a new decision invented here.
+
+### 2. Authoritative financial definitions adopted
+
+- **Money received this month**: the sum of every dollar with a KNOWN,
+  dated receipt event falling in the fundraiser's local calendar month
+  -- (a) a brand-new commitment-category row's `paid_cents` at the
+  moment it was first recorded (`created_at` in-period), plus (b) every
+  `jl_payment_assignment_audits` row whose `payment_date` (falling back
+  to `created_at` only if that is somehow null, the exact same fallback
+  the import route itself uses) falls in-period, summing
+  `applied_cents + new_gift_cents`. **Never** activity_date-filtered.
+  Counted once, reconciled against the two giving_activities-insert
+  paths that can otherwise double it (Section 1.3 above).
+- **New commitments this month**: the sum of `committed_cents` for every
+  `REAL_COMMITMENT_CATEGORIES` row whose `created_at` falls in-period,
+  regardless of payment status -- a pledge still unpaid, partially paid,
+  or already paid in full all count in full the moment they are first
+  recorded, exactly matching the Trip Dashboard's own "a pledge counts
+  in full the moment it is confirmed" rule. A later payment against an
+  OLDER pledge can never retroactively inflate this figure, because that
+  pledge's `created_at` never changes.
+- **Outstanding pledges**: unchanged by this round -- `getOutstandingPledges`
+  already correctly joins `pledge_balance_corrections`
+  (`COALESCE(pbc.corrected_balance_cents, ga.balance_cents)`), the exact
+  pattern `app/pledge-review/page.tsx` itself uses. Confirmed still
+  correct; this round added no new query for it.
+- **Fundraising activity**: this capability already keeps new
+  commitments, money received (split into new-gift vs.
+  existing-pledge-payment), and donor contact counts as clearly separate
+  fields -- never one blended figure -- so the assistant can answer "is
+  this a new pledge or a payment on an old one" without guessing.
+
+**Alignment with the Financial Dashboard**: the Trip Fundraising Results
+Dashboard does not compute a period-bounded "money received this
+calendar month" at all -- it reports lifetime-to-date paid/committed
+figures for whatever records are explicitly attributed to a trip. There
+is therefore no existing Financial Dashboard definition this capability
+could contradict for that specific figure; this is the first place in
+the codebase that computes it, and it is built to the most conservative,
+defensible definition the data actually supports (Section 6 discloses
+exactly where that falls short of "every dollar, no matter how it was
+recorded").
+
+### 3. Code changes
+
+- **`lib/assistant/fundraising-progress.ts`** (new, pure, no
+  `cloudflare:workers` import): exports the four literal SQL query
+  strings (`NEW_COMMITMENTS_SQL`, `NEW_GIVING_ROWS_SQL`,
+  `PAYMENT_ASSIGNMENT_AUDITS_SQL`, `DONORS_CONTACTED_SQL`) AND the
+  reconciliation arithmetic (`summarizeFundraisingProgress`) -- the SQL
+  lives here, not in capabilities.ts, specifically so a Node test can
+  execute the real, literal queries without pulling in `cloudflare:workers`.
+  The dedup set is built from both of a payment's possible giving_activities
+  fingerprints (plain and `:remainder`-derived, via the imported
+  `remainderGiftFingerprint`), not just one.
+- **`lib/workspace/local-time.ts`**: `localMonthBoundaries` extended with
+  `dateOnlyEndEpoch`/`instantEndEpoch` -- every monthly query now has a
+  proper exclusive upper bound, computed with the same December-rollover-
+  safe arithmetic as the existing start boundary.
+- **`lib/assistant/capabilities.ts`**: `getFundraisingProgress` rewritten
+  to run the four queries above and call `summarizeFundraisingProgress`;
+  `FundraisingProgress`'s return shape changed to
+  `moneyReceivedTotal`/`moneyReceivedTransactionCount`/`newGiftsReceivedTotal`/
+  `paymentsOnExistingPledgesTotal`/`newCommitmentsTotal`/`newCommitmentsCount`/
+  `donorsContacted`/`limitations`. The capability description shown to
+  the planning AI was rewritten to describe the new breakdown.
+- **`lib/assistant/protocol.ts`**: the compose system prompt gained two
+  rules -- always relay a `limitations` entry when reporting that
+  figure, and never state a donor/household/people count unless the
+  data explicitly labels a field that way (Section 5 explains why the
+  second rule exists).
+- **`tests/relationship-snapshot-stage3.test.mjs`**: one pre-existing
+  D1-query-count ceiling for `capabilities.ts` moved from `<=5` to
+  `<=6`, with a comment explaining the one new query is in the unrelated
+  `fundraising_progress` capability, not a second Snapshot lookup in
+  `donor_summary` (that guarantee was independently re-verified, not
+  merely assumed).
+
+### 4. Reconciliation results -- synthetic scenarios
+
+Ran against a real in-memory SQLite database (`node:sqlite`'s
+`DatabaseSync`, built from this repo's own `drizzle/*.sql` migrations --
+the same harness `tests/asks.test.mjs`/`tests/data-health.test.mjs`
+already use), executing the literal exported SQL constants, for October
+2026 in `America/New_York`:
+
+| Scenario | Expected treatment | Actual result |
+|---|---|---|
+| Direct donation, no pledge | New commitment + money received, both $1,000 | ✅ Both $1,000 |
+| New unpaid pledge, future due date | New commitment $500; $0 received | ✅ Exactly that -- future due date never read |
+| New partially-paid pledge | New commitment $800; $300 received (its initial paid amount) | ✅ Exactly that |
+| Payment on a pledge from a prior month | $0 new commitment (pledge predates this month); payment counted via audit | ✅ $0 commitment; $700 received via audit |
+| Multiple installments, same pledge | Both installments summed independently | ✅ $700 + $200 = $900 |
+| Payment imported after its true transaction date | Attributed to the TRUE payment date's month, not the import month | ✅ Placed in September (true date), confirmed absent from October AND present when September's own window is queried |
+| Corrected pledge balance | Zero effect on either figure | ✅ No change (this capability never reads pledge_balance_corrections) |
+| Cancelled/reversed transaction | Fully excluded | ✅ Excluded (workspace_status != 'active') |
+| Future-dated transaction/pledge | Counted as a new commitment; NEVER as money received | ✅ $150 commitment; $0 received |
+| Transaction at month start/end boundary | Inclusive start, exclusive end | ✅ At-start row included; at-end row excluded (belongs to next month); one-second-before-end row included |
+
+Two additional scenarios, not in the review's list but essential to
+this implementation's own correctness, also verified: a plain "new
+gift" reconciliation decision (giving_activities row and audit row share
+one fingerprint) counted exactly once, and an overpayment remainder
+(giving_activities row under the DERIVED `:remainder` fingerprint, audit
+row under the plain one) also counted exactly once.
+
+### 5. AI safety -- two defects found, both fixed
+
+**Structural (never relied on the model to self-police):** the AI plans
+only by selecting from a fixed capability registry and a donor
+reference; `fundraising_progress` performs zero writes, zero dynamic
+SQL, and returns only the deterministic result of the queries above.
+The compose step is instructed never to add, combine, or recompute a
+dollar figure itself.
+
+**Found only through live testing, fixed at the source:** asking the
+real, live Staging assistant "How much money did we actually receive
+this month, and how much of that came from existing pledges versus new
+gifts?" returned a correct dollar breakdown but prefaced it with
+**"you received $4,825 from 15 donors"** -- 15 was actually
+`moneyReceivedCount`, a count of giving/payment ROWS (4 new rows + 11
+payment-assignment audits), not a count of distinct donors. The model
+inferred "donors" from an ambiguously-named field, which is exactly the
+kind of confident misstatement this task was created to prevent. Fixed
+by renaming the field to `moneyReceivedTransactionCount` everywhere (so
+neither this code nor the model can relabel it) and adding an explicit
+compose-prompt rule: never state a donor/household/people count unless
+the data explicitly labels a field that way. Re-tested live after the
+fix -- the same question now returns "$4,825 in total" with the correct
+breakdown and no fabricated donor count. A new structural test
+(`tests/assistant-capabilities-safety.test.mjs`) locks in that the
+ambiguous field name can never reappear and that the compose prompt rule
+stays present.
+
+### 6. Disclosed limitation -- payments without a recorded date
+
+Payments applied to an existing pledge through an ordinary JL reimport
+refresh (mechanism 1 in Section 1) have no payment date recorded
+anywhere in this schema -- only that the pledge's paid/balance figures
+had changed by the time of that particular import. This capability does
+**not** estimate or guess at that date; it is excluded from "money
+received this month" entirely, and every `fundraising_progress` result
+carries an explicit `limitations` entry stating this plainly, which the
+compose prompt is instructed to always relay. **This means the
+assistant's "money received" figure can be a genuine UNDER-count**
+relative to the fundraiser's own intuitive sense of "everything that
+came in," specifically for pledge payments that were never run through
+the payment-review screen.
+
+**The safest system-wide solution, proposed but NOT implemented this
+round** (per the task's own instruction to stop and explain before a
+schema/import-process change): route every ordinary reimport-detected
+paid/balance increase through the same `jl_payment_assignment_audits`
+trail the explicit review screen already uses, recording a payment date
+derived from the import's own processing time (an honest "when we found
+out" date, clearly distinguished from a payment-review-confirmed "when
+it actually happened" date) rather than leaving it unrecorded. This
+would require a product decision (is "when we found out" an acceptable
+date for a reimport-detected payment, or should the fundraiser be asked
+to confirm/correct it, as they already are for explicitly payment-shaped
+rows?) and a migration-free code change to `app/api/import/route.ts`'s
+existing upsert path -- not attempted here, since it changes import/
+payment-processing behavior beyond this review's own scope and was
+explicitly called out as something to stop and discuss first.
+
+### 7. Donor privacy during this round's own testing -- disclosed
+
+Direct SQL verification against Staging (via `wrangler d1 execute`,
+read-only, no AI involved) used only account-wide AGGREGATE totals --
+no individual donor name or identifying detail. Live AI-pipeline testing
+of `fundraising_progress` itself (aggregate totals only) and of
+`donor_summary` (the existing synthetic "QA TEST" donor only) stayed
+within that same boundary.
+
+**One incidental exposure, disclosed rather than hidden**: a single
+broader test question ("How much was newly pledged this month, and how
+much is still outstanding?") was answered by the planner selecting BOTH
+`fundraising_progress` and `outstanding_pledges` -- the second
+capability lists real donors by name, and its response surfaced five
+real donor names and ids in this session. This was not anticipated when
+the question was written; it demonstrates that the donor-privacy
+safeguard established in the prior round (reuse the synthetic donor)
+protects against a tester deliberately asking about a specific real
+donor, but does **not** by itself prevent an innocuously-phrased,
+multi-capability question from incidentally invoking a donor-listing
+capability during financial-feature testing. No real donor name is
+repeated in this document. **Recommended safeguard for future rounds**:
+when verifying one capability live, phrase test questions narrowly
+enough that the planner cannot reasonably select an unrelated,
+donor-listing capability, or test via conversation.lastDonorRefs/direct
+capability dispatch rather than an open-ended natural-language question
+whenever the capability under test is not itself donor-scoped.
+
+### 8. Verification
+
+- **Full regression + full suite**: `node scripts/run-tests.mjs` --
+  **211/211 test files pass**, including the new
+  `tests/fundraising-progress.test.mjs` (pure dedup-logic unit tests
+  plus the full real-SQLite scenario table above) and the updated
+  `tests/local-time.test.mjs`/`tests/assistant-capabilities-safety.test.mjs`/
+  `tests/relationship-snapshot-stage3.test.mjs`.
+- **Type check**: `npx tsc --noEmit` -- clean.
+- **Lint**: `npm run lint` -- **94 errors / 43 warnings**, the
+  established baseline, unchanged.
+- **Build**: `pnpm run build:staging-independent` -- succeeds.
+- **Staging verification, direct SQL (no AI)**: the four literal
+  exported SQL constants were run directly against real Staging data
+  via `wrangler d1 execute` -- all four executed without error and
+  produced internally consistent aggregate totals (new commitments:
+  4 rows; payment-assignment audits: 11 rows; donors contacted: 0),
+  confirming the queries are valid against the real production-shaped
+  schema, not just the synthetic test database.
+- **Staging verification, full AI pipeline**: `fundraising_progress`
+  exercised live through the real chat pipeline both before and after
+  the `moneyReceivedTransactionCount` fix (Section 5); `donor_summary`
+  against the synthetic "QA TEST" donor confirmed as a working,
+  unaffected capability (Section 7).
+- **Production/Staging isolation reconfirmed**: deploy output's own
+  printed bindings (`fundraising-os-staging-db`,
+  `https://fundraising-os-staging.sgoldstein.workers.dev`) point only at
+  Staging; no Production file, binding, or secret was read, written, or
+  referenced.
+- **Staging write window**: opened once for this round's own live
+  verification (the same `/api/assistant` POST-method guard situation
+  every prior AI-feature round has needed a window for), closed
+  immediately after; `git diff --stat wrangler.staging.jsonc` confirmed
+  empty; a live write probe afterward returned the guard's own `403`.
+  Staging-wide row counts (`donors` 255, `interactions` 203,
+  `recommendations` 5, `giving_activities` 5463,
+  `jl_payment_assignment_audits` 91) reconfirmed byte-identical before
+  and after this round's entire testing session -- zero writes.
+- **Deployed Staging Worker versions this round**:
+  `ea47dd9b-9fb8-445d-b925-b29d253a9309` (write window open, first
+  version of the fix live) → `0b35cafc-484d-4556-9383-e6ed8042c36b`
+  (write window still open, the `moneyReceivedTransactionCount` fix
+  live) → `640a6a9d-5e39-417c-9505-55fbd72c83e3` (write guard restored,
+  current).
+
+### 9. Remaining limitations and Production readiness
+
+- **Resolved**: the no-upper-bound query, the overly narrow category
+  exclusion, partially-paid pledges inflating the new-commitment figure,
+  pledges miscounted as "newly created" merely because their balance
+  changed, and the live-discovered "N donors" fabrication.
+- **Disclosed, not resolved this round** (Section 6): payments applied
+  to a pre-existing pledge through an ordinary reimport refresh (no
+  payment-review decision) have no recorded date and are therefore
+  excluded from "money received this month" -- a genuine under-count
+  risk, always disclosed to the fundraiser via the `limitations` field
+  rather than silently absorbed. Fixing this fully would require a
+  deliberate, separately-authorized change to the import/payment-
+  processing pipeline (Section 6 proposes the shape of that change).
+- **Disclosed, process-only** (Section 7): one incidental real-donor-name
+  exposure during this round's own live testing, from a question that
+  triggered an unrelated donor-listing capability alongside the one
+  under test -- no change to the application itself, a recommended
+  testing-practice adjustment for future rounds.
+- Not performed: any change to Production. This round touched only this
+  feature branch's own files and Staging.
+
+**Final report, independently calculated results vs. AI-generated
+explanations, clearly distinguished:** every dollar figure quoted above
+(Section 4's table, Section 8's row counts, the $4,825/$2,915/$1,910
+breakdown) was computed by direct SQL/arithmetic (`wrangler d1 execute`,
+the synthetic-database test suite, or `summarizeFundraisingProgress`
+itself) and independently verified against the live assistant's own
+stated answer where both exist (Section 5) -- never taken on the AI's
+word alone. The AI's own contribution, verified separately, was limited
+to explaining and phrasing those already-computed figures, plus (once)
+a labeling error in that phrasing, which was caught by this
+independent cross-check and fixed at the source rather than in the
+prompt alone.
+
+**Is Ask Fundraising OS ready for Production?** Per this round's own
+closing instruction: **stopping here.** All three originally-reviewed
+financial-accuracy defects, plus the live-discovered donor-count
+fabrication, are fixed, tested, and verified on Staging as described
+above. This document is being left for an independent ChatGPT review
+before Production deployment authorization is requested -- no
+Production deployment was performed, and none will be requested from
+this session until that independent review has had a chance to weigh
+in on this entry.
