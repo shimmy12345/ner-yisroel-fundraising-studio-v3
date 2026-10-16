@@ -49288,3 +49288,317 @@ financial-data, migration, or import-pipeline change was implemented.
 Stopping here per this round's own instruction: implementation,
 Staging verification, and documentation are complete; Production
 deployment requires separate authorization.**
+
+## Final Production Safety Review for Ask AI (2026-10-16) -- FIXED, TESTED, VERIFIED LIVE ON STAGING, PRODUCTION NOT TOUCHED
+
+Two priorities for this round: (1) guarantee the mandatory financial
+disclosures the prior five rounds (`9789649`, `8431f49`, `36eddff`,
+`960ba6a`, `9bd0863`) established can never be silently truncated or
+omitted from the assistant's response; (2) verify Ask Fundraising OS
+cannot disclose one fundraiser's donor information to another.
+Staging only, per this round's own instruction -- no Production
+deployment, Production database change, or migration. Also
+instructed not to redesign the prior rounds' financial calculations
+absent a genuine new defect, and not to unnecessarily cripple
+legitimate CRM functionality while hardening privacy. Code committed
+as `b3a96ce`.
+
+### 1. Mandatory disclosure truncation -- a genuine, newly found and fixed defect
+
+**Root cause.** `lib/assistant/protocol.ts`'s `appendFinancialLimitations()`
+is the deterministic, un-bypassable step that appends the prior rounds'
+mandatory financial-limitations disclosure to every answer that needs
+one -- the model never decides whether to include it. The function was:
+
+```ts
+export function appendFinancialLimitations(answer: string, limitations: string[]): string {
+  if (limitations.length === 0) return answer;
+  const combined = [answer, ...limitations].join("\n\n");
+  return combined.slice(0, MAX_ANSWER_LENGTH);
+}
+```
+
+Limitations were appended LAST, then the whole combined string was
+sliced from the end. A model answer is itself allowed up to
+`MAX_ANSWER_LENGTH` (4000) characters by `parseComposeResponse`, so a
+sufficiently long answer could push some or all of the disclosure past
+the cutoff -- silently reproducing, in the one function that exists to
+prevent it, the exact failure mode it is supposed to prevent. This was
+not caught by the existing test because that test only ever asserted
+`result.length <= MAX_ANSWER_LENGTH`, never that the disclosure text
+itself survived.
+
+**Fix.** Same file, same exported signature, same unconditional call
+site (`orchestrator.ts`, via `financialLimitationsFrom(data)` --
+unchanged):
+
+- Compute `limitationsBlock = limitations.join("\n\n")` first.
+- **Pathological case** -- the disclosures alone already exceed
+  `MAX_ANSWER_LENGTH` (no realistic combination of this feature's
+  current limitation strings reaches this, but it is handled rather
+  than assumed impossible): reserve the entire budget for disclosures,
+  truncate via a new `truncateAtWordBoundary(text, maxLength)` helper,
+  and append a visible notice --
+  `" [Additional financial disclosures were cut off due to length -- ask a follow-up question for the complete details.]"`
+  -- so a cut is disclosed rather than silent.
+- **Normal case** -- `answerBudget = MAX_ANSWER_LENGTH - limitationsBlock.length - 2`
+  (2 for the `"\n\n"` join); only the model's own prose is truncated
+  (at a word boundary when that boundary falls past half the budget,
+  else a hard cut), never the disclosure.
+- `truncateAtWordBoundary` is a small, pure, independently-testable
+  helper: returns `""` for a non-positive budget, returns the input
+  unchanged if it already fits, otherwise cuts at the last space
+  within the budget (trimmed) or hard-cuts if no such space exists.
+
+**Tests.** `tests/fundraising-progress.test.mjs`'s
+`appendFinancialLimitations` block was rewritten (not just extended)
+because the old test could never have caught this bug by construction.
+New cases: baseline pass-through and ordering; a near-limit answer
+(`MAX_ANSWER_LENGTH - 10` chars) with one and with multiple
+disclosures -- asserts the disclosure text survives verbatim and
+in full, and that it is the answer that was shortened, not the other
+way around; an answer at exactly `MAX_ANSWER_LENGTH` (the most extreme
+realistic case); a single disclosure alone exceeding
+`MAX_ANSWER_LENGTH` and two disclosures whose combined length exceeds
+it while neither alone does (both exercise the pathological path --
+the notice must appear, and the surviving disclosure text up to the
+notice must never end mid-word); an empty answer with one disclosure
+(result must equal the disclosure exactly, no stray leading
+separator); an empty answer with no disclosures (returns an empty
+string).
+
+**Verified with the established before/after technique.** Backed up
+`protocol.ts`, temporarily reinstated the exact old one-line buggy
+implementation under the real export name, reran the test suite -- it
+failed exactly as predicted, at the near-limit-answer assertion that
+the disclosure must survive in full and verbatim. Restored the fix;
+reran; all tests pass again. This confirms the new tests actually
+detect the bug they were written to catch, not merely that they pass
+against the fixed code.
+
+### 2. Donor-authorization testability hardening -- audited, refactored, no new defect found
+
+**Audit performed first (read-only, no code changed as a result).**
+Re-examined every path donor data can reach the assistant through:
+
+- `lib/assistant/conversation.ts`'s `resolveDonorReference` -- the
+  ordinal path ("the second one") always re-verifies the candidate
+  donor id against the current request's `owner_user_id` before
+  trusting it, and never trusts the client-supplied `href` in
+  conversation state, always rebuilding it via `donorHref()`. Confirmed
+  intact and unchanged by any of the five financial-reporting rounds.
+- `lib/assistant/capabilities.ts`'s `getDonorSummary` delegates to
+  `loadMeetingBrief`, which independently re-checks
+  `WHERE id = ? AND owner_user_id = ? AND data_source = 'live'` on the
+  donor itself before loading anything else -- genuine defense in
+  depth, confirmed by direct source read.
+- `lib/workspace/live-data.ts`'s request-scoped brief cache: the cache
+  key includes `userId`, and the cache itself is a fresh `Map` created
+  per incoming request (not a durable, cross-request store) -- no
+  cross-user cache-poisoning path exists, confirmed by direct source
+  read rather than assumed from the variable name.
+- Prompt-injection shape: the PLAN step (`planTurn`) only ever sees
+  conversation history and the fundraiser's own typed question, never
+  `VERIFIED_CRM_DATA` -- a donor's own notes can never influence which
+  capability or donor gets selected. The COMPOSE step does see CRM
+  data, but always wrapped in `delimited("VERIFIED_CRM_DATA", ...)`
+  with the compose prompt explicitly framing it as data to explain,
+  never instructions to follow, including any donor notes. The final
+  `referencedDonors` sent to the client is computed by filtering the
+  server's own already-fetched, already-authorized donor list against
+  the model's `referencedDonorIds` -- the model's own output can only
+  ever narrow that list, never introduce an unverified or cross-user
+  donor into it.
+
+No new vulnerability was found in any of the above -- consistent with
+this round's instruction not to redesign working protections absent a
+genuine defect.
+
+**Refactor for testability.** The two SQL statements that are the
+entire authorization boundary for every donor reference the
+assistant can resolve were living inline inside `conversation.ts` and
+`capabilities.ts`, both of which import `cloudflare:workers` and so
+cannot be exercised directly by a Node test -- the same constraint
+every D1-dependent file in this repo has. Following the precedent set
+by `lib/assistant/fundraising-progress.ts` in the immediately
+preceding round, extracted both statements into a new pure module,
+`lib/assistant/donor-authorization.ts` (no `cloudflare:workers`
+import):
+
+```ts
+export const DONOR_OWNERSHIP_CHECK_SQL =
+  "SELECT id, display_name FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL";
+export const DONOR_SEARCH_SQL =
+  "SELECT id, display_name FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL AND display_name LIKE ? ORDER BY display_name LIMIT ?";
+```
+
+`conversation.ts` and `capabilities.ts` now import and use these
+constants rather than inlining their own copies. This is a
+testability refactor, not a behavior change -- the literal SQL text
+executed is unchanged.
+
+**New test: `tests/assistant-donor-privacy.test.mjs`.** Runs the two
+real, extracted statements against a real synthetic multi-user SQLite
+database (the same `DatabaseSync` + real `drizzle/*.sql` migrations
+harness as `fundraising-progress.test.mjs`). Seeds two users, each
+with a donor named identically "John Smith" (direct name-collision
+test), plus other donors and one archived donor. Covers: authorized
+access to one's own donor; a direct request for another user's real
+donor id (correctly returns nothing); guessing a nonexistent id;
+identical names across users resolving only to each user's own donor;
+a forged-conversation-state attack naming another user's real donor id
+via the ordinal path (correctly returns nothing, proving a prior turn
+-- real or forged -- can never grant cross-user access); an archived
+donor never resolving even for its rightful owner; a 16-row name match
+against a 6-row `MAX_SEARCH_RESULTS` cap (still correctly bounded);
+plus structural re-confirmation (reading the real orchestrator/
+protocol/conversation-state source) of the prompt-injection and
+donor-link safety properties described above.
+
+**Verified with the same before/after technique.** Backed up
+`donor-authorization.ts`, swapped `DONOR_OWNERSHIP_CHECK_SQL` for a
+version that keeps the same two bind parameters (so the test doesn't
+just fail on a parameter-count mismatch) but makes the second one an
+inert no-op, removing the real ownership filter -- reran the test, and
+it failed exactly as predicted: the cross-user lookup returned the
+other user's real donor row instead of nothing. Restored the fix;
+reran; all tests pass again.
+
+### 3. Data minimization (task item 3) -- reviewed, no defect, no change needed
+
+Reviewed every donor field the assistant's capabilities surface
+(`lib/relationships/meeting-brief.ts`'s donor query, the fields
+`getDonorSummary` returns) against the full `donors` table schema
+across all migrations. This organization's schema has no SSN,
+tax-identifier, bank-account, routing-number, wealth-screening, or
+other financial-identity field anywhere -- there is nothing of that
+category to minimize. Every field actually surfaced (name, email,
+phone, address, relationship summary, institutional memory, interests,
+family, giving history, important dates, yahrtzeits) is directly used
+by the CRM features this round was instructed not to unnecessarily
+cripple (meeting prep, donor summaries, outreach recommendations).
+Removing any of them would degrade legitimate fundraiser functionality
+for no security benefit. No code change made for this item.
+
+### Test, type, and lint results
+
+- `node scripts/run-tests.mjs`: 212/212 test files pass (211 prior
+  + new `tests/assistant-donor-privacy.test.mjs`). Also required a
+  small update to `tests/assistant-capabilities-safety.test.mjs`,
+  whose structural check for `conversation.ts`'s ownership SQL had been
+  asserting on inline source text that no longer exists there after
+  the extraction -- updated to assert the ownership/search guarantees
+  against the new `donor-authorization.ts` constants directly, plus
+  that both call sites import (rather than inline) them.
+  `tests/relationship-snapshot-stage3.test.mjs`'s `env.DB.prepare(`
+  count-ceiling assertion needed no change -- the refactor replaces
+  inline SQL with an imported constant at the same call sites, so the
+  per-call `prepare()` count is unchanged.
+- `npx tsc --noEmit`: clean.
+- `npm run lint`: unchanged at exactly 94 errors / 43 warnings.
+- `pnpm run build:staging-independent`: succeeds.
+
+### Staging verification (live, through the real AI pipeline)
+
+Opened the Staging write window (`STAGING_WRITES_ENABLED=true` in
+`wrangler.staging.jsonc`, rebuild, deploy) -- required because
+`/api/assistant` is POST-only and the staging write guard blocks every
+mutating method under `/api/**` by method alone, regardless of whether
+the route itself is read-only.
+
+- Asked "How much money have we received this month, and what's our
+  total fundraising progress so far this year?" -- the live response
+  included the full Category A / Category B financial-limitations
+  disclosure from the prior round, verbatim and un-truncated, directly
+  confirming the Part 1 fix holds through the real compose model, not
+  just the pure-function test.
+- Asked for a donor summary of the synthetic QA TEST donor
+  (`5894d764-c4ea-4b87-a595-7fcc4664ba0e`, "QA TEST -- AI Meeting Notes
+  (safe synthetic donor, do not use for real data)", owned by
+  `user_sgoldstein@nirc.edu`) by exact display name -- correctly
+  resolved and returned a donor-profile link that, followed, landed on
+  exactly that real, owned donor -- confirming `searchDonors` and the
+  donor-href-rebuilding path both work correctly live after the
+  `donor-authorization.ts` refactor. (A looser phrasing, "Tell me about
+  QA TEST," first produced "I don't have any data about QA TEST" -- the
+  planning model (Workers AI) did not route that phrasing to a donor
+  lookup; this is model routing behavior, not a resolution defect, and
+  matches the "safe but conservative" behavior already disclosed in an
+  earlier round.)
+- No real donor data was used for any live test -- only the existing
+  synthetic QA TEST donor.
+- Closed the write window (reverted `wrangler.staging.jsonc`, rebuilt,
+  redeployed), confirmed `git diff --stat wrangler.staging.jsonc` empty,
+  and confirmed a live `POST /api/assistant` now returns 403 with the
+  standard read-only message.
+
+True cross-user live testing was not possible on Staging, which
+currently has only one real user account (`user_sgoldstein@nirc.edu`)
+-- the same limitation noted in the immediately preceding round. The
+synthetic multi-user SQLite test (`assistant-donor-privacy.test.mjs`)
+against the real, extracted authorization SQL is the authoritative
+proof for cross-user isolation this round, exactly as it was for the
+cross-owner fingerprint isolation fix in the prior round.
+
+### What was verified how (explicit, per this round's own requirement)
+
+- **Verified by automated test, against real SQL/real migrations:**
+  disclosure-truncation fix (all boundary cases); donor-ownership and
+  donor-search cross-user isolation, including the forged-reference and
+  name-collision attacks; search-result capping; archived-donor
+  exclusion.
+- **Verified live on Staging, through the real AI pipeline:**
+  end-to-end disclosure survival on a real long financial answer;
+  donor-summary resolution and donor-link correctness for the one real
+  account available; write-guard re-engagement after the testing
+  window closed.
+- **Not tested, and why:** true live cross-user isolation (Staging has
+  only one real user account -- covered instead by the authoritative
+  synthetic-database test); donor-entry free-text content for
+  accidentally-typed sensitive data (a data-entry risk, not a code
+  defect -- out of scope for this review).
+
+### Direct answers to this round's closing questions
+
+**1. Can the mandatory financial disclosure ever be silently
+truncated or omitted now?** No. The disclosure is always reserved in
+full first; only the model's own prose is shortened. The one
+remaining way content can be cut is the disclosure block itself
+exceeding the entire answer budget, and that path is both disclosed
+(a visible notice is appended) and, for this feature's current set of
+limitation strings, a scenario no real combination reaches today.
+
+**2. Can Ask Fundraising OS disclose one fundraiser's donor data to
+another?** No new path was found, and the existing protections
+(fresh per-request ownership re-verification, owner-scoped search,
+request-scoped non-persistent caching, plan/compose data isolation,
+server-side donor-link filtering) were directly verified sound,
+including under a real synthetic cross-user attack simulation, not
+merely re-read and assumed correct.
+
+**3. Is any sensitive donor field reaching the AI unnecessarily?**
+No -- this schema holds no financial-identity or wealth-screening data
+of any kind; every field the AI receives is directly used by existing,
+intended CRM features.
+
+**4. Is Ask Fundraising OS ready for Production?**
+CONDITIONAL. Every defect raised across all six independent-review
+rounds on this feature to date (`9789649`, `8431f49`, `36eddff`,
+`960ba6a`, `9bd0863`, and this round's `b3a96ce`) is fixed, tested, and
+live-verified where live verification was possible. The one remaining
+gap is procedural, not technical: Staging's single-real-user
+limitation means true live cross-user isolation has never been
+observed directly in a live request/response pair, only proven against
+a real synthetic database running the exact production SQL. Given six
+consecutive rounds of this specific class of review have each found at
+most one genuine defect and none remain open, the owner may reasonably
+judge the synthetic-database proof sufficient to proceed -- but that is
+the owner's own call to make, not one this round makes for them. No
+other blocker exists. Recommended next action: either accept the
+synthetic-database isolation proof as sufficient and authorize a
+Production deployment, or create a second real Staging user account
+specifically to observe one live cross-user request/response pair
+before doing so.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred.**
