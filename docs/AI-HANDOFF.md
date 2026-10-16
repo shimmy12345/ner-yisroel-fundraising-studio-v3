@@ -49942,3 +49942,292 @@ every step ran sequentially, directly. No unrelated feature,
 migration, or financial-data correction was deployed or attempted. No
 additional feature development was begun after deployment. Stopping
 here per this round's instruction.
+
+## Fix AI Donor Prioritization and Giving-History Intelligence (2026-10-16) -- FIXED, TESTED, VERIFIED LIVE ON STAGING, PRODUCTION NOT TOUCHED
+
+Owner reported that Ask Fundraising OS repeatedly returned the same four
+recent small-gift donors across this exact conversation, regardless of
+phrasing or correction:
+
+1. "Which donors should I prioritize today, and why?"
+2. "No, donors based on giving history."
+3. "No, which donors in general should I focus on based on their past
+   giving levels?"
+
+Scoped to the working branch and Staging only, per this round's own
+instruction -- no Production deployment. Code committed as `8fad317`.
+
+### Root cause (confirmed by investigation, not assumed)
+
+Traced the full retrieval/planning/conversation/response pipeline
+before writing any code. The assistant's only "who should I
+prioritize" capabilities --`todays_priorities`, `this_week_priorities`,
+`lapsed_relationships` -- are all derived from
+`lib/workspace/live-data.ts`'s `loadWorkspaceBrief` relationship queue:
+overdue follow-ups, due-today reminders, and contact gaps. None of them
+read a donor's giving amount at all. There was no capability anywhere
+in the registry (`lib/assistant/protocol.ts`'s `CAPABILITY_NAMES`,
+`lib/assistant/capabilities.ts`'s `CAPABILITY_DESCRIPTIONS`) that
+ranked the portfolio by lifetime or annual giving. Asking "based on
+giving history" had nothing better to select from, so the planner kept
+re-selecting the same recency-driven queue no matter how the question
+was phrased or corrected -- this was a missing capability, not a prompt
+wording problem, confirmed before any fix was attempted.
+
+### What was built
+
+**1. A new pure module, `lib/assistant/giving-history.ts`** (no
+`cloudflare:workers` import, same convention as
+`fundraising-progress.ts` and `donor-authorization.ts`):
+
+- `GIVING_BY_DONOR_YEAR_SQL` -- one portfolio-wide, owner-scoped query
+  returning every donor's real paid giving, grouped by the calendar
+  year each gift's `activity_date` falls in. `UNION ALL`s two sources:
+  `giving_activities` (excluding `needs_review`/`nonfinancial_entry`/
+  `pending_gift`, the same exclusion `meeting-brief.ts`'s own giving
+  query uses) and the legacy `gifts` table -- deliberately matching the
+  donor profile page's own `lifetimePaidCents` definition exactly
+  (`lib/relationships/meeting-brief-model.ts`), so an Ask AI answer can
+  never disagree with what the donor's own profile already shows for
+  the same donor.
+- `OPEN_COMMITMENTS_BY_DONOR_SQL` -- every donor's current open/
+  partially-paid pledge exposure, reusing the exact
+  `pledge_balance_corrections` override join `getOutstandingPledges`
+  already uses, kept completely separate from paid giving -- a
+  pledge's committed amount is never counted as money received.
+- `summarizeGivingHistory()` -- a pure, synchronous ranking function.
+  For each donor: lifetime paid, distinct giving years, peak year,
+  most recent giving year, and years since their last gift. Computes
+  four mutually-exclusive-where-applicable signals, each from a named,
+  documented, exported constant (so a test can assert against the real
+  threshold, not a guessed number):
+  - `high_value` -- top `HIGH_VALUE_TOP_FRACTION` (25%) of the
+    portfolio by lifetime paid. Deliberately RELATIVE to the real
+    portfolio, never a fixed dollar figure -- a fixed number would be
+    meaningless across organizations of different sizes and is exactly
+    the kind of invented threshold the task's own instruction warned
+    against.
+  - `consistent` -- at least `CONSISTENT_MIN_YEARS` (3) distinct giving
+    years, covering at least `CONSISTENT_COVERAGE_THRESHOLD` (60%) of
+    the years since their first gift, with no lapse.
+  - `declined` -- their most recent giving year's total is below
+    `DECLINE_RATIO_THRESHOLD` (50%) of their own historical peak year,
+    but they still gave within the last `LAPSED_YEARS_THRESHOLD` (2)
+    years -- always compared to the donor's OWN prior peak, never a
+    cross-donor or invented capacity figure.
+  - `lapsed` -- no real paid gift in at least `LAPSED_YEARS_THRESHOLD`
+    (2) full years.
+  - `insufficient_history` -- fewer than 2 distinct giving years AND
+    fewer than 2 gifts -- too little data for ANY trend claim; such a
+    donor can still appear (e.g. under `high_value`, if their one gift
+    is large) but is only ever described by what is literally true.
+  - Shortlist ranking applies a boost (`LAPSED_SCORE_MULTIPLIER` 1.5,
+    `DECLINED_SCORE_MULTIPLIER` 1.3) to lapsed/declined donors over an
+    equally-large but already-engaged donor -- a lapsed or declined
+    major donor is the most actionable cultivation opportunity this
+    data can support without inventing anything: their OWN past giving
+    already proves what they are capable of, never a prediction of a
+    future gift.
+
+**2. `getHistoricalGivingPriorities()` in `capabilities.ts`.** Runs the
+two portfolio-wide queries plus a scoped donor-name lookup (owner-
+scoped, `data_source = 'live'`, `archived_at IS NULL` -- deliberately
+tighter than `getOutstandingPledges`' own name lookup, since this
+capability actively RECOMMENDS donors, and a merged/archived record is
+never a valid cultivation target) in one `Promise.all`, feeds the raw
+rows through `summarizeGivingHistory`, over-fetches before the
+archived-donor filter so a few filtered-out candidates never silently
+shrink the shortlist below `MAX_RESULT_ITEMS`, and attaches each
+shortlisted donor's current open-pledge balance/committed context
+(kept visibly separate from their lifetime-paid figure).
+
+**3. Registry and prompt changes.** `historical_giving_priorities`
+added to `CAPABILITY_NAMES`/`CAPABILITY_DESCRIPTIONS`/orchestrator
+dispatch. Every existing giving/reminder-adjacent capability's
+description now states plainly what it is NOT for (e.g.
+`todays_priorities`: "do NOT use this for... questions that mention
+past giving, giving levels, giving history, or donor significance").
+The plan prompt (`buildPlanSystemPrompt`) gained an explicit new rule:
+on a correction ("no," "not that," "I meant," etc.), the planner must
+not simply repeat its prior capability selection -- it must read what
+the correction specifies and select accordingly. The compose prompt
+gained a rule specific to this capability's data: explain only from
+the real evidence provided (lifetime total, years, trend) and never
+state or imply a donor's wealth, capacity, or likelihood to give.
+
+### Tests
+
+`tests/giving-history.test.mjs`, two parts:
+
+- **Part A** -- `summarizeGivingHistory` against hand-built rows
+  covering every synthetic donor type the task's own "Testing" section
+  asked for, in one connected 8-donor scenario so ranking/exclusion is
+  proven against real competition: a lapsed major donor ($300k
+  lifetime, nothing since 2019 -- correctly `high_value` + `lapsed`), a
+  declined major donor ($225k lifetime, peak $80k in 2020 down to $5k
+  by 2025, still gave last year -- correctly `declined`, never
+  `lapsed`), a consistent annual donor (7 straight years -- correctly
+  `consistent`), an ordinary 2-year donor (correctly no signal), a
+  brand-new donor with one gift this year (correctly
+  `insufficient_history`), and the regression itself -- two small
+  recent gifts ($300 total) that must never outrank the real historical
+  donors. Asserts the exact top-5 shortlist order and explicitly
+  asserts the small-recent and brand-new donors are excluded from it.
+  Separately verifies the `HIGH_VALUE_TOP_FRACTION` threshold is
+  relative to real portfolio size (not a fixed dollar amount) with a
+  4-donor and a 1-donor scenario, plus an empty-input case.
+- **Part B** -- the two real SQL statements against a synthetic
+  multi-year, multi-user SQLite database (same `DatabaseSync` + real
+  `drizzle/*.sql` migrations harness as every other `lib/assistant/*`
+  pure module): multi-year aggregation stays per-year, not summed
+  across years; a partially-paid pledge's current `paid_cents` counts
+  once toward lifetime giving (never its full `committed_cents`,
+  never double-counted against the separate open-commitments query);
+  the `pledge_balance_corrections` override is correctly applied; the
+  legacy `gifts` table is correctly unioned in; `needs_review`/
+  `nonfinancial_entry`/`pending_gift` rows are correctly excluded; and
+  two users with identically-named donors never see each other's
+  giving history or totals.
+
+**Verified with the established before/after technique.** Backed up
+`giving-history.ts`, temporarily changed the shortlist sort to rank by
+`mostRecentPaidDateEpoch` instead of `priorityScore` (i.e., literally
+reproducing the reported bug -- rank by recency) -- the test failed
+exactly as predicted: the brand-new and small-recent donors jumped to
+the top of the shortlist, displacing the real lapsed/declined/
+consistent donors entirely. Restored the fix; reran; all tests pass
+again.
+
+**Full-suite results:** `node scripts/run-tests.mjs` -- 213/213 test
+files pass (212 prior + new `tests/giving-history.test.mjs`).
+`tests/assistant-protocol.test.mjs` extended to assert the new
+capability name, the correction-handling rule text, and the no-wealth-
+invention compose rule. `tests/assistant-capabilities-safety.test.mjs`
+extended to cover `giving-history.ts` in its write-pattern and owner-
+scoping checks, and its `localMonthBoundaries` import-text assertion
+updated for the added `localDateParts` import.
+`tests/relationship-snapshot-stage3.test.mjs`'s `capabilities.ts`
+`env.DB.prepare(` ceiling bumped from 7 to 10 (3 new, fully-explained,
+unrelated queries) with a dated comment, same convention every prior
+round's ceiling bump used. `npx tsc --noEmit`: clean. `npm run lint`:
+unchanged at exactly 94 errors / 43 warnings.
+`pnpm run build:staging-independent`: succeeds.
+
+### Staging verification (live, through the real AI pipeline)
+
+Seven new synthetic test donors were created directly in the Staging
+D1 database (owned by the real Staging account,
+`user_sgoldstein@nirc.edu`, same convention as the existing "QA TEST --
+AI Meeting Notes" fixture), clearly labeled `SYNTHETIC TEST — ... (safe,
+do not use for real data)`, **left in place afterward as a reusable
+fixture** for future rounds, matching the existing QA TEST donor's own
+precedent:
+
+| Donor | Design | Lifetime paid |
+|---|---|---|
+| Lapsed Major Donor | $150k in 2018 and 2019, nothing since | $300,000 |
+| Declined Major Donor | Peak $80k (2020), down to $5k by 2025 | $225,000 |
+| Consistent Annual Donor | $10k/year, 2021-2026 | $60,000 |
+| Small Recent Donor | Two $75 gifts this year | $150 |
+| New Donor No History | One $500 gift this year | $500 |
+| Partial Pledge Payer | $50k committed, $20k paid, $30k open | $20,000 paid |
+| Multi Payment Pledge | $40k committed, $38k paid (cumulative) | $38,000 paid |
+
+Opened the Staging write window (`STAGING_WRITES_ENABLED=true`,
+rebuild, deploy -- required because `/api/assistant` is POST-only and
+the staging write guard blocks every mutating method under `/api/**`
+by method alone), then ran the task's exact three-question conversation
+live:
+
+1. **"Which donors should I prioritize today, and why?"** -> "There
+   are no donors prioritized for today." -- honest, grounded in the
+   real (empty) relationship queue, no hallucinated list. Matches the
+   owner's own original report of this step.
+2. **"No, donors based on giving history."** -> correctly recognized as
+   a correction and switched to `historical_giving_priorities`. The
+   live response named real, historically significant donors (a
+   lifetime total over $200,000 across 33 distinct giving years, etc.)
+   and explicitly explained the decline signal ("their giving has
+   declined from their own prior peak year") for several donors,
+   including the synthetic Declined Major Donor. None of the small/new
+   synthetic donors appeared.
+3. **"No, which donors in general should I focus on based on their past
+   giving levels?"** -> correctly STAYED on
+   `historical_giving_priorities` rather than reverting to the
+   recency-driven queue -- the exact failure mode reported. This
+   response's shortlist included both the synthetic Lapsed Major Donor
+   and Declined Major Donor alongside six real, long-tenured Staging
+   donors (giving histories spanning 30-54 distinct years), none of
+   the small/new synthetic donors present.
+
+A follow-up ("Which of these donors have open pledges?") correctly
+broadened to the portfolio's real open pledges and surfaced the
+synthetic Partial Pledge Payer with its exact real figures ("a balance
+of $30,000 out of a $50,000 commitment") -- confirming paid, committed,
+and outstanding balance stay visibly distinct, never conflated.
+
+**Independent cross-check, not relying on the AI's narrative alone**:
+pulled the real `GIVING_BY_DONOR_YEAR_SQL` results and donor names
+directly from the Staging database and replayed them through the exact
+same `summarizeGivingHistory()` function locally in Node (bypassing the
+AI entirely). This independently confirmed the Lapsed Major Donor ranks
+#1 by the real backend logic (priority score $450,000, the highest of
+any donor in the portfolio) -- which surfaced one disclosed, minor
+limitation below.
+
+**One disclosed limitation, not a backend defect**: on the second
+question's response, the small Workers AI compose model's own
+narrative/`referencedDonorIds` output omitted the single
+highest-ranked donor (the synthetic Lapsed Major Donor) from that one
+reply, even though the capability itself retrieved and ranked it
+correctly (confirmed by the independent replay above, and confirmed
+present in the THIRD question's response moments later). This is
+compose-step narrative completeness variance from a small model under
+a 900-token budget, not a ranking or retrieval defect -- the same class
+of "safe but conservative" model-routing variance already disclosed in
+an earlier round for the planning step. Not fixed this round, since
+forcing every single shortlisted item into prose risks working against
+this capability's own "prefer a concise, useful shortlist" design
+intent; flagged here for visibility rather than silently left
+undocumented.
+
+Closed the write window (reverted `wrangler.staging.jsonc`, rebuilt,
+redeployed), confirmed `git diff --stat wrangler.staging.jsonc` empty,
+and confirmed a live `POST /api/assistant` now returns 403 with the
+standard read-only message.
+
+### What was verified how
+
+- **Verified by automated test, against real SQL/real migrations**:
+  every signal classification rule, the relative high-value threshold,
+  shortlist ranking/exclusion (including the exact regression
+  scenario), multi-year/multi-payment/partial-pledge aggregation
+  correctness, the legacy-gifts UNION, category exclusion, the
+  balance-correction override, and cross-user/identical-name
+  isolation.
+- **Verified live on Staging, through the real AI pipeline**: the
+  exact three-question conversation from the task, including the
+  correction-recognition behavior; the open-pledge follow-up;
+  independently cross-checked against the real backend ranking
+  function run directly against the real Staging data.
+- **Not separately live-tested this round**: the Consistent Annual
+  Donor, New Donor No History, and Multi Payment Pledge synthetic
+  donors were not individually surfaced in a live conversation this
+  round (their behavior is covered by Part A/B's unit tests against
+  the real SQL and ranking logic) -- all three remain available on
+  Staging as a persistent fixture for a future round's live spot-check
+  if wanted.
+
+### Direct answer to this round's success criterion
+
+Asked live, on Staging, through the real AI pipeline: "Which donors in
+general should I focus on based on their past giving levels?" Fundraising
+OS genuinely analyzed historical giving across the full authorized
+portfolio and recommended real, evidence-backed cultivation
+priorities (largest lifetime givers, including ones whose giving has
+since declined from their own peak) -- it did not repeat the prior
+recency-driven stewardship list. The success criterion is met.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. Stopping
+here for independent review, per this round's own instruction.**
