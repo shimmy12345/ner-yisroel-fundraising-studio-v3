@@ -3,10 +3,14 @@ import {
   buildSystemPrompt,
   buildUserMessage,
   parseOrganizedResponse,
-  organizeMeetingNotes,
-  DEFAULT_ANTHROPIC_MODEL,
-  MAX_TRANSCRIPT_LENGTH,
+  MEETING_NOTES_JSON_SCHEMA,
 } from "../lib/meeting-notes/organize.ts";
+
+// This file covers only the provider-agnostic pieces shared by every AI
+// provider: the prompt, the response shape, and strict output validation.
+// Provider-specific network/binding behavior lives in
+// tests/meeting-notes-workers-ai-provider.test.mjs and
+// tests/meeting-notes-anthropic-provider.test.mjs.
 
 // --- Prompt construction: the hard "never invent facts" / "data not
 // instructions" rules must actually be present in the system prompt, and
@@ -100,84 +104,22 @@ assert.equal(parseOrganizedResponse(JSON.stringify({
   assert.equal(result.data.followUpActions[0].description, "Real one");
 }
 
-// --- organizeMeetingNotes: the actual network call, fully mocked ---
+// --- MEETING_NOTES_JSON_SCHEMA: the shape providers with native structured
+// output are asked to constrain generation to must actually describe every
+// field parseOrganizedResponse checks, so the two never drift apart. ---
 
-{
-  const result = await organizeMeetingNotes({ transcript: "   ", apiKey: "test-key" });
-  assert.equal(result.ok, false, "an empty transcript must never be sent to the provider");
+assert.equal(MEETING_NOTES_JSON_SCHEMA.type, "object");
+for (const field of [
+  "summary",
+  "donorInterests",
+  "fundraisingOpportunities",
+  "confirmedCommitments",
+  "possibleCommitments",
+  "followUpActions",
+  "relationshipContext",
+]) {
+  assert.ok(field in MEETING_NOTES_JSON_SCHEMA.properties, `schema must describe ${field}`);
+  assert.ok(MEETING_NOTES_JSON_SCHEMA.required.includes(field), `schema must require ${field}`);
 }
-
-{
-  // Successful call: the mock asserts the request shape (model, headers,
-  // delimited transcript) and returns a realistic Anthropic Messages API
-  // response envelope.
-  const fetchImpl = async (url, init) => {
-    assert.equal(url, "https://api.anthropic.com/v1/messages");
-    assert.equal(init.headers["x-api-key"], "test-key");
-    assert.equal(init.headers["anthropic-version"], "2023-06-01");
-    const sentBody = JSON.parse(init.body);
-    assert.equal(sentBody.model, "claude-haiku-5-5");
-    assert.match(sentBody.messages[0].content, /<<<MEETING_NOTES_START>>>/);
-    return new Response(JSON.stringify({ content: [{ type: "text", text: validResponse }] }), { status: 200 });
-  };
-  const result = await organizeMeetingNotes({ transcript: "Met with the Kleins.", apiKey: "test-key", fetchImpl });
-  assert.equal(result.ok, true);
-  assert.equal(result.data.summary, "Discussed the building fund campaign.");
-}
-
-{
-  // Configurable model id must actually be sent, never hardcoded past the
-  // caller's override.
-  const fetchImpl = async (_url, init) => {
-    const sentBody = JSON.parse(init.body);
-    assert.equal(sentBody.model, "claude-haiku-custom-test");
-    return new Response(JSON.stringify({ content: [{ type: "text", text: validResponse }] }), { status: 200 });
-  };
-  const result = await organizeMeetingNotes({ transcript: "Met with the Kleins.", apiKey: "test-key", model: "claude-haiku-custom-test", fetchImpl });
-  assert.equal(result.ok, true);
-}
-
-{
-  // Provider error (e.g. rate limit, auth failure) must degrade to a safe
-  // fallback message, never throw or leak the raw error body.
-  const fetchImpl = async () => new Response("some provider error body that must never be echoed", { status: 429 });
-  const result = await organizeMeetingNotes({ transcript: "Met with the Kleins.", apiKey: "test-key", fetchImpl });
-  assert.equal(result.ok, false);
-  assert.doesNotMatch(result.error, /must never be echoed/);
-}
-
-{
-  // A network-level throw (not just a non-200) must also degrade safely.
-  const fetchImpl = async () => { throw new Error("network down"); };
-  const result = await organizeMeetingNotes({ transcript: "Met with the Kleins.", apiKey: "test-key", fetchImpl });
-  assert.equal(result.ok, false);
-}
-
-{
-  // A slow/hanging provider must be cancelled by the timeout, not hang the
-  // request indefinitely.
-  const fetchImpl = (_url, init) => new Promise((_resolve, reject) => {
-    init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-  });
-  const result = await organizeMeetingNotes({ transcript: "Met with the Kleins.", apiKey: "test-key", fetchImpl, timeoutMs: 20 });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /too long/i);
-}
-
-{
-  // A transcript longer than the cap must be truncated before being sent,
-  // never rejected outright and never sent in full.
-  const longTranscript = "a".repeat(MAX_TRANSCRIPT_LENGTH + 500);
-  const fetchImpl = async (_url, init) => {
-    const sentBody = JSON.parse(init.body);
-    const sentTranscript = sentBody.messages[0].content;
-    assert.ok(sentTranscript.length < longTranscript.length + 100, "the oversized transcript must have been truncated before sending");
-    return new Response(JSON.stringify({ content: [{ type: "text", text: validResponse }] }), { status: 200 });
-  };
-  const result = await organizeMeetingNotes({ transcript: longTranscript, apiKey: "test-key", fetchImpl });
-  assert.equal(result.ok, true);
-}
-
-assert.equal(DEFAULT_ANTHROPIC_MODEL, "claude-haiku-5-5");
 
 console.log("meeting-notes-organize.test.mjs: all assertions passed");

@@ -1,9 +1,12 @@
 // AI Meeting Notes -- "Organize Notes" (docs/AI-HANDOFF.md, "Voice
 // Dictation and AI Meeting Notes"). Converts a dictated/typed meeting
-// transcript into structured fundraising notes via the Anthropic Messages
-// API, called server-side only (app/api/meeting-notes/organize/route.ts
-// holds the API key; this module never sees it from anywhere but a direct
-// function argument).
+// transcript into structured fundraising notes. This module holds only the
+// provider-agnostic pieces -- the prompt, the response JSON shape, and
+// strict output validation -- shared by every AI provider. The actual
+// outbound call (and whatever secret/binding it needs) lives in
+// lib/meeting-notes/providers/*.ts; app/api/meeting-notes/organize/route.ts
+// picks which provider to call and never sees a transcript go anywhere
+// this module didn't build the prompt for.
 //
 // The model is instructed, and the output is independently re-validated, to
 // never invent donor facts, pledge amounts, dates, or commitments -- only
@@ -13,9 +16,7 @@
 // instructions -- the prompt-injection mitigation for free-text donor
 // dictation (see buildUserMessage's own comment).
 
-export const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5";
-
-// A hard ceiling on what this feature will ever send to Anthropic.
+// A hard ceiling on what this feature will ever send to any AI provider.
 // Matches the spirit of app/api/interactions/route.ts's own 5000-char note
 // cap, sized up modestly for a longer dictated meeting (not a hard
 // technical limit on the model's context window).
@@ -39,6 +40,45 @@ export type OrganizedMeetingNotes = {
 export type OrganizeResult =
   | { ok: true; data: OrganizedMeetingNotes }
   | { ok: false; error: string };
+
+// A JSON Schema description of OrganizedMeetingNotes, for providers that
+// support constraining generation to a schema natively (e.g. Workers AI's
+// response_format: {type: "json_schema", json_schema}). Purely an extra
+// reliability hint to the provider -- parseOrganizedResponse below is still
+// always run against whatever text comes back, since schema-constrained
+// generation is a provider-side best effort, never a substitute for
+// server-side validation.
+export const MEETING_NOTES_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: "string" },
+    donorInterests: { type: "array", items: { type: "string" } },
+    fundraisingOpportunities: { type: "array", items: { type: "string" } },
+    confirmedCommitments: { type: "array", items: { type: "string" } },
+    possibleCommitments: { type: "array", items: { type: "string" } },
+    followUpActions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          description: { type: "string" },
+          suggestedDueDate: { type: ["string", "null"] },
+        },
+        required: ["description", "suggestedDueDate"],
+      },
+    },
+    relationshipContext: { type: "string" },
+  },
+  required: [
+    "summary",
+    "donorInterests",
+    "fundraisingOpportunities",
+    "confirmedCommitments",
+    "possibleCommitments",
+    "followUpActions",
+    "relationshipContext",
+  ],
+} as const;
 
 export function buildSystemPrompt(): string {
   return [
@@ -138,65 +178,3 @@ export function parseOrganizedResponse(raw: string): OrganizeResult {
   };
 }
 
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-
-// The only function that actually talks to Anthropic. Never throws --
-// every failure path (network error, timeout, non-200, malformed body)
-// resolves to {ok:false, error}, so a caller can always fall back to
-// manual entry. Takes apiKey/model as explicit arguments, never reads an
-// env var itself, so it stays trivially testable with a mock fetchImpl and
-// never needs a real secret in a test process.
-export async function organizeMeetingNotes(params: {
-  transcript: string;
-  apiKey: string;
-  model?: string;
-  fetchImpl?: FetchLike;
-  timeoutMs?: number;
-}): Promise<OrganizeResult> {
-  const transcript = params.transcript.trim();
-  if (transcript.length === 0) return { ok: false, error: "There is no meeting text to organize yet." };
-  const bounded = transcript.length > MAX_TRANSCRIPT_LENGTH ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH) : transcript;
-
-  const fetchImpl = params.fetchImpl ?? fetch;
-  const model = params.model && params.model.trim().length > 0 ? params.model.trim() : DEFAULT_ANTHROPIC_MODEL;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), params.timeoutMs ?? 25000);
-
-  try {
-    const response = await fetchImpl("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": params.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1500,
-        system: buildSystemPrompt(),
-        messages: [{ role: "user", content: buildUserMessage(bounded) }],
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      // Never surface the raw provider error body (it could echo request
-      // content back) -- only the status, which is safe and useful enough
-      // for an operator reading logs to know "it's failing", not why in
-      // donor-content terms.
-      return { ok: false, error: `AI organization is temporarily unavailable (provider returned ${response.status}).` };
-    }
-
-    const body = await response.json() as { content?: Array<{ type?: string; text?: string }> };
-    const textBlock = body.content?.find((block) => block.type === "text");
-    if (!textBlock?.text) return { ok: false, error: "AI organization returned an empty response." };
-    return parseOrganizedResponse(textBlock.text);
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      return { ok: false, error: "AI organization took too long and was cancelled." };
-    }
-    return { ok: false, error: "AI organization could not be reached." };
-  } finally {
-    clearTimeout(timeout);
-  }
-}

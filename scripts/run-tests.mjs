@@ -239,6 +239,9 @@ const TEST_FILES = [
   "tests/meeting-notes-followups.test.mjs",
   "tests/meeting-notes-idempotency.test.mjs",
   "tests/meeting-notes-fundraising-scenarios.test.mjs",
+  "tests/meeting-notes-anthropic-provider.test.mjs",
+  "tests/meeting-notes-workers-ai-provider.test.mjs",
+  "tests/meeting-notes-provider-selection.test.mjs",
 ];
 
 function runOne(file) {

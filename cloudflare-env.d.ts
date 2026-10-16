@@ -2,6 +2,14 @@ interface Fetcher {
   fetch(request: Request): Promise<Response>;
 }
 
+// Minimal shape of Cloudflare's Workers AI binding -- only the one method
+// this app calls (lib/meeting-notes/providers/workers-ai.ts). Hand-rolled
+// rather than pulled from @cloudflare/workers-types, matching this file's
+// own D1Database/Fetcher convention above.
+interface Ai {
+  run(model: string, inputs: Record<string, unknown>): Promise<unknown>;
+}
+
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
   run(): Promise<unknown>;
@@ -86,18 +94,39 @@ declare module "cloudflare:workers" {
     // "healthy".
     STATUS_WORKER?: Fetcher;
     // AI Meeting Notes "Organize Notes" (docs/AI-HANDOFF.md, "Voice
-    // Dictation and AI Meeting Notes"). A Cloudflare Worker *secret*
-    // (`wrangler secret put`), never a `vars` entry -- must never appear
-    // in this repo, a wrangler config file, or any log line. Absent means
-    // AI organization is simply unavailable (callers must treat that as
-    // "unavailable", never attempt a call, and let the fundraiser save
-    // notes manually instead) -- this is the deliberate state on every
-    // environment until the owner separately approves activating real,
-    // paid Anthropic API usage.
-    ANTHROPIC_API_KEY?: string;
-    // A `vars` entry (not a secret) -- the Claude model id to use for
+    // Dictation and AI Meeting Notes" / "Implement Cloudflare AI Meeting
+    // Notes on Staging"). The Cloudflare Workers AI binding is the DEFAULT
+    // provider (lib/meeting-notes/providers/workers-ai.ts) -- a `[ai]`
+    // binding declared directly in wrangler config, like DB above, never a
+    // secret. Absent means Workers AI organization is unavailable; the
+    // route falls back to reporting "unavailable" rather than attempting a
+    // call, same as the Anthropic case below.
+    AI?: Ai;
+    // A `vars` entry (not a secret) -- the Workers AI model id to use for
     // Organize Notes, configurable without a code change. Absent falls
-    // back to lib/meeting-notes/organize.ts's own DEFAULT_ANTHROPIC_MODEL.
+    // back to lib/meeting-notes/providers/workers-ai.ts's own
+    // DEFAULT_WORKERS_AI_MODEL.
+    WORKERS_AI_MODEL?: string;
+    // A `vars` entry (not a secret) -- which provider app/api/meeting-
+    // notes/organize/route.ts calls: "workers-ai" (the default; also used
+    // if this is absent or any other value) or "anthropic". Changing
+    // providers is a config-only change, no code deploy required.
+    AI_PROVIDER?: "workers-ai" | "anthropic";
+    // Anthropic Claude -- kept as a configurable, currently INACTIVE
+    // alternative provider (lib/meeting-notes/providers/anthropic.ts),
+    // selected only if AI_PROVIDER is explicitly set to "anthropic". A
+    // Cloudflare Worker *secret* (`wrangler secret put`), never a `vars`
+    // entry -- must never appear in this repo, a wrangler config file, or
+    // any log line. Absent on every environment as of this round, and
+    // deliberately not created: this app does not require a separate
+    // Anthropic account to use AI Meeting Notes. Absent means Anthropic
+    // organization is unavailable (callers must treat that as
+    // "unavailable", never attempt a call, and let the fundraiser save
+    // notes manually instead).
+    ANTHROPIC_API_KEY?: string;
+    // A `vars` entry (not a secret) -- the Claude model id to use when
+    // AI_PROVIDER="anthropic". Absent falls back to lib/meeting-notes/
+    // providers/anthropic.ts's own DEFAULT_ANTHROPIC_MODEL.
     ANTHROPIC_MODEL?: string;
   };
 }

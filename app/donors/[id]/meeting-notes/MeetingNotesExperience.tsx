@@ -44,6 +44,13 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
 
   const [organizeStatus, setOrganizeStatus] = useState<"idle" | "organizing" | "done" | "unavailable" | "error">("idle");
   const [organizeMessage, setOrganizeMessage] = useState("");
+  // A minimum gap between Organize Notes attempts, on top of the
+  // disable-while-in-flight guard above -- a defense against accidental
+  // repeated AI calls (e.g. impatient repeated clicking after a slow
+  // response), not a defense against malicious abuse (this is a
+  // single-owner, authenticated app).
+  const [lastOrganizeAt, setLastOrganizeAt] = useState(0);
+  const ORGANIZE_COOLDOWN_MS = 3000;
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState("");
@@ -58,6 +65,12 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
   const canSave = saveStatus !== "saving" && (summaryText.trim().length > 0 || transcript.trim().length > 0);
 
   async function handleOrganize() {
+    const now = Date.now();
+    if (now - lastOrganizeAt < ORGANIZE_COOLDOWN_MS) {
+      setOrganizeMessage("Give it a few seconds before organizing again.");
+      return;
+    }
+    setLastOrganizeAt(now);
     setOrganizeStatus("organizing");
     setOrganizeMessage("");
     try {
