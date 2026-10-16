@@ -56,6 +56,16 @@
       "database_id": "a51c6571-ae16-4614-aa9a-08f8e6be3ecd"
     }
   ],
+  // Cloudflare Workers AI binding -- AI Meeting Notes "Organize Notes"
+  // (docs/AI-HANDOFF.md, "Authorized Production Deployment of AI
+  // Meeting Notes"), owner-authorized 2026-10-16 after extensive
+  // Staging verification. Identical binding to wrangler.staging.jsonc's
+  // own -- NOT a secret, declared directly here like DB above, on the
+  // same Cloudflare account already used for Staging's own verified
+  // Workers AI usage (confirmed same account id for both Workers).
+  "ai": {
+    "binding": "AI"
+  },
   // Worker-to-Worker binding only -- NOT an R2 binding, mirroring
   // wrangler.staging.jsonc's own comment and guardrail exactly. Points at
   // the (not yet deployed) Production status-worker -- see
@@ -113,7 +123,20 @@
     // be done manually by the owner. Until then, a request bearing this
     // token is rejected at the Access edge exactly as it is today -- no
     // security restriction is weakened by setting this var early.
-    "MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID": "983ea5fccaebc48932c5e69df510f74a.access"
+    "MORNING_BRIEF_SERVICE_TOKEN_CLIENT_ID": "983ea5fccaebc48932c5e69df510f74a.access",
+    // AI Meeting Notes "Organize Notes" (docs/AI-HANDOFF.md, "Authorized
+    // Production Deployment of AI Meeting Notes"). AI_PROVIDER picks
+    // which provider app/api/meeting-notes/organize/route.ts calls --
+    // "workers-ai" is the ONLY provider configured here. Anthropic is
+    // deliberately NOT enabled: no ANTHROPIC_API_KEY secret exists on
+    // Production (confirmed via `wrangler secret list` -- only the three
+    // Gmail OAuth secrets are present), so selecting "anthropic" would
+    // just report "AI organization isn't configured yet," never used.
+    "AI_PROVIDER": "workers-ai",
+    // The Workers AI model id, identical to wrangler.staging.jsonc's own
+    // already-verified value. NOT a secret -- the `ai` binding above is
+    // the only credential this provider needs.
+    "WORKERS_AI_MODEL": "@cf/mistralai/mistral-small-3.1-24b-instruct"
   },
   // Daily Fundraising Agenda email cron -- ACTIVE (2026-10-12 Production
   // Daily Email Cutover round, docs/AI-HANDOFF.md). The owner entered
