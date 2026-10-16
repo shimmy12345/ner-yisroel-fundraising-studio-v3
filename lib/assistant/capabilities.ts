@@ -30,8 +30,9 @@ import { localMonthBoundaries } from "../workspace/local-time.ts";
 import {
   summarizeFundraisingProgress,
   NEW_COMMITMENTS_SQL,
-  VERIFIED_NEW_GIVING_ROWS_SQL,
-  PAYMENT_ASSIGNMENT_AUDITS_SQL,
+  RECORDED_PAID_BALANCE_ROWS_SQL,
+  VERIFIED_DATED_PAYMENT_AUDITS_SQL,
+  UNDATED_PAYMENT_AUDITS_SQL,
   DONORS_CONTACTED_SQL,
   type NewGivingRow,
   type PaymentAssignmentAuditRow,
@@ -198,69 +199,51 @@ export async function getDonorSummary(ctx: AssistantContext, donorId: string): P
   };
 }
 
-// --- 8. Fundraising progress this month -- real, reconciled totals only.
-// There is no "goal" or target concept anywhere in this schema (confirmed
-// by review, docs/AI-HANDOFF.md).
+// --- 8. Fundraising progress this month. There is no "goal" or target concept
+// anywhere in this schema (confirmed by review, docs/AI-HANDOFF.md).
 //
-// Rebuilt from first principles (independent code review, "Final
-// Financial Accuracy Fix for Ask Fundraising OS", 2026-10-16) after the
-// original version was found to: have no upper month boundary (so it
-// silently swept in every later month too); exclude only 'open_pledge'
-// (so needs_review/nonfinancial_entry/pending_gift/pending_pledge rows
-// could be counted as real donations); and filter by activity_date, which
-// lib/import/jl-refresh.ts's own doc comment establishes is a pledge's
-// DUE DATE, never updated once a payment is applied -- meaning the old
-// query could count an old pledge's entire historical paid_cents as
-// "this month's" money the instant any one new payment nudged it, or
-// miss a genuine same-month payment entirely, depending on where that
-// frozen date happened to fall.
-//
-// The fix: "new commitments" is now gated on created_at (set once at
-// insert, never touched by any payment update -- see
+// Rebuilt across four independent review rounds (2026-10-16) -- see
 // lib/assistant/fundraising-progress.ts's own header comment for the
-// full data-model investigation), using the exact same
-// REAL_COMMITMENT_CATEGORIES set the Trip Fundraising Results Dashboard
-// already uses for "what counts as a real commitment"
-// (lib/relationships/trip-financial-attribution.ts), so this capability
-// can never disagree with that dashboard about which categories count.
-// "Verified money received" is reconciled by lib/assistant/
-// fundraising-progress.ts's summarizeFundraisingProgress against
-// jl_payment_assignment_audits -- the one place a payment applied to a
-// pre-existing pledge has an actual recorded date -- with an explicit,
-// always-disclosed limitation for the payments that do not go through
-// that audited path (see that module). event_or_ad (event/ad revenue)
-// is deliberately excluded from both figures here, consistent with the
-// Trip Dashboard's own existing treatment of that category, not a new
-// decision invented for this capability.
-//
-// SECOND and THIRD fixes (two later independent reviews, both
-// 2026-10-16 -- see fundraising-progress.ts's own header comment for
-// the full history): a new giving_activities row's paid_cents, for a
-// period this capability is asked about, is reconstructed to its value
-// "as of that period's own end" via VERIFIED_NEW_GIVING_ROWS_SQL's
-// correlated subquery against giving_activity_import_changes -- never
-// simply the row's raw CURRENT value, which a later reimport could
-// otherwise move and retroactively change a previously-reported total,
-// and never an all-or-nothing "touched since creation" exclusion
-// either, which could retroactively ZERO a previously-reported total
-// instead. recordedCumulativePaidTotal exposes the row's truly CURRENT,
-// live balance separately, explicitly never labeled "received."
+// complete history (an activity_date/due-date bug, two different
+// cumulative-balance stability bugs that each fixed the other's defect
+// while introducing their own, and finally a mislabeling + a cross-owner
+// isolation gap). This capability now reports three EXPLICITLY SEPARATE,
+// never-conflated categories, never summed into one undifferentiated
+// "total raised" figure:
+//   A. Verified dated payments -- a real, individually-dated transaction
+//      confirmed through the payment-review screen. Never the import/
+//      processing timestamp standing in for a missing payment date.
+//   B. Recorded paid balance -- what a pledge/gift first recorded this
+//      period shows as paid, as of this period's own end. A fact about
+//      the RECORD (reconstructed from giving_activity_import_changes,
+//      isolated per-owner via a join through data_imports -- that
+//      change-log table has no owner_user_id column of its own, and
+//      source_fingerprint is a pure content hash with no user/donor
+//      identity folded in, so this isolation is load-bearing, not
+//      incidental), never a claim about when the underlying cash was
+//      actually received.
+//   C. New commitments -- committed_cents of a row first recorded this
+//      period, by committed amount, regardless of payment status.
+// A payment applied to a PRE-EXISTING pledge through an ordinary
+// reimport refresh, with no payment-review decision, remains the one
+// gap nothing here can verify -- always disclosed, never guessed at.
 
 export type FundraisingProgress = {
   periodLabel: string;
-  verifiedMoneyReceivedTotal: string;
-  // A count of giving/payment ROWS, never distinct donors -- deliberately
-  // named so neither this code nor the AI composing an answer from it can
-  // relabel it "N donors" (see fundraising-progress.ts's own header
-  // comment on this field for why that distinction is load-bearing).
-  verifiedMoneyReceivedTransactionCount: number;
-  newGiftsReceivedTotal: string;
+  // Category A.
+  verifiedDatedPaymentsTotal: string;
+  // A count of payment-review decisions, never distinct donors --
+  // deliberately named so neither this code nor the AI composing an
+  // answer from it can relabel it "N donors" (see fundraising-progress.ts's
+  // own header comment on this field for why that distinction is
+  // load-bearing -- this exact mistake happened live on Staging twice,
+  // against two different count fields).
+  verifiedDatedPaymentsTransactionCount: number;
+  newGiftsViaReviewTotal: string;
   paymentsOnExistingPledgesTotal: string;
-  // CURRENT cumulative paid balance on commitments created this period --
-  // may include money added by a later, undated reimport. Never claimed
-  // as "received"; shown for visibility only (see this capability's own
-  // header comment and fundraising-progress.ts's RECONCILIATION_LIMITATION).
-  recordedCumulativePaidTotal: string;
+  // Category B -- a record-keeping fact, never "received"/"verified."
+  recordedPaidBalanceTotal: string;
+  // Category C.
   newCommitmentsTotal: string;
   newCommitmentsCount: number;
   donorsContacted: number;
@@ -268,7 +251,7 @@ export type FundraisingProgress = {
 };
 
 function emptyFundraisingProgress(periodLabel: string): FundraisingProgress {
-  return { periodLabel, verifiedMoneyReceivedTotal: money(0), verifiedMoneyReceivedTransactionCount: 0, newGiftsReceivedTotal: money(0), paymentsOnExistingPledgesTotal: money(0), recordedCumulativePaidTotal: money(0), newCommitmentsTotal: money(0), newCommitmentsCount: 0, donorsContacted: 0, limitations: [] };
+  return { periodLabel, verifiedDatedPaymentsTotal: money(0), verifiedDatedPaymentsTransactionCount: 0, newGiftsViaReviewTotal: money(0), paymentsOnExistingPledgesTotal: money(0), recordedPaidBalanceTotal: money(0), newCommitmentsTotal: money(0), newCommitmentsCount: 0, donorsContacted: 0, limitations: [] };
 }
 
 export async function getFundraisingProgress(ctx: AssistantContext): Promise<FundraisingProgress> {
@@ -283,33 +266,43 @@ export async function getFundraisingProgress(ctx: AssistantContext): Promise<Fun
 
   if (ctx.mode !== "live") return emptyFundraisingProgress(periodLabel);
 
-  const [commitments, verifiedNewGivingRows, auditRows, contacts] = await Promise.all([
-    env.DB.prepare(NEW_COMMITMENTS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number; total: number; cumulativePaidTotal: number }>(),
+  const [commitments, recordedPaidBalanceRows, verifiedDatedAuditRows, undatedAuditRows, contacts] = await Promise.all([
+    env.DB.prepare(NEW_COMMITMENTS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number; total: number }>(),
     // Bind order matches the SQL's own `?` order: periodEnd (the
     // subquery's "first update at/after period end" threshold) first,
     // then userId, then periodStart, then periodEnd again for the
-    // outer created_at upper bound -- see VERIFIED_NEW_GIVING_ROWS_SQL's
+    // outer created_at upper bound -- see RECORDED_PAID_BALANCE_ROWS_SQL's
     // own comment in fundraising-progress.ts.
-    env.DB.prepare(VERIFIED_NEW_GIVING_ROWS_SQL).bind(instantEndEpoch, ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
-    env.DB.prepare(PAYMENT_ASSIGNMENT_AUDITS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<PaymentAssignmentAuditRow>(),
+    env.DB.prepare(RECORDED_PAID_BALANCE_ROWS_SQL).bind(instantEndEpoch, ctx.userId, instantStartEpoch, instantEndEpoch).all<NewGivingRow>(),
+    env.DB.prepare(VERIFIED_DATED_PAYMENT_AUDITS_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).all<PaymentAssignmentAuditRow>(),
+    // Not period-bound -- a missing payment_date is a data-quality fact
+    // about the record, never something to search for within one month.
+    // One row per matching audit entry (never pre-aggregated in SQL --
+    // see UNDATED_PAYMENT_AUDITS_SQL's own comment).
+    env.DB.prepare(UNDATED_PAYMENT_AUDITS_SQL).bind(ctx.userId).all<{ cents: number; paymentFingerprint: string }>(),
     env.DB.prepare(DONORS_CONTACTED_SQL).bind(ctx.userId, instantStartEpoch, instantEndEpoch).first<{ n: number }>(),
   ]);
 
   const summary = summarizeFundraisingProgress({
     periodLabel,
-    newGivingRows: verifiedNewGivingRows.results,
-    paymentAssignmentAuditRows: auditRows.results,
-    newCommitments: { count: commitments?.n ?? 0, committedCents: commitments?.total ?? 0, cumulativePaidCents: commitments?.cumulativePaidTotal ?? 0 },
+    recordedPaidBalanceRows: recordedPaidBalanceRows.results,
+    verifiedDatedPaymentAuditRows: verifiedDatedAuditRows.results,
+    undatedPaymentAudits: {
+      count: undatedAuditRows.results.length,
+      cents: undatedAuditRows.results.reduce((sum, row) => sum + row.cents, 0),
+      fingerprints: undatedAuditRows.results.map((row) => row.paymentFingerprint),
+    },
+    newCommitments: { count: commitments?.n ?? 0, committedCents: commitments?.total ?? 0 },
     donorsContacted: contacts?.n ?? 0,
   });
 
   return {
     periodLabel: summary.periodLabel,
-    verifiedMoneyReceivedTotal: money(summary.verifiedMoneyReceivedCents),
-    verifiedMoneyReceivedTransactionCount: summary.verifiedMoneyReceivedTransactionCount,
-    newGiftsReceivedTotal: money(summary.newGiftsReceivedCents),
+    verifiedDatedPaymentsTotal: money(summary.verifiedDatedPaymentsCents),
+    verifiedDatedPaymentsTransactionCount: summary.verifiedDatedPaymentsTransactionCount,
+    newGiftsViaReviewTotal: money(summary.newGiftsViaReviewCents),
     paymentsOnExistingPledgesTotal: money(summary.paymentsOnExistingPledgesCents),
-    recordedCumulativePaidTotal: money(summary.recordedCumulativePaidCents),
+    recordedPaidBalanceTotal: money(summary.recordedPaidBalanceCents),
     newCommitmentsTotal: money(summary.newCommitmentsCents),
     newCommitmentsCount: summary.newCommitmentsCount,
     donorsContacted: summary.donorsContacted,
@@ -346,6 +339,6 @@ export const CAPABILITY_DESCRIPTIONS: Record<string, string> = {
   outstanding_pledges: "Every donor with a real, currently open or partially-paid pledge balance.",
   payment_plans_attention: "Donors whose payment plan is behind and genuinely needs attention right now (a plan with a valid upcoming payment is never included here).",
   donor_summary: "A full relationship summary for one specific named donor: giving history, recent contact, open asks, family dates, and the current suggested action. Also use this to prepare for a meeting with a donor, to summarize recent history with a donor, or to gather what's needed to draft a follow-up message.",
-  fundraising_progress: "Reconciled totals for this month: VERIFIED money received (dated payments only, split into new gifts vs. payments on existing pledges, counted once), a separate recorded-cumulative-paid figure that may be incomplete-by-date and must never be called 'received', new pledge/gift commitments created this month regardless of payment status, and donors contacted. Use this for 'how much did we raise', 'what's new this month', or 'how much came from existing pledges'. There is no fundraising goal/target tracked in this system. Always relay the disclosed limitation about payments that cannot be dated -- never imply the verified total is complete.",
+  fundraising_progress: "Reconciled totals for this month, kept as THREE SEPARATE categories, never summed into one 'total raised' figure: (A) verifiedDatedPaymentsTotal -- real, individually-dated payments only, split into new gifts vs. payments on existing pledges; (B) recordedPaidBalanceTotal -- what pledges/gifts first recorded this month show as paid, as of month-end, which is a fact about the RECORD, not proof of when that cash was actually received (always describe it as 'recorded as paid,' never as 'received'); (C) new pledge/gift commitments created this month regardless of payment status. Also donors contacted. Use this for 'how much did we raise' (answer with A, and mention B separately as a recorded balance, not a receipt), 'what's new this month' (C), or 'how much came from existing pledges' (A's paymentsOnExistingPledgesTotal). There is no fundraising goal/target tracked in this system. Always relay every disclosed limitation -- never imply any total is complete, and never describe a historical comparison (e.g. a different month) this capability was not actually asked to retrieve.",
   search_donors: "Find donors by name when the fundraiser names someone and which specific donor they mean is not yet clear.",
 };

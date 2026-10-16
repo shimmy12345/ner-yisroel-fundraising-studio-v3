@@ -176,12 +176,12 @@ assert.match(fundraisingProgressSrc, /created_at\s*>=\s*\?\s*AND\s*created_at\s*
 assert.doesNotMatch(capabilitiesSrc, /activity_date\s*>=/, "fundraising_progress must never filter by activity_date -- it is a pledge due date, never a receipt date (see lib/import/jl-refresh.ts)");
 assert.doesNotMatch(fundraisingProgressSrc, /activity_date\s*>=/, "the exported SQL constants must never filter by activity_date -- it is a pledge due date, never a receipt date (see lib/import/jl-refresh.ts)");
 assert.match(fundraisingProgressSrc, /import\s*\{\s*REAL_COMMITMENT_CATEGORIES\s*\}\s*from\s*"\.\.\/relationships\/pledge-payment-plan\.ts"/, "new commitments must reuse the Trip Dashboard's own REAL_COMMITMENT_CATEGORIES, never a separately invented category list");
-assert.match(fundraisingProgressSrc, /jl_payment_assignment_audits/, "money received must reconcile against the one table that actually records a dated payment event applied to an existing pledge");
+assert.match(fundraisingProgressSrc, /jl_payment_assignment_audits/, "verified dated payments must reconcile against the one table that actually records a dated payment event applied to an existing pledge");
 assert.match(capabilitiesSrc, /summarizeFundraisingProgress\(/, "the actual reconciliation arithmetic must live in the shared, independently unit-tested pure module, not be re-implemented inline");
 assert.match(capabilitiesSrc, /limitations:/, "the capability's own return type must carry forward the disclosed limitation, never silently drop it");
 
 assert.doesNotMatch(fundraisingProgressSrc, /from\s*["']cloudflare:workers["']/, "the reconciliation arithmetic must stay a pure function with no database/env dependency, so it is directly unit-testable");
-assert.match(fundraisingProgressSrc, /auditedFingerprints\.has\(row\.sourceFingerprint\)/, "a new completed_gift row must be skipped when a payment-assignment audit already accounts for the same payment fingerprint, or its money is counted twice");
+assert.match(fundraisingProgressSrc, /excludedFingerprints\.has\(row\.sourceFingerprint\)/, "a recorded-paid-balance row must be skipped when a payment-assignment audit (dated or not) already accounts for the same payment fingerprint, or its money is counted twice or misfiled");
 
 // --- Live-observed defect, fixed at the source (Staging verification,
 // 2026-10-16): the model relabeled a transaction/row count as "N
@@ -192,7 +192,7 @@ assert.match(fundraisingProgressSrc, /auditedFingerprints\.has\(row\.sourceFinge
 
 assert.doesNotMatch(fundraisingProgressSrc, /\bmoneyReceivedCount\b/, "the ambiguous field name must not reappear in the pure module");
 assert.doesNotMatch(capabilitiesSrc, /\bmoneyReceivedCount\b/, "the ambiguous field name must not reappear in capabilities.ts");
-assert.match(fundraisingProgressSrc, /verifiedMoneyReceivedTransactionCount/, "the field must be named unambiguously as a VERIFIED transaction count, never a donor count");
+assert.match(fundraisingProgressSrc, /verifiedDatedPaymentsTransactionCount/, "the field must be named unambiguously as a VERIFIED, DATED transaction count, never a donor count");
 const protocolSrc = await readFile(new URL("../lib/assistant/protocol.ts", import.meta.url), "utf8");
 assert.match(protocolSrc, /never state a number of donors/i, "the compose prompt must explicitly forbid inventing a donor/household count from a row/transaction count");
 // Live-observed AGAIN (Staging, "Resolve Historical Payment Totals
@@ -205,25 +205,6 @@ assert.match(protocolSrc, /never state a number of donors/i, "the compose prompt
 // moneyReceivedTransactionCount.
 assert.match(protocolSrc, /newCommitmentsCount/, "the donor-count rule must name newCommitmentsCount specifically, not just speak in the abstract -- a generic rule already failed to stop this live");
 
-// --- Final Payment Accuracy and Financial Data Integrity Review
-// (2026-10-16): a new giving row's CURRENT paid_cents may only be
-// treated as verified money received if it has never been touched
-// since the single import that created it -- otherwise a LATER, undated
-// reimport against an in-period pledge could retroactively inflate a
-// previously-reported month's own total on a later re-query. The old
-// limitation wording ("will be reflected once that pledge is fully
-// paid") was false -- this capability never retroactively attributes an
-// undated payment to any month -- and must not reappear. The disclosure
-// is also enforced in the deterministic response layer
-// (orchestrator.ts's appendFinancialLimitations call), not solely
-// through a prompt instruction. ---
-
-assert.match(fundraisingProgressSrc, /VERIFIED_NEW_GIVING_ROWS_SQL/, "the verified-new-giving query must be named to make clear it is the dated, trustworthy subset, not every new row");
-assert.match(fundraisingProgressSrc, /recordedCumulativePaidCents/, "the current cumulative balance must be exposed as its own, separately-labeled figure, never folded into the verified total");
-assert.doesNotMatch(fundraisingProgressSrc, /will be reflected once that pledge is fully paid/i, "the limitation wording must never claim an omitted payment will eventually be reflected -- it never is, retroactively");
-assert.match(orchestratorSrc, /appendFinancialLimitations\(/, "the financial disclosure must be enforced in the deterministic response layer, not left to the prompt alone");
-assert.match(protocolSrc, /export function appendFinancialLimitations/, "the deterministic disclosure helper must exist and be exported for orchestrator.ts and tests to use");
-
 // --- "Resolve Historical Payment Totals Before Production" (2026-10-16):
 // an earlier blunt "exclude the whole row once touched" rule
 // (updated_at = created_at) could retroactively ZERO a previously-
@@ -231,10 +212,60 @@ assert.match(protocolSrc, /export function appendFinancialLimitations/, "the det
 // one. The correct fix reconstructs paid_cents "as of this period's own
 // end" from giving_activity_import_changes -- data this app already
 // writes, atomically, on every update -- rather than treating a touched
-// row as all-or-nothing. ---
+// row as all-or-nothing. The old limitation wording ("will be reflected
+// once that pledge is fully paid") was false and must not reappear. The
+// disclosure is also enforced in the deterministic response layer
+// (orchestrator.ts's appendFinancialLimitations call), not solely
+// through a prompt instruction. ---
 
-assert.match(fundraisingProgressSrc, /giving_activity_import_changes/, "verified money received must reconstruct a touched row's as-of-period-end value from the existing import change log, never simply exclude it");
+assert.match(fundraisingProgressSrc, /RECORDED_PAID_BALANCE_ROWS_SQL/, "the recorded-paid-balance query must be named to make clear it is a balance, never 'verified' or 'received'");
+assert.match(fundraisingProgressSrc, /giving_activity_import_changes/, "the recorded paid balance must be reconstructed from the existing import change log, never simply excluded or guessed at");
 assert.match(fundraisingProgressSrc, /json_extract\(c\.previous_json/, "the reconstruction must read the prior paid_cents from the change log's own previous_json, not invent or estimate a value");
 assert.doesNotMatch(fundraisingProgressSrc, /AND\s+updated_at\s*=\s*created_at/i, "the blunt all-or-nothing exclusion must not reappear as an actual WHERE-clause condition (mentioning it in a historical comment is fine; using it as a live filter is not)");
+assert.doesNotMatch(fundraisingProgressSrc, /will be reflected once that pledge is fully paid/i, "the limitation wording must never claim an omitted payment will eventually be reflected -- it never is, retroactively");
+assert.match(orchestratorSrc, /appendFinancialLimitations\(/, "the financial disclosure must be enforced in the deterministic response layer, not left to the prompt alone");
+assert.match(protocolSrc, /export function appendFinancialLimitations/, "the deterministic disclosure helper must exist and be exported for orchestrator.ts and tests to use");
+
+// --- "Final Financial Reporting Integrity and Data Isolation Review"
+// (2026-10-16): two real defects found in the prior round's own fix.
+//
+// (1) MISLABELING: a reconstructed "balance as of period end" was being
+// presented as "verified money received" -- but reconciling WHICH ROW a
+// snapshot belongs to is not the same as proving WHEN the underlying
+// cash was received (a pledge could be fully paid before it is ever
+// imported). Fixed by splitting into three never-conflated categories:
+// verifiedDatedPaymentsTotal (A, a real dated transaction),
+// recordedPaidBalanceTotal (B, a record-keeping fact, explicitly never
+// called "received"/"verified"), and newCommitmentsTotal (C).
+//
+// (2) CROSS-OWNER ISOLATION GAP: the correlated subquery against
+// giving_activity_import_changes matched only on source_fingerprint,
+// with NO owner/user scoping -- that table has no owner_user_id column
+// of its own, and source_fingerprint is a pure content hash with no
+// user/donor identity folded in, so two different users whose JL
+// exports happen to share a fingerprint could have one user's
+// reconstruction read a DIFFERENT user's change-log row. Fixed by
+// joining through data_imports (which DOES have user_id) and requiring
+// that import's own user_id to match the row being reconstructed's
+// owner_user_id. ---
+
+assert.match(fundraisingProgressSrc, /verifiedDatedPaymentsCents/, "a genuinely dated payment must be its own, separately-named category");
+assert.match(fundraisingProgressSrc, /recordedPaidBalanceCents/, "a reconstructed balance must be its own, separately-named category, never sharing a name with the verified/dated one");
+assert.match(capabilitiesSrc, /verifiedDatedPaymentsTotal/, "the capability layer must expose Category A under its own, unambiguous name");
+assert.match(capabilitiesSrc, /recordedPaidBalanceTotal/, "the capability layer must expose Category B under its own, unambiguous name, never sharing a name with Category A");
+assert.doesNotMatch(fundraisingProgressSrc, /recordedCumulativePaidCents/, "the old, now-removed 'live cumulative' figure must not reappear -- recordedPaidBalanceCents (as-of-period-end) replaced it");
+assert.doesNotMatch(capabilitiesSrc, /verifiedMoneyReceivedTotal|verifiedMoneyReceivedCents/, "the old, mislabeled field name must never reappear in capabilities.ts");
+// The dangerous fallback that treated an import/processing timestamp as
+// if it were a verified payment date must never reappear.
+assert.doesNotMatch(fundraisingProgressSrc, /COALESCE\(payment_date,\s*created_at\)\s*(>=|<)/, "a payment with no recorded payment_date must never be silently dated using created_at in an actual query condition -- payment_date IS NOT NULL is required instead (mentioning the old, removed pattern in a historical comment is fine)");
+assert.match(fundraisingProgressSrc, /payment_date\s+IS\s+NOT\s+NULL/i, "verified dated payments must explicitly require a real payment_date, never fall back to the processing timestamp");
+assert.match(fundraisingProgressSrc, /UNDATED_PAYMENT_AUDITS_SQL/, "a payment-review decision with no recorded date must be surfaced as its own disclosed data-quality gap, never silently dropped or silently dated");
+// The critical isolation fix itself.
+assert.match(fundraisingProgressSrc, /JOIN\s+data_imports\s+di\s+ON\s+di\.id\s*=\s*c\.import_id/i, "the reconstruction subquery must join through data_imports to resolve which user actually ran each historical import");
+assert.match(fundraisingProgressSrc, /di\.user_id\s*=\s*ga\.owner_user_id/, "the reconstruction subquery must require the historical import's own user to match the row being reconstructed's owner -- giving_activity_import_changes has no owner column of its own, so this join is the only thing preventing one user's change history from leaking into another's reconstruction");
+// Never claim Category B (a balance) is "received" or "verified" in the
+// compose prompt's own instructions to the model.
+assert.match(protocolSrc, /recordedPaidBalanceTotal/, "the compose prompt must name recordedPaidBalanceTotal specifically so the model knows it is a distinct category, not a synonym for received/verified");
+assert.match(protocolSrc, /never.*historical comparison|cannot make the comparison/i, "the compose prompt must explicitly forbid inventing a comparison across a period this capability was not asked to retrieve");
 
 console.log("assistant-capabilities-safety.test.mjs: all assertions passed");
