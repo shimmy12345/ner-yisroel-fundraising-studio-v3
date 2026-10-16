@@ -131,4 +131,31 @@ assert.match(orchestratorSrc, /No specific donor was identified for this questio
 assert.match(orchestratorSrc, /delimited\("VERIFIED_CRM_DATA"/);
 assert.match(orchestratorSrc, /delimited\("CONVERSATION_HISTORY"/);
 
+// --- Donor profile URL security (independent code review, 2026-10-16):
+// a donor profile href must always be REGENERATED server-side from a
+// validated donor id, never read from client-supplied conversation
+// state. conversation.ts's ordinal-reference resolution is the one place
+// that handles a round-tripped, client-held donor list -- it must build
+// the resolved donor's href from the just-verified `owned` row (donorHref
+// of an id this statement's own owner_user_id check already confirmed),
+// and must never assign the client's own `candidate.href` field to
+// anything returned to the caller. ---
+
+assert.doesNotMatch(conversationSrc, /href:\s*candidate\.href/, "conversation.ts must never reuse the client-supplied candidate.href -- it must rebuild the link from the verified donor id");
+assert.match(conversationSrc, /href:\s*donorHref\(owned\.id\)/, "the resolved donor's href must be rebuilt from the ownership-verified id, using the shared canonical helper");
+assert.match(conversationSrc, /import\s*\{[^}]*donorHref[^}]*\}\s*from\s*"\.\/conversation-state\.ts"/, "conversation.ts must reuse the one shared donorHref helper, never define or inline its own copy");
+assert.doesNotMatch(capabilitiesSrc, /function donorHref/, "capabilities.ts must no longer define its own donorHref -- it must import the single shared one from conversation-state.ts");
+
+// --- Monthly fundraising totals and timezone boundaries (independent
+// code review, 2026-10-16): the month boundary for fundraising_progress
+// must come from the fundraiser's LOCAL timezone via the shared
+// localMonthBoundaries helper, never a UTC-truncated "now" -- a
+// reintroduced setUTCDate(1)/setUTCHours(0 straight off `ctx.now` would
+// silently misattribute transactions near local midnight to the wrong
+// reporting month. ---
+
+assert.doesNotMatch(capabilitiesSrc, /setUTCDate\(1\)/, "capabilities.ts must never truncate the fundraising-progress month boundary straight to UTC");
+assert.match(capabilitiesSrc, /localMonthBoundaries\(/, "fundraising_progress must compute its month boundary via the shared, timezone-aware helper");
+assert.match(capabilitiesSrc, /import\s*\{\s*localMonthBoundaries\s*\}\s*from\s*"\.\.\/workspace\/local-time\.ts"/);
+
 console.log("assistant-capabilities-safety.test.mjs: all assertions passed");

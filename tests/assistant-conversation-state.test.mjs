@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { boundConversationState, MAX_HISTORY_TURNS, MAX_HISTORY_CHARS, MAX_QUESTION_LENGTH } from "../lib/assistant/conversation-state.ts";
+import { boundConversationState, donorHref, MAX_HISTORY_TURNS, MAX_HISTORY_CHARS, MAX_QUESTION_LENGTH } from "../lib/assistant/conversation-state.ts";
 
 // Ask Fundraising OS -- bounded, privacy-conscious conversation context
 // (docs/AI-HANDOFF.md, "Upgrade Ask Fundraising OS to a Real AI
@@ -118,6 +118,55 @@ import { boundConversationState, MAX_HISTORY_TURNS, MAX_HISTORY_CHARS, MAX_QUEST
   const many = Array.from({ length: 50 }, (_, i) => ({ donorId: `d${i}`, name: `Donor ${i}`, href: `/donors/d${i}` }));
   const state = boundConversationState({ lastDonorRefs: many });
   assert.ok(state.lastDonorRefs.length <= 10);
+}
+
+// --- Donor profile URL security (independent code review, 2026-10-16):
+// lastDonorRefs is round-tripped through the client with every request,
+// so a forged entry -- a donorId the fundraiser genuinely owns, paired
+// with an attacker-chosen href -- must never survive into the bounded
+// state. The href is always REGENERATED from donorId with the same
+// canonical helper, never trusted from the client, regardless of what
+// string the client sent. ---
+
+{
+  const state = boundConversationState({
+    lastDonorRefs: [{ donorId: "d1", name: "Smith", href: "https://evil.example.com/phish" }],
+  });
+  assert.deepEqual(state.lastDonorRefs, [{ donorId: "d1", name: "Smith", href: donorHref("d1") }]);
+  assert.equal(state.lastDonorRefs[0].href, "/donors/d1", "a malicious external href must be replaced with the canonical server-generated link, never passed through");
+}
+
+{
+  // Other shapes of a forged href -- protocol-relative, javascript:,
+  // and a path to a completely different part of the app -- must all be
+  // discarded the same way, not merely external http(s) URLs.
+  const malicious = [
+    "//evil.example.com/phish",
+    "javascript:alert(1)",
+    "/admin/delete-everything",
+    "/donors/some-other-users-donor-id",
+  ];
+  for (const href of malicious) {
+    const state = boundConversationState({ lastDonorRefs: [{ donorId: "d1", name: "Smith", href }] });
+    assert.equal(state.lastDonorRefs[0].href, "/donors/d1", `forged href "${href}" must never survive boundConversationState`);
+  }
+}
+
+{
+  // A row with a client-supplied href that happens to already look
+  // canonical is unaffected -- this proves the fix regenerates
+  // unconditionally rather than only when something looks suspicious
+  // (an allowlist/blocklist on shape would be the wrong kind of fix).
+  const state = boundConversationState({ lastDonorRefs: [{ donorId: "d7", name: "Jones", href: "/donors/d7" }] });
+  assert.deepEqual(state.lastDonorRefs, [{ donorId: "d7", name: "Jones", href: "/donors/d7" }]);
+}
+
+{
+  // A row missing href entirely (a future/alternate client payload shape)
+  // must still be accepted and given a real canonical href -- href is no
+  // longer a required client-supplied field, since it is never trusted.
+  const state = boundConversationState({ lastDonorRefs: [{ donorId: "d9", name: "No Href" }] });
+  assert.deepEqual(state.lastDonorRefs, [{ donorId: "d9", name: "No Href", href: "/donors/d9" }]);
 }
 
 console.log("assistant-conversation-state.test.mjs: all assertions passed");

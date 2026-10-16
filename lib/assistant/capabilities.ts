@@ -26,7 +26,8 @@ import { loadWorkspaceBrief, type WorkspacePriority } from "../workspace/live-da
 import { loadMeetingBrief } from "../relationships/meeting-brief.ts";
 import type { DataMode } from "../workspace/mode.ts";
 import { financialDateLabel } from "../financial-date.ts";
-import type { DonorRef } from "./conversation-state.ts";
+import { localMonthBoundaries } from "../workspace/local-time.ts";
+import { donorHref, type DonorRef } from "./conversation-state.ts";
 
 export const MAX_RESULT_ITEMS = 8;
 export const MAX_SEARCH_RESULTS = 6;
@@ -49,10 +50,6 @@ export type { DonorRef };
 
 function money(cents: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
-}
-
-function donorHref(donorId: string): string {
-  return `/donors/${encodeURIComponent(donorId)}`;
 }
 
 // --- 1/2. Today's priorities / this week's priorities -- reuses
@@ -208,20 +205,25 @@ export type FundraisingProgress = {
 };
 
 export async function getFundraisingProgress(ctx: AssistantContext): Promise<FundraisingProgress> {
-  const monthStart = new Date(ctx.now * 1000);
-  monthStart.setUTCDate(1);
-  monthStart.setUTCHours(0, 0, 0, 0);
-  const periodStartEpoch = Math.floor(monthStart.getTime() / 1000);
-  const periodLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: ctx.timezone }).format(new Date(ctx.now * 1000));
+  // The month boundary must be the FUNDRAISER'S local calendar month, not
+  // whatever month it happens to be in UTC right now -- otherwise a gift
+  // entered, or a conversation held, near local midnight can be silently
+  // misattributed to the wrong reporting month (independent code review,
+  // monthly fundraising totals and timezone boundaries, 2026-10-16).
+  // giving_activities.activity_date is a date-only value (lib/
+  // financial-date.ts), so it is compared against dateOnlyStartEpoch;
+  // interactions.occurred_at is a true moment-in-time, so it is compared
+  // against the real UTC instant of local midnight, instantStartEpoch.
+  const { dateOnlyStartEpoch, instantStartEpoch, periodLabel } = localMonthBoundaries(ctx.now, ctx.timezone);
 
   if (ctx.mode !== "live") {
     return { periodLabel, giftsCount: 0, giftsTotal: money(0), newPledgesCount: 0, newPledgesTotal: money(0), donorsContacted: 0 };
   }
 
   const [gifts, pledges, contacts] = await Promise.all([
-    env.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(paid_cents),0) AS total FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category NOT IN ('open_pledge') AND activity_date >= ?`).bind(ctx.userId, periodStartEpoch).first<{ n: number; total: number }>(),
-    env.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(committed_cents),0) AS total FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category IN ('open_pledge','partially_paid_pledge') AND activity_date >= ?`).bind(ctx.userId, periodStartEpoch).first<{ n: number; total: number }>(),
-    env.DB.prepare(`SELECT COUNT(DISTINCT donor_id) AS n FROM interactions WHERE user_id = ? AND occurred_at >= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%'`).bind(ctx.userId, periodStartEpoch).first<{ n: number }>(),
+    env.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(paid_cents),0) AS total FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category NOT IN ('open_pledge') AND activity_date >= ?`).bind(ctx.userId, dateOnlyStartEpoch).first<{ n: number; total: number }>(),
+    env.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(committed_cents),0) AS total FROM giving_activities WHERE owner_user_id = ? AND workspace_status = 'active' AND record_origin = 'live' AND category IN ('open_pledge','partially_paid_pledge') AND activity_date >= ?`).bind(ctx.userId, dateOnlyStartEpoch).first<{ n: number; total: number }>(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT donor_id) AS n FROM interactions WHERE user_id = ? AND occurred_at >= ? AND source NOT LIKE 'cancelled:%' AND source NOT LIKE 'archived:%'`).bind(ctx.userId, instantStartEpoch).first<{ n: number }>(),
   ]);
 
   return {

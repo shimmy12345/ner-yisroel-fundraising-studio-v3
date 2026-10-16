@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { localHour, localDayKey, timeOfDayGreeting } from "../lib/workspace/local-time.ts";
+import { localHour, localDayKey, timeOfDayGreeting, localMonthBoundaries } from "../lib/workspace/local-time.ts";
 
 // Bug: the homepage always said "Good morning" regardless of the actual
 // time of day -- app/page.tsx had it as a hardcoded literal, with no
@@ -94,6 +94,84 @@ async function run() {
   assert.match(liveData, /function dayKey\(epoch: number, timezone: string\)/);
   assert.match(scheduledActivity, /function localDay\(epoch: number, timezone: string\)/);
   assert.match(relationshipQueue, /function relationshipQueueBucket\(dueAt: number \| null, now: number, timezone: string\)/);
+
+  // ---- localMonthBoundaries: monthly fundraising totals must use the
+  // fundraiser's LOCAL calendar month, never UTC's own current month
+  // (independent code review, monthly fundraising totals and timezone
+  // boundaries, 2026-10-16: lib/assistant/capabilities.ts's
+  // getFundraisingProgress previously truncated `now` straight to UTC
+  // midnight of the 1st, so a gift or contact near local midnight could
+  // be silently counted in the wrong reporting month). ----
+
+  // Plain midday case, no boundary trickiness: Oct 15, 2026 15:00 UTC is
+  // Oct 15 11:00 EDT (UTC-4) -- squarely inside October both ways.
+  {
+    const b = localMonthBoundaries(Date.UTC(2026, 9, 15, 15, 0, 0) / 1000, ET);
+    assert.equal(b.periodLabel, "October 2026");
+    assert.equal(b.dateOnlyStartEpoch, Date.UTC(2026, 9, 1) / 1000, "date-only boundary is Oct 1 at UTC midnight -- the same convention activity_date itself uses");
+    assert.equal(b.instantStartEpoch, Date.UTC(2026, 9, 1, 4, 0, 0) / 1000, "instant boundary is the real UTC moment of Oct 1 00:00 EDT (UTC-4)");
+  }
+
+  // THE regression this fix targets: it is already Nov 1 in UTC, but
+  // still Oct 31 evening in America/New_York -- a UTC-naive boundary
+  // would wrongly treat this moment as "November," closing out October's
+  // totals roughly 4-5 hours early every single month.
+  {
+    const nowUtcNov1Early = Date.UTC(2026, 10, 1, 2, 0, 0) / 1000; // Nov 1 02:00 UTC = Oct 31 22:00 EDT
+    const b = localMonthBoundaries(nowUtcNov1Early, ET);
+    assert.equal(b.periodLabel, "October 2026", "the fundraiser's own local calendar day is still Oct 31 -- this must still report October, not November");
+    assert.equal(b.dateOnlyStartEpoch, Date.UTC(2026, 9, 1) / 1000);
+  }
+
+  // Mirror sanity check, just inside the new local month: Nov 1 06:00 UTC
+  // is Nov 1 02:00 EDT (EDT ends later that same day) -- genuinely
+  // November locally, so the boundary must have already rolled over.
+  {
+    const nowJustAfterRollover = Date.UTC(2026, 10, 1, 6, 0, 0) / 1000;
+    const b = localMonthBoundaries(nowJustAfterRollover, ET);
+    assert.equal(b.periodLabel, "November 2026");
+    assert.equal(b.dateOnlyStartEpoch, Date.UTC(2026, 10, 1) / 1000);
+  }
+
+  // Year rollover: Jan 1, 2026 03:00 UTC is Dec 31, 2025 22:00 EST
+  // (winter, UTC-5) -- still December of the PRIOR year, not January.
+  {
+    const nowNewYearUtc = Date.UTC(2026, 0, 1, 3, 0, 0) / 1000;
+    const b = localMonthBoundaries(nowNewYearUtc, ET);
+    assert.equal(b.periodLabel, "December 2025");
+    assert.equal(b.dateOnlyStartEpoch, Date.UTC(2025, 11, 1) / 1000);
+    assert.equal(b.instantStartEpoch, Date.UTC(2025, 11, 1, 5, 0, 0) / 1000, "Dec 1 2025 00:00 EST (UTC-5, winter) is Dec 1 05:00 UTC");
+  }
+
+  // DST transition inside the month itself: March 2026's 1st falls BEFORE
+  // that year's "spring forward" (2026-03-08), so the month-start instant
+  // must use the EARLIER (EST, UTC-5) offset even when "now" is evaluated
+  // well after the transition, later in the same month.
+  {
+    const nowLateMarchAfterDstStart = Date.UTC(2026, 2, 20, 12, 0, 0) / 1000; // Mar 20, well after spring-forward
+    const b = localMonthBoundaries(nowLateMarchAfterDstStart, ET);
+    assert.equal(b.periodLabel, "March 2026");
+    assert.equal(b.dateOnlyStartEpoch, Date.UTC(2026, 2, 1) / 1000);
+    assert.equal(b.instantStartEpoch, Date.UTC(2026, 2, 1, 5, 0, 0) / 1000, "Mar 1 2026 00:00 is still EST (UTC-5) -- DST does not start until Mar 8");
+  }
+
+  // The two epoch conventions must never collapse into the same value for
+  // a timezone with a real offset -- a "fix" that quietly merges them
+  // back into one UTC-midnight boundary would reintroduce this exact bug
+  // for occurred_at-based counts (e.g. donorsContacted).
+  {
+    const b = localMonthBoundaries(Date.UTC(2026, 9, 15, 15, 0, 0) / 1000, ET);
+    assert.notEqual(b.dateOnlyStartEpoch, b.instantStartEpoch, "date-only and true-instant month boundaries must differ for a non-UTC timezone");
+  }
+
+  // A genuinely UTC fundraiser (sanity check, not the production policy)
+  // collapses both conventions to the same value, since there is no
+  // offset to create a mismatch.
+  {
+    const b = localMonthBoundaries(Date.UTC(2026, 9, 15, 15, 0, 0) / 1000, "UTC");
+    assert.equal(b.dateOnlyStartEpoch, b.instantStartEpoch);
+    assert.equal(b.periodLabel, "October 2026");
+  }
 
   process.stdout.write("Local time-of-day checks passed.\n");
 }

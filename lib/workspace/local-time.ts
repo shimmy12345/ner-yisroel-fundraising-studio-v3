@@ -81,6 +81,42 @@ function timezoneOffsetMinutes(epochMs: number, timezone: string): number {
   return (asUtc - epochMs) / 60000;
 }
 
+// The start of "this month" in the given LOCAL timezone, in the two
+// different epoch conventions this app's monthly aggregations need --
+// never UTC's own current month, which drifts from the fundraiser's real
+// calendar month for part of every day (independent code review, monthly
+// fundraising totals and timezone boundaries, 2026-10-16: a gift entered
+// late at night local time, or queried early in the morning UTC, must
+// still land in the correct local reporting month, through a DST
+// transition and a year rollover included).
+export type LocalMonthBoundaries = {
+  // For comparing against a DATE-ONLY value (e.g.
+  // giving_activities.activity_date -- lib/financial-date.ts's own
+  // UTC-midnight-anchored calendar-day convention, which has no real
+  // timezone of its own). This is simply "the 1st of the local month,"
+  // expressed in that same date-only convention -- never DST-adjusted,
+  // because a calendar day is not an instant.
+  dateOnlyStartEpoch: number;
+  // For comparing against a true MOMENT-IN-TIME value (e.g.
+  // interactions.occurred_at). This is the actual UTC instant that
+  // local midnight on the 1st corresponds to -- DST-safe via
+  // zonedTimeToUtc, so a gift or contact made right around the real
+  // local midnight boundary is never shifted into the wrong month.
+  instantStartEpoch: number;
+  // Human-readable month label in the fundraiser's own timezone (e.g.
+  // "October 2026"), for display -- never computed from the server's or
+  // browser's own timezone.
+  periodLabel: string;
+};
+
+export function localMonthBoundaries(epochSeconds: number, timezone: string): LocalMonthBoundaries {
+  const { year, month } = localDateParts(epochSeconds, timezone);
+  const dateOnlyStartEpoch = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
+  const instantStartEpoch = Math.floor(zonedTimeToUtc(year, month, 1, 0, 0, timezone).getTime() / 1000);
+  const periodLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: timezone }).format(new Date(epochSeconds * 1000));
+  return { dateOnlyStartEpoch, instantStartEpoch, periodLabel };
+}
+
 // Converts a local wall-clock date/time (year, 1-indexed month, day, hour,
 // minute) in the given IANA timezone into the absolute UTC instant it
 // represents. DST-safe: a naive guess (treating the wall-clock fields as

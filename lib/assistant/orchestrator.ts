@@ -47,7 +47,7 @@ import {
   type AssistantContext,
   type DonorRef,
 } from "./capabilities.ts";
-import { resolveDonorReference, type ConversationState } from "./conversation.ts";
+import { resolveDonorReference, donorHref, type ConversationState } from "./conversation.ts";
 import {
   buildPlanSystemPrompt,
   buildComposeSystemPrompt,
@@ -192,7 +192,7 @@ export async function runAssistantTurn(params: {
   // directly, never guessed at by either AI step.
   let donor: DonorRef | null = null;
   if (params.presetDonorId) {
-    const resolution = await resolveDonorReference({ kind: "ordinal", value: 1 }, { history: [], lastDonorRefs: [{ donorId: params.presetDonorId, name: "", href: `/donors/${encodeURIComponent(params.presetDonorId)}` }] }, params.ctx);
+    const resolution = await resolveDonorReference({ kind: "ordinal", value: 1 }, { history: [], lastDonorRefs: [{ donorId: params.presetDonorId, name: "", href: donorHref(params.presetDonorId) }] }, params.ctx);
     if (resolution.kind === "resolved") donor = resolution.donor;
   } else if (plan.donorReference.kind !== "none") {
     const resolution = await resolveDonorReference(plan.donorReference, params.conversation, params.ctx);
