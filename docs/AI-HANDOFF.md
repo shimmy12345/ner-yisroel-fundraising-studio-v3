@@ -46783,3 +46783,169 @@ the reported bug's scope)
 deployment, configuration change, or data change occurred. Staging
 write protection is confirmed restored. Stopping here per this round's
 instruction to stop after the Staging fix and verification.**
+
+## Final Follow-Up Date Safety Fix (2026-10-16) -- FIXED, TESTED ON STAGING, PRODUCTION NOT TOUCHED
+
+Independent review of the prior round's fix identified a real risk: the
+new weekday matchers (`this <weekday>`, `on <weekday>`, bare
+`<weekday>`) are plain pattern matches with no concept of a qualifying
+word, so a compound or negated phrase containing a weekday name could
+silently match and resolve to the wrong date instead of being flagged.
+This round reviewed every flagged phrase against the actual code (not
+just in theory), fixed what was genuinely broken, and found one
+additional issue beyond the resolver itself.
+
+### 1. What the generic weekday matcher could incorrectly match
+
+Each of the five phrases named in the review was tested directly
+against the pre-fix resolver, not assumed:
+
+| Phrase | Pre-fix result | Problem |
+|---|---|---|
+| `a week from Monday` | **Resolved to the nearest Monday** (`2026-10-19`) | Silently ignored "a week from" entirely -- a full week off |
+| `the Monday after next` | **Resolved to the nearest Monday** (`2026-10-19`) | Silently ignored "after next" -- one week early |
+| `two Mondays from now` | Already unresolved | Safe only by accident -- plural "Mondays" never matched the singular-weekday patterns |
+| `the following Monday` | **Resolved to the nearest Monday** (`2026-10-19`) | Silently ignored "following" entirely |
+| `not this Monday, but next Monday` | **Resolved to next Monday** (`2026-10-26`) | Coincidentally correct, but only because `next <weekday>` happens to be checked first and the regex finds "next Monday" anywhere in the string |
+| `this Monday, not next Monday` (reversed) | **Resolved to next Monday** (`2026-10-26`) | **Wrong.** The speaker meant "this Monday" (the 19th); the code returned "next Monday" (the 26th) regardless, because it has no concept of negation at all -- confirmed live with a meeting date where "this Monday" and "next Monday" actually diverge (`2026-10-19`, a Monday) |
+
+Three of the five were genuine, confirmed silent-wrong-date bugs. One
+(negation) was a genuine bug that happened to look safe in the specific
+example given, but was proven unsafe with the reversed phrasing. One
+(`two Mondays from now`) was already safe, for an unrelated reason
+(plural weekday names never matched the singular pattern), not because
+anything handled it correctly on purpose.
+
+### 2. Fix: a compound-qualifier pre-check, before any weekday pattern
+
+`lib/meeting-notes/due-date-resolver.ts` gained
+`findCompoundQualifier`, checked **first**, before the Jewish-calendar
+check, before explicit dates, and before any weekday pattern -- a
+qualifying word must always win over a coincidental weekday-name match
+anywhere later in the phrase:
+
+- **Negation** -- `/\b(not|n't)\b/`. Catches "not X, but Y" and "X,
+  not Y" in both orders; the resolver has no reliable way to parse
+  which side is actually meant, so both now require manual
+  confirmation rather than guessing (the wrong guess, previously).
+- **Ordinal stacking** -- `/\b(after|before)\s+(next|last)\b/`.
+  Catches "the Monday after next," "the Friday before last."
+- **"Following"** -- `/\bfollowing\b/`. Catches "the following
+  Monday" (ambiguous relative to a prior reference point, not the
+  meeting date this resolver anchors to).
+- **Weekday-scoped "from" offset** -- a weekday immediately adjacent
+  to "from" in either order (`from Monday`, `Monday(s) from`).
+  Deliberately scoped to require an actual weekday name adjacent to
+  "from," specifically so it does **not** catch the already-correct
+  "a week from now" / "a few days from now" (verified both still
+  resolve correctly, below) -- those contain no weekday name at all.
+
+Any match short-circuits straight to `{ kind: "unresolved", phrase,
+reason }` with a specific, human-readable reason naming which kind of
+qualifier was found -- the original wording is always preserved
+verbatim, never discarded, same as every other unresolved case in this
+resolver.
+
+**Simple, unambiguous phrases are unaffected** -- re-verified directly:
+`this Monday`, `next Monday`, `on Monday`, `tomorrow`, `this Friday`,
+`in two weeks`, `a week from now`, `a few days from now` all still
+resolve exactly as before. None of these patterns can fire on them:
+none contain a negation word, an ordinal-stacking phrase, "following,"
+or a weekday name adjacent to "from."
+
+### 3. A second, deeper issue found during live verification
+
+Testing the fix live (not just the unit tests) against the real Workers
+AI model surfaced something the resolver alone could never catch: for
+the transcript "...follow up a week from Monday...", Workers AI did
+**not** preserve the phrase -- it returned `suggestedDueDate: "next
+Tuesday"`, a date with no correct relationship to "a week from Monday"
+at all (a week from the nearest Monday would itself be a Monday, not a
+Tuesday). Because that corrupted value looks exactly like an ordinary
+simple phrase, it would have sailed straight through the new
+compound-qualifier guard undetected and auto-resolved to a wrong date
+-- the exact failure mode this round exists to eliminate, just
+originating one layer earlier than expected (the AI's own reasoning,
+not the resolver's regex).
+
+**Fixed at the source**: `lib/meeting-notes/organize.ts`'s system
+prompt now explicitly instructs the model to copy due-date wording as
+close to verbatim as possible and **never do its own date math or
+convert it to a different day name**, since a separate, deterministic
+system (this resolver) is responsible for that. Re-tested live,
+twice, after the prompt change: "a week from Monday" and "the Monday
+after next" are now both preserved verbatim by Workers AI, which means
+they correctly reach and trip the new compound-qualifier guard instead
+of silently becoming a different, wrong phrase before the guard ever
+sees them.
+
+### 4. Regression tests added
+
+`tests/meeting-notes-due-date-resolver.test.mjs` gained coverage for:
+all five originally-flagged phrases (now unresolved, with the original
+wording preserved verbatim); an additional ordinal case ("the Friday
+before last"); both orders of the negation case, specifically at a
+meeting date where "this Monday" and "next Monday" diverge (proving
+negation-handling isn't accidentally "working" only when both sides
+happen to agree); a compound qualifier confirmed to stay unresolved
+even across a year boundary (the qualifier check must run independently
+of, and before, any date arithmetic); and confirmation that the
+previously-correct simple phrases (`a week from now`, `a few days from
+now`, `this Monday`) are unaffected by the new guard.
+`tests/meeting-notes-organize.test.mjs` gained an assertion that the
+system prompt contains the new "never do your own date math"
+instruction, so this can never silently regress.
+
+**Full suite**: 206/206 test files pass, `npx tsc --noEmit` clean,
+`npm run lint` at the exact pre-existing baseline (94 errors / 43
+warnings).
+
+### 5. Live verification on Staging (synthetic data only)
+
+One supervised write window (`STAGING_WRITES_ENABLED` uncommented,
+redeployed twice -- once for the resolver fix, once more after the
+system-prompt fix was added mid-round -- tested, test data deleted,
+re-commented, redeployed, `403` reconfirmed), using the same reusable
+synthetic donor fixture (`5894d764-c4ea-4b87-a595-7fcc4664ba0e`):
+
+- **Live-confirmed the pre-fix bugs are real**, not just theoretical:
+  called `/api/meeting-notes/organize` directly with transcripts
+  containing "a week from Monday," "not this Monday, but next Monday,"
+  and "the following Monday" -- Workers AI returned each phrase
+  faithfully (except the "a week from Monday" case, which is what
+  surfaced the AI-level issue described above).
+- **Live-confirmed the fix, in the actual rendered UI**, not just via
+  direct API calls: typed "...follow up a week from Monday..." into
+  the real Meeting Notes form, clicked Organize Notes, and read the
+  live DOM -- the follow-up showed **"AI noted: 'a week from Monday'
+  -- couldn't be turned into an exact date automatically,"** the date
+  `<input>` field was empty (`value: ""`), and a "No specific date
+  needed" checkbox was present and unchecked.
+- **Confirmed the approval/confirmation gate still works for this new
+  case**: approved the follow-up (checked "Proposed") and clicked Save
+  *without* checking "No specific date needed" -- Save was correctly
+  blocked (no navigation occurred, the inline date-required error was
+  present). Then checked "No specific date needed" and clicked Save
+  again -- this time it succeeded.
+- **Verified what was actually saved, directly in D1**: the
+  recommendation's `due_at` is `NULL` -- the fundraiser's explicit "no
+  date" confirmation was respected exactly, never a guessed date.
+- **Cleanup**: deleted the one test interaction and its linked
+  recommendation; re-confirmed 0 interactions / 0 recommendations / 0
+  giving_activities for the donor afterward. The donor fixture itself
+  was kept, as always.
+- **Write protection restored and reverified**: `git diff --stat
+  wrangler.staging.jsonc` empty; a live authenticated
+  `POST /api/meeting-notes/organize` after the final redeploy returned
+  `403`. Current Staging Worker version with both fixes live:
+  **`f9db46ee-31a3-4be9-9d07-eb02adf1c6a8`**.
+
+No parallel or forked agent was used for any part of this round's
+investigation, implementation, deployment, database access, or
+verification -- every step ran sequentially, directly.
+
+**No Production file was read or written this round. No Production
+deployment, configuration change, or data change occurred. Staging
+write protection is confirmed restored. Stopping here per this round's
+instruction to stop after Staging verification, for independent review
+before any separately authorized Production deployment.**
