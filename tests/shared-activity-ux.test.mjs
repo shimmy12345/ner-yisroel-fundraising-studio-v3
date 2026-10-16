@@ -109,8 +109,18 @@ assert.match(sharedActivityActions, /className="danger-button"/, "delete-whole-a
 assert.match(timelineExperience, /splitInteractionSummary\(activity\.shared_activity_summary \?\? activity\.summary\)/);
 const meetingBrief = await readFile(new URL("../lib/relationships/meeting-brief.ts", import.meta.url), "utf8");
 assert.match(meetingBrief, /summary: item\.shared_activity_summary \?\? item\.summary,/);
-const assistantRoute = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
-assert.match(assistantRoute, /latest\.shared_activity_summary \?\? latest\.summary/);
+// "Upgrade Ask Fundraising OS to a Real AI Assistant" removed the
+// Assistant's own ad-hoc interaction query (which used to carry this
+// exact preference inline) entirely -- it now always reads an
+// interaction's summary through loadMeetingBrief (lib/assistant/
+// capabilities.ts's getDonorSummary), the same canonical path just
+// checked above. The real regression this originally guarded against
+// (a second, divergeable copy of this preference) is better checked by
+// asserting that copy no longer exists, not by asserting new
+// architecture reproduces the old one's exact line.
+const assistantCapabilities = await readFile(new URL("../lib/assistant/capabilities.ts", import.meta.url), "utf8");
+assert.doesNotMatch(assistantCapabilities, /shared_activity_summary|\.summary\s*\?\?/, "the Assistant must never carry its own copy of the shared-summary preference -- only loadMeetingBrief's");
+assert.match(assistantCapabilities, /loadMeetingBrief\(/);
 
 // 12. Recipient timeline copy shows a count, never an enumerated recipient
 // list, on the donor timeline or the Meeting Brief card.

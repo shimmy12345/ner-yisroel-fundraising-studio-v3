@@ -8,7 +8,12 @@ async function run() {
   const today = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const relationshipQueue = await readFile(new URL("../app/components/RelationshipQueueExperience.tsx", import.meta.url), "utf8");
   const live = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
-  const assistant = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
+  // "Upgrade Ask Fundraising OS to a Real AI Assistant" moved the
+  // Assistant's own donor-scoped queries out of the route file and into
+  // lib/assistant/capabilities.ts (the route itself now only wires
+  // auth/conversation state to lib/assistant/orchestrator.ts) -- this is
+  // the file that must carry the ownership check now.
+  const assistant = await readFile(new URL("../lib/assistant/capabilities.ts", import.meta.url), "utf8");
   const donors = await readFile(new URL("../app/donors/page.tsx", import.meta.url), "utf8");
   const donor = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
   const unifiedTimeline = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");

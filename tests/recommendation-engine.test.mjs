@@ -333,17 +333,21 @@ async function run() {
   // already established in tests/monday-import-safety.test.mjs.) ---
   const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
   const meetingBrief = await readFile(new URL("../lib/relationships/meeting-brief.ts", import.meta.url), "utf8");
-  const assistantRoute = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
+  // "Upgrade Ask Fundraising OS to a Real AI Assistant" moved the
+  // Assistant's own donor-data retrieval out of the route file and into
+  // lib/assistant/capabilities.ts -- this is the file that must carry
+  // the loadMeetingBrief reuse now, not the route itself.
+  const assistantCapabilities = await readFile(new URL("../lib/assistant/capabilities.ts", import.meta.url), "utf8");
   const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
   const ruleBased = await readFile(new URL("../lib/ai/rule-based.ts", import.meta.url), "utf8");
   for (const [name, source] of [["donor page", donorPage], ["Meeting Brief", meetingBrief], ["homepage/Today queue", liveData]]) {
     assert.match(source, /buildRecommendationEvidence\(/, `${name} must build evidence through the shared engine`);
     assert.match(source, /buildDonorRecommendation\(/, `${name} must rank through the shared engine`);
   }
-  // Assistant reuses Meeting Brief's own loader for the primary donor
-  // rather than re-deriving evidence itself -- so it can never diverge
-  // from what the Meeting Brief page shows for that same donor.
-  assert.match(assistantRoute, /loadMeetingBrief\(/, "Assistant must reuse the Meeting Brief loader for the primary donor, not a separate evidence path");
+  // Assistant reuses Meeting Brief's own loader for a donor rather than
+  // re-deriving evidence itself -- so it can never diverge from what the
+  // Meeting Brief page shows for that same donor.
+  assert.match(assistantCapabilities, /loadMeetingBrief\(/, "Assistant must reuse the Meeting Brief loader, not a separate evidence path");
   // rule-based.ts must format s.donor.recommendation as-is, never
   // reconstruct next-action text from raw recommendations/reasons itself.
   assert.match(ruleBased, /s\.donor\.recommendation/);
@@ -359,7 +363,7 @@ async function run() {
   assert.match(meetingBrief, /familyImportantDates/, "Meeting Brief must expose family important dates unconditionally, separate from the gated recommendation");
   assert.match(meetingBriefModel, /familyImportantDates/, "the MeetingBrief type must carry unconditional relationship-date awareness");
   assert.match(liveData, /yahrtzeits:/, "the homepage/Today queue must feed yahrtzeit rows into the shared evidence");
-  assert.match(assistantRoute, /familyImportantDates/, "Assistant must surface family important-date awareness, not just the gated recommendation");
+  assert.match(assistantCapabilities, /familyImportantDates/, "Assistant must surface family important-date awareness, not just the gated recommendation");
   // Never described as an interaction or implying outreach occurred.
   assert.doesNotMatch(meetingBrief.match(/familyImportantDates[\s\S]{0,400}/)?.[0] ?? "", /INSERT INTO interactions/);
 

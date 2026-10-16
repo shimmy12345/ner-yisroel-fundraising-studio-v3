@@ -61,15 +61,28 @@ async function run() {
   assert.match(speech, /return \(\) =>/);
   assert.match(speech, /Listening is not supported in this browser/);
 
+  // "Upgrade Ask Fundraising OS to a Real AI Assistant" replaced the
+  // single-shot rule-based form with a real chat interface (conversation
+  // history, donor links, suggested follow-ups) -- the guarantees below
+  // are the chat UI's equivalents of the original form's, not the exact
+  // same implementation details.
   assert.match(assistant, /if \(inFlightRef\.current\) return/);
   assert.match(assistant, /inFlightRef\.current = true/);
   assert.match(assistant, /disabled=\{loading\}/);
-  assert.match(assistant, /state === "loading"/);
-  assert.match(assistant, /state === "success"/);
-  assert.match(assistant, /state === "empty"/);
-  assert.match(assistant, /state === "error"/);
   assert.match(assistant, /event\.metaKey \|\| event\.ctrlKey/);
-  assert.doesNotMatch(assistant, /setPrompt\(""\)/);
+  // The user's own message is appended to the visible conversation
+  // BEFORE the input is cleared -- it is still never silently lost if
+  // the subsequent request fails (a chat bubble now, not text left
+  // sitting in the box, but the same underlying guarantee).
+  const sendFn = assistant.match(/async function send\([\s\S]*?\n  \}/)?.[0] ?? "";
+  assert.match(sendFn, /setMessages\(\(prev\) => \[\.\.\.prev, \{ id: messageId\(\), role: "user"/);
+  assert.ok(sendFn.indexOf('role: "user"') < sendFn.indexOf('setPrompt("")'), "the user's message must be recorded in the conversation before the input is cleared");
+  // Every outcome (AI unavailable, an ambiguous donor needing
+  // clarification, or a real grounded answer) is rendered as its own
+  // distinct message type -- never silently merged or dropped.
+  for (const role of ['"assistant-error"', '"assistant-clarification"', '"assistant"']) {
+    assert.match(assistant, new RegExp(`role === ${role}`));
+  }
   assert.doesNotMatch(assistant, /Coming soon/);
 
   assert.equal(classifyAssistantPrompt("Prepare me for the Chen meeting"), "meeting-brief");

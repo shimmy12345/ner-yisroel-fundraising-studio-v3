@@ -243,6 +243,10 @@ const TEST_FILES = [
   "tests/meeting-notes-workers-ai-provider.test.mjs",
   "tests/meeting-notes-provider-selection.test.mjs",
   "tests/meeting-notes-due-date-resolver.test.mjs",
+  "tests/ai-workers-ai-client.test.mjs",
+  "tests/assistant-protocol.test.mjs",
+  "tests/assistant-conversation-state.test.mjs",
+  "tests/assistant-capabilities-safety.test.mjs",
 ];
 
 function runOne(file) {

@@ -147,7 +147,11 @@ async function run() {
     const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
     const meetingBrief = await readFile(new URL("../lib/relationships/meeting-brief.ts", import.meta.url), "utf8");
     const meetingBriefModel = await readFile(new URL("../lib/relationships/meeting-brief-model.ts", import.meta.url), "utf8");
-    const assistantRoute = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
+    // "Upgrade Ask Fundraising OS to a Real AI Assistant" moved the
+    // Assistant's donor-data retrieval into lib/assistant/capabilities.ts;
+    // the route itself (app/api/assistant/route.ts) now does no direct D1
+    // access at all (see the query-count assertion below).
+    const assistantCapabilities = await readFile(new URL("../lib/assistant/capabilities.ts", import.meta.url), "utf8");
     const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
     const factSynthesis = await readFile(new URL("../lib/relationships/fact-synthesis.ts", import.meta.url), "utf8");
 
@@ -156,8 +160,8 @@ async function run() {
     assert.match(donorPage, /sanitizeScheduledRelationshipContext\(resolvedSnapshot\.relationshipSummary, resolvedSnapshot\.institutionalMemory/, "the donor page's displayed Snapshot must come from the resolver's output, not the raw donor row");
     assert.match(meetingBrief, /resolveRelationshipSnapshot\(/, "Meeting Brief's loader must call the shared resolver");
     assert.match(meetingBriefModel, /relationshipSnapshot:/, "MeetingBrief's type/return must carry the resolved snapshot for downstream consumers (Assistant)");
-    assert.match(assistantRoute, /primaryMeetingBrief\s*\?\s*primaryMeetingBrief\.relationshipSnapshot/, "Assistant must prefer Meeting Brief's already-resolved live Snapshot");
-    assert.doesNotMatch(assistantRoute, /new RuleBasedAIService[\s\S]*resolveRelationshipSnapshot/, "Assistant must never implement its own separate Relationship Intelligence resolution");
+    assert.match(assistantCapabilities, /brief\.relationshipSnapshot\.relationshipSummary/, "Assistant must prefer Meeting Brief's already-resolved live Snapshot");
+    assert.doesNotMatch(assistantCapabilities, /resolveRelationshipSnapshot/, "Assistant must never implement its own separate Relationship Intelligence resolution -- only consume Meeting Brief's already-resolved snapshot");
     // Workspace/Homepage and Daily Agenda expose no separate Relationship
     // Snapshot display text of their own (confirmed by investigation --
     // their only narrative-column reads feed Stage 2's already fact-aware
@@ -183,11 +187,19 @@ async function run() {
   {
     const donorPage = await readFile(new URL("../app/donors/[id]/page.tsx", import.meta.url), "utf8");
     const meetingBrief = await readFile(new URL("../lib/relationships/meeting-brief.ts", import.meta.url), "utf8");
+    // "Upgrade Ask Fundraising OS to a Real AI Assistant" moved every
+    // direct D1 query the Assistant feature makes out of the route file
+    // (now 0) and into lib/assistant/capabilities.ts -- its own donor-
+    // summary capability still reuses Meeting Brief's already-resolved
+    // Snapshot rather than a second lookup, same guarantee as before,
+    // just living in a different file.
     const assistantRoute = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
+    const assistantCapabilities = await readFile(new URL("../lib/assistant/capabilities.ts", import.meta.url), "utf8");
     const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
     assert.equal((donorPage.match(/env\.DB\.prepare\(/g) ?? []).length, 27, "Stage 3 must add zero new queries to the donor page beyond what Donor Rebbeim and Manual Pledge Balance Corrections separately added (27 = Stage 2's 24 + Donor Rebbeim's 2 + Balance Corrections' 1)");
     assert.equal((meetingBrief.match(/env\.DB\.prepare\(/g) ?? []).length, 15, "Stage 3 must add zero new queries to meeting-brief.ts -- the resolver reuses the already-fetched relationshipFactRows/openAskRows");
-    assert.equal((assistantRoute.match(/env\.DB\.prepare\(/g) ?? []).length, 4, "Stage 3 must add zero new queries to the Assistant route -- it reuses Meeting Brief's already-resolved Snapshot instead of a second lookup");
+    assert.equal((assistantRoute.match(/env\.DB\.prepare\(/g) ?? []).length, 0, "the Assistant route itself must make no direct D1 query at all -- everything goes through lib/assistant/capabilities.ts");
+    assert.ok((assistantCapabilities.match(/env\.DB\.prepare\(/g) ?? []).length <= 5, "the Assistant's donor-summary capability must still reuse Meeting Brief's already-resolved Snapshot, not add a second lookup for it");
     // 21, not 19: live-data.ts's count has since grown by two queries for
     // reasons entirely unrelated to Stage 3 (same pattern as the donor-page
     // count's own comment above) -- Pledge Renewal Reminders (2026-10-08,

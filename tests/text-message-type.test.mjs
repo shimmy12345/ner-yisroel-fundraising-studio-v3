@@ -185,7 +185,12 @@ const sharedRoute = await readFile(new URL("../app/api/interactions/shared/route
 const captureExperience = await readFile(new URL("../app/capture/CaptureExperience.tsx", import.meta.url), "utf8");
 const timelineExperience = await readFile(new URL("../app/donors/[id]/UnifiedRelationshipTimeline.tsx", import.meta.url), "utf8");
 const meetingBriefPage = await readFile(new URL("../app/donors/[id]/meeting-brief/page.tsx", import.meta.url), "utf8");
-const assistantRoute = await readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8");
+// "Upgrade Ask Fundraising OS to a Real AI Assistant" moved the
+// Assistant's donor-data retrieval into lib/assistant/capabilities.ts,
+// which reuses loadMeetingBrief's own (type-agnostic, unchanged)
+// summary-preference logic rather than carrying a second copy -- see
+// that round's docs/AI-HANDOFF.md entry.
+const assistantCapabilities = await readFile(new URL("../lib/assistant/capabilities.ts", import.meta.url), "utf8");
 const liveData = await readFile(new URL("../lib/workspace/live-data.ts", import.meta.url), "utf8");
 const outcomeExperience = await readFile(new URL("../app/interactions/[id]/outcome/OutcomeExperience.tsx", import.meta.url), "utf8");
 
@@ -220,7 +225,8 @@ assert.match(outcomeExperience, /interactionKindLabel\(type as InteractionKind\)
 
 // 15/16: Meeting Brief and Assistant never expose the raw "text" enum value where a label belongs.
 assert.doesNotMatch(meetingBriefPage, />text</, "Meeting Brief must never render the raw enum value as visible text");
-assert.match(assistantRoute, /shared_activity_summary \?\? latest\.summary/, "Assistant must keep using the existing summary-preference logic, unaffected by adding a new type");
+assert.match(assistantCapabilities, /loadMeetingBrief\(/, "Assistant must keep using loadMeetingBrief's summary-preference logic, unaffected by adding a new type");
+assert.doesNotMatch(assistantCapabilities, /shared_activity_summary/, "the Assistant must never carry its own copy of the shared-summary preference");
 
 // 17: no automatic reminder/recommendation creation for a shared Text Message
 // -- this is the existing, unmodified shared-route contract; a new type must
