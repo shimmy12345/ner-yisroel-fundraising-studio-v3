@@ -251,6 +251,14 @@ const TEST_FILES = [
   "tests/fundraising-progress.test.mjs",
   "tests/assistant-donor-privacy.test.mjs",
   "tests/giving-history.test.mjs",
+  "tests/calendar-event-id.test.mjs",
+  "tests/calendar-event-body.test.mjs",
+  "tests/calendar-sync-guard.test.mjs",
+  "tests/calendar-sync-reconciler.test.mjs",
+  "tests/calendar-sync-sqlite-store.test.mjs",
+  "tests/calendar-capture-idempotency.test.mjs",
+  "tests/calendar-sync-lifecycle.test.mjs",
+  "tests/calendar-sweep-agenda-independence.test.mjs",
 ];
 
 function runOne(file) {

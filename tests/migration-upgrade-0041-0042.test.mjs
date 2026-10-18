@@ -68,11 +68,22 @@ function seedPlan(db, { id, donorId, pledgeActivityId, userId = "u1" }) {
 // change as if it were a data mutation. This snapshot asks a narrower,
 // correct question: did any value that existed BEFORE the upgrade
 // change? The new column's own value is asserted separately below.
-const PRE_EXISTING_TABLES = ["users", "donors", "giving_activities"];
+//
+// `users` gets the same explicit-column-list treatment as of migration
+// 0048 (Google Calendar sync, 2026-10-18), which adds
+// `calendar_sync_enabled` -- a later, unrelated migration legitimately
+// widening a table this test's UPGRADE_MIGRATIONS slice (everything
+// after 0040) now also happens to include, since that slice is
+// open-ended by construction. Same fix, same reasoning as the plan
+// columns above: this test's own premise is "did pre-existing DATA
+// survive," never "did the schema stay frozen at exactly 0041+0042."
+const PRE_EXISTING_TABLES = ["donors", "giving_activities"];
 const PRE_0041_PLAN_COLUMNS = ["id", "user_id", "donor_id", "pledge_activity_id", "cadence", "installment_amount_cents", "expected_day_of_month", "next_expected_payment_at", "final_expected_payment_at", "note", "ended_at", "created_at", "updated_at", "original_pledge_date", "commitment_duration_months"];
+const PRE_0041_USER_COLUMNS = ["id", "email", "name", "created_at", "updated_at", "preferred_first_name", "organization_name", "job_title", "timezone", "avatar_url", "household_import_review_mode"];
 function snapshot(db) {
   const result = {};
   for (const table of PRE_EXISTING_TABLES) result[table] = db.prepare(`SELECT * FROM ${table} ORDER BY id`).all();
+  result.users = db.prepare(`SELECT ${PRE_0041_USER_COLUMNS.join(",")} FROM users ORDER BY id`).all();
   result.pledge_payment_plans = db.prepare(`SELECT ${PRE_0041_PLAN_COLUMNS.join(",")} FROM pledge_payment_plans ORDER BY id`).all();
   return result;
 }

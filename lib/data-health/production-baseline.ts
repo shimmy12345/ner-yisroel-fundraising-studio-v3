@@ -9,18 +9,22 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 48 as of 0047_trip_prospect_selection.sql — adds one new column
-// (trip_prospects.selected_at) and its supporting index (see
-// docs/AI-HANDOFF.md's "Trip Planning -- Deliberate Prospect Selection"
-// entry), not a rebuild of anything existing, so PRODUCTION_BASELINE_HASH
-// changed again (PRODUCTION_BASELINE_LEVEL stays "0019": that label
-// identifies the single bootstrap file's origin, not its current
-// contents). This migration is applied to Staging only as of this
-// round -- Production has not yet received it, so Production's own
-// "schema-comparison" health check will report this one column/index as
-// a difference until a separately authorized Production deployment
-// applies 0047 there too.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 48;
+// 49 as of 0048_google_calendar_sync.sql — adds two new tables
+// (calendar_event_links, calendar_event_link_history), four new nullable
+// columns across interactions/trip_prospects, and one new boolean on
+// users (see docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md and
+// docs/AI-HANDOFF.md's Google Calendar entries), not a rebuild of
+// anything existing, so PRODUCTION_BASELINE_HASH changed again
+// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
+// single bootstrap file's origin, not its current contents). This
+// migration has NOT been applied to any remote database (Staging or
+// Production) as of this round -- it exists only as a committed file,
+// proven against a local, isolated node:sqlite database by
+// tests/calendar-sync-sqlite-store.test.mjs -- so every environment's own
+// "schema-comparison" health check will report these new tables/columns
+// as a difference until a separately authorized deployment round applies
+// 0048 there.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 49;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

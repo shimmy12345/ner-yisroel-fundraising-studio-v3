@@ -82,6 +82,43 @@ CREATE TABLE `backup_alert_state` (
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
+CREATE TABLE `calendar_event_link_history` (
+  `id` text PRIMARY KEY NOT NULL,
+  `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`),
+  `generation` integer NOT NULL,
+  `google_event_id` text NOT NULL,
+  `create_status` text DEFAULT 'not_attempted' NOT NULL,
+  `cleanup_needed` integer DEFAULT 0 NOT NULL,
+  `cleanup_status` text DEFAULT 'not_needed' NOT NULL,
+  `cleanup_attempts` integer DEFAULT 0 NOT NULL,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed')),
+  CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))
+);
+
+CREATE TABLE `calendar_event_links` (
+  `id` text PRIMARY KEY NOT NULL,
+  `interaction_id` text NOT NULL REFERENCES `interactions`(`id`),
+  `user_id` text NOT NULL REFERENCES `users`(`id`),
+  `google_calendar_id` text DEFAULT 'primary' NOT NULL,
+  `generation` integer DEFAULT 0 NOT NULL,
+  `google_event_id` text,
+  `google_etag` text,
+  `desired_state` text DEFAULT 'present' NOT NULL,
+  `desired_revision` integer DEFAULT 1 NOT NULL,
+  `synced_revision` integer DEFAULT 0 NOT NULL,
+  `sync_status` text DEFAULT 'pending' NOT NULL,
+  `last_error` text,
+  `attempt_count` integer DEFAULT 0 NOT NULL,
+  `lease_owner` text,
+  `lease_expires_at` integer,
+  `created_at` integer NOT NULL,
+  `updated_at` integer NOT NULL,
+  CHECK (`desired_state` IN ('present','absent')),
+  CHECK (`sync_status` IN ('pending','synced','failed','missing_remotely'))
+);
+
 CREATE TABLE `data_health_repair_audits` (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` text NOT NULL,
@@ -511,7 +548,7 @@ CREATE TABLE `interactions` (
   `summary` text NOT NULL,
   `source` text DEFAULT 'manual' NOT NULL,
   `created_at` integer NOT NULL,
-  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')),
+  `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text,
   FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
@@ -752,7 +789,7 @@ CREATE TABLE `trip_prospects` (
 	`trip_notes` text,
 	`linked_interaction_id` text,
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL, `selected_at` integer,
+	`updated_at` integer NOT NULL, `selected_at` integer, `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text,
 	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
@@ -780,7 +817,7 @@ CREATE TABLE `users` (
   `name` text,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL
-, `preferred_first_name` text, `organization_name` text, `job_title` text, `timezone` text DEFAULT 'America/New_York' NOT NULL, `avatar_url` text, `household_import_review_mode` text NOT NULL DEFAULT 'auto_unchanged');
+, `preferred_first_name` text, `organization_name` text, `job_title` text, `timezone` text DEFAULT 'America/New_York' NOT NULL, `avatar_url` text, `household_import_review_mode` text NOT NULL DEFAULT 'auto_unchanged', `calendar_sync_enabled` integer DEFAULT 0 NOT NULL);
 
 CREATE TABLE `workspace_backup_audits` (
   `id` text PRIMARY KEY NOT NULL,
@@ -829,6 +866,14 @@ CREATE INDEX `activity_status_audits_interaction_date_idx` ON `activity_status_a
 CREATE INDEX `ask_changes_ask_idx` ON `ask_changes` (`ask_id`,`created_at`);
 
 CREATE INDEX `asks_donor_status_idx` ON `asks` (`donor_id`,`status`);
+
+CREATE INDEX `calendar_event_link_history_cleanup_idx` ON `calendar_event_link_history` (`cleanup_needed`,`cleanup_status`);
+
+CREATE UNIQUE INDEX `calendar_event_link_history_link_generation_uidx` ON `calendar_event_link_history` (`link_id`,`generation`);
+
+CREATE UNIQUE INDEX `calendar_event_links_interaction_uidx` ON `calendar_event_links` (`interaction_id`);
+
+CREATE INDEX `calendar_event_links_sync_status_idx` ON `calendar_event_links` (`sync_status`);
 
 CREATE INDEX `data_imports_user_date_idx` ON `data_imports` (`user_id`,`created_at`);
 
@@ -1014,5 +1059,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','6b9e84015e0a7df2bf03efe8a53aba54ad7489443fcc82f72a85dd25e1af05ea',1785944072);
 PRAGMA optimize;

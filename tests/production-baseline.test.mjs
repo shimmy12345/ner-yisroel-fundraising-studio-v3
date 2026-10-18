@@ -393,18 +393,43 @@ test("baseline picks up the schema-adding 0047 trip prospect selection migration
   // 0047_trip_prospect_selection.sql adds one new column
   // (trip_prospects.selected_at) and its supporting index -- Trip
   // Planning's Deliberate Prospect Selection round, see
-  // docs/AI-HANDOFF.md -- the current LATEST migration as of this round,
-  // so the schema hash must change again. Applied to Staging only as of
-  // this round -- this baseline/manifest update is still correct to make
-  // now: it tracks the canonical branch's own intended schema, not yet
-  // what every environment currently runs.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0047_trip_prospect_selection.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 48);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // docs/AI-HANDOFF.md. No longer the latest migration (0048 is, see the
+  // test below) -- same "included, not necessarily last" convention as
+  // 0046's own test above, which this test previously violated by
+  // asserting `.at(-1)` instead.
+  assert.ok(manifest.sourceMigrations.includes("0047_trip_prospect_selection.sql"));
   const prospectsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospects");
   assert.ok(prospectsTable, "trip_prospects must still be a real table in the baseline topology");
   assert.match(prospectsTable.sql, /selected_at/);
   const selectedIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_prospects_trip_selected_idx");
   assert.ok(selectedIndex, "the (trip_id, selected_at) index must be captured in the baseline");
+});
+
+test("baseline picks up the schema-adding 0048 Google Calendar sync migration", () => {
+  // 0048_google_calendar_sync.sql adds two new tables
+  // (calendar_event_links, calendar_event_link_history), four new
+  // nullable columns (interactions.all_day/all_day_date/end_at/location,
+  // mirrored on trip_prospects), and one new boolean
+  // (users.calendar_sync_enabled) -- see
+  // docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md and docs/AI-HANDOFF.md --
+  // the current LATEST migration as of this round, so the schema hash
+  // must change again. NOT applied to any remote database (Staging or
+  // Production) as of this round -- this baseline/manifest update is
+  // still correct to make now: it tracks the canonical branch's own
+  // intended schema, not yet what any environment currently runs.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0048_google_calendar_sync.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 49);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const linksTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "calendar_event_links");
+  assert.ok(linksTable, "calendar_event_links must be a real table in the baseline topology");
+  assert.match(linksTable.sql, /desired_state/);
+  assert.match(linksTable.sql, /lease_owner/);
+  const historyTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "calendar_event_link_history");
+  assert.ok(historyTable, "calendar_event_link_history must be a real table in the baseline topology");
+  const uniqueIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "calendar_event_links_interaction_uidx");
+  assert.ok(uniqueIndex, "the UNIQUE(interaction_id) duplicate-prevention backstop must be captured in the baseline");
+  assert.match(uniqueIndex.sql, /UNIQUE/i);
+  const interactionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "interactions");
+  assert.match(interactionsTable.sql, /all_day_date/, "interactions.all_day_date must be captured in the baseline");
 });

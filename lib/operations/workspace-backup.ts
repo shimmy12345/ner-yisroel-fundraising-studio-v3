@@ -112,6 +112,25 @@ export const WORKSPACE_BACKUP_EXCLUDED_TABLES = [
   // recovery scenario loses only which trip a record was attributed to,
   // never the underlying financial record itself.
   "trip_financial_attributions",
+  // Google Calendar sync core (2026-10-18, docs/GOOGLE-CALENDAR-
+  // INTEGRATION-DESIGN.md and docs/AI-HANDOFF.md) -- NOT wired into any
+  // live route/cron yet, but the tables exist as of migration 0048.
+  // Same deliberate-deferral reasoning as trips/trip_prospects above:
+  // calendar_event_links/calendar_event_link_history hold only sync
+  // bookkeeping (lease state, revision counters, a Google event id) --
+  // never donor address, giving, pledge, or financial data, and never
+  // the Google OAuth credentials themselves (those are Worker secrets,
+  // never database rows). Losing these rows in a disaster-recovery
+  // scenario loses only calendar-sync status, never any FOS relationship
+  // fact -- the linked interactions row (which this partial export
+  // already excludes from WORKSPACE_BACKUP_TABLES for the same reason)
+  // remains the source of truth either way. Covered today only by the
+  // nightly whole-database R2 backup, and by the restore-order/
+  // staging-reset coverage already enforced in lib/operations/
+  // staging-reset.ts and tests/staging-reset.test.mjs/
+  // d1-restore-order.test.mjs.
+  "calendar_event_links",
+  "calendar_event_link_history",
   // Donor Research (Stage A) findings -- same reason as above.
   "donor_research_runs",
   "donor_research_pending_evidence",
