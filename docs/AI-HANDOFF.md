@@ -51235,3 +51235,367 @@ Production/Staging isolation plus email scheduling are unchanged.
 Production (`shimmydonors.org`) is now running commit
 `2451034be5c14a03aa0a695c767f5402538b8012`, Worker version
 `4ac568b8-1589-4252-8b8b-958829a1d341`, deployed 2026-10-16T21:06Z.
+
+## Trip Planning -- Deliberate Prospect Selection (2026-10-18) -- IMPLEMENTED, TESTED, VERIFIED LIVE ON STAGING, PRODUCTION NOT TOUCHED
+
+Owner's problem: Trip creation auto-inserted every regional donor into
+`trip_prospects` as `not_contacted`, conflating "lives in the
+destination region" with "a deliberate outreach target the owner
+actually picked." The owner needed to build a deliberate outreach list
+before requesting meetings, open a trip and see only those people, and
+search prospects within a trip's region instead of scrolling the whole
+donor directory. Adding another status alone would not have solved
+this -- the fix is a real separation between candidates and selections.
+
+### 1. What changed
+
+**Schema** -- `drizzle/0047_trip_prospect_selection.sql`, purely
+additive: one new nullable column, `trip_prospects.selected_at`
+(integer epoch), plus a supporting `(trip_id, selected_at)` index. No
+column removed, retyped, or renamed; no table removed or recreated.
+`trip_prospects.selected_at IS NOT NULL` is now the one authoritative
+signal that a prospect is a deliberate outreach target, never a new
+`TripProspectStatus` value -- the owner's own "adding another status
+alone will not solve the workflow" / "do not add a redundant schema
+status without a reason" instruction is satisfied by keeping the
+existing seven statuses exactly as they are and layering selection as
+an orthogonal concept.
+
+**`lib/relationships/trips-data.ts`** (the one D1-touching module):
+- `createTrip()` no longer auto-inserts any `trip_prospects` row, even
+  when a destination region is chosen -- it only ever inserts the
+  `trips` row itself now. Confirmed live on Staging: creating a new
+  trip with a region selected produced **0** `trip_prospects` rows
+  (previously it inserted one per regional donor).
+- `listDonorsForTripSearch()` (new) -- every live, owned donor,
+  annotated with this trip's own `alreadySelected`/`existingProspectId`
+  state. Always the full list, never truncated or paginated (plain
+  object array, same scale as the existing "Add a donor manually"
+  donor list this feature already loaded in full). Region and text
+  search both happen **client-side** over this one array, reusing
+  `filterByGeo()`/`matchesRegionFilter()`
+  (`lib/relationships/donor-geo-filter.ts`) and `searchDonors()`
+  (`lib/relationships/donor-search.ts`) -- the exact same matching the
+  donor directory's own Travel Region/City filters and search box
+  already use (name, household, spouse, JL code, email, phone). Never
+  a second search implementation.
+- `selectTripProspect()` (replaces `addManualProspect`) -- the one,
+  explicit "Add to trip" action, called identically whether the donor
+  came from a regional match or an out-of-region search. If no
+  `trip_prospects` row exists for this donor on this trip yet, it
+  inserts one with `selected_at` set immediately and `added_method`
+  decided by whether the donor is *currently* in the trip's own
+  destination region (`auto_region`) or not (`manual`) -- a
+  presentation label only, never gating whether the row counts as
+  selected. If a row **already exists and was never selected** (a
+  legacy auto-inserted candidate from before this round, or one
+  offered a moment earlier in "Find prospects"), the SAME row is
+  reused -- only `selected_at`/`updated_at` are written; its id, notes,
+  status, meeting/interaction links, and financial attributions are
+  never touched or recreated. This doubles as the explicit,
+  non-destructive "select an existing ambiguous candidate" mechanism
+  Section 5 required. Returns a distinct `already_selected` reason if
+  the donor is already a selected prospect, so duplicates are
+  structurally prevented (the existing `UNIQUE(trip_id, donor_id)`
+  index on the table still backs this at the database level for any
+  concurrent-request race).
+- `listTripProspects()` ("My trip prospects") now filters
+  `WHERE tp.selected_at IS NOT NULL` -- only deliberately selected
+  prospects, never every candidate. Also now returns each prospect's
+  JL code (`donorCode`, resolved the same `external_id || donor_code`
+  way every other donor list in this app does) so the UI can offer
+  name-or-code search without a second query shape. Cross-trip conflict
+  detection (an existing feature, unchanged in spirit) is now also
+  scoped to `selected_at IS NOT NULL` on the *other* trip's row -- a
+  candidate nobody ever selected on another trip is not a real
+  scheduling conflict.
+- `listTrips()`'s `prospectCount` (shown on each trip's card in the
+  trip list) now counts only selected prospects -- confirmed live: the
+  pre-existing "Chicago" trip's card changed from showing its old
+  auto-inserted count to **"0 prospects"** immediately after the
+  migration, then to **"2 prospects"** after two were explicitly
+  selected during verification.
+
+**API routes**:
+- `POST /api/trips/:id/prospects` now calls `selectTripProspect()`;
+  returns 201 for a brand-new selection, 200 when an existing
+  unselected candidate was reused, 409 `"already a selected prospect"`
+  for a genuine duplicate attempt.
+- `POST /api/trips` no longer returns `autoAddedCount` (nothing is
+  auto-added); `createTrip()` dropped its now-unused `timezone`
+  parameter.
+- `GET /api/trips/:id` (a JSON endpoint distinct from the page itself)
+  updated to return `findProspectDonors` instead of the old
+  `newlyMatchingDonors`, matching the data model change.
+- No change to the prospect status/notes/meeting-scheduling PATCH route
+  or the financial-attribution routes -- none of that logic is affected
+  by selection.
+
+**UI** (`app/travel-planning/[id]/TripDashboardExperience.tsx`,
+substantially rewritten; `app/travel-planning/[id]/page.tsx`,
+`app/travel-planning/TravelPlanningExperience.tsx`):
+- Two explicit, clearly labeled views: **"My trip prospects"**
+  (default on open) and **"Find prospects"**, as a tab switcher styled
+  like this app's existing filter-chip convention
+  (`.portfolio-focus-filters`, already used elsewhere in this app).
+- **My trip prospects**: shows only selected prospects. Its own
+  name/JL-code search box and a status filter (including the new
+  "Planned outreach" label) narrow the displayed list client-side,
+  without any extra request. The full-trip count ("X prospects") and
+  the status-breakdown summary grid above it are always computed over
+  every selected prospect, never the filtered subset; a second line
+  ("Showing X of Y prospects") appears only while a filter is active.
+  The financial dashboard above both tabs is computed from
+  `trip_financial_attributions` exclusively and is never touched by
+  either tab's filtering. Each prospect row is now compact by default
+  (name, status, added-method badge, short suggested-reason line,
+  Prepare for Meeting, Remove) with a "Details" toggle revealing trip
+  notes, next action, meeting scheduling/completion, and the financial
+  panel -- auto-expanded while actively scheduling or completing a
+  meeting so that confirmation panel is never hidden.
+- **Find prospects**: a search box plus the trip's own destination
+  region (defaulted automatically) and an explicit "Search all
+  regions" checkbox exception. Every result shows an explicit "Add to
+  trip" button, or, for a donor already selected on this trip, a
+  disabled-looking "Already in My trip prospects" badge instead --
+  "clearly identify already-added people," never hidden, never
+  silently re-addable. Clearing the search box returns to the full
+  regional (or all-regions) candidate list. The old, separate "New
+  prospects available" panel and "Add a donor manually" box are both
+  retired -- Find Prospects is now the one, unified way to add anyone,
+  whether they match the region or not.
+- **Reused `not_contacted` status, clearer label**: the status
+  dropdown and every status-count label now show **"Planned
+  outreach"** instead of "Not Contacted" for the exact same
+  `not_contacted` value -- no schema change, no new status.
+- **Search/filter state survives routine saves and donor-profile
+  detours**: tab, My-trip-prospects search/status filter, and Find
+  Prospects' search/region-toggle all round-trip through the page's own
+  URL (`?tab=find&q=...&status=...&findQ=...&allRegions=1`), read on
+  the server for the initial render and kept in sync client-side via
+  `history.replaceState` -- the exact same pattern
+  `app/donors/page.tsx`'s own region/city filters already use. Because
+  `donorNavigationHref()` already captures the current
+  `window.location` (pathname + search + hash) when a donor-profile or
+  "Prepare for Meeting" link is clicked, whatever is already in the URL
+  comes back automatically after that detour, with no new navigation
+  plumbing. Local React state (what already made `addQuery` survive a
+  `router.refresh()` before this round) continues to survive every
+  routine save exactly as it did already.
+
+**Trip-creation hint text** updated to no longer claim donors are
+"added automatically" when a region is chosen.
+
+### 2. Existing-trip data -- what was inspected and what the migration does
+
+Inspected Staging's real `trip_prospects` data before writing the
+backfill: the one pre-existing trip ("Chicago," created in an earlier
+round) had **45** rows, **every one** `added_method='auto_region'`,
+`status='not_contacted'`, with zero trip notes, zero next actions, zero
+manual ranks, zero meeting times, zero linked interactions, and zero
+*active* financial attributions (5 historical attributions existed for
+that trip but all 5 were already soft-removed, `removed_at` set, from
+earlier verification rounds -- confirmed by direct query before
+touching anything).
+
+The migration's backfill (two `UPDATE` statements, both purely
+additive) distinguishes intent as follows, and is proven against
+synthetic fixtures covering every real shape in
+`tests/trip-prospect-selection-schema.test.mjs` (built on a database
+constructed from every migration through 0046, with fixture rows
+inserted *before* 0047 is applied -- not a fresh all-migrations-at-once
+build, which would run the backfill against an empty table and prove
+nothing):
+
+- `added_method = 'manual'` → always selected, as of its own
+  `created_at` (a deliberate, one-at-a-time add was always deliberate,
+  even under the old code).
+- `added_method = 'auto_region'` **and** the row shows any real sign of
+  deliberate attention -- status changed away from `not_contacted`,
+  trip notes, a next action, a manual rank, a meeting time, a linked
+  interaction, **or an ACTIVE (not soft-removed) financial
+  attribution** -- → selected, using `updated_at` (the closest real
+  timestamp to when that edit happened), never `created_at`.
+- `added_method = 'auto_region'` with **zero** signal of any kind →
+  left unselected. Never assumed disposable, never deleted, never
+  silently promoted -- it simply remains a candidate, visible and
+  pickable in "Find prospects" exactly like a brand-new regional match
+  would be.
+
+Applied to Staging via `wrangler d1 execute --file` (this project has
+no `d1_migrations` tracking table; every migration is applied this same
+direct way, matching precedent). Result on the real Chicago trip's 45
+rows: **all 45 remained unselected** (`selected_at IS NULL`) --
+expected and correct, since none had any signal. Row count, ids,
+`created_at`, every other column verified unchanged before vs. after
+(45 rows before, 45 after, same ids). Nothing was deleted or recreated.
+
+**Trip Planning is already live on Production** (deployed 2026-10-15,
+per that round's own handoff entry) with real trip data the owner has
+been using since. This migration and refactor are **Staging-only as of
+this round**, per the explicit scope of this task -- Production's
+`trip_prospects` table does not yet have `selected_at` and Production's
+code still runs the old auto-insert-on-creation behavior. Before this
+same migration is ever applied to Production, the exact same
+reconciliation should be run there first (query Production's own
+`trip_prospects` rows for the same signals) so the owner can review
+what the backfill would do to real Production trip data before it
+runs -- this round deliberately stops short of that, per its own
+"Production is out of scope" instruction.
+
+### 3. Tests and checks
+
+- `npm test` (`node scripts/run-tests.mjs`): **214/214** test files
+  pass, including the new
+  `tests/trip-prospect-selection-schema.test.mjs` (backfill logic
+  against realistic fixtures, described above) and the updated
+  `tests/production-baseline.test.mjs` (demoted the former "0046 is
+  latest" assertions to inclusion-only, added the equivalent "0047 is
+  now latest" assertions -- the exact pattern every earlier migration
+  in that file already follows). Removed the now-superseded
+  `findNewlyMatchingDonors` pure function and its dedicated test block
+  from `lib/relationships/trip-model.ts` / `tests/trip-model.test.mjs`
+  -- fully subsumed by the new, more general client-side
+  search+region composition, and otherwise dead code.
+- `npx tsc --noEmit`: clean.
+- `npx eslint .`: **94 errors / 43 warnings** -- byte-identical to the
+  established baseline; no new lint issues.
+- `pnpm run build:staging-independent` + `verify-build-manifest.mjs
+  staging-independent`: both pass. Confirmed the built bundle actually
+  contains the new code before deploying:
+  `grep -c selectTripProspect dist/server/index.js` → 2,
+  `grep -c listDonorsForTripSearch` → 3, `grep -c selected_at` → 14.
+- `node scripts/generate-production-baseline.mjs --write`: baseline
+  migration count 47 → 48, hash updated, `lib/data-health/production-
+  baseline.ts`'s hardcoded count/comment updated to match (same
+  mechanical update every earlier migration in this repo has made).
+- `node scripts/check-main-restore-sync.mjs`: reports **expected
+  drift** -- `main`'s own restore/schema mirror does not yet have
+  migration 0047. Ran `node scripts/prepare-main-restore-sync-patch.mjs`
+  (read-only) first to confirm this is a **safe, pure addition** (one
+  new column + one new index on an existing table, nothing removed or
+  renamed, no new table) -- exactly the class of change
+  `docs/D1-MIGRATION-SYNC-PROCESS.md`'s own automation handles
+  unattended. Expected: once this branch's commit is pushed, the
+  `prepare-sync` GitHub Actions job opens/updates its own automated PR
+  against `main` with the equivalent patch, with no manual
+  intervention needed. Not yet pushed as of this entry -- see
+  "Unresolved / remaining" below.
+
+### 4. Live, authenticated browser verification on Staging
+
+Deployed via `wrangler deploy --config wrangler.staging.jsonc`.
+Previous Staging Worker version `a32be8c3-293f-48f1-9155-d647f15c4284`
+→ new version **`ed6bc53a-3f53-4582-b3e7-8c958b9f20ff`**. Bindings
+(DB, STATUS_WORKER, AI, every env var) and cron (empty, explicitly
+cleared) confirmed unchanged in the deploy output.
+
+Authenticated through the real Cloudflare Access Google Workspace SSO
+flow (an already-authenticated browser session, no password entered),
+then drove the real UI end to end -- every item below was checked by
+actually clicking through the browser and/or reading the resulting
+live D1 rows directly, not by source inspection or a bare HTTP status:
+
+- **Opening the pre-existing "Chicago" trip** landed on "My trip
+  prospects" by default, showing "No one is selected for this trip
+  yet." with a "Find prospects to add" shortcut -- confirmed the 45
+  legacy candidates are NOT being treated as selected.
+- **Find prospects** on that same trip showed "Showing 45 of 266
+  donors in Chicago & suburbs" with none marked already-added.
+- **Searched for a specific regional donor** ("Amster") -- narrowed to
+  1 of 45 -- and clicked **Add to trip**; the row immediately flipped
+  to "Already in My trip prospects." Reloaded the page fresh: "My trip
+  prospects" showed 1, with status "Planned outreach," labeled
+  "REGIONAL MATCH," and the real evidence-based suggested reason from
+  the existing recommendation engine -- no fabricated urgency, nothing
+  implying contact occurred.
+- **Selected a second, different pre-existing legacy candidate**
+  ("Bassman") via the identical Find Prospects flow, then confirmed
+  directly against D1 that the SAME pre-existing `trip_prospects` row
+  id was updated in place (`selected_at` set, `created_at` unchanged)
+  rather than a new row being inserted -- the "explicit way to select
+  an existing ambiguous candidate" working correctly, verified at the
+  database level, not inferred from the UI alone. Trip-wide row count
+  stayed at exactly 45 throughout (2 now selected, 43 still
+  unselected candidates) -- confirms nothing was duplicated.
+- **Status filter**: selecting "Declined" on "My trip prospects"
+  (2 real selected prospects, both "Planned outreach") correctly showed
+  "Showing 0 of 2 prospects" with the no-match message; switching back
+  to "Planned outreach" showed "Showing 2 of 2."
+- **Name search combined with the status filter**: searching "Amster"
+  while filtered to "Planned outreach" correctly narrowed to "Showing 1
+  of 2 prospects," URL `?status=not_contacted&q=Amster` -- both filters
+  compose correctly and both persist in the URL.
+- **Out-of-region search exception**: on the Chicago trip, searching
+  "Abramovitz" (a real Baltimore-region donor) in Find Prospects with
+  the region scope defaulted returned 0 results ("Showing 0 of 266 ...
+  in Chicago & suburbs"); checking **"Search all regions"** immediately
+  returned 1 result ("Showing 1 of 266 ... in all regions"), correctly
+  surfacing the same donor outside the trip's own region only once the
+  explicit exception was chosen.
+- **Separation between trips**: created a brand-new disposable trip
+  ("Baltimore Isolation Test," region = Baltimore & Maryland suburbs)
+  through the real UI form. Confirmed directly against D1 that trip
+  creation produced **zero** `trip_prospects` rows (the core fix,
+  proved at the database level, not just by reading "0 prospects" in
+  the UI). In Find Prospects on that NEW trip, the same Abramovitz
+  donor appeared as a genuine, never-before-tracked candidate (not
+  "already selected" -- correctly scoped per-trip despite having just
+  been searched, unselected, on the other trip); adding him created a
+  brand-new `trip_prospects` row (`last_row_id` confirmed it was a
+  fresh insert, not a reuse) scoped to only that trip, with
+  `added_method='auto_region'` (correctly, since he matches that
+  trip's own destination region) and `selected_at` set immediately.
+  This disposable isolation-test trip and its one row were deleted
+  afterward (direct D1 delete) -- pure verification scaffolding, not
+  real trip data.
+- **Planning actions create no interactions, alter no financial
+  records**: expanded Amster's row via the new "Details" toggle
+  (confirming the compact/expandable requirement), typed and saved a
+  disposable trip note, confirmed it persisted in D1. Directly queried
+  D1 before and after every add/select/note-save performed during this
+  verification: `interactions` count for every donor touched stayed at
+  **0** throughout, and no `giving_activities` row was created for any
+  of them. Confirms adding/selecting/annotating a prospect never
+  fabricates contact or touches financial records.
+- Everything above was read back from the live, authenticated page or
+  directly from D1 -- nothing in this section was concluded from a bare
+  HTTP response or from source code alone.
+
+**Not separately re-verified this round** (unchanged by this round's
+code, already covered by this feature's own prior verification
+rounds): meeting scheduling/completion's real-interaction creation,
+the financial-attribution "record/associate a donation or pledge"
+flows, and cross-trip conflict warnings. None of this round's changes
+touch that logic.
+
+### 5. Unresolved / remaining
+
+- **Production is untouched** -- no migration applied, no deploy, as
+  explicitly scoped. Production's `trip_prospects` table still lacks
+  `selected_at` and Production's own code still runs the old
+  auto-insert-on-creation behavior with real owner trip data. A future,
+  separately authorized Production round should (a) run the same
+  signal-based reconciliation query against Production's real
+  `trip_prospects` rows FIRST and report what the backfill would
+  select/leave-unselected for owner review before running it, (b) apply
+  `drizzle/0047_trip_prospect_selection.sql` to Production, then (c)
+  deploy this code.
+- **Production's own `/api/health` "schema-comparison" check will show
+  one difference** (the new column/index) until that future round
+  applies 0047 there -- expected and self-explanatory, not a defect;
+  the regenerated baseline manifest intentionally tracks this branch's
+  own full intended schema, matching every earlier migration's own
+  interim period before its own Production deployment.
+- **`main`'s restore/schema mirror is not yet synchronized** -- expected
+  (see Testing section above); `prepare-sync`'s own automation is
+  expected to open the matching PR automatically once this branch's
+  commit reaches the remote, requiring no manual sync given this is a
+  pure, structurally-detected-safe addition.
+- No in-session UI test could be run for "promoting" a *real* ambiguous
+  legacy row with actual notes/meetings/attributions, because Staging's
+  one pre-existing trip's 45 legacy rows happened to have zero signal
+  across the board -- the backfill's handling of a row WITH signal is
+  proven instead by the dedicated schema-level regression test's
+  realistic fixtures (Section 3), not by live Staging data that doesn't
+  currently contain that case.
