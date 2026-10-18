@@ -51678,14 +51678,16 @@ main-restore-sync-patch.mjs --out-dir <dir>` (the exact same generator
 `lib/data-health/production-baseline.ts` and `production-baseline/
 schema-manifest.json`, since a column/index-only migration needs no
 restore-order change), applied it, then fixed the one CRLF-hardcoded
-marker to match the real LF content -- never special-cased to accept
-either line ending, since exactly one is actually correct. Ran
-`main`'s own full suite and build **before** pushing anything:
-`npm test` → **155/155** passing, `npm run build` → clean. Re-ran this
-branch's own `check-main-restore-sync.mjs` pointed at the repaired
-local commit (`MAIN_REF=main-restore-sync-repair`) and confirmed **"D1
-restore/schema state on main is in sync with the canonical schema. No
-drift detected."** before pushing anything to the remote.
+marker to match the real LF content. **This first fix was itself
+corrected the next day -- see "Independent Review Correction" below;
+the claim that the marker's own line ending needed to match a single
+"correct" checkout is wrong, and was retracted.** Ran `main`'s own
+full suite and build **before** pushing anything: `npm test` →
+**155/155** passing, `npm run build` → clean. Re-ran this branch's own
+`check-main-restore-sync.mjs` pointed at the repaired local commit
+(`MAIN_REF=main-restore-sync-repair`) and confirmed **"D1 restore/
+schema state on main is in sync with the canonical schema. No drift
+detected."** before pushing anything to the remote.
 
 **Could not push the fix directly to `main`.** This session's own
 tooling blocked a direct `git push origin main-restore-sync-repair:
@@ -51710,10 +51712,62 @@ suite + build + the sync checker, all green) was already run locally,
 matching the exact rigor the automation itself performs before
 proposing a PR.
 
+### 3b. Independent Review Correction (2026-10-19)
+
+Independent review correctly flagged that section 3's own fix was
+incomplete: **replacing the hardcoded `\r\n` marker with `\n` still
+made the test depend on the checkout's own line endings -- it only
+inverted which single line ending the test silently required**,
+correct for an LF checkout, broken again the moment these workflow
+files are ever checked out with CRLF (a Windows `core.autocrlf=true`
+checkout, same as the one that caused the original bug, or a future
+`.gitattributes` rule). The claim in section 3 above that "exactly one
+[line ending] is actually correct here" was wrong and is retracted.
+
+**The real fix**: normalize both workflow files' text from CRLF to LF
+immediately after reading them, before any marker extraction or bash
+execution -- `test/d1-backup-identity-metadata.test.mjs`'s `nightly`/
+`monthly` variables are now always the normalized LF text regardless
+of how the checkout represented them, so every `extractSpan()` marker
+(already written in plain `\n`) and the bash snippet handed to
+`runBash()` are correct either way. **The actual security validation
+logic is completely unchanged** -- every regex, the allowlist pattern,
+every injection/path-traversal/malformed-input assertion in the test
+is identical to before; only how the source text is read changed.
+
+Added a direct, permanent regression check inside the test itself:
+building a synthetic CRLF variant of the real (normalized) text,
+confirming it re-normalizes back to the exact same LF text, and
+confirming it extracts to the byte-identical span. Verified this is
+not merely a synthetic/theoretical property, but true of the real
+files: force-checked-out `.github/workflows/d1-restore-verify-
+monthly.yml` and `d1-backup-nightly.yml` on disk both ways (`git
+checkout --` with `core.autocrlf=false` for a genuine LF checkout,
+then with `core.autocrlf=true` after deleting and re-checking out the
+files to force a genuine CRLF rewrite -- confirmed via `cat -A`, `^M`
+present only in the CRLF case) and ran the test against each real
+checkout directly. **Passed under both.**
+
+`main`'s own full suite (**155/155**) and `npm run build` both pass
+with this correction in place. Re-ran this branch's own
+`check-main-restore-sync.mjs` against the corrected local commit and
+confirmed **"D1 restore/schema state on main is in sync with the
+canonical schema. No drift detected."** again before pushing.
+
+Pushed this correction to **PR #19's existing branch**
+(`main-restore-sync-repair`, now at commit **`b24ca171dd6e5fb48c9cf4cb7de3ec2b7d8c16cb`**,
+2 commits total) -- the PR itself was updated in place, not replaced or
+reopened. Confirmed via the GitHub API: `state: "open"`, `commits: 2`,
+`mergeable: true`. Still **not merged** -- the same CI-bypass
+safeguard that blocked a direct push to `main` applies unchanged; this
+remains the owner's own decision.
+
 ### 4. Remaining step to fully close this out
 
-**Merge PR #19.** Once merged, `origin/main` will have the real fix and
-the 0047 sync in one commit. At that point, re-running `d1-restore-
+**Merge PR #19** (currently commit `b24ca171dd6e5fb48c9cf4cb7de3ec2b7d8c16cb`,
+2 commits, open, mergeable). Once merged, `origin/main` will have the
+real fix (now checkout-agnostic, not checkout-dependent) and the 0047
+sync in one combined history. At that point, re-running `d1-restore-
 sync-check.yml` against `feature/independent-cloudflare-sandbox`'s
 current tip (`workflow_dispatch`, or any future push touching a
 schema-relevant path) is expected to report `check`: pass,
