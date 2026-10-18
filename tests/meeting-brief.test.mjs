@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { buildMeetingBrief, familyDateLine } from "../lib/relationships/meeting-brief-model.ts";
+import { nextGregorianRecurrence } from "../lib/calendar/gregorian-recurring-date.ts";
+import { nextYahrtzeitOccurrence } from "../lib/calendar/hebrew-date.ts";
 
 const donor = {
   id: "donor-a",
@@ -69,6 +71,80 @@ assert.match(loader, /COALESCE\(pbc\.corrected_balance_cents, ga\.balance_cents\
 assert.match(loader, /i\.donor_id = \? AND i\.user_id = \? AND d\.owner_user_id = \?/);
 assert.match(loader, /r\.donor_id = \? AND r\.user_id = \? AND d\.owner_user_id = \?/);
 assert.doesNotMatch(loader, /data_source = 'sample'/);
+
+// --- Date-only occurrence formatting (2026-10-18 fix): birthday/anniversary/
+// yahrtzeit nextOccurrence epochs are date-only values at UTC midnight (see
+// gregorian-recurring-date.ts/hebrew-date.ts's own "Date-only epoch seconds,
+// UTC midnight" doc comments), never a real timestamp. Formatting them with
+// the fundraiser's own timezone (like `dateLabel`, used for real timestamps
+// such as historical-context source dates) shifts the displayed day
+// backward for any fundraiser west of UTC -- the exact bug reported live
+// ("Dovid's Birthday: Feb 15; next occurrence Feb 14, 2027" in
+// America/New_York). The loader must format these three occurrence types
+// with a UTC-pinned label, matching ImportantDatesManagement.tsx's
+// established convention, never the timezone-aware `dateLabel`. ---
+const occurrenceLabelFn = loader.match(/const occurrenceDateLabel = \(epoch: number\) => new Intl\.DateTimeFormat\("en-US", \{([^}]+)\}\)/);
+assert.ok(occurrenceLabelFn, "meeting-brief.ts must define a dedicated occurrence-date formatter");
+assert.match(occurrenceLabelFn[1], /timeZone:\s*"UTC"/, "the occurrence-date formatter must be pinned to UTC, never the fundraiser's own timezone");
+assert.match(loader, /shortLabel: occurrence\.primary\.hebrewLabel,\s*\n\s*nextOccurrenceLabel: occurrenceDateLabel\(occurrence\.primary\.gregorianEpoch\)/, "yahrtzeit nextOccurrenceLabel must use the UTC-pinned occurrenceDateLabel");
+assert.match(loader, /shortLabel: occurrence\.primary\.label,\s*\n\s*nextOccurrenceLabel: occurrenceDateLabel\(occurrence\.primary\.gregorianEpoch\)/, "birthday/anniversary nextOccurrenceLabel must use the UTC-pinned occurrenceDateLabel");
+// dateLabel (timezone-aware) must still be used only for real timestamps
+// (historical-context source dates), never reused for an occurrence epoch.
+assert.doesNotMatch(loader, /nextOccurrenceLabel: dateLabel\(/, "nextOccurrenceLabel must never be formatted with the timezone-aware dateLabel");
+
+// The exact formatter meeting-brief.ts now uses (UTC-pinned month/day/year),
+// run against the real recurrence functions, must reproduce the donor page's
+// ImportantDatesManagement.tsx reading of the same recorded date -- proving
+// agreement between the two surfaces, not just independent correctness.
+const occurrenceDateLabel = (epoch) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(epoch * 1000));
+const donorPageOccurrenceLabel = (epoch) => new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(epoch * 1000));
+// The buggy formatter the loader used to apply, kept here only to prove the
+// regression fixture actually exercises the bug (i.e. the two formatters
+// really do disagree for these fixtures, not that the test is vacuous).
+const buggyTimezoneShiftedLabel = (epoch, timezone) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
+// Only a timezone BEHIND UTC can shift a UTC-midnight date-only epoch
+// backward to the previous calendar day -- a zone ahead of UTC (e.g.
+// Asia/Jerusalem) displays the same day, just later in it, so it is
+// included above for the agreement checks but excluded from the
+// disagreement sanity checks below.
+const WEST_OF_UTC = new Set(["America/New_York", "America/Los_Angeles"]);
+
+for (const timezone of ["America/New_York", "America/Los_Angeles", "UTC", "Asia/Jerusalem"]) {
+  // Birthday: reproduces the reported Feb 15 -> "Feb 14" regression.
+  {
+    const now = Math.floor(Date.parse("2026-10-18T00:00:00Z") / 1000);
+    const occurrence = nextGregorianRecurrence(2, 15, timezone, now);
+    const fixed = occurrenceDateLabel(occurrence.primary.gregorianEpoch);
+    assert.equal(fixed, "Feb 15, 2027", `birthday occurrence must read Feb 15 regardless of fundraiser timezone (${timezone})`);
+    assert.equal(fixed, donorPageOccurrenceLabel(occurrence.primary.gregorianEpoch), `Meeting Prep's birthday label must agree with the donor page's (${timezone})`);
+    if (WEST_OF_UTC.has(timezone)) {
+      assert.notEqual(buggyTimezoneShiftedLabel(occurrence.primary.gregorianEpoch, timezone), fixed, `sanity: the pre-fix timezone-shifted formatter must actually disagree for a west-of-UTC zone (${timezone}), or this fixture proves nothing`);
+    }
+  }
+  // Anniversary, and a year-boundary case: a UTC-midnight Jan 1 epoch, which
+  // a west-of-UTC zone (e.g. America/New_York, UTC-5) shifts back into Dec
+  // 31 of the PRIOR year -- the most severe form of this bug class, since it
+  // corrupts the year as well as the day.
+  {
+    const now = Math.floor(Date.parse("2026-12-20T00:00:00Z") / 1000);
+    const occurrence = nextGregorianRecurrence(1, 1, timezone, now);
+    const fixed = occurrenceDateLabel(occurrence.primary.gregorianEpoch);
+    assert.equal(fixed, "Jan 1, 2027", `year-boundary anniversary occurrence must read Jan 1, 2027, never Dec 31, 2026 (${timezone})`);
+    assert.equal(fixed, donorPageOccurrenceLabel(occurrence.primary.gregorianEpoch), `Meeting Prep's year-boundary label must agree with the donor page's (${timezone})`);
+  }
+  // Yahrtzeit: same UTC-midnight date-only convention (hebrew-date.ts), same
+  // potential day/year shift.
+  {
+    const now = Math.floor(Date.parse("2026-10-18T00:00:00Z") / 1000);
+    const occurrence = nextYahrtzeitOccurrence("Shevat", 1, timezone, now);
+    const fixed = occurrenceDateLabel(occurrence.primary.gregorianEpoch);
+    assert.equal(fixed, donorPageOccurrenceLabel(occurrence.primary.gregorianEpoch), `Meeting Prep's yahrtzeit label must agree with the donor page's (${timezone})`);
+    if (WEST_OF_UTC.has(timezone)) {
+      assert.notEqual(buggyTimezoneShiftedLabel(occurrence.primary.gregorianEpoch, timezone), fixed, `sanity: the pre-fix timezone-shifted formatter must actually disagree for yahrtzeit in a west-of-UTC zone (${timezone}), or this fixture proves nothing`);
+    }
+  }
+}
+
 assert.match(page, /Log Meeting Outcome/);
 assert.match(page, /type=meeting/);
 for (const section of ["SUGGESTED ACTION", "LAST INTERACTION", "RECENT DISCUSSION TOPICS", "OPEN COMMITMENTS", "LAST GIFT", "PEOPLE MENTIONED", "SUGGESTED PREPARATION"]) assert.match(page, new RegExp(section));

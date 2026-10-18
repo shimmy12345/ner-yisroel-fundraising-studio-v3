@@ -200,6 +200,15 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
   }));
   const reminderData: MeetingBriefReminder[] = reminders.results.map((item) => ({ id: item.id, action: item.action, reason: item.reason, dueAt: item.due_at }));
   const dateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", year: "numeric" }).format(new Date(epoch * 1000));
+  // Birthdays/anniversaries/yahrtzeits' nextOccurrence epochs are date-only
+  // values at UTC midnight (same convention as ImportantDatesManagement.tsx's
+  // yahrtzeitOccurrenceLabel/gregorianOccurrenceLabel), never a real
+  // timestamp -- formatting them with the fundraiser's own timezone (like
+  // dateLabel above) shifts the displayed day backward for any fundraiser
+  // west of UTC. Must stay pinned to UTC; only the *next-occurrence
+  // determination* above (nextYahrtzeitOccurrence/nextGregorianRecurrence)
+  // is timezone-aware, not this label.
+  const occurrenceDateLabel = (epoch: number) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(epoch * 1000));
   const unconfirmedHistoricalContext = historicalContextRows.results.map((row) => importedContextLine(row.text, row.source, row.source_date ? dateLabel(row.source_date) : null));
 
   // Family important dates: always surfaced for awareness (never gated by
@@ -219,7 +228,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
         personName: null,
         relationship: item.relationship,
         shortLabel: occurrence.primary.hebrewLabel,
-        nextOccurrenceLabel: dateLabel(occurrence.primary.gregorianEpoch),
+        nextOccurrenceLabel: occurrenceDateLabel(occurrence.primary.gregorianEpoch),
         ambiguous: occurrence.ambiguous,
         ambiguityNote: occurrence.ambiguityNote,
       };
@@ -234,7 +243,7 @@ export async function loadMeetingBrief(userId: string, donorId: string, timezone
         personName: item.personName,
         relationship: item.relationship,
         shortLabel: occurrence.primary.label,
-        nextOccurrenceLabel: dateLabel(occurrence.primary.gregorianEpoch),
+        nextOccurrenceLabel: occurrenceDateLabel(occurrence.primary.gregorianEpoch),
         ambiguous: occurrence.ambiguous,
         ambiguityNote: occurrence.ambiguityNote,
       };
