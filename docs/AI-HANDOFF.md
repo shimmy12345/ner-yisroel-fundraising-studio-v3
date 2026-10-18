@@ -52221,3 +52221,147 @@ occurred.
   code across that range (section 0); not a discrepancy, but worth
   recording precisely rather than silently reporting the authorized
   SHA as if it were the literal build stamp.
+
+## Meeting Prep -- Date-Only Occurrence Formatting Fix (2026-10-18) -- STAGING, VERIFIED LIVE
+
+### 1. Bug report and root cause
+
+Reported live via screenshot: a donor's Meeting Prep page showed
+"Dovid's Birthday: Feb 15; next occurrence **Feb 14, 2027**" -- one day
+off from the recorded Feb 15 date, and disagreeing with the same
+donor's regular profile page, which correctly showed Feb 15.
+
+Root cause, confirmed by reading the code directly:
+`lib/relationships/meeting-brief.ts`'s `loadMeetingBrief()` formatted
+`occurrence.primary.gregorianEpoch` (the next-occurrence date for
+birthdays/anniversaries from `nextGregorianRecurrence()` in
+`lib/calendar/gregorian-recurring-date.ts`, and for yahrtzeits from
+`nextYahrtzeitOccurrence()` in `lib/calendar/hebrew-date.ts`) through
+the same `dateLabel()` helper used for real timestamps, which applies
+`timeZone: timezone` (the fundraiser's own timezone, e.g.
+`America/New_York`). But both recurrence modules' own doc comments are
+explicit: `gregorianEpoch` is "Date-only epoch seconds, UTC midnight,"
+never a real timestamp. Formatting a UTC-midnight instant in a
+timezone west of UTC rolls it back to the previous calendar day --
+exactly the Feb 15 -> Feb 14 symptom. `app/donors/[id]/
+ImportantDatesManagement.tsx` (the regular donor page) already got
+this right, formatting the identical epoch with `timeZone: "UTC"` in
+both `yahrtzeitOccurrenceLabel()` and `gregorianOccurrenceLabel()` --
+which is why the donor page showed the correct date while Meeting Prep
+did not.
+
+### 2. Fix
+
+`lib/relationships/meeting-brief.ts`: added a second, dedicated
+formatter, `occurrenceDateLabel()`, pinned to `timeZone: "UTC"`, and
+switched both `nextOccurrenceLabel` assignments (yahrtzeit and
+birthday/anniversary, inside the `familyImportantDates` build) to use
+it instead of the timezone-aware `dateLabel()`. `dateLabel()` itself
+is untouched and still used for real timestamps elsewhere (e.g.
+`unconfirmedHistoricalContext`'s source dates) -- this was a scoping
+fix, not a global timezone change. The timezone-aware *determination*
+of which occurrence is next (`nextYahrtzeitOccurrence`/
+`nextGregorianRecurrence`, which correctly use the fundraiser's
+timezone to decide "today" when picking the upcoming year) is
+completely unchanged -- only the display label's own formatting
+timezone was wrong, never the recurrence logic itself. No stored dates
+were touched; this is a pure read-path/display fix.
+
+### 3. Regression coverage (tests/meeting-brief.test.mjs)
+
+Added to the existing D1-free meeting-brief test file (which, per the
+established convention also used by `tests/important-dates-safety.test.mjs`,
+verifies `loadMeetingBrief`'s D1-dependent logic via source-pattern
+assertions against the `cloudflare:workers`-importing loader file,
+since that module can't run outside a Workers runtime):
+
+- Source assertions: the loader must define a UTC-pinned
+  `occurrenceDateLabel`, both `nextOccurrenceLabel` assignments
+  (yahrtzeit and birthday/anniversary) must use it, and
+  `nextOccurrenceLabel` must never be assigned from the
+  timezone-aware `dateLabel`.
+- Functional regression, run against the *real* recurrence functions
+  (`nextGregorianRecurrence`/`nextYahrtzeitOccurrence`, not a
+  reimplementation) across four timezones (`America/New_York`,
+  `America/Los_Angeles`, `UTC`, `Asia/Jerusalem`):
+  - Birthday: reproduces the exact reported case (Feb 15 -> must read
+    "Feb 15, 2027" in every tested timezone, never "Feb 14").
+  - Year-boundary case: a Jan 1 occurrence (UTC-midnight epoch, which
+    a timezone behind UTC could roll back into Dec 31 of the *prior*
+    year -- the most severe form of this bug class, corrupting the
+    year as well as the day) -- must read "Jan 1, 2027" in every
+    tested timezone.
+  - Yahrtzeit: same UTC-midnight convention, same cross-timezone check.
+  - Every case asserts the fixed label equals a donor-page-equivalent
+    formatter (`dateStyle: "medium", timeZone: "UTC"`, matching
+    `ImportantDatesManagement.tsx`'s own convention) -- proving
+    agreement with the donor page, not just independent correctness.
+  - A sanity check (restricted to the two timezones actually behind
+    UTC, `America/New_York`/`America/Los_Angeles` -- `Asia/Jerusalem`
+    is ahead of UTC and would not reproduce this bug) proves the
+    fixture genuinely exercises the bug: the pre-fix
+    timezone-shifted formatter is asserted to actually *disagree*
+    with the fixed one for these cases, so the regression test cannot
+    be vacuously true.
+
+### 4. Checks run (all against commit `a0ccb2f`)
+
+- `npm test`: **214/214 test files passed**, including the extended
+  `meeting-brief.test.mjs`. The D1 restore/schema main-sync check
+  (`scripts/check-main-restore-sync.mjs`) also ran as part of the
+  suite and reported no drift against `main` -- expected, since this
+  change touches no schema/migration.
+- `npx tsc --noEmit -p tsconfig.json`: clean, no errors.
+- `npm run lint`: **94 errors / 43 warnings**, byte-identical to the
+  baseline recorded in the prior Production deployment entry above.
+  The one warning inside `lib/relationships/meeting-brief.ts`
+  (`yearsSinceForOccurrence` unused import) is pre-existing and
+  untouched by this change.
+- `npm run build`: succeeded, no errors.
+
+### 5. Staging deployment and live verification
+
+Built with `npm run build:staging-independent`, verified with
+`node scripts/verify-build-manifest.mjs staging-independent`, deployed
+with `wrangler deploy --config wrangler.staging.jsonc`.
+
+- **Staging Worker version:** `7ed4e81d-4387-4cb1-9a77-bbd8571ab639`
+  (`fundraising-os-staging`, https://fundraising-os-staging.sgoldstein.workers.dev)
+- **Release commit:** `a0ccb2f610ac5a47991c05ee763d70a756981b7f`
+
+Live verification (authenticated browser, real Staging data read
+directly via `wrangler d1 execute --remote` to find existing
+fixtures -- no test data created) -- Meeting Prep's rendered output
+compared directly against the same donor's regular profile page for
+all three family-date types:
+
+| Donor (Staging) | Type | Recorded | Donor page | Meeting Prep | Agree? |
+|---|---|---|---|---|---|
+| Rabbi & Mrs. Chaim Gluck | Birthday | May 15 | "Next occurrence: May 15, 2027" | "Chaim's Birthday: May 15; next occurrence May 15, 2027." | Yes |
+| Mr. & Mrs. Yale Miller | Yahrtzeit x4 | 11 Teves / 16 Shevat / 11 Sivan / 7 Av | Dec 21, 2026 / Jan 24, 2027 / Jun 16, 2027 / Aug 10, 2027 | same four dates, same order | Yes |
+| Mr. & Mrs. Abie Cohen | Anniversary | Dec 26 | "Next occurrence: Dec 26, 2026" | "Wedding anniversary: Dec 26; next occurrence Dec 26, 2026." | Yes |
+
+Before this fix, the Chaim Gluck birthday case would have shown "May
+14, 2027" in Meeting Prep (America/New_York is UTC-4 in May) while the
+donor page correctly showed "May 15, 2027" -- the same bug class as
+the originally reported "Dovid" case, reproduced and fixed on real
+Staging data, not just a synthetic fixture.
+
+### 6. Scope and remaining limitations
+
+- This is a **Staging-only** deployment. Production (`shimmydonors.org`)
+  still runs the pre-fix Meeting Prep date formatting as of this
+  writing -- Production donors will continue to see the off-by-one
+  occurrence date for birthdays/anniversaries/yahrtzeits in Meeting
+  Prep (though not on their regular donor page, which was already
+  correct) until this fix is separately reviewed and deployed to
+  Production.
+- Scope was deliberately narrow: only the three `nextOccurrenceLabel`
+  assignments inside `familyImportantDates`. No other date formatting
+  in Meeting Prep (gift dates, interaction dates, reminder due dates,
+  the payment-plan `nextExpectedLabel`, which already correctly used
+  the UTC-pinned `financialDateLabel`) was touched, and none of them
+  exhibited this bug -- they format real timestamps, not date-only
+  recurrence values.
+- **Stopping for review before Production, per instruction.** No
+  Production code or data was touched in this round.
