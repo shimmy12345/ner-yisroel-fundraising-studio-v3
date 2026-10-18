@@ -52365,3 +52365,156 @@ Staging data, not just a synthetic fixture.
   recurrence values.
 - **Stopping for review before Production, per instruction.** No
   Production code or data was touched in this round.
+
+## Meeting Prep Date-Only Fix -- Authorized Production Deployment (2026-10-18) -- SUCCESSFUL
+
+Same fix as the Staging entry immediately above, now independently
+authorized for Production and deployed after a fresh preflight.
+
+### 0. Fresh fact-confirmation and release-diff inspection
+
+- **Reviewed commit:** `a0ccb2f610ac5a47991c05ee763d70a756981b7f`
+  (working tree clean at `bc6701b` on `feature/independent-cloudflare-
+  sandbox`, with `bc6701b` itself being only the docs commit that
+  recorded the Staging entry above -- no code after `a0ccb2f`).
+- **Last Production application-code commit:** `74918d6` (Trip
+  Planning Deliberate Prospect Selection, the prior authorized
+  deployment). `git diff --stat 74918d6 a0ccb2f` showed exactly three
+  files: `docs/AI-HANDOFF.md` (986 insertions -- five intervening
+  documentation-only commits), `lib/relationships/meeting-brief.ts`
+  (13 lines), `tests/meeting-brief.test.mjs` (76 lines). The
+  `meeting-brief.ts` diff was re-read in full and matches byte-for-
+  byte the fix reviewed and already verified live on Staging above --
+  only the two `nextOccurrenceLabel` call sites and the new
+  `occurrenceDateLabel` helper. **No unrelated application changes
+  would have shipped; nothing to stop for.**
+
+### 1. Preflight
+
+- **Current Production Worker version (rollback target):**
+  `aa1de8b4-4f2a-4643-be82-28d430fc9964` (the Trip Planning release,
+  live since 2026-10-18T15:59:59Z).
+- **Backup/restore health:** `backup_alert_state` queried directly
+  against Production -- 0 active alerts.
+- **Required checks, run fresh against the current branch head:**
+  `npm test` -- 214/214 test files passed (including the extended
+  `meeting-brief.test.mjs`), D1 restore/schema main-sync check
+  reported no drift against `main`; `npx tsc --noEmit` -- clean;
+  `npm run lint` -- 94 errors / 43 warnings, byte-identical to the
+  baseline recorded in every prior entry; `npm run build` (plain) --
+  succeeded.
+- **Production build:** `npm run build:production-independent`
+  succeeded; `node scripts/verify-build-manifest.mjs
+  production-independent` confirmed the manifest matches
+  (`"environment":"production-independent"`, built seconds earlier);
+  `grep -rl occurrenceDateLabel dist/` confirmed the fix is actually
+  present in the compiled Production bundle before deploying.
+- No migration is part of this release (none authorized, none
+  needed) -- confirmed by re-reading the diff in step 0, which
+  touches no `drizzle/` file and no schema.
+
+No check failed; proceeded to deployment.
+
+### 2. Deployment
+
+`npx wrangler deploy --config wrangler.production.jsonc`.
+
+**New Production Worker version: `6da14108-af5a-4a47-8f83-ba64f210ac6c`.**
+
+Deploy output confirmed bindings unchanged from every prior release:
+`env.DB` -> `fundraising-os-production-db` (the Production database,
+distinct from `fundraising-os-staging-db`), cron trigger `0 * * * *`
+unchanged, `APP_BASE_URL` still `https://shimmydonors.org`.
+
+### 3. Post-deployment verification (all read-only; no test donor/trip/interaction/financial record created; no existing date edited)
+
+- **The exact reported case, live on Production:** donor "Rabbi &
+  Mrs. Dovid Bashevkin" (the donor from the originally reported
+  screenshot, located via a direct, read-only `important_dates`
+  query for `type='birthday' AND month=2 AND day=15` -- not assumed).
+  Donor page: "Next occurrence: Feb 15, 2027" (already correct both
+  before and after, since the donor page was never the buggy code
+  path). Meeting Prep, **before this fix would have read "Feb 14,
+  2027"** -- now reads: **"Dovid's Birthday: Feb 15; next occurrence
+  Feb 15, 2027."** Matches the donor page exactly.
+- **A second, richer multi-date donor** (located the same way, via a
+  direct query, not hand-picked for convenience): one donor carrying
+  2 birthdays, 2 yahrtzeits (one with a real Adar-ambiguity note), and
+  1 anniversary. All five occurrence labels read identically on the
+  donor page and Meeting Prep:
+  - Yahrtzeit (12 Cheshvan): both "Oct 23, 2026."
+  - Birthday (Oct 26): both "Oct 26, 2026."
+  - Birthday (Dec 1): both "Dec 1, 2026."
+  - Yahrtzeit (16 Adar, leap-year ambiguity): both "Feb 23, 2027" --
+    and Meeting Prep correctly carries the ambiguity note ("Recorded
+    as plain Adar; the upcoming occurrence falls in a leap year with
+    two Adars... Confirm which one applies") rather than silently
+    dropping it.
+  - Anniversary (Jun 25, 1979): both "Jun 25, 2027 (48 years
+    married)" / "Jun 25, 2027."
+- **Donor pages and Travel Planning still load correctly:**
+  `/donors` (directory, 297 donors) and the existing Teaneck-10/20/26
+  trip (`/travel-planning/6535f09f-...`) both loaded normally; the
+  trip still defaults to "My trip prospects" with the badge/button
+  state showing exactly **9** (`aria-pressed="true"`), confirming the
+  separately-deployed Trip Planning fix is unaffected by this
+  release.
+- **Deployed release confirmed:** `wrangler deployments list` showed
+  `6da14108-...` as the current (100%) version, created at deploy
+  time.
+- **Database isolation confirmed:** deploy output's own binding list
+  (`env.DB` -> `fundraising-os-production-db`), matching every prior
+  release -- Production and Staging remain on their own separate D1
+  databases.
+- **Email scheduling configuration confirmed unchanged:** cron
+  trigger `0 * * * *` reported in the deploy output; `wrangler secret
+  list --config wrangler.production.jsonc` confirmed all three Gmail
+  secrets (`GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`,
+  `GMAIL_OAUTH_REFRESH_TOKEN`) still present by name (values never
+  read).
+- **Data baselines confirmed unchanged** (no migration ran this
+  round, so this is a sanity check, not a reconciliation): donors 297,
+  giving_activities 5935 -- both byte-identical to the baseline
+  recorded in the prior Production deployment entry above;
+  important_dates 189, yahrtzeits 40, and `trip_prospects` with
+  `selected_at IS NOT NULL` still exactly 9 -- nothing this release
+  touches wrote to the database.
+
+No material regression observed; rollback was not needed. The
+recorded rollback target (`aa1de8b4-4f2a-4643-be82-28d430fc9964`)
+remains available via `wrangler rollback` if one is needed later --
+rolling back would only revert the Worker code, never touch data,
+consistent with this release never having run a migration.
+
+### 4. Staging vs. Production -- what was established where
+
+- **Established on Staging only** (prior entry above, real Staging
+  donors, not reproduced again here): the cross-timezone functional
+  regression test fixtures (`America/New_York`, `America/
+  Los_Angeles`, `UTC`, `Asia/Jerusalem`), the year-boundary Jan 1
+  case, and the explicit "pre-fix formatter disagrees" sanity checks
+  -- all of that is unit/integration-level coverage in `tests/
+  meeting-brief.test.mjs`, verified once, not environment-specific,
+  and does not need separate live re-verification per environment.
+- **Established live on Production, this round, independently of
+  Staging:** the exact originally-reported Dovid Bashevkin case, a
+  second independent multi-date donor fixture, Donors/Travel Planning
+  page health, deployed-release/version/isolation/email-config
+  confirmation, and data-baseline stability. Nothing here was assumed
+  to carry over from the Staging round's results.
+
+### 5. Scope and remaining limitations
+
+- Scope matches the Staging entry exactly: only the three
+  `nextOccurrenceLabel` assignments inside `familyImportantDates` in
+  `lib/relationships/meeting-brief.ts`. No stored date, no recurrence-
+  determination logic, and no other date-formatting path (gift dates,
+  interaction dates, reminder due dates, the payment-plan
+  `nextExpectedLabel`) was touched.
+- No migration was part of this release, and none was needed -- this
+  was a pure display-layer fix.
+- This fix is now live for every fundraiser's Meeting Prep on
+  Production, not only the one donor/case originally reported --
+  verified above against an independently-selected second donor to
+  confirm the fix generalizes, not just the one case named in the bug
+  report.
