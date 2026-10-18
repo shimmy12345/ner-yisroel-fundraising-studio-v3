@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { enrollMeetingForSync, recordCancel, recordReopen, recordReschedule, reconcileGenerationCleanup, reconcilePresentAbsent, resolveCreateOutcome } from "../lib/calendar/calendar-sync-reconciler.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { enrollMeetingForSync, recordCancel, recordReopen, recordReschedule, reconcileGenerationCleanup, reconcilePresentAbsent } from "../lib/calendar/calendar-sync-reconciler.ts";
 import { InMemoryCalendarStore } from "../lib/calendar/testing/in-memory-calendar-store.ts";
+import { SqliteCalendarStore } from "../lib/calendar/testing/sqlite-calendar-store.ts";
 import { ScriptedCalendarClient, createDeferred, ok200, ok201, ok204, err404, err409, err412, errNetwork } from "../lib/calendar/testing/scripted-calendar-client.ts";
 import { deriveGoogleEventId } from "../lib/calendar/calendar-event-id.ts";
 
@@ -244,9 +248,15 @@ async function run() {
   }
 
   // =========================================================================
-  // Issue 2a/2b: cancel during an ambiguous create, including a DELAYED
-  // create that succeeds AFTER a delete returned 404 -- do not claim 404
-  // alone guarantees absence while a create may still be in flight.
+  // Issue 2a/2b + Bug 2 (2026-10-19 independent review): cancel during an
+  // ambiguous create, including a DELAYED create that succeeds AFTER a
+  // delete returned 404 -- do not claim 404 alone guarantees absence
+  // while a create may still be in flight. This is the EXACT reproduction
+  // from the review: enroll, start reconcilePresentAbsent and suspend its
+  // initial GET, call recordCancel, run generation cleanup (must now back
+  // off -- the fix), resume the GET with 404, the original worker
+  // proceeds to INSERT and succeeds, and a LATER sweep must still find
+  // and remove the newly-created event -- never a permanent orphan.
   // =========================================================================
   {
     const store = new InMemoryCalendarStore();
@@ -256,53 +266,153 @@ async function run() {
     const eventId = deriveGoogleEventId("int-ambig-cancel", 0);
     const getFields = async () => makeFields("int-ambig-cancel");
 
-    // Create attempt starts; its insert call is suspended (ambiguous: we
-    // genuinely don't know yet whether Google will process it).
+    // Start reconcilePresentAbsent and suspend its INITIAL GET -- before
+    // this fix, nothing serialized a concurrent cleanup call against this
+    // in-flight attempt at all.
+    const deferredGet = createDeferred();
+    client.enqueue("get", eventId, () => deferredGet.promise);
+    const createAttempt = reconcilePresentAbsent(store, client, getFields, "int-ambig-cancel", "worker-create", now + 1, 30);
+    await new Promise((resolve) => setImmediate(resolve)); // let it acquire the lease and reach the suspended GET
+
+    let link = await store.getLinkByInteraction("int-ambig-cancel");
+    assert.equal(link.leaseOwner, "worker-create", "the in-flight attempt must hold the lease while its GET is suspended");
+
+    // The owner cancels while the create is still suspended on its GET.
+    await recordCancel(store, now + 2, "int-ambig-cancel");
+    link = await store.getLinkByInteraction("int-ambig-cancel");
+    assert.equal(link.desiredState, "absent");
+    let history = await store.getHistory(link.id, 0);
+    assert.equal(history.cleanupNeeded, true);
+    assert.equal(history.createStatus, "not_attempted", "the create attempt hasn't even reached its own in-flight marker yet -- this is the exact ordering the review's reproduction exploited");
+
+    // "Run generation cleanup": an INDEPENDENT cleanup call (e.g. a sweep
+    // tick) while worker-create still holds the lease. THE FIX: this must
+    // now contend for the SAME lease and back off -- it must NEVER reach
+    // client.delete() at all while the create attempt is still active, so
+    // it can no longer draw the premature "done" conclusion the review
+    // found.
+    const cleanupWhileLeaseHeld = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, now + 3, "cleanup-worker");
+    assert.equal(cleanupWhileLeaseHeld.kind, "lease_contended", "cleanup must back off while a present-state reconcile attempt for the same link is active -- it must never race ahead of it");
+    assert.ok(!client.calls.some((c) => c.op === "delete"), "no DELETE call may be made while cleanup correctly backs off for the held lease");
+    history = await store.getHistory(link.id, 0);
+    assert.equal(history.cleanupStatus, "not_needed", "cleanup must not have touched cleanupStatus at all -- it never got past the lease check");
+
+    // NOW the original GET resolves 404. The attempt re-validates desired
+    // state immediately (the same fix that protects every other mutating
+    // call) and finds desired_state is now 'absent' -- it must abort
+    // rather than proceeding to INSERT, even though it still technically
+    // holds the lease. This is a STRONGER outcome than the bug report's
+    // own narrative ("the original worker... proceeds to INSERT and
+    // succeeds"): the fix prevents the doomed event from ever being
+    // created at all, rather than only cleaning it up afterward.
+    deferredGet.resolve(err404());
+    const createOutcome = await createAttempt;
+    assert.equal(createOutcome.kind, "superseded", "a cancel landing before the create's own mutating call must abort it, never let it proceed to INSERT");
+    assert.ok(!client.calls.some((c) => c.op === "insert"), "no INSERT call may be made once the meeting was cancelled -- never create a doomed event in the first place");
+    history = await store.getHistory(link.id, 0);
+    assert.equal(history.createStatus, "not_attempted", "createStatus must still correctly show nothing was ever attempted");
+
+    link = await store.getLinkByInteraction("int-ambig-cancel");
+    assert.equal(link.leaseOwner, null, "the aborted attempt must still release its lease");
+
+    // A LATER cleanup, now that the lease is free, confirms absence --
+    // since cleanup itself holds the lease while checking, a 404 against
+    // a generation that was never (and now never will be) created is
+    // genuinely conclusive, not merely "uncertain": no present-state
+    // attempt can be racing it, by construction. Google call ordering
+    // across this whole scenario: GET (worker-create) -> DELETE (later
+    // cleanup, 404/already-gone) -- INSERT is never called at all.
+    client.enqueueValue("delete", eventId, err404());
+    const cleanupAfterRelease = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, now + 4, "cleanup-worker-2");
+    assert.equal(cleanupAfterRelease.kind, "done", "once the lease is free, a 404 for a generation that was never created must be confirmed as done immediately -- never a permanent orphan, and never an unnecessary extra retry either");
+    history = await store.getHistory(link.id, 0);
+    assert.equal(history.cleanupStatus, "done");
+    assert.ok(!client.calls.some((c) => c.op === "insert"), "across the ENTIRE scenario, no event was ever created on Google -- there was never anything to orphan");
+  }
+
+  // --- A genuinely ambiguous variant: the create's own mutating call (not
+  // just its GET) is what's suspended when the lease expires -- this is
+  // the case where cleanup legitimately cannot yet be sure, and must
+  // retry after the create's true outcome resolves. ---
+  {
+    const store = new InMemoryCalendarStore();
+    const client = new ScriptedCalendarClient();
+    const now = 1000;
+    await enrollMeetingForSync(store, now, { interactionId: "int-ambig-insert", userId: "u1", googleCalendarId: "primary" });
+    const eventId = deriveGoogleEventId("int-ambig-insert", 0);
+    const getFields = async () => makeFields("int-ambig-insert");
+
     client.enqueueValue("get", eventId, err404());
     const deferredInsert = createDeferred();
     client.enqueue("insert", eventId, () => deferredInsert.promise);
-    const createAttempt = reconcilePresentAbsent(store, client, getFields, "int-ambig-cancel", "worker-create", now + 1, 5);
-    await new Promise((resolve) => setImmediate(resolve)); // let it reach the insert call and mark createStatus in_flight
+    const createAttempt = reconcilePresentAbsent(store, client, getFields, "int-ambig-insert", "worker-create", now + 1, /* short TTL so it can expire */ 5);
+    await new Promise((resolve) => setImmediate(resolve));
 
-    let history = await store.getHistory((await store.getLinkByInteraction("int-ambig-cancel")).id, 0);
-    assert.equal(history.createStatus, "in_flight", "create must be marked in-flight BEFORE the ambiguous call, so a concurrent cleanup can see it");
+    let link = await store.getLinkByInteraction("int-ambig-insert");
+    let history = await store.getHistory(link.id, 0);
+    assert.equal(history.createStatus, "in_flight", "createStatus must be marked in-flight before the ambiguous INSERT call");
 
-    // The owner cancels while the create is still ambiguous.
-    await recordCancel(store, now + 2, "int-ambig-cancel");
-    let link = await store.getLinkByInteraction("int-ambig-cancel");
-    assert.equal(link.desiredState, "absent");
-    history = await store.getHistory(link.id, 0);
-    assert.equal(history.cleanupNeeded, true);
+    await recordCancel(store, now + 2, "int-ambig-insert");
 
-    // A cleanup sweep runs the delete NOW, while the create is still
-    // ambiguous -- Google (correctly, in this adversarial ordering)
-    // reports 404 because the original insert hasn't landed yet.
+    // Time passes well beyond the lease TTL without the INSERT resolving --
+    // cleanup can now acquire the (expired) lease, but createStatus is
+    // genuinely ambiguous (in_flight), so a 404 here must NOT be trusted.
+    const muchLater = now + 100;
     client.enqueueValue("delete", eventId, err404());
-    const cleanup1 = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, now + 3);
-    assert.equal(cleanup1.kind, "uncertain", "a 404 while the create is still unresolved must NOT be trusted as confirmed absence");
+    const cleanup1 = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, muchLater, "cleanup-worker");
+    assert.equal(cleanup1.kind, "uncertain", "a 404 while createStatus is genuinely in_flight must not be trusted as confirmed absence, even once cleanup can acquire the expired lease");
     history = await store.getHistory(link.id, 0);
     assert.equal(history.cleanupStatus, "uncertain");
 
-    // NOW the original, long-delayed create finally succeeds at Google --
-    // a real orphaned event now genuinely exists there.
+    // The long-delayed insert finally succeeds -- a real event now exists.
     deferredInsert.resolve(ok201({ id: eventId }));
     await createAttempt;
-    // The create attempt's own lease-gated bookkeeping write may or may
-    // not still hold the lease depending on TTL -- either way, what
-    // matters is the create's OWN resolution gets recorded durably.
-    await resolveCreateOutcome(store, link.id, 0, "succeeded");
     history = await store.getHistory(link.id, 0);
-    assert.equal(history.createStatus, "succeeded", "the late create's true outcome must be recorded regardless of lease state");
-    assert.equal(history.cleanupStatus, "uncertain", "cleanup must still be pending another attempt -- not wrongly marked done by the earlier 404");
+    assert.equal(history.createStatus, "succeeded", "the late insert's true outcome must still be recorded even though its lease had already expired");
 
-    // A LATER cleanup sweep, now that the create's outcome is resolved,
-    // must retry the delete -- and this time it actually finds (and
-    // removes) the real, now-existing event.
+    // A follow-up cleanup now correctly finds and removes the real event.
     client.enqueueValue("delete", eventId, ok204());
-    const cleanup2 = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, now + 4);
-    assert.equal(cleanup2.kind, "done", "once the create's outcome is known, a follow-up delete must actually succeed and complete the cleanup");
-    history = await store.getHistory(link.id, 0);
-    assert.equal(history.cleanupStatus, "done");
+    const cleanup2 = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, muchLater + 1, "cleanup-worker-2");
+    assert.equal(cleanup2.kind, "done", "once the create's true outcome is known, a follow-up delete must succeed and complete the cleanup");
+  }
+
+  // =========================================================================
+  // The SAME exact ordering, proven against the real SQLite-backed store --
+  // not only the in-memory fake.
+  // =========================================================================
+  {
+    const db = new DatabaseSync(":memory:");
+    const migrationDir = path.join(path.resolve(import.meta.dirname, ".."), "drizzle");
+    for (const migration of fs.readdirSync(migrationDir).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) db.exec(fs.readFileSync(path.join(migrationDir, migration), "utf8"));
+    db.prepare("INSERT INTO users (id, email, created_at, updated_at) VALUES ('u1', 'u1@example.test', 1000, 1000)").run();
+    db.prepare("INSERT INTO donors (id, owner_user_id, data_source, display_name, created_at, updated_at) VALUES ('d1', 'u1', 'live', 'Test Donor', 1000, 1000)").run();
+    db.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, created_at, updated_at) VALUES ('int-sqlite-cancel', 'd1', 'u1', 'meeting', 86400, 'Meeting', 1000, 1000)").run();
+    const store = new SqliteCalendarStore(db);
+    const client = new ScriptedCalendarClient();
+    const now = 1000;
+    await enrollMeetingForSync(store, now, { interactionId: "int-sqlite-cancel", userId: "u1", googleCalendarId: "primary" });
+    const eventId = deriveGoogleEventId("int-sqlite-cancel", 0);
+    const getFields = async () => makeFields("int-sqlite-cancel");
+
+    const deferredGet = createDeferred();
+    client.enqueue("get", eventId, () => deferredGet.promise);
+    const createAttempt = reconcilePresentAbsent(store, client, getFields, "int-sqlite-cancel", "worker-create", now + 1, 30);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await recordCancel(store, now + 2, "int-sqlite-cancel");
+    let link = await store.getLinkByInteraction("int-sqlite-cancel");
+
+    const cleanupWhileLeaseHeld = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, now + 3, "cleanup-worker");
+    assert.equal(cleanupWhileLeaseHeld.kind, "lease_contended", "the real SQLite-backed lease must also block a concurrent cleanup attempt");
+
+    deferredGet.resolve(err404());
+    const createOutcome = await createAttempt;
+    assert.equal(createOutcome.kind, "superseded", "the real SQLite-backed store must also abort the create once desired_state changed, never proceeding to INSERT");
+    assert.ok(!client.calls.some((c) => c.op === "insert"));
+
+    client.enqueueValue("delete", eventId, err404());
+    const cleanupAfterRelease = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, eventId, now + 4, "cleanup-worker-2");
+    assert.equal(cleanupAfterRelease.kind, "done", "against the real SQLite store too, cleanup must confirm absence once the lease is free, since nothing was ever created");
   }
 
   // =========================================================================
@@ -330,7 +440,7 @@ async function run() {
     await recordCancel(store, now + 2, "int-reopen");
     let link = await store.getLinkByInteraction("int-reopen");
     client.enqueueValue("delete", genZeroId, errNetwork());
-    const failedCleanup = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, genZeroId, now + 3);
+    const failedCleanup = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, genZeroId, now + 3, "cleanup-worker-1");
     assert.equal(failedCleanup.kind, "failed");
     let historyGen0 = await store.getHistory(link.id, 0);
     assert.equal(historyGen0.cleanupStatus, "pending");
@@ -365,7 +475,7 @@ async function run() {
       return realDelete(calendarId, eventId);
     };
     client.enqueueValue("delete", genZeroId, ok204());
-    const finalCleanup = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, genZeroId, now + 6);
+    const finalCleanup = await reconcileGenerationCleanup(store, client, "primary", link.id, 0, genZeroId, now + 6, "cleanup-worker-2");
     assert.equal(finalCleanup.kind, "done", "generation 0's deletion must eventually complete");
     assert.deepEqual(deleteCalls, [genZeroId], "cleanup must delete ONLY the old generation's event -- the new generation's event must never be touched by cleanup");
 

@@ -1,17 +1,20 @@
 # Google Calendar Integration — Design + Isolated Sync Core (implemented, not wired)
 
-Status: **CORE SYNC LOGIC IMPLEMENTED AND TESTED, AWAITING INDEPENDENT
-RE-REVIEW BEFORE ROUTE WIRING.** The pure reconciliation logic, event-id/
-event-body construction, the environment/account guard, the request-
-idempotency contract, and a local persistence proof are implemented and
-covered by 8 adversarial test files (commit `de57005`,
+Status: **FOUR REPRODUCIBLE BUGS FOUND BY INDEPENDENT REVIEW OF COMMIT
+de57005 FIXED (2026-10-19), AWAITING RE-REVIEW BEFORE ROUTE WIRING.** The
+pure reconciliation logic, event-id/event-body construction, the
+environment/account guard, the request-idempotency contract, and a local
+persistence proof are implemented and covered by 9 adversarial test
+files (commit `de57005` + the 2026-10-19 fix commit,
 `feature/independent-cloudflare-sandbox`). **Still not done**: no live
 Google call, OAuth client, credential, or real calendar event; no
 migration applied to any remote database; no route or cron wiring; no
-deployment. See "Implementation status" at the end of this document for
-exactly what is proven by executable tests versus what still depends on
-future live Google testing. This document is the full investigation and
-design report;
+deployment. See "Implementation status" and, below it, "2026-10-19
+independent review: 4 bugs found and fixed" at the end of this document
+for exactly what is proven by executable tests, what was WRONG in the
+2026-10-18 status and has now been retracted/corrected, and what still
+depends on future live Google testing. This document is the full
+investigation and design report;
 `docs/AI-HANDOFF.md` carries a condensed summary and points here.
 
 Goal: when a meeting is scheduled anywhere in FOS — Trip Planning or
@@ -992,3 +995,208 @@ Honestly scoped, not glossed over:
    still gated behind a separate, explicit owner review and approval
    before any Production credential or deployment, exactly as §14's
    rollout sequence above already specifies.
+
+---
+
+## 2026-10-19 independent review: 4 bugs found and fixed
+
+Independent review of commit `de57005` reproduced four distinct bugs in
+the isolated sync core, all now fixed, with new regression tests
+proving each fix (9 test files total; new file
+`tests/calendar-sync-regression-2026-10-19.test.mjs` plus updates to
+`tests/calendar-capture-idempotency.test.mjs` and
+`tests/calendar-sync-reconciler.test.mjs`). Still design/isolated-core
+only -- no live Google call, OAuth setup, credential, remote migration,
+route/cron wiring, or deployment.
+
+Honesty note on process: the four reconciler-side fixes (2-4, plus the
+async-lifetime fix) were implemented together in one pass, since they
+touch overlapping code paths, with tests then iterated to green against
+the fixed code -- not each bug strictly red-then-green in isolation.
+Each fix was derived directly from the review's own precise
+reproduction steps, not discovered independently via a failing test.
+
+### Claims retracted from the 2026-10-18 "Implementation status" above
+
+The following statements from the prior round's status section
+overstated what had actually been proven, and are retracted/corrected
+here rather than left standing:
+
+- *"A worker whose lease expires mid-flight is proven unable to...
+  reach Google with a live mutating call once the lease is gone."*
+  **Retracted as stated.** This was true only for a SINGLE
+  `reconcilePresentAbsent` call racing against *itself* having lost its
+  lease. It did NOT cover an INDEPENDENT caller (a standalone cleanup
+  sweep tick, or a direct test/future-route call) racing a *different*,
+  currently-active `reconcilePresentAbsent` attempt for the SAME link --
+  that path had no lease coordination at all, which is exactly Bug 2
+  below.
+- *"Ambiguous create during cancel, including a delayed create landing
+  AFTER a 404 delete: proven end-to-end."* **Retracted as stated.** The
+  prior test called `reconcileGenerationCleanup` directly, as a bare
+  function with no lease of its own, while a separate
+  `reconcilePresentAbsent` attempt was independently suspended -- it
+  exercised the `createStatus` state machine correctly in isolation, but
+  never exercised genuine concurrent execution between an active
+  reconcile attempt and an independent cleanup call, which is the actual
+  shape of the real bug the review found.
+- The "Revision accuracy under a race" proof covered only the
+  reconciler's own internal capture-then-send logic (does a reconcile
+  attempt report the revision it actually sent). It did NOT cover
+  concurrent CALLERS of `recordReschedule` itself racing each other at
+  the write layer -- that is a separate, previously untested claim, and
+  was genuinely broken (Bug 4).
+- Request idempotency was described as "proven" based on sequential-
+  retry tests only. No test exercised genuine `Promise.all` concurrency
+  against `createMeetingIdempotently`, which is exactly where Bug 1 was
+  found.
+
+Everything else in the 2026-10-18 "Implementation status" section
+(event-id derivation, event-body construction, the guard matrix, the
+409-verify-content path, `missing_remotely` detection's use of durable
+history over volatile syncStatus, reopen's fresh-generation-id
+allocation, lifecycle rules, and sweep/agenda independence) was not
+implicated by this review and stands as previously proven.
+
+### The four bugs, and the fix for each
+
+**1. Concurrent Capture saves create duplicate interactions**
+(`lib/calendar/meeting-create-idempotency.ts`). `createInteraction()`
+ran BEFORE the idempotency key was claimed -- two genuinely simultaneous
+calls (reproduced via `Promise.all`) both passed the "key not found"
+check and both created a real interaction row before either reached the
+claim step. **Fixed** by deriving a single deterministic, owner-scoped
+interaction id from `(ownerUserId, key)` (`deriveInteractionIdForKey()`)
+and routing creation through an atomic create-or-find
+(`createInteraction(candidateId)` must behave like `INSERT ... ON
+CONFLICT(id) DO NOTHING`) -- the real duplicate-prevention guarantee is
+now the interaction table's own primary-key constraint, enforced by the
+database engine, not by which of two racing checks happens to run
+first. Also crash-safe: a retry after a crash between the two steps
+recomputes the same candidate id and converges on the already-created
+row. Proven against true `Promise.all` concurrency (2-way and 8-way),
+simultaneous CONFLICTING payloads under the same key, owner isolation
+under concurrency, and a real SQLite-backed interactions table (not
+only the in-memory fake) -- checking actual persisted row counts, not
+only returned ids.
+
+**2. Cancel during the initial GET can leave an orphaned event**
+(`lib/calendar/calendar-sync-reconciler.ts`). The exact review
+reproduction: enroll, start `reconcilePresentAbsent` and suspend its
+initial GET, call `recordCancel`, run an INDEPENDENT generation cleanup
+(no lease coordination existed), which saw a 404 (nothing created yet)
+and `createStatus=not_attempted` and concluded `done`; the suspended GET
+then resolved, the original worker (still holding its lease) proceeded
+to INSERT and succeeded; the premature `cleanupStatus=done` meant no
+later sweep ever revisited it. **Fixed two ways:** (a)
+`reconcileGenerationCleanup` is now split into a lease-ACQUIRING public
+entry point and a lease-ASSUMING internal implementation -- an
+independent cleanup call now contends for the exact same per-link lease
+a `reconcilePresentAbsent` attempt holds, so the two can never
+interleave for the same link at all (the call made from inside an
+already-lease-holding reconcile attempt uses the internal
+implementation directly, never re-acquiring a lease it already holds).
+(b) Every mutating call (insert, and each update) now re-validates
+desired_state/generation/lease immediately beforehand
+(`revalidateBeforeMutation()`) -- in the exact reproduction, this means
+the original worker's own resumed GET now detects the cancel and aborts
+*before* ever calling INSERT, which is a strictly stronger outcome than
+the review's own description of the bug (no doomed event is created at
+all, rather than being created and relying on cleanup to catch it
+later). A genuinely ambiguous variant (the create's own mutating call,
+not just its GET, is what's suspended when the lease expires) is kept
+as a separate, still-passing test: once cleanup acquires the lease, a
+`createStatus` of `not_attempted` is safe to treat as conclusive
+(mutual exclusion guarantees nothing else could be creating it), but
+`in_flight` still correctly means "ambiguous, don't trust a 404 yet" --
+that state can only be observed after a PRIOR attempt's lease already
+expired while its real HTTP call was still outstanding, which lease
+re-acquisition cannot retroactively resolve. Proven against both the
+in-memory store and the real SQLite store, checking actual Google call
+ordering (via the scripted client's own call log) through to eventual
+confirmed absence.
+
+**3. Crash recovery fails to record confirmed creation**
+(`lib/calendar/calendar-sync-reconciler.ts`). The branch where a GET
+finds an existing event directly (200, not via insert or the 409-verify
+path -- i.e. the crash-recovery path, where a prior attempt crashed
+after Google actually created the event but before recording
+`createStatus=succeeded` locally) never wrote `createStatus` at all. A
+later manual deletion was then misclassified as "never created" (since
+`createStatus` was still stuck at `not_attempted`/`in_flight`) and
+silently re-inserted instead of reported `missing_remotely`. **Fixed**
+by adding the same `store.updateHistory(..., {createStatus:
+"succeeded"})` confirmation to this branch that the insert-success and
+409-verify branches already had. Proven end-to-end through
+`reconcilePresentAbsent` only (never by manually calling
+`resolveCreateOutcome`/`updateHistory` to force the fix's own effect):
+seed `createStatus=in_flight` (simulating the crash), run a recovery
+reconcile (GET finds it, UPDATE succeeds), confirm `createStatus`
+becomes `succeeded`, then simulate a manual deletion + a reschedule and
+confirm the reconciler reports `missing_remotely` with no INSERT call
+-- against both the in-memory and real SQLite stores.
+
+**4. Revision/generation increments are not atomic**
+(`lib/calendar/calendar-sync-reconciler.ts`,
+`lib/calendar/calendar-sync-types.ts`, both store implementations).
+`recordReschedule` read `desiredRevision` and passed `desiredRevision +
+1` to an unconditional write -- two simultaneous calls could both read
+the same value and both compute the same increment, losing one of the
+two. **Fixed** by adding three new atomic store primitives --
+`applyReschedule`, `applyCancel`, `applyReopen` -- each expressing its
+`+ 1` INSIDE a single SQL statement
+(`desired_revision = desired_revision + 1`) for the real store, or as a
+single synchronous (never-interrupted) operation for the in-memory
+fake, rather than a read-then-compute-then-write in this module.
+`applyCancel` additionally applies the link-row change and the history
+row's `cleanup_needed` flag together as one atomic unit (a real SQL
+transaction for the SQLite store), so a concurrent reader can never
+observe one without the other. `applyReopen` atomically bumps both
+`desired_revision` and `generation` together, so even multiple
+simultaneous reopen attempts (an unusual action, but now safe
+regardless) each get a distinct, never-colliding generation number.
+Proven via true `Promise.all` concurrency (10-way for reschedule, a
+6-way mixed reschedule/cancel race, and a 6-way concurrent-reopen
+generation-allocation race) against BOTH the in-memory store and the
+real SQLite store, checking the actual final persisted revision/
+generation values, not just that each call individually "succeeded."
+
+**Also fixed, per the review's explicit callout**: `reconcilePresentAbsent`
+had a bare `return reconcileDeleteCurrentGeneration(...)` (no `await`)
+inside its `try` block -- the surrounding `finally` (which releases the
+lease) ran immediately, before the delete helper's own lease-protected
+bookkeeping writes completed, so a cancellation's own `syncStatus`/
+`cleanupStatus` confirmation could silently fail against an
+already-released lease. Fixed by awaiting it (`return await ...`).
+Proven by suspending the DELETE call and confirming the lease is still
+held while it's pending, released only after it resolves AND the
+bookkeeping is correctly persisted.
+
+### Checks run
+
+223 test files pass (`npm test`), including all 9 calendar test files;
+`tsc --noEmit` clean; `npm run lint` unchanged from the established
+baseline (94 errors, 46 warnings -- the warnings are the same
+intentional, documented `recordComplete` unused-parameter instances as
+the prior round, kept for signature consistency with its `recordXxx`
+siblings); `npm run build` succeeds. The D1 restore/schema main-sync
+check against `origin/main` shows the same expected, unchanged drift as
+the prior round (migration 0048's new tables/columns aren't yet known
+to `main`'s own tracking) -- unrelated to this round's fixes, which
+touched no schema.
+
+### What remains honestly unproven (unchanged from the prior round)
+
+This round fixed logic bugs in the sync core; it did not reduce or
+increase what still depends on live Google testing, which remains
+exactly as scoped in "Implementation status" above: real `calendar.
+events.owned` permission coverage, real `If-Match`/ETag behavior, real
+error-response shapes and network timing, the OAuth flow itself (still
+no Google Cloud project or credential exists), whether this exact
+event-id format is accepted by Google's live validation, and end-to-end
+behavior once wired into a real Cloudflare Workers runtime. The
+concurrency properties proven this round and the prior one are both
+proven through directly-orchestrated interleavings at the reconciler/
+store level -- a different, in some respects stronger (it can force
+exact adversarial orderings a live system might rarely hit), but not
+identical guarantee to a live production run.

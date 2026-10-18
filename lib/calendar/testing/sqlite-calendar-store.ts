@@ -137,6 +137,61 @@ export class SqliteCalendarStore implements CalendarLinkStore {
     return Number(result.changes) === 1;
   }
 
+  // Issue 4: the `+ 1` happens INSIDE the SQL statement itself
+  // (`desired_revision = desired_revision + 1`), never computed in
+  // application code from a value read moments earlier -- this is what
+  // makes two genuinely concurrent callers safe: SQLite serializes the
+  // two UPDATE statements against each other regardless of how their
+  // surrounding async JS happens to interleave, so one necessarily reads
+  // (and increments) the OTHER's already-written value, never the same
+  // stale value twice.
+  async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
+    this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, sync_status = CASE WHEN sync_status = 'synced' THEN 'pending' ELSE sync_status END, updated_at = ? WHERE id = ?`).run(now, linkId);
+    return this.getLinkById(linkId);
+  }
+
+  // Same atomic-increment guarantee, plus the desired_state flip and the
+  // history row's cleanup_needed flag applied together as one SQL
+  // transaction -- a concurrent reader can never observe one change
+  // without the other.
+  async applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', updated_at = ? WHERE id = ?`).run(now, linkId);
+      this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = ?`).run(linkId, generation);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getLinkById(linkId);
+  }
+
+  // Same atomic-increment guarantee for BOTH desired_revision and
+  // generation together, plus the fresh-generation field reset, all in
+  // one statement -- two simultaneous reopen attempts (however unusual
+  // that is) would still each be allocated a distinct, never-colliding
+  // generation number by SQLite itself, never both computing the same
+  // "current + 1".
+  async applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null> {
+    this.db
+      .prepare(
+        `UPDATE calendar_event_links SET
+          generation = generation + 1,
+          desired_revision = desired_revision + 1,
+          desired_state = 'present',
+          google_event_id = NULL,
+          google_etag = NULL,
+          sync_status = 'pending',
+          last_error = NULL,
+          attempt_count = 0,
+          updated_at = ?
+        WHERE id = ?`,
+      )
+      .run(now, linkId);
+    return this.getLinkById(linkId);
+  }
+
   async getHistory(linkId: string, generation: number): Promise<CalendarLinkHistoryRow | null> {
     const row = this.db.prepare("SELECT * FROM calendar_event_link_history WHERE link_id = ? AND generation = ?").get(linkId, generation);
     return row ? toHistoryRow(row) : null;

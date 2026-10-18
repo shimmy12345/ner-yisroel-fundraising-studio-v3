@@ -124,7 +124,40 @@ export interface CalendarLinkStore {
   // saved FOS meeting" extends to "a slow sync attempt must never block a
   // new edit"). Reconcile bookkeeping (syncedRevision/syncStatus/etag)
   // NEVER goes through this method -- only updateLinkAsLeaseHolder does.
+  // Still useful as a general single-field intent write; the three
+  // revision/generation-bumping transitions below must NOT be built on
+  // top of it (see their own doc comments for why).
   writeIntent(linkId: string, patch: Partial<CalendarLinkRow>): Promise<boolean>;
+  // Issue 4 (2026-10-19 review): atomically increments desired_revision
+  // by exactly 1 (`desired_revision = desired_revision + 1` inside a
+  // single UPDATE, never a read-then-compute-then-write in application
+  // code) and applies the rest of `patch` in the SAME statement. Two
+  // truly simultaneous callers can never both read the same pre-
+  // increment value and both compute the same post-increment one -- the
+  // arithmetic happens inside the store itself. Returns the row as it
+  // exists immediately after, or null if the link doesn't exist.
+  applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null>;
+  // Same atomic-increment guarantee as applyReschedule, PLUS flips
+  // desired_state to 'absent' and resets sync_status, as one indivisible
+  // unit together with marking the given generation's history row
+  // cleanup_needed=1 -- both the link-row change and the history-row
+  // change are applied together (a single transaction for the real
+  // SQLite/D1 store; no intervening await for the in-memory one), so a
+  // concurrent reader can never observe desired_state='absent' with
+  // cleanup_needed still 0, or vice versa.
+  applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null>;
+  // Same atomic-increment guarantee again, this time incrementing BOTH
+  // desired_revision and generation by exactly 1 together, and resetting
+  // the per-generation fields (google_event_id/etag/sync_status/
+  // last_error/attempt_count) back to a fresh-generation starting state,
+  // all in one indivisible unit. The caller still inserts the new
+  // generation's own history row as an immediate follow-up (using the
+  // freshly-allocated generation number this method returns) -- that
+  // insert targets a BRAND NEW, already-uniquely-allocated generation
+  // number, so it can never collide with or corrupt a concurrent
+  // transition the way the bare revision/generation fields themselves
+  // could before this fix.
+  applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null>;
   getHistory(linkId: string, generation: number): Promise<CalendarLinkHistoryRow | null>;
   insertHistory(row: Omit<CalendarLinkHistoryRow, "createdAt" | "updatedAt">, now: number): Promise<void>;
   updateHistory(linkId: string, generation: number, patch: Partial<CalendarLinkHistoryRow>): Promise<void>;

@@ -63,6 +63,50 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     return true;
   }
 
+  // Issue 4: every field touched here is mutated synchronously, with no
+  // `await` between reading `link.desiredRevision`/`link.generation` and
+  // writing the incremented value -- the same atomicity guarantee a real
+  // single SQL UPDATE statement provides, not an accident of there being
+  // only one JS thread. (An implementation that `await`ed partway through
+  // would NOT correctly model a real database's guarantee and would
+  // reintroduce exactly the lost-update race this method exists to rule
+  // out structurally.)
+  async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
+    const link = this.links.get(linkId);
+    if (!link) return null;
+    link.desiredRevision += 1;
+    if (link.syncStatus === "synced") link.syncStatus = "pending";
+    link.updatedAt = now;
+    return { ...link };
+  }
+
+  async applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null> {
+    const link = this.links.get(linkId);
+    if (!link) return null;
+    link.desiredRevision += 1;
+    link.desiredState = "absent";
+    link.syncStatus = "pending";
+    link.updatedAt = now;
+    const history = this.history.get(`${linkId}:${generation}`);
+    if (history) history.cleanupNeeded = true; // same synchronous unit as the link-row change above -- never separately observable
+    return { ...link };
+  }
+
+  async applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null> {
+    const link = this.links.get(linkId);
+    if (!link) return null;
+    link.generation += 1;
+    link.desiredRevision += 1;
+    link.desiredState = "present";
+    link.googleEventId = null;
+    link.googleEtag = null;
+    link.syncStatus = "pending";
+    link.lastError = null;
+    link.attemptCount = 0;
+    link.updatedAt = now;
+    return { ...link };
+  }
+
   async getHistory(linkId: string, generation: number): Promise<CalendarLinkHistoryRow | null> {
     const row = this.history.get(`${linkId}:${generation}`);
     return row ? { ...row } : null;
