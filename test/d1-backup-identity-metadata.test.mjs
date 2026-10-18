@@ -24,8 +24,24 @@ import { join } from "node:path";
 // pattern-matching alone (see test/d1-backup-status-publish.test.mjs for
 // that style, used here only for the mechanical, low-risk parts).
 
-const nightly = await readFile(new URL("../.github/workflows/d1-backup-nightly.yml", import.meta.url), "utf8");
-const monthly = await readFile(new URL("../.github/workflows/d1-restore-verify-monthly.yml", import.meta.url), "utf8");
+// Independent review correction (2026-10-19, see docs/AI-HANDOFF.md):
+// normalized to LF immediately on read, before any marker extraction or
+// bash execution -- this test's job is to prove the real bash LOGIC is
+// correct, never to depend on how this checkout happened to represent
+// line endings. The prior fix (replacing a hardcoded `\r\n` endMarker
+// with `\n`) only shifted which single checkout line-ending this test
+// silently required; it would have failed again the moment the files
+// were ever checked out with CRLF (a Windows `core.autocrlf=true`
+// checkout, or a future `.gitattributes` rule). Normalizing here makes
+// every extractSpan() marker below -- and the actual bash snippet handed
+// to runBash() -- correct for either line ending the real files are
+// ever checked out with, since both arrive here as the identical LF
+// text. The security validation logic itself (the regexes, the
+// allowlist pattern, every assertion below) is completely unchanged.
+const nightlyRaw = await readFile(new URL("../.github/workflows/d1-backup-nightly.yml", import.meta.url), "utf8");
+const monthlyRaw = await readFile(new URL("../.github/workflows/d1-restore-verify-monthly.yml", import.meta.url), "utf8");
+const nightly = nightlyRaw.replace(/\r\n/g, "\n");
+const monthly = monthlyRaw.replace(/\r\n/g, "\n");
 
 function extractSpan(text, startMarker, endMarker, label) {
   const startIdx = text.indexOf(startMarker);
@@ -68,11 +84,44 @@ async function run() {
   // belongs to "if aws s3api head-object...; then" and isn't part of the
   // validation logic itself), so the extracted fragment is self-contained
   // and syntactically balanced on its own.
-  const validationScript = extractSpan(monthly, "VALID=false", 'else\r\n            echo "::warning::Could not HEAD', "identity-validation");
+  //
+  // D1 restore/schema sync check repair (2026-10-18, corrected 2026-10-19,
+  // see docs/AI-HANDOFF.md): the endMarker below was originally hardcoded
+  // with a literal `\r\n` between "else" and the following "echo" line,
+  // which only ever matched on a Windows checkout with
+  // `core.autocrlf=true` silently rewriting LF to CRLF in the working
+  // tree -- it permanently failed on the Linux GitHub Actions runner,
+  // which checks out the real, unmodified LF content. Simply swapping
+  // that literal to `\n` (the first fix) would have only inverted the
+  // bug -- correct for an LF checkout, broken again for a CRLF one. The
+  // real fix is the normalization above, applied to `monthly`/`nightly`
+  // before either is ever read here: this marker is plain `\n` because
+  // that is what the normalized text always is, not because `\n` is
+  // assumed to be the checkout's own line ending.
+  const validationScript = extractSpan(monthly, "VALID=false", 'else\n            echo "::warning::Could not HEAD', "identity-validation");
   // Sanity: the extraction actually captured the real regex, not an empty
   // or unrelated span -- guards against the anchors silently matching the
   // wrong location after a future edit.
   assert.match(validationScript, /EXPECTED_PATTERN="\^daily\/\$\{DATABASE_NAME\}-\[0-9\]\{8\}T\[0-9\]\{6\}Z\\\.sql\\\.gz\\\.gpg\\\$"/, "extraction sanity: must contain the real allowlist pattern");
+  // Regression proof (independent review, 2026-10-19): the extraction
+  // must produce the IDENTICAL span regardless of which line ending the
+  // real workflow file happens to be checked out with -- proven directly
+  // by building a synthetic CRLF variant of the real (already-
+  // normalized) text, independent of whatever this specific checkout's
+  // own `monthlyRaw` bytes happen to be, and confirming normalizing it
+  // reproduces `monthly` exactly and extracts to the identical span. This
+  // is what actually guards against this class of bug recurring -- the
+  // marker literal's own choice of `\n` above is just a consequence of
+  // normalizing, never an assumption about the checkout's real line
+  // endings.
+  {
+    const crlfVariant = monthly.replace(/\n/g, "\r\n");
+    assert.match(crlfVariant, /\r\n/, "sanity: the synthetic CRLF variant must actually contain CRLF, or this proves nothing");
+    const crlfNormalized = crlfVariant.replace(/\r\n/g, "\n");
+    assert.equal(crlfNormalized, monthly, "normalizing a CRLF checkout of this file must reproduce the exact same LF text");
+    const crlfValidationScript = extractSpan(crlfNormalized, "VALID=false", 'else\n            echo "::warning::Could not HEAD', "identity-validation (synthetic CRLF input)");
+    assert.equal(crlfValidationScript, validationScript, "extraction must be identical whether the source file is checked out with CRLF or LF line endings");
+  }
 
   function validate(datedKey) {
     // DATED_KEY is provided directly (standing in for what the real script
