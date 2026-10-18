@@ -51929,3 +51929,295 @@ this round):
   4. Deploy the already-Staging-verified Worker code to Production.
 - **Stopped here, as instructed**: no Production migration, no
   Production deployment, no merge of PR #19 performed this round.
+
+## Authorized Production Deployment -- Trip Planning Deliberate Prospect Selection (2026-10-18) -- SUCCESSFUL
+
+Owner explicitly authorized a controlled Production deployment of the
+reviewed Trip Planning prospect-selection fix -- trip opens on "My
+trip prospects" showing only selected people; "Find prospects"
+searches within the trip's region with an explicit all-regions option;
+explicit "Add to trip," duplicate prevention, and "Planned outreach"
+status; selected-list search/status filters and compact prospect
+rows; migration `0047_trip_prospect_selection.sql` and its reviewed
+backfill -- subject to the safety gates below. No donor records,
+financial records, email scheduling, secrets, or unrelated
+configuration were touched.
+
+### 0. Fresh verification of the stated facts, before proceeding
+
+- **Reviewed application commit**: `74918d63fd1eb93ff209561115ea5143e4745cc7`,
+  confirmed to exist with that exact full SHA (`git log 74918d6 -1
+  --format=%H`). The branch's current tip, `db47f3e8bb9580f9d6579ed86146d4ae642803f2`,
+  is three commits ahead of it -- `git diff --name-only 74918d6
+  db47f3e` touches only `docs/AI-HANDOFF.md`, confirmed empty for every
+  other path. The deployed build is cut from the working tree at
+  `db47f3e` (hence the release stamp below reads that SHA), but its
+  application code is byte-identical to the reviewed `74918d6`.
+- **PR #19**: confirmed merged via a fresh GitHub API call --
+  `merged: true`, `merge_commit_sha: 4ea8a30367421679c5a996f7de9eba6c1e64051b`,
+  `state: "closed"`.
+- **Both schema-sync jobs**: confirmed green via a fresh GitHub API
+  call against the real re-run (`runs/39136248217/attempts/2/jobs`) --
+  `check: completed/success`, `prepare-sync: completed/success`. Also
+  re-ran this branch's own `check-main-restore-sync.mjs` locally against
+  the real `origin/main` and got `D1 restore/schema state on main is
+  in sync with the canonical schema. No drift detected.`
+
+### 1. Exact release scope -- verified, nothing unrelated
+
+`git diff --stat` from the last Production-deployed commit
+(`2451034be5c14a03aa0a695c767f5402538b8012`, confirmed live via
+`/api/health`'s own `release` check before this deploy: `0.1.0 ·
+2451034`) to the reviewed `74918d6` touches exactly the 18 files that
+commit itself introduces: the three trip API routes, `app/globals.css`,
+`TravelPlanningExperience.tsx`, `TripDashboardExperience.tsx`,
+`app/travel-planning/[id]/page.tsx`, the migration file, `lib/data-
+health/production-baseline.ts`, `lib/relationships/trip-model.ts` and
+`trips-data.ts`, the regenerated `production-baseline/` artifacts,
+`scripts/run-tests.mjs`, and four test files. (The wider `2451034..
+db47f3e` diff additionally shows `docs/AI-HANDOFF.md` only, from the
+intervening documentation-only commits -- confirmed above.) `git diff
+--name-only` against `wrangler.production.jsonc`, `wrangler.
+staging.jsonc`, `worker/index.ts`, `cloudflare-env.d.ts`, `package.json`,
+and `db/schema.ts` across the same range was **empty** -- zero config,
+binding, secret, cron, or ORM-schema change in scope. No commits exist
+on the remote beyond `db47f3e` (fresh `git fetch`). **Nothing
+unrelated would ship; proceeded.**
+
+### 2. Preflight (all PASS)
+
+1. **Latest Production backup**: PASS -- `/api/health`'s
+   `automated-backup` check, read live: "Completed successfully
+   2026-10-18T12:35:24Z (object: daily/fundraising-os-production-
+   db-20261018T123519Z.sql.gz.gpg)," same day as this deployment.
+2. **Restore-verification**: PASS -- "Successfully restored and
+   verified the Oct 12, 2026 backup. Restore testing runs monthly";
+   Production's own `backup_alert_state` table queried directly and
+   confirmed empty (zero outstanding failures).
+3. **Current Production Worker version recorded as the rollback
+   target, before any change**: **`4ac568b8-1589-4252-8b8b-958829a1d341`**
+   (100% traffic, created 2026-10-16T21:06:25Z, deployed commit
+   `2451034`) -- `wrangler deployments list`.
+4. **Production/Staging D1 isolation**: PASS -- `wrangler d1 list`
+   shows two distinct uuids (`a51c6571-...` production,
+   `6c18396c-...` staging) with distinct sizes (10,350,592 vs.
+   9,568,256 bytes at the time of this check).
+5. **Tests/typecheck/build/manifest**: `npm test` → **214/214**
+   passing (including the main-sync checker, reporting no drift).
+   `npx tsc --noEmit` → clean. `pnpm run build:production-independent`
+   → succeeded. `node scripts/verify-build-manifest.mjs
+   production-independent` → PASS. Confirmed the built bundle actually
+   contains the reviewed code before deploying: `grep -c
+   selectTripProspect dist/server/index.js` → 2, `grep -c
+   listDonorsForTripSearch` → 3, `grep -c selected_at` → 14.
+6. **Lint against the established baseline**: `npx eslint .` →
+   **94 errors / 43 warnings** -- byte-identical to the established
+   baseline; no new issues.
+7. **Migration 0047 confirmed NOT already applied**: `PRAGMA
+   table_info(trip_prospects)` against Production, read live -- no
+   `selected_at` column present before this round touched anything.
+8. **Production donor/financial baselines, recorded before any
+   change** (all via direct, read-only `wrangler d1 execute --remote`):
+
+   | Metric | Value |
+   |---|---|
+   | Donors (`data_source='live'`, not archived) | 297 |
+   | Giving activities (`record_origin='live'`) | 5,935 |
+   | Open pledges (active) | 33 |
+   | Partially-paid pledges (active) | 58 |
+   | Legacy `gifts` rows | 0 |
+   | Active payment plans | 46 |
+   | Active pledge-balance corrections | 2 |
+   | Committed (open + partially-paid, active) | $286,599.00 |
+   | Paid (all active giving activities) | $4,020,638.60 |
+   | Outstanding balance (open + partially-paid, active) | $181,224.15 |
+   | Interactions | 204 |
+
+9. **Existing trip/prospect data, recorded in full before any
+   change**: exactly **one** real Production trip, "Teaneck-10/20/26"
+   (`6535f09f-512f-403a-ba8e-875c735d0f41`, status `active`, region
+   "North/Central NJ -- Teaneck/Bergenfield area"), with **47**
+   `trip_prospects` rows, all `added_method='auto_region'`. Zero
+   `trip_financial_attributions` rows of any kind (active or removed)
+   anywhere in Production. Every row's `trip_notes`/`next_action`/
+   `manual_rank`/`meeting_at`/`linked_interaction_id` and `status`
+   recorded per-row before migration (see section 3).
+
+### 3. Fresh reconciliation immediately before migration -- matches the authorized rule exactly, no discrepancy
+
+Re-ran the exact signal-based reconciliation query (the same rule
+migration 0047's backfill applies) directly against Production,
+immediately before applying anything:
+
+| Outcome | Count | Basis |
+|---|---|---|
+| Would remain **selected** | **9** | `status = 'meeting_requested'`, zero other fields set |
+| Would become an **unselected candidate** | **38** | `status = 'not_contacted'`, zero signal of any kind |
+
+Identical to the prior read-only result for this trip -- same 47
+total, same 9/38 split, same donor identities (verified by prospect
+id, not just count). Confirmed directly: zero `trip_prospects` rows
+anywhere in Production have `added_method='manual'`; zero have any
+active OR removed financial attribution; the 9 that would be selected
+differ from the 38 by status alone (`meeting_requested` vs.
+`not_contacted`), with no notes/next action/manual rank/meeting/
+interaction set on any of the 47. **No unexplained discrepancy, no
+preservation risk. Per the owner's explicit authorization of this
+exact, reviewed rule -- proceeded without preselecting any donor by
+giving history or donor size**, and without altering anything about
+the 38 that would remain candidates.
+
+The 9 donors confirmed to remain selected (by name and prospect id,
+recorded here so the post-deploy check could confirm an EXACT match,
+not just a count): Mr. & Mrs. Philip J Gross, Mr. & Mrs. Shai Gerson,
+Mr. & Mrs. Martin Fineberg, Rabbi & Mrs. Dovid Bashevkin, Rabbi & Mrs.
+Simcha Willig, Mr. & Mrs. Yossi Kra, Mr. & Dr. Aryeh Kurz, Mr. & Mrs.
+Moshe Greenberg, Mr. & Mrs. Alan Tabacznik.
+
+### 4. Migration applied, then deployed
+
+**`drizzle/0047_trip_prospect_selection.sql` applied to Production**
+via `wrangler d1 execute --remote --file` (this project has no
+`d1_migrations` tracking table; every migration is applied this same
+direct way, matching precedent). Result: 4 queries executed, 67 rows
+written. **Verified immediately, directly against the live
+database**: `trip_prospects` for the Teaneck trip now shows **47
+total, 9 selected** -- and the 9 selected prospect ids match the
+section-3 prediction **exactly** (set equality checked programmatically,
+not just counted), all still carrying `status='meeting_requested'`
+(never reset). Row count and distinct-donor count both still **47**
+-- nothing deleted or recreated.
+
+**Deployed** via `wrangler deploy --config wrangler.production.jsonc`.
+New Worker version: **`aa1de8b4-4f2a-4643-be82-28d430fc9964`** (100%
+traffic, 2026-10-18T15:59:58Z). Deploy output's own binding list
+(`env.DB`, `env.STATUS_WORKER`, `env.AI`, every environment variable)
+and cron (`schedule: 0 * * * *`) are unchanged from the pre-deploy
+configuration -- confirmed by direct comparison with the prior deploy's
+own recorded output, not merely assumed.
+
+### 5. Post-deployment verification -- all against live Production, directly
+
+**Release and schema, read live from `/api/health`** (authenticated,
+real session): `release: "0.1.0 · db47f3e"` (this round's deployed
+commit -- see section 0 on why this SHA, not `74918d6`, is correct and
+expected); `schema-comparison: "Match"` (now matching the UPDATED,
+48-migration baseline this build carries, since both the migration and
+the deploy landed); `production-readiness: "Ready"`; `database:
+"Connected"`; `active-donors: "297"` (unchanged).
+
+**Financial/business-data baselines, re-captured with the identical
+queries as section 2.8, immediately after deployment**: donors 297,
+giving activities 5,935, open pledges 33, partially-paid 58, legacy
+gifts 0, payment plans 46, corrections 2, committed $286,599.00, paid
+$4,020,638.60, outstanding balance $181,224.15, interactions 204 --
+**every single figure byte-identical to the pre-deployment baseline**.
+`trip_financial_attributions` count still 0; `trips` count still 1 (no
+test trip created); `interactions` count still 204 (no interaction
+created by anything this round did).
+
+**Teaneck trip, fetched live and authenticated** (`GET /travel-
+planning/6535f09f-...`, direct `fetch()` from the authenticated
+browser session -- not source inspection, not a bare HTTP status
+check):
+- The "My trip prospects" tab button carries `class="active"
+  aria-pressed="true"` in the real rendered HTML -- it IS the default
+  tab on open, exactly as required.
+- Its own count badge reads **`<span>9</span>`** -- not 47, not 0.
+- All **9** expected donor names (Philip J Gross, Shai Gerson, Martin
+  Fineberg, Dovid Bashevkin, Simcha Willig, Yossi Kra, Aryeh Kurz,
+  Moshe Greenberg, Alan Tabacznik) are present in the page; exactly
+  **9** donor-profile links and **9** "Prepare for Meeting" links are
+  present -- one pair per selected prospect, no more, no fewer.
+- The travel-planning trip-list card for "Teaneck-10/20/26" now shows
+  **"9 prospects"** (confirmed via the real server-rendered HTML, not
+  a cached or stale value).
+- **"Find prospects"** (`?tab=find&findQ=Mann`, a real unselected
+  candidate's surname): "Showing 1 of 297 donors in North/Central NJ
+  -- Teaneck/Bergenfield area matching 'Mann'," with a real "Add to
+  trip" button present and **not** marked "Already in My trip
+  prospects" -- the remaining 38 candidates are genuinely still
+  available there, unselected, exactly as the reconciliation predicted.
+  The explicit "Search all regions" option and every status-filter
+  label (including "Planned outreach") are present in the real HTML.
+- A real donor profile (`/donors/0aa58b7e-...`, one of the 9 selected
+  donors) loads with status 200 and the donor's own real name and
+  pledge content -- donor-profile navigation is intact.
+
+**Other existing Production surfaces, each fetched live and
+authenticated, status 200**: `/` (Today), `/donors` (directory),
+`/settings`, `/travel-planning` (trip list), `/pledge-review`. The
+settings page renders its email-configuration section normally
+("Connected" status visible). Production's own Gmail OAuth secrets
+(`GMAIL_OAUTH_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`) confirmed still
+present via `wrangler secret list` (names only, as always -- never
+values). Production/Staging D1 isolation re-confirmed unchanged
+(distinct uuids, unaffected by this round).
+
+**No arbitrary people were added, no test trips were created, no
+interactions were recorded, and no financial records were created on
+Production for this verification** -- every check above was either a
+read-only database query or a plain authenticated `GET` request;
+nothing in this section performed a write. Confirmed directly: zero
+new `trips`, zero new `trip_financial_attributions`, zero new
+`interactions` anywhere in Production as a result of this round's
+verification activity.
+
+### 6. What was established on Staging/tests vs. confirmed live on Production (explicit distinction)
+
+- **Confirmed directly on live Production this round**: migration
+  0047 applied cleanly and reconciled exactly as predicted; the new
+  Worker version deployed with unchanged bindings/cron/secrets; the
+  Teaneck trip's own "My trip prospects" default view, tab badge,
+  donor names, and "Find prospects" regional search all render
+  correctly against real production data; every financial/business-
+  data baseline is unchanged; no interaction, test trip, or financial
+  record was created.
+- **Established earlier on Staging, not independently re-verified
+  live against Production this round** (unchanged by this round, and
+  not necessary to re-derive): the backfill's handling of a legacy row
+  that DOES carry real signal (notes, a meeting, a linked interaction,
+  or an active financial attribution) -- Production's own 47 rows
+  happened to contain no such case, so this round's live Production
+  check could only confirm the "zero signal" and "status changed"
+  branches, not the others. Those other branches are proven instead by
+  the dedicated schema-level regression test's realistic fixtures
+  (`tests/trip-prospect-selection-schema.test.mjs`) and were not
+  re-exercised against real Production rows, because no real
+  Production row of that shape currently exists to test against.
+  Meeting scheduling/completion's real-interaction creation and the
+  financial-attribution "record/associate" flows are unchanged by this
+  round's code and were not re-exercised on Production (doing so would
+  have created a real interaction or financial record, which the
+  owner's own instructions for this round explicitly prohibited).
+
+### 7. Rollback target and conditions (not exercised)
+
+**Rollback target, if ever needed**: `wrangler rollback 4ac568b8-
+1589-4252-8b8b-958829a1d341 --config wrangler.production.jsonc`
+(the Worker version live immediately before this deployment). Per the
+owner's own explicit instruction, a rollback would roll back the
+**Worker only** -- the additive migration and all trip data (including
+the new `selected_at` backfill) would be **retained**, never dropped
+or reversed; no column removed, no backfill undone, no record deleted
+as a rollback shortcut. **Not exercised** -- no material regression
+occurred.
+
+### 8. Remaining limitations
+
+- Production's `trip_prospects` table currently has exactly one real
+  trip and zero rows carrying any of the richer signals (notes, next
+  action, manual rank, meeting, linked interaction, financial
+  attribution) -- the backfill's handling of those cases remains
+  proven only by the dedicated schema-level test and Staging's own
+  (also signal-free) legacy data, never by a real Production row of
+  that shape. The next trip the owner builds up with real notes/
+  meetings before this feature existed in its current form (there
+  will not be one, since this is now the live behavior going forward)
+  is a non-issue; this is noted purely for completeness.
+- The release stamp on Production (`db47f3e`) is three documentation-
+  only commits ahead of the specific commit named in this
+  authorization (`74918d6`) -- verified byte-identical application
+  code across that range (section 0); not a discrepancy, but worth
+  recording precisely rather than silently reporting the authorized
+  SHA as if it were the literal build stamp.
