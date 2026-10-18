@@ -8,7 +8,7 @@ import { buildSuggestionSnapshot } from "../lib/relationships/trip-model.ts";
 // unmodified recommendation engine (buildRecommendationEvidence ->
 // buildDonorRecommendation -- the exact functions lib/relationships/
 // meeting-brief.ts already calls, which is what trips-data.ts's own
-// createTrip()/addManualProspect() call via loadMeetingBrief()) -- never
+// selectTripProspect() calls via loadMeetingBrief()) -- never
 // a reimplementation of payment-plan, ask, or completed-outreach logic
 // for trip prioritization specifically. A fixture that fakes the final
 // DonorRecommendation shape would not actually prove this; these go

@@ -2,12 +2,13 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { DonorAutocomplete } from "../../capture/DonorAutocomplete";
 import { donorNavigationHref, meetingBriefNavigationHref } from "../../../lib/navigation/donor-navigation";
-import type { DonorSearchRecord } from "../../../lib/relationships/donor-search";
-import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity } from "../../../lib/relationships/trips-data";
+import { searchDonors } from "../../../lib/relationships/donor-search";
+import { ALL_REGIONS, ALL_CITIES, filterByGeo } from "../../../lib/relationships/donor-geo-filter";
+import { numericDonorCode } from "../../../lib/relationships/donor-identity";
+import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
-import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus, type RegionCandidateDonor } from "../../../lib/relationships/trip-model";
+import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
 import { FinancialSummaryCard, FinancialSummaryGrid } from "../../components/FinancialSummaryCard";
 import { ProgressBar } from "../../components/ProgressBar";
 
@@ -17,12 +18,16 @@ const CATEGORY_LABELS: Record<string, string> = {
   pending_gift: "Pending donation", pending_pledge: "Pending pledge",
 };
 
+// "Planned outreach" (Section 2) reuses the existing `not_contacted`
+// status with a clearer display label -- it means "added, intended to
+// contact, not yet contacted," never a separate schema value.
 const STATUS_LABELS: Record<TripProspectStatus, string> = {
-  not_contacted: "Not Contacted", contacted: "Contacted", meeting_requested: "Meeting Requested",
+  not_contacted: "Planned outreach", contacted: "Contacted", meeting_requested: "Meeting Requested",
   meeting_scheduled: "Meeting Scheduled", meeting_completed: "Meeting Completed", declined: "Declined", unable_to_schedule: "Unable to Schedule",
 };
 const SUMMARY_STATUSES: readonly TripProspectStatus[] = ["not_contacted", "contacted", "meeting_requested", "meeting_scheduled", "meeting_completed", "declined", "unable_to_schedule"];
 const NEEDING_ATTENTION: ReadonlySet<TripProspectStatus> = new Set(["not_contacted", "meeting_requested"]);
+const VALID_STATUS_FILTERS = new Set<string>(TRIP_PROSPECT_STATUSES);
 
 // Trip start/end are plain calendar dates (no meaningful time-of-day or
 // destination timezone -- see the trips schema's own header comment),
@@ -58,15 +63,59 @@ async function patchProspect(tripId: string, prospectId: string, body: Record<st
   if (!response.ok) throw new Error(payload.error ?? "That change could not be saved.");
 }
 
-export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, allDonors, fundraiserTimezone, financialAttributions, financialSummary }: {
-  trip: TripRecord; prospects: TripProspectRecord[]; newlyMatchingDonors: RegionCandidateDonor[]; allDonors: DonorSearchRecord[]; fundraiserTimezone: string;
+// Deliberate Prospect Selection (2026-10-18) -- tab/search/filter state
+// round-trips through the URL (never just React state), so it survives
+// both a routine `router.refresh()` (which it would anyway, since this
+// component's own local state is preserved across a refresh the same
+// way `addQuery` always was) AND a full navigation away to a donor
+// profile and back, via the SAME `from=` mechanism
+// app/donors/page.tsx's own region/city filters already rely on --
+// `donorNavigationHref` captures `window.location` (pathname + search +
+// hash) at the moment a donor link is clicked, so whatever this
+// function has already written into the URL comes back automatically.
+function syncUrl(updates: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  for (const [key, value] of Object.entries(updates)) {
+    if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+  }
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function matchesProspectQuery(prospect: TripProspectRecord, query: string) {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return true;
+  return prospect.donorDisplayName.toLocaleLowerCase().includes(needle) || (prospect.donorCode ?? "").toLocaleLowerCase().includes(needle);
+}
+
+export function TripDashboardExperience({
+  trip, prospects, findProspectDonors, fundraiserTimezone, financialAttributions, financialSummary,
+  initialTab, initialProspectQuery, initialStatusFilter, initialFindQuery, initialAllRegions,
+}: {
+  trip: TripRecord; prospects: TripProspectRecord[]; findProspectDonors: FindProspectDonor[]; fundraiserTimezone: string;
   financialAttributions: TripFinancialAttributionRow[]; financialSummary: TripFinancialSummary;
+  initialTab: "mine" | "find"; initialProspectQuery: string; initialStatusFilter: string; initialFindQuery: string; initialAllRegions: boolean;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [addQuery, setAddQuery] = useState("");
   const [busyProspectId, setBusyProspectId] = useState<string | null>(null);
+  const [busyDonorId, setBusyDonorId] = useState<string | null>(null);
 
+  const [tab, setTab] = useState<"mine" | "find">(initialTab);
+  const [prospectQuery, setProspectQuery] = useState(initialProspectQuery);
+  const [statusFilter, setStatusFilter] = useState<TripProspectStatus | "all">(VALID_STATUS_FILTERS.has(initialStatusFilter) ? (initialStatusFilter as TripProspectStatus) : "all");
+  const [findQuery, setFindQuery] = useState(initialFindQuery);
+  const [allRegions, setAllRegions] = useState(initialAllRegions);
+
+  function changeTab(next: "mine" | "find") { setTab(next); syncUrl({ tab: next === "find" ? "find" : "" }); }
+  function changeProspectQuery(next: string) { setProspectQuery(next); syncUrl({ q: next }); }
+  function changeStatusFilter(next: TripProspectStatus | "all") { setStatusFilter(next); syncUrl({ status: next === "all" ? "" : next }); }
+  function changeFindQuery(next: string) { setFindQuery(next); syncUrl({ findQ: next }); }
+  function changeAllRegions(next: boolean) { setAllRegions(next); syncUrl({ allRegions: next ? "1" : "" }); }
+
+  // Full-trip counts (Section 3): always over EVERY selected prospect,
+  // never the filtered subset -- these drive the summary grid and must
+  // never shift just because the owner typed into the search box.
   const counts = useMemo(() => {
     const byStatus = new Map<TripProspectStatus, number>();
     for (const status of SUMMARY_STATUSES) byStatus.set(status, 0);
@@ -74,6 +123,32 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
     return byStatus;
   }, [prospects]);
   const needingAttention = prospects.filter((prospect) => NEEDING_ATTENTION.has(prospect.status)).length;
+
+  const filteredProspects = useMemo(
+    () => prospects.filter((prospect) => (statusFilter === "all" || prospect.status === statusFilter) && matchesProspectQuery(prospect, prospectQuery)),
+    [prospects, statusFilter, prospectQuery],
+  );
+  const prospectsFiltering = statusFilter !== "all" || prospectQuery.trim().length > 0;
+
+  // Find prospects (Section 4): region + text search composed over the
+  // SAME full donor list, via the exact same filterByGeo()/searchDonors()
+  // the donor directory uses -- never truncated, never a second search
+  // implementation.
+  const effectiveRegion = allRegions || !trip.destinationRegionId ? ALL_REGIONS : trip.destinationRegionId;
+  // searchDonors() (lib/relationships/donor-search.ts) is typed over the
+  // plain DonorSearchRecord shape, so its result loses the extra
+  // alreadySelected/existingProspectId/city/state fields at the type
+  // level even though they still exist at runtime -- resolved back to
+  // the full FindProspectDonor by id, exactly like
+  // DonorDirectoryExperience.tsx's own `relationshipById.get(...)`
+  // pattern, rather than widening the shared search utility's signature.
+  const findProspectDonorById = useMemo(() => new Map(findProspectDonors.map((donor) => [donor.id, donor])), [findProspectDonors]);
+  const regionFiltered = useMemo(() => filterByGeo(findProspectDonors, effectiveRegion, ALL_CITIES), [findProspectDonors, effectiveRegion]);
+  const findResults = useMemo(
+    () => searchDonors(regionFiltered, findQuery, Number.MAX_SAFE_INTEGER).map((donor) => findProspectDonorById.get(donor.id)!),
+    [regionFiltered, findQuery, findProspectDonorById],
+  );
+  const findScopeLabel = trip.destinationRegionId && !allRegions ? (trip.destinationRegionLabel ?? "the destination region") : "all regions";
 
   function refresh() { router.refresh(); }
 
@@ -87,14 +162,16 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
 
   async function addDonor(donorId: string) {
     setError(null);
+    setBusyDonorId(donorId);
     try {
       const response = await fetch(`/api/trips/${encodeURIComponent(trip.id)}/prospects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ donorId }) });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "This donor could not be added.");
-      setAddQuery("");
       refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "This donor could not be added.");
+    } finally {
+      setBusyDonorId(null);
     }
   }
 
@@ -121,7 +198,7 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
 
     <section className="travel-planning-dashboard" aria-label="Trip dashboard">
       <div className="travel-planning-dashboard-grid">
-        <article><strong>{prospects.length}</strong><span>Total prospects</span></article>
+        <article><strong>{prospects.length}</strong><span>Selected prospects</span></article>
         {SUMMARY_STATUSES.map((status) => <article key={status}><strong>{counts.get(status) ?? 0}</strong><span>{STATUS_LABELS[status]}</span></article>)}
         <article className="travel-planning-attention"><strong>{needingAttention}</strong><span>Needing outreach</span></article>
       </div>
@@ -130,27 +207,23 @@ export function TripDashboardExperience({ trip, prospects, newlyMatchingDonors, 
 
     <TripFinancialResultsSection summary={financialSummary} attributions={financialAttributions} />
 
-    {newlyMatchingDonors.length > 0 && <section className="travel-planning-new-prospects" aria-label="New prospects available">
-      <h2>New prospects available</h2>
-      <p>These donors now match {trip.destinationRegionLabel} but were not on this trip when it was created. Add them if you&rsquo;d like -- they are never inserted automatically.</p>
-      <ul>
-        {newlyMatchingDonors.map((donor) => <li key={donor.id}>
-          <span>{donor.displayName} &mdash; {[donor.city, donor.state].filter(Boolean).join(", ")}</span>
-          <button type="button" onClick={() => addDonor(donor.id)}>Add to trip</button>
-        </li>)}
-      </ul>
-    </section>}
+    <nav className="portfolio-focus-filters travel-planning-tabs" aria-label="Trip prospect views">
+      <button type="button" className={tab === "mine" ? "active" : ""} aria-pressed={tab === "mine"} onClick={() => changeTab("mine")}>My trip prospects<span>{prospects.length}</span></button>
+      <button type="button" className={tab === "find" ? "active" : ""} aria-pressed={tab === "find"} onClick={() => changeTab("find")}>Find prospects</button>
+    </nav>
 
-    <section className="travel-planning-add-prospect" aria-label="Add a donor manually">
-      <h2>Add a donor manually</h2>
-      <DonorAutocomplete donors={allDonors} selectedId="" onSelect={(id) => { if (id) addDonor(id); }} initialQuery={addQuery} onQueryChange={setAddQuery} clearable inputId="trip-add-donor" label="Search any donor in the CRM" placeholder="Search last name, household, spouse, JL code, email, or phone" />
-    </section>
-
-    <section className="travel-planning-prospects" aria-label="Trip prospects">
-      <h2>Prospects ({prospects.length})</h2>
-      {prospects.length === 0 && <p className="travel-planning-empty-inline">No prospects yet. {trip.destinationRegionId ? "" : "This trip has no destination region, so add donors manually above."}</p>}
-      {prospects.map((prospect) => <ProspectRow key={prospect.id} tripId={trip.id} prospect={prospect} busy={busyProspectId === prospect.id} fundraiserTimezone={fundraiserTimezone} onBusyAction={(action) => withBusy(prospect.id, action)} onRemove={() => removeDonor(prospect.id, prospect.donorDisplayName)} attributions={financialAttributions.filter((a) => a.donorId === prospect.donorId)} onRefresh={refresh} />)}
-    </section>
+    {tab === "mine" ? <MyTripProspectsPanel
+      trip={trip} prospects={prospects} filteredProspects={filteredProspects} filtering={prospectsFiltering}
+      prospectQuery={prospectQuery} onProspectQueryChange={changeProspectQuery}
+      statusFilter={statusFilter} onStatusFilterChange={changeStatusFilter}
+      busyProspectId={busyProspectId} fundraiserTimezone={fundraiserTimezone}
+      onBusyAction={withBusy} onRemove={removeDonor} financialAttributions={financialAttributions} onRefresh={refresh}
+      onFindProspects={() => changeTab("find")}
+    /> : <FindProspectsPanel
+      trip={trip} results={findResults} resultCount={findResults.length} totalCount={findProspectDonors.length}
+      findQuery={findQuery} onFindQueryChange={changeFindQuery} allRegions={allRegions} onAllRegionsChange={changeAllRegions}
+      findScopeLabel={findScopeLabel} busyDonorId={busyDonorId} onAdd={addDonor}
+    />}
   </>;
 }
 
@@ -171,6 +244,87 @@ function TripStatusControl({ tripId, currentStatus, onChanged }: { tripId: strin
   </select>;
 }
 
+// "My trip prospects" (Section 3) -- only deliberately selected
+// prospects (already filtered server-side), with its own name/code
+// search and status filter layered on client-side. Full-trip counts
+// (the summary grid above, and `prospects.length` here) are always
+// computed over the unfiltered array; only the LIST itself narrows.
+function MyTripProspectsPanel({
+  trip, prospects, filteredProspects, filtering, prospectQuery, onProspectQueryChange, statusFilter, onStatusFilterChange,
+  busyProspectId, fundraiserTimezone, onBusyAction, onRemove, financialAttributions, onRefresh, onFindProspects,
+}: {
+  trip: TripRecord; prospects: TripProspectRecord[]; filteredProspects: TripProspectRecord[]; filtering: boolean;
+  prospectQuery: string; onProspectQueryChange: (value: string) => void;
+  statusFilter: TripProspectStatus | "all"; onStatusFilterChange: (value: TripProspectStatus | "all") => void;
+  busyProspectId: string | null; fundraiserTimezone: string;
+  onBusyAction: (prospectId: string, action: () => Promise<void>) => void; onRemove: (prospectId: string, name: string) => void;
+  financialAttributions: TripFinancialAttributionRow[]; onRefresh: () => void; onFindProspects: () => void;
+}) {
+  return <section className="travel-planning-prospects" aria-label="My trip prospects">
+    <div className="travel-planning-prospect-filters">
+      <label>Search<input type="text" value={prospectQuery} onChange={(event) => onProspectQueryChange(event.target.value)} placeholder="Search name or JL code" /></label>
+      <label>Status<select value={statusFilter} onChange={(event) => onStatusFilterChange(event.target.value as TripProspectStatus | "all")}>
+        <option value="all">All statuses</option>
+        {TRIP_PROSPECT_STATUSES.map((status) => <option key={status} value={status}>{STATUS_LABELS[status]}</option>)}
+      </select></label>
+    </div>
+
+    <p className="travel-planning-filtered-count">
+      {filtering ? `Showing ${filteredProspects.length} of ${prospects.length} prospect${prospects.length === 1 ? "" : "s"}.` : `${prospects.length} prospect${prospects.length === 1 ? "" : "s"}.`}
+    </p>
+
+    {prospects.length === 0 && <div className="travel-planning-empty-inline">
+      <p>No one is selected for this trip yet.</p>
+      <button type="button" onClick={onFindProspects}>Find prospects to add</button>
+    </div>}
+    {prospects.length > 0 && filteredProspects.length === 0 && <p className="travel-planning-empty-inline">No selected prospects match this search or filter.</p>}
+
+    {filteredProspects.map((prospect) => <ProspectRow key={prospect.id} tripId={trip.id} prospect={prospect} busy={busyProspectId === prospect.id} fundraiserTimezone={fundraiserTimezone} onBusyAction={(action) => onBusyAction(prospect.id, action)} onRemove={() => onRemove(prospect.id, prospect.donorDisplayName)} attributions={financialAttributions.filter((a) => a.donorId === prospect.donorId)} onRefresh={onRefresh} />)}
+  </section>;
+}
+
+// "Find prospects" (Sections 1 & 4) -- regional candidates (default) or
+// every donor (explicit "Search all regions" exception), searched with
+// the exact same matching donor search already uses everywhere else.
+// Never auto-selected -- only the explicit "Add to trip" button writes
+// anything.
+function FindProspectsPanel({
+  trip, results, resultCount, totalCount, findQuery, onFindQueryChange, allRegions, onAllRegionsChange, findScopeLabel, busyDonorId, onAdd,
+}: {
+  trip: TripRecord; results: FindProspectDonor[]; resultCount: number; totalCount: number;
+  findQuery: string; onFindQueryChange: (value: string) => void; allRegions: boolean; onAllRegionsChange: (value: boolean) => void;
+  findScopeLabel: string; busyDonorId: string | null; onAdd: (donorId: string) => void;
+}) {
+  return <section className="travel-planning-find-prospects" aria-label="Find prospects">
+    <p className="travel-planning-find-intro">Search {trip.destinationRegionId ? "donors in this trip's region" : "any donor"} and add the ones you actually plan to reach out to. Nothing here is added until you choose it.</p>
+    <div className="directory-filters travel-planning-find-filters" role="group" aria-label="Find prospects filters">
+      <label className="directory-filter travel-planning-find-search">
+        <span>Search</span>
+        <input type="text" value={findQuery} onChange={(event) => onFindQueryChange(event.target.value)} placeholder="Search name, household, spouse, JL code, email, or phone" />
+      </label>
+      {trip.destinationRegionId && <label className="directory-filter travel-planning-all-regions-toggle">
+        <span>Region</span>
+        <span className="travel-planning-all-regions-checkbox"><input type="checkbox" checked={allRegions} onChange={(event) => onAllRegionsChange(event.target.checked)} /> Search all regions</span>
+      </label>}
+    </div>
+    <p className="travel-planning-find-scope">Showing {resultCount} of {totalCount} donors in {findScopeLabel}{findQuery.trim() ? ` matching “${findQuery.trim()}”` : ""}.</p>
+
+    {resultCount === 0 && <p className="travel-planning-empty-inline">No donors match. {findQuery.trim() ? "Clear the search to see candidates again." : "This trip's region has no matching donors yet."}</p>}
+
+    <ul className="travel-planning-candidate-list">
+      {results.map((donor) => <li key={donor.id} className={donor.alreadySelected ? "already-selected" : ""}>
+        <span className="travel-planning-candidate-identity">
+          <strong>{donor.name}</strong>{numericDonorCode({ donorCode: donor.code }) && <span className="donor-code">{numericDonorCode({ donorCode: donor.code })}</span>}
+          <small>{[[donor.city, donor.state].filter(Boolean).join(", "), donor.spouse].filter(Boolean).join(" · ")}</small>
+        </span>
+        {donor.alreadySelected
+          ? <span className="travel-planning-already-added">Already in My trip prospects</span>
+          : <button type="button" disabled={busyDonorId === donor.id} onClick={() => onAdd(donor.id)}>Add to trip</button>}
+      </li>)}
+    </ul>
+  </section>;
+}
+
 function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction, onRemove, attributions, onRefresh }: {
   tripId: string; prospect: TripProspectRecord; busy: boolean; fundraiserTimezone: string; onBusyAction: (action: () => Promise<void>) => void; onRemove: () => void;
   attributions: TripFinancialAttributionRow[]; onRefresh: () => void;
@@ -183,14 +337,20 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   const [nextActionDraft, setNextActionDraft] = useState(prospect.nextAction ?? "");
   const [scheduling, setScheduling] = useState(false);
   const [completing, setCompleting] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [meetingAtDraft, setMeetingAtDraft] = useState(prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "");
   const [locationDraft, setLocationDraft] = useState(prospect.meetingLocation ?? "");
   const [completionNotesDraft, setCompletionNotesDraft] = useState("");
   const returnTo = typeof window !== "undefined" ? `${window.location.pathname}${window.location.search}${window.location.hash}` : `/travel-planning/${tripId}`;
+  // Compact by default (Section 3): notes, next action, meeting
+  // scheduling, and the financial panel only render once expanded, or
+  // automatically while actively scheduling/completing a meeting so the
+  // confirmation panel is never hidden.
+  const showDetails = expanded || scheduling || completing;
 
   function changeStatus(status: TripProspectStatus) {
-    if (status === "meeting_scheduled") { setScheduling(true); setCompleting(false); return; }
-    if (status === "meeting_completed") { setCompleting(true); setScheduling(false); return; }
+    if (status === "meeting_scheduled") { setScheduling(true); setCompleting(false); setExpanded(true); return; }
+    if (status === "meeting_completed") { setCompleting(true); setScheduling(false); setExpanded(true); return; }
     onBusyAction(() => patchProspect(tripId, prospect.id, { status }));
   }
 
@@ -223,11 +383,12 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   return <article className={`travel-planning-prospect-row${busy ? " busy" : ""}`}>
     <div className="travel-planning-prospect-heading">
       <a href={donorNavigationHref(prospect.donorId, returnTo, "travel-planning")}><strong>{prospect.donorDisplayName}</strong></a>
-      <span className={`travel-planning-added-method ${prospect.addedMethod}`}>{prospect.addedMethod === "auto_region" ? "Auto-suggested" : "Manually added"}</span>
+      <span className={`travel-planning-added-method ${prospect.addedMethod}`}>{prospect.addedMethod === "auto_region" ? "Regional match" : "Added manually"}</span>
       <select value={prospect.status} disabled={busy} onChange={(event) => changeStatus(event.target.value as TripProspectStatus)}>
         {TRIP_PROSPECT_STATUSES.map((status) => <option key={status} value={status}>{STATUS_LABELS[status]}</option>)}
       </select>
       <a className="travel-planning-prepare-link" href={meetingBriefNavigationHref(prospect.donorId, returnTo, "travel-planning")}>Prepare for Meeting →</a>
+      <button type="button" className="travel-planning-details-toggle" aria-expanded={showDetails} onClick={() => setExpanded((current) => !current)}>{showDetails ? "Hide details" : "Details"}</button>
       <button type="button" className="travel-planning-remove" disabled={busy} onClick={onRemove}>Remove</button>
     </div>
 
@@ -240,26 +401,28 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
 
     {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">{prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.</p>}
 
-    {scheduling && <div className="travel-planning-confirm-panel">
-      <label>Meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
-      <label>Location (optional)<input type="text" value={locationDraft} onChange={(event) => setLocationDraft(event.target.value)} maxLength={300} /></label>
-      <p className="travel-planning-confirm-hint">This creates a real scheduled interaction on this donor&rsquo;s timeline.</p>
-      <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmScheduling} disabled={!meetingAtDraft}>Confirm scheduled meeting</button><button type="button" onClick={() => setScheduling(false)}>Cancel</button></div>
-    </div>}
+    {showDetails && <>
+      {scheduling && <div className="travel-planning-confirm-panel">
+        <label>Meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
+        <label>Location (optional)<input type="text" value={locationDraft} onChange={(event) => setLocationDraft(event.target.value)} maxLength={300} /></label>
+        <p className="travel-planning-confirm-hint">This creates a real scheduled interaction on this donor&rsquo;s timeline.</p>
+        <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmScheduling} disabled={!meetingAtDraft}>Confirm scheduled meeting</button><button type="button" onClick={() => setScheduling(false)}>Cancel</button></div>
+      </div>}
 
-    {completing && <div className="travel-planning-confirm-panel">
-      <label>Actual meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft || (prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "")} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
-      <label>Meeting notes (required)<textarea value={completionNotesDraft} onChange={(event) => setCompletionNotesDraft(event.target.value)} maxLength={5000} placeholder="What happened, decisions made, any commitments" /></label>
-      <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives.</p>
-      <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmCompletion} disabled={!meetingAtDraft || completionNotesDraft.trim().length < 2}>Confirm meeting completed</button><button type="button" onClick={() => setCompleting(false)}>Cancel</button></div>
-    </div>}
+      {completing && <div className="travel-planning-confirm-panel">
+        <label>Actual meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft || (prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "")} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
+        <label>Meeting notes (required)<textarea value={completionNotesDraft} onChange={(event) => setCompletionNotesDraft(event.target.value)} maxLength={5000} placeholder="What happened, decisions made, any commitments" /></label>
+        <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives.</p>
+        <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmCompletion} disabled={!meetingAtDraft || completionNotesDraft.trim().length < 2}>Confirm meeting completed</button><button type="button" onClick={() => setCompleting(false)}>Cancel</button></div>
+      </div>}
 
-    <div className="travel-planning-prospect-fields">
-      <label>Trip notes<textarea value={notesDraft} onChange={(event) => setNotesDraft(event.target.value)} onBlur={saveFields} maxLength={5000} placeholder="Notes specific to this trip" /></label>
-      <label>Next action<input type="text" value={nextActionDraft} onChange={(event) => setNextActionDraft(event.target.value)} onBlur={saveFields} maxLength={500} placeholder="e.g. Call to confirm Tuesday" /></label>
-    </div>
+      <div className="travel-planning-prospect-fields">
+        <label>Trip notes<textarea value={notesDraft} onChange={(event) => setNotesDraft(event.target.value)} onBlur={saveFields} maxLength={5000} placeholder="Notes specific to this trip" /></label>
+        <label>Next action<input type="text" value={nextActionDraft} onChange={(event) => setNextActionDraft(event.target.value)} onBlur={saveFields} maxLength={500} placeholder="e.g. Call to confirm Tuesday" /></label>
+      </div>
 
-    <ProspectFinancialPanel tripId={tripId} prospectId={prospect.id} attributions={attributions} onRefresh={onRefresh} />
+      <ProspectFinancialPanel tripId={tripId} prospectId={prospect.id} attributions={attributions} onRefresh={onRefresh} />
+    </>}
   </article>;
 }
 

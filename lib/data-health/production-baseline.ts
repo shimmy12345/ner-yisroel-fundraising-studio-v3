@@ -9,13 +9,18 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 47 as of 0046_trip_financial_attributions.sql — adds one new table
-// (trip_financial_attributions; see docs/AI-HANDOFF.md's "Trip
-// Fundraising Results Dashboard" entry), not a rebuild of anything
-// existing, so PRODUCTION_BASELINE_HASH changed again
-// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
-// single bootstrap file's origin, not its current contents).
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 47;
+// 48 as of 0047_trip_prospect_selection.sql — adds one new column
+// (trip_prospects.selected_at) and its supporting index (see
+// docs/AI-HANDOFF.md's "Trip Planning -- Deliberate Prospect Selection"
+// entry), not a rebuild of anything existing, so PRODUCTION_BASELINE_HASH
+// changed again (PRODUCTION_BASELINE_LEVEL stays "0019": that label
+// identifies the single bootstrap file's origin, not its current
+// contents). This migration is applied to Staging only as of this
+// round -- Production has not yet received it, so Production's own
+// "schema-comparison" health check will report this one column/index as
+// a difference until a separately authorized Production deployment
+// applies 0047 there too.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 48;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

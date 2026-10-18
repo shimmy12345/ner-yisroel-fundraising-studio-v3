@@ -1,13 +1,13 @@
 import { getChatGPTUser } from "../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../lib/auth/profile";
-import { addManualProspect, getTrip } from "../../../../../lib/relationships/trips-data";
+import { selectTripProspect, getTrip } from "../../../../../lib/relationships/trips-data";
 import { logger } from "../../../../../lib/logger";
 
-// Manual add (Section C) -- also the one route the "New prospects
-// available" panel's own "Add" action calls, by donor id, exactly like
-// any other manual add. Both are `added_method: 'manual'`: a donor
-// pulled in from the live region-match panel was still an explicit,
-// one-at-a-time fundraiser decision, never an automatic insert.
+// Deliberate Prospect Selection (2026-10-18) -- the one, explicit "Add to
+// trip" action, called identically from Find Prospects whether the donor
+// matched the trip's region or was found via an out-of-region search.
+// selectTripProspect() itself decides added_method and whether this
+// reuses an existing, never-selected candidate row or inserts a new one.
 type AddProspectBody = { donorId?: string };
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -27,15 +27,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const now = Math.floor(Date.now() / 1000);
   try {
-    const result = await addManualProspect(profile.id, id, donorId, "manual", profile.timezone, now);
+    const result = await selectTripProspect(profile.id, id, donorId, profile.timezone, now);
     if (!result.ok) {
       if (result.reason === "donor_not_found") return Response.json({ error: "Donor not found" }, { status: 404 });
-      return Response.json({ error: "This donor is already on this trip" }, { status: 409 });
+      if (result.reason === "trip_not_found") return Response.json({ error: "Trip not found" }, { status: 404 });
+      return Response.json({ error: "This donor is already a selected prospect on this trip" }, { status: 409 });
     }
-    logger.info("trip_prospect_added", { userId: profile.id, tripId: id, donorId, addedMethod: "manual" });
-    return Response.json({ prospectId: result.prospectId }, { status: 201 });
+    logger.info("trip_prospect_selected", { userId: profile.id, tripId: id, donorId, created: result.created });
+    return Response.json({ prospectId: result.prospectId }, { status: result.created ? 201 : 200 });
   } catch (error) {
-    logger.error("trip_prospect_add_failed", error, { userId: profile.id, tripId: id, donorId });
+    logger.error("trip_prospect_select_failed", error, { userId: profile.id, tripId: id, donorId });
     return Response.json({ error: "Donor could not be added to this trip" }, { status: 500 });
   }
 }

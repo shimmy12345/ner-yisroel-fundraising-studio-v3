@@ -752,7 +752,7 @@ CREATE TABLE `trip_prospects` (
 	`trip_notes` text,
 	`linked_interaction_id` text,
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL,
+	`updated_at` integer NOT NULL, `selected_at` integer,
 	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action
@@ -993,6 +993,8 @@ CREATE INDEX `trip_prospects_donor_idx` ON `trip_prospects` (`donor_id`);
 
 CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`);
 
+CREATE INDEX `trip_prospects_trip_selected_idx` ON `trip_prospects` (`trip_id`,`selected_at`);
+
 CREATE INDEX `trips_owner_status_idx` ON `trips` (`owner_user_id`,`status`);
 
 CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);
@@ -1012,5 +1014,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','a20d155cd5a1160d7d90eadcba04e0f6cedef7a718cb4c2f37f786155d8a6d25',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7',1785944072);
 PRAGMA optimize;

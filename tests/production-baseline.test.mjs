@@ -373,13 +373,12 @@ test("baseline picks up the schema-adding 0045 trips migration", () => {
 
 test("baseline picks up the schema-adding 0046 trip financial attributions migration", () => {
   // 0046_trip_financial_attributions.sql adds one new table (Trip
-  // Fundraising Results Dashboard, see docs/AI-HANDOFF.md) -- the
-  // current LATEST migration as of this round -- so the schema hash
-  // must change again.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0046_trip_financial_attributions.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 47);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // Fundraising Results Dashboard, see docs/AI-HANDOFF.md). No longer the
+  // LATEST migration (see the 0047 test below, added 2026-10-18) -- this
+  // test keeps proving its own table/index are still correctly captured
+  // in the baseline topology, matching the 0044/0045 tests' own "no
+  // longer latest" convention above.
+  assert.ok(manifest.sourceMigrations.includes("0046_trip_financial_attributions.sql"));
   const attributionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_financial_attributions");
   assert.ok(attributionsTable, "trip_financial_attributions must be a real table in the baseline topology");
   assert.match(attributionsTable.sql, /giving_activity_id/);
@@ -388,4 +387,24 @@ test("baseline picks up the schema-adding 0046 trip financial attributions migra
   assert.ok(uniqueIndex, "the partial UNIQUE(giving_activity_id) WHERE removed_at IS NULL index -- the real double-counting guard -- must be captured in the baseline");
   assert.match(uniqueIndex.sql, /UNIQUE/i);
   assert.match(uniqueIndex.sql, /WHERE/i);
+});
+
+test("baseline picks up the schema-adding 0047 trip prospect selection migration", () => {
+  // 0047_trip_prospect_selection.sql adds one new column
+  // (trip_prospects.selected_at) and its supporting index -- Trip
+  // Planning's Deliberate Prospect Selection round, see
+  // docs/AI-HANDOFF.md -- the current LATEST migration as of this round,
+  // so the schema hash must change again. Applied to Staging only as of
+  // this round -- this baseline/manifest update is still correct to make
+  // now: it tracks the canonical branch's own intended schema, not yet
+  // what every environment currently runs.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0047_trip_prospect_selection.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 48);
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const prospectsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospects");
+  assert.ok(prospectsTable, "trip_prospects must still be a real table in the baseline topology");
+  assert.match(prospectsTable.sql, /selected_at/);
+  const selectedIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_prospects_trip_selected_idx");
+  assert.ok(selectedIndex, "the (trip_id, selected_at) index must be captured in the baseline");
 });

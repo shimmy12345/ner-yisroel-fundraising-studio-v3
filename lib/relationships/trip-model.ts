@@ -7,7 +7,6 @@
 // D1-touching loader that calls it" (lib/relationships/trips-data.ts).
 
 import type { DonorRecommendation } from "./recommendation-rank.ts";
-import { regionsForCityState, type TravelRegionId } from "./travel-regions.ts";
 
 export type TripStatus = "planning" | "active" | "completed" | "cancelled";
 export const TRIP_STATUSES: readonly TripStatus[] = ["planning", "active", "completed", "cancelled"];
@@ -191,17 +190,6 @@ export function tripCancelledInteractionSource(existingSource: string): string {
 // create a second row for a retried request.
 export function tripMeetingInteractionId(prospectId: string): string {
   return `trip-meeting-${prospectId}`;
-}
-
-// Newly matching donors (Section C's explicit "new donors who later match
-// the region should appear in a separate panel, never silently inserted"
-// requirement). Pure: takes whatever candidate donor rows and already-
-// tracked donor ids a caller hands it, reuses regionsForCityState()
-// (the exact same function the donor directory's own City/Region filters
-// use) -- never a second region-matching implementation.
-export type RegionCandidateDonor = { id: string; displayName: string; city: string | null; state: string | null };
-export function findNewlyMatchingDonors(candidates: readonly RegionCandidateDonor[], regionId: TravelRegionId, alreadyTrackedDonorIds: ReadonlySet<string>): RegionCandidateDonor[] {
-  return candidates.filter((donor) => !alreadyTrackedDonorIds.has(donor.id) && regionsForCityState(donor.city, donor.state).includes(regionId));
 }
 
 // Validation -- same `{ ok: true; <field> } | { ok: false }` shape

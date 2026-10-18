@@ -100,6 +100,7 @@ const TEST_FILES = [
   "tests/trip-suggestion-evidence.test.mjs",
   "tests/trip-financial-attribution.test.mjs",
   "tests/trip-financial-attribution-schema.test.mjs",
+  "tests/trip-prospect-selection-schema.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",
   "tests/data-health-repair.test.mjs",

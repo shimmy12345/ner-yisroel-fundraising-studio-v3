@@ -1485,14 +1485,29 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-attention strong { color:#a3402c; }
 .travel-planning-financial-note { margin:14px 0 0; color:var(--muted); font-size:12px; line-height:1.5; }
 
-.travel-planning-new-prospects, .travel-planning-add-prospect { margin-bottom:22px; padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); }
-.travel-planning-new-prospects h2, .travel-planning-add-prospect h2, .travel-planning-prospects h2 { margin:0 0 8px; font-family:Georgia,serif; font-size:18px; font-weight:500; }
-.travel-planning-new-prospects p { margin:0 0 12px; color:var(--muted); font-size:13px; }
-.travel-planning-new-prospects ul { display:grid; gap:8px; margin:0; padding:0; list-style:none; }
-.travel-planning-new-prospects li { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #eceee9; border-radius:9px; background:#fbfcfa; font-size:13px; }
-.travel-planning-new-prospects li button { min-height:34px; padding:0 12px; border:1px solid #d3ded7; border-radius:7px; background:#edf3ef; color:#315f4b; font-size:12px; font-weight:700; cursor:pointer; }
+/* Deliberate Prospect Selection (2026-10-18) -- tabs, both panels'
+   filters, and the Find Prospects candidate list. */
+.travel-planning-tabs { margin:22px 0 16px; }
+.travel-planning-prospect-filters, .travel-planning-find-filters { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px; }
+.travel-planning-prospect-filters label { display:flex; flex:1 1 200px; min-width:160px; flex-direction:column; gap:6px; color:#66736d; font-size:12px; font-weight:650; }
+.travel-planning-prospect-filters input, .travel-planning-prospect-filters select { min-height:42px; padding:9px 11px; border:1px solid #d9ddd8; border-radius:8px; background:#fbfcfa; color:var(--ink); font-size:14px; }
+.travel-planning-find-search { flex:2 1 260px; }
+.travel-planning-find-search input { min-height:44px; padding:10px 12px; border:1px solid #d9ddd8; border-radius:8px; background:#fbfcfa; color:var(--ink); font-size:15px; width:100%; }
+.travel-planning-all-regions-checkbox { display:flex; align-items:center; gap:7px; min-height:44px; font-size:13px; font-weight:600; color:var(--ink); }
+.travel-planning-filtered-count, .travel-planning-find-intro, .travel-planning-find-scope { margin:0 0 14px; color:var(--muted); font-size:12px; line-height:1.5; }
+.travel-planning-empty-inline button { margin-top:10px; min-height:38px; padding:0 14px; border:0; border-radius:8px; background:var(--green); color:#fff; font-size:12px; font-weight:700; cursor:pointer; }
+
+.travel-planning-candidate-list { display:grid; gap:8px; margin:0; padding:0; list-style:none; }
+.travel-planning-candidate-list li { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #eceee9; border-radius:9px; background:#fbfcfa; font-size:13px; }
+.travel-planning-candidate-list li.already-selected { background:#f3f6f3; opacity:.75; }
+.travel-planning-candidate-identity { display:flex; flex-direction:column; gap:2px; }
+.travel-planning-candidate-identity small { color:var(--muted); font-size:11px; }
+.travel-planning-candidate-list li button { min-height:34px; padding:0 12px; border:1px solid #d3ded7; border-radius:7px; background:#edf3ef; color:#315f4b; font-size:12px; font-weight:700; cursor:pointer; white-space:nowrap; }
+.travel-planning-candidate-list li button:disabled { opacity:.6; cursor:wait; }
+.travel-planning-already-added { color:#5a6a61; font-size:11px; font-weight:700; white-space:nowrap; }
 
 .travel-planning-prospects { display:grid; gap:14px; }
+.travel-planning-prospects h2 { margin:0 0 8px; font-family:Georgia,serif; font-size:18px; font-weight:500; }
 .travel-planning-prospect-row { padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:var(--shadow); }
 .travel-planning-prospect-row.busy { opacity:.65; }
 .travel-planning-prospect-heading { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
@@ -1502,6 +1517,7 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-added-method { padding:2px 8px; border-radius:20px; background:#edf1ee; color:#5a6a61; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
 .travel-planning-added-method.auto_region { background:#e7f0ea; color:#285942; }
 .travel-planning-prepare-link { margin-left:auto; color:#315f4b; font-size:12px; font-weight:700; text-decoration:none; }
+.travel-planning-details-toggle { min-height:32px; padding:0 10px; border:1px solid #d3ded7; border-radius:7px; background:#fff; color:#315f4b; font-size:11px; font-weight:700; cursor:pointer; }
 .travel-planning-remove { min-height:32px; padding:0 10px; border:1px solid #e3d3cd; border-radius:7px; background:#fff; color:#8a4940; font-size:11px; font-weight:700; cursor:pointer; }
 .travel-planning-conflict-caution { margin:0 0 8px; padding:8px 10px; border-radius:8px; background:#fbf2e8; color:#7a5a24; font-size:12px; line-height:1.5; }
 .travel-planning-suggested-reason { margin:0 0 8px; color:#45544c; font-size:13px; line-height:1.55; }

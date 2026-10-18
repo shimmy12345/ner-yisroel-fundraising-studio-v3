@@ -4,7 +4,6 @@ import {
   statusRequiresInteraction, isConflictingProspectStatus, findCrossTripConflicts,
   buildSuggestionSnapshot, timezoneForState, parseLocalDateTimeInput,
   tripScheduledInteractionSource, tripCompletedInteractionSource, tripCancelledInteractionSource, tripMeetingInteractionId,
-  findNewlyMatchingDonors,
   validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, validateMeetingLocation, validateNextAction,
   validateMeetingCompletion, validateMeetingScheduling,
 } from "../lib/relationships/trip-model.ts";
@@ -164,20 +163,6 @@ async function run() {
   // request from ever creating a duplicate interaction. ---
   assert.equal(tripMeetingInteractionId("prospect-abc"), tripMeetingInteractionId("prospect-abc"));
   assert.notEqual(tripMeetingInteractionId("prospect-abc"), tripMeetingInteractionId("prospect-xyz"));
-
-  // --- Newly matching donors (Section C): reuses regionsForCityState()
-  // directly -- a donor already tracked on the trip is excluded even if
-  // they'd otherwise match; a donor outside the region is excluded
-  // regardless of tracking. ---
-  {
-    const candidates = [
-      { id: "d1", displayName: "Already Tracked", city: "Chicago", state: "IL" },
-      { id: "d2", displayName: "New Match", city: "Lincolnwood", state: "IL" },
-      { id: "d3", displayName: "Wrong Region", city: "Baltimore", state: "MD" },
-    ];
-    const result = findNewlyMatchingDonors(candidates, "chicago-suburbs", new Set(["d1"]));
-    assert.deepEqual(result.map((d) => d.id), ["d2"]);
-  }
 
   // --- Validators (same { ok: true; ... } | { ok: false } shape
   // lib/capture/ask.ts's own validators already use). ---

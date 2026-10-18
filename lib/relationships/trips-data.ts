@@ -9,13 +9,14 @@
 import { env } from "cloudflare:workers";
 import { loadMeetingBrief } from "./meeting-brief.ts";
 import { regionsForCityState, travelRegionById, type TravelRegionId } from "./travel-regions.ts";
+import type { DonorSearchRecord } from "./donor-search.ts";
 import { zonedTimeToUtc } from "../workspace/local-time.ts";
 import { insertPendingGift, insertPendingPledge } from "../giving/pending-records.ts";
 import {
-  buildSuggestionSnapshot, findCrossTripConflicts, findNewlyMatchingDonors, parseLocalDateTimeInput,
+  buildSuggestionSnapshot, findCrossTripConflicts, parseLocalDateTimeInput,
   statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
   tripMeetingInteractionId, tripScheduledInteractionSource, validateMeetingCompletion, validateMeetingScheduling,
-  type AddedMethod, type CrossTripConflict, type RegionCandidateDonor, type TripProspectStatus, type TripStatus,
+  type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus,
 } from "./trip-model.ts";
 
 // Independent-review correction (2026-10-15): resolves a `datetime-local`
@@ -37,79 +38,58 @@ async function resolveMeetingEpoch(donorId: string, localDateTime: unknown, fall
   return Math.floor(utc.getTime() / 1000);
 }
 
-// A deliberately small, fixed concurrency limit for the one-time,
-// trip-creation auto-suggestion fan-out (Section B): the largest single
-// approved region today (Baltimore & Maryland suburbs, 57 real donors --
-// see docs/AI-HANDOFF.md's Phase 1 audit) would otherwise issue ~57
-// concurrent loadMeetingBrief() calls, each itself ~14 parallel D1
-// queries -- conservative batching avoids relying on D1's own concurrent-
-// connection ceiling for a single Worker invocation. This is the only
-// place in this module that needs it; every other operation here touches
-// at most one donor.
-async function mapWithConcurrencyLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  async function worker() {
-    while (cursor < items.length) {
-      const index = cursor++;
-      results[index] = await fn(items[index]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+type DonorSearchRow = {
+  id: string; display_name: string; primary_first_name: string | null; last_name: string | null;
+  spouse: string | null; spouse_first_name: string | null; donor_code: string | null; external_id: string | null;
+  email: string | null; phone: string | null; city: string | null; state: string | null;
+};
+
+async function liveOwnedDonorRows(userId: string): Promise<DonorSearchRow[]> {
+  const result = await env.DB.prepare(`SELECT id, display_name, primary_first_name, last_name, spouse, spouse_first_name, donor_code, external_id, email, phone, city, state
+      FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL`).bind(userId).all<DonorSearchRow>();
+  return result.results;
 }
 
-type DonorRow = { id: string; display_name: string; city: string | null; state: string | null };
-
-async function liveOwnedDonors(userId: string): Promise<DonorRow[]> {
-  const result = await env.DB.prepare("SELECT id, display_name, city, state FROM donors WHERE owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(userId).all<DonorRow>();
-  return result.results;
+function toDonorSearchRecord(row: DonorSearchRow): DonorSearchRecord & { city: string | null; state: string | null } {
+  return {
+    id: row.id, name: row.display_name, primaryFirstName: row.primary_first_name, lastName: row.last_name,
+    spouse: row.spouse || row.spouse_first_name, code: row.external_id || row.donor_code, email: row.email, phone: row.phone,
+    city: row.city, state: row.state,
+  };
 }
 
 export type TripListItem = { id: string; name: string; destinationRegionLabel: string | null; startDate: number; endDate: number; status: TripStatus; prospectCount: number };
 
 export async function listTrips(userId: string): Promise<TripListItem[]> {
+  // `prospectCount` counts only SELECTED prospects (Deliberate Prospect
+  // Selection, 2026-10-18) -- a regional candidate the owner hasn't
+  // acted on yet was never a real outreach target, so it must never
+  // inflate this trip card's own count.
   const result = await env.DB.prepare(`SELECT t.id, t.name, t.destination_region_label, t.start_date, t.end_date, t.status,
-      (SELECT COUNT(*) FROM trip_prospects WHERE trip_id = t.id) AS prospect_count
+      (SELECT COUNT(*) FROM trip_prospects WHERE trip_id = t.id AND selected_at IS NOT NULL) AS prospect_count
     FROM trips t WHERE t.owner_user_id = ? ORDER BY t.start_date DESC`).bind(userId).all<{ id: string; name: string; destination_region_label: string | null; start_date: number; end_date: number; status: TripStatus; prospect_count: number }>();
   return result.results.map((row) => ({ id: row.id, name: row.name, destinationRegionLabel: row.destination_region_label, startDate: row.start_date, endDate: row.end_date, status: row.status, prospectCount: row.prospect_count }));
 }
 
 export type CreateTripInput = { name: string; destinationRegionId: TravelRegionId | null; startDate: number; endDate: number; goalCents: number | null; notes: string | null };
 
-// Creates the trip row, then (when a destination region was chosen)
-// auto-populates trip_prospects for every live, owned, non-archived
-// donor currently matching it -- via regionsForCityState(), the EXACT
-// same function the donor directory's own Travel Region filter uses,
-// never a reimplementation. Each prospect's suggested_reason/
-// suggested_score/suggested_generated_at is a snapshot of the real,
-// unmodified loadMeetingBrief()'s own `.recommendation` at this exact
-// moment -- never a separate trip-prioritization score. This is the
-// ONLY place this auto-population ever runs; a donor added to the region
-// afterward is surfaced only via findNewlyMatchingProspects() below,
-// never inserted here automatically.
-export async function createTrip(userId: string, input: CreateTripInput, timezone: string, now: number): Promise<{ tripId: string; autoAddedCount: number }> {
+// Creates the trip row only. Deliberate Prospect Selection (2026-10-18,
+// see docs/AI-HANDOFF.md) -- a destination region is still stored on the
+// trip and still drives "Find prospects"' default region, but no
+// trip_prospects row is ever inserted here, even when a region is
+// chosen. Conflating "lives in the destination region" with "a deliberate
+// outreach target the owner actually picked" was exactly the problem
+// this round fixes -- regional donors are surfaced live, read-only, via
+// listDonorsForTripSearch() below, and a row is only ever created (with
+// selected_at set immediately) through the explicit "Add to trip" action
+// (selectTripProspect()).
+export async function createTrip(userId: string, input: CreateTripInput, now: number): Promise<{ tripId: string }> {
   const tripId = crypto.randomUUID();
   const region = input.destinationRegionId ? travelRegionById(input.destinationRegionId) : null;
   await env.DB.prepare(`INSERT INTO trips (id, owner_user_id, name, destination_region_id, destination_region_label, start_date, end_date, fundraising_goal_cents, notes, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planning', ?, ?)`)
     .bind(tripId, userId, input.name, region?.id ?? null, region?.label ?? null, input.startDate, input.endDate, input.goalCents, input.notes, now, now).run();
-
-  if (!region) return { tripId, autoAddedCount: 0 };
-
-  const donors = await liveOwnedDonors(userId);
-  const matching = donors.filter((donor) => regionsForCityState(donor.city, donor.state).includes(region.id));
-  if (matching.length === 0) return { tripId, autoAddedCount: 0 };
-
-  const briefs = await mapWithConcurrencyLimit(matching, 8, (donor) => loadMeetingBrief(userId, donor.id, timezone, now));
-  const statements = matching.map((donor, index) => {
-    const snapshot = buildSuggestionSnapshot(briefs[index]?.recommendation ?? null, now);
-    return env.DB.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, suggested_reason, suggested_score, suggested_generated_at, created_at, updated_at)
-        VALUES (?, ?, ?, 'auto_region', 'not_contacted', ?, ?, ?, ?, ?)`)
-      .bind(crypto.randomUUID(), tripId, donor.id, snapshot.reason, snapshot.score, snapshot.generatedAt, now, now);
-  });
-  await env.DB.batch(statements);
-  return { tripId, autoAddedCount: matching.length };
+  return { tripId };
 }
 
 export type TripRecord = { id: string; name: string; destinationRegionId: TravelRegionId | null; destinationRegionLabel: string | null; startDate: number; endDate: number; goalCents: number | null; notes: string | null; status: TripStatus; createdAt: number; updatedAt: number };
@@ -123,34 +103,45 @@ export async function getTrip(userId: string, tripId: string): Promise<TripRecor
 }
 
 export type TripProspectRecord = {
-  id: string; donorId: string; donorDisplayName: string; donorCity: string | null; donorState: string | null;
-  addedMethod: AddedMethod; status: TripProspectStatus;
+  id: string; donorId: string; donorDisplayName: string; donorCity: string | null; donorState: string | null; donorCode: string | null;
+  addedMethod: AddedMethod; status: TripProspectStatus; selectedAt: number;
   suggestedReason: string | null; suggestedScore: number | null; suggestedGeneratedAt: number | null;
   manualRank: number | null; meetingAt: number | null; meetingLocation: string | null; nextAction: string | null; trip_notes: string | null;
   linkedInteractionId: string | null; crossTripConflicts: CrossTripConflict[];
 };
 
+// "My trip prospects" (Deliberate Prospect Selection, 2026-10-18) -- only
+// rows the owner has explicitly selected (`selected_at IS NOT NULL`),
+// never every regional candidate. A candidate row that exists in
+// trip_prospects but was never selected (a legacy auto-inserted row the
+// owner hasn't acted on, or one not yet picked in "Find prospects") is
+// deliberately excluded here -- see listDonorsForTripSearch() below for
+// where it DOES surface.
 export async function listTripProspects(userId: string, tripId: string): Promise<TripProspectRecord[]> {
   const prospectRows = await env.DB.prepare(`SELECT tp.id, tp.donor_id, d.display_name AS donor_display_name, d.city AS donor_city, d.state AS donor_state,
-        tp.added_method, tp.status, tp.suggested_reason, tp.suggested_score, tp.suggested_generated_at, tp.manual_rank,
+        d.external_id, d.donor_code,
+        tp.added_method, tp.status, tp.selected_at, tp.suggested_reason, tp.suggested_score, tp.suggested_generated_at, tp.manual_rank,
         tp.meeting_at, tp.meeting_location, tp.next_action, tp.trip_notes, tp.linked_interaction_id
       FROM trip_prospects tp JOIN donors d ON d.id = tp.donor_id
-      WHERE tp.trip_id = ? AND d.owner_user_id = ?
+      WHERE tp.trip_id = ? AND d.owner_user_id = ? AND tp.selected_at IS NOT NULL
       ORDER BY (tp.manual_rank IS NULL), tp.manual_rank, tp.suggested_score IS NULL, tp.suggested_score DESC, d.display_name`)
     .bind(tripId, userId).all<{
       id: string; donor_id: string; donor_display_name: string; donor_city: string | null; donor_state: string | null;
-      added_method: AddedMethod; status: TripProspectStatus; suggested_reason: string | null; suggested_score: number | null; suggested_generated_at: number | null;
+      external_id: string | null; donor_code: string | null;
+      added_method: AddedMethod; status: TripProspectStatus; selected_at: number; suggested_reason: string | null; suggested_score: number | null; suggested_generated_at: number | null;
       manual_rank: number | null; meeting_at: number | null; meeting_location: string | null; next_action: string | null; trip_notes: string | null; linked_interaction_id: string | null;
     }>();
   if (prospectRows.results.length === 0) return [];
 
   const donorIds = [...new Set(prospectRows.results.map((row) => row.donor_id))];
-  // Cross-trip conflicts (Section C): every OTHER trip's prospect row for
-  // any donor on THIS trip, across every one of this owner's trips --
-  // one query, not one per prospect.
+  // Cross-trip conflicts (Section C): every OTHER trip's SELECTED
+  // prospect row for any donor on THIS trip, across every one of this
+  // owner's trips -- one query, not one per prospect. A candidate on
+  // another trip that was never selected is not a real scheduling
+  // conflict (nothing was actually planned there).
   const conflictRows = await env.DB.prepare(`SELECT tp.donor_id, tp.trip_id, t.name AS trip_name, tp.status, tp.meeting_at
       FROM trip_prospects tp JOIN trips t ON t.id = tp.trip_id
-      WHERE t.owner_user_id = ? AND tp.trip_id != ? AND tp.donor_id IN (${donorIds.map(() => "?").join(",")})`)
+      WHERE t.owner_user_id = ? AND tp.trip_id != ? AND tp.selected_at IS NOT NULL AND tp.donor_id IN (${donorIds.map(() => "?").join(",")})`)
     .bind(userId, tripId, ...donorIds).all<{ donor_id: string; trip_id: string; trip_name: string; status: TripProspectStatus; meeting_at: number | null }>();
   const rowsByDonor = new Map<string, Array<{ tripId: string; tripName: string; status: TripProspectStatus; meetingAt: number | null }>>();
   for (const row of conflictRows.results) {
@@ -166,60 +157,83 @@ export async function listTripProspects(userId: string, tripId: string): Promise
   const conflictsByDonor = new Map<string, CrossTripConflict[]>([...rowsByDonor.entries()].map(([donorId, rows]) => [donorId, findCrossTripConflicts(rows, tripId)]));
 
   return prospectRows.results.map((row) => ({
-    id: row.id, donorId: row.donor_id, donorDisplayName: row.donor_display_name, donorCity: row.donor_city, donorState: row.donor_state,
-    addedMethod: row.added_method, status: row.status, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
+    id: row.id, donorId: row.donor_id, donorDisplayName: row.donor_display_name, donorCity: row.donor_city, donorState: row.donor_state, donorCode: row.external_id || row.donor_code,
+    addedMethod: row.added_method, status: row.status, selectedAt: row.selected_at, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
     manualRank: row.manual_rank, meetingAt: row.meeting_at, meetingLocation: row.meeting_location, nextAction: row.next_action, trip_notes: row.trip_notes,
     linkedInteractionId: row.linked_interaction_id, crossTripConflicts: conflictsByDonor.get(row.donor_id) ?? [],
   }));
 }
 
-// Section C's "new prospects available" panel -- always computed live,
-// never cached/materialized, and NEVER inserted into trip_prospects on
-// its own. A donor is offered here the moment they exist in `donors`
-// and match the trip's region AND are not already tracked on this trip
-// -- whether they are brand new, just imported, or just had their
-// address corrected, with no backfill or migration step of any kind.
-export async function findNewlyMatchingProspects(userId: string, tripId: string): Promise<RegionCandidateDonor[]> {
-  const trip = await getTrip(userId, tripId);
-  if (!trip?.destinationRegionId) return [];
-  const [donors, trackedRows] = await Promise.all([
-    liveOwnedDonors(userId),
-    env.DB.prepare("SELECT donor_id FROM trip_prospects WHERE trip_id = ?").bind(tripId).all<{ donor_id: string }>(),
+// "Find prospects" (Deliberate Prospect Selection, 2026-10-18) -- every
+// live, owned donor, annotated with this trip's own selection state.
+// Always the FULL list (never truncated, never paginated) -- region and
+// text-search narrowing both happen client-side over this same array,
+// reusing searchDonors()/filterByGeo() exactly as the donor directory
+// does, never a second search implementation. A donor already selected
+// on this trip is marked `alreadySelected` (never hidden -- "clearly
+// identify already-added people"); a donor with an existing but
+// unselected trip_prospects row (a legacy auto-inserted candidate, or
+// one offered here a moment ago) carries `existingProspectId` so
+// selectTripProspect() can reuse that exact row instead of inserting a
+// second one.
+export type FindProspectDonor = DonorSearchRecord & { city: string | null; state: string | null; alreadySelected: boolean; existingProspectId: string | null };
+
+export async function listDonorsForTripSearch(userId: string, tripId: string): Promise<FindProspectDonor[]> {
+  const [donorRows, trackedRows] = await Promise.all([
+    liveOwnedDonorRows(userId),
+    env.DB.prepare("SELECT id, donor_id, selected_at FROM trip_prospects WHERE trip_id = ?").bind(tripId).all<{ id: string; donor_id: string; selected_at: number | null }>(),
   ]);
-  const tracked = new Set(trackedRows.results.map((row) => row.donor_id));
-  const candidates: RegionCandidateDonor[] = donors.map((donor) => ({ id: donor.id, displayName: donor.display_name, city: donor.city, state: donor.state }));
-  return findNewlyMatchingDonors(candidates, trip.destinationRegionId, tracked);
+  const trackedByDonor = new Map(trackedRows.results.map((row) => [row.donor_id, row]));
+  return donorRows.map((row) => {
+    const tracked = trackedByDonor.get(row.id);
+    return { ...toDonorSearchRecord(row), alreadySelected: Boolean(tracked && tracked.selected_at !== null), existingProspectId: tracked?.id ?? null };
+  });
 }
 
-export type AddProspectResult = { ok: true; prospectId: string } | { ok: false; reason: "donor_not_found" | "already_on_trip" };
+export type SelectProspectResult = { ok: true; prospectId: string; created: boolean } | { ok: false; reason: "donor_not_found" | "trip_not_found" | "already_selected" };
 
-// Manual add (Section C) -- also used to pull a donor in from the
-// "newly matching" panel above, via the SAME explicit, one-at-a-time
-// action; never auto-inserted. Computes the SAME suggestion snapshot a
-// freshly-added donor would get via loadMeetingBrief() regardless of
-// addedMethod -- it is still real, current CRM evidence either way; only
-// `added_method` itself records how the donor was added.
-export async function addManualProspect(userId: string, tripId: string, donorId: string, addedMethod: AddedMethod, timezone: string, now: number): Promise<AddProspectResult> {
-  const donor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(donorId, userId).first<{ id: string }>();
+// The explicit "Add to trip" action (Section 1/5) -- the ONLY way a
+// trip_prospects row is ever created or selected going forward, whether
+// the donor came from a regional match or an out-of-region search. If a
+// trip_prospects row already exists for this donor (a fresh insert from
+// a moment ago, or a legacy candidate from before this feature shipped)
+// and was never selected, THAT SAME ROW is reused (its id, notes,
+// status, meeting/interaction links, and financial attributions are
+// never touched or recreated) -- this is also the explicit, non-
+// destructive mechanism for picking an existing ambiguous candidate into
+// "My trip prospects" that Section 5 requires. `added_method` is only
+// ever decided at INSERT time (by whether the donor is currently in the
+// trip's own destination region) and is never rewritten when reusing an
+// existing row, preserving how it was originally added.
+export async function selectTripProspect(userId: string, tripId: string, donorId: string, timezone: string, now: number): Promise<SelectProspectResult> {
+  const trip = await getTrip(userId, tripId);
+  if (!trip) return { ok: false, reason: "trip_not_found" };
+  const donor = await env.DB.prepare("SELECT id, city, state FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live' AND archived_at IS NULL").bind(donorId, userId).first<{ id: string; city: string | null; state: string | null }>();
   if (!donor) return { ok: false, reason: "donor_not_found" };
-  const existing = await env.DB.prepare("SELECT id FROM trip_prospects WHERE trip_id = ? AND donor_id = ?").bind(tripId, donorId).first<{ id: string }>();
-  if (existing) return { ok: false, reason: "already_on_trip" };
 
+  const existing = await env.DB.prepare("SELECT id, selected_at FROM trip_prospects WHERE trip_id = ? AND donor_id = ?").bind(tripId, donorId).first<{ id: string; selected_at: number | null }>();
+  if (existing) {
+    if (existing.selected_at !== null) return { ok: false, reason: "already_selected" };
+    await env.DB.prepare("UPDATE trip_prospects SET selected_at = ?, updated_at = ? WHERE id = ?").bind(now, now, existing.id).run();
+    return { ok: true, prospectId: existing.id, created: false };
+  }
+
+  const addedMethod: AddedMethod = trip.destinationRegionId && regionsForCityState(donor.city, donor.state).includes(trip.destinationRegionId) ? "auto_region" : "manual";
   const brief = await loadMeetingBrief(userId, donorId, timezone, now);
   const snapshot = buildSuggestionSnapshot(brief?.recommendation ?? null, now);
   const prospectId = crypto.randomUUID();
   try {
-    await env.DB.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, suggested_reason, suggested_score, suggested_generated_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'not_contacted', ?, ?, ?, ?, ?)`)
-      .bind(prospectId, tripId, donorId, addedMethod, snapshot.reason, snapshot.score, snapshot.generatedAt, now, now).run();
+    await env.DB.prepare(`INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, suggested_reason, suggested_score, suggested_generated_at, selected_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'not_contacted', ?, ?, ?, ?, ?, ?)`)
+      .bind(prospectId, tripId, donorId, addedMethod, snapshot.reason, snapshot.score, snapshot.generatedAt, now, now, now).run();
   } catch {
-    // UNIQUE(trip_id, donor_id) caught a race (two concurrent adds for
-    // the same donor) that the pre-check above missed -- structurally
+    // UNIQUE(trip_id, donor_id) caught a race (two concurrent selections
+    // for the same donor) that the pre-check above missed -- structurally
     // impossible to double-insert, matching every other UNIQUE-
     // constraint-as-the-real-guarantee pattern in this app.
-    return { ok: false, reason: "already_on_trip" };
+    return { ok: false, reason: "already_selected" };
   }
-  return { ok: true, prospectId };
+  return { ok: true, prospectId, created: true };
 }
 
 // Removal (Section C): deletes only the trip_prospects row. Deliberately

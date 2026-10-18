@@ -59,14 +59,13 @@ export async function POST(request: Request) {
   const now = Math.floor(Date.now() / 1000);
 
   try {
-    const { tripId, autoAddedCount } = await createTrip(
+    const { tripId } = await createTrip(
       profile.id,
       { name: nameResult.name, destinationRegionId: region?.id ?? null, startDate: datesResult.startDate, endDate: datesResult.endDate, goalCents: goalResult.goalCents, notes: notesResult.notes },
-      profile.timezone,
       now,
     );
-    logger.info("trip_created", { userId: profile.id, tripId, autoAddedCount });
-    return Response.json({ tripId, autoAddedCount }, { status: 201 });
+    logger.info("trip_created", { userId: profile.id, tripId });
+    return Response.json({ tripId }, { status: 201 });
   } catch (error) {
     logger.error("trip_create_failed", error, { userId: profile.id });
     return Response.json({ error: "Trip could not be saved" }, { status: 500 });

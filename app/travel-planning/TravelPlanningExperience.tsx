@@ -83,7 +83,7 @@ export function TravelPlanningExperience({ trips, regions }: { trips: TripListIt
       {error && <p className="travel-planning-form-error">{error}</p>}
       <div className="travel-planning-form-actions">
         <button type="submit" disabled={submitting}>{submitting ? "Creating…" : "Create Trip"}</button>
-        <p className="travel-planning-form-hint">If a region is chosen, donors currently in that region are added automatically with an evidence-based reason for each. You can add or remove prospects manually at any time afterward.</p>
+        <p className="travel-planning-form-hint">If a region is chosen, you&rsquo;ll be able to find donors there in &ldquo;Find prospects&rdquo; once the trip is created -- nothing is added automatically. You choose who to add, from this region or any other.</p>
       </div>
     </form>}
 

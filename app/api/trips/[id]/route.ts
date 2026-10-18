@@ -1,6 +1,6 @@
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
-import { getTrip, listTripProspects, findNewlyMatchingProspects, updateTrip } from "../../../../lib/relationships/trips-data";
+import { getTrip, listTripProspects, listDonorsForTripSearch, updateTrip } from "../../../../lib/relationships/trips-data";
 import { validateTripName, validateTripDates, validateFundraisingGoalCents, validateNotes, isValidTripStatus } from "../../../../lib/relationships/trip-model";
 import { logger } from "../../../../lib/logger";
 
@@ -13,11 +13,11 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   const trip = await getTrip(profile.id, id);
   if (!trip) return Response.json({ error: "Trip not found" }, { status: 404 });
 
-  const [prospects, newlyMatching] = await Promise.all([
+  const [prospects, findProspectDonors] = await Promise.all([
     listTripProspects(profile.id, id),
-    findNewlyMatchingProspects(profile.id, id),
+    listDonorsForTripSearch(profile.id, id),
   ]);
-  return Response.json({ trip, prospects, newlyMatchingDonors: newlyMatching });
+  return Response.json({ trip, prospects, findProspectDonors });
 }
 
 type UpdateTripBody = {
