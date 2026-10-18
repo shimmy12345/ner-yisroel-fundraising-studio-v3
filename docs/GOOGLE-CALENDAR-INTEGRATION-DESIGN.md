@@ -1,10 +1,18 @@
-# Google Calendar Integration — Design (not implemented)
+# Google Calendar Integration — Design + Isolated Sync Core (implemented, not wired)
 
-Status: **DESIGN REVISION, AWAITING INDEPENDENT RE-REVIEW.** No schema,
-migration, application code, or Google Cloud/OAuth setup has been
-created. No new Google permission has been requested. No calendar event
-has been created. This document is the full investigation and design
-report; `docs/AI-HANDOFF.md` carries a condensed summary and points here.
+Status: **CORE SYNC LOGIC IMPLEMENTED AND TESTED, AWAITING INDEPENDENT
+RE-REVIEW BEFORE ROUTE WIRING.** The pure reconciliation logic, event-id/
+event-body construction, the environment/account guard, the request-
+idempotency contract, and a local persistence proof are implemented and
+covered by 8 adversarial test files (commit `de57005`,
+`feature/independent-cloudflare-sandbox`). **Still not done**: no live
+Google call, OAuth client, credential, or real calendar event; no
+migration applied to any remote database; no route or cron wiring; no
+deployment. See "Implementation status" at the end of this document for
+exactly what is proven by executable tests versus what still depends on
+future live Google testing. This document is the full investigation and
+design report;
+`docs/AI-HANDOFF.md` carries a condensed summary and points here.
 
 Goal: when a meeting is scheduled anywhere in FOS — Trip Planning or
 donor/Capture scheduling — it can automatically appear on
@@ -798,3 +806,189 @@ events and all FOS meeting data are unaffected either way.
 - [Handle API errors (409 id-exists, 410/404 already-deleted)](https://developers.google.com/calendar/api/guides/errors)
 - [Calendar API auth / scopes (calendar.events vs. calendar.events.owned)](https://developers.google.com/calendar/api/auth)
 - [Calendars & events concepts (primary calendar ownership)](https://developers.google.com/workspace/calendar/api/concepts/events-calendars)
+
+---
+
+## Implementation status (2026-10-18) — isolated sync core, not wired
+
+Commit `de57005` on `feature/independent-cloudflare-sandbox`. Authorized
+scope for this round: pure sync logic, a mocked Calendar client, and
+automated tests, plus local persistence tests against an isolated
+temporary database. No live Google call, OAuth setup, credential, real
+calendar event, remote database migration, route/cron wiring, or
+deployment.
+
+### What exists now
+
+- `drizzle/0048_google_calendar_sync.sql` — `calendar_event_links`,
+  `calendar_event_link_history`, and the `interactions`/
+  `trip_prospects`/`users` columns this design calls for. Additive only;
+  **not applied to any remote database.**
+- `lib/calendar/calendar-event-id.ts`, `calendar-event-body.ts`,
+  `calendar-sync-guard.ts`, `calendar-sync-types.ts`,
+  `calendar-sync-reconciler.ts`, `meeting-create-idempotency.ts` — the
+  logic described in §§3-10 above, now real code, not just prose.
+- `lib/calendar/testing/` — an in-memory `CalendarLinkStore` (for
+  precisely-controlled concurrency proofs) and a real `node:sqlite`-
+  backed one (for schema-level persistence proof), both implementing the
+  same interface a future D1 adapter would.
+- 8 new test files, 222/222 test files passing repository-wide, clean
+  `tsc`, lint unchanged from baseline (94 errors; a handful of new,
+  reviewed, acceptable warnings — intentional API-signature-consistency
+  unused parameters, e.g. `recordComplete`'s, matching its sibling
+  `recordXxx` functions' shape).
+
+### Two design gaps this process found and fixed (not merely confirmed)
+
+The instruction was to resolve the remaining concurrency/lifecycle
+issues *through* executable tests, not just write tests confirming the
+design doc's prose. Two real gaps surfaced this way:
+
+1. **A stale worker could still reach Google, not just corrupt local
+   bookkeeping.** The design doc's §4.6 claimed the lease was sufficient
+   "defense in depth" alongside the etag check. Writing the stale-lease-
+   convergence test (worker A's lease expires mid-GET, worker B
+   completes first, A's GET finally resolves) showed A would still
+   proceed to call `events.update` with Google before any lease check
+   rejected it — a real, previously-unconsidered risk of a stale,
+   possibly content-overwriting write reaching Google even though the
+   *local* write-back was correctly rejected. **Fixed**: `reconcile
+   PresentAbsent` now re-confirms lease ownership (`stillHoldsLease()`)
+   immediately before every mutating Google call, not only at the final
+   bookkeeping write.
+2. **`missing_remotely` was keyed off the wrong signal.** The original
+   implementation checked `link.syncStatus === "synced"` to decide
+   whether a 404 meant "manually deleted" vs. "never created yet" — but
+   `syncStatus` legitimately resets to `"pending"` on every reschedule,
+   so a meeting that was synced, then rescheduled, then manually deleted
+   in Google would have silently recreated itself instead of being
+   flagged. **Fixed**: the check now reads the durable, per-generation
+   `history.createStatus === "succeeded"` fact instead, which a
+   reschedule never touches.
+
+Two smaller, purely mechanical bugs were also found and fixed in the
+process: the scripted test client originally discarded every call's real
+arguments before reaching a registered responder (making several
+"capture what was sent" assertions silently vacuous until fixed), and
+migration 0048 originally placed explanatory `--` comments *between*
+column definitions inside two `CREATE TABLE` statements — harmless to
+SQLite itself, but `lib/data-health/production-baseline.ts`'s own
+schema-normalization (which collapses an object's recorded SQL onto one
+line for comparison) would then let that comment swallow the rest of the
+statement as a parse-breaking side effect, caught by the repository's
+own existing `tests/production-backup-readiness.test.mjs` once the
+migration was wired into the production-baseline tooling. Fixed by
+moving every such comment above its `CREATE TABLE` statement.
+
+### What is proven by executable tests
+
+- **Request idempotency** (`tests/calendar-capture-idempotency.test.mjs`):
+  owner-scoped lookup, rejection of a reused key with different content,
+  no cross-owner leakage even on an identical literal key string across
+  two owners, correct defer-to-winner behavior on a lost creation race,
+  and client-side key retention across retries / rotation only after
+  success.
+- **412-retry reload, not replay** (`tests/calendar-sync-reconciler.test.mjs`):
+  a retried update after a 412 is proven, by directly inspecting the
+  actual payload sent, to carry the reloaded desired state, never the
+  pre-412 captured one.
+- **Revision accuracy under a race**: an in-flight sync attempt that
+  captured revision 1 is proven to report and persist exactly revision
+  1 even after two further reschedules raced ahead to revision 3 while
+  it was suspended — never fabricating credit for work it didn't send.
+- **Stale-lease convergence**: a worker whose lease expires mid-flight is
+  proven unable to clear a new holder's lease, overwrite its bookkeeping,
+  or even reach Google with a live mutating call once the lease is gone.
+- **409-then-verify-reconcile-content**: proven that an ambiguous 409 on
+  insert is followed by a real content-reconciling update, not treated as
+  already-synced.
+- **Ambiguous create during cancel, including a delayed create landing
+  AFTER a 404 delete**: proven end-to-end — the first cleanup attempt
+  correctly refuses to trust the 404 while the create is still
+  unresolved, the late create's true outcome is recorded regardless of
+  lease state, and a follow-up cleanup sweep then correctly finds and
+  removes the real, now-existing event.
+- **Reopen never reuses a tombstoned id, and the old generation's cleanup
+  is never abandoned**: proven that a reopen after a *failed* cleanup
+  attempt computes a fresh id, leaves the old generation's `pending`
+  cleanup state completely untouched, lets the new generation's create
+  proceed independently, and that a later cleanup sweep for the old
+  generation deletes *only* its own event id, never the new one's.
+- **`missing_remotely` requires explicit Recreate**: proven both that a
+  404 on a previously-created (not merely previously-synced) generation
+  is classified as a manual deletion, and that such a row is structurally
+  excluded from the sweep's own "needs reconciliation" query — not merely
+  conventionally skipped.
+- **Lease contention**: two concurrent attempts for the same meeting are
+  proven to never both proceed — the second finds the lease held and
+  backs off.
+- **Real SQL persistence** (`tests/calendar-sync-sqlite-store.test.mjs`):
+  the `UNIQUE(interaction_id)` duplicate-prevention backstop, the lease
+  acquire/release/steal-prevention compare-and-swap, and the
+  unconditional nature of intent writes are proven against an actual
+  SQLite database built from the real committed migration — not only
+  against the in-memory fake's own bookkeeping.
+- **Lifecycle rules** (`tests/calendar-sync-lifecycle.test.mjs`):
+  completion while a sync is still pending is proven to be a true,
+  byte-for-byte no-op on the link row; cancelling while fully
+  disconnected is proven to durably record the intent with zero network
+  calls, and a later "reconnect" sweep is proven to pick up and complete
+  exactly that recorded work; a meeting that was never explicitly
+  enrolled is proven invisible to the sweep (no Google call, no link row
+  ever created for it); an all-day event's date is proven byte-for-byte
+  identical regardless of which timezone value is passed alongside it.
+- **Sweep/agenda independence** (`tests/calendar-sweep-agenda-independence.test.mjs`):
+  proven that `lib/calendar/` and `lib/agenda/` have completely disjoint
+  import graphs in both directions, that `worker/index.ts` is untouched
+  by this round, and that neither wrangler config carries a new 5-minute
+  cron entry yet.
+
+### What still depends on future live Google testing
+
+Honestly scoped, not glossed over:
+
+- Whether `calendar.events.owned` genuinely permits every operation this
+  design uses (custom-id insert, get, update with `If-Match`, delete) —
+  verified only against Google's current documentation text (§4.1, §10.1),
+  never exercised against the real API.
+- Whether `events.update` actually honors `If-Match` the way the
+  version-resources guide documents for "update and delete" generically
+  — never confirmed against a real response from Google's servers.
+- The real shape/timing of Google's actual `409`/`412`/`404`/`410`
+  responses and real network ambiguity (timeouts, partial responses) —
+  the test suite's "ambiguous" scenarios are constructed by deliberately
+  withholding a scripted resolution via a deferred promise, which proves
+  the code's handling of that *state* is correct, not that real Google
+  network behavior matches the assumptions encoded in the mock.
+- The OAuth token refresh flow, scope grant, and the owner's one-time
+  manual authorization — none of this exists yet; no Google Cloud
+  project, OAuth client, or secret has been created.
+- Whether a real custom event id in this exact derived format is
+  accepted by Google's live validation, and whether a genuine insert
+  collision really returns 409 in practice as documented.
+- End-to-end behavior once wired into real routes and a real Cloudflare
+  Workers runtime (`ctx.waitUntil()` timing, real HTTP request handling,
+  D1's actual concurrency behavior) — the concurrency properties above
+  were proven at the reconciler/store level through directly-orchestrated
+  interleavings, which is a different (stronger, in some respects — it
+  can force exact adversarial orderings a real system might rarely hit)
+  but not identical guarantee to a live production run.
+
+### Next bounded phase (recommended, not started)
+
+1. Build the real D1-backed `CalendarLinkStore` adapter, mirroring the
+   now-proven `SqliteCalendarStore`.
+2. Build the real Google Calendar HTTP client, mirroring
+   `lib/agenda/gmail-client.ts`'s token-refresh and error-sanitization
+   discipline.
+3. Wire the proven idempotency contract into `POST /api/interactions`,
+   and the proven `recordReschedule`/`recordCancel`/`recordReopen`/
+   `recordComplete` calls into the existing interaction routes and Trip
+   Planning's scheduling functions, in the same D1 batch as their
+   existing writes.
+4. Settings UI (§2, §5.3).
+5. **Only then**: the Google Cloud/OAuth setup (§12) and a real,
+   Staging-only, disposable-test-calendar live-verification pass —
+   still gated behind a separate, explicit owner review and approval
+   before any Production credential or deployment, exactly as §14's
+   rollout sequence above already specifies.

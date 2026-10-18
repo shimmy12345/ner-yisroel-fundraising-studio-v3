@@ -52723,3 +52723,130 @@ secret, or calendar event created.
 Nothing implemented; no Google Cloud project, OAuth client, secret,
 calendar event, or deployment created; `main`/Production/Staging
 untouched by this round.
+
+### Isolated sync core implemented and tested (2026-10-18) -- STILL NOT WIRED, AWAITING INDEPENDENT RE-REVIEW BEFORE ROUTE WIRING
+
+**Commit `de57005`** on `feature/independent-cloudflare-sandbox`.
+Authorized scope: pure sync logic, a mocked Calendar client, and
+automated tests, plus local persistence tests against an isolated
+temporary database. **No live Google call, OAuth setup, credential, real
+calendar event, remote database migration, route/cron wiring, or
+deployment** -- all confirmed still true after this round.
+
+**What was built**: `drizzle/0048_google_calendar_sync.sql` (additive
+only, not applied to any remote database); `lib/calendar/` -- pure
+event-id derivation, pure event-body construction (all-day vs. timed,
+exclusive end-date, PII/financial-data exclusion, unrelated-field
+preservation on update), the environment/account guard, the core
+reconciliation engine, and a prototype Capture request-idempotency
+contract; `lib/calendar/testing/` -- an in-memory store for precisely
+-controlled concurrency proofs and a real `node:sqlite`-backed store for
+schema-level persistence proof, both implementing the same store
+interface a future D1 adapter would. Full detail, including the exact
+mechanism for every one of the 7 reviewer-raised concurrency/lifecycle
+issues, is in `docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md`'s new
+"Implementation status" section at the end of the document.
+
+**Two real design gaps were found and fixed by writing the adversarial
+tests themselves**, not merely confirmed by them: (1) a stale worker
+whose lease expired mid-flight could still reach Google with a live,
+possibly content-overwriting call before any lease check rejected it --
+the design doc's prior claim that the lease plus a final write-back
+check was sufficient defense-in-depth was wrong; fixed by re-confirming
+lease ownership immediately before every mutating Google call, not only
+at the final bookkeeping write. (2) `missing_remotely` detection was
+keyed off `link.syncStatus`, which legitimately resets to `"pending"` on
+every reschedule -- a synced-then-rescheduled-then-manually-deleted
+meeting would have silently recreated itself instead of being flagged;
+fixed to key off the durable, per-generation `history.createStatus`
+fact instead, which a reschedule never touches. Two smaller mechanical
+bugs were also found and fixed: the scripted test client originally
+discarded every call's real arguments (silently making several
+"prove what was actually sent" assertions vacuous), and migration 0048
+originally placed explanatory comments *between* column definitions
+inside two `CREATE TABLE` statements, which this repo's own schema-
+normalization tooling (`lib/data-health/production-baseline.ts`)
+would corrupt into invalid SQL on a schema-only backup round-trip --
+caught by the repository's own pre-existing
+`tests/production-backup-readiness.test.mjs` once the migration was
+wired into the baseline/staging-reset/restore-order tooling (also
+updated this round, since every new table a migration adds must be
+classified there, per that tooling's own existing regression tests).
+
+**Proven by executable tests** (8 new test files, adversarial
+scenarios with deliberately interleaved concurrent attempts via
+deferred promises, not just sequential happy paths): request
+idempotency (owner-scoped, conflict-detecting, no cross-owner leakage);
+a 412 retry reloads the actual latest desired state (proven by
+inspecting the real payload sent, not just the outcome); an in-flight
+attempt reports and persists only the revision it actually sent, never
+a newer one that raced ahead while it was suspended; a worker whose
+lease expires mid-flight cannot clear a new holder's lease, overwrite
+its bookkeeping, or reach Google at all once the lease is gone; a 409 on
+insert is followed by a real content-reconciling update, not treated as
+already-synced; cancelling during an ambiguous create -- including a
+delayed create that lands AFTER a 404 delete -- converges correctly
+without ever losing track of the real, eventually-created event;
+reopening after a failed cleanup uses a brand-new id and leaves the old
+generation's pending cleanup completely untouched, and a later sweep
+removes only the old generation's event, never the new one's;
+`missing_remotely` is structurally excluded from the sweep's own
+"needs reconciliation" query, not merely conventionally skipped; two
+concurrent attempts for the same meeting never both proceed; the real
+SQLite schema (not just the in-memory fake) enforces the
+`UNIQUE(interaction_id)` duplicate-prevention backstop and the lease
+compare-and-swap; completion while a sync is still pending is a true
+byte-for-byte no-op; cancelling while fully disconnected durably
+records the intent with zero network calls and a later "reconnect"
+sweep completes exactly that work; a never-enrolled meeting is
+structurally invisible to the sweep; an all-day event's date is
+byte-for-byte independent of timezone; and the calendar sweep module
+has a completely disjoint import graph from the existing Gmail/agenda
+cron in both directions, with neither `worker/index.ts` nor either
+wrangler config touched.
+
+**What still depends on future live Google testing, stated honestly**:
+whether `calendar.events.owned` actually permits every operation used
+(verified only against Google's documentation text, never the real
+API); whether `events.update` genuinely honors `If-Match` the way
+documented; the real shape/timing of Google's actual error responses
+and network ambiguity; the OAuth flow itself (no Google Cloud project
+or credential exists yet); whether this exact derived event-id format
+is accepted by Google's live validation; and end-to-end behavior once
+wired into a real Cloudflare Workers runtime (`ctx.waitUntil()` timing,
+real D1 concurrency) -- the concurrency properties above were proven
+through directly-orchestrated interleavings at the reconciler/store
+level, a different (in some respects stronger -- it can force exact
+adversarial orderings a live system might rarely hit) but not identical
+guarantee to a live production run.
+
+**Checks**: 222/222 test files pass (including all 8 new ones plus the
+existing `production-baseline`/`staging-reset`/`d1-restore-order`/
+`production-backup-readiness` suites, updated for the new migration's
+schema); `tsc --noEmit` clean; lint error count unchanged from baseline
+(94); a small, reviewed increase in warning count (intentional unused
+parameters kept for API-signature consistency across the `recordXxx`
+function family, e.g. `recordComplete`'s). `npm run build` succeeds. The
+D1 restore/schema main-sync check against `origin/main` reports the
+expected drift (migration 0048 and its two new tables are not yet known
+to `main`'s own tracking) -- this is the same "always fails on real
+drift until a separate schema-sync PR is prepared" behavior documented
+in `docs/D1-MIGRATION-SYNC-PROCESS.md` and exercised in every prior
+schema-adding round this session; preparing that PR is a distinct,
+separate action, out of this round's scope, and was not attempted.
+
+**Next bounded phase** (recommended, not started): a real D1-backed
+`CalendarLinkStore` adapter mirroring the now-proven SQLite one; a real
+Google Calendar HTTP client mirroring `gmail-client.ts`'s token-refresh
+and error-sanitization discipline; wiring the proven idempotency
+contract and `recordReschedule`/`recordCancel`/`recordReopen`/
+`recordComplete` calls into the real interaction/Trip Planning routes;
+Settings UI; and only after all of that, the actual Google Cloud/OAuth
+setup and a Staging-only live-verification pass against a disposable
+test calendar -- still gated behind a separate, explicit owner review
+before any Production credential or deployment.
+
+**Status: core sync logic implemented and adversarially tested,
+awaiting independent re-review before any route wiring, live Google
+setup, migration, or deployment.** `main`/Production/Staging untouched
+by this round.
