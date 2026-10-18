@@ -52518,3 +52518,94 @@ consistent with this release never having run a migration.
   verified above against an independently-selected second donor to
   confirm the fix generalizes, not just the one case named in the bug
   report.
+
+## Google Calendar Integration -- Design Only, Awaiting Independent Review (2026-10-18)
+
+**Request.** Investigate and design a shared Google Calendar integration:
+when a meeting is scheduled anywhere in FOS (Trip Planning or donor/
+Capture scheduling), it should be able to automatically appear on the
+fundraiser's own existing primary Google Calendar, one-way (FOS ->
+Google only). Investigation and design only -- **no code, schema,
+migration, OAuth setup, Google permission, calendar event, or deployment
+was created or touched.**
+
+**Full design: `docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md`.** Summary:
+
+- **One canonical meeting entity, not two.** Both Trip Planning
+  (`lib/relationships/trips-data.ts`'s `scheduleProspectMeeting()`/
+  `completeProspectMeeting()`, deterministic id `trip-meeting-
+  ${prospectId}`) and plain Capture (`POST /api/interactions`) write
+  into the **same `interactions` table** -- confirmed by reading both
+  paths directly, not assumed. `interactions.id` is the one id a
+  calendar link should key off. Scheduling/completion/cancellation
+  state already lives in an established `source`-prefix convention
+  (`capture-scheduled:`/`capture-completed:`/`cancelled:`/`archived:`,
+  centralized in `lib/workspace/scheduled-activity.ts`), with a strong
+  existing compare-and-swap concurrency guard on the outcome route
+  (`app/api/interactions/[id]/outcome/route.ts`) that the new sync
+  layer's own concurrency handling is modeled on.
+- **Confirmed out of scope, structurally, not just by convention**:
+  reminders/recommendations (`due_at`) never touch `interactions` at
+  all for "Planned outreach"/`meeting_requested`/any status except
+  `meeting_scheduled`/`meeting_completed` (`trip-model.ts:38`) -- so
+  those statuses have nothing for a sync layer to ever see, satisfying
+  "must never create calendar events" by construction, not a filter
+  that has to remember to exclude them.
+- **Reuses the existing, already-DST-safe destination-timezone pipeline
+  for trip meetings as-is** (`parseLocalDateTimeInput` ->
+  `timezoneForState` -> `zonedTimeToUtc`, `lib/relationships/
+  trip-model.ts` + `lib/workspace/local-time.ts`) -- confirmed this
+  pipeline already produces a true Unix instant for every live
+  scheduled meeting (never the UTC-midnight-anchored "date-only epoch"
+  convention used elsewhere for recurring family dates), so no new
+  timezone-conversion code is needed for timed meetings.
+- **Date-only ("all-day") scheduling and meeting duration/end-time are
+  both genuinely new concepts** -- confirmed no live path creates a
+  date-only meeting today (`occurredAtDateOnly` only ever means
+  "Monday.com historical import, time unknown," never a live
+  all-day meeting -- deliberately not reused, to avoid silently
+  changing that column's existing meaning) and no duration/end-time
+  column exists anywhere in the schema. Proposed: new, additive-only
+  migration `0048` -- `interactions.all_day`/`end_at`/`location`
+  (all nullable/defaulted, nothing existing altered) plus a new
+  `calendar_event_links` table (one row per synced meeting, `UNIQUE
+  (interaction_id)` as the real duplicate-prevention backstop,
+  `status: pending|synced|failed` with a safe retry action).
+- **OAuth**: a structurally separate credential from Gmail's --
+  `GOOGLE_CALENDAR_OAUTH_CLIENT_ID/_SECRET/_REFRESH_TOKEN`, narrowest
+  usable scope (`calendar.events`, not the broader `calendar` scope),
+  Internal app type (same precedent already proven for Gmail), one-time
+  **manual, owner-performed, out-of-band authorization** -- deliberately
+  not a new in-app OAuth redirect/callback flow, mirroring the exact,
+  already-reviewed Gmail precedent rather than building new surface
+  area for a single-owner app. Destination calendar is Google's
+  reserved `"primary"` literal -- no calendar-listing call or broader
+  scope needed to address the owner's own existing calendar.
+- **Staging safety**: mirrors the exact fail-closed, call-site
+  environment-guard pattern already proven necessary for Gmail after a
+  real 2026-10-14 incident showed Cloudflare config alone (an empty
+  `triggers.crons`) was not sufficient to stop a real send from
+  Staging -- recommended default is Staging has no calendar secrets
+  configured at all (inert, "Not connected") plus an explicit
+  `deploymentEnvironment`-gated guard as defense in depth.
+- **Duplicate prevention**: Google Calendar's `events.insert` accepts a
+  caller-supplied event id; this design derives one deterministically
+  from `interactions.id` so a retried insert after an ambiguous timeout
+  safely resolves to "already exists" instead of creating a second
+  event -- the primary mechanism, backed by `calendar_event_links`'
+  own `UNIQUE(interaction_id)` as a second layer.
+- **No backfill**: migration leaves `calendar_event_links` empty; a
+  pre-existing scheduled meeting only syncs if the owner takes a
+  separate, explicit action later -- never automatic.
+- **Seven explicit owner decisions listed** in the design doc's final
+  section (default meeting duration, whether to offer donor address as
+  a one-click location fill-in, group/shared-activity scope, all-day
+  support in Trip Planning specifically, a disposable Staging test
+  calendar, whether a "sync existing meetings" backfill action is
+  wanted at all, and one Google API documentation double-check) --
+  **no hard architectural blocker was found.**
+
+**Status: awaiting independent review and the owner decisions above.**
+Nothing implemented; no Google Cloud project, OAuth client, secret, or
+calendar event created; `main`/Production/Staging untouched by this
+investigation.
