@@ -51600,7 +51600,7 @@ touch that logic.
   realistic fixtures (Section 3), not by live Staging data that doesn't
   currently contain that case.
 
-## D1 Restore/Schema Sync Check Failure -- Root Cause, Fix, and Production Reconciliation (2026-10-18)
+## D1 Restore/Schema Sync Check Failure -- Root Cause, Fix, and Production Reconciliation (2026-10-18) -- RESOLVED, MERGED, VERIFIED LIVE
 
 Investigated GitHub Actions run **39136248217** (`d1-restore-sync-check.yml`,
 triggered by the push of commit `06c5c299` -- the Trip Planning
@@ -51762,18 +51762,71 @@ reopened. Confirmed via the GitHub API: `state: "open"`, `commits: 2`,
 safeguard that blocked a direct push to `main` applies unchanged; this
 remains the owner's own decision.
 
-### 4. Remaining step to fully close this out
+### 4. PR #19 merged and verified live -- INCIDENT CLOSED (2026-10-18)
 
-**Merge PR #19** (currently commit `b24ca171dd6e5fb48c9cf4cb7de3ec2b7d8c16cb`,
-2 commits, open, mergeable). Once merged, `origin/main` will have the
-real fix (now checkout-agnostic, not checkout-dependent) and the 0047
-sync in one combined history. At that point, re-running `d1-restore-
-sync-check.yml` against `feature/independent-cloudflare-sandbox`'s
-current tip (`workflow_dispatch`, or any future push touching a
-schema-relevant path) is expected to report `check`: pass,
-`prepare-sync`: pass (no-op, already synced) -- not yet confirmed live
-by an actual green run, since that requires the merge first. This is
-the one remaining action before this incident is fully closed.
+Before merging, re-confirmed PR #19's head and scope had not changed
+since review: `head_sha` `b24ca171dd6e5fb48c9cf4cb7de3ec2b7d8c16cb`
+(matching exactly), `base_sha` `600e46016f7ad4ea55871873c9888419eff20caa`
+(origin/main unmoved since review), 2 commits, 3 files changed,
+`mergeable: true`, `mergeable_state: "clean"` -- confirmed via the
+GitHub API directly, not assumed from the earlier report. The only
+checks attached to the PR itself were Netlify's deploy-preview checks
+(unrelated, all green) -- `d1-restore-sync-check.yml` never runs
+against a PR targeting `main` (its trigger is scoped to
+`feature/independent-cloudflare-sandbox` only), so there was no CI gate
+on the PR itself to wait for; the relevant validation (`main`'s own
+test suite, build, and the sync checker) had already been run locally
+against this exact commit.
+
+**Merged via the normal GitHub PR workflow**, squash-merge (this
+repo's own established convention for merging into `main` -- every
+prior sync PR's commit message on `main` carries the same
+`(#<number>)` suffix squash-merge produces), subject to whatever
+repository protections apply -- none blocked it. **Merge commit:
+`4ea8a30367421679c5a996f7de9eba6c1e64051b`**, "Fix D1 restore/schema
+sync: CRLF-sensitive test bug + sync migration 0047 (#19)", merged
+2026-10-18T15:37:18Z. Confirmed `origin/main` fast-forwarded to this
+commit via a fresh `git fetch`. Re-ran this branch's own
+`check-main-restore-sync.mjs` against the real, now-merged
+`origin/main` (not a local branch stand-in) and confirmed **"D1
+restore/schema state on main is in sync with the canonical schema. No
+drift detected."**
+
+**Re-ran the actual GitHub Actions workflow** -- `workflow_dispatch`'s
+"Run workflow" button does not appear for this workflow in the UI (the
+file only ever lives on `feature/independent-cloudflare-sandbox`, not
+on the default branch `main` -- the exact same, already-documented
+platform behavior as the "'Run workflow' Button Missing" entry above;
+not a new problem). Used that entry's own established, safer
+alternative instead: **"Re-run all jobs"** on the original failing run,
+**39136248217** (which does a live `git fetch origin main` at execution
+time regardless of which commit originally triggered it, so this is a
+real, current re-verification, not a replay of stale state). Confirmed
+via the GitHub API that attempt 2 was genuinely queued and ran (not
+just a stale cache): `run_attempt: 2`, `status: "queued"` immediately
+after triggering, then polled to `status: "completed"`,
+`conclusion: "success"`.
+
+**Both jobs passed, with real substantive output, read directly from
+each job's own expanded log -- not inferred from the green checkmark
+alone**:
+- **`check`** -- succeeded in 10s. Log: `Comparing this branch's
+  current schema/restore state against origin/main (4ea8a3036742)...`
+  → `D1 restore/schema state on main is in sync with the canonical
+  schema. No drift detected.` → `main's restore/baseline tracking is
+  current. No sync needed.`
+- **`prepare-sync`** -- succeeded in 6s. Log:
+  `Run node scripts/open-or-update-sync-pr.mjs --apply` →
+  `{"outcome": "already_synced"}` -- correctly recognized nothing
+  further to do, wrote nothing, opened no PR (there is nothing left to
+  sync).
+
+**This incident is now fully closed**: `main`'s restore/schema
+tracking matches the canonical branch's real schema exactly, the CRLF-
+checkout-dependence bug is fixed and verified against both real LF and
+real CRLF checkouts (see the Independent Review Correction above), and
+a live, current GitHub Actions run confirms both jobs green against
+the actual post-merge state -- not a local approximation.
 
 ## Read-Only Production Trip-Prospect Reconciliation for Migration 0047 (2026-10-18) -- READ-ONLY, NOTHING APPLIED
 
