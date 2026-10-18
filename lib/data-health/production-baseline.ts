@@ -9,49 +9,17 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 47 as of 0046_trip_financial_attributions.sql (feature/independent-
-// cloudflare-sandbox commit e9a40f2, synced to this branch 2026-10-15 --
-// schema-manifest.json copied verbatim from that branch's own current,
-// verified manifest, the same sync mechanism as commits 4ea1d5e/62628b3/
-// ad80cf6/5e48837/114c7bb/[0041-0042 sync]/[0043 sync]; see
-// docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair" and
-// "October 14 2026 Email Incident" entries). This sync covers THREE
-// migrations in one pass, same as the prior 0039+0040 and 0041+0042
-// syncs:
-//   - 0044_agenda_manual_test_send_log.sql: ADDS ONE NEW TABLE
-//     (agenda_manual_test_send_log, the temporary Gmail OAuth
-//     verification mechanism's one-time claim record -- see
-//     docs/AI-HANDOFF.md's "October 14 2026 Email Incident" entry). Its
-//     only foreign key is `user_id` -> `users.id` -- the same shape as
-//     backup_alert_state/agenda_send_log just below, not
-//     pledge_balance_corrections -- so it is NOT part of
-//     STAGING_RESET_TABLE_ORDER.
-//   - 0045_trips.sql: ADDS TWO NEW TABLES (trips, trip_prospects --
-//     Trip-Based Meeting Planning; see docs/AI-HANDOFF.md). Real
-//     fundraising/relationship data, not account configuration, so both
-//     fall into FUNDRAISING_DATA_TABLES automatically and ARE part of
-//     STAGING_RESET_TABLE_ORDER.
-//   - 0046_trip_financial_attributions.sql: ADDS ONE NEW TABLE
-//     (trip_financial_attributions -- Trip Fundraising Results
-//     Dashboard; see docs/AI-HANDOFF.md). Same as trips/trip_prospects:
-//     real fundraising data, part of STAGING_RESET_TABLE_ORDER.
-// All four new tables are why this sync could not be handled by the
-// automated prepare-sync job (it deliberately refuses any migration that
-// introduces a new table -- see docs/D1-MIGRATION-SYNC-PROCESS.md --
-// confirmed by running scripts/prepare-main-restore-sync-patch.mjs on the
-// canonical branch, which returned safe:false with exactly that reason)
-// and had to be prepared by hand, following the same narrow pattern as
-// every prior new-table sync. See lib/operations/staging-reset.ts and
-// lib/operations/d1-restore-order.ts for each table's restore-order
-// placement and test/d1-restore-order.test.mjs for the dependency-order
-// regressions.
-// PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL stays
-// "0019": that label identifies the single bootstrap file's origin, not
-// its current contents). Caught by this repository's own generic
-// restore/schema drift guard (feature/independent-cloudflare-sandbox's
-// scripts/check-main-restore-sync.mjs) before any scheduled monthly
-// restore-verification run would have found it.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 47;
+// 48 as of 0047_trip_prospect_selection.sql
+// Automated sync, generated 2026-10-18T14:59:21.066Z by scripts/prepare-main-
+// restore-sync-patch.mjs (see docs/D1-MIGRATION-SYNC-PROCESS.md).
+// production-baseline/schema-manifest.json was replaced verbatim from
+// feature/independent-cloudflare-sandbox's own current, verified
+// manifest -- the same sync mechanism used for every prior round (see
+// docs/AI-HANDOFF.md's "D1 Monthly Restore Verification Repair"
+// entries). PRODUCTION_BASELINE_LEVEL stays "0019": that label
+// identifies the single bootstrap file's origin, not its current
+// contents.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 48;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

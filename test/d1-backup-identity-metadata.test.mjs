@@ -68,7 +68,25 @@ async function run() {
   // belongs to "if aws s3api head-object...; then" and isn't part of the
   // validation logic itself), so the extracted fragment is self-contained
   // and syntactically balanced on its own.
-  const validationScript = extractSpan(monthly, "VALID=false", 'else\r\n            echo "::warning::Could not HEAD', "identity-validation");
+  //
+  // D1 restore/schema sync check repair (2026-10-18, see docs/AI-HANDOFF.md):
+  // the endMarker below was previously hardcoded with a literal `\r\n`
+  // between "else" and the following "echo" line. The actual committed
+  // workflow file (read via readFile above) has always had plain `\n`
+  // line endings -- `\r\n` only ever appeared here because this test was
+  // last edited on a Windows checkout with `core.autocrlf=true`, which
+  // silently rewrites LF to CRLF in the working tree without changing
+  // what's actually stored in the repository. That made this test pass
+  // on a Windows machine while permanently failing on the Linux GitHub
+  // Actions runner, which checks out the real, unmodified LF content --
+  // first caught not by this test's own CI run, but by the D1 Migration
+  // Sync Automation's `prepare-sync` job, which independently validates
+  // a candidate schema-sync patch against `main`'s own full test suite
+  // before ever proposing a PR (see docs/D1-MIGRATION-SYNC-PROCESS.md).
+  // Fixed to match the real, authoritative LF content -- never special-
+  // cased to tolerate either line ending, since exactly one of them is
+  // actually correct here.
+  const validationScript = extractSpan(monthly, "VALID=false", 'else\n            echo "::warning::Could not HEAD', "identity-validation");
   // Sanity: the extraction actually captured the real regex, not an empty
   // or unrelated span -- guards against the anchors silently matching the
   // wrong location after a future edit.

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "a20d155cd5a1160d7d90eadcba04e0f6cedef7a718cb4c2f37f786155d8a6d25",
+  "schemaHash": "f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -48,7 +48,8 @@
     "0043_agenda_send_log.sql",
     "0044_agenda_manual_test_send_log.sql",
     "0045_trips.sql",
-    "0046_trip_financial_attributions.sql"
+    "0046_trip_financial_attributions.sql",
+    "0047_trip_prospect_selection.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6441,6 +6442,13 @@
             "notNull": true,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "selected_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6487,6 +6495,17 @@
             "partial": false,
             "origin": "c",
             "sql": "CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`)"
+          },
+          {
+            "name": "trip_prospects_trip_selected_idx",
+            "columns": [
+              "trip_id",
+              "selected_at"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `trip_prospects_trip_selected_idx` ON `trip_prospects` (`trip_id`,`selected_at`)"
           },
           {
             "name": null,
@@ -7350,7 +7369,7 @@
     {
       "type": "table",
       "name": "trip_prospects",
-      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `selected_at` integer, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -7781,6 +7800,11 @@
       "type": "index",
       "name": "trip_prospects_trip_donor_idx",
       "sql": "CREATE UNIQUE INDEX `trip_prospects_trip_donor_idx` ON `trip_prospects` (`trip_id`,`donor_id`)"
+    },
+    {
+      "type": "index",
+      "name": "trip_prospects_trip_selected_idx",
+      "sql": "CREATE INDEX `trip_prospects_trip_selected_idx` ON `trip_prospects` (`trip_id`,`selected_at`)"
     },
     {
       "type": "index",
