@@ -41,10 +41,25 @@ function sanitizedError(status: number | "error", errorClass?: string): string {
 
 // --- Durable intent (never touches the network) --------------------------
 
+// Bug 2 (2026-10-20 review): "a crash between link creation and history
+// creation leaves an unrecoverable enrollment." The link and generation-0
+// history rows are now created together via store.insertLinkWithHistory
+// -- one atomic unit, so a NEW crash between the two writes can no longer
+// happen at all. For an EXISTING link (this interaction was already
+// enrolled, possibly under an older, non-atomic version of this
+// function, or any other cause), ensureHistory() self-heals a missing
+// history row before returning -- "existing incomplete state must be
+// detected and repaired... before any Google creation" is satisfied here
+// at the earliest possible point, and independently again (as a
+// universal backstop, regardless of entry point) inside
+// reconcilePresentAbsent's own present-state path below.
 export async function enrollMeetingForSync(store: CalendarLinkStore, now: number, args: { interactionId: string; userId: string; googleCalendarId: string }): Promise<CalendarLinkRow | null> {
   const existing = await store.getLinkByInteraction(args.interactionId);
-  if (existing) return null; // already enrolled -- caller should use recordReschedule/recordCancel instead
-  const link = await store.insertLink(
+  if (existing) {
+    await store.ensureHistory(existing.id, existing.generation, existing.googleEventId ?? deriveGoogleEventId(existing.interactionId, existing.generation), now);
+    return null; // already enrolled -- caller should use recordReschedule/recordCancel instead
+  }
+  return store.insertLinkWithHistory(
     {
       id: randomUUID(),
       interactionId: args.interactionId,
@@ -64,9 +79,6 @@ export async function enrollMeetingForSync(store: CalendarLinkStore, now: number
     },
     now,
   );
-  if (!link) return null;
-  await store.insertHistory({ id: randomUUID(), linkId: link.id, generation: 0, googleEventId: deriveGoogleEventId(link.interactionId, 0), createStatus: "not_attempted", cleanupNeeded: false, cleanupStatus: "not_needed", cleanupAttempts: 0 }, now);
-  return link;
 }
 
 // A reschedule must succeed regardless of whether a reconcile attempt
@@ -106,17 +118,16 @@ export async function recordCancel(store: CalendarLinkStore, now: number, intera
 // generation's history row (and its cleanupNeeded/cleanupStatus) is left
 // completely untouched, so a pending or uncertain deletion from the
 // cancelled generation is never abandoned (Issue 2). The generation bump
-// itself is atomic (store.applyReopen, Issue 4) -- the new generation
-// number this function uses to derive the event id and insert the new
-// history row is always the one the store actually, atomically allocated,
-// never a value computed from a possibly-stale read.
+// AND the new generation's history row are created atomically together
+// by store.applyReopen (Bug 2, 2026-10-20 review: "apply the same fix to
+// recordReopen, which currently advances the link before inserting the
+// new generation's history") -- there is no longer a separate
+// insertHistory call here for a crash to land between.
 export async function recordReopen(store: CalendarLinkStore, now: number, interactionId: string): Promise<boolean> {
   const link = await store.getLinkByInteraction(interactionId);
   if (!link || link.desiredState !== "absent") return false;
   const updated = await store.applyReopen(link.id, now);
-  if (!updated) return false;
-  await store.insertHistory({ id: randomUUID(), linkId: link.id, generation: updated.generation, googleEventId: deriveGoogleEventId(interactionId, updated.generation), createStatus: "not_attempted", cleanupNeeded: false, cleanupStatus: "not_needed", cleanupAttempts: 0 }, now);
-  return true;
+  return updated !== null;
 }
 
 // Marking a meeting completed never touches the calendar event (Issue 5
@@ -196,6 +207,20 @@ export async function reconcilePresentAbsent(
 
       const eventId = fresh.googleEventId ?? deriveGoogleEventId(fresh.interactionId, generationBeingSent);
       if (!fresh.googleEventId) await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, { googleEventId: eventId, updatedAt: now });
+
+      // Bug 2 (2026-10-20 review): universal backstop. A history row for
+      // this generation might be missing -- not only from the exact
+      // enrollment-crash reproduction (already repaired at enrollment-
+      // retry time above), but from ANY cause, and regardless of entry
+      // point (a sweep can reach this generation via
+      // listNeedingReconciliation without ever going through
+      // enrollMeetingForSync's own repair branch). "Missing required
+      // history must not silently pass as an ordinary no-op": self-heal
+      // it HERE, unconditionally, before the first network call this
+      // function makes -- so createStatus/cleanupNeeded bookkeeping for
+      // this generation is always writable from this point on, never a
+      // silent no-op against a row that was never actually created.
+      await store.ensureHistory(fresh.id, generationBeingSent, eventId, now);
 
       const getResult = await client.get(fresh.googleCalendarId, eventId);
 
@@ -405,8 +430,26 @@ export async function reconcileGenerationCleanup(store: CalendarLinkStore, clien
 // lease, which is exactly the ambiguity resolveCreateOutcome() exists to
 // eventually settle.
 async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number): Promise<CleanupOutcome> {
-  const history = await store.getHistory(linkId, generation);
-  if (!history || !history.cleanupNeeded) return { kind: "not_needed" };
+  let history = await store.getHistory(linkId, generation);
+  if (!history) {
+    // Bug 2 (2026-10-20 review): "cleanup cannot find history, returns
+    // not_needed, and cancellation reports 'delete failed' without
+    // sending any Google DELETE." This function is only ever called with
+    // a real googleEventId specifically because the caller already
+    // determined cleanup for this generation is warranted
+    // (reconcileDeleteCurrentGeneration only reaches here when
+    // desiredState='absent' and the link's own googleEventId is set; the
+    // sweep's own listPendingCleanup loop only returns rows that already
+    // have a history row with cleanup_needed=1, so it can never trigger
+    // this branch at all). A missing history row here is therefore
+    // ALWAYS the Bug 2 integrity gap, never a legitimate "nothing to do"
+    // -- self-heal it as cleanup-needed and proceed, rather than
+    // silently reporting "not_needed" without ever attempting the real
+    // Google DELETE.
+    history = await store.ensureHistory(linkId, generation, googleEventId, now, true);
+  } else if (!history.cleanupNeeded) {
+    return { kind: "not_needed" };
+  }
   if (history.cleanupStatus === "done") return { kind: "done" };
 
   const deleteResult = await client.delete(calendarId, googleEventId);

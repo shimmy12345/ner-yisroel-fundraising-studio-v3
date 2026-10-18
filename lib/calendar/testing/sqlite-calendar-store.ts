@@ -10,8 +10,10 @@
 // is exactly what makes it useful for isolating "does the SQL itself
 // enforce this" from any async-scheduling nondeterminism.
 
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { CalendarLinkHistoryRow, CalendarLinkRow, CalendarLinkStore, CreateStatus, CleanupStatus, DesiredState, SyncStatus } from "../calendar-sync-types.ts";
+import { deriveGoogleEventId } from "../calendar-event-id.ts";
 
 // node:sqlite's DatabaseSync.prepare().get()/.all() return a loosely-typed
 // row (Record<string, SQLOutputValue>); these narrow it to exactly the
@@ -109,6 +111,43 @@ export class SqliteCalendarStore implements CalendarLinkStore {
     return this.getLinkById(row.id);
   }
 
+  // Bug 2 (2026-10-20 review): the link INSERT and generation-0 history
+  // INSERT happen inside one real SQL transaction -- if the history
+  // insert fails for any reason, the link insert is rolled back too, so
+  // no partial ("link exists, history doesn't") state can ever be
+  // committed.
+  async insertLinkWithHistory(row: Omit<CalendarLinkRow, "createdAt" | "updatedAt">, now: number): Promise<CalendarLinkRow | null> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO calendar_event_links
+          (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, now, now);
+      this.db
+        .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, 0, ?, 'not_attempted', 0, 'not_needed', 0, ?, ?)`)
+        .run(randomUUID(), row.id, deriveGoogleEventId(row.interactionId, 0), now, now);
+      this.db.exec("COMMIT");
+    } catch {
+      this.db.exec("ROLLBACK");
+      return null; // UNIQUE(interaction_id) collision (or any other failure) -- nothing partially committed
+    }
+    return this.getLinkById(row.id);
+  }
+
+  // Bug 2 (2026-10-20 review): idempotent self-heal. `INSERT ... ON
+  // CONFLICT DO NOTHING` means a history row that already exists is
+  // never touched/overwritten -- only a genuinely missing one is created.
+  async ensureHistory(linkId: string, generation: number, googleEventId: string, now: number, cleanupNeeded = false): Promise<CalendarLinkHistoryRow> {
+    this.db
+      .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'not_attempted', ?, 'not_needed', 0, ?, ?) ON CONFLICT(link_id, generation) DO NOTHING`)
+      .run(randomUUID(), linkId, generation, googleEventId, cleanupNeeded ? 1 : 0, now, now);
+    const row = this.db.prepare("SELECT * FROM calendar_event_link_history WHERE link_id = ? AND generation = ?").get(linkId, generation);
+    return toHistoryRow(row as RawRow);
+  }
+
   async acquireLease(linkId: string, leaseOwner: string, now: number, ttlSeconds: number): Promise<boolean> {
     const result = this.db.prepare(`UPDATE calendar_event_links SET lease_owner = ?, lease_expires_at = ? WHERE id = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)`).run(leaseOwner, now + ttlSeconds, linkId, now);
     return Number(result.changes) === 1;
@@ -168,27 +207,45 @@ export class SqliteCalendarStore implements CalendarLinkStore {
   }
 
   // Same atomic-increment guarantee for BOTH desired_revision and
-  // generation together, plus the fresh-generation field reset, all in
-  // one statement -- two simultaneous reopen attempts (however unusual
-  // that is) would still each be allocated a distinct, never-colliding
-  // generation number by SQLite itself, never both computing the same
-  // "current + 1".
+  // generation together, plus the fresh-generation field reset AND the
+  // new generation's own history row insert -- all inside one real SQL
+  // transaction (Bug 2, 2026-10-20 review: "apply the same fix to
+  // recordReopen, which currently advances the link before inserting the
+  // new generation's history"). A reader can never observe the link's
+  // generation already bumped without that generation's history row
+  // existing. Two simultaneous reopen attempts (however unusual that is)
+  // would still each be allocated a distinct, never-colliding generation
+  // number by SQLite itself, never both computing the same "current + 1".
   async applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null> {
-    this.db
-      .prepare(
-        `UPDATE calendar_event_links SET
-          generation = generation + 1,
-          desired_revision = desired_revision + 1,
-          desired_state = 'present',
-          google_event_id = NULL,
-          google_etag = NULL,
-          sync_status = 'pending',
-          last_error = NULL,
-          attempt_count = 0,
-          updated_at = ?
-        WHERE id = ?`,
-      )
-      .run(now, linkId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          `UPDATE calendar_event_links SET
+            generation = generation + 1,
+            desired_revision = desired_revision + 1,
+            desired_state = 'present',
+            google_event_id = NULL,
+            google_etag = NULL,
+            sync_status = 'pending',
+            last_error = NULL,
+            attempt_count = 0,
+            updated_at = ?
+          WHERE id = ?`,
+        )
+        .run(now, linkId);
+      const updated = this.db.prepare("SELECT * FROM calendar_event_links WHERE id = ?").get(linkId) as RawRow | undefined;
+      if (!updated) throw new Error("applyReopen: link disappeared mid-transaction");
+      const interactionId = updated.interaction_id as string;
+      const generation = updated.generation as number;
+      this.db
+        .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'not_attempted', 0, 'not_needed', 0, ?, ?)`)
+        .run(randomUUID(), linkId, generation, deriveGoogleEventId(interactionId, generation), now, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return this.getLinkById(linkId);
   }
 

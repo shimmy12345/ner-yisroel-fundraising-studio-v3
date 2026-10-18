@@ -103,7 +103,36 @@ export interface CalendarLinkStore {
   getLinkById(linkId: string): Promise<CalendarLinkRow | null>;
   // Creates generation 0. Fails (returns null) if a row already exists --
   // callers must go through recordDesiredState for an existing meeting.
+  // Low-level; enrollMeetingForSync uses insertLinkWithHistory below
+  // instead, which also creates generation 0's history row atomically.
+  // Kept on the interface for store implementations/tests that need the
+  // link row alone.
   insertLink(row: Omit<CalendarLinkRow, "createdAt" | "updatedAt">, now: number): Promise<CalendarLinkRow | null>;
+  // Bug 2 (2026-10-20 review): "a crash between link creation and
+  // history creation leaves an unrecoverable enrollment." Creates the
+  // link row AND generation 0's history row together as ONE atomic unit
+  // (a real SQL transaction for the SQLite/D1 store; a single
+  // uninterrupted synchronous operation, with the link insert undone if
+  // the history insert fails, for the in-memory one) -- a reader can
+  // never observe the link existing without its generation-0 history
+  // row, which is what made the original bug possible (a history-less
+  // link silently passed every later "does history exist" check as a
+  // no-op instead of a detectable integrity failure). Fails (returns
+  // null) under the same condition insertLink does.
+  insertLinkWithHistory(row: Omit<CalendarLinkRow, "createdAt" | "updatedAt">, now: number): Promise<CalendarLinkRow | null>;
+  // Bug 2 (2026-10-20 review): idempotent self-heal -- creates the
+  // (linkId, generation) history row ONLY if it doesn't already exist
+  // (never overwrites an existing one), and always returns the row as it
+  // exists immediately after (existing or freshly created). This is the
+  // repair primitive every code path that depends on history existing
+  // (enrollment's "already exists" branch, a present-state reconcile
+  // attempt, and generation cleanup) calls defensively before doing
+  // anything else, so "missing required history" can never silently pass
+  // as an ordinary no-op regardless of how the gap arose. `cleanupNeeded`
+  // defaults to false (a freshly-repaired row has no known-needed cleanup
+  // yet); cleanup's own call site passes true, since by construction it
+  // is only ever invoked when cleanup genuinely is needed.
+  ensureHistory(linkId: string, generation: number, googleEventId: string, now: number, cleanupNeeded?: boolean): Promise<CalendarLinkHistoryRow>;
   // Acquires the lease iff currently unheld or expired. Returns the lease
   // token (== leaseOwner) on success, null if contended.
   acquireLease(linkId: string, leaseOwner: string, now: number, ttlSeconds: number): Promise<boolean>;
@@ -147,16 +176,17 @@ export interface CalendarLinkStore {
   // cleanup_needed still 0, or vice versa.
   applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null>;
   // Same atomic-increment guarantee again, this time incrementing BOTH
-  // desired_revision and generation by exactly 1 together, and resetting
-  // the per-generation fields (google_event_id/etag/sync_status/
-  // last_error/attempt_count) back to a fresh-generation starting state,
-  // all in one indivisible unit. The caller still inserts the new
-  // generation's own history row as an immediate follow-up (using the
-  // freshly-allocated generation number this method returns) -- that
-  // insert targets a BRAND NEW, already-uniquely-allocated generation
-  // number, so it can never collide with or corrupt a concurrent
-  // transition the way the bare revision/generation fields themselves
-  // could before this fix.
+  // desired_revision and generation by exactly 1 together, resetting the
+  // per-generation fields (google_event_id/etag/sync_status/last_error/
+  // attempt_count) back to a fresh-generation starting state, AND
+  // inserting the new generation's own history row -- all as ONE atomic
+  // unit (Bug 2, 2026-10-20 review: "apply the same fix to recordReopen,
+  // which currently advances the link before inserting the new
+  // generation's history"). A reader can never observe the link's
+  // generation field already bumped without that generation's history
+  // row existing. The freshly-allocated generation number is also
+  // already-uniquely-allocated by this same atomic operation, so it can
+  // never collide with or corrupt a concurrent transition.
   applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null>;
   getHistory(linkId: string, generation: number): Promise<CalendarLinkHistoryRow | null>;
   insertHistory(row: Omit<CalendarLinkHistoryRow, "createdAt" | "updatedAt">, now: number): Promise<void>;

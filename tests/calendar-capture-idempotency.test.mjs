@@ -19,6 +19,12 @@ class FakeKeyStore {
   }
 }
 
+const NOW = 1000;
+
+function payload(overrides = {}) {
+  return { donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, endAt: 5900, location: null, summary: "Meeting", ...overrides };
+}
+
 // A real, atomic "interactions" table stand-in: create-or-find by id, with
 // NO await between the existence check and the write -- the same
 // guarantee a single `INSERT ... ON CONFLICT(id) DO NOTHING` SQL statement
@@ -27,20 +33,31 @@ class FakeKeyStore {
 // on, not an accident of JS being single-threaded: see the real SQLite
 // version of this same table further below, which proves the guarantee
 // holds against a genuine database engine, not just this fake.
+//
+// 2026-10-20 review fix: `createWithId` now always returns `persistedFields`
+// -- the ACTUAL content stored at that id (whichever call wrote it) -- so
+// createMeetingIdempotently can verify content, not just existence.
 class FakeInteractionsTable {
   constructor() {
     this.rows = new Map();
     this.createCalls = 0; // every ATTEMPT, including ones that find an existing row
   }
-  async createWithId(id, payload) {
+  async createWithId(id, meetingPayload) {
     this.createCalls += 1;
-    if (this.rows.has(id)) return { id, created: false };
-    this.rows.set(id, { id, ...payload });
-    return { id, created: true };
+    const existing = this.rows.get(id);
+    if (existing) return { id, created: false, persistedFields: { ...existing } };
+    this.rows.set(id, { ...meetingPayload });
+    return { id, created: true, persistedFields: { ...meetingPayload } };
   }
 }
 
-const NOW = 1000;
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 async function run() {
   // --- A genuinely new save creates exactly once ---
@@ -50,8 +67,8 @@ async function run() {
     const result = await createMeetingIdempotently(store, NOW, {
       key: "key-1",
       ownerUserId: "owner-A",
-      fingerprint: computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" }),
-      createInteraction: (candidateId) => interactions.createWithId(candidateId, { donorId: "d1" }),
+      fingerprint: computeMeetingFingerprint(payload()),
+      createInteraction: (candidateId) => interactions.createWithId(candidateId, payload()),
     });
     assert.equal(result.outcome, "created");
     assert.equal(interactions.rows.size, 1);
@@ -62,8 +79,8 @@ async function run() {
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
-    const createInteraction = (candidateId) => interactions.createWithId(candidateId, { donorId: "d1" });
+    const fingerprint = computeMeetingFingerprint(payload());
+    const createInteraction = (candidateId) => interactions.createWithId(candidateId, payload());
     const first = await createMeetingIdempotently(store, NOW, { key: "key-retry", ownerUserId: "owner-A", fingerprint, createInteraction });
     const second = await createMeetingIdempotently(store, NOW + 1, { key: "key-retry", ownerUserId: "owner-A", fingerprint, createInteraction });
     const third = await createMeetingIdempotently(store, NOW + 2, { key: "key-retry", ownerUserId: "owner-A", fingerprint, createInteraction });
@@ -79,26 +96,34 @@ async function run() {
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const createInteraction = (candidateId) => interactions.createWithId(candidateId, {});
-    const fpA = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting with Donor A" });
-    const fpB = computeMeetingFingerprint({ donorId: "d2", type: "meeting", occurredAt: 6000, allDay: false, allDayDate: null, summary: "Meeting with Donor B" });
-    await createMeetingIdempotently(store, NOW, { key: "reused-key", ownerUserId: "owner-A", fingerprint: fpA, createInteraction });
-    const conflicting = await createMeetingIdempotently(store, NOW + 1, { key: "reused-key", ownerUserId: "owner-A", fingerprint: fpB, createInteraction });
+    const fpA = computeMeetingFingerprint(payload({ summary: "Meeting with Donor A" }));
+    const fpB = computeMeetingFingerprint(payload({ donorId: "d2", occurredAt: 6000, summary: "Meeting with Donor B" }));
+    await createMeetingIdempotently(store, NOW, { key: "reused-key", ownerUserId: "owner-A", fingerprint: fpA, createInteraction: (id) => interactions.createWithId(id, payload({ summary: "Meeting with Donor A" })) });
+    const conflicting = await createMeetingIdempotently(store, NOW + 1, { key: "reused-key", ownerUserId: "owner-A", fingerprint: fpB, createInteraction: (id) => interactions.createWithId(id, payload({ donorId: "d2", occurredAt: 6000, summary: "Meeting with Donor B" })) });
     assert.equal(conflicting.outcome, "conflict", "reusing a key with genuinely different meeting content must be rejected, never treated as a safe retry");
     assert.equal(interactions.rows.size, 1, "a rejected conflicting reuse of a key must never create a second interaction row");
+  }
+
+  // --- Fingerprint includes end time/duration and location (2026-10-20 review) ---
+  {
+    const base = payload({ endAt: 5900, location: "Office" });
+    const differentEnd = payload({ endAt: 7200, location: "Office" });
+    const differentLocation = payload({ endAt: 5900, location: "Donor's home" });
+    assert.notEqual(computeMeetingFingerprint(base), computeMeetingFingerprint(differentEnd), "a different end time/duration must change the fingerprint");
+    assert.notEqual(computeMeetingFingerprint(base), computeMeetingFingerprint(differentLocation), "a different location must change the fingerprint");
   }
 
   // --- Scoped to the authenticated owner: lookups never cross owners, even for the identical key string ---
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
-    const forOwnerA = await createMeetingIdempotently(store, NOW, { key: "shared-literal-key", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => interactions.createWithId(id, { owner: "A" }) });
+    const fingerprint = computeMeetingFingerprint(payload());
+    const forOwnerA = await createMeetingIdempotently(store, NOW, { key: "shared-literal-key", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => interactions.createWithId(id, payload()) });
     // Owner B uses the EXACT SAME key string, with DIFFERENT content --
     // must be treated as a brand-new, independent save, never see or
     // collide with owner A's record.
-    const differentFingerprint = computeMeetingFingerprint({ donorId: "d9", type: "call", occurredAt: 9999, allDay: false, allDayDate: null, summary: "Totally different" });
-    const forOwnerB = await createMeetingIdempotently(store, NOW, { key: "shared-literal-key", ownerUserId: "owner-B", fingerprint: differentFingerprint, createInteraction: (id) => interactions.createWithId(id, { owner: "B" }) });
+    const differentFingerprint = computeMeetingFingerprint(payload({ donorId: "d9", type: "call", occurredAt: 9999, endAt: 9999, summary: "Totally different" }));
+    const forOwnerB = await createMeetingIdempotently(store, NOW, { key: "shared-literal-key", ownerUserId: "owner-B", fingerprint: differentFingerprint, createInteraction: (id) => interactions.createWithId(id, payload({ donorId: "d9", type: "call", occurredAt: 9999, endAt: 9999, summary: "Totally different" })) });
     assert.equal(forOwnerA.outcome, "created");
     assert.equal(forOwnerB.outcome, "created", "a different owner using the identical key string must never see owner A's record as a conflict or a replay");
     assert.notEqual(forOwnerB.interactionId, forOwnerA.interactionId);
@@ -114,7 +139,7 @@ async function run() {
 
   // --- Lost race against a concurrent identical save: both callers converge on the SAME winning record ---
   {
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
+    const fingerprint = computeMeetingFingerprint(payload());
     class RacyStore extends FakeKeyStore {
       async save(record) {
         // Simulate: by the time this "insert" actually lands, a concurrent
@@ -125,7 +150,7 @@ async function run() {
     }
     const store = new RacyStore();
     const interactions = new FakeInteractionsTable();
-    const result = await createMeetingIdempotently(store, NOW, { key: "race-key", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => interactions.createWithId(id, {}) });
+    const result = await createMeetingIdempotently(store, NOW, { key: "race-key", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => interactions.createWithId(id, payload()) });
     assert.equal(result.outcome, "replayed", "losing a creation race against an identical concurrent request must defer to the winner, not error out");
     assert.equal(result.interactionId, "int-winner");
   }
@@ -148,8 +173,8 @@ async function run() {
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
-    const request = { key: "concurrent-key", ownerUserId: "owner-A", fingerprint, createInteraction: (candidateId) => interactions.createWithId(candidateId, { donorId: "d1" }) };
+    const fingerprint = computeMeetingFingerprint(payload());
+    const request = { key: "concurrent-key", ownerUserId: "owner-A", fingerprint, createInteraction: (candidateId) => interactions.createWithId(candidateId, payload()) };
 
     const [resultA, resultB] = await Promise.all([createMeetingIdempotently(store, NOW, request), createMeetingIdempotently(store, NOW, request)]);
 
@@ -163,8 +188,8 @@ async function run() {
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
-    const request = { key: "concurrent-key-wide", ownerUserId: "owner-A", fingerprint, createInteraction: (candidateId) => interactions.createWithId(candidateId, {}) };
+    const fingerprint = computeMeetingFingerprint(payload());
+    const request = { key: "concurrent-key-wide", ownerUserId: "owner-A", fingerprint, createInteraction: (candidateId) => interactions.createWithId(candidateId, payload()) };
     const results = await Promise.all(Array.from({ length: 8 }, () => createMeetingIdempotently(store, NOW, request)));
     assert.equal(interactions.rows.size, 1, "8 truly simultaneous identical save attempts must still persist exactly one interaction row");
     const ids = new Set(results.map((r) => r.interactionId));
@@ -178,10 +203,10 @@ async function run() {
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const fpA = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting with Donor A" });
-    const fpB = computeMeetingFingerprint({ donorId: "d2", type: "meeting", occurredAt: 6000, allDay: false, allDayDate: null, summary: "Meeting with Donor B" });
-    const requestA = { key: "conflicting-key", ownerUserId: "owner-A", fingerprint: fpA, createInteraction: (id) => interactions.createWithId(id, { donorId: "d1" }) };
-    const requestB = { key: "conflicting-key", ownerUserId: "owner-A", fingerprint: fpB, createInteraction: (id) => interactions.createWithId(id, { donorId: "d2" }) };
+    const fpA = computeMeetingFingerprint(payload({ summary: "Meeting with Donor A" }));
+    const fpB = computeMeetingFingerprint(payload({ donorId: "d2", occurredAt: 6000, summary: "Meeting with Donor B" }));
+    const requestA = { key: "conflicting-key", ownerUserId: "owner-A", fingerprint: fpA, createInteraction: (id) => interactions.createWithId(id, payload({ summary: "Meeting with Donor A" })) };
+    const requestB = { key: "conflicting-key", ownerUserId: "owner-A", fingerprint: fpB, createInteraction: (id) => interactions.createWithId(id, payload({ donorId: "d2", occurredAt: 6000, summary: "Meeting with Donor B" })) };
 
     const [resultA, resultB] = await Promise.all([createMeetingIdempotently(store, NOW, requestA), createMeetingIdempotently(store, NOW, requestB)]);
 
@@ -196,9 +221,8 @@ async function run() {
   {
     const store = new FakeKeyStore();
     const interactions = new FakeInteractionsTable();
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
-    const requestA = { key: "shared-key-concurrent", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => interactions.createWithId(id, { owner: "A" }) };
-    const requestB = { key: "shared-key-concurrent", ownerUserId: "owner-B", fingerprint, createInteraction: (id) => interactions.createWithId(id, { owner: "B" }) };
+    const requestA = { key: "shared-key-concurrent", ownerUserId: "owner-A", fingerprint: computeMeetingFingerprint(payload({ summary: "Owner A's meeting" })), createInteraction: (id) => interactions.createWithId(id, payload({ summary: "Owner A's meeting" })) };
+    const requestB = { key: "shared-key-concurrent", ownerUserId: "owner-B", fingerprint: computeMeetingFingerprint(payload({ summary: "Owner B's meeting" })), createInteraction: (id) => interactions.createWithId(id, payload({ summary: "Owner B's meeting" })) };
 
     const [resultA, resultB] = await Promise.all([createMeetingIdempotently(store, NOW, requestA), createMeetingIdempotently(store, NOW, requestB)]);
 
@@ -222,18 +246,26 @@ async function run() {
   // (`INSERT ... ON CONFLICT(id) DO NOTHING`), not merely because of how
   // this fake's JS happens to be scheduled.
   // =========================================================================
-  {
+  function sqliteInteractionsTable() {
     const db = new DatabaseSync(":memory:");
-    db.exec("CREATE TABLE interactions (id TEXT PRIMARY KEY, donor_id TEXT)");
-    const createWithId = async (candidateId, payload) => {
-      const result = db.prepare("INSERT INTO interactions (id, donor_id) VALUES (?, ?) ON CONFLICT(id) DO NOTHING").run(candidateId, payload.donorId ?? null);
-      const changes = Number(result.changes);
-      return { id: candidateId, created: changes === 1 };
+    db.exec("CREATE TABLE interactions (id TEXT PRIMARY KEY, donor_id TEXT, type TEXT, occurred_at INTEGER, all_day INTEGER, all_day_date TEXT, end_at INTEGER, location TEXT, summary TEXT)");
+    const toFields = (row) => ({ donorId: row.donor_id, type: row.type, occurredAt: row.occurred_at, allDay: Boolean(row.all_day), allDayDate: row.all_day_date, endAt: row.end_at, location: row.location, summary: row.summary });
+    const createWithId = (candidateId, meetingPayload) => {
+      const insertResult = db
+        .prepare("INSERT INTO interactions (id, donor_id, type, occurred_at, all_day, all_day_date, end_at, location, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
+        .run(candidateId, meetingPayload.donorId, meetingPayload.type, meetingPayload.occurredAt, meetingPayload.allDay ? 1 : 0, meetingPayload.allDayDate, meetingPayload.endAt, meetingPayload.location, meetingPayload.summary);
+      const created = Number(insertResult.changes) === 1;
+      const row = db.prepare("SELECT * FROM interactions WHERE id = ?").get(candidateId);
+      return Promise.resolve({ id: candidateId, created, persistedFields: toFields(row) });
     };
+    return { db, createWithId };
+  }
 
+  {
+    const { db, createWithId } = sqliteInteractionsTable();
     const store = new FakeKeyStore();
-    const fingerprint = computeMeetingFingerprint({ donorId: "d1", type: "meeting", occurredAt: 5000, allDay: false, allDayDate: null, summary: "Meeting" });
-    const request = { key: "sqlite-concurrent-key", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => createWithId(id, { donorId: "d1" }) };
+    const fingerprint = computeMeetingFingerprint(payload());
+    const request = { key: "sqlite-concurrent-key", ownerUserId: "owner-A", fingerprint, createInteraction: (id) => createWithId(id, payload()) };
 
     const [resultA, resultB] = await Promise.all([createMeetingIdempotently(store, NOW, request), createMeetingIdempotently(store, NOW, request)]);
 
@@ -241,6 +273,96 @@ async function run() {
     assert.equal(rowCount, 1, "exactly one row must be persisted in the REAL SQLite table for two truly simultaneous identical save attempts");
     assert.equal(resultA.interactionId, resultB.interactionId);
     assert.ok((resultA.outcome === "created" && resultB.outcome === "replayed") || (resultA.outcome === "replayed" && resultB.outcome === "created"));
+  }
+
+  // =========================================================================
+  // Bug 1 (2026-10-20 independent review): "conflicting saves can mismatch
+  // the saved meeting and idempotency record." Exact reproduction: request
+  // A's create-or-find writes meeting A's content and then pauses before
+  // returning; request B (same owner/key, DIFFERENT fingerprint) runs its
+  // own create-or-find, finds A's already-persisted content, and (pre-fix)
+  // reported "replayed" using B's OWN fingerprint -- leaving the persisted
+  // meeting as A's content but the idempotency record pointing at
+  // fingerprint B. Checks ACTUAL PERSISTED CONTENT and BOTH responses, not
+  // just outcome strings. Run against both the in-memory and SQLite
+  // interactions tables.
+  // =========================================================================
+  for (const useSqlite of [false, true]) {
+    const { table, getPersisted } = useSqlite
+      ? (() => {
+          const { db, createWithId } = sqliteInteractionsTable();
+          return { table: { createWithId }, getPersisted: (id) => db.prepare("SELECT * FROM interactions WHERE id = ?").get(id) };
+        })()
+      : (() => {
+          const fake = new FakeInteractionsTable();
+          return { table: fake, getPersisted: (id) => fake.rows.get(id) };
+        })();
+
+    const store = new FakeKeyStore();
+    const key = "shared-key";
+    const ownerUserId = "owner-A";
+    const payloadA = payload({ summary: "Meeting A", donorId: "donor-A" });
+    const payloadB = payload({ summary: "Meeting B", donorId: "donor-B" });
+    const fingerprintA = computeMeetingFingerprint(payloadA);
+    const fingerprintB = computeMeetingFingerprint(payloadB);
+    const candidateId = deriveInteractionIdForKey(ownerUserId, key);
+
+    // Request A's create-or-find: writes meeting A's content immediately,
+    // but the call back to createMeetingIdempotently is held open
+    // (deferred) until resumed explicitly below -- modeling "pauses
+    // before returning" from the exact reproduction.
+    const deferredA = createDeferred();
+    let aHasWritten = false;
+    const requestA = {
+      key,
+      ownerUserId,
+      fingerprint: fingerprintA,
+      createInteraction: async (id) => {
+        const result = await table.createWithId(id, payloadA);
+        aHasWritten = true;
+        await deferredA.promise; // pause here -- the write already landed, the call just hasn't returned yet
+        return result;
+      },
+    };
+    const attemptA = createMeetingIdempotently(store, NOW, requestA);
+
+    // Let A's write actually land before B starts (reproduces "its
+    // createInteraction(candidateId) atomically inserts meeting A, then
+    // pauses before returning").
+    while (!aHasWritten) await new Promise((resolve) => setImmediate(resolve));
+
+    // Request B: same owner/key, DIFFERENT fingerprint. Its own
+    // create-or-find finds A's already-persisted content.
+    const requestB = { key, ownerUserId, fingerprint: fingerprintB, createInteraction: (id) => table.createWithId(id, payloadB) };
+    const resultB = await createMeetingIdempotently(store, NOW + 1, requestB);
+
+    // THE FIX: B must detect that the persisted content (A's) doesn't
+    // match what B asked for, and must report "conflict" -- never
+    // "replayed" for content that was never actually saved for B.
+    assert.equal(resultB.outcome, "conflict", `[sqlite=${useSqlite}] B must see a conflict -- the persisted content belongs to A's request, not B's`);
+
+    // B must NOT have saved an idempotency record at all (never with its
+    // own mismatched fingerprint).
+    const keyRecordAfterB = await store.find(ownerUserId, key);
+    assert.equal(keyRecordAfterB, null, `[sqlite=${useSqlite}] B's conflict must never result in a saved idempotency record`);
+
+    // Resume A.
+    deferredA.resolve();
+    const resultA = await attemptA;
+    assert.equal(resultA.outcome, "created", `[sqlite=${useSqlite}] A, whose content actually matches what was persisted, must succeed`);
+    assert.equal(resultA.interactionId, candidateId);
+
+    // Final state must be fully consistent: the persisted meeting is A's
+    // content, AND the idempotency record's fingerprint is A's -- never a
+    // B-fingerprint pointing at A's content (the exact bug).
+    const persisted = getPersisted(candidateId);
+    assert.ok(persisted, `[sqlite=${useSqlite}] the interaction must actually exist`);
+    const persistedSummary = useSqlite ? persisted.summary : persisted.summary;
+    assert.equal(persistedSummary, "Meeting A", `[sqlite=${useSqlite}] the actually persisted content must be A's, never B's`);
+    const keyRecordFinal = await store.find(ownerUserId, key);
+    assert.ok(keyRecordFinal, `[sqlite=${useSqlite}] the idempotency record must exist after A completes`);
+    assert.equal(keyRecordFinal.fingerprint, fingerprintA, `[sqlite=${useSqlite}] the saved fingerprint must match the ACTUAL persisted content (A's), never a mismatched one`);
+    assert.equal(keyRecordFinal.interactionId, candidateId);
   }
 
   // --- MeetingCreateKeySession: retains the key across retries, rotates only after success ---

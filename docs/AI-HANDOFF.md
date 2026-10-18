@@ -52960,3 +52960,85 @@ schema).
 independent re-review before any route wiring, live Google setup,
 migration, or deployment.** `main`/Production/Staging untouched by
 this round.
+
+### 2 more reproducible bugs found and fixed (2026-10-20) -- STILL NOT WIRED, AWAITING RE-REVIEW
+
+Independent execution of commit `1fdba7d` found two further real bugs in
+the isolated sync core. Both are fixed, each with new regression tests
+proving the fix against both stores. For Bug 1, the exact
+deferred-ordering reproduction was written and run against the prior
+(unfixed) code first and confirmed to fail with the exact mismatch
+described, then fixed. For Bug 2, the store-interface change and
+reconciler changes were designed together before any new test ran
+(the fix spans the interface and three call sites that needed to agree
+in the same pass), then the new tests were run against the fixed code
+and confirmed to exercise the exact reproduction end to end. Full
+detail, including explicit retractions, is in
+`docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md`'s new "2026-10-20
+independent review" section. Still design/isolated-core only -- no live
+Google call, OAuth setup, credential, remote migration, route/cron
+wiring, or deployment.
+
+**Claim retracted, stated plainly**: the 2026-10-19 fix's "the database's
+own primary-key constraint is now the real guarantee" for Capture
+idempotency was true for preventing duplicate ROWS, but silently
+incomplete -- it never checked whether a concurrent caller's own
+fingerprint matched what actually got persisted at that id before
+treating a found-existing result as a safe replay. That gap is Bug 1.
+
+**1. Conflicting saves could mismatch the saved meeting and idempotency
+record** (`lib/calendar/meeting-create-idempotency.ts`): request A
+inserts meeting A then pauses before returning; request B (same
+owner/key, different fingerprint) finds A's row via create-or-find and
+saves the idempotency record FIRST with its own fingerprint, reporting
+"replayed"; A resumes, loses the save race, and reports "conflict" --
+persisted state was meeting A, but the saved fingerprint was B's. Fixed
+by verifying ACTUAL persisted content (not just id/created) against the
+caller's own requested fingerprint before ever saving the idempotency
+record -- a mismatch is now always `conflict`, never a false "replayed."
+The fingerprint was also widened to include `endAt`/`location`, which
+were previously omitted. Proven with the review's exact deferred-
+ordering reproduction, checking both the actual persisted content and
+both callers' responses, against the in-memory fake and a real
+SQLite-backed `interactions` table.
+
+**2. A crash between link creation and history creation left an
+unrecoverable enrollment** (`lib/calendar/calendar-sync-reconciler.ts` +
+`lib/calendar/calendar-sync-types.ts` + both store implementations):
+`enrollMeetingForSync` inserted the link row; a crash before the
+generation-0 history row existed left a retry returning `null` without
+repairing anything; a later reconcile's history updates silently
+affected zero rows; cancel + reconcile again found no history, reported
+`not_needed`, and cancellation failed without ever sending a Google
+DELETE. Fixed in three layers: new enrollments now insert the link and
+generation-0 history together as one atomic unit
+(`insertLinkWithHistory`); a new self-healing `ensureHistory` primitive
+repairs a missing history row both at enrollment-retry time and as a
+universal backstop inside `reconcilePresentAbsent` itself (so a sweep
+reaching a broken link through any entry point still self-heals); and
+cleanup now treats a missing history row it reaches as the integrity gap
+to repair, never a legitimate no-op, since it is only ever reached when
+cleanup is already known to be warranted. The same atomic fix was
+applied to `recordReopen`'s `applyReopen`, which now bumps the
+generation and inserts the new generation's history row together in one
+transaction. Proven against both stores: the exact reproduction through
+enrollment-retry repair; the same corruption reconciled with no
+enrollment retry (proving the backstop alone); `insertLinkWithHistory`'s
+own atomicity on a rejected enrollment; `applyReopen`'s atomicity across
+several sequential reopens; and a multi-generation scenario where an
+older generation's separately-corrupted history still self-heals and
+its cleanup still sends a real Google DELETE (checked via the scripted
+client's call log, not just the returned outcome), while a newer,
+just-created generation is never touched.
+
+**Checks**: 224/224 test files pass (10 calendar test files, including
+the new `tests/calendar-sync-regression-2026-10-20.test.mjs`, registered
+in `scripts/run-tests.mjs`); `tsc --noEmit` clean; lint unchanged from
+baseline (94 errors, 46 warnings); `npm run build` succeeds. The D1
+main-sync check shows the same expected, unrelated drift as both prior
+rounds (this round touched no schema).
+
+**Status: 2 more reproduced bugs fixed and regression-tested, awaiting
+independent re-review before any route wiring, live Google setup,
+migration, or deployment.** `main`/Production/Staging untouched by
+this round.

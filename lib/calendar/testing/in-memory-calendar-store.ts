@@ -9,7 +9,9 @@
 // tests/calendar-sync-sqlite-store.test.mjs for the persistence-level
 // proof that a real SQL schema enforces the same guarantees.
 
+import { randomUUID } from "node:crypto";
 import type { CalendarLinkHistoryRow, CalendarLinkRow, CalendarLinkStore } from "../calendar-sync-types.ts";
+import { deriveGoogleEventId } from "../calendar-event-id.ts";
 
 export class InMemoryCalendarStore implements CalendarLinkStore {
   private links = new Map<string, CalendarLinkRow>();
@@ -30,6 +32,27 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     const full: CalendarLinkRow = { ...row, createdAt: now, updatedAt: now };
     this.links.set(full.id, full);
     return { ...full };
+  }
+
+  // Bug 2 (2026-10-20 review): both writes happen synchronously, with no
+  // `await` between them -- the same atomicity a real single SQL
+  // transaction provides, not an accident of JS's single thread. If the
+  // link insert is rejected (interaction already enrolled), the history
+  // insert never happens at all; there is no way to observe one without
+  // the other.
+  async insertLinkWithHistory(row: Omit<CalendarLinkRow, "createdAt" | "updatedAt">, now: number): Promise<CalendarLinkRow | null> {
+    const link = await this.insertLink(row, now);
+    if (!link) return null;
+    await this.insertHistory({ id: randomUUID(), linkId: link.id, generation: 0, googleEventId: deriveGoogleEventId(link.interactionId, 0), createStatus: "not_attempted", cleanupNeeded: false, cleanupStatus: "not_needed", cleanupAttempts: 0 }, now);
+    return link;
+  }
+
+  async ensureHistory(linkId: string, generation: number, googleEventId: string, now: number, cleanupNeeded = false): Promise<CalendarLinkHistoryRow> {
+    const existing = this.history.get(`${linkId}:${generation}`);
+    if (existing) return { ...existing };
+    const created: CalendarLinkHistoryRow = { id: randomUUID(), linkId, generation, googleEventId, createStatus: "not_attempted", cleanupNeeded, cleanupStatus: "not_needed", cleanupAttempts: 0, createdAt: now, updatedAt: now };
+    this.history.set(`${linkId}:${generation}`, created);
+    return { ...created };
   }
 
   async acquireLease(linkId: string, leaseOwner: string, now: number, ttlSeconds: number): Promise<boolean> {
@@ -92,6 +115,9 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     return { ...link };
   }
 
+  // Bug 2 (2026-10-20 review): the generation bump AND the new
+  // generation's history insert happen in the same synchronous unit --
+  // never observable with the link advanced but the history missing.
   async applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null> {
     const link = this.links.get(linkId);
     if (!link) return null;
@@ -104,6 +130,7 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     link.lastError = null;
     link.attemptCount = 0;
     link.updatedAt = now;
+    this.history.set(`${linkId}:${link.generation}`, { id: randomUUID(), linkId, generation: link.generation, googleEventId: deriveGoogleEventId(link.interactionId, link.generation), createStatus: "not_attempted", cleanupNeeded: false, cleanupStatus: "not_needed", cleanupAttempts: 0, createdAt: now, updatedAt: now });
     return { ...link };
   }
 

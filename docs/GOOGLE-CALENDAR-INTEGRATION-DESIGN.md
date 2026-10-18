@@ -1200,3 +1200,167 @@ proven through directly-orchestrated interleavings at the reconciler/
 store level -- a different, in some respects stronger (it can force
 exact adversarial orderings a live system might rarely hit), but not
 identical guarantee to a live production run.
+
+## 2026-10-20 independent review: 2 more bugs found and fixed
+
+Independent execution of commit `1fdba7d` found two further reproducible
+bugs in the isolated sync core, both now fixed, with new regression
+tests proving each fix. New file
+`tests/calendar-sync-regression-2026-10-20.test.mjs` (registered in
+`scripts/run-tests.mjs`); updates to
+`lib/calendar/meeting-create-idempotency.ts`,
+`lib/calendar/calendar-sync-types.ts`,
+`lib/calendar/calendar-sync-reconciler.ts`, and both store
+implementations (`lib/calendar/testing/in-memory-calendar-store.ts`,
+`lib/calendar/testing/sqlite-calendar-store.ts`); and a full rewrite of
+`tests/calendar-capture-idempotency.test.mjs` to carry real persisted-
+content checks instead of only id/created booleans. Still design/
+isolated-core only -- no live Google call, OAuth setup, credential,
+remote migration, route/cron wiring, or deployment.
+
+Honesty note on process: both fixes were derived directly from the
+review's own precise reproduction steps. For Bug 1, the regression test
+(the exact deferred-ordering reproduction) was written and run against
+the PRIOR (unfixed) `createMeetingIdempotently` first, confirmed to fail
+with the exact mismatch the review described, and only then fixed. For
+Bug 2, the store-interface change (`insertLinkWithHistory`/
+`ensureHistory`) and the reconciler changes were designed together
+before any new test ran, since the fix spans the interface and three
+call sites that all needed to agree in the same pass; the new tests were
+then run against the fixed code and confirmed to exercise the exact
+reproduction (crash-simulated link-without-history, retry-repair,
+reconcile, cancel, and a real Google DELETE on final cleanup) rather
+than being adjusted to merely pass.
+
+### Claims retracted from the 2026-10-19 section above
+
+- The idempotency fix's "the real duplicate-prevention guarantee is now
+  the interaction table's own primary-key constraint" claim is still
+  true for PREVENTING duplicate rows, but was silently incomplete: it
+  never addressed what happens when a concurrent caller's OWN fingerprint
+  doesn't match whatever ended up persisted at that id. A found-existing
+  result was treated as a safe "replayed" outcome based solely on
+  `created: false`, never on whether the content actually matches. That
+  gap is exactly Bug 1 below -- **retracted as an implicit "fully solved"
+  claim**; the create-or-find contract described in that section is
+  necessary but was not, by itself, sufficient.
+- Nothing in the 2026-10-19 section described `enrollMeetingForSync` or
+  `recordReopen` as crash-safe across their own multiple persistence
+  steps, so there is no specific claim to retract there; Bug 2 is a new
+  finding, not a correction of an overstated one. It is called out here
+  only so a future reader does not mistake the 2026-10-19 "Checks run"
+  line's clean bill of health as having covered this.
+
+Everything else in the 2026-10-18 and 2026-10-19 sections above (event-id
+derivation, event-body construction, the guard matrix, the 409-verify-
+content path, `missing_remotely` detection, lifecycle rules, sweep/agenda
+independence, and the four 2026-10-19 fixes themselves) was not
+implicated by this review and stands as previously proven.
+
+### The two bugs, and the fix for each
+
+**1. Conflicting saves can mismatch the saved meeting and idempotency
+record** (`lib/calendar/meeting-create-idempotency.ts`). The exact review
+reproduction: request A (fingerprint A) atomically inserts meeting A via
+`createInteraction`, then pauses before returning; request B (same
+owner/key, fingerprint B) runs its create-or-find, finds A's row,
+`created=false`; B saves the idempotency record FIRST, with its OWN
+fingerprint B, and reports "replayed"; A resumes, loses the key-record
+save race, and reports "conflict." Persisted state: meeting A, but
+idempotency fingerprint B -- B received a success response for content
+that was never actually saved. **Fixed** by making content verification,
+not merely row existence, the gate before ever calling `store.save()`:
+`createInteraction` now returns `persistedFields` alongside `id`/
+`created`, and `createMeetingIdempotently` computes the fingerprint of
+what was ACTUALLY persisted (whether by this call or a concurrent
+winner) and compares it to the caller's own requested fingerprint before
+treating the outcome as a safe replay -- a mismatch is now always
+reported as `conflict`, never a false "replayed." The fingerprint itself
+was also widened to include `endAt` and `location` (previously missing,
+so two meetings differing only in end time or location could have
+collided under the same fingerprint). Proven with the review's exact
+deferred-ordering reproduction (A's write completes, is detected via a
+polling wait, B runs to completion while A is still suspended, A then
+resumes), checking BOTH the actual persisted row content and both
+callers' responses, against the in-memory fake and a real SQLite-backed
+`interactions` table.
+
+**2. A crash between link creation and history creation leaves an
+unrecoverable enrollment** (`lib/calendar/calendar-sync-reconciler.ts`,
+`lib/calendar/calendar-sync-types.ts`, both store implementations). The
+exact review reproduction: `enrollMeetingForSync` inserts
+`calendar_event_links`; a crash/error in `insertHistory` leaves
+generation 0 with no history row; a retry finds the existing link and
+returns `null` without repairing history; a reconcile does GET (404) then
+INSERT (succeeds), but the history update silently affects zero rows
+(no history row to update); cancel, then reconcile again; cleanup cannot
+find history, reports `not_needed`, and cancellation fails WITHOUT ever
+sending a Google DELETE. **Fixed** in three layers: (a) new enrollments
+go through `store.insertLinkWithHistory`, inserting the link and
+generation-0 history together as one atomic unit (a single SQL
+transaction for the SQLite store; a single uninterrupted synchronous
+operation for the in-memory store) -- a crash between the two writes can
+no longer happen going forward; (b) a NEW self-healing primitive,
+`store.ensureHistory`, repairs a missing history row idempotently
+wherever one is found -- called at enrollment-retry time (repairing
+pre-existing/legacy inconsistencies without blocking on which caused
+them), and again as a universal backstop inside
+`reconcilePresentAbsent`'s own present-state path, unconditionally,
+before its first network call -- so a sweep that reaches a broken link
+through any entry point still self-heals, not only one that happens to
+retry enrollment first; (c) `reconcileGenerationCleanupLocked` now
+treats a missing history row as the Bug 2 integrity gap to repair (via
+`ensureHistory`, with `cleanupNeeded=true`) rather than an ordinary "no
+history exists, so nothing to do" -- this function is only ever reached
+when the caller already knows cleanup is warranted (either
+`reconcileDeleteCurrentGeneration`, or the sweep's own
+`listPendingCleanup`, which can only return rows that already carry
+`cleanup_needed=1`), so a null history row reaching it can only mean the
+integrity gap, never a legitimate no-op. The same atomicity fix was
+applied to `recordReopen`: `applyReopen` now bumps the generation AND
+inserts the new generation's history row together in one transaction
+(reading back the freshly-allocated generation number mid-transaction
+for the real store, to compute the new history row's event id), closing
+the same crash class the review called out for reopen specifically.
+Proven against BOTH stores: the exact reproduction through
+enrollment-retry repair; the same corrupted state reconciled WITHOUT an
+enrollment retry first (proving the backstop inside
+`reconcilePresentAbsent` itself, independent of entry point);
+`insertLinkWithHistory`'s own atomicity (a rejected second enrollment for
+an already-linked interaction leaves no orphaned history row);
+`applyReopen`'s atomicity across several sequential reopens (every
+generation's history row exists immediately, with no intervening step
+for a crash to land in); and a multi-generation scenario proving an
+older generation's separately-corrupted history still self-heals and its
+cleanup still completes (a real Google DELETE is sent, checked via the
+scripted client's own call log, not only the returned outcome), while a
+newer, just-created generation's own event is never touched by that
+cleanup.
+
+### Checks run
+
+224 test files pass (`npm test`), including all 10 calendar test files
+(the new `calendar-sync-regression-2026-10-20.test.mjs` is registered in
+`scripts/run-tests.mjs`); `tsc --noEmit` clean; `npm run lint` unchanged
+from the established baseline (94 errors, 46 warnings); `npm run build`
+succeeds. The D1 restore/schema main-sync check against `origin/main`
+shows the same expected, unchanged drift as both prior rounds (migration
+0048's tables still aren't known to `main`'s own tracking) -- unrelated
+to this round's fixes, which touched no schema.
+
+### What remains honestly unproven (unchanged from the prior rounds)
+
+This round fixed two more logic bugs in the sync core; it did not
+reduce or increase what still depends on live Google testing, which
+remains exactly as scoped in "Implementation status" above: real
+`calendar.events.owned` permission coverage, real `If-Match`/ETag
+behavior, real error-response shapes and network timing, the OAuth flow
+itself (still no Google Cloud project or credential exists), whether
+this exact event-id format is accepted by Google's live validation, and
+end-to-end behavior once wired into a real Cloudflare Workers runtime.
+All concurrency and crash-recovery properties proven across all three
+review rounds are proven through directly-orchestrated interleavings and
+directly-simulated persistence gaps at the reconciler/store level -- not
+an identical guarantee to a live production run, nor to a real D1
+instance's own transaction/crash semantics (only `node:sqlite` has been
+exercised).

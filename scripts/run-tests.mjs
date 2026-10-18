@@ -256,6 +256,7 @@ const TEST_FILES = [
   "tests/calendar-sync-guard.test.mjs",
   "tests/calendar-sync-reconciler.test.mjs",
   "tests/calendar-sync-regression-2026-10-19.test.mjs",
+  "tests/calendar-sync-regression-2026-10-20.test.mjs",
   "tests/calendar-sync-sqlite-store.test.mjs",
   "tests/calendar-capture-idempotency.test.mjs",
   "tests/calendar-sync-lifecycle.test.mjs",
