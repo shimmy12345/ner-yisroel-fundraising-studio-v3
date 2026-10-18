@@ -52609,3 +52609,117 @@ was created or touched.**
 Nothing implemented; no Google Cloud project, OAuth client, secret, or
 calendar event created; `main`/Production/Staging untouched by this
 investigation.
+
+### Revision -- concurrency, duplicate-prevention, and all-day storage reworked (2026-10-18) -- DESIGN ONLY, AWAITING RE-REVIEW
+
+Independent review found the first draft's concurrency/duplicate-
+prevention/cancellation mechanisms not concrete enough to implement
+safely, and an internal contradiction in the all-day-meeting storage
+design. Each issue was resolved concretely in
+`docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md` (fully rewritten), verified
+against **current official Google Calendar API documentation** (fetched
+live this round, cited inline in the doc -- not relied on from training
+knowledge alone). Still **design only**: no schema, code, OAuth client,
+secret, or calendar event created.
+
+- **Capture's missing request idempotency (Issue 1)**: confirmed
+  `POST /api/interactions` generates its id server-side, so a retry/
+  double-click can create two real `interactions` rows no
+  `calendar_event_links` constraint can undo. Fix: move id generation to
+  the client (one UUID per form-open, resent on every retry), route
+  becomes `INSERT ... ON CONFLICT(id) DO NOTHING` -- the exact
+  idempotent-upsert idiom already proven elsewhere in this codebase
+  (trip meetings, the outcome route's follow-up interaction), not a new
+  pattern.
+- **Durable sync, ordering, and crash recovery (Issue 2) -- the core
+  rework**: replaced "local compare-and-swap after `events.patch`" with
+  a desired-state/revision model (`desired_state`, `desired_revision`,
+  `synced_revision`, `google_etag`) reconciled by a durable,
+  lease-serialized sweep. **Verified live against Google's own current
+  docs**: `events.patch` does not document `If-Match` support and
+  Google's own reference recommends `get` then `update` instead -- this
+  design now uses `events.get` -> `events.update` with `If-Match`,
+  correcting the original draft's `events.patch` choice. The real
+  ordering guarantee is Google's own `412 Precondition Failed` on a
+  stale etag, not FOS's local database -- stated explicitly, per the
+  review's instruction not to claim local CAS alone guarantees remote
+  ordering. A 5-minute reconciliation Cron Trigger (new, separate from
+  the hourly agenda cron) plus a per-meeting lease (`lease_owner`/
+  `lease_expires_at`, TTL ~120s) give crash recovery: durable intent is
+  written atomically with the triggering `interactions` write, so a
+  Worker crash mid-sync is caught by the next sweep, never lost.
+- **Cancellation/reopening and Google-side tombstones (Issue 3)**:
+  verified live that Google permanently blocks reinserting a deleted
+  event's id (`409`, confirmed via Google's own error-handling guide and
+  a Calendar API client issue report) -- exactly the risk the review
+  flagged. Fix: a `generation` counter on the (never-deleted)
+  `calendar_event_links` row; the Google event id is derived from
+  `(interaction_id, generation)`, so a reopen bumps the generation and
+  uses a brand-new id, never reinserting the old tombstoned one. A new
+  append-only `calendar_event_link_history` table retains a full
+  durable audit trail across generations. Ambiguous-timeout-during-
+  cancel and repeated-cancel are both handled as pure idempotent
+  re-attempts of the same `desired_state='absent'` reconcile.
+- **Verified account and real disconnect (Issue 4)**: connection status
+  is now resolved by calling Google's own identity endpoint (standard
+  `openid`/`userinfo.email` scopes, re-checked on every sync attempt,
+  not a typed Settings label) and a hard guard refuses every Production
+  sync whose verified account isn't exactly `sgoldstein@nirc.edu`'s
+  primary calendar. A new persisted `users.calendar_sync_enabled`
+  boolean, checked at every call site (not just hidden in the Settings
+  UI), is the real "Disconnect" -- clearing a display label alone no
+  longer does anything. Credentials remain server-side-only Worker
+  secrets, same as Gmail, with a dedicated safety test planned mirroring
+  `tests/agenda-safety.test.mjs`.
+- **All-day storage contradiction (Issue 5) resolved**: the original
+  draft's §3.5 and §5.2 disagreed about where an all-day meeting's date
+  actually lives. Fixed by adding a dedicated `all_day_date` (`'YYYY-
+  MM-DD'` string, never an epoch) as the sole source of truth -- applying
+  the exact lesson from this same session's own Meeting Prep date-only
+  bug fix earlier today, deliberately not repeating that bug class here.
+  `occurredAt` stays populated for compatibility with every existing
+  display path but is now explicitly documented as a derived value the
+  calendar-sync layer never reads for an all-day meeting. Verified
+  Google's `end.date` is documented as exclusive; confirmed `timeZone`
+  only applies to the `dateTime` form. Mirrored onto `trip_prospects`
+  the same way `meeting_location` already is.
+- **Permissions and Staging (Issue 6)**: verified live that
+  `calendar.events.owned` ("events only on calendars the user owns") is
+  sufficient and strictly narrower than the originally-proposed
+  `calendar.events` -- scope recommendation revised down. Staging now
+  requires an explicit `CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID`
+  (non-secret var) and the guard unconditionally refuses `calendarId ==
+  "primary"` on Staging, plus refuses if Staging's verified account
+  identity ever happens to equal the real owner's -- even with the
+  Staging opt-in enabled, even if Production secrets were accidentally
+  copied over.
+- **Existing meetings vs. Google-side edits (Issue 7)**: retrying an
+  already-enrolled failed sync and enrolling a previously-unsynced
+  meeting are now explicitly distinct operations (the latter stays
+  never-automatic). A manual Google-side delete of an FOS-created event
+  is detected (via the `get` every reconcile already starts with) and
+  produces a new `missing_remotely` status with an explicit Recreate
+  action -- **never a silent automatic recreation**. A manual Google-side
+  edit with no pending FOS change is left untouched indefinitely; FOS's
+  own next legitimate change still wins on its next push, consistent
+  with the existing one-way-sync disclosure.
+- **Defaults firmed up, per instruction**: 30-minute editable default
+  duration; manual-only location entry with an explicit one-click
+  donor-address-fill button (never automatic); all-day scheduling
+  supported in both Capture and Trip Planning; single-donor meetings
+  only for v1; no automatic enrollment of existing meetings, confirmed
+  firm rather than reopened as a question. Only two genuinely
+  irreducible open items remain (the owner must physically create a
+  disposable Staging test calendar; whether a later "enroll existing
+  meetings" action is wanted at all for the backlog) -- every other
+  owner-question from the first draft was converted to a concrete
+  recommendation.
+- **17-row failure-scenario acceptance-test table and a 14-step
+  implementation sequence** added (`docs/GOOGLE-CALENDAR-INTEGRATION-
+  DESIGN.md` sections 13-14), plus a Google Cloud/OAuth setup checklist
+  kept fully separate from the architecture sections (section 12).
+
+**Status: design revision complete, awaiting independent re-review.**
+Nothing implemented; no Google Cloud project, OAuth client, secret,
+calendar event, or deployment created; `main`/Production/Staging
+untouched by this round.
