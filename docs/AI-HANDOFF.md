@@ -55636,3 +55636,105 @@ dispatched, this agent will inspect the actual run results and record
 them here with the real evidence (exact commands, target database,
 before/after counts, schema/restore results, temporary-database
 cleanup, and any unresolved issue), per the owner's own instruction.
+
+## 2026-10-19 (ninth follow-up review): the ACTUAL dispatch was attempted and failed cleanly during target validation -- a real `d1 info` CLI-argument bug, fixed and re-verified; still not successfully applied
+
+**Scope of this round**: the owner actually dispatched
+`apply-0049-calendar-schema-repair-staging` for the first time this
+round (run `39298894750`, against commit `66f6052`). It failed --
+**before any backup or mutation, exactly as the gated design intends on
+a pre-repair failure** -- with a real, concrete CLI-argument bug, which
+this round found the exact cause of, fixed, and re-verified. **Staging
+remains completely unchanged. No recovery action was needed or taken.
+Repair SQL unchanged. No change to `main`, no credential handled by
+this agent, no OAuth, no live Google call, no merge.**
+
+### What the actual run proved, inspected directly via its own job page
+
+[Run 39298894750](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39298894750)
+(`apply-0049-calendar-schema-repair-staging` job, `118218559974`) --
+**failed in 28s**, during the "Apply the reviewed Calendar schema
+repair to Staging" step, at target validation:
+```
+Resolving the target database id via the wrangler CLI (d1 info)...
+ABORTED during phase "target-validation": wrangler d1 info fundraising-os-staging-db --remote --config .../wrangler.staging-repair.jsonc --json failed:
+✘ [ERROR] Unknown argument: remote
+Nothing on Staging was touched -- this failed before the repair batch was ever attempted. Fix the cause above and re-run; no recovery action of any kind is needed.
+```
+This is also the first REAL confirmation, in an actual dispatched run
+(not a rehearsal), that the gated-dispatch mechanism and the phase-
+specific failure reporting built in prior rounds both work exactly as
+designed: the job's own three gates correctly let it run; the
+pre-existing `verify` job on this SAME run independently confirmed
+`skipped` (via the Actions API, not assumed) -- the two never ran
+together; and `describeFailure()`'s own `pre-repair-retention`-style
+"nothing touched" message fired correctly for a REAL, non-synthetic
+failure, matching exactly what the offline regression tests already
+predicted it would say.
+
+### Root cause and fix
+
+Wrangler 4.92.0's `d1 info` subcommand does not accept `--remote` at
+all -- confirmed directly against the pinned version's own `--help`:
+its epilogue reads "This command acts on remote D1 Databases"; it has
+no such flag to pass, and passing one anyway fails outright with
+"Unknown argument: remote". `scripts/lib/staging-repair-connect.mjs`
+had been written assuming `--remote` was required (true for `d1
+execute`/`d1 export`, false for `d1 info`/`d1 create`/`d1 delete`,
+which are always-remote by default). Re-checked every OTHER wrangler
+invocation in this execution path against the SAME pinned version's own
+`--help` output (`d1 execute`, `d1 export`, and -- via the pre-existing
+`scripts/verify-remote-restore.mjs` -- `d1 create`/`d1 delete`): all
+correct as written; only `d1 info` was wrong.
+
+**Fixed** (commit `7fa3abe`, re-pinned in `de172c9`'s successor commit
+`5f0ebf1`): removed `--remote` from the `d1 info` call. Extracted
+`buildD1InfoArgs()`/`buildSchemaRowsExecuteArgs()` as pure argv
+builders in `scripts/lib/staging-repair-connect.mjs`, so the exact
+arguments are now covered by a real regression
+(`tests/staging-repair-connect-args.test.mjs`, 3 cases) without
+spawning wrangler or touching the network at all. Target validation
+itself is **not weakened** -- the same two-independent-path (binding +
+CLI) cross-check and fail-closed behavior as before; only the one
+invalid flag was removed.
+
+### Checks run this round
+
+Local: 233/233 test files pass (up from 232 -- the one new offline
+file), `tsc --noEmit` clean, `eslint` unchanged from baseline,
+`tests/backup-automation.test.mjs` still passes against the re-pinned
+workflow file. The full Calendar/D1 Linux CI workflow re-ran clean on
+the fix: [run 39301059593](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39301059593)
+(commit `5f0ebf1`) -- **success**, all existing D1-only coverage
+(including the recovery rehearsal and three failure-injection cases)
+still passes unmodified. `scripts/check-main-restore-sync.mjs` still
+fails -- the same pre-existing, unrelated condition noted in every
+round since migration 0048 landed on this branch.
+
+### The repair migration SQL is unchanged
+
+Still hashes to `b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae`.
+Every bug found across this and the two prior rounds (the remote-
+binding gap, the backup-retention `set -uo pipefail` bug, and now this
+`d1 info` CLI-argument bug) has been in the Staging *execution wrapper*
+around the repair, never in the repair itself.
+
+### Not done, and not authorized beyond preparation this round
+
+**The repair has still not been successfully applied to Staging.** The
+one real dispatch attempt failed during read-only target validation,
+before any backup, any write, or any temporary scratch database --
+confirmed directly from the run's own log and the job's own
+`describeFailure()` output, not assumed. No recovery action was needed
+or taken, matching exactly what the owner's own report already
+concluded. No Production change, no change to `main`, no credential
+handled by this agent, no OAuth, no live Google call, no merge.
+
+**Stopping here for independent review before any further dispatch
+attempt.** The gated-dispatch mechanism and phase-specific failure
+reporting are now proven against a REAL run, not just a rehearsal; the
+one concrete bug that run surfaced is fixed, covered by a real
+regression, and re-pinned. Dispatch instructions are unchanged from the
+prior round's entry (workflow id `335671346`, `ref:
+feature/independent-cloudflare-sandbox`, `confirm_repair:
+APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING`).
