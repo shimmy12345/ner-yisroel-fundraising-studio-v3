@@ -54890,3 +54890,267 @@ unapplied; Staging is deployed and live-verified for the ordinary
 cancellation path this fix touches. No Production change, no credential
 of any kind, no OAuth setup, no live Google call, no Gmail/agenda-email
 change, no cron activation, no merge into `main`.
+
+## 2026-10-19 (fifth follow-up review): the Calendar schema repair rehearsed against real D1 -- the originally-proposed mechanism failed TWICE, corrected both times, now proven; NOT applied anywhere, Staging unchanged
+
+**Scope of this round, exactly as instructed**: rehearse
+`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`
+against a REAL local Workers/D1 database on Linux CI, correct it if D1's
+actual behavior required it, add a committed/repeatable rehearsal, and
+prepare (never execute) a concrete Staging-only application plan. **Do
+NOT apply the repair anywhere. Do not drop/rebuild remote tables, change
+`sqlite_schema`, or touch Production. No OAuth, credentials, live Google
+calls, email changes, cron activation, deployment, or merge into `main`
+this round.** All of that held: nothing in this round touched Staging,
+Production, or any remote database at all -- everything below ran
+against an ephemeral, `persist:false`/`remoteBindings:false` local D1 on
+GitHub's own Ubuntu CI runner.
+
+### The headline finding: the originally-proposed mechanism does not work on real D1, twice, for two independent reasons
+
+The prior round's draft used `PRAGMA foreign_keys=OFF` around a
+drop-and-rebuild of `calendar_event_links`/`calendar_event_link_history`,
+modeled on SQLite's own documented 12-step "complex schema change"
+procedure, and had only ever been tested against plain `node:sqlite` --
+never real D1. This round's job was to find out whether that actually
+holds up. It did not, in two separate ways, each caught by this
+rehearsal's own first real-D1 CI run for that version and fixed before
+the next one:
+
+1. **`PRAGMA foreign_keys=OFF` has no effect on D1 at all** (already
+   suspected going into this round, per the user's own instruction not to
+   rely on it) -- confirmed via research: D1 enforces foreign keys
+   unconditionally on every query. The documented SQLite alternative for
+   exactly this "temporarily violate an FK mid-rebuild" case is `PRAGMA
+   defer_foreign_keys = on`, deferring the check to the end of the current
+   transaction -- corrected to that first.
+2. **`PRAGMA defer_foreign_keys = on`, inside a single `db.batch()`, ALSO
+   does not reliably work on D1** -- this is the actual headline finding,
+   and it would not have been caught without rehearsing against a real D1
+   binding with synthetic data that genuinely exercises the FK. The first
+   real-CI run of that version failed with:
+   ```
+   Error: D1_ERROR: Durable Object was reset and rolled back to its last
+   known good state because the application left the database in a state
+   where constraints were violated: FOREIGN KEY constraint failed:
+   SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_FOREIGNKEY)
+   ```
+   at the `DROP TABLE calendar_event_links` step. This matches a
+   confirmed, currently open/unresolved upstream limitation --
+   [cloudflare/workerd#7657](https://github.com/cloudflare/workerd/issues/7657)
+   and [cloudflare/workers-sdk#16071](https://github.com/cloudflare/workers-sdk/issues/16071)
+   -- D1 performs its own commit-time foreign-key consistency check on a
+   `db.batch()`'s Durable-Object-level storage transaction, and that check
+   does not reliably honor `defer_foreign_keys`'s SQL-level deferral
+   window the way plain SQLite does. **`defer_foreign_keys` is therefore
+   not a dependable mechanism for this kind of rebuild on D1**, despite
+   being SQLite's own documented answer to this exact scenario everywhere
+   else. The repair was redesigned to never drop a table while anything
+   else's FOREIGN KEY still points at it at all (rebuild the child table
+   WITHOUT its FK first, then the parent, then the child again WITH the FK
+   restored) -- no deferred-checking of any kind relied upon.
+
+That redesign's own first real-CI run then caught a THIRD, independent
+real-D1 quirk: it used `ALTER TABLE <temp> RENAME TO <real-name>` to move
+the rebuilt table into place, and the real table's own stored schema text
+came back as `CREATE TABLE "calendar_event_links" (...)` -- **double
+quotes**, not the backtick quoting every committed migration actually
+uses. This is a well-known SQLite behavior (`ALTER TABLE ... RENAME TO`
+always re-quotes the renamed identifier with double quotes, regardless of
+the original CREATE statement's quoting style) -- not a new bug, but one
+that would have silently reintroduced a NEW schema/baseline mismatch
+(`compareSchemaObjects()` compares stored SQL text, not just structure)
+in the exact same breath as fixing the original one. **Corrected again**:
+the final table under each real name is now always created by a literal,
+directly-quoted `CREATE TABLE` statement -- never produced by a rename.
+Only the OLD table (dropped immediately after its data is copied out) is
+ever renamed, so its resulting quote style never persists anywhere.
+
+A fourth, smaller, non-blocking finding along the way: **D1's in-Worker
+`D1Database` binding (`db.prepare()`/`db.batch()`) rejects `PRAGMA
+integrity_check` outright** with `D1_ERROR: not authorized: SQLITE_AUTH`
+-- unrelated to the repair's correctness, but it means that specific
+check can never be run directly against a live D1 binding. The wrangler
+CLI's `d1 execute --remote --command` path does **not** have this
+restriction (confirmed: `scripts/verify-remote-restore.mjs` already runs
+`PRAGMA integrity_check` this exact way against Production's own restore
+verification) -- the proposed Staging procedure below uses that path for
+this specific check, never the binding.
+
+### What finally passed, and the exact evidence
+
+**Commit `d029060`** (branch `feature/independent-cloudflare-sandbox`) is
+the version that passed. Full evidence trail, every run actually
+inspected via the Actions API and the run's own job page (never assumed):
+
+| Commit | What changed | CI run | Result |
+|---|---|---|---|
+| `1279d66` | `defer_foreign_keys` version + new rehearsal test | [run 39274035972](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39274035972) | **Failed** -- `FOREIGN KEY constraint failed` at `DROP TABLE calendar_event_links` (finding #2 above). |
+| `2d6e8db` | Never-drop-a-referenced-table rebuild order | [run 39275327022](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39275327022) | **Failed** -- `D1_ERROR: not authorized: SQLITE_AUTH` on the rehearsal's own direct `PRAGMA integrity_check` call (finding #4 above; the repair batch itself had already succeeded by this point). |
+| `a9aa153` | Removed the direct `PRAGMA integrity_check` call from the test | [run 39275647851](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39275647851) | **Failed** -- parity assertion caught the rename's double-quote regression (finding #3 above); repair batch, row preservation, and `foreign_key_check` all still passed. |
+| `d029060` | Final tables always created directly, never via rename | [run 39276452439](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39276452439) | **Success.** `calendar-schema-repair-rehearsal.test.mjs: all assertions passed against a REAL local D1 binding`, alongside all four pre-existing D1-only suites, unmodified. |
+
+Local checks on `d029060`: 229/229 test files pass, `tsc --noEmit` clean,
+`eslint` clean on every changed file. `scripts/check-main-restore-sync.mjs`
+still fails -- this is the same pre-existing, unrelated condition noted
+in every round since migration 0048 landed on this branch (`main` has not
+merged 0048 yet, so its own restore-order/baseline tracking is stale
+relative to this branch); nothing this round touched changed that.
+
+### Exactly what `tests/calendar-schema-repair-rehearsal.test.mjs` proves (commit `d029060`, run `39276452439`)
+
+Against a real local Workers/D1 binding (`getPlatformProxy()`,
+`persist:false`, `remoteBindings:false` -- never touches any remote
+database):
+1. **The pre-fix defect is real against the exact byte-for-byte original
+   schema text**: migration 0048's original buggy `CREATE TABLE` text
+   (reconstructed from `git show bf8a8ed:drizzle/0048_google_calendar_sync.sql`,
+   the parent of fix commit `d153259`), run through the REAL
+   `normalizeSchemaSql()` the production backup path uses, reproduces a
+   genuine SQL syntax error on restore.
+2. **Synthetic data covering the required cases**: 6 links (one per
+   `SyncStatus` value: `pending`, `synced`, `failed`, `invalid`,
+   `auth_required`, `missing_remotely`) and 10 history rows across them,
+   three links spanning multiple generations (a cancel-then-reopen
+   cycle), with history rows covering every `CleanupStatus` value
+   including two genuinely PENDING cleanups (`pending` and `uncertain`).
+3. **The repair applies via the EXACT proposed mechanism** -- one single
+   `db.batch()` call built from the migration file's own 16 statements,
+   parsed the same way the proposed Staging script parses them.
+4. **Every row and column survives byte-for-byte** (`assert.deepEqual`
+   against a before-repair snapshot, both tables), every index is present
+   and correctly defined, the restored `link_id` FOREIGN KEY is
+   genuinely back (`PRAGMA foreign_key_list`, not just a column-shape
+   check), and `PRAGMA foreign_key_check` against the live D1 database is
+   clean.
+5. **The repaired tables' own stored text is now BYTE-IDENTICAL** (after
+   whitespace normalization) to what today's already-corrected migration
+   0048 produces fresh -- full parity with a brand-new environment, not
+   merely "no longer broken."
+6. **The real, actual production schema-backup/restore path** --
+   `buildSchemaOnlyBackup()`, the exact function
+   `tests/production-backup-readiness.test.mjs` exercises -- now succeeds
+   against the repaired database's full schema (all 49 migrations, not
+   just the two calendar tables), and the resulting backup restores
+   cleanly into a fresh database with a clean integrity check, no
+   foreign-key violations, and zero business rows (schema-only).
+7. **Failure handling**: a deliberately doomed batch (a guaranteed NOT
+   NULL violation spliced into an otherwise-valid rebuild-shaped
+   sequence) throws as a whole, leaves no stray rebuild-named table
+   behind even though its own earlier statements would have succeeded in
+   isolation, and leaves the real table's data completely unchanged --
+   zero partial state.
+
+### Limitations, honestly recorded
+
+- **Rehearsed on local D1, not Staging's own remote database.** This
+  rehearsal proves the mechanism is sound against a real D1 engine with
+  realistic data; it does not prove Staging's own specific live rows
+  behave identically (though they are structurally the same schema, and
+  the rehearsal's synthetic data was deliberately built to cover every
+  state Staging's real rows can be in). The proposed procedure below
+  re-verifies against Staging's own real data before and after, rather
+  than assuming the rehearsal's result transfers unchanged.
+- **`defer_foreign_keys` is confirmed unreliable on D1** for this
+  "temporarily violate an FK mid-rebuild" pattern -- a genuine platform
+  limitation (open upstream issues cited above), not something this
+  round's design can work around other than avoiding it entirely, which
+  the final version does.
+- **`PRAGMA integrity_check` cannot be run against a live D1 binding at
+  all** (`SQLITE_AUTH`) -- the proposed procedure substitutes the
+  wrangler CLI's `--remote --command` path for that one check, matching
+  this repo's own existing, proven `scripts/verify-remote-restore.mjs`
+  pattern.
+- **`ALTER TABLE ... RENAME TO` permanently changes an identifier's
+  quoting style to double quotes.** This is a general SQLite/D1 fact this
+  round discovered, not specific to this migration -- worth remembering
+  for any FUTURE schema change in this codebase that considers a
+  rename-based rebuild: never let the renamed name be the one that
+  persists; always create the real, final name directly.
+- Google Calendar synchronization itself remains **completely
+  unverified** -- no OAuth client, no credential, no live Google API call
+  has ever been made by any round of this feature, including this one.
+  This round never touched that.
+
+### The complete proposed Staging-only application plan (prepared, NOT executed)
+
+`scripts/apply-0049-calendar-schema-repair-staging.mjs` (new this round,
+not wired into `package.json`, CI, or anything else -- committed purely
+as the concrete, reviewable artifact this plan describes, exactly as
+`drizzle/pending-review/` holds the migration itself). It has never been
+run. Running it requires `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`
+in the environment and is a separate, explicit decision for the owner (or
+an agent with the owner's explicit go-ahead for this specific action) to
+make after reviewing this entry. In order, aborting immediately on any
+failed check:
+1. **Preflight**: asserts the config path is Staging's own
+   (`wrangler.staging.jsonc`, `fundraising-os-staging-db`) and never
+   mentions the production database name; hashes the migration file and
+   refuses to proceed unless it matches `d029060`'s own exact, rehearsed
+   content (`sha256 b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae`)
+   -- a future edit to the `.sql` file without updating this constant (and
+   re-rehearsing) is refused, not silently applied; confirms the
+   Cloudflare credentials are present.
+2. **Full recoverable backup before anything changes**: `wrangler d1
+   export fundraising-os-staging-db --remote --config
+   wrangler.staging.jsonc --output staging-backup-before-0049-<timestamp>.sql`,
+   asserts the file exists and is non-empty, and prints the exact restore
+   command for that file before doing anything else.
+3. **Before snapshot**: every row of `calendar_event_links` and
+   `calendar_event_link_history`, via read-only `wrangler d1 execute
+   --remote --command` queries.
+4. **Applies the repair**: one single `db.batch()` call, built from the
+   migration file's own parsed statements, against the REAL remote
+   Staging D1 binding (`getPlatformProxy({configPath:
+   "wrangler.staging.jsonc", remoteBindings: true})`) -- never `wrangler
+   d1 execute --file`, whose cross-statement atomicity for a whole file is
+   not reliably documented.
+5. **After snapshot**: re-reads both tables and asserts
+   `assert.deepEqual` against step 3's snapshot -- every row and column
+   byte-for-byte unchanged.
+6. **`PRAGMA foreign_key_check` and `PRAGMA integrity_check`**, both via
+   `wrangler d1 execute --remote --command` directly against Staging (the
+   CLI path, not the Worker binding, per the limitation above) -- must be
+   clean and `"ok"` respectively.
+7. **Schema-health check**: Staging's live schema, read via `SELECT
+   name,type,tbl_name,sql FROM sqlite_schema ...`, through the same
+   `compareSchemaObjects()`/`stagingSchemaObjects()` the Workspace Health
+   page and `production-backup-readiness.test.mjs` already use -- must
+   now report a clean match for both calendar tables, where it previously
+   did not.
+8. **Restore verification**: a SECOND full export (now schema-fixed),
+   fed through this repo's own existing, proven
+   `scripts/verify-remote-restore.mjs` -- the exact script Production's
+   own monthly backup verification already runs -- creating a throwaway
+   scratch D1 database, restoring the fixed backup into it, and running
+   the same integrity/foreign-key/schema/row-count checks the manual
+   recovery runbook requires, always deleting the scratch database
+   afterward.
+
+If any step fails, the script aborts immediately and prints which step
+succeeded last and the exact command to restore the pre-repair backup.
+Nothing in this plan touches `sqlite_schema` directly, nothing drops or
+rebuilds a remote table outside of this one reviewed, rehearsed
+migration, and nothing here is scheduled, automated, or self-triggering
+-- it runs only when a human (or an explicitly authorized agent) invokes
+it by hand.
+
+### Not done, and not authorized this round
+
+The repair has **not** been applied anywhere -- Staging's
+`calendar_event_links`/`calendar_event_link_history` tables are exactly
+as they were at the start of this round. No remote table was dropped or
+rebuilt, `sqlite_schema` was never touched on any remote database, and
+Production was never referenced by anything that executed. No OAuth
+setup, no credential of any kind, no live Google call, no Gmail/
+agenda-email change, no cron activation, no deployment, no merge into
+`main`. Calendar writes remain disabled exactly as before.
+
+**Stopping here for independent review, per this round's own explicit
+instruction.** The originally-proposed repair mechanism failed against
+real D1 twice, for two independently confirmed reasons (one a documented
+open upstream limitation, one a general SQLite rename-quoting fact) --
+both corrected, both re-rehearsed, now green against a real local D1 on
+Linux CI with synthetic data covering every link/generation/cleanup/sync
+state this repair needs to handle correctly. A concrete, step-by-step
+Staging application script exists, is committed, and has never been run.
