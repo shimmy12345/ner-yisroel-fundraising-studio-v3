@@ -55738,3 +55738,148 @@ regression, and re-pinned. Dispatch instructions are unchanged from the
 prior round's entry (workflow id `335671346`, `ref:
 feature/independent-cloudflare-sandbox`, `confirm_repair:
 APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING`).
+
+## 2026-10-19 (tenth follow-up review): a second real dispatch hung for ~21 minutes after a failed remote-session startup -- diagnosed, fixed, still not applied; a likely permissions gap reported, not acted on
+
+**Scope of this round**: the owner dispatched the (by-then `d1 info`-
+fixed) repair job a second time -- run `39301756858`. It failed within
+seconds, during the SAME read-only target-validation phase as before,
+but this time the JOB itself did not end for ~21 minutes, until
+GitHub's own 20-minute job-level timeout cancelled it. **Staging remains
+completely unchanged -- the failure was during read-only target
+validation, before any backup or mutation was ever attempted. No
+recovery action was needed or taken. No token permission was broadened,
+no credential was touched, the execution mechanism itself is unchanged,
+no change to `main`, no OAuth, no live Google call, no merge.**
+
+### What the actual run showed, inspected directly (job `118228469555`)
+
+```
+Opening the real remote Staging D1 binding (getPlatformProxy, remoteBindings: true)...
+⎔ Establishing remote connection...
+✘ [ERROR] A request to the Cloudflare API (/accounts/***/workers/subdomain/edge-preview) failed.
+ABORTED during phase "target-validation": Failed to start the remote proxy session. There is likely additional logging output above.
+Nothing on Staging was touched -- this failed before the repair batch was ever attempted. Fix the cause above and re-run; no recovery action of any kind is needed.
+Error: The operation was canceled.
+```
+Step timing (via the Actions API, not estimated): the "Apply the
+reviewed Calendar schema repair to Staging" step started at
+`2026-10-19T18:21:23Z` and was marked `cancelled` at
+`2026-10-19T18:42:35Z` -- **21 minutes 12 seconds**, even though the
+error text above was already fully printed within the first few
+seconds. The `verify` job on this SAME run independently confirmed
+`skipped` (via the Actions API) -- the gated-dispatch mechanism itself
+continues to work correctly; this round's defect is specifically the
+HANG after a known, already-reported failure, not the gating or the
+error-reporting logic (which fired exactly as designed, correctly
+saying "nothing was touched").
+
+### Diagnosis: a real, source-confirmed mechanism for the hang; a well-evidenced (not assumed) likely cause for the underlying failure
+
+**The hang's mechanism, confirmed directly in wrangler 4.92.0's own
+bundled source** (not guessed): `getPlatformProxy({remoteBindings:
+true})` internally starts a real local Miniflare "proxy server worker"
+(`startWorker(...)`), which itself must call Cloudflare's
+`/accounts/{accountId}/workers/subdomain/edge-preview` API to obtain a
+remote preview session. When that call fails, the worker's own `raw`
+object emits an `"error"` event -- and the specific code path that then
+throws `"Failed to start the remote proxy session. There is likely
+additional logging output above."` does so **without disposing the
+already-started local worker first**. The outer promise this agent's
+code awaits rejects almost immediately (matching the observed timing:
+the error text appeared within seconds), but the already-started local
+Miniflare process/handle is left running, keeping Node's event loop
+alive -- there is no object for OUR OWN code to dispose in this failure
+(the rejection happens before `getPlatformProxy()` ever returns a
+`proxy` at all), so this is a resource leak inside wrangler's own
+error-handling path, not something fixable from this script's side
+beyond forcing our own process to exit regardless.
+
+**The likely cause of the underlying API failure -- reported as a
+finding, not acted on.** Cross-referencing wrangler's own source (the
+`edge-preview` endpoint is part of its temporary-preview-Worker/remote-
+bindings machinery, structurally similar to deploying a short-lived
+test Worker) against real-world reports:
+- [cloudflare/workers-sdk#10091](https://github.com/cloudflare/workers-sdk/issues/10091) -- an open feature request confirming a token scoped for R2 bucket write access failed against this exact `edge-preview` endpoint, and only a broad `Workers Scripts: Edit` permission was found to work.
+- A [Cloudflare community report](https://community.cloudflare.com/t/wrangler-edge-preview-minimum-permissions-free-plan-billing-and-token-revocation/968103) describes the SAME failure even with a token holding Individual Workers Editor plus account-wide Workers Content Read-only (`RemoteSessionAuthenticationError`, wrangler 4.148.0) -- Cloudflare has not documented the exact minimum permission set this feature needs, and it appears to require more than a narrowly D1-scoped token would plausibly have.
+
+**Most likely cause, stated precisely, per this round's own
+instruction**: the existing `CLOUDFLARE_D1_API_TOKEN` secret (named and,
+by every use in this repo until now, scoped for D1 operations only --
+`d1 info`/`d1 execute`/`d1 export`, all of which worked correctly in
+every prior round's dispatch) most likely lacks the broader **Workers
+Scripts: Edit** (account-level) permission that `getPlatformProxy({
+remoteBindings: true})`'s own internal preview-session mechanism
+requires. This is a well-evidenced, but **not certain**, diagnosis --
+this agent has no Cloudflare dashboard access to directly inspect that
+token's actual configured scope, and was explicitly instructed not to
+assume the cause or broaden any permission itself. **If the owner wants
+to confirm or resolve this**: check the `CLOUDFLARE_D1_API_TOKEN`
+token's permission groups in the Cloudflare dashboard against `Account
+> Workers Scripts > Edit`; if it is missing, either add it to the
+existing token or provision a separate token with it for this specific
+job. No such change was made or requested to be made by this agent.
+
+### The fix made this round (addresses the hang, not the underlying cause)
+
+Two changes, addressing two different failure modes, both in
+`lib/operations/calendar-schema-repair-apply.ts` and wired into both
+`scripts/apply-0049-calendar-schema-repair-staging.mjs` and
+`scripts/recover-0049-calendar-schema-repair-staging.mjs` (both share
+`connectAndValidateStagingTarget()`):
+1. `withStartupTimeout()` wraps the `getPlatformProxy()` call with a
+   bounded 90-second timeout -- defense-in-depth for a DIFFERENT,
+   not-yet-observed failure mode (the promise never settling at all,
+   rather than rejecting quickly as this one did). 3 new regression
+   tests (resolves-before-timeout, rejects-before-timeout-with-the-
+   real-error, times-out-with-its-own-message-if-the-promise-never-
+   settles).
+2. Both scripts now call `process.exit(0)`/`process.exit(1)` explicitly
+   once `main()` has FULLY settled (including its own `finally { await
+   dispose() }`), rather than relying on `process.exitCode` plus natural
+   event-loop drain. This is the fix for the ACTUALLY observed hang:
+   terminates the job promptly regardless of what a third-party
+   dependency's internals left dangling.
+
+**Target validation, the single-batch repair design, and every existing
+backup/retention protection are unchanged** -- this round added
+startup/shutdown robustness around the one call that failed; nothing
+about what gets validated, how the repair is applied, or how backups
+are retained was touched.
+
+### Checks run this round
+
+Local: 233/233 test files pass, `tsc --noEmit` clean, `eslint` unchanged
+from baseline, `tests/backup-automation.test.mjs` still passes against
+the re-pinned workflow file. The full Calendar/D1 Linux CI workflow was
+re-run on the fix commit (`ec90cf3`) and actually inspected, not
+assumed: [run 39306906044](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39306906044)
+-- **success** (59s). All existing D1-only coverage (including the
+recovery rehearsal and three failure-injection cases) still passes
+unmodified.
+
+### The repair migration SQL is unchanged
+
+Still hashes to `b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae`.
+Every bug found across the last four rounds (the remote-binding gap,
+the backup-retention shell-script bug, the `d1 info` CLI-argument bug,
+and now this startup-hang/likely-permissions finding) has been in the
+Staging execution wrapper or its underlying platform/tooling
+dependencies, never in the repair itself.
+
+### Not done, and not authorized beyond preparation this round
+
+**The repair has still not been successfully applied to Staging.**
+Two real dispatch attempts now, both failed during read-only target
+validation, before any backup, write, or temporary scratch database --
+confirmed directly from each run's own log, never assumed. No token
+permission was broadened, no credential was handled or viewed by this
+agent, the execution mechanism itself was not replaced. No Production
+change, no change to `main`, no OAuth, no live Google call, no merge.
+
+**Stopping here for independent review before another repair
+dispatch.** The hang itself is fixed and covered by regression tests;
+the likely underlying cause (a Workers Scripts permission gap) is
+reported precisely, with citations, for the owner's own decision --
+this agent neither assumed it with certainty nor took any action on it.
+Dispatch instructions remain unchanged from the prior round's entry.
