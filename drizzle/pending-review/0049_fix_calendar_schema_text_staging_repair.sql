@@ -53,15 +53,44 @@
 -- this round's own session used (not committed -- a throwaway local
 -- check) for the exact commands; docs/AI-HANDOFF.md records the result.
 --
--- To actually apply this (Staging only, once reviewed and renumbered
--- into drizzle/ in sequence):
---   wrangler d1 execute fundraising-os-staging-db --remote --config
---     wrangler.staging.jsonc --file drizzle/00NN_....sql
--- then re-run `node scripts/generate-production-baseline.mjs --write`
--- (the migration count and baseline hash both change) and re-verify via
--- scripts/db:baseline:rehearse / the Workspace Health "Staging ↔
--- baseline schema" check.
-PRAGMA foreign_keys=OFF;
+-- CORRECTED (2026-10-19, fifth follow-up review) -- the previous draft
+-- used `PRAGMA foreign_keys=OFF`, which does NOT work the way it does in
+-- ordinary SQLite. Confirmed against Cloudflare's own current D1
+-- documentation and independently rehearsed against a real local
+-- Workers/D1 database (see docs/AI-HANDOFF.md for the CI evidence):
+-- D1 enforces foreign key constraints by default on every query, and
+-- `PRAGMA foreign_keys` cannot disable that enforcement at all --
+-- setting it has no effect. The documented, D1-supported mechanism for
+-- a migration that temporarily violates a constraint mid-sequence (as
+-- every "rebuild a table under a new name, copy rows, drop the old one,
+-- rename" repair must -- `calendar_event_link_history.link_id`
+-- references `calendar_event_links`, which this repair drops and
+-- recreates) is `PRAGMA defer_foreign_keys = on`: constraint checks are
+-- deferred until the END of the current transaction, so the real
+-- SQLite rule still applies ("DELETE/DROP a referenced parent while
+-- referencing child rows still exist" is normally rejected immediately)
+-- but only as of the final COMMIT, by which point the renamed table is
+-- back in place with the SAME ids every child row already points to.
+-- `defer_foreign_keys` resets to OFF automatically at that same commit
+-- -- no explicit "turn it back on" statement is needed or appropriate.
+--
+-- Critically, this ONLY works if every statement below executes inside
+-- ONE SINGLE transaction -- `defer_foreign_keys`'s own deferral window
+-- is exactly "the current transaction," and D1's own only CONFIRMED
+-- atomic multi-statement primitive is the Workers binding's own
+-- `db.batch([...])` call (D1 itself documents: a batch runs as one
+-- transaction; if any statement fails, the whole batch is rolled back).
+-- `wrangler d1 execute --file`'s own cross-statement atomicity for a
+-- whole file is NOT reliably documented or confirmed the same way (community
+-- reports describe large files being split into multiple separately-
+-- sent batches) -- this repair is therefore meant to be applied via a
+-- SINGLE `db.batch()` call containing every statement below, in order,
+-- never via a plain `wrangler d1 execute --file` invocation and never
+-- as separate, individually-committed statements. See docs/AI-HANDOFF.md's
+-- own "Staging-only application plan" for the exact script this
+-- requires and the rehearsal that proved it against a real local D1.
+--> statement-breakpoint
+PRAGMA defer_foreign_keys = on;
 --> statement-breakpoint
 CREATE TABLE `calendar_event_links_rebuild_0049` (
   `id` text PRIMARY KEY NOT NULL,
@@ -126,5 +155,9 @@ ALTER TABLE `calendar_event_link_history_rebuild_0049` RENAME TO `calendar_event
 CREATE UNIQUE INDEX `calendar_event_link_history_link_generation_uidx` ON `calendar_event_link_history` (`link_id`,`generation`);
 --> statement-breakpoint
 CREATE INDEX `calendar_event_link_history_cleanup_idx` ON `calendar_event_link_history` (`cleanup_needed`,`cleanup_status`);
---> statement-breakpoint
-PRAGMA foreign_keys=ON;
+-- No trailing `PRAGMA foreign_keys=ON` here: `defer_foreign_keys` already
+-- resets itself to OFF automatically at this batch's own commit (the end
+-- of "the current transaction" it deferred), and D1 never actually
+-- disabled FK enforcement in the first place for this to "turn back on" --
+-- an explicit statement here would be a no-op at best and misleading at
+-- worst (implying foreign_keys was ever OFF under D1, which it cannot be).

@@ -50,7 +50,7 @@ function migrationFiles(): string[] {
 // markers and this repo's `--` doc comments) are stripped first, since
 // every one of them is a whole-line comment in every migration file this
 // was checked against, never a trailing same-line comment after real SQL.
-function splitSqlStatements(sql: string): string[] {
+export function splitSqlStatements(sql: string): string[] {
   const withoutComments = sql
     .split("\n")
     .filter((line) => !line.trim().startsWith("--"))

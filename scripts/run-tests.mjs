@@ -287,7 +287,7 @@ function runOne(file) {
 // which this repo's CI runs on an Ubuntu runner
 // (.github/workflows/calendar-d1-adapter-test.yml) where the Linux
 // workerd binary is expected to start normally.
-const INTENTIONALLY_EXCLUDED_FROM_MAIN_SUITE = new Set(["tests/calendar-d1-store.test.mjs", "tests/calendar-adapters-integration.test.mjs", "tests/trip-calendar-sync-integration.test.mjs", "tests/trip-entrypoints-atomicity.test.mjs"]);
+const INTENTIONALLY_EXCLUDED_FROM_MAIN_SUITE = new Set(["tests/calendar-d1-store.test.mjs", "tests/calendar-adapters-integration.test.mjs", "tests/trip-calendar-sync-integration.test.mjs", "tests/trip-entrypoints-atomicity.test.mjs", "tests/calendar-schema-repair-rehearsal.test.mjs"]);
 
 function checkDrift() {
   const onDisk = new Set(readdirSync(path.join(root, "tests")).filter((f) => f.endsWith(".test.mjs")).map((f) => `tests/${f}`));

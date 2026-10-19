@@ -11,7 +11,15 @@
 # stubs the "cloudflare:workers" module these functions import (see
 # tests/fixtures/cloudflare-workers-loader.mjs) -- against a REAL local
 # Workers/D1 runtime (wrangler's own getPlatformProxy(), per
-# lib/calendar/testing/local-d1.ts) on an Ubuntu runner.
+# lib/calendar/testing/local-d1.ts) on an Ubuntu runner, plus (2026-10-19,
+# sixth follow-up review) tests/calendar-schema-repair-rehearsal.test.mjs
+# -- rehearses the NOT-YET-APPLIED drizzle/pending-review/0049_fix_
+# calendar_schema_text_staging_repair.sql draft against a real local D1:
+# reproduces the pre-fix buggy Staging schema with synthetic data, applies
+# the repair via a single db.batch(), and verifies data/index/constraint
+# preservation, a clean foreign_key_check/integrity_check, the real
+# schema-backup/restore path, and atomic rollback on a forced failure.
+# Never applies anything to Staging or Production.
 #
 # Why this workflow exists, and why it runs on Linux rather than wherever
 # the rest of this repo's CI/local dev happens: this project's own
@@ -54,10 +62,12 @@ on:
       - "tests/calendar-google-client.test.mjs"
       - "tests/trip-calendar-sync-integration.test.mjs"
       - "tests/trip-entrypoints-atomicity.test.mjs"
+      - "tests/calendar-schema-repair-rehearsal.test.mjs"
       - "tests/fixtures/wrangler.calendar-d1-test.jsonc"
       - "tests/fixtures/cloudflare-workers-loader.mjs"
       - "tests/fixtures/fake-cloudflare-workers.mjs"
       - "drizzle/0048_google_calendar_sync.sql"
+      - "drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql"
       - "cloudflare-env.d.ts"
       - "scripts/ci/calendar-d1-smoke-test.mjs"
       - ".github/workflows/calendar-d1-adapter-test.yml"
