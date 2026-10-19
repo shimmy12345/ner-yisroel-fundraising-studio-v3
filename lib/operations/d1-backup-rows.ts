@@ -82,7 +82,7 @@ export function parameterizeInsertStatement(statementSql: string): { columns: st
 // walks the file line by line accumulating each statement until that
 // terminator, which is sufficient for this specific, well-structured
 // output without needing a full SQL parser.
-function splitIntoStatements(sqlText: string): string[] {
+export function splitIntoStatements(sqlText: string): string[] {
   const statements: string[] = [];
   let buffer: string[] = [];
   for (const line of sqlText.split("\n")) {

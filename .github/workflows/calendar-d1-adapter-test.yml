@@ -18,7 +18,14 @@
 # reproduces the pre-fix buggy Staging schema with synthetic data, applies
 # the repair via a single db.batch(), and verifies data/index/constraint
 # preservation, a clean foreign_key_check/integrity_check, the real
-# schema-backup/restore path, and atomic rollback on a forced failure.
+# schema-backup/restore path, and atomic rollback on a forced failure --
+# extended (2026-10-19, seventh follow-up review) to also rehearse the
+# real recovery procedure (lib/operations/calendar-schema-repair-
+# recovery.ts) against real local D1, and to inject a guaranteed failure
+# into the REAL parsed repair statements at three points (early, right
+# after a real DROP TABLE, and late in the second rebuild pass), each
+# against its own fresh database, proving rollback is total even deep
+# into the batch and that a corrected retry still succeeds afterward.
 # Never applies anything to Staging or Production.
 #
 # Why this workflow exists, and why it runs on Linux rather than wherever
@@ -68,6 +75,15 @@ on:
       - "tests/fixtures/fake-cloudflare-workers.mjs"
       - "drizzle/0048_google_calendar_sync.sql"
       - "drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql"
+      - "lib/operations/calendar-schema-repair-recovery.ts"
+      - "lib/operations/d1-backup-rows.ts"
+      - "lib/operations/staging-repair-target.ts"
+      - "tests/calendar-schema-repair-recovery.test.mjs"
+      - "tests/staging-repair-target-validation.test.mjs"
+      - "scripts/apply-0049-calendar-schema-repair-staging.mjs"
+      - "scripts/recover-0049-calendar-schema-repair-staging.mjs"
+      - "scripts/lib/staging-repair-connect.mjs"
+      - "wrangler.staging-repair.jsonc"
       - "cloudflare-env.d.ts"
       - "scripts/ci/calendar-d1-smoke-test.mjs"
       - ".github/workflows/calendar-d1-adapter-test.yml"

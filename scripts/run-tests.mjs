@@ -113,6 +113,8 @@ const TEST_FILES = [
   "tests/restore-sync-generator.test.mjs",
   "tests/restore-sync-branch-policy.test.mjs",
   "tests/production-backup-readiness.test.mjs",
+  "tests/staging-repair-target-validation.test.mjs",
+  "tests/calendar-schema-repair-recovery.test.mjs",
   "tests/production-readiness-diagnostics.test.mjs",
   "tests/workspace-health-semantics.test.mjs",
   "tests/import-center-pending-reviews.test.mjs",

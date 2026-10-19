@@ -1,0 +1,36 @@
+{
+  // DEDICATED, MINIMAL config for scripts/apply-0049-calendar-schema-repair-
+  // staging.mjs ONLY -- never used for `wrangler dev`, `wrangler deploy`, or
+  // any other purpose. Deliberately excludes every binding, var, and
+  // trigger wrangler.staging.jsonc declares (AI, STATUS_WORKER, Access
+  // vars, cron) except the one D1 database this repair touches -- a repair
+  // script has no business holding bindings it never uses, and keeping
+  // them out means a bug in this file can never accidentally reach
+  // anything beyond that one database.
+  //
+  // The one binding below is explicitly marked `"remote": true`. Without
+  // it, `getPlatformProxy({remoteBindings: true})` silently resolves this
+  // binding to an EMPTY LOCAL SIMULATED database instead of the real
+  // remote Staging D1 -- confirmed directly in wrangler's own source
+  // (d1DatabaseEntry only attaches a remote proxy connection when BOTH
+  // `remoteBindings: true` is passed AND the binding's own config entry
+  // has `remote: true`; otherwise it always falls back to `{ id }` alone,
+  // i.e. local). `wrangler.staging.jsonc` deliberately does NOT set this
+  // (local-by-default is the correct behavior for normal development and
+  // `wrangler dev`) -- reusing that file here would have made this
+  // script believe it repaired Staging while it actually did nothing to
+  // any real database at all. Never add `"remote": true` to
+  // wrangler.staging.jsonc itself; keep that file's normal-development
+  // default untouched. Never point this file at the production database.
+  "name": "fundraising-os-staging",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fundraising-os-staging-db",
+      "database_id": "6c18396c-0a8f-4f2c-ba83-ea809ec10289",
+      "remote": true
+    }
+  ]
+}
