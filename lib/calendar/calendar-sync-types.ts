@@ -174,8 +174,17 @@ export interface CalendarLinkStore {
   // yet); cleanup's own call site passes true, since by construction it
   // is only ever invoked when cleanup genuinely is needed.
   ensureHistory(linkId: string, generation: number, googleEventId: string, now: number, cleanupNeeded?: boolean): Promise<CalendarLinkHistoryRow>;
-  // Acquires the lease iff currently unheld or expired. Returns the lease
-  // token (== leaseOwner) on success, null if contended.
+  // Acquires the lease iff currently unheld or expired, storing the
+  // caller-supplied `leaseOwner` as the lease token. Returns true on
+  // success, false if contended. 2026-10-19 review (follow-up): this
+  // store never generates the token itself -- the CALLER must pass a
+  // value that is unique per acquisition attempt (never a value reused
+  // across separate attempts for the same link), or two distinct
+  // attempts can be mistaken for the same lease holder once an older
+  // one's lease has genuinely expired and a newer one has taken over.
+  // See calendar-sync-reconciler.ts's runReconciliationSweep for where
+  // that uniqueness is actually generated (a fresh randomUUID() per
+  // acquisition) for every production caller.
   acquireLease(linkId: string, leaseOwner: string, now: number, ttlSeconds: number): Promise<boolean>;
   // Only succeeds if this exact leaseOwner currently holds the lease --
   // a stale worker whose lease already expired-and-was-reacquired must
@@ -288,10 +297,19 @@ export interface CalendarLinkStore {
   // Every generation, across every link, still owed a cleanup attempt --
   // never joined against or gated by the current generation's own
   // create/update work (Issue 2's "keep deletion retries separate").
-  listPendingCleanup(now: number): Promise<CalendarLinkHistoryRow[]>;
+  // 2026-10-19 review (follow-up): `userId`, when provided, restricts
+  // this to generations belonging to that one owner's own links only --
+  // required so runReconciliationSweep's own owner-scoped call (Trip
+  // Planning's "best-effort immediate reconcile" after an authenticated
+  // owner's own action) can never even see, let alone touch, another
+  // owner's pending cleanup. Omitted, this is the original, unscoped
+  // every-owner query a future global cron still needs.
+  listPendingCleanup(now: number, userId?: string): Promise<CalendarLinkHistoryRow[]>;
   // Every link row needing attention (sync_status != 'synced' or a
   // revision mismatch) -- the sweep's ONLY source of work. It never scans
   // `interactions` directly, which is what makes "retry already-enrolled
   // work" and "enroll a new meeting" structurally distinct operations.
-  listNeedingReconciliation(now: number): Promise<CalendarLinkRow[]>;
+  // 2026-10-19 review (follow-up): same `userId` scoping as
+  // listPendingCleanup above, and for the same reason.
+  listNeedingReconciliation(now: number, userId?: string): Promise<CalendarLinkRow[]>;
 }

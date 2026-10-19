@@ -70,6 +70,24 @@ assert.equal(shouldBlockStagingWrite("staging-independent", "DELETE", "/api/trip
 assert.equal(shouldBlockStagingWrite("staging-independent", "POST", "/api/tripsomething", undefined), true, "a route that merely starts with the same letters, but isn't actually under /api/trips, must stay blocked");
 assert.equal(shouldBlockStagingWrite("staging-independent", "POST", "/api/donors", undefined), true, "the carve-out must never leak into unrelated donor/financial routes");
 
+// Google Calendar sync narrowed first release (2026-10-19 review,
+// follow-up): "confirm the Settings enable/disable behavior is
+// consistent with the Staging safety guard." PATCH /api/calendar-sync
+// is a new route, outside /api/trips, so it deliberately falls into the
+// SAME blocked "accepted trade-off" bucket as PUT /api/profile -- it is
+// NOT added to the Trip Planning carve-out (that carve-out's own
+// justification is specifically "every route this feature has or ever
+// will have lives under /api/trips by construction," which
+// /api/calendar-sync does not satisfy; adding it would be exactly the
+// kind of unauthorized carve-out growth this guard's own header warns
+// against). This is also proven generically by the repo-wide route walk
+// below (nonTripRouteFiles), but asserted directly here too, by name,
+// since it is the one behavior an owner testing Settings on Staging will
+// actually hit.
+assert.equal(shouldBlockStagingWrite("staging-independent", "PATCH", "/api/calendar-sync", undefined), true, "the calendar-sync enable/disable toggle is deliberately NOT exempted -- Staging stays read-only for it, same bucket as PUT /api/profile");
+assert.equal(shouldBlockStagingWrite("staging-independent", "GET", "/api/calendar-sync", undefined), false, "reading the connection status is never blocked -- only the mutating PATCH is");
+assert.equal(shouldBlockStagingWrite("staging-independent", "PATCH", "/api/calendar-sync", "true"), false, "the owner's own STAGING_WRITES_ENABLED escape hatch still lifts this block, same as every other non-Trip-Planning route");
+
 // --- Structural coverage: the guard is actually wired into the one real
 // request-dispatch path, ahead of everything else, and can never be
 // bypassed by a route this repo doesn't know about yet. ---

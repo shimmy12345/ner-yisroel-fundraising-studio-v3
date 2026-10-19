@@ -356,7 +356,20 @@ export class SqliteCalendarStore implements CalendarLinkStore {
     this.db.prepare(`UPDATE calendar_event_link_history SET ${setClause} WHERE link_id = ? AND generation = ?`).run(...values, linkId, generation);
   }
 
-  async listPendingCleanup(): Promise<CalendarLinkHistoryRow[]> {
+  // 2026-10-19 review (follow-up): `userId`, when provided, joins against
+  // the owning link row -- see this method's own interface doc comment
+  // (calendar-sync-types.ts) for why.
+  async listPendingCleanup(_now: number, userId?: string): Promise<CalendarLinkHistoryRow[]> {
+    if (userId) {
+      const rows = this.db
+        .prepare(
+          `SELECT h.* FROM calendar_event_link_history h
+          JOIN calendar_event_links l ON l.id = h.link_id
+          WHERE h.cleanup_needed = 1 AND h.cleanup_status != 'done' AND l.user_id = ?`,
+        )
+        .all(userId);
+      return rows.map(toHistoryRow);
+    }
     const rows = this.db.prepare(`SELECT * FROM calendar_event_link_history WHERE cleanup_needed = 1 AND cleanup_status != 'done'`).all();
     return rows.map(toHistoryRow);
   }
@@ -365,15 +378,20 @@ export class SqliteCalendarStore implements CalendarLinkStore {
   // both permanent-until-explicitly-corrected states that must never be
   // retried on the normal sweep schedule -- and defers a 'failed' link
   // whose next_retry_at is still in the future (bounded backoff).
-  async listNeedingReconciliation(now: number): Promise<CalendarLinkRow[]> {
+  // 2026-10-19 review (follow-up): `userId`, when provided, restricts
+  // this to that one owner's own links only.
+  async listNeedingReconciliation(now: number, userId?: string): Promise<CalendarLinkRow[]> {
+    const ownerClause = userId ? "AND user_id = ?" : "";
+    const bindings: Array<number | string> = userId ? [now, userId] : [now];
     const rows = this.db
       .prepare(
         `SELECT * FROM calendar_event_links
         WHERE sync_status NOT IN ('missing_remotely','invalid','auth_required')
           AND (sync_status != 'synced' OR synced_revision != desired_revision)
-          AND (next_retry_at IS NULL OR next_retry_at <= ?)`,
+          AND (next_retry_at IS NULL OR next_retry_at <= ?)
+          ${ownerClause}`,
       )
-      .all(now);
+      .all(...bindings);
     return rows.map(toLinkRow);
   }
 }

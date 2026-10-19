@@ -162,23 +162,36 @@ export class D1CalendarStore implements CalendarLinkStore {
   // -- no RETURNING, no follow-up read needed.
   async insertLinkWithHistory(row: Omit<CalendarLinkRow, "createdAt" | "updatedAt">, now: number): Promise<CalendarLinkRow | null> {
     try {
-      await this.db.batch([
-        this.db
-          .prepare(
-            `INSERT INTO calendar_event_links
-            (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, next_retry_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, row.nextRetryAt, now, now),
-        this.db
-          .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, 0, ?, 'not_attempted', 0, 'not_needed', 0, ?, ?)`)
-          .bind(randomUUID(), row.id, deriveGoogleEventId(row.interactionId, 0), now, now),
-      ]);
+      await this.db.batch(this.insertLinkWithHistoryStatements(row, now));
     } catch (error) {
       if (isUniqueConstraintViolation(error)) return null; // UNIQUE(interaction_id) collision -- the whole batch rolled back, nothing partially committed
       throw error;
     }
     return this.getLinkById(row.id);
+  }
+
+  // 2026-10-19 review (follow-up), Integration safety "commit the meeting
+  // change and durable sync intent atomically": the un-executed statement
+  // pair this method builds is the exact same SQL insertLinkWithHistory
+  // itself runs via db.batch() above -- exposed separately so a CALLER
+  // that already has its own db.batch() call for an unrelated write (e.g.
+  // trips-data.ts's own interactions/trip_prospects update) can append
+  // these statements to that SAME batch, making the meeting change and the
+  // durable calendar intent commit as one indivisible D1 operation rather
+  // than two sequential ones. Never executes anything itself.
+  insertLinkWithHistoryStatements(row: Omit<CalendarLinkRow, "createdAt" | "updatedAt">, now: number): D1PreparedStatement[] {
+    return [
+      this.db
+        .prepare(
+          `INSERT INTO calendar_event_links
+          (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, next_retry_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, row.nextRetryAt, now, now),
+      this.db
+        .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, 0, ?, 'not_attempted', 0, 'not_needed', 0, ?, ?)`)
+        .bind(randomUUID(), row.id, deriveGoogleEventId(row.interactionId, 0), now, now),
+    ];
   }
 
   // Idempotent self-heal -- `INSERT ... ON CONFLICT DO NOTHING` never
@@ -242,19 +255,32 @@ export class D1CalendarStore implements CalendarLinkStore {
   // reset to 'pending' (with next_retry_at cleared), not just 'synced'
   // -- see SqliteCalendarStore's own identical comment on this method.
   async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
-    const result = await this.db
-      .prepare(
-        `UPDATE calendar_event_links SET
-          desired_revision = desired_revision + 1,
-          sync_status = CASE WHEN sync_status IN ('synced','failed','invalid','auth_required') THEN 'pending' ELSE sync_status END,
-          next_retry_at = CASE WHEN sync_status IN ('synced','failed','invalid','auth_required') THEN NULL ELSE next_retry_at END,
-          updated_at = ?
-        WHERE id = ? AND desired_state = 'present'`,
-      )
-      .bind(now, linkId)
-      .run();
+    const result = await this.applyRescheduleStatements(linkId, now)[0].run();
     if (result.meta.changes === 0) return null;
     return this.getLinkById(linkId);
+  }
+
+  // Un-executed form of the single guarded UPDATE above, for a caller
+  // that needs to append it to its OWN db.batch() call -- see
+  // insertLinkWithHistoryStatements' own comment for why this exists.
+  // Always exactly one statement (the WHOLE atomic unit is this one
+  // guarded UPDATE already -- see this method's own header comment on
+  // calendar-sync-types.ts's applyReschedule), so a caller can always
+  // safely spread this into a larger batch without needing to know how
+  // many statements it contains.
+  applyRescheduleStatements(linkId: string, now: number): D1PreparedStatement[] {
+    return [
+      this.db
+        .prepare(
+          `UPDATE calendar_event_links SET
+            desired_revision = desired_revision + 1,
+            sync_status = CASE WHEN sync_status IN ('synced','failed','invalid','auth_required') THEN 'pending' ELSE sync_status END,
+            next_retry_at = CASE WHEN sync_status IN ('synced','failed','invalid','auth_required') THEN NULL ELSE next_retry_at END,
+            updated_at = ?
+          WHERE id = ? AND desired_state = 'present'`,
+        )
+        .bind(now, linkId),
+    ];
   }
 
   // D1-native shape (see this file's own header): ONE guarded UPDATE
@@ -286,11 +312,20 @@ export class D1CalendarStore implements CalendarLinkStore {
   // fully atomic (one db.batch() call, no RETURNING, no follow-up read),
   // at the cost of this one documented redundant-write case.
   async applyCancel(linkId: string, now: number): Promise<CalendarLinkRow | null> {
-    await this.db.batch([
+    await this.db.batch(this.applyCancelStatements(linkId, now));
+    return this.getLinkById(linkId);
+  }
+
+  // Un-executed form of applyCancel's own two-statement db.batch() above
+  // -- see insertLinkWithHistoryStatements' own comment for why this
+  // exists. Always exactly these two statements, in this order, so a
+  // caller spreading this into a larger batch gets the same atomic pair
+  // this method already runs on its own.
+  applyCancelStatements(linkId: string, now: number): D1PreparedStatement[] {
+    return [
       this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', next_retry_at = NULL, updated_at = ? WHERE id = ? AND desired_state != 'absent'`).bind(now, linkId),
       this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = (SELECT generation FROM calendar_event_links WHERE id = ?)`).bind(linkId, linkId),
-    ]);
-    return this.getLinkById(linkId);
+    ];
   }
 
   // D1-native shape (see this file's own header). Statement 1 attempts
@@ -325,7 +360,24 @@ export class D1CalendarStore implements CalendarLinkStore {
     if (!before) return null;
     const newGeneration = expectedGeneration + 1;
 
-    await this.db.batch([
+    await this.db.batch(this.applyReopenStatements(linkId, before.interactionId, expectedGeneration, now));
+
+    const current = await this.getLinkById(linkId);
+    if (!current) return null;
+    if (current.generation === newGeneration && current.desiredState === "present") return current; // this exact transition won OR was already won (replay) -- reuse it either way
+    return null; // no longer matches any real, still-pending cancellation this request was meant to reopen
+  }
+
+  // Un-executed form of applyReopen's own two-statement db.batch() above
+  // -- see insertLinkWithHistoryStatements' own comment for why this
+  // exists. `interactionId` must be the SAME link's own interaction_id
+  // (applyReopen's own caller reads it off the live row immediately
+  // beforehand, since the new generation's deterministic Google event id
+  // is derived from it) -- never a value a caller already had cached from
+  // an earlier, possibly-stale read.
+  applyReopenStatements(linkId: string, interactionId: string, expectedGeneration: number, now: number): D1PreparedStatement[] {
+    const newGeneration = expectedGeneration + 1;
+    return [
       this.db
         .prepare(
           `UPDATE calendar_event_links SET
@@ -344,13 +396,8 @@ export class D1CalendarStore implements CalendarLinkStore {
         .bind(newGeneration, now, linkId, expectedGeneration),
       this.db
         .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) SELECT ?, ?, ?, ?, 'not_attempted', 0, 'not_needed', 0, ?, ? WHERE NOT EXISTS (SELECT 1 FROM calendar_event_link_history WHERE link_id = ? AND generation = ?)`)
-        .bind(randomUUID(), linkId, newGeneration, deriveGoogleEventId(before.interactionId, newGeneration), now, now, linkId, newGeneration),
-    ]);
-
-    const current = await this.getLinkById(linkId);
-    if (!current) return null;
-    if (current.generation === newGeneration && current.desiredState === "present") return current; // this exact transition won OR was already won (replay) -- reuse it either way
-    return null; // no longer matches any real, still-pending cancellation this request was meant to reopen
+        .bind(randomUUID(), linkId, newGeneration, deriveGoogleEventId(interactionId, newGeneration), now, now, linkId, newGeneration),
+    ];
   }
 
   async getHistory(linkId: string, generation: number): Promise<CalendarLinkHistoryRow | null> {
@@ -373,7 +420,25 @@ export class D1CalendarStore implements CalendarLinkStore {
     await this.db.prepare(`UPDATE calendar_event_link_history SET ${setClause} WHERE link_id = ? AND generation = ?`).bind(...values, linkId, generation).run();
   }
 
-  async listPendingCleanup(): Promise<CalendarLinkHistoryRow[]> {
+  // 2026-10-19 review (follow-up): `userId`, when provided, joins against
+  // the owning link row so this can never return -- let alone let the
+  // sweep acquire a lease on and mutate -- a generation belonging to a
+  // DIFFERENT owner's meeting. `calendar_event_link_history` itself has
+  // no `user_id` column (it only ever makes sense in terms of its own
+  // link), so the join is the real guard here, not a WHERE on a column
+  // that doesn't exist on this table.
+  async listPendingCleanup(_now: number, userId?: string): Promise<CalendarLinkHistoryRow[]> {
+    if (userId) {
+      const { results } = await this.db
+        .prepare(
+          `SELECT h.* FROM calendar_event_link_history h
+          JOIN calendar_event_links l ON l.id = h.link_id
+          WHERE h.cleanup_needed = 1 AND h.cleanup_status != 'done' AND l.user_id = ?`,
+        )
+        .bind(userId)
+        .all<RawRow>();
+      return results.map(toHistoryRow);
+    }
     const { results } = await this.db.prepare(`SELECT * FROM calendar_event_link_history WHERE cleanup_needed = 1 AND cleanup_status != 'done'`).all<RawRow>();
     return results.map(toHistoryRow);
   }
@@ -382,15 +447,23 @@ export class D1CalendarStore implements CalendarLinkStore {
   // both permanent-until-explicitly-corrected states that must never be
   // retried on the normal sweep schedule -- and defers a 'failed' link
   // whose next_retry_at is still in the future (bounded backoff).
-  async listNeedingReconciliation(now: number): Promise<CalendarLinkRow[]> {
+  // 2026-10-19 review (follow-up): `userId`, when provided, restricts
+  // this to that one owner's own links only -- see this method's own
+  // interface doc comment (calendar-sync-types.ts) for why this is
+  // required, not merely convenient, for Trip Planning's owner-scoped
+  // immediate sweep.
+  async listNeedingReconciliation(now: number, userId?: string): Promise<CalendarLinkRow[]> {
+    const ownerClause = userId ? "AND user_id = ?" : "";
+    const bindings = userId ? [now, userId] : [now];
     const { results } = await this.db
       .prepare(
         `SELECT * FROM calendar_event_links
         WHERE sync_status NOT IN ('missing_remotely','invalid','auth_required')
           AND (sync_status != 'synced' OR synced_revision != desired_revision)
-          AND (next_retry_at IS NULL OR next_retry_at <= ?)`,
+          AND (next_retry_at IS NULL OR next_retry_at <= ?)
+          ${ownerClause}`,
       )
-      .bind(now)
+      .bind(...bindings)
       .all<RawRow>();
     return results.map(toLinkRow);
   }

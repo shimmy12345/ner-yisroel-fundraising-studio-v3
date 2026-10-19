@@ -93,7 +93,7 @@ CREATE TABLE `calendar_event_link_history` (
   `cleanup_attempts` integer DEFAULT 0 NOT NULL,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
-  CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed')),
+  CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid')),
   CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))
 );
 
@@ -113,10 +113,11 @@ CREATE TABLE `calendar_event_links` (
   `attempt_count` integer DEFAULT 0 NOT NULL,
   `lease_owner` text,
   `lease_expires_at` integer,
+  `next_retry_at` integer,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
   CHECK (`desired_state` IN ('present','absent')),
-  CHECK (`sync_status` IN ('pending','synced','failed','missing_remotely'))
+  CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))
 );
 
 CREATE TABLE `data_health_repair_audits` (
@@ -1059,5 +1060,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','6b9e84015e0a7df2bf03efe8a53aba54ad7489443fcc82f72a85dd25e1af05ea',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','b643aac0c5b582c2cd20f7aa372dc3157ca6bfd2fad16748562d33307d00cb9b',1785944072);
 PRAGMA optimize;

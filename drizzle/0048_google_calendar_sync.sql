@@ -22,6 +22,35 @@
 -- reused across generations, since a deleted Google event's id can never
 -- be reinserted (verified against Google's own 409 "identifier already
 -- exists" documentation).
+--
+-- IMPORTANT (2026-10-19 review, follow-up -- a real bug this fixes, not
+-- a restatement): every explanatory comment for this table's columns is
+-- kept HERE, before the statement -- NEVER inside the parenthesized
+-- column list. Two comments added by an earlier review round (one
+-- between `lease_expires_at`/`next_retry_at`, one between the two CHECK
+-- clauses) violated this exact rule -- the SAME rule the sibling
+-- `calendar_event_link_history` table's own comment below already
+-- documented, which had ITSELF also been violated by one more comment
+-- the same earlier round added there (also fixed this round): `lib/
+-- data-health/production-baseline.ts`'s normalizeSchemaSql() (and
+-- scripts/generate-production-baseline.mjs's own `normalized()`)
+-- collapse this object's recorded SQL onto a single line for structural
+-- comparison -- a `--` comment placed between column definitions then
+-- swallowed every following column/CHECK as part of that single-line
+-- comment once reconstructed, producing genuinely invalid SQL. This was
+-- not merely theoretical: it broke `production-backup-readiness.test.mjs`'s
+-- own schema-only-backup round-trip ("near CREATE: syntax error"), since
+-- `lib/operations/schema-backup.ts`'s buildSchemaOnlyBackup() re-executes
+-- exactly that normalized, corrupted text. `next_retry_at`: bounded-
+-- backoff scheduling for a 'failed' link -- null means eligible now (no
+-- backoff in effect). Never consulted for 'invalid'/'auth_required',
+-- which are excluded from automatic reconciliation entirely regardless
+-- of this value. `sync_status`: 'invalid' (a definitive, permanent
+-- rejection -- this app's own pre-mutation validation or a real Google
+-- 400 -- never auto-retried) and 'auth_required' (a 401/403, an
+-- authentication/configuration problem, also never auto-retried) added
+-- (2026-10-19 review, issue 2) -- see calendar-sync-types.ts's own
+-- SyncStatus doc comment.
 CREATE TABLE `calendar_event_links` (
   `id` text PRIMARY KEY NOT NULL,
   `interaction_id` text NOT NULL REFERENCES `interactions`(`id`),
@@ -38,19 +67,10 @@ CREATE TABLE `calendar_event_links` (
   `attempt_count` integer DEFAULT 0 NOT NULL,
   `lease_owner` text,
   `lease_expires_at` integer,
-  -- 2026-10-19 review, issue 2: bounded-backoff scheduling for a
-  -- 'failed' link -- null means eligible now (no backoff in effect).
-  -- Never consulted for 'invalid'/'auth_required', which are excluded
-  -- from automatic reconciliation entirely regardless of this value.
   `next_retry_at` integer,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
   CHECK (`desired_state` IN ('present','absent')),
-  -- 2026-10-19 review, issue 2: 'invalid' (a definitive, permanent
-  -- rejection -- this app's own pre-mutation validation or a real
-  -- Google 400 -- never auto-retried) and 'auth_required' (a 401/403,
-  -- an authentication/configuration problem, also never auto-retried)
-  -- added -- see calendar-sync-types.ts's own SyncStatus doc comment.
   CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))
 );
 --> statement-breakpoint
@@ -100,6 +120,17 @@ CREATE INDEX `calendar_event_links_sync_status_idx` ON `calendar_event_links` (`
 -- flight" -- a delete that returns 404/410 while create_status is still
 -- 'in_flight' lands here, not 'done', and is retried by a later sweep
 -- once the create's own outcome has actually resolved.
+-- `create_status`'s CHECK (2026-10-19 review, issue 2): 'invalid' added
+-- -- a DEFINITIVE, PERMANENT rejection of this generation's create
+-- attempt (a real Google 400), distinct from 'in_flight' (genuinely
+-- ambiguous -- timeout/network/malformed response) -- see
+-- calendar-sync-types.ts's own CreateStatus doc comment. Kept HERE, with
+-- every other explanatory comment for this table, per this same
+-- comment's own "IMPORTANT" rule above -- a 2026-10-19 follow-up review
+-- found this ONE comment had been added directly between columns
+-- despite that rule, which is exactly the corruption it warns about
+-- (confirmed: it broke production-backup-readiness.test.mjs's schema-
+-- only-backup round-trip with a real "near CREATE: syntax error").
 CREATE TABLE `calendar_event_link_history` (
   `id` text PRIMARY KEY NOT NULL,
   `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`),
@@ -111,11 +142,6 @@ CREATE TABLE `calendar_event_link_history` (
   `cleanup_attempts` integer DEFAULT 0 NOT NULL,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
-  -- 2026-10-19 review, issue 2: 'invalid' added -- a DEFINITIVE,
-  -- PERMANENT rejection of this generation's create attempt (a real
-  -- Google 400), distinct from 'in_flight' (genuinely ambiguous --
-  -- timeout/network/malformed response) -- see
-  -- calendar-sync-types.ts's own CreateStatus doc comment.
   CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid')),
   CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))
 );

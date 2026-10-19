@@ -32,7 +32,11 @@ import { deriveGoogleEventId } from "./calendar-event-id.ts";
 import { buildGoogleEventBody, mergeFosFieldsIntoExistingEvent, validateMeetingDesiredFields } from "./calendar-event-body.ts";
 import type { CalendarLinkRow, CalendarLinkStore, GoogleApiResult, GoogleCalendarClient, MeetingDesiredFields } from "./calendar-sync-types.ts";
 
-const DEFAULT_LEASE_TTL_SECONDS = 120;
+// Exported (2026-10-19, follow-up review) so a caller that acquires a
+// lease directly -- e.g. trip-calendar-sync.ts's own single-interaction
+// Retry reconcile -- can pass the same real default rather than guessing
+// or hardcoding a second copy of this number.
+export const DEFAULT_LEASE_TTL_SECONDS = 120;
 const MAX_PRECONDITION_RETRIES = 2;
 
 // 2026-10-19 review (second round), clock bug: `reconcilePresentAbsent`
@@ -765,6 +769,43 @@ export type SweepResult = { reconciled: ReconcileOutcome[]; cleaned: CleanupOutc
 // than all of them sharing one timestamp frozen at the sweep's own start
 // (which could otherwise matter for a sweep over many links that takes
 // a non-trivial amount of real time to run).
+// 2026-10-19 review (follow-up): two independent fixes to how this
+// production entry point acquires leases and selects work, neither of
+// which the core per-link primitives (acquireLease/updateLinkAsLeaseHolder)
+// could fix on their own, since they only ever enforce whatever leaseOwner
+// string a CALLER hands them:
+//
+// 1. "Generate a unique lease token for every acquisition." This used to
+//    build `leaseOwner` as `${leaseOwnerPrefix}:${link.id}` -- a value
+//    that is IDENTICAL across every separate call to this sweep (or any
+//    other caller sharing the same prefix) for the same link. Two
+//    genuinely distinct attempts -- e.g. a sweep tick and a concurrent
+//    direct retry, or two sweep ticks where the first is still suspended
+//    on a slow network call when its lease expires and a second,
+//    unrelated attempt re-acquires it -- would then hold EQUAL leaseOwner
+//    strings by construction. The second attempt's acquisition would
+//    still correctly block the first while the first's lease is still
+//    valid (acquireLease only compares expiry), but once the first
+//    attempt's lease genuinely expires and the second re-acquires it,
+//    the first attempt's own later, long-delayed write would wrongly
+//    pass `lease_owner = ?` once it finally resolves, since the string it
+//    captured matches the SECOND attempt's current holder by coincidence
+//    of being deterministic rather than by actually being the same
+//    attempt. A fresh `randomUUID()` suffix, generated separately for
+//    every single acquisition this function makes, makes that collision
+//    structurally impossible: no two attempts, however many share the
+//    same prefix, can ever compare equal.
+// 2. "Scope the immediate reconciliation sweep to the authenticated
+//    owner." `scopeUserId`, when provided, is forwarded to the store's
+//    own listNeedingReconciliation/listPendingCleanup so this call can
+//    never even SEE another owner's pending link or cleanup row, let
+//    alone acquire a lease on or mutate one -- not merely "the lease
+//    would fail if it tried," but "it never tries at all." Omitted
+//    (undefined), this remains the original unscoped, every-owner sweep
+//    -- the shape a future global cron trigger still needs; Trip
+//    Planning's own caller (trip-calendar-sync.ts's
+//    attemptImmediateTripCalendarSync) always passes the authenticated
+//    owner's own userId.
 export async function runReconciliationSweep(
   store: CalendarLinkStore,
   client: GoogleCalendarClient,
@@ -772,17 +813,18 @@ export async function runReconciliationSweep(
   leaseOwnerPrefix: string,
   now: number,
   clock: Clock = () => now,
+  scopeUserId?: string,
 ): Promise<SweepResult> {
   const reconciled: ReconcileOutcome[] = [];
-  const toReconcile = await store.listNeedingReconciliation(now);
+  const toReconcile = await store.listNeedingReconciliation(now, scopeUserId);
   for (const link of toReconcile) {
-    reconciled.push(await reconcilePresentAbsent(store, client, getMeetingFields, link.interactionId, `${leaseOwnerPrefix}:${link.id}`, now, DEFAULT_LEASE_TTL_SECONDS, clock));
+    reconciled.push(await reconcilePresentAbsent(store, client, getMeetingFields, link.interactionId, `${leaseOwnerPrefix}:${link.id}:${randomUUID()}`, now, DEFAULT_LEASE_TTL_SECONDS, clock));
   }
 
   const cleaned: CleanupOutcome[] = [];
-  const toCleanup = await store.listPendingCleanup(now);
+  const toCleanup = await store.listPendingCleanup(now, scopeUserId);
   for (const historyRow of toCleanup) {
-    cleaned.push(await reconcileGenerationCleanup(store, client, await calendarIdForLink(store, historyRow.linkId), historyRow.linkId, historyRow.generation, historyRow.googleEventId, now, `${leaseOwnerPrefix}:cleanup:${historyRow.linkId}`, DEFAULT_LEASE_TTL_SECONDS, clock));
+    cleaned.push(await reconcileGenerationCleanup(store, client, await calendarIdForLink(store, historyRow.linkId), historyRow.linkId, historyRow.generation, historyRow.googleEventId, now, `${leaseOwnerPrefix}:cleanup:${historyRow.linkId}:${randomUUID()}`, DEFAULT_LEASE_TTL_SECONDS, clock));
   }
 
   return { reconciled, cleaned };

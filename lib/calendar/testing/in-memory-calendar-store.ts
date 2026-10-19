@@ -216,8 +216,14 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     Object.assign(row, patch);
   }
 
-  async listPendingCleanup(): Promise<CalendarLinkHistoryRow[]> {
-    return [...this.history.values()].filter((row) => row.cleanupNeeded && row.cleanupStatus !== "done").map((row) => ({ ...row }));
+  // 2026-10-19 review (follow-up): `userId`, when provided, restricts
+  // this to generations whose OWN link belongs to that one owner -- see
+  // this method's own interface doc comment (calendar-sync-types.ts).
+  async listPendingCleanup(_now: number, userId?: string): Promise<CalendarLinkHistoryRow[]> {
+    return [...this.history.values()]
+      .filter((row) => row.cleanupNeeded && row.cleanupStatus !== "done")
+      .filter((row) => !userId || this.links.get(row.linkId)?.userId === userId)
+      .map((row) => ({ ...row }));
   }
 
   // 2026-10-19 review, issue 2: EXCLUDES "invalid"/"auth_required" links
@@ -226,11 +232,14 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
   // retries for permanent invalid requests") -- and defers a "failed"
   // link whose `nextRetryAt` is still in the future, implementing the
   // bounded backoff `now` is passed in for.
-  async listNeedingReconciliation(now: number): Promise<CalendarLinkRow[]> {
+  // 2026-10-19 review (follow-up): `userId`, when provided, restricts
+  // this to that one owner's own links only.
+  async listNeedingReconciliation(now: number, userId?: string): Promise<CalendarLinkRow[]> {
     return [...this.links.values()]
       .filter((link) => link.syncStatus !== "synced" || link.syncedRevision !== link.desiredRevision)
       .filter((link) => link.syncStatus !== "missing_remotely" && link.syncStatus !== "invalid" && link.syncStatus !== "auth_required")
       .filter((link) => link.nextRetryAt === null || link.nextRetryAt <= now)
+      .filter((link) => !userId || link.userId === userId)
       .map((link) => ({ ...link }));
   }
 }

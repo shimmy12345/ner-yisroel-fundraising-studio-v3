@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "6b9e84015e0a7df2bf03efe8a53aba54ad7489443fcc82f72a85dd25e1af05ea",
+  "schemaHash": "b643aac0c5b582c2cd20f7aa372dc3157ca6bfd2fad16748562d33307d00cb9b",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -759,7 +759,7 @@
         ],
         "checks": [
           "CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))",
-          "CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed'))"
+          "CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid'))"
         ]
       },
       {
@@ -871,6 +871,13 @@
             "primaryKeyOrder": 0
           },
           {
+            "name": "next_retry_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
             "name": "created_at",
             "type": "INTEGER",
             "notNull": true,
@@ -935,7 +942,7 @@
         ],
         "checks": [
           "CHECK (`desired_state` IN ('present','absent'))",
-          "CHECK (`sync_status` IN ('pending','synced','failed','missing_remotely'))"
+          "CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))"
         ]
       },
       {
@@ -7487,12 +7494,12 @@
     {
       "type": "table",
       "name": "calendar_event_link_history",
-      "sql": "CREATE TABLE `calendar_event_link_history` ( `id` text PRIMARY KEY NOT NULL, `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`), `generation` integer NOT NULL, `google_event_id` text NOT NULL, `create_status` text DEFAULT 'not_attempted' NOT NULL, `cleanup_needed` integer DEFAULT 0 NOT NULL, `cleanup_status` text DEFAULT 'not_needed' NOT NULL, `cleanup_attempts` integer DEFAULT 0 NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed')), CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done')) )"
+      "sql": "CREATE TABLE `calendar_event_link_history` ( `id` text PRIMARY KEY NOT NULL, `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`), `generation` integer NOT NULL, `google_event_id` text NOT NULL, `create_status` text DEFAULT 'not_attempted' NOT NULL, `cleanup_needed` integer DEFAULT 0 NOT NULL, `cleanup_status` text DEFAULT 'not_needed' NOT NULL, `cleanup_attempts` integer DEFAULT 0 NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid')), CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done')) )"
     },
     {
       "type": "table",
       "name": "calendar_event_links",
-      "sql": "CREATE TABLE `calendar_event_links` ( `id` text PRIMARY KEY NOT NULL, `interaction_id` text NOT NULL REFERENCES `interactions`(`id`), `user_id` text NOT NULL REFERENCES `users`(`id`), `google_calendar_id` text DEFAULT 'primary' NOT NULL, `generation` integer DEFAULT 0 NOT NULL, `google_event_id` text, `google_etag` text, `desired_state` text DEFAULT 'present' NOT NULL, `desired_revision` integer DEFAULT 1 NOT NULL, `synced_revision` integer DEFAULT 0 NOT NULL, `sync_status` text DEFAULT 'pending' NOT NULL, `last_error` text, `attempt_count` integer DEFAULT 0 NOT NULL, `lease_owner` text, `lease_expires_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`desired_state` IN ('present','absent')), CHECK (`sync_status` IN ('pending','synced','failed','missing_remotely')) )"
+      "sql": "CREATE TABLE `calendar_event_links` ( `id` text PRIMARY KEY NOT NULL, `interaction_id` text NOT NULL REFERENCES `interactions`(`id`), `user_id` text NOT NULL REFERENCES `users`(`id`), `google_calendar_id` text DEFAULT 'primary' NOT NULL, `generation` integer DEFAULT 0 NOT NULL, `google_event_id` text, `google_etag` text, `desired_state` text DEFAULT 'present' NOT NULL, `desired_revision` integer DEFAULT 1 NOT NULL, `synced_revision` integer DEFAULT 0 NOT NULL, `sync_status` text DEFAULT 'pending' NOT NULL, `last_error` text, `attempt_count` integer DEFAULT 0 NOT NULL, `lease_owner` text, `lease_expires_at` integer, `next_retry_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`desired_state` IN ('present','absent')), CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely')) )"
     },
     {
       "type": "table",

@@ -41,17 +41,38 @@
 // link row would exist to retry. Documented in docs/AI-HANDOFF.md, not
 // hidden.
 
+import { randomUUID } from "node:crypto";
 import { D1CalendarStore } from "../calendar/d1-calendar-store.ts";
 import {
   createGoogleCalendarClient, realHttpTransport, resolveVerifiedGoogleAccountEmail,
   type CalendarOAuthCredentials, type HttpTransport,
 } from "../calendar/google-calendar-client.ts";
 import { isCalendarSyncAllowed } from "../calendar/calendar-sync-guard.ts";
-import { enrollMeetingForSync, recordReschedule, recordCancel, recordReopen, runReconciliationSweep, type SweepResult } from "../calendar/calendar-sync-reconciler.ts";
+import {
+  DEFAULT_LEASE_TTL_SECONDS, enrollMeetingForSync, reconcilePresentAbsent, recordReschedule, recordCancel, recordReopen,
+  runReconciliationSweep, type Clock, type ReconcileOutcome, type SweepResult,
+} from "../calendar/calendar-sync-reconciler.ts";
 import type { CalendarLinkRow, GoogleCalendarClient, MeetingDesiredFields } from "../calendar/calendar-sync-types.ts";
 import { timezoneForState } from "./trip-model.ts";
 
 const DEFAULT_FALLBACK_TIMEZONE = "America/New_York";
+
+// Lease protection (2026-10-19 review, follow-up): every production call
+// into the reconciler must pass a REAL, advancing clock, read fresh at
+// each expiry-sensitive check -- never the single frozen `now` number a
+// caller captured once at the top of a request. Before this fix,
+// attemptImmediateTripCalendarSync passed no `clock` at all, which meant
+// runReconciliationSweep (and reconcilePresentAbsent/
+// reconcileGenerationCleanup underneath it) defaulted to `() => now` --
+// a clock that NEVER advances, so a lease's own genuine real-world
+// expiry while this attempt was suspended on a network call could never
+// be detected by this same attempt's own later checks (exactly the bug
+// commit 1fffef2 fixed inside the core reconciler itself, but which
+// remained live at this production call site because nothing here ever
+// supplied the fix's own advancing clock). `realClock` is the one actual
+// production clock this module uses; `ImmediateSyncArgs.clock` is a
+// test-only override, mirroring the existing `transport`/`client` seams.
+const realClock: Clock = () => Math.floor(Date.now() / 1000);
 
 // Re-reads the current `interactions` row fresh -- never a value captured
 // at scheduling time -- matching every other getMeetingFields() the core
@@ -109,6 +130,63 @@ export async function recordTripMeetingCancelled(db: D1Database, interactionId: 
   await recordCancel(store, now, interactionId);
 }
 
+// --- Atomic persistence (2026-10-19 review, follow-up) --------------------
+//
+// "Commit the Trip meeting change and durable Calendar intent atomically
+// using supported D1 operations." recordTripMeetingScheduled/
+// recordTripMeetingCancelled above each execute their own db.batch() call
+// immediately -- correct in isolation, but a SEPARATE D1 round trip from
+// whatever wrote the meeting change itself (trips-data.ts's own
+// interactions/trip_prospects batch), which is exactly the atomicity gap
+// prior rounds of this feature reported rather than hid. These two
+// functions instead BUILD the same guarded statements
+// enrollMeetingForSync/recordReschedule/recordCancel/recordReopen would
+// execute, WITHOUT executing them, so trips-data.ts can append them to
+// its OWN db.batch() call -- the meeting change and the durable calendar
+// intent then commit together, as one indivisible D1 operation: D1's own
+// documented guarantee ("every statement in one batch call commits
+// together or none do" -- this file's own d1-calendar-store.ts header)
+// means a genuine failure anywhere in that combined batch rolls back
+// BOTH halves together, never leaving one committed without the other.
+// A guard mismatch inside one of these statements (e.g. attempting to
+// reschedule a meeting some other request already cancelled) is NOT a
+// failure -- it is the same harmless, already-idempotent no-op these
+// statements' own WHERE clauses always produced; only the meeting
+// change's own statements determine whether the overall call reports
+// success. Reuses the exact same dispatch decision
+// recordTripMeetingScheduled already makes (no link yet -> enroll; link
+// absent -> reopen; link present -> reschedule) and D1CalendarStore's own
+// newly-exposed *Statements() builders -- never a second copy of that
+// SQL or that decision logic.
+export async function buildTripMeetingScheduledStatements(db: D1Database, interactionId: string, userId: string, googleCalendarId: string, now: number): Promise<D1PreparedStatement[]> {
+  const store = new D1CalendarStore(db);
+  const existingLink = await store.getLinkByInteraction(interactionId);
+  if (!existingLink) {
+    return store.insertLinkWithHistoryStatements(
+      {
+        id: randomUUID(), interactionId, userId, googleCalendarId, generation: 0, googleEventId: null, googleEtag: null,
+        desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null,
+        attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null,
+      },
+      now,
+    );
+  }
+  if (existingLink.desiredState === "absent") return store.applyReopenStatements(existingLink.id, existingLink.interactionId, existingLink.generation, now);
+  return store.applyRescheduleStatements(existingLink.id, now);
+}
+
+// Same shape as buildTripMeetingScheduledStatements above, for the cancel
+// path. Returns an empty array (not an error) when no link was ever
+// enrolled for this interaction -- recordCancel's own existing "nothing
+// to cancel" no-op, preserved exactly, just expressed as "contribute
+// nothing to the caller's batch" instead of "run nothing."
+export async function buildTripMeetingCancelledStatements(db: D1Database, interactionId: string, now: number): Promise<D1PreparedStatement[]> {
+  const store = new D1CalendarStore(db);
+  const existingLink = await store.getLinkByInteraction(interactionId);
+  if (!existingLink) return [];
+  return store.applyCancelStatements(existingLink.id, now);
+}
+
 // --- Enable/disable (Settings' persisted, enforced disconnect flag) ------
 
 export async function isCalendarSyncEnabledForUser(db: D1Database, userId: string): Promise<boolean> {
@@ -142,6 +220,12 @@ export type ImmediateSyncArgs = {
   // (userinfo) check's own scripted response. Never set by any real
   // caller -- trips-data.ts's own wiring never passes this.
   client?: GoogleCalendarClient;
+  // Test-only seam (2026-10-19 review, follow-up): an advancing, test-
+  // controlled Clock, overriding `realClock`. Never set by any real
+  // caller -- trips-data.ts's own wiring never passes this, so every
+  // production call always reads the real wall clock fresh at each
+  // expiry-sensitive check, exactly as "lease protection" requires.
+  clock?: Clock;
 };
 
 // Attempts to actually reach Google for every link needing attention
@@ -155,10 +239,19 @@ export type ImmediateSyncArgs = {
 // scheduling when Calendar is disabled or unavailable": the meeting
 // itself was already saved by the caller before this ever runs, and this
 // function cannot affect that outcome either way.
+//
+// Owner isolation (2026-10-19 review, follow-up): `args.userId` is passed
+// through to runReconciliationSweep's own `scopeUserId`, so this sweep
+// -- triggered by ONE authenticated owner's own scheduling/cancel/Retry
+// action -- can never see, acquire a lease on, or mutate another owner's
+// pending link or cleanup row. Before this fix, every owner's own action
+// triggered an UNSCOPED sweep that would also attempt to reconcile every
+// OTHER owner's pending work as a side effect.
 export async function attemptImmediateTripCalendarSync(args: ImmediateSyncArgs): Promise<SweepResult | null> {
   if (!args.calendarSyncEnabled || !args.credentials) return null;
   const transport = args.transport ?? realHttpTransport;
   const client = args.client ?? createGoogleCalendarClient(args.credentials, transport);
+  const clock = args.clock ?? realClock;
   const verifiedEmail = await resolveVerifiedGoogleAccountEmail(args.credentials, transport);
   const guard = isCalendarSyncAllowed({
     environment: args.environment, calendarSyncEnabled: args.calendarSyncEnabled, credentialsPresent: true,
@@ -166,7 +259,47 @@ export async function attemptImmediateTripCalendarSync(args: ImmediateSyncArgs):
   });
   if (!guard.allowed) return null;
   const store = new D1CalendarStore(args.db);
-  return runReconciliationSweep(store, client, (interactionId) => loadTripMeetingFields(args.db, interactionId, args.fosBaseUrl), `trip:${args.userId}`, args.now);
+  return runReconciliationSweep(store, client, (interactionId) => loadTripMeetingFields(args.db, interactionId, args.fosBaseUrl), `trip:${args.userId}`, args.now, clock, args.userId);
+}
+
+// Safe Retry (2026-10-19 review, follow-up): reconciles ONE already-
+// enrolled meeting's CURRENT desired state -- whatever it already is,
+// present or absent -- without ever touching durable intent. Deliberately
+// never calls enrollMeetingForSync/recordReschedule/recordCancel/
+// recordReopen (the functions attemptImmediateTripCalendarSync's own
+// sibling, the scheduling path, dispatches through): those are the
+// "scheduling logic" this round's own instruction says Retry must never
+// call, since recordTripMeetingScheduled's dispatch would REOPEN a
+// canceled meeting purely as a side effect of retrying its sync -- a real
+// bug this function exists to not have. Calling the core's own
+// reconcilePresentAbsent directly for just this one interaction's link
+// means: a 'present' link is retried toward being created/updated on
+// Google (ordinary retry); an 'absent' (canceled) link is retried toward
+// being DELETED from Google (reconcilePresentAbsent's own "absent" branch
+// already does this, including cleanup) -- cancellation is always
+// preserved, never reopened, and any cleanup still owed is still finished.
+// Returns null under the exact same "never even attempt" conditions as
+// attemptImmediateTripCalendarSync (disabled, no credentials, or the
+// guard refuses) or when no link has ever been enrolled for this
+// interaction at all (nothing to retry).
+export async function reconcileTripMeetingCalendarLink(args: ImmediateSyncArgs & { interactionId: string }): Promise<ReconcileOutcome | null> {
+  if (!args.calendarSyncEnabled || !args.credentials) return null;
+  const transport = args.transport ?? realHttpTransport;
+  const client = args.client ?? createGoogleCalendarClient(args.credentials, transport);
+  const clock = args.clock ?? realClock;
+  const verifiedEmail = await resolveVerifiedGoogleAccountEmail(args.credentials, transport);
+  const guard = isCalendarSyncAllowed({
+    environment: args.environment, calendarSyncEnabled: args.calendarSyncEnabled, credentialsPresent: true,
+    verifiedEmail, calendarId: args.calendarId, stagingTestCalendarId: args.stagingTestCalendarId,
+  });
+  if (!guard.allowed) return null;
+  const store = new D1CalendarStore(args.db);
+  const existingLink = await store.getLinkByInteraction(args.interactionId);
+  if (!existingLink) return null; // nothing enrolled for this meeting yet -- never created here, only an explicit schedule does that
+  // Unique per acquisition (same reason as runReconciliationSweep's own
+  // randomUUID() suffix) -- a fresh token every call, never reused.
+  const leaseOwner = `trip-retry:${args.userId}:${args.interactionId}:${randomUUID()}`;
+  return reconcilePresentAbsent(store, client, (interactionId) => loadTripMeetingFields(args.db, interactionId, args.fosBaseUrl), args.interactionId, leaseOwner, args.now, DEFAULT_LEASE_TTL_SECONDS, clock);
 }
 
 // --- Read-only status, for the Trip row and Settings ----------------------

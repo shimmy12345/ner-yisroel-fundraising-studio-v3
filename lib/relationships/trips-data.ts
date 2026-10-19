@@ -19,8 +19,9 @@ import {
   type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus,
 } from "./trip-model.ts";
 import {
-  attemptImmediateTripCalendarSync, getTripMeetingCalendarLink, googleCalendarEventViewUrl, loadCalendarConnectionStatus,
-  recordTripMeetingCancelled, recordTripMeetingScheduled, setCalendarSyncEnabledForUser as setCalendarSyncEnabledForUserRow,
+  attemptImmediateTripCalendarSync, buildTripMeetingCancelledStatements, buildTripMeetingScheduledStatements,
+  getTripMeetingCalendarLink, googleCalendarEventViewUrl, loadCalendarConnectionStatus, reconcileTripMeetingCalendarLink,
+  setCalendarSyncEnabledForUser as setCalendarSyncEnabledForUserRow,
   type CalendarConnectionStatus,
 } from "./trip-calendar-sync.ts";
 import { logger } from "../logger.ts";
@@ -48,47 +49,85 @@ function fosBaseUrl(): string {
   return env.APP_BASE_URL ?? "";
 }
 
-// Writes the durable calendar-sync intent immediately after (never
-// inside) the caller's own already-committed interactions/trip_prospects
-// batch, then makes one best-effort attempt to actually reach Google --
-// gated by the exact same guard every round of this feature's design has
-// required (see trip-calendar-sync.ts's own header for the atomicity
-// limitation this accepts). Never throws: a calendar-sync problem of any
-// kind must never fail the caller's own already-successful response ("a
-// Google failure must never lose the saved FOS meeting").
-async function syncTripMeetingToCalendar(interactionId: string, userId: string, now: number): Promise<void> {
-  try {
-    const calendarId = calendarDestinationId();
-    await recordTripMeetingScheduled(env.DB, interactionId, userId, calendarId, now);
-    await attemptImmediateTripCalendarSync({
-      db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__,
-      calendarSyncEnabled: await isCalendarSyncEnabledForUserInternal(userId),
-      credentials: calendarEnvCredentials(), calendarId, stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
-      fosBaseUrl: fosBaseUrl(), now,
-    });
-  } catch (error) {
-    logger.error("trip_calendar_sync_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
-  }
-}
-
-async function cancelTripMeetingCalendarSync(interactionId: string, userId: string, now: number): Promise<void> {
-  try {
-    await recordTripMeetingCancelled(env.DB, interactionId, now);
-    const calendarId = calendarDestinationId();
-    await attemptImmediateTripCalendarSync({
-      db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__,
-      calendarSyncEnabled: await isCalendarSyncEnabledForUserInternal(userId),
-      credentials: calendarEnvCredentials(), calendarId, stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
-      fosBaseUrl: fosBaseUrl(), now,
-    });
-  } catch (error) {
-    logger.error("trip_calendar_sync_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
-  }
-}
-
 async function isCalendarSyncEnabledForUserInternal(userId: string): Promise<boolean> {
   const row = await env.DB.prepare("SELECT calendar_sync_enabled FROM users WHERE id = ?").bind(userId).first<{ calendar_sync_enabled: number }>();
   return row?.calendar_sync_enabled === 1;
+}
+
+// Integration safety, atomic persistence (2026-10-19 review, follow-up):
+// builds the durable calendar-sync intent statements for a schedule/
+// reschedule/reopen, to be appended to the CALLER's own db.batch() call
+// -- never executed here, never a separate D1 round trip from the
+// meeting change itself (see trip-calendar-sync.ts's own
+// buildTripMeetingScheduledStatements doc comment for exactly what this
+// makes atomic and why). A failure reading the current link state (the
+// one await this performs) is caught and logged, returning no statements
+// at all -- "preserve existing scheduling when Calendar is disabled or
+// unavailable" extends to "a calendar-intent read failure must never
+// block the meeting save," so the caller's own meeting-change statements
+// still commit on their own in that case.
+async function tripCalendarScheduleStatements(interactionId: string, userId: string, now: number): Promise<D1PreparedStatement[]> {
+  try {
+    return await buildTripMeetingScheduledStatements(env.DB, interactionId, userId, calendarDestinationId(), now);
+  } catch (error) {
+    logger.error("trip_calendar_intent_build_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
+    return [];
+  }
+}
+
+async function tripCalendarCancelStatements(interactionId: string, now: number): Promise<D1PreparedStatement[]> {
+  try {
+    return await buildTripMeetingCancelledStatements(env.DB, interactionId, now);
+  } catch (error) {
+    logger.error("trip_calendar_intent_build_failed", { interactionId, error: error instanceof Error ? error.message : String(error) });
+    return [];
+  }
+}
+
+// The one remaining non-atomic step: an actual best-effort attempt to
+// REACH Google, run only AFTER the meeting change and the durable intent
+// have already committed together (see the two functions above). This
+// can never be folded into the same D1 batch -- it is a real network
+// call, not a database write -- so it stays exactly what every prior
+// round already documented: a separate step whose own failure is caught
+// and logged, never surfaced as a failure of the already-successful
+// save. Owner-scoped (passes `userId` through to
+// attemptImmediateTripCalendarSync's own `args.userId`), so this can
+// never attempt to reconcile any OTHER owner's pending work as a side
+// effect of this one owner's action.
+async function attemptBestEffortCalendarReconcile(userId: string, now: number): Promise<void> {
+  try {
+    const calendarId = calendarDestinationId();
+    await attemptImmediateTripCalendarSync({
+      db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__,
+      calendarSyncEnabled: await isCalendarSyncEnabledForUserInternal(userId),
+      credentials: calendarEnvCredentials(), calendarId, stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
+      fosBaseUrl: fosBaseUrl(), now,
+    });
+  } catch (error) {
+    logger.error("trip_calendar_sync_failed", { userId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+// Safe Retry (2026-10-19 review, follow-up): reconciles this one meeting's
+// CURRENT desired state only -- never recordTripMeetingScheduled/
+// recordTripMeetingCancelled, which could reopen a canceled meeting as a
+// side effect (see trip-calendar-sync.ts's reconcileTripMeetingCalendarLink
+// doc comment). Never throws: same "a calendar-sync problem must never
+// surface as a failure of an otherwise-successful request" rule as every
+// other calendar call site in this file.
+async function reconcileTripMeetingCalendarSync(interactionId: string, userId: string, now: number): Promise<void> {
+  try {
+    const calendarId = calendarDestinationId();
+    await reconcileTripMeetingCalendarLink({
+      db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__,
+      calendarSyncEnabled: await isCalendarSyncEnabledForUserInternal(userId),
+      credentials: calendarEnvCredentials(), calendarId, stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
+      fosBaseUrl: fosBaseUrl(), now, interactionId,
+    });
+  } catch (error) {
+    logger.error("trip_calendar_retry_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 // Exposed for the Retry action (app/api/trips/.../calendar-retry) and the
@@ -106,13 +145,14 @@ export async function tripMeetingCalendarStatus(userId: string, tripId: string, 
 }
 
 // The Retry action -- "safe" because it only ever re-attempts reconciling
-// the EXISTING recorded intent (never creates a new one, never bypasses
-// the guard) via the same attemptImmediateTripCalendarSync() every
-// scheduling action already uses.
+// this one owner-scoped meeting's EXISTING recorded intent (never writes
+// a new intent, never calls scheduling logic that could reopen a
+// canceled meeting -- see reconcileTripMeetingCalendarSync's own doc
+// comment above).
 export async function retryTripMeetingCalendarSync(userId: string, tripId: string, prospectId: string, now: number): Promise<boolean> {
   const prospect = await ownedProspect(userId, tripId, prospectId);
   if (!prospect || !prospect.linkedInteractionId) return false;
-  await syncTripMeetingToCalendar(prospect.linkedInteractionId, userId, now);
+  await reconcileTripMeetingCalendarSync(prospect.linkedInteractionId, userId, now);
   return true;
 }
 
@@ -420,16 +460,26 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
     const interaction = await env.DB.prepare("SELECT source FROM interactions WHERE id = ? AND user_id = ?").bind(existing.linkedInteractionId, userId).first<{ source: string }>();
     if (interaction && !interaction.source.startsWith("capture-completed:") && !interaction.source.startsWith("cancelled:")) {
       statements.push(env.DB.prepare("UPDATE interactions SET source = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId));
-      // "Canceling removes only its linked FOS-created event" -- written
-      // immediately after this batch commits, never inside it (see
-      // trip-calendar-sync.ts's own header on the atomicity this accepts).
       cancelCalendarForInteractionId = existing.linkedInteractionId;
     }
   }
+  // Integration safety, atomic persistence: the trip_prospects status
+  // update's own result (at this fixed index, regardless of how many
+  // calendar statements get appended after it below) is what "did the
+  // update actually apply" is judged on -- never `.at(-1)`, which would
+  // silently start reading the WRONG statement's result once calendar
+  // statements follow it in the same batch.
+  const prospectUpdateIndex = statements.length;
   statements.push(env.DB.prepare("UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ?").bind(nextStatus, now, prospectId, existing.status));
+  // "Canceling removes only its linked FOS-created event," committed as
+  // ONE atomic D1 operation together with the meeting/status change above
+  // -- never a separate batch call after this one commits (see
+  // trip-calendar-sync.ts's own buildTripMeetingCancelledStatements doc
+  // comment for exactly what this makes atomic).
+  if (cancelCalendarForInteractionId) statements.push(...(await tripCalendarCancelStatements(cancelCalendarForInteractionId, now)));
   const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
-  if ((results.at(-1)?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
-  if (cancelCalendarForInteractionId) await cancelTripMeetingCalendarSync(cancelCalendarForInteractionId, userId, now);
+  if ((results[prospectUpdateIndex]?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
+  if (cancelCalendarForInteractionId) await attemptBestEffortCalendarReconcile(userId, now);
   return { ok: true };
 }
 
@@ -486,13 +536,19 @@ export async function scheduleProspectMeeting(userId: string, tripId: string, pr
     env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
       .bind(meetingAt, location, interactionId, now, prospectId),
   ];
+  // Integration safety, atomic persistence (2026-10-19 review, follow-
+  // up): the durable calendar-sync intent (enroll/reschedule/reopen --
+  // tripCalendarScheduleStatements picks the right one, same dispatch
+  // recordTripMeetingScheduled used to make non-atomically) is appended
+  // to this SAME db.batch() call, so the meeting change and the calendar
+  // intent commit together or not at all -- see
+  // trip-calendar-sync.ts's own buildTripMeetingScheduledStatements doc
+  // comment for exactly what this guarantees.
+  statements.push(...(await tripCalendarScheduleStatements(interactionId, userId, now)));
   await env.DB.batch(statements);
-  // Calendar sync intent -- see syncTripMeetingToCalendar's own doc
-  // comment for exactly what "atomic" means here and the gap it accepts.
-  // Covers both an initial schedule AND a reschedule/reopen (same
-  // deterministic interactionId as any prior scheduling of this same
-  // prospect) -- recordTripMeetingScheduled() itself picks the right one.
-  await syncTripMeetingToCalendar(interactionId, userId, now);
+  // The one remaining non-atomic step: an actual best-effort attempt to
+  // reach Google, run only after the above has already committed.
+  await attemptBestEffortCalendarReconcile(userId, now);
   return { ok: true };
 }
 
