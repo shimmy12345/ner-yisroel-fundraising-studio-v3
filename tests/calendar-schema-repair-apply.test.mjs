@@ -10,6 +10,7 @@ import {
   verifyBackupRestoresAndMatches,
   retainBackupSecurely,
   applyRepairBatchGuardedByRetention,
+  withStartupTimeout,
   describeFailure,
 } from "../lib/operations/calendar-schema-repair-apply.ts";
 
@@ -323,3 +324,34 @@ test("describeFailure for post-repair-retention fails loudly but never recommend
   assert.match(message, /already committed successfully/i);
   assert.match(message, /Do NOT restore/i);
 });
+
+// =============================================================================
+// withStartupTimeout() -- a real dispatched run found getPlatformProxy()
+// can fail its own internal remote-session startup without the process
+// ever exiting (GitHub had to cancel the job after its own 20-minute
+// job-level timeout, ~21 minutes after the real error was already
+// printed). This is the bounded-timeout half of the fix (the other half
+// -- forcing process.exit() once main() settles -- is exercised live by
+// every real dispatch, not something a unit test can meaningfully fake).
+// =============================================================================
+
+test("withStartupTimeout resolves with the promise's own value when it settles before the timeout", async () => {
+  const result = await withStartupTimeout(Promise.resolve("connected"), 1000, "should not fire");
+  assert.equal(result, "connected");
+});
+
+test("withStartupTimeout rejects with the promise's own error when it rejects before the timeout -- never masks the real failure", async () => {
+  await assert.rejects(
+    () => withStartupTimeout(Promise.reject(new Error("Failed to start the remote proxy session")), 1000, "should not fire"),
+    /Failed to start the remote proxy session/,
+  );
+});
+
+test("withStartupTimeout rejects with its OWN message if the promise never settles in time", async () => {
+  const neverSettles = new Promise(() => {});
+  await assert.rejects(
+    () => withStartupTimeout(neverSettles, 20, "timed out waiting for the remote session"),
+    /timed out waiting for the remote session/,
+  );
+});
+

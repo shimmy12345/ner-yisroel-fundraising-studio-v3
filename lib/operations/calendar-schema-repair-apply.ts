@@ -18,6 +18,36 @@ export class PhaseError extends Error {
 
 export type Row = Record<string, unknown>;
 
+// A real dispatched run (39301756858) found that `getPlatformProxy({
+// remoteBindings: true})` can fail its own internal remote-proxy-session
+// startup (wrangler's own error: "Failed to start the remote proxy
+// session") WITHOUT the process ever exiting -- GitHub Actions had to
+// cancel the job after its own 20-minute job-level timeout, ~21 minutes
+// after the error was already printed. Confirmed in wrangler 4.92.0's
+// own source: this specific error path throws after a local Miniflare
+// "proxy server worker" has already been started, without disposing it
+// first -- an orphaned local process/handle that keeps Node's event
+// loop alive even though the rejected promise itself settled almost
+// immediately. There is no handle for OUR code to dispose in this
+// failure (the rejection happens before `getPlatformProxy()` ever
+// returns a `proxy` object at all), so the only lever available on our
+// side is: (a) this bounded timeout, so a FUTURE hang (the promise never
+// settling at all, a different failure mode than the one observed)
+// fails fast with a clear message instead of waiting for GitHub's own
+// blunt job-level timeout, and (b) forcing `process.exit()` once `main()`
+// has fully settled (see the apply/recover scripts themselves), which
+// terminates the job promptly regardless of what wrangler's internals
+// left dangling.
+export function withStartupTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 // node:sqlite's own row objects have a NULL prototype (confirmed:
 // `Object.getPrototypeOf(db.prepare(...).get())` is `null`, not
 // `Object.prototype`), while a D1 binding's `.all()` results are

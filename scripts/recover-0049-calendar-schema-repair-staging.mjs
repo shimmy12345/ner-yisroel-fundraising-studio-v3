@@ -66,10 +66,19 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error("\nRECOVERY ABORTED:", error.message);
-  console.error(
-    "This recovery batch is a single db.batch() call, same atomicity guarantee as the repair migration itself: a clean, reported rejection means nothing changed. If this instead failed with a network/timeout-shaped error, whether it committed is genuinely uncertain -- re-run the read-only inspection queries from scripts/apply-0049-calendar-schema-repair-staging.mjs's own failure guidance before any further action, never assume either outcome.",
-  );
-  process.exitCode = 1;
-});
+// Forced exit, same reasoning and same bug as
+// scripts/apply-0049-calendar-schema-repair-staging.mjs's own main()
+// call site: connectAndValidateStagingTarget() (shared by both scripts)
+// can leave an orphaned local process running after a failed
+// getPlatformProxy() remote-session startup, even once this script has
+// already caught and reported the error -- only once main() has FULLY
+// settled.
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error("\nRECOVERY ABORTED:", error.message);
+    console.error(
+      "This recovery batch is a single db.batch() call, same atomicity guarantee as the repair migration itself: a clean, reported rejection means nothing changed. If this instead failed with a network/timeout-shaped error, whether it committed is genuinely uncertain -- re-run the read-only inspection queries from scripts/apply-0049-calendar-schema-repair-staging.mjs's own failure guidance before any further action, never assume either outcome.",
+    );
+    process.exit(1);
+  });

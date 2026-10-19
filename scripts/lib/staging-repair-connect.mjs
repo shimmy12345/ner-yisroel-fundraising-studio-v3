@@ -20,9 +20,17 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { getPlatformProxy } from "wrangler";
 import { computeSchemaFingerprint, validateRepairTarget } from "../../lib/operations/staging-repair-target.ts";
+import { withStartupTimeout } from "../../lib/operations/calendar-schema-repair-apply.ts";
 
 export const STAGING_REPAIR_CONFIG_PATH = path.resolve(import.meta.dirname, "../../wrangler.staging-repair.jsonc");
 export const STAGING_DATABASE_NAME = "fundraising-os-staging-db";
+// See withStartupTimeout's own header for why this exists: a real
+// dispatched run found getPlatformProxy({remoteBindings:true}) can fail
+// its own internal session startup without the process ever exiting.
+// 90s is a generous margin above a normal successful connection while
+// still failing fast compared to GitHub's own 20-minute job-level
+// timeout, which is what actually ended that run.
+const REMOTE_PROXY_STARTUP_TIMEOUT_MS = 90_000;
 const SCHEMA_ROWS_QUERY = "SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name;";
 
 export function wrangler(args, { allowFailure = false, cwd } = {}) {
@@ -82,7 +90,11 @@ export async function connectAndValidateStagingTarget({ expectedAccountId = proc
   const cliSchemaRows = cliSchemaResult?.[0]?.results ?? [];
 
   console.log("Opening the real remote Staging D1 binding (getPlatformProxy, remoteBindings: true)...");
-  const proxy = await getPlatformProxy({ configPath: STAGING_REPAIR_CONFIG_PATH, remoteBindings: true });
+  const proxy = await withStartupTimeout(
+    getPlatformProxy({ configPath: STAGING_REPAIR_CONFIG_PATH, remoteBindings: true }),
+    REMOTE_PROXY_STARTUP_TIMEOUT_MS,
+    `Timed out after ${REMOTE_PROXY_STARTUP_TIMEOUT_MS}ms waiting for getPlatformProxy() to establish the remote D1 binding session. If it instead fails quickly with its own error (e.g. "Failed to start the remote proxy session"), this timeout never fires -- that failure mode is handled by this script forcing process.exit() once main() settles, since wrangler can leave an orphaned local process running after that specific error (confirmed in its own source; see docs/AI-HANDOFF.md).`,
+  );
   const db = proxy.env.DB;
 
   let bindingSchemaRows = [];

@@ -314,7 +314,21 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  reportFailure(error);
-  process.exitCode = 1;
-});
+// A real dispatched run found that a failed getPlatformProxy() remote-
+// session startup can leave an orphaned local process running even
+// after main() itself has already caught the error and finished
+// reporting it -- GitHub Actions had to cancel the job after its own
+// 20-minute job-level timeout, ~21 minutes after the real error was
+// already printed. Forcing process.exit() here, only once main() has
+// FULLY settled (including its own `finally { await dispose() }`),
+// terminates the job promptly regardless of what a third-party
+// dependency's internals left dangling -- see
+// lib/operations/calendar-schema-repair-apply.ts's withStartupTimeout()
+// for the companion fix (a bounded timeout for the OTHER possible
+// failure mode: the same call hanging instead of rejecting quickly).
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    reportFailure(error);
+    process.exit(1);
+  });
