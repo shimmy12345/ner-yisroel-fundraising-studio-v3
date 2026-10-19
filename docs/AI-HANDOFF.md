@@ -54692,3 +54692,201 @@ including the exact cancellation path this round's main fix addresses.
 No Production change, no credential of any kind, no OAuth setup, no
 live Google call, no Gmail/agenda-email change, no cron activation, no
 merge into `main`.
+
+## 2026-10-19 (fourth follow-up review): bind cancellation to the calendar link's own generation, not just the status label -- Staging deployed and live-verified, Google itself still unverified live
+
+**Two commits** on `feature/independent-cloudflare-sandbox`, reviewing
+and correcting `58551ef` (the round immediately before this one):
+
+- **`7a86fd2`** -- the main fix: binds `setSimpleProspectStatus`'s
+  cancellation guard to the calendar link's own `generation`, plus a
+  new regression through the real entry points with a stateful
+  simulated calendar.
+- **`c610177`** -- CI caught a real regression in `7a86fd2` itself
+  within minutes -- fixed before merge, same honest-recording practice
+  as the prior round's own two self-corrections.
+
+### The bug, exactly as reproduced
+
+Independently reproduced the precise reported interleaving:
+`setSimpleProspectStatus` reads the prospect's status
+(`meeting_scheduled`) and the calendar link's state, and starts
+preparing a cancellation; a competing request fully cancels that SAME
+generation and reopens it as a NEW generation before the stale
+request's own batch runs -- `trip_prospects.status` and the
+interaction's own `source` both return to their ORIGINAL "scheduled"
+values as part of that reopen; the stale cancellation then resumes.
+**Confirmed**: the status-only guard added two rounds ago (`adac6f2`)
+cannot distinguish these two situations -- it re-checks the SAME status
+value it originally read, finds it unchanged (the reopen restored it),
+and incorrectly lets the stale cancellation through, canceling the
+REOPENED meeting and flagging the WRONG (new) generation for cleanup.
+
+### The fix
+
+`setSimpleProspectStatus` now additionally captures the calendar link's
+own `generation` at the SAME moment it reads the interaction's source
+(via the already-exported `getTripMeetingCalendarLink`), and extends its
+existing guard with a second, self-contained clause:
+`` EXISTS (SELECT 1 FROM calendar_event_links WHERE interaction_id = ?
+AND generation = ?) ``. This is the durable transition identity a
+status label cannot provide: a status round-trips back to a prior
+value; a generation never does (it only ever advances, via reopen).
+Being a self-contained `EXISTS` rather than a bare `generation` column
+reference, the SAME guard fragment is safe to AND onto `interactions`
+and `trip_prospects` too, even though neither table has a `generation`
+column of its own -- satisfying "enforce that identity across the
+meeting, prospect, Calendar intent, and cleanup writes" with one
+mechanism, not four separate ones. No change to `D1CalendarStore` or
+the `D1CrossTableGuard` type itself -- only the guard
+`trips-data.ts` constructs. A stale cancellation now returns
+`{ok:false, reason:"conflict"}` and leaves the reopened meeting
+(interaction, prospect, calendar intent, and cleanup flag) completely
+untouched.
+
+### A real regression in this very fix, caught by CI before merge
+
+The first version of the generation guard ALSO required
+`desired_state = 'present'` (to pin down the exact state, not just the
+generation number). This broke the ORDINARY, non-racing cancel path:
+the cancel statements this guard is applied to run in a fixed order
+within the SAME batch -- the main `calendar_event_links` UPDATE (which
+flips `desired_state` to `'absent'`) BEFORE the
+`calendar_event_link_history` cleanup-flag UPDATE -- and D1 batch
+statements observe EARLIER statements' own writes within the same
+batch (the same class of self-referential-ordering bug found and fixed
+two rounds ago, this time inside the NEW guard's own logic rather than
+the statement ordering). By the time the cleanup statement ran, its
+copy of the guard was checking `desired_state = 'present'` against a
+row THAT VERY CANCELLATION had already flipped to `'absent'` moments
+earlier in the SAME batch -- permanently, silently false, even with no
+race at all. CI's own regression suite caught this immediately (`false
+!== true` on a plain, non-racing cancel in the "competing reopen
+transitions" block). **Fixed** (`c610177`) by checking `generation`
+alone, dropping the self-referential `desired_state` clause: cancel
+itself never changes `generation` (only reopen does), so it remains a
+stable, sufficient identity across the very operation this guard
+protects, and the actual race it defends against (a competing reopen
+bumping `generation`) is unaffected -- a generation mismatch alone still
+correctly rejects a stale cancellation.
+
+### Regression coverage
+
+A new block in `tests/trip-entrypoints-atomicity.test.mjs` (block 8)
+reproduces the exact interleaving through the real
+`scheduleProspectMeeting`/`setSimpleProspectStatus` entry points against
+real local D1: schedules a meeting (generation 0); syncs it once
+against a `StatefulCalendarClient` (a real simulated remote event
+exists); pauses a cancellation (via the same `interceptFirstBatch`
+test-side instrumentation used by earlier rounds -- never touching
+production code) immediately before its own batch runs; inside that
+pause, a competing request fully cancels generation 0 and reopens it as
+generation 1 (confirmed via sanity-check assertions: generation 1,
+`desired_state='present'`, status back to `meeting_scheduled`); resumes
+the stale cancellation; confirms it returns `{ok:false,
+reason:"conflict"}`; and then confirms, via direct query, that the
+REOPENED meeting's own generation, `desired_state`, prospect status,
+interaction source/location, AND the reopened generation's own cleanup
+flag are ALL completely unaffected by the stale cancellation. Finally
+reconciles against the SAME `StatefulCalendarClient` again and confirms
+the real simulated event was never deleted -- the reopened meeting still
+reconciles to `synced`. Every prior block in this file (lease
+protection, owner isolation, the original conflicting-transition fix,
+database read/batch failures, recovery, calendar-disabled scheduling,
+persisted consistency, Retry) is retained and unmodified, and the
+existing `tests/calendar-d1-store.test.mjs`/
+`tests/calendar-adapters-integration.test.mjs`/`tests/trip-calendar-
+sync-integration.test.mjs` suites are retained and unmodified.
+
+### Checks
+
+229/229 local test files pass; `npx tsc --noEmit -p tsconfig.json`
+clean; `npx eslint .` unchanged from the documented 94-error/46-warning
+baseline -- confirmed after both commits. **CI evidence, both pushes,
+actually inspected**:
+- `7a86fd2`: [run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39266948686) --
+  **failed** (`tests/trip-entrypoints-atomicity.test.mjs`'s own
+  "competing reopen transitions" block -- an ORDINARY, non-racing
+  cancel: `AssertionError: expected true, got false` -- the
+  self-referential `desired_state` regression described above).
+  Inspected directly via the run's own job page.
+- `c610177`: [run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39267841487)
+  (job `118111998065`) -- **success**. Every existing suite still
+  passes unmodified, plus the complete real-entry-point suite including
+  the new block 8, against the real local D1/workerd runtime on the
+  Ubuntu runner.
+
+### Staging deployment and live verification
+
+**Staging deployment**: `pnpm run deploy:staging-independent` -- Worker
+`fundraising-os-staging`, Version ID
+**`34b3efa3-a2b3-4525-bdd6-8666c725bdf7`**, built from commit `c610177`
+(the CI-green commit). No schema change, no migration applied this
+round -- the repair migration from the prior round
+(`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`)
+remains unapplied, exactly as instructed. Confirmed immediately before
+deploying: `wrangler secret list --config wrangler.staging.jsonc` still
+shows only the three Gmail secrets, no `GOOGLE_CALENDAR_OAUTH_*` secret
+of any kind. Settings' "Workspace health" page independently confirms
+`Deployed version: 0.1.0 · c610177`.
+
+**Verified live, directly against the deployed Staging Worker and the
+real Staging D1**, using the same "Chicago" trip / "Mr. & Mrs. Aryeh
+Bassman" prospect prior rounds have used, restoring it to "Planned
+outreach" afterward. This round's authenticated browser session had
+expired (a fresh tab group, not the same browser state as prior
+rounds); signed back in via the existing Google Workspace SSO session
+already active in the browser (no credential of any kind entered by
+this agent -- a pure navigation through an already-authenticated
+session, landing directly on "Shimmy Goldstein / Yeshivas Ner Yisroel"):
+- **Schedule** (reopen, generation 2→3): `desired_revision` 9→10,
+  `desired_state='present'`, `trip_prospects.status='meeting_scheduled'`.
+- **Cancel -- the exact path this round's fix touches, run through the
+  real deployed app with no race involved**: `desired_state='absent'`,
+  `desired_revision` 10→11, `cleanup_needed=1`, `interactions.source`
+  correctly prefixed `cancelled:`, `trip_prospects.status='declined'`.
+  **This directly confirms the self-referential-ordering regression
+  fix (`c610177`) works live**: under the FIRST version of the guard
+  (`7a86fd2`, before CI caught the bug), this exact step would have
+  silently failed to cancel anything.
+- **Retry**: `200`/`pending` (no credentials, correct); confirmed via
+  direct query that nothing changed.
+- **Completion**: `trip_prospects.status='meeting_completed'`; the
+  calendar link's `generation`/`desired_state`/`desired_revision`
+  **completely unchanged** (`3`/`absent`/`11`) -- completion still never
+  touches calendar history.
+- Restored the prospect to "Planned outreach" afterward. No browser
+  console errors observed.
+
+The EXACT raced interleaving this round's fix addresses (a genuinely
+concurrent cancel-then-reopen racing a stale cancellation) is not
+practically reproducible through manual, sequential browser
+interaction -- that proof is what the new CI regression (block 8, real
+local D1, run `39267841487`) exists for. What was live-verified on
+Staging is that the fix does not regress the ORDINARY cancellation
+path, which is exactly what `c610177`'s own fix was about.
+
+**What remains honestly unproven**: Google synchronization itself is
+still **NOT verified** -- no OAuth client exists, no credential has
+been installed anywhere, and no live Google API call has ever been made
+by any round of this feature, including this one.
+
+**Not done, and not authorized this round**: no Production action of
+any kind; Gmail credentials and email scheduling completely untouched;
+no OAuth setup; no merge into `main`; the repair migration remains
+prepared and locally tested but NOT applied anywhere.
+
+**Owner setup checklist**: unchanged from the prior round's own
+Staging-first writeup (see "2026-10-19 (third follow-up review)" above)
+-- nothing in this round's work affects that analysis or those steps.
+
+**Stopping here for independent review, per this round's own explicit
+instruction.** One real persistence bug found and fixed in
+`setSimpleProspectStatus` (with a real mid-round regression caught and
+fixed by CI before merge, honestly recorded); a dedicated regression
+added through the real entry points with a stateful simulated calendar,
+retaining every prior test unmodified; the repair migration remains
+unapplied; Staging is deployed and live-verified for the ordinary
+cancellation path this fix touches. No Production change, no credential
+of any kind, no OAuth setup, no live Google call, no Gmail/agenda-email
+change, no cron activation, no merge into `main`.
