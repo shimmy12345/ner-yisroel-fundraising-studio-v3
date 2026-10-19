@@ -53537,3 +53537,382 @@ scenarios, verified in actual CI (run #4, commit `bf8a8ed`, first-attempt
 green). Awaiting further independent review before any route wiring,
 OAuth setup, live Google call, or deployment.** `main`/Production/
 Staging untouched by this round.
+
+## 2026-10-19 (continued): clock bug fix, then Trip Planning wired to Google Calendar sync (narrowed first release) -- Staging deployed, Google itself still unverified live
+
+Two commits on `feature/independent-cloudflare-sandbox`, in order:
+
+### 1. Clock bug fix (commit `1fffef2`)
+
+Independent reproduction, reported exactly as given: `reconcilePresentAbsent`
+received ONE fixed `now` and reused that same frozen value for every
+expiry check and protected write for the entire call, including after
+awaited network operations -- so a lease acquired at `now` with a short
+TTL could never be observed as expired by this SAME attempt's own later
+checks, no matter how long it was actually suspended on a real network
+call. Reproduced exactly as specified against `bf8a8ed`: now=1000, 5s
+lease (expires 1005); suspend GET; advance clock to 1010; GET returns
+404; pre-fix, INSERT still executed and the link was marked synced
+despite the lease having genuinely expired at 1005.
+
+**Fixed** with an injectable `Clock` type (`() => number`), read FRESH at
+every expiry-sensitive check and protected write, defaulting to `() =>
+now` everywhere so every existing call site (and every one of the 10
+pre-existing calendar test files) keeps its exact prior behavior with
+zero changes required. New file `tests/calendar-sync-clock-regression.test.mjs`
+(4 blocks: the exact reproduction with no takeover; retry after natural
+expiry; expiry with takeover, proving both the stale write is rejected
+AND the real remote outcome is still durably recorded; unique lease
+token verification) -- registered in `scripts/run-tests.mjs`. A first
+draft of two of these tests raced the reconciler's own internal progress
+(advancing the test clock before `acquireLease` had actually run) --
+fixed with the same signal-deferred pattern (`getCallStarted`) already
+used once before in this session for an analogous bug, confirmed by
+re-running after the fix.
+
+**Checks**: 229/229 local test files pass (228 existing + the new
+clock-regression file); `tsc --noEmit` clean; lint at the documented
+94-error/46-warning baseline. **CI evidence**:
+[run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39200539051)
+(commit `1fffef2`) completed, conclusion `success`.
+
+### 2. Trip Planning wired to Google Calendar sync -- narrowed first release (commit `9016096`)
+
+Scope, exactly as authorized: confirmed, timed Trip Planning meetings
+only, syncing one-way to the eventual owner's primary Google Calendar,
+including reschedule and cancellation. All-day scheduling, Capture
+integration, group meetings, existing-meeting backfill, and the 5-minute
+reconciliation cron are all still deferred, not built this round. The
+core (`lib/calendar/`) and its D1/Google adapters are reused completely
+unmodified except for the clock fix above -- this round is the FIRST
+app-level consumer of that already-proven core.
+
+**What was built**:
+
+- `lib/relationships/trip-calendar-sync.ts` (new) -- the one new
+  env-agnostic, fully plain-Node-testable layer (mirrors
+  `google-calendar-client.ts`'s own "take credentials/transport as
+  parameters, never read `cloudflare:workers` directly" rationale):
+  dispatches a schedule/reschedule/reopen to the correct one of the
+  core's `enrollMeetingForSync`/`recordReschedule`/`recordReopen`; a
+  thin `recordTripMeetingCancelled` pass-through to `recordCancel`; a
+  best-effort `attemptImmediateTripCalendarSync` (gated by the exact
+  same `isCalendarSyncAllowed` guard every round of this design has
+  required, reusing the core's own `runReconciliationSweep` unmodified
+  -- no new per-interaction dispatch logic); `loadTripMeetingFields`
+  (re-reads `interactions`/`donors`/`users` fresh, recomputing the
+  destination timezone the same way `trips-data.ts`'s own
+  `resolveMeetingEpoch` does, rather than storing it as a new column);
+  `isCalendarSyncEnabledForUser`/`setCalendarSyncEnabledForUser`;
+  `loadCalendarConnectionStatus` (Settings' live-verified display);
+  `googleCalendarEventViewUrl` (the Google Calendar permalink format,
+  honestly flagged as unverified against a real event). A test-only
+  `client` override on `attemptImmediateTripCalendarSync`'s args lets a
+  test inject `StatefulCalendarClient` directly, bypassing
+  `createGoogleCalendarClient` -- never used by any real caller.
+- `lib/relationships/trips-data.ts`: `scheduleProspectMeeting` gains a
+  `durationMinutes` parameter (`trip-model.ts`'s new
+  `validateMeetingDurationMinutes`, default 30, validated by the route)
+  and now writes `end_at`/`location` into `interactions` (migration
+  0048 added these columns in an earlier round; this is the first code
+  that actually populates them) in addition to its existing
+  `trip_prospects` mirror writes; the sync call happens immediately
+  after that batch commits, never inside it (see the atomicity note
+  below). The existing cancel branch of `setSimpleProspectStatus`
+  (moving away from `meeting_scheduled`, already wrapping the
+  interaction's `source` with `cancelled:`) now also records a calendar
+  cancel. `completeProspectMeeting` deliberately makes no calendar call
+  at all -- the core's own `recordComplete` is an intentional no-op;
+  calling it would add nothing. `listTripProspects` gains a
+  `calendarSync: { status: "pending"|"synced"|"failed"; viewUrl }|null`
+  field per prospect, collapsed from the full `SyncStatus` union via one
+  extra query over this page's own linked interaction ids (same
+  "separate query, merged in JS" convention as `crossTripConflicts`).
+  New exported helpers for the two new routes below:
+  `tripMeetingCalendarStatus`, `retryTripMeetingCalendarSync`,
+  `getCalendarConnectionStatusForUser`, `setCalendarSyncEnabledForUser`.
+- New route `POST /api/trips/[id]/prospects/[prospectId]/calendar-retry`
+  -- "safe" because it only ever re-attempts reconciling the already-
+  recorded intent for this one owner-scoped meeting (via `ownedProspect`,
+  the same owner-scope check every other trip route already uses); it
+  can never create a new link, change the meeting itself, or bypass the
+  guard.
+- New route `GET`/`PATCH /api/calendar-sync` -- Settings' connection
+  status (re-checked live on every load, same `/api/profile` GET/PATCH
+  shape this codebase already uses elsewhere) and the persisted enable/
+  disable toggle (Disconnect is this same toggle, flipped off).
+- UI: `TripDashboardExperience.tsx` gains a duration input (default 30,
+  shown only while scheduling) and a collapsed status
+  badge/Retry-button/"View on Google Calendar" link on the trip row;
+  `app/settings/CalendarSyncSettings.tsx` (new) + wired into
+  `app/settings/page.tsx` -- live connection status, the enable/disable
+  checkbox, and the one-way-sync disclosure text.
+- `tests/trip-calendar-sync-integration.test.mjs` (new, CI-only via
+  `pnpm run test:calendar-d1`, registered in `package.json` and this
+  workflow's trigger paths): the full schedule -> synced -> reschedule
+  (same event id, updated content) -> cancel -> deleted cycle against a
+  REAL local D1 (`lib/calendar/testing/local-d1.ts`) and a STATEFUL
+  simulated Google calendar (`StatefulCalendarClient`, injected via the
+  new test-only `client` override -- a `MockHttpTransport` scripted with
+  exactly one token+userinfo pair backs only the live identity check);
+  disabled/no-credentials proofs (zero network calls reach an
+  intentionally empty, never-enqueued transport); a guard-refusal proof
+  (Staging with no configured test calendar id -- the identity check
+  runs, but zero calendar mutations are ever attempted); and
+  `loadCalendarConnectionStatus`'s own no-credentials/connected shapes.
+
+**Atomicity -- honestly scoped, not overclaimed.** D1 has no cross-
+statement transaction (`d1-calendar-store.ts`'s own header,
+unchanged), and `CalendarLinkStore`'s atomic primitives
+(`insertLinkWithHistory`/`applyReschedule`/`applyCancel`/`applyReopen`)
+are each their own separate `db.batch()` call already. Merging them
+into `trips-data.ts`'s own `interactions`/`trip_prospects` batch would
+require changing that frozen interface, which this round's explicit "do
+not rebuild or expand the architecture" instruction rules out. What is
+actually guaranteed: the meeting change commits first, as its own
+complete, already-proven, unmodified batch; the calendar-intent write
+happens immediately after, with no intervening awaited work; a
+calendar-intent write failure is caught and logged at every call site in
+`trips-data.ts`, never surfaced as a failure of the meeting-change
+response itself ("a Google failure must never lose the saved FOS
+meeting," extended here to "a calendar-link-write failure must never
+lose it either"). The one gap this leaves -- a process crash in the
+narrow window between the two writes -- means a meeting could be saved
+with no calendar link ever created for it; no cron exists yet to retry
+that case automatically, and an explicit Retry cannot help either, since
+no link row would exist to retry against. Narrow, reported, not hidden;
+closing it for real would mean exposing raw prepared statements across
+the `CalendarLinkStore` boundary, a real architecture change deliberately
+out of this round's scope.
+
+**Checks**: 228/229 local test files pass (229 total, including the new
+clock-regression file from part 1 above; the one failure is the same
+pre-existing, expected `tests/production-baseline.test.mjs`/
+`check-main-restore-sync.mjs` drift every round since migration 0048
+landed has shown -- migration 0048's new tables/columns are not yet
+known to `main`'s own restore-order tracking; unrelated to this round);
+`tsc --noEmit` clean; `npm run lint` unchanged from the documented
+94-error/46-warning baseline. **CI evidence**:
+[run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39203120355)
+(commit `9016096`, "Calendar D1 adapter test" workflow) completed,
+conclusion `success` -- includes the new
+`trip-calendar-sync-integration.test.mjs` passing against the real local
+D1/workerd runtime on the Ubuntu runner, first attempt green. This
+repository has no general "run the full suite in CI" workflow at all
+(confirmed by listing `.github/workflows/`) -- `pnpm test`/`tsc --noEmit`/
+`npm run lint` are this project's own established developer-side checks,
+run locally above; the Calendar D1 workflow is the only CI job that
+exists because it specifically needs a Linux `workerd` binary this
+project's Windows sandbox cannot run.
+
+**Migration applied to Staging (schema only, zero data; NOT applied to
+Production)**: `drizzle/0048_google_calendar_sync.sql` applied via
+`wrangler d1 execute fundraising-os-staging-db --remote --config
+wrangler.staging.jsonc --file drizzle/0048_google_calendar_sync.sql` --
+13 queries executed, 17 rows written (schema objects only). Verified
+directly afterward via separate read-only queries (never trusting the
+`--file` mode's own JSON summary alone, per this repo's established
+practice): both `calendar_event_links` and `calendar_event_link_history`
+exist; all 4 named indexes exist; `interactions`/`trip_prospects`/`users`
+carry the exact new columns the migration specifies
+(`all_day`/`all_day_date`/`end_at`/`location` on `interactions`,
+`all_day`/`all_day_date` on `trip_prospects`, `calendar_sync_enabled` on
+`users`); `SELECT COUNT(*) FROM calendar_event_links` returns 0 (no data
+created). The resulting `main`-restore-sync drift this produces is the
+exact same, already-expected drift `pnpm test`'s own check already
+reports locally (migration 0048's two new tables require a human
+restore-order judgment call the sync automation deliberately never makes
+for a new table) -- not a new finding, and out of scope to fix this round
+("no merge into `main`").
+
+**Staging deployment**: `pnpm run deploy:staging-independent` --
+Worker `fundraising-os-staging`, Version ID
+`f96ce5d0-4814-4129-8623-81aa977a28ab`, build manifest verified for
+`staging-independent`. Confirmed via `wrangler secret list --config
+wrangler.staging.jsonc` immediately before deploying: no
+`GOOGLE_CALENDAR_OAUTH_*` secret exists on Staging, and
+`CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID` is absent from
+`wrangler.staging.jsonc`'s `vars` -- i.e. Calendar writes are
+structurally disabled on this deployment (`isCalendarSyncAllowed`'s own
+Staging branch refuses unconditionally with no test calendar id
+configured), with no real credential anywhere near it, exactly as
+required.
+
+**Verified live, directly against the deployed Staging Worker and the
+real Staging D1 (not a synthetic/local test)**: authenticated via an
+already-live session (no credential handling performed by this agent),
+navigated to an existing real trip ("Chicago," a real prospect, "Mr. &
+Mrs. Aryeh Bassman") and exercised the full cycle through the actual UI:
+- **Schedule**: set status to "Meeting Scheduled," entered a date/time
+  and left duration at its default; the UI correctly showed "Meeting
+  Dec 1, 2026, 10:00 AM (America/Chicago) · Calendar sync pending"
+  immediately after saving.
+- **Reschedule**: re-opened the same panel (pre-filled with the
+  existing time, confirming the form's own pre-fill logic), changed the
+  time to 2:30 PM, confirmed; the row updated to the new time, still
+  "Calendar sync pending."
+- **Cancel**: changed status to "Declined"; the underlying interaction
+  (confirmed via a direct, independent `wrangler d1 execute --remote`
+  query against `calendar_event_links`/`interactions`, not merely the
+  UI's own report) shows `desired_revision=3` (enroll, reschedule,
+  cancel -- one per action taken), `desired_state="absent"`,
+  `sync_status="pending"` (correctly never attempted -- no credentials
+  exist), `end_at` = `occurred_at` + 1800s (the default 30-minute
+  duration, correctly persisted), and the interaction's own `source`
+  correctly prefixed `cancelled:` -- the pre-existing cancel-the-
+  interaction behavior is completely unaffected by this round's
+  addition.
+- Restored the prospect's status back to "Planned outreach" afterward,
+  leaving the real trip's data in a clean, non-confusing state; the
+  cancelled interaction row itself remains, by design, matching this
+  feature's own pre-existing, unmodified "never deletes, only
+  relabels" behavior.
+- No browser console errors on either the trip page or Settings across
+  this entire sequence.
+- Settings' Google Calendar section rendered correctly: "Not connected
+  -- the one-time Google setup has not been completed yet," matching
+  the real, independently-verified `calendar_sync_enabled=0` row.
+  `GET /api/calendar-sync` works on Staging (not a mutating request).
+
+**One real, now-documented finding, not a bug**: `PATCH
+/api/calendar-sync` (the Settings enable/disable toggle) is correctly
+blocked on Staging by the pre-existing `lib/operations/staging-write-
+guard.ts` -- that guard blanket-blocks every mutating `/api/**` request
+on Staging except the one deliberate `/api/trips/**` carve-out this
+feature's OWN prior round already added; `/api/calendar-sync` was never
+added to that carve-out (it is a new route, outside `/api/trips`), so it
+falls under the guard's own explicitly-"accepted trade-off" bucket --
+the exact same bucket `PUT /api/profile` already sits in, per that
+guard's own header comment. **The toggle itself was therefore not
+exercised against a real write on Staging this round** -- verified
+instead by code review (identical `GET`/`PATCH` shape to the
+already-working `/api/profile` route) and by the passing integration
+test's own direct exercise of `setCalendarSyncEnabledForUser`/
+`isCalendarSyncEnabledForUser` against a real local D1. Deliberately NOT
+fixed by adding `/api/calendar-sync` to the trip-planning carve-out this
+round -- that carve-out's own justification is specifically "every route
+this feature has or ever will have lives under `/api/trips` by
+construction, and no donor/financial/import route does," which
+`/api/calendar-sync` does not satisfy; expanding it would be exactly the
+kind of unauthorized scope growth this round's "do not rebuild or expand
+the architecture" instruction rules out. The owner can still verify the
+toggle on Staging later with the existing `STAGING_WRITES_ENABLED=true`
+escape hatch (a deliberate, time-boxed testing window, same mechanism
+already documented for `/api/profile` itself), or simply trust it once
+real credentials make the end-to-end Settings flow worth exercising live
+together.
+
+**What remains honestly unproven**: Google synchronization itself is
+**NOT verified** -- no OAuth client exists, no credential has been
+installed anywhere, and no live Google API call has ever been made by
+any round of this feature, including this one. Every "pending" status
+observed above is the CORRECT behavior for "no credentials configured,"
+not evidence that a real sync would succeed. Whether
+`calendar.events.owned` actually permits every operation this design
+uses, whether `events.update` honors `If-Match` the way documented,
+real error-response shapes/timing, and the OAuth flow itself all remain
+exactly as scoped in every prior round's own "what remains honestly
+unproven" section -- unchanged by this round, which only wired the
+already-isolated, already-proven core into the app for the first time.
+
+**Not done, and not authorized this round**: no Production migration,
+deployment, or credential installation of any kind; Gmail credentials
+and email scheduling completely untouched (confirmed by this round
+touching zero files under `lib/agenda/`, matching
+`tests/calendar-sweep-agenda-independence.test.mjs`'s own existing
+invariant, which this round's new code does not import into or from
+either direction); no cron trigger added to either wrangler config; no
+merge into `main`.
+
+### Owner setup steps -- NOT yet performed; conflict identified first, per this round's own instruction
+
+**The conflict, found before any step below was proposed to the owner**:
+this design's existing Staging guard (`calendar-sync-guard.ts`'s
+`staging-independent` branch) requires the Staging test account's
+verified email to be a DIFFERENT Google account than
+`sgoldstein@nirc.edu` -- a deliberate belt-and-braces check so an
+accidentally-copied Production credential is refused even if the
+calendar id happened to also be wrong. But the design's own Production
+OAuth client is, and should remain, **Internal** user type (restricted
+to the `nirc.edu` Google Workspace organization -- chosen specifically
+to avoid the Testing-mode 7-day refresh-token-expiry trap and 100-test-
+user cap). **Google's own Internal consent-screen restriction means an
+account OUTSIDE the `nirc.edu` Workspace org cannot authorize an
+Internal-type OAuth client at all** -- it is refused outright with an
+`org_internal` error, confirmed against current third-party
+documentation of Google's own behavior (Google's help center describes
+this exact error as occurring "when authorization is requested from
+users outside the Google Cloud project's parent [organization]"; an
+Internal consent screen "only works for a Cloud project owned by a
+Workspace... organization, not a personal Google account"). So the
+"different account" the Staging guard requires **cannot be a personal
+Gmail account** authorized against the SAME Internal OAuth client the
+Production setup uses -- it must be either (a) a second, genuinely
+different `nirc.edu` Workspace mailbox/account (if one exists or can be
+provisioned by whoever administers that Workspace), authorized against
+the same Internal client, or (b) a separate, dedicated OAuth client
+registered as **External + Testing** specifically for the Staging
+verification pass, accepting that mode's 7-day refresh-token expiry as
+an acceptable trade-off for a bounded, one-time verification window
+(never for the long-lived Production client). This is a real decision
+only the owner can make (which second account, if any, exists) -- not
+resolved here, surfaced here, exactly as this round's own instruction
+required before asking the owner to perform any of the steps below.
+
+**Steps, once the owner decides which path above to take** (unchanged
+in substance from `docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md`'s own
+S12, restated here with the conflict above already factored in):
+
+1. In the existing Google Cloud project (the one already used for
+   Gmail), enable the Google Calendar API (APIs & Services -> Library).
+2. OAuth consent screen (now under Google Auth Platform's "Audience"
+   tab) -- add scopes `https://www.googleapis.com/auth/calendar.events.owned`,
+   `openid`, and `.../auth/userinfo.email`, alongside the existing
+   `gmail.send` entry (never removing or modifying it).
+3. Create a **new**, separate OAuth 2.0 Client ID (Desktop app type,
+   same reason as Gmail's -- supports the one-time manual authorization
+   flow with no hosted redirect URI) -- never reuse Gmail's client or
+   token.
+4. **Production authorization**: the owner, manually, in a browser,
+   authorizes this new client against `sgoldstein@nirc.edu` (their real
+   account, which IS inside the `nirc.edu` Workspace org, so the
+   Internal restriction does not block this step) -- yielding a
+   `client_id`/`client_secret`/`refresh_token`. Store via `wrangler
+   secret put GOOGLE_CALENDAR_OAUTH_CLIENT_ID --config
+   wrangler.production.jsonc` (and the same for `_CLIENT_SECRET`/
+   `_REFRESH_TOKEN`). **Not performed this round; no Production secret
+   exists.**
+5. **Staging authorization** (separate, later, only once the owner has
+   resolved the conflict above by choosing path (a) or (b)): a second
+   manual authorization against whichever account the owner has
+   decided on, pointed at a disposable test calendar the owner creates
+   themselves in that account (never `"primary"`) -- its own three
+   secrets via `wrangler secret put ... --config wrangler.staging.jsonc`,
+   plus `CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID` set as a plain `vars`
+   entry (not a secret) in `wrangler.staging.jsonc`. **Not performed
+   this round; no Staging secret or test-calendar var exists.**
+6. Only after Staging is live-verified against every practical scenario
+   in the design doc's own S13 acceptance-test table, and only as a
+   separate, explicit, later decision: add the 5-minute reconciliation
+   Cron Trigger to `wrangler.production.jsonc`, and perform Production's
+   own OAuth authorization/secret setup/deployment -- none of which this
+   round touches or recommends doing yet.
+
+**This agent cannot and will not perform steps 1-5** -- they require the
+owner's own Google account/Workspace-admin access this agent has no
+path to, and step 4/5's credentials are exactly the kind of secret this
+agent must never see, generate, or handle on the owner's behalf. Once
+the owner has performed whichever of steps 1-5 apply to their chosen
+path and confirms the three Staging secrets + `CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID`
+are set, the next session can live-verify Staging's actual sync behavior
+end-to-end against the real Calendar API for the first time -- the one
+thing no round of this feature, including this one, has yet done.
+
+**Stopping here for independent review, per this round's own explicit
+instruction.** Everything above that did not require a credential is
+complete and verified (two commits, real CI evidence for both, Staging
+migration applied and independently verified, Staging deployed and
+live-exercised end-to-end through the real UI with a real, independently
+queried D1 result). Nothing beyond this has been attempted: no Production
+change of any kind, no credential of any kind installed anywhere, no
+merge into `main`, Gmail/email scheduling completely untouched.
