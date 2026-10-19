@@ -7,9 +7,10 @@
 //
 // Connects to the REAL remote Staging D1 through TWO independent paths
 // -- the Workers `D1Database` binding (via `getPlatformProxy({
-// remoteBindings: true})`) and the wrangler CLI's own `d1 execute
-// --remote` -- and refuses to proceed unless both agree on the same,
-// known database identity. This exists because the binding alone can
+// remoteBindings: true})`) and the wrangler CLI (`d1 info`, which is
+// always-remote with no flag of its own, and `d1 execute --remote`) --
+// and refuses to proceed unless both agree on the same, known database
+// identity. This exists because the binding alone can
 // silently resolve to an EMPTY LOCAL SIMULATED database (see
 // wrangler.staging-repair.jsonc's own header for the exact mechanism)
 // while every call still appears to succeed; cross-checking against the
@@ -41,6 +42,29 @@ export function wranglerJson(args) {
   throw new Error(`Could not find JSON in wrangler output for: ${args.join(" ")}\n${result.stdout}`);
 }
 
+// Pure argv builders for every wrangler invocation this module makes --
+// extracted specifically so the EXACT arguments can be asserted in a
+// test without spawning wrangler at all (tests/staging-repair-connect-
+// args.test.mjs). This exists because of a real bug an actual dispatch
+// run caught: `d1 info` was called with `--remote`, which wrangler
+// 4.92.0 does not accept for that subcommand at all (confirmed via its
+// own `--help`: "This command acts on remote D1 Databases" -- it is
+// ALWAYS remote, with no flag to pass; `d1 info --remote` fails outright
+// with "Unknown argument: remote"). `d1 execute`/`d1 export`/`d1 create`/
+// `d1 delete` were separately re-checked against the SAME pinned
+// version's own `--help` output and are correct as used elsewhere in
+// this execution path (`d1 execute`/`d1 export` DO require `--remote` to
+// act on the real database; `d1 create`/`d1 delete` are, like `d1 info`,
+// always-remote with no such flag -- scripts/verify-remote-restore.mjs's
+// existing calls already got this right).
+export function buildD1InfoArgs(databaseName, configPath) {
+  return ["d1", "info", databaseName, "--config", configPath];
+}
+
+export function buildSchemaRowsExecuteArgs(databaseName, configPath) {
+  return ["d1", "execute", databaseName, "--remote", "--config", configPath, "--command", SCHEMA_ROWS_QUERY];
+}
+
 // Opens the real remote Staging D1 binding, independently fetches the
 // same live schema via the wrangler CLI, cross-validates both against
 // Staging's known database id, and throws (closing the proxy first) if
@@ -50,11 +74,11 @@ export function wranglerJson(args) {
 // "validated" and "used."
 export async function connectAndValidateStagingTarget({ expectedAccountId = process.env.STAGING_REPAIR_EXPECTED_ACCOUNT_ID || null } = {}) {
   console.log("Resolving the target database id via the wrangler CLI (d1 info)...");
-  const info = wranglerJson(["d1", "info", STAGING_DATABASE_NAME, "--remote", "--config", STAGING_REPAIR_CONFIG_PATH]);
+  const info = wranglerJson(buildD1InfoArgs(STAGING_DATABASE_NAME, STAGING_REPAIR_CONFIG_PATH));
   const cliDatabaseId = info?.uuid ?? info?.[0]?.uuid ?? null;
 
   console.log("Reading the live schema via the wrangler CLI (read-only)...");
-  const cliSchemaResult = wranglerJson(["d1", "execute", STAGING_DATABASE_NAME, "--remote", "--config", STAGING_REPAIR_CONFIG_PATH, "--command", SCHEMA_ROWS_QUERY]);
+  const cliSchemaResult = wranglerJson(buildSchemaRowsExecuteArgs(STAGING_DATABASE_NAME, STAGING_REPAIR_CONFIG_PATH));
   const cliSchemaRows = cliSchemaResult?.[0]?.results ?? [];
 
   console.log("Opening the real remote Staging D1 binding (getPlatformProxy, remoteBindings: true)...");

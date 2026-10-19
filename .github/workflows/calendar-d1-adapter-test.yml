@@ -85,6 +85,7 @@ on:
       - "scripts/apply-0049-calendar-schema-repair-staging.mjs"
       - "scripts/recover-0049-calendar-schema-repair-staging.mjs"
       - "scripts/lib/staging-repair-connect.mjs"
+      - "tests/staging-repair-connect-args.test.mjs"
       - "scripts/lib/backup-retention.mjs"
       - "wrangler.staging-repair.jsonc"
       - ".github/workflows/d1-restore-verify-monthly.yml"
