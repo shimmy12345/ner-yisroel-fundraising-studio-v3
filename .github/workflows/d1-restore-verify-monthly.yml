@@ -400,14 +400,17 @@ jobs:
       # Pinned to the EXACT commit this repair, this script, and this
       # workflow job were all independently reviewed at -- see this
       # job's own header comment for why a branch name is not used here.
-      # Re-pinned once already (from 4dd1474 to this commit) when a
-      # review found and fixed a real backup-retention bug in the
-      # application script itself -- re-pin again, deliberately, if a
-      # newer, re-reviewed commit should be used.
+      # Re-pinned twice already: 4dd1474 -> c2e7c205 (a real backup-
+      # retention bug), then c2e7c205 -> this commit (the ACTUAL
+      # dispatched run, 39298894750, failed during read-only target
+      # validation with "Unknown argument: remote" -- `d1 info` does not
+      # accept `--remote` on wrangler 4.92.0 at all; fixed in
+      # scripts/lib/staging-repair-connect.mjs). Re-pin again,
+      # deliberately, if a newer, re-reviewed commit should be used.
       - name: Checkout the exact independently reviewed repair commit
         uses: actions/checkout@v4
         with:
-          ref: c2e7c2054b260d1cd068d90b0020b82ee9886e15
+          ref: 7fa3abe736c08b7e88b4ed1704888ec6cee4855f
 
       - uses: pnpm/action-setup@v4
         with:
