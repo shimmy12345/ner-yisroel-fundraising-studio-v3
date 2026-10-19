@@ -18,6 +18,114 @@ import {
   tripMeetingInteractionId, tripScheduledInteractionSource, validateMeetingCompletion, validateMeetingScheduling,
   type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus,
 } from "./trip-model.ts";
+import {
+  attemptImmediateTripCalendarSync, getTripMeetingCalendarLink, googleCalendarEventViewUrl, loadCalendarConnectionStatus,
+  recordTripMeetingCancelled, recordTripMeetingScheduled, setCalendarSyncEnabledForUser as setCalendarSyncEnabledForUserRow,
+  type CalendarConnectionStatus,
+} from "./trip-calendar-sync.ts";
+import { logger } from "../logger.ts";
+
+// Google Calendar sync narrowed first release (2026-10-19, see
+// docs/AI-HANDOFF.md) -- the thin env-reading layer over
+// trip-calendar-sync.ts's own testable, env-agnostic functions (see that
+// file's own header for why the split exists). This is the one place in
+// this feature that reads GOOGLE_CALENDAR_OAUTH_*/CALENDAR_SYNC_STAGING_
+// TEST_CALENDAR_ID/__FUNDRAISING_OS_ENVIRONMENT__ -- trips-data.ts already
+// imports "cloudflare:workers" for every other D1 access this feature
+// makes, so this is not a new import boundary.
+function calendarEnvCredentials(): { clientId: string; clientSecret: string; refreshToken: string } | null {
+  if (!env.GOOGLE_CALENDAR_OAUTH_CLIENT_ID || !env.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET || !env.GOOGLE_CALENDAR_OAUTH_REFRESH_TOKEN) return null;
+  return { clientId: env.GOOGLE_CALENDAR_OAUTH_CLIENT_ID, clientSecret: env.GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET, refreshToken: env.GOOGLE_CALENDAR_OAUTH_REFRESH_TOKEN };
+}
+// Production's own destination is always its owner's real primary
+// calendar; Staging's is the explicit, non-"primary" test calendar id
+// (absent means Staging sync stays refused -- calendar-sync-guard.ts's
+// own job, not this function's) -- never any other environment value.
+function calendarDestinationId(): string {
+  return __FUNDRAISING_OS_ENVIRONMENT__ === "staging-independent" ? (env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? "") : "primary";
+}
+function fosBaseUrl(): string {
+  return env.APP_BASE_URL ?? "";
+}
+
+// Writes the durable calendar-sync intent immediately after (never
+// inside) the caller's own already-committed interactions/trip_prospects
+// batch, then makes one best-effort attempt to actually reach Google --
+// gated by the exact same guard every round of this feature's design has
+// required (see trip-calendar-sync.ts's own header for the atomicity
+// limitation this accepts). Never throws: a calendar-sync problem of any
+// kind must never fail the caller's own already-successful response ("a
+// Google failure must never lose the saved FOS meeting").
+async function syncTripMeetingToCalendar(interactionId: string, userId: string, now: number): Promise<void> {
+  try {
+    const calendarId = calendarDestinationId();
+    await recordTripMeetingScheduled(env.DB, interactionId, userId, calendarId, now);
+    await attemptImmediateTripCalendarSync({
+      db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__,
+      calendarSyncEnabled: await isCalendarSyncEnabledForUserInternal(userId),
+      credentials: calendarEnvCredentials(), calendarId, stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
+      fosBaseUrl: fosBaseUrl(), now,
+    });
+  } catch (error) {
+    logger.error("trip_calendar_sync_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function cancelTripMeetingCalendarSync(interactionId: string, userId: string, now: number): Promise<void> {
+  try {
+    await recordTripMeetingCancelled(env.DB, interactionId, now);
+    const calendarId = calendarDestinationId();
+    await attemptImmediateTripCalendarSync({
+      db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__,
+      calendarSyncEnabled: await isCalendarSyncEnabledForUserInternal(userId),
+      credentials: calendarEnvCredentials(), calendarId, stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
+      fosBaseUrl: fosBaseUrl(), now,
+    });
+  } catch (error) {
+    logger.error("trip_calendar_sync_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function isCalendarSyncEnabledForUserInternal(userId: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT calendar_sync_enabled FROM users WHERE id = ?").bind(userId).first<{ calendar_sync_enabled: number }>();
+  return row?.calendar_sync_enabled === 1;
+}
+
+// Exposed for the Retry action (app/api/trips/.../calendar-retry) and the
+// Trip row's own status display -- a thin, owner-scope-enforced read of
+// this one meeting's calendar link, never a bare store call a route could
+// reach for any interactionId.
+export type TripMeetingCalendarStatus = { syncStatus: string; googleEventId: string | null; googleCalendarId: string | null; lastError: string | null } | null;
+
+export async function tripMeetingCalendarStatus(userId: string, tripId: string, prospectId: string): Promise<TripMeetingCalendarStatus> {
+  const prospect = await ownedProspect(userId, tripId, prospectId);
+  if (!prospect || !prospect.linkedInteractionId) return null;
+  const link = await getTripMeetingCalendarLink(env.DB, prospect.linkedInteractionId);
+  if (!link) return null;
+  return { syncStatus: link.syncStatus, googleEventId: link.googleEventId, googleCalendarId: link.googleCalendarId, lastError: link.lastError };
+}
+
+// The Retry action -- "safe" because it only ever re-attempts reconciling
+// the EXISTING recorded intent (never creates a new one, never bypasses
+// the guard) via the same attemptImmediateTripCalendarSync() every
+// scheduling action already uses.
+export async function retryTripMeetingCalendarSync(userId: string, tripId: string, prospectId: string, now: number): Promise<boolean> {
+  const prospect = await ownedProspect(userId, tripId, prospectId);
+  if (!prospect || !prospect.linkedInteractionId) return false;
+  await syncTripMeetingToCalendar(prospect.linkedInteractionId, userId, now);
+  return true;
+}
+
+export async function getCalendarConnectionStatusForUser(userId: string): Promise<CalendarConnectionStatus> {
+  return loadCalendarConnectionStatus({
+    db: env.DB, userId, environment: __FUNDRAISING_OS_ENVIRONMENT__, credentials: calendarEnvCredentials(),
+    calendarId: calendarDestinationId(), stagingTestCalendarId: env.CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID ?? null,
+  });
+}
+
+export async function setCalendarSyncEnabledForUser(userId: string, enabled: boolean, now: number): Promise<void> {
+  await setCalendarSyncEnabledForUserRow(env.DB, userId, enabled, now);
+}
 
 // Independent-review correction (2026-10-15): resolves a `datetime-local`
 // input value into a real UTC epoch using the PROSPECT'S OWN donor state
@@ -102,12 +210,21 @@ export async function getTrip(userId: string, tripId: string): Promise<TripRecor
   return { id: row.id, name: row.name, destinationRegionId: row.destination_region_id as TravelRegionId | null, destinationRegionLabel: row.destination_region_label, startDate: row.start_date, endDate: row.end_date, goalCents: row.fundraising_goal_cents, notes: row.notes, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
+// Collapsed, display-only summary of the full SyncStatus union (Minimal
+// controls: "Pending, Synced, or actionable failure, safe Retry") -- the
+// underlying calendar_event_links row still carries the precise status;
+// this is deliberately the one simplified shape the Trip row UI needs.
+// null means "never scheduled/no link exists" (planned outreach,
+// meeting_requested, declined, etc. -- these create nothing, see
+// trip-model.ts's statusRequiresInteraction()).
+export type TripMeetingCalendarSummary = { status: "pending" | "synced" | "failed"; viewUrl: string | null } | null;
+
 export type TripProspectRecord = {
   id: string; donorId: string; donorDisplayName: string; donorCity: string | null; donorState: string | null; donorCode: string | null;
   addedMethod: AddedMethod; status: TripProspectStatus; selectedAt: number;
   suggestedReason: string | null; suggestedScore: number | null; suggestedGeneratedAt: number | null;
   manualRank: number | null; meetingAt: number | null; meetingLocation: string | null; nextAction: string | null; trip_notes: string | null;
-  linkedInteractionId: string | null; crossTripConflicts: CrossTripConflict[];
+  linkedInteractionId: string | null; crossTripConflicts: CrossTripConflict[]; calendarSync: TripMeetingCalendarSummary;
 };
 
 // "My trip prospects" (Deliberate Prospect Selection, 2026-10-18) -- only
@@ -156,11 +273,32 @@ export async function listTripProspects(userId: string, tripId: string): Promise
   // duplicated here.
   const conflictsByDonor = new Map<string, CrossTripConflict[]>([...rowsByDonor.entries()].map(([donorId, rows]) => [donorId, findCrossTripConflicts(rows, tripId)]));
 
+  // Calendar sync status (Minimal controls) -- one extra query over every
+  // linked interaction id on this page, merged in JS, same "separate
+  // query, never a speculative JOIN into this feature's own schema"
+  // convention as crossTripConflicts above. A prospect with no linked
+  // interaction at all (never scheduled) never appears here.
+  const interactionIds = [...new Set(prospectRows.results.map((row) => row.linked_interaction_id).filter((id): id is string => id !== null))];
+  const linksByInteraction = new Map<string, { syncStatus: string; googleEventId: string | null; googleCalendarId: string }>();
+  if (interactionIds.length > 0) {
+    const linkRows = await env.DB.prepare(`SELECT interaction_id, sync_status, google_event_id, google_calendar_id FROM calendar_event_links WHERE interaction_id IN (${interactionIds.map(() => "?").join(",")})`)
+      .bind(...interactionIds).all<{ interaction_id: string; sync_status: string; google_event_id: string | null; google_calendar_id: string }>();
+    for (const row of linkRows.results) linksByInteraction.set(row.interaction_id, { syncStatus: row.sync_status, googleEventId: row.google_event_id, googleCalendarId: row.google_calendar_id });
+  }
+  const calendarSyncFor = (linkedInteractionId: string | null): TripMeetingCalendarSummary => {
+    if (!linkedInteractionId) return null;
+    const link = linksByInteraction.get(linkedInteractionId);
+    if (!link) return null;
+    const status = link.syncStatus === "synced" ? "synced" : link.syncStatus === "pending" ? "pending" : "failed";
+    const viewUrl = status === "synced" && link.googleEventId ? googleCalendarEventViewUrl(link.googleEventId, link.googleCalendarId) : null;
+    return { status, viewUrl };
+  };
+
   return prospectRows.results.map((row) => ({
     id: row.id, donorId: row.donor_id, donorDisplayName: row.donor_display_name, donorCity: row.donor_city, donorState: row.donor_state, donorCode: row.external_id || row.donor_code,
     addedMethod: row.added_method, status: row.status, selectedAt: row.selected_at, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
     manualRank: row.manual_rank, meetingAt: row.meeting_at, meetingLocation: row.meeting_location, nextAction: row.next_action, trip_notes: row.trip_notes,
-    linkedInteractionId: row.linked_interaction_id, crossTripConflicts: conflictsByDonor.get(row.donor_id) ?? [],
+    linkedInteractionId: row.linked_interaction_id, crossTripConflicts: conflictsByDonor.get(row.donor_id) ?? [], calendarSync: calendarSyncFor(row.linked_interaction_id),
   }));
 }
 
@@ -277,15 +415,21 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
   const existing = await ownedProspect(userId, tripId, prospectId);
   if (!existing) return { ok: false, reason: "not_found" };
   const statements = [];
+  let cancelCalendarForInteractionId: string | null = null;
   if (existing.status === "meeting_scheduled" && nextStatus !== "meeting_completed" && existing.linkedInteractionId) {
     const interaction = await env.DB.prepare("SELECT source FROM interactions WHERE id = ? AND user_id = ?").bind(existing.linkedInteractionId, userId).first<{ source: string }>();
     if (interaction && !interaction.source.startsWith("capture-completed:") && !interaction.source.startsWith("cancelled:")) {
       statements.push(env.DB.prepare("UPDATE interactions SET source = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId));
+      // "Canceling removes only its linked FOS-created event" -- written
+      // immediately after this batch commits, never inside it (see
+      // trip-calendar-sync.ts's own header on the atomicity this accepts).
+      cancelCalendarForInteractionId = existing.linkedInteractionId;
     }
   }
   statements.push(env.DB.prepare("UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ?").bind(nextStatus, now, prospectId, existing.status));
   const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
   if ((results.at(-1)?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
+  if (cancelCalendarForInteractionId) await cancelTripMeetingCalendarSync(cancelCalendarForInteractionId, userId, now);
   return { ok: true };
 }
 
@@ -315,26 +459,40 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
 // string from the request body -- resolved to a real UTC epoch via
 // resolveMeetingEpoch() (the donor's own destination timezone, DST-safe,
 // never the browser's ambient zone) before anything else runs.
-export async function scheduleProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, location: string | null, confirmed: boolean, fallbackTimezone: string, now: number): Promise<StatusUpdateResult> {
+// `durationMinutes` is already validated by the caller (trip-model.ts's
+// validateMeetingDurationMinutes, defaulting to
+// DEFAULT_MEETING_DURATION_MINUTES) -- "show an editable duration,
+// default 30 minutes," stored explicitly in `interactions.end_at` (never
+// silently applied and hidden), since this is the one column migration
+// 0048 already added for exactly this purpose and never previously
+// populated by this function.
+export async function scheduleProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, location: string | null, durationMinutes: number, confirmed: boolean, fallbackTimezone: string, now: number): Promise<StatusUpdateResult> {
   if (!confirmed) return { ok: false, reason: "confirmation_required" };
   const existing = await ownedProspect(userId, tripId, prospectId);
   if (!existing) return { ok: false, reason: "not_found" };
   if (existing.status === "meeting_completed") return { ok: false, reason: "already_completed" };
   const meetingAt = await resolveMeetingEpoch(existing.donorId, meetingAtLocal, fallbackTimezone);
   if (meetingAt === null || !validateMeetingScheduling(meetingAt, now).ok) return { ok: false, reason: "invalid_meeting_time" };
+  const endAt = meetingAt + durationMinutes * 60;
   const interactionId = tripMeetingInteractionId(prospectId);
   const source = tripScheduledInteractionSource(tripId);
   const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
   const summary = `Trip meeting scheduled with ${donor?.display_name ?? "donor"}.`;
   const statements = [
-    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at)
-        VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at`)
-      .bind(interactionId, existing.donorId, userId, meetingAt, summary, source, now, now),
+    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, end_at, location, summary, source, created_at, updated_at)
+        VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, end_at = excluded.end_at, location = excluded.location, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at`)
+      .bind(interactionId, existing.donorId, userId, meetingAt, endAt, location, summary, source, now, now),
     env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
       .bind(meetingAt, location, interactionId, now, prospectId),
   ];
   await env.DB.batch(statements);
+  // Calendar sync intent -- see syncTripMeetingToCalendar's own doc
+  // comment for exactly what "atomic" means here and the gap it accepts.
+  // Covers both an initial schedule AND a reschedule/reopen (same
+  // deterministic interactionId as any prior scheduling of this same
+  // prospect) -- recordTripMeetingScheduled() itself picks the right one.
+  await syncTripMeetingToCalendar(interactionId, userId, now);
   return { ok: true };
 }
 
@@ -368,6 +526,11 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
       .bind(meetingAt, interactionId, now, prospectId),
   ];
   await env.DB.batch(statements);
+  // "Completion retains calendar history" -- deliberately no calendar
+  // call here at all (the core's own recordComplete() is an intentional
+  // no-op; see calendar-sync-reconciler.ts's own doc comment). The
+  // meeting's existing calendar link/history, if any, is left completely
+  // untouched by marking it completed.
   return { ok: true };
 }
 

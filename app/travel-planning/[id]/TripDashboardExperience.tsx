@@ -8,7 +8,7 @@ import { ALL_REGIONS, ALL_CITIES, filterByGeo } from "../../../lib/relationships
 import { numericDonorCode } from "../../../lib/relationships/donor-identity";
 import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
-import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
+import { DEFAULT_MEETING_DURATION_MINUTES, TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
 import { FinancialSummaryCard, FinancialSummaryGrid } from "../../components/FinancialSummaryCard";
 import { ProgressBar } from "../../components/ProgressBar";
 
@@ -340,7 +340,9 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   const [expanded, setExpanded] = useState(false);
   const [meetingAtDraft, setMeetingAtDraft] = useState(prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "");
   const [locationDraft, setLocationDraft] = useState(prospect.meetingLocation ?? "");
+  const [durationDraft, setDurationDraft] = useState(String(DEFAULT_MEETING_DURATION_MINUTES));
   const [completionNotesDraft, setCompletionNotesDraft] = useState("");
+  const [retryingCalendarSync, setRetryingCalendarSync] = useState(false);
   const returnTo = typeof window !== "undefined" ? `${window.location.pathname}${window.location.search}${window.location.hash}` : `/travel-planning/${tripId}`;
   // Compact by default (Section 3): notes, next action, meeting
   // scheduling, and the financial panel only render once expanded, or
@@ -360,7 +362,20 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   // a client-side Date() parse in the browser's own zone.
   function confirmScheduling() {
     if (!meetingAtDraft) return;
-    onBusyAction(async () => { await patchProspect(tripId, prospect.id, { status: "meeting_scheduled", meetingAtLocal: meetingAtDraft, meetingLocation: locationDraft || null, confirmScheduling: true }); setScheduling(false); });
+    const durationMinutes = Number(durationDraft);
+    onBusyAction(async () => { await patchProspect(tripId, prospect.id, { status: "meeting_scheduled", meetingAtLocal: meetingAtDraft, meetingLocation: locationDraft || null, meetingDurationMinutes: Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : undefined, confirmScheduling: true }); setScheduling(false); });
+  }
+
+  // "Safe Retry" -- only re-attempts reconciling the already-recorded
+  // calendar intent for this meeting; never changes the meeting itself.
+  async function retryCalendarSync() {
+    setRetryingCalendarSync(true);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospect.id)}/calendar-retry`, { method: "POST" });
+      if (response.ok) onRefresh();
+    } finally {
+      setRetryingCalendarSync(false);
+    }
   }
 
   // Requires an explicit, non-empty date -- never silently defaults to
@@ -399,13 +414,17 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       {prospect.suggestedGeneratedAt && <small> — suggested {dateLabel(prospect.suggestedGeneratedAt)}{prospect.suggestedScore != null ? `, evidence score ${prospect.suggestedScore.toFixed(2)}` : ""}. Current CRM status may have changed since -- see Prepare for Meeting for up-to-date detail.</small>}
     </p>
 
-    {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">{prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.</p>}
+    {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">
+      {prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.
+      {prospect.calendarSync && <CalendarSyncBadge calendarSync={prospect.calendarSync} busy={retryingCalendarSync} onRetry={retryCalendarSync} />}
+    </p>}
 
     {showDetails && <>
       {scheduling && <div className="travel-planning-confirm-panel">
         <label>Meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
         <label>Location (optional)<input type="text" value={locationDraft} onChange={(event) => setLocationDraft(event.target.value)} maxLength={300} /></label>
-        <p className="travel-planning-confirm-hint">This creates a real scheduled interaction on this donor&rsquo;s timeline.</p>
+        <label>Duration (minutes)<input type="number" min={1} max={1440} step={1} value={durationDraft} onChange={(event) => setDurationDraft(event.target.value)} /></label>
+        <p className="travel-planning-confirm-hint">This creates a real scheduled interaction on this donor&rsquo;s timeline and, if Google Calendar sync is enabled in Settings, a matching one-way calendar event.</p>
         <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmScheduling} disabled={!meetingAtDraft}>Confirm scheduled meeting</button><button type="button" onClick={() => setScheduling(false)}>Cancel</button></div>
       </div>}
 
@@ -424,6 +443,22 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       <ProspectFinancialPanel tripId={tripId} prospectId={prospect.id} attributions={attributions} onRefresh={onRefresh} />
     </>}
   </article>;
+}
+
+// Minimal controls (2026-10-19, see docs/AI-HANDOFF.md): "Pending,
+// Synced, or actionable failure, safe Retry, and View on Google Calendar
+// when available." The collapsed three-state badge mirrors
+// TripMeetingCalendarSummary's own collapsing of the full SyncStatus
+// union -- a prospect with no calendarSync at all (never scheduled, or a
+// status that creates nothing) renders nothing here.
+function CalendarSyncBadge({ calendarSync, busy, onRetry }: { calendarSync: NonNullable<TripProspectRecord["calendarSync"]>; busy: boolean; onRetry: () => void }) {
+  if (calendarSync.status === "synced") {
+    return <span className="travel-planning-calendar-sync synced"> &middot; Synced to Google Calendar{calendarSync.viewUrl && <> (<a href={calendarSync.viewUrl} target="_blank" rel="noreferrer">View on Google Calendar</a>)</>}</span>;
+  }
+  if (calendarSync.status === "pending") {
+    return <span className="travel-planning-calendar-sync pending"> &middot; Calendar sync pending</span>;
+  }
+  return <span className="travel-planning-calendar-sync failed"> &middot; Calendar sync failed <button type="button" className="travel-planning-calendar-retry" disabled={busy} onClick={onRetry}>{busy ? "Retrying…" : "Retry"}</button></span>;
 }
 
 // Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).

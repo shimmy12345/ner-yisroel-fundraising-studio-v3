@@ -1,7 +1,7 @@
 import { getChatGPTUser } from "../../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../../lib/auth/profile";
 import { getTrip, removeProspect, setSimpleProspectStatus, scheduleProspectMeeting, completeProspectMeeting, updateProspectFields } from "../../../../../../lib/relationships/trips-data";
-import { isValidProspectStatus, statusRequiresInteraction, validateMeetingLocation, validateNextAction, validateNotes } from "../../../../../../lib/relationships/trip-model";
+import { isValidProspectStatus, statusRequiresInteraction, validateMeetingDurationMinutes, validateMeetingLocation, validateNextAction, validateNotes } from "../../../../../../lib/relationships/trip-model";
 import { logger } from "../../../../../../lib/logger";
 
 // Trip-specific status/notes/meeting tracking (Section D). The two
@@ -27,6 +27,7 @@ type UpdateProspectBody = {
   status?: string;
   meetingAtLocal?: string;
   meetingLocation?: string | null;
+  meetingDurationMinutes?: number;
   completionNotes?: string;
   confirmScheduling?: boolean;
   confirmCompletion?: boolean;
@@ -56,10 +57,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (body.status === "meeting_scheduled") {
       const locationResult = validateMeetingLocation(body.meetingLocation);
       if (!locationResult.ok) return Response.json({ error: "Meeting location is too long" }, { status: 422 });
+      const durationResult = validateMeetingDurationMinutes(body.meetingDurationMinutes);
+      if (!durationResult.ok) return Response.json({ error: "Meeting duration must be a positive number of minutes (24 hours or fewer)" }, { status: 422 });
       if (body.confirmScheduling !== true) return Response.json({ error: "Confirm the meeting time before scheduling it" }, { status: 422 });
-      const result = await scheduleProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, locationResult.location, true, profile.timezone, now);
+      const result = await scheduleProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, locationResult.location, durationResult.durationMinutes, true, profile.timezone, now);
       if (!result.ok) return statusErrorResponse(result.reason);
-      logger.info("trip_prospect_meeting_scheduled", { userId: profile.id, tripId: id, prospectId });
+      logger.info("trip_prospect_meeting_scheduled", { userId: profile.id, tripId: id, prospectId, durationMinutes: durationResult.durationMinutes });
     } else if (body.status === "meeting_completed") {
       if (body.confirmCompletion !== true) return Response.json({ error: "Confirm the meeting outcome before marking it completed" }, { status: 422 });
       const result = await completeProspectMeeting(profile.id, id, prospectId, body.meetingAtLocal, body.completionNotes ?? "", true, profile.timezone, now);

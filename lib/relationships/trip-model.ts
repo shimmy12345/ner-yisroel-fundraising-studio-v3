@@ -271,3 +271,18 @@ export function validateMeetingScheduling(meetingAt: unknown, now: number): { ok
   if (meetingAt <= now) return { ok: false };
   return { ok: true, meetingAt };
 }
+
+// Google Calendar sync narrowed first release (2026-10-19, see
+// docs/AI-HANDOFF.md): "show an editable duration, default 30 minutes."
+// Omitted/undefined/null means "use the default", never a validation
+// error -- an existing caller that doesn't send this field at all must
+// keep working exactly as before. The sanity ceiling (24h) is the same
+// kind of "catch an obviously malformed payload" guard as
+// MAX_TRIP_SPAN_DAYS above, not a product rule about real meeting length.
+export const DEFAULT_MEETING_DURATION_MINUTES = 30;
+const MAX_MEETING_DURATION_MINUTES = 24 * 60;
+export function validateMeetingDurationMinutes(value: unknown): { ok: true; durationMinutes: number } | { ok: false } {
+  if (value === undefined || value === null) return { ok: true, durationMinutes: DEFAULT_MEETING_DURATION_MINUTES };
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > MAX_MEETING_DURATION_MINUTES) return { ok: false };
+  return { ok: true, durationMinutes: value };
+}

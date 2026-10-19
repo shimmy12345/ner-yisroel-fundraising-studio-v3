@@ -1,8 +1,12 @@
 # Runs the Google Calendar D1 persistence adapter's own contract/
 # concurrency test suite (tests/calendar-d1-store.test.mjs and
-# tests/calendar-adapters-integration.test.mjs) against a REAL local
-# Workers/D1 runtime (wrangler's own getPlatformProxy(), per
-# lib/calendar/testing/local-d1.ts) on an Ubuntu runner.
+# tests/calendar-adapters-integration.test.mjs), plus (2026-10-19, Trip
+# Planning narrowed first release) the Trip Planning wiring layer's own
+# full schedule/reschedule/cancel path against a STATEFUL simulated
+# Google calendar (tests/trip-calendar-sync-integration.test.mjs) --
+# against a REAL local Workers/D1 runtime (wrangler's own
+# getPlatformProxy(), per lib/calendar/testing/local-d1.ts) on an Ubuntu
+# runner.
 #
 # Why this workflow exists, and why it runs on Linux rather than wherever
 # the rest of this repo's CI/local dev happens: this project's own
@@ -37,9 +41,13 @@ on:
       - feature/independent-cloudflare-sandbox
     paths:
       - "lib/calendar/**"
+      - "lib/relationships/trip-calendar-sync.ts"
+      - "lib/relationships/trips-data.ts"
+      - "lib/relationships/trip-model.ts"
       - "tests/calendar-d1-store.test.mjs"
       - "tests/calendar-adapters-integration.test.mjs"
       - "tests/calendar-google-client.test.mjs"
+      - "tests/trip-calendar-sync-integration.test.mjs"
       - "tests/fixtures/wrangler.calendar-d1-test.jsonc"
       - "drizzle/0048_google_calendar_sync.sql"
       - "cloudflare-env.d.ts"
