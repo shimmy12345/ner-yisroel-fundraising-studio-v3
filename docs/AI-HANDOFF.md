@@ -54332,3 +54332,363 @@ regenerated; one cosmetic, zero-risk Staging residual identified,
 precisely explained, and left for the owner (or a future session with
 the right permission) to apply or ignore. No Production change, no
 credential of any kind, no merge into `main`.
+
+## 2026-10-19 (third follow-up review): fix conflicting meeting/Calendar transitions, stop silently losing intent on read failures, test the real entry points, correct the Staging schema finding -- Staging deployed and live-verified, Google itself still unverified live
+
+**Three commits** on `feature/independent-cloudflare-sandbox`, reviewing
+and correcting the round immediately before this one (`d153259`/`ad26080`,
+the "lease protection, owner isolation, safe Retry, atomic persistence"
+round):
+
+- **`adac6f2`** -- the main fix: conflicting meeting/Calendar
+  transitions, silent intent loss on read failures, the real-entry-point
+  test suite, and the prepared (not applied) Staging repair migration.
+- **`f704cc8`** -- CI caught a real regression in `adac6f2` itself within
+  minutes (see below) -- fixed before this branch's own CI went green.
+- **`917442e`** -- CI then caught a test-only bug (not a production
+  issue) in the new test file's own identity-transport helper -- fixed.
+
+This sequence -- write, push, CI fails, fix, push, CI fails differently,
+fix, push, CI passes -- is recorded in full, not cleaned up into a single
+commit, because it is itself part of the evidence this round's own
+instruction asked for: real CI results, actually inspected, not assumed.
+
+### 1. Conflicting meeting/Calendar transitions -- the exact reproduction, fixed
+
+**Independently reproduced, exactly as described**: an enrolled, present
+calendar link; `scheduleProspectMeeting` reads it as present and starts
+building a reschedule; a competing cancellation commits first (flipping
+`desired_state` to `absent`); the reschedule's own (now-stale) batch
+still runs. **Confirmed the bug was real**: the batch's own calendar
+statement correctly matched zero rows (its guard failing), but the
+`interactions`/`trip_prospects` statements in the SAME batch had NO
+precondition tied to the calendar read at all -- they committed
+unconditionally regardless. Final state: FOS said "meeting scheduled";
+the calendar intent stayed "absent." Last round's own "atomic" framing
+was wrong about what it actually guaranteed -- it made the BATCH
+atomic (D1's own all-or-nothing commit), not the LOGICAL transition
+(a guarded statement matching zero rows is not a batch failure).
+
+**Fixed**: `trip-calendar-sync.ts`'s new `planTripMeetingScheduledIntent`
+makes the same enroll/reschedule/reopen dispatch decision as before, but
+now ALSO returns a `D1CrossTableGuard` -- a boolean SQL fragment
+(`` `EXISTS (SELECT 1 FROM calendar_event_links WHERE interaction_id = ?
+AND desired_state = 'present')` `` for reschedule, the absent+generation
+form for reopen, `NOT EXISTS (...)` for a first-time enroll) re-verified
+FRESH at execution time. `scheduleProspectMeeting` ANDs this into its OWN
+`interactions` upsert's `ON CONFLICT DO UPDATE ... WHERE` clause and its
+`trip_prospects` UPDATE's `WHERE` clause too, so every statement in the
+combined batch shares the IDENTICAL precondition: either all of them
+affect a row together, or (the precondition went stale) none of them do
+-- never the partial outcome the race used to produce. A guard mismatch
+means nothing committed, so `scheduleProspectMeeting` retries the WHOLE
+transition against a fresh read (bounded, `MAX_CALENDAR_INTENT_ATTEMPTS
+= 5`) -- safe because nothing partial was left behind, and because
+scheduling's own intent ("make this meeting scheduled at this time")
+stays valid regardless of the calendar's prior state. A genuine
+first-enroll race (a real `UNIQUE(interaction_id)` collision, which
+rolls back the WHOLE batch including the meeting change) is caught
+specifically and also retried.
+
+**Cancellation and reopening, reviewed the same way**: `setSimpleProspectStatus`'s
+cancel branch applies the identical `D1CrossTableGuard` pattern, but
+checking "`trip_prospects` still has the EXACT status this request
+read" -- shared across the `interactions` cancel-prefix write AND the
+calendar-cancel statements. A guard mismatch there is reported as a
+conflict, never retried (cancellation's own intent -- "decline a
+meeting that really is still scheduled" -- is conditional, unlike
+scheduling's). Reopening is already covered by `scheduleProspectMeeting`'s
+own retry loop (reopen is one of its three dispatch branches); the
+core's own existing "reuse the winning transition" idempotency
+(`applyReopen`'s own generation-identity check, unchanged) still
+prevents two concurrent reopen attempts from allocating two generations
+for one cancellation -- proven again, through the real entry point this
+time, by a dedicated regression (see below).
+
+**A real regression in this very fix, caught by CI before merge**:
+positioning the calendar-cancel statements AFTER the `trip_prospects`
+update in the batch array seemed natural (matching the OLD order), but
+D1 batch statements observe EARLIER statements' own writes within the
+SAME batch -- by the time the calendar statements ran, `trip_prospects.status`
+had ALREADY become the new status, making the guard permanently,
+silently false and the calendar cancel a no-op on the ORDINARY,
+non-racing path too (not merely the race case). CI's own new regression
+test (`tests/trip-entrypoints-atomicity.test.mjs`) caught this
+immediately -- commit `f704cc8` reorders the calendar statements to be
+built and pushed BEFORE the `trip_prospects` update, so the guard
+observes the pre-update status as intended. Independently re-verified
+live on Staging afterward (see below): cancellation now actually
+cancels the calendar intent again.
+
+### 2. Stop silently losing Calendar intent on database read failures -- fixed
+
+**Independently reproduced**: the two wrapper functions
+(`tripCalendarScheduleStatements`/`tripCalendarCancelStatements`,
+`trips-data.ts`) caught a thrown read error from the calendar builder
+and returned an empty statement array -- `scheduleProspectMeeting` then
+saved the meeting change and returned `{ok:true}` anyway, with the
+calendar intent silently unchanged and nothing visible to any caller.
+
+**Fixed**: neither wrapper function exists anymore. Both
+`scheduleProspectMeeting` and `setSimpleProspectStatus` now call the
+calendar-intent builders DIRECTLY and catch only at the point where they
+decide the function's own return value: a read failure aborts that
+attempt immediately with `{ok:false, reason:"calendar_unavailable"}`
+BEFORE any `db.batch()` call runs at all -- the meeting change is never
+saved either, satisfying "roll back the save with an actionable retry
+response" by simply never making the save in the first place. A
+genuine, non-constraint `db.batch()` failure (a real connectivity
+problem, distinct from a benign guard mismatch) propagates rather than
+being caught -- `scheduleProspectMeeting` only catches
+`isUniqueConstraintViolation`, re-throwing everything else.
+`StatusUpdateResult` gained two new reasons (`calendar_unavailable`,
+`calendar_conflict` -- the latter for retry exhaustion), each with its
+own distinct, actionable message in the route's `statusErrorResponse`
+(503 and 409 respectively).
+
+**Confirmed distinguished from "Calendar is intentionally disabled"**:
+the durable calendar intent is read/built and recorded REGARDLESS of
+`calendar_sync_enabled` -- that flag, and the absence of credentials,
+only gate `attemptBestEffortCalendarReconcile`'s own live network
+attempt, a completely separate step. No new background architecture was
+added for this (no retry-queue table, no new column) -- the fix is
+entirely "abort before saving, or retry the SQL transition," both using
+only the D1 operations already in place.
+
+### 3. Tests through the ACTUAL application entry points
+
+New `tests/trip-entrypoints-atomicity.test.mjs` calls
+`scheduleProspectMeeting`/`setSimpleProspectStatus`/`retryTripMeetingCalendarSync`
+DIRECTLY -- never a stand-in UPDATE -- against a REAL local D1 database.
+Since these functions `import { env } from "cloudflare:workers"` (a
+module that only exists inside an actual Workers/vinext runtime, never
+under plain Node), a new Node ESM loader hook
+(`tests/fixtures/cloudflare-workers-loader.mjs`, registered via
+`node:module`'s `register()`) redirects that one specifier to a mutable
+stub (`tests/fixtures/fake-cloudflare-workers.mjs`) the test points at
+the real local D1 binding -- the ONLY way found to exercise these exact
+functions rather than a parallel reimplementation. (The loader also had
+to re-implement Node's own extensionless-relative-import probing, which
+a registered hook's `nextResolve` does not inherit automatically --
+documented in the loader's own header; confirmed by direct, isolated
+testing before relying on it.)
+
+Covers, through the real entry points: the exact cancel/reschedule
+interleaving above (converges correctly after one retry); competing
+concurrent reopen attempts (exactly one generation bump across both,
+confirmed); a genuine database-read failure (aborts before any save,
+confirmed via direct query that nothing was created); a genuine batch
+failure (propagates, never swallowed); recovery after a failed attempt
+followed by a clean subsequent cancellation; calendar-disabled
+scheduling (succeeds normally, intent still recorded); and, using the
+existing `StatefulCalendarClient` against the SAME database a
+trips-data.ts call just wrote to, persisted link/history consistency
+together with simulated remote event existence -- proving the recorded
+intent is genuinely actionable, not merely self-consistent bookkeeping.
+Retry is confirmed to never write a new intent revision at all.
+CI-only (needs the real local D1/workerd runtime), registered in
+`package.json`'s `test:calendar-d1`, `scripts/run-tests.mjs`'s own
+exclusion list, and the CI workflow's trigger paths, alongside the
+existing suite -- which it leaves completely unmodified and still fully
+passing (confirmed in every CI run this round, including the two that
+failed elsewhere).
+
+### 4. The Staging schema finding, corrected -- this is a real defect, not cosmetic
+
+**Last round's "cosmetic/zero-risk" characterization was wrong, and is
+withdrawn.** Re-verified properly this round, exactly as instructed:
+exported Staging's actual live schema **read-only** (`wrangler d1
+execute --remote` with a single `SELECT ... FROM sqlite_schema`,
+confirmed `changes:0`/`changed_db:false`/`rows_written:0` in its own
+result metadata -- nothing written, no table dropped, no `sqlite_schema`
+modified), then ran that exact exported text through the SAME
+normalize-then-rebuild logic `lib/operations/schema-backup.ts`'s
+`buildSchemaOnlyBackup()` uses internally, against an isolated local
+in-memory SQLite database -- never the repo's own already-fixed
+migration copy. **Result: it fails.** `near "CREATE": syntax error`,
+reproduced directly against Staging's own, currently-live,
+currently-stored schema text. This is a live, present-tense defect in
+the real schema-backup/restore path as it exists on Staging TODAY, not
+a hypothetical or already-fixed one.
+
+**Why the earlier regenerated-baseline fix (commit `d153259`) did not
+reach this**: that fix corrected the MIGRATION FILE and the
+LOCALLY-REGENERATED baseline artifacts -- both are inputs to a FRESH
+schema build, never to a table SQLite already created from the OLD
+text. A table's own stored `CREATE TABLE` text, once it exists, cannot
+be changed by editing a migration file after the fact; only rebuilding
+the table does.
+
+**Repair migration prepared, locally tested, NOT applied anywhere**:
+`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`
+-- the standard SQLite "create the corrected table under a temporary
+name, copy every row across unchanged, drop the old table, rename the
+new one into place, recreate its indexes" pattern, for both
+`calendar_event_links` and `calendar_event_link_history`. Every column,
+type, default, constraint, and index is byte-identical to the
+already-corrected migration 0048; only the stored comment placement
+changes. Deliberately placed under `drizzle/pending-review/`, not
+`drizzle/` itself, so `scripts/generate-production-baseline.mjs`,
+`lib/calendar/testing/local-d1.ts`, and every other tool that globs
+`drizzle/*.sql` never picks it up automatically -- renumbering it into
+the real sequence (and the cascading updates that implies: regenerating
+the baseline, bumping the hardcoded migration-count assertion in
+`lib/data-health/production-baseline.ts`) is the owner's own decision,
+not performed here. **Locally tested** (never applied anywhere):
+reconstructed Staging's exact live (pre-repair) schema in an isolated
+in-memory database, seeded it with the one real existing row this
+feature has in each table (the "Bassman" trip-meeting test artifact,
+captured via a separate read-only query beforehand), applied the draft
+migration, and confirmed: it applies without error; both rows survive
+with every column identical (`JSON.stringify` equality, not merely "a
+row still exists"); and the SAME restore-verification check that failed
+before the migration now succeeds (`integrity_check = ok`). This
+verification was done with throwaway local scripts (not committed --
+the migration file itself and this record are the lasting artifacts).
+
+**Why this round did not apply the migration**: the instruction for
+this round explicitly says to prepare it "for separate review," not to
+apply it -- consistent with the broader "no credential, no Production
+action" posture and with last round's own DROP TABLE attempt having
+already been correctly blocked by this session's own permission system.
+This round did not attempt any destructive action on Staging at all;
+the repair approach used here (rebuild, not drop) was designed
+specifically to be data-preserving if and when the owner decides to
+apply it.
+
+### Checks
+
+229/229 local test files pass; `npx tsc --noEmit -p tsconfig.json`
+clean; `npx eslint .` unchanged from the documented 94-error/46-warning
+baseline -- confirmed after every one of this round's three commits, not
+only the last one. **CI evidence, all three pushes, actually inspected**:
+- `adac6f2`: [run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39262405010) --
+  **failed** (`tests/trip-entrypoints-atomicity.test.mjs`'s own
+  "competing reopen transitions" block: `AssertionError: expected
+  'absent', got 'present'` -- the statement-ordering regression
+  described above). Inspected directly via the run's own job page.
+- `f704cc8`: [run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39263291527) --
+  **failed differently** (`TypeError: Cannot read properties of null
+  (reading 'reconciled')` -- a test-only bug, the identity-transport
+  helper's email not matching `PRODUCTION_OWNER_EMAIL`). Inspected
+  directly.
+- `917442e`: [run](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39263962392)
+  (job `118098592165`) -- **success**. Every existing suite
+  (`calendar-d1-store.test.mjs`, `calendar-adapters-integration.test.mjs`,
+  `trip-calendar-sync-integration.test.mjs`) still passes unmodified,
+  plus the complete new real-entry-point suite, against the real local
+  D1/workerd runtime on the Ubuntu runner.
+
+### Staging deployment and live verification
+
+**Staging deployment**: `pnpm run deploy:staging-independent` -- Worker
+`fundraising-os-staging`, Version ID
+**`b223a587-5c3c-4806-bd40-070b1433314b`**, built from commit `917442e`
+(the CI-green commit). No migration applied this round (no schema
+change in the applied code -- the repair migration above is explicitly
+NOT applied). Confirmed immediately before deploying: `wrangler secret
+list --config wrangler.staging.jsonc` still shows only the three Gmail
+secrets, no `GOOGLE_CALENDAR_OAUTH_*` secret of any kind. Settings'
+"Workspace health" page independently confirms `Deployed version: 0.1.0
+· 917442e`.
+
+**Verified live, directly against the deployed Staging Worker and the
+real Staging D1**, using the same "Chicago" trip / "Mr. & Mrs. Aryeh
+Bassman" prospect prior rounds have used, restoring it to "Planned
+outreach" after:
+- **Schedule** (reopen, since the prior round's own cycle left this
+  link `absent`): generation bumped 1→2, `desired_revision` 6→7,
+  `desired_state='present'`, `trip_prospects.status='meeting_scheduled'`
+  -- all confirmed via direct, independent D1 query.
+- **Reschedule**: generation unchanged at 2, `desired_revision` 7→8,
+  `interactions.occurred_at` updated to the new time.
+- **Cancel -- the exact path this round's main fix was about**:
+  `desired_state='absent'`, `desired_revision` 8→9, `cleanup_needed=1`,
+  `interactions.source` correctly prefixed `cancelled:`,
+  `trip_prospects.status='declined'` -- **directly confirms the fix
+  works live, not merely in CI**: before this round's fix, this exact
+  step would have left `desired_state='present'`.
+- **Retry** (`POST /api/trips/.../calendar-retry`): returned
+  `200`/`pending` (no credentials, correct); confirmed via direct query
+  that `desired_revision` stayed at `9` and `desired_state` stayed
+  `absent` -- never reopened.
+- **Completion** (`PATCH` with `status:"meeting_completed"`, a real past
+  local time, meaningful notes): `trip_prospects.status='meeting_completed'`,
+  `interactions.source`/`summary` updated with the submitted notes, and
+  the calendar link's `desired_state`/`desired_revision` **completely
+  unchanged** (`absent`/`9`) -- confirming completion never touches
+  calendar history.
+- Restored the prospect to "Planned outreach" afterward. No browser
+  console errors observed across the sequence.
+
+**What remains honestly unproven**: Google synchronization itself is
+still **NOT verified** -- no OAuth client exists, no credential has
+been installed anywhere, and no live Google API call has ever been
+made by any round of this feature, including this one.
+
+**Not done, and not authorized this round**: no Production action of
+any kind; Gmail credentials and email scheduling completely untouched;
+no OAuth setup; no merge into `main`; the repair migration was prepared
+and locally tested but NOT applied anywhere.
+
+### Owner setup checklist -- Staging first, resolves the Internal-app/test-account conflict
+
+1. **Decide the Staging test account** (this is the actual blocking
+   decision -- everything else below is mechanical once it's made). The
+   Production OAuth client must stay **Internal** type (restricted to
+   the `nirc.edu` Workspace, avoiding Testing-mode's 7-day token expiry
+   and 100-user cap); the Staging guard (`calendar-sync-guard.ts`)
+   separately requires the Staging test account to be a DIFFERENT
+   Google account than the real owner. An Internal client flatly
+   refuses any account outside the `nirc.edu` Workspace (`org_internal`
+   error), so the Staging account cannot be an ordinary personal Gmail
+   address authorized against the SAME client. Pick one:
+   - (a) a second real `nirc.edu` Workspace mailbox, authorized against
+     the SAME Internal OAuth client, or
+   - (b) a separate, dedicated OAuth client registered as **External +
+     Testing**, used only for this one bounded Staging verification
+     pass (accepting its 7-day refresh-token expiry as a one-time cost
+     -- never for the long-lived Production client).
+2. In the existing Google Cloud project (the one Gmail already uses):
+   enable the Calendar API; add scopes `calendar.events.owned`,
+   `openid`, `userinfo.email` to the consent screen, alongside the
+   existing `gmail.send` (never removing it).
+3. Create a NEW OAuth 2.0 Client ID (Desktop app type) -- never reuse
+   Gmail's client or token.
+4. Authorize this client against whichever account was chosen in step
+   1; create a disposable, non-`"primary"` test calendar in that same
+   account.
+5. `wrangler secret put GOOGLE_CALENDAR_OAUTH_CLIENT_ID` (and
+   `_CLIENT_SECRET`/`_REFRESH_TOKEN`) `--config wrangler.staging.jsonc`;
+   add `CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID` as a plain `vars` entry
+   (not a secret) in `wrangler.staging.jsonc`, set to that test
+   calendar's id.
+6. Only AFTER Staging's real sync is live-verified end-to-end against
+   the real Calendar API (schedule/reschedule/cancel actually
+   appearing/disappearing on the real test calendar -- the one thing no
+   round of this feature has yet done): as a separate, later, explicitly
+   authorized decision, repeat the authorization against
+   `sgoldstein@nirc.edu` for Production, install Production secrets,
+   and consider the 5-minute reconciliation Cron Trigger -- none of
+   which this or any prior round has done.
+
+**This agent cannot and will not perform any of these steps itself** --
+they require the owner's own Google account/Workspace-admin access, and
+installing a real credential on the owner's behalf is exactly what this
+agent must never do. **Live Google synchronization must remain,
+and does remain, explicitly unverified until the owner performs these
+steps and a future session exercises it against the real Calendar API.**
+
+**Stopping here for independent review, per this round's own explicit
+instruction.** Two real persistence bugs found and fixed in the
+production Trip entry points (with a real mid-round regression caught
+and fixed by CI before merge, honestly recorded rather than squashed
+away); the actual application entry points now have dedicated
+regression coverage; the Staging schema finding is corrected from an
+incorrect "cosmetic" claim to a confirmed real defect, with a complete,
+locally-tested, data-preserving repair prepared for separate review
+(never applied); Staging is deployed and live-verified end-to-end,
+including the exact cancellation path this round's main fix addresses.
+No Production change, no credential of any kind, no OAuth setup, no
+live Google call, no Gmail/agenda-email change, no cron activation, no
+merge into `main`.
