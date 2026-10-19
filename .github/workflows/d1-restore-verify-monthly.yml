@@ -400,17 +400,18 @@ jobs:
       # Pinned to the EXACT commit this repair, this script, and this
       # workflow job were all independently reviewed at -- see this
       # job's own header comment for why a branch name is not used here.
-      # Re-pinned twice already: 4dd1474 -> c2e7c205 (a real backup-
-      # retention bug), then c2e7c205 -> this commit (the ACTUAL
-      # dispatched run, 39298894750, failed during read-only target
-      # validation with "Unknown argument: remote" -- `d1 info` does not
-      # accept `--remote` on wrangler 4.92.0 at all; fixed in
-      # scripts/lib/staging-repair-connect.mjs). Re-pin again,
+      # Re-pinned three times already: 4dd1474 -> c2e7c205 (a real
+      # backup-retention bug) -> 7fa3abe7 (a real `d1 info` CLI-argument
+      # bug) -> this commit (run 39301756858 hung for ~21 minutes after
+      # a failed getPlatformProxy() remote-session startup, until
+      # GitHub's own 20-minute job-level timeout cancelled it -- fixed
+      # with a bounded startup timeout and a forced process.exit(); see
+      # docs/AI-HANDOFF.md for the full diagnosis). Re-pin again,
       # deliberately, if a newer, re-reviewed commit should be used.
       - name: Checkout the exact independently reviewed repair commit
         uses: actions/checkout@v4
         with:
-          ref: 7fa3abe736c08b7e88b4ed1704888ec6cee4855f
+          ref: c208a25856af56dadfd2d375e358257a0519edb8
 
       - uses: pnpm/action-setup@v4
         with:
