@@ -494,22 +494,26 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
       cancelCalendarForInteractionId = existing.linkedInteractionId;
     }
   }
-  // Integration safety, atomic persistence: the trip_prospects status
-  // update's own result (at this fixed index, regardless of how many
-  // calendar statements get appended after it below) is what "did the
-  // update actually apply" is judged on -- never `.at(-1)`, which would
-  // silently start reading the WRONG statement's result once calendar
-  // statements follow it in the same batch.
-  const prospectUpdateIndex = statements.length;
-  statements.push(env.DB.prepare("UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ?").bind(nextStatus, now, prospectId, existing.status));
   // "Canceling removes only its linked FOS-created event," committed as
-  // ONE atomic D1 operation together with the meeting/status change above
+  // ONE atomic D1 operation together with the meeting/status change below
   // -- never a separate batch call after this one commits (see
   // trip-calendar-sync.ts's own buildTripMeetingCancelledStatements doc
   // comment for exactly what this makes atomic). A failure reading the
   // current calendar link state aborts the WHOLE request before any
   // batch runs -- the status change is not saved either -- rather than
   // silently losing the calendar intent while the status change succeeds.
+  //
+  // MUST be built and pushed BEFORE the trip_prospects update below, not
+  // after: these statements' own guard re-checks "trip_prospects still
+  // has the status this request read" via the SAME `statusGuardSql`
+  // fragment, and D1 batch statements observe EARLIER statements' own
+  // writes within the SAME batch (confirmed by this exact bug: an
+  // earlier version of this function pushed the trip_prospects update
+  // FIRST, so by the time these statements ran, trip_prospects.status
+  // had already become `nextStatus` -- making the guard permanently,
+  // silently false and the calendar cancel a permanent no-op, even on
+  // the ordinary, non-racing path). Pushed first, this guard still
+  // observes the PRE-update status, exactly as intended.
   if (cancelCalendarForInteractionId) {
     let calendarStatements: D1PreparedStatement[];
     try {
@@ -520,6 +524,12 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
     }
     statements.push(...calendarStatements);
   }
+  // Integration safety, atomic persistence: the trip_prospects status
+  // update's own result (at this fixed index, regardless of how many
+  // calendar statements were pushed before it above) is what "did the
+  // update actually apply" is judged on -- never `.at(-1)`.
+  const prospectUpdateIndex = statements.length;
+  statements.push(env.DB.prepare("UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ?").bind(nextStatus, now, prospectId, existing.status));
   const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
   if ((results[prospectUpdateIndex]?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
   if (cancelCalendarForInteractionId) await attemptBestEffortCalendarReconcile(userId, now);
