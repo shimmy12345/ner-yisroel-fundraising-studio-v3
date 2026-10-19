@@ -400,10 +400,14 @@ jobs:
       # Pinned to the EXACT commit this repair, this script, and this
       # workflow job were all independently reviewed at -- see this
       # job's own header comment for why a branch name is not used here.
+      # Re-pinned once already (from 4dd1474 to this commit) when a
+      # review found and fixed a real backup-retention bug in the
+      # application script itself -- re-pin again, deliberately, if a
+      # newer, re-reviewed commit should be used.
       - name: Checkout the exact independently reviewed repair commit
         uses: actions/checkout@v4
         with:
-          ref: 4dd14740097fd9b9b80b17756255ed4362466664
+          ref: c2e7c2054b260d1cd068d90b0020b82ee9886e15
 
       - uses: pnpm/action-setup@v4
         with:
