@@ -34,6 +34,34 @@ import type { CalendarLinkRow, CalendarLinkStore, GoogleApiResult, GoogleCalenda
 
 const DEFAULT_LEASE_TTL_SECONDS = 120;
 const MAX_PRECONDITION_RETRIES = 2;
+
+// 2026-10-19 review (second round), clock bug: `reconcilePresentAbsent`
+// used to receive ONE fixed `now` and reuse that SAME frozen value for
+// every expiry check and protected write for the ENTIRE call, including
+// after awaited network operations -- so a lease acquired at `now` with
+// a short TTL could never be observed as expired by THIS SAME attempt's
+// own later checks, no matter how long it was actually suspended on a
+// network call, because every check compared `leaseExpiresAt` (derived
+// from that same frozen `now`) against that IDENTICAL frozen `now`
+// again. Independent reproduction confirmed this against commit
+// `bf8a8ed`: start at now=1000 with a 5s lease (expires 1005); suspend
+// GET; advance the clock to 1010; GET returns 404; INSERT still
+// executed and the link was marked synced, despite the lease having
+// genuinely expired at 1005.
+//
+// Fixed with an injectable `Clock` -- a zero-argument function called
+// FRESH at each expiry-sensitive operation (every `acquireLease` and
+// `revalidateBeforeMutation` call) and at each protected write (every
+// `updateLinkAsLeaseHolder` call, both for its own expiry comparison
+// and for the `updatedAt` value it writes), never a value captured once
+// and reused. Defaults to `() => now` everywhere it's accepted, so
+// EVERY existing call site that only ever passed a plain `now` number
+// keeps its exact prior behavior (a constant "clock" that never
+// advances during the call) -- this is a purely additive capability,
+// not a breaking change to any existing caller. A real production
+// caller passes `() => Math.floor(Date.now() / 1000)`; a test passes a
+// closure over a mutable variable it advances explicitly mid-test.
+export type Clock = () => number;
 // 2026-10-19 review, issue 2: bounded exponential backoff for a
 // retryable ("failed") link -- 30s, 60s, 120s, ... capped at 30 minutes,
 // so a transient failure is retried with increasing delay rather than
@@ -254,11 +282,12 @@ export async function reconcilePresentAbsent(
   leaseOwner: string,
   now: number,
   ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+  clock: Clock = () => now,
 ): Promise<ReconcileOutcome> {
   const initial = await store.getLinkByInteraction(interactionId);
   if (!initial) return { kind: "no_link" };
 
-  const acquired = await store.acquireLease(initial.id, leaseOwner, now, ttlSeconds);
+  const acquired = await store.acquireLease(initial.id, leaseOwner, clock(), ttlSeconds);
   if (!acquired) return { kind: "lease_contended" };
 
   try {
@@ -283,11 +312,11 @@ export async function reconcilePresentAbsent(
         // `return await ...` forces the function to actually suspend
         // here, so `finally` only runs once the helper (and its
         // lease-protected writes) has fully finished.
-        return await reconcileDeleteCurrentGeneration(store, client, fresh, leaseOwner, now);
+        return await reconcileDeleteCurrentGeneration(store, client, fresh, leaseOwner, now, clock);
       }
 
       const fields = await getMeetingFields(fresh.interactionId);
-      if (!fields) return finishFailed(store, fresh, leaseOwner, now, "meeting fields unavailable");
+      if (!fields) return finishFailed(store, fresh, leaseOwner, now, "meeting fields unavailable", clock);
 
       // 2026-10-19 review, issue 2: "validate real calendar dates, finite
       // timestamps, endAt > occurredAt, and valid timezone inputs before
@@ -297,10 +326,10 @@ export async function reconcilePresentAbsent(
       // Google is never even contacted, rather than only being
       // discoverable via a real Google 400 after the fact.
       const fieldValidation = validateMeetingDesiredFields(fields);
-      if (!fieldValidation.valid) return finishInvalid(store, fresh, leaseOwner, now, fieldValidation.reason);
+      if (!fieldValidation.valid) return finishInvalid(store, fresh, leaseOwner, now, fieldValidation.reason, clock);
 
       const eventId = fresh.googleEventId ?? deriveGoogleEventId(fresh.interactionId, generationBeingSent);
-      if (!fresh.googleEventId) await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, now, { googleEventId: eventId, updatedAt: now });
+      if (!fresh.googleEventId) { const freshNow = clock(); await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, freshNow, { googleEventId: eventId, updatedAt: freshNow }); }
 
       // Bug 2 (2026-10-20 review): universal backstop. A history row for
       // this generation might be missing -- not only from the exact
@@ -334,7 +363,12 @@ export async function reconcilePresentAbsent(
       // ORIGINAL version checked lease OWNERSHIP only, never EXPIRY, so
       // an expired worker whose lease no one else had yet re-acquired
       // could still pass this check and send a real mutating call.
-      { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, now, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
+      // 2026-10-19 review (clock bug): the value compared against
+      // `leaseExpiresAt` is now `clock()`, read FRESH right here --
+      // never the `now` captured once at the top of this function and
+      // reused after the GET above may have suspended for a real,
+      // meaningful amount of time.
+      { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, clock(), "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
 
       if (!getResult.ok && (getResult.status === 404 || getResult.status === 410)) {
         // Whether this generation was EVER previously confirmed created is
@@ -348,7 +382,8 @@ export async function reconcilePresentAbsent(
         if (historyForGeneration?.createStatus === "succeeded") {
           // Previously confirmed created, now gone -- a manual Google-side
           // deletion (Issue 7). Never recreate automatically.
-          const ok = await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, now, { syncStatus: "missing_remotely", updatedAt: now });
+          const freshNow = clock();
+          const ok = await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, freshNow, { syncStatus: "missing_remotely", updatedAt: freshNow });
           if (!ok) return { kind: "lease_contended" };
           return { kind: "missing_remotely" };
         }
@@ -371,30 +406,30 @@ export async function reconcilePresentAbsent(
         await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "in_flight" });
         // Re-check immediately before the actual network call -- the
         // updateHistory write above is itself an await point where a
-        // cancel could have landed.
-        { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, now, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
+        // cancel could have landed. `clock()` read fresh again here too.
+        { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, clock(), "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
         const body = { ...buildGoogleEventBody(fields), id: eventId };
         const insertResult = await client.insert(fresh.googleCalendarId, body);
 
         if (insertResult.ok) {
           await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "succeeded" });
-          return finishSynced(store, fresh, leaseOwner, now, revisionBeingSent, insertResult.etag ?? null);
+          return finishSynced(store, fresh, leaseOwner, now, revisionBeingSent, insertResult.etag ?? null, clock);
         }
         if (!insertResult.ok && insertResult.status === 409) {
           // Issue 3: a 409 alone does not prove the latest desired
           // content was synced -- GET, verify, and reconcile content.
           const verify = await client.get(fresh.googleCalendarId, eventId);
-          { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, now, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
-          if (!verify.ok) return categorizedFinish(store, fresh, leaseOwner, now, verify);
+          { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, clock(), "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
+          if (!verify.ok) return categorizedFinish(store, fresh, leaseOwner, now, verify, clock);
           await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "succeeded" });
           const merged = mergeFosFieldsIntoExistingEvent(verify.event!, fields);
           const updateResult = await client.update(fresh.googleCalendarId, eventId, merged, verify.etag ?? "");
-          if (updateResult.ok) return finishSynced(store, fresh, leaseOwner, now, revisionBeingSent, updateResult.etag ?? null);
+          if (updateResult.ok) return finishSynced(store, fresh, leaseOwner, now, revisionBeingSent, updateResult.etag ?? null, clock);
           if (!updateResult.ok && updateResult.status === 412) {
             if (--attemptsLeft > 0) continue; // reload and retry from the top
-            return finishFailed(store, fresh, leaseOwner, now, "412 retries exhausted");
+            return finishFailed(store, fresh, leaseOwner, now, "412 retries exhausted", clock);
           }
-          return categorizedFinish(store, fresh, leaseOwner, now, updateResult);
+          return categorizedFinish(store, fresh, leaseOwner, now, updateResult, clock);
         }
         // 2026-10-19 review, issue 2: categorize the failure -- a
         // DEFINITIVE 400 marks this generation's history "invalid"
@@ -411,10 +446,10 @@ export async function reconcilePresentAbsent(
         const failure = describeApiFailure(insertResult);
         if (failure.category === "invalid") await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "invalid" });
         else if (!failure.ambiguous) await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "failed" });
-        return finishByCategory(store, fresh, leaseOwner, now, failure);
+        return finishByCategory(store, fresh, leaseOwner, now, failure, clock);
       }
 
-      if (!getResult.ok) return categorizedFinish(store, fresh, leaseOwner, now, getResult);
+      if (!getResult.ok) return categorizedFinish(store, fresh, leaseOwner, now, getResult, clock);
 
       // Event exists on Google -- by construction (we always address it by
       // the deterministic id for this exact interactionId+generation) it
@@ -434,12 +469,12 @@ export async function reconcilePresentAbsent(
       await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "succeeded" });
       const merged = mergeFosFieldsIntoExistingEvent(getResult.event!, fields);
       const updateResult = await client.update(fresh.googleCalendarId, eventId, merged, getResult.etag ?? "");
-      if (updateResult.ok) return finishSynced(store, fresh, leaseOwner, now, revisionBeingSent, updateResult.etag ?? null);
+      if (updateResult.ok) return finishSynced(store, fresh, leaseOwner, now, revisionBeingSent, updateResult.etag ?? null, clock);
       if (!updateResult.ok && updateResult.status === 412) {
         if (--attemptsLeft > 0) continue;
-        return finishFailed(store, fresh, leaseOwner, now, "412 retries exhausted");
+        return finishFailed(store, fresh, leaseOwner, now, "412 retries exhausted", clock);
       }
-      return categorizedFinish(store, fresh, leaseOwner, now, updateResult);
+      return categorizedFinish(store, fresh, leaseOwner, now, updateResult, clock);
     }
   } finally {
     await store.releaseLease(initial.id, leaseOwner);
@@ -479,11 +514,23 @@ async function revalidateBeforeMutation(store: CalendarLinkStore, linkId: string
   return { ok: true, row: current };
 }
 
-async function finishSynced(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, revisionSent: number, etag: string | null): Promise<ReconcileOutcome> {
+// 2026-10-19 review (clock bug): every `finish*` helper below now takes
+// an OPTIONAL `clock` (defaulting to `() => now`, so every existing
+// caller that only ever passed a plain `now` is unaffected) and calls
+// it FRESH, right here, immediately before its own `updateLinkAsLeaseHolder`
+// call -- this is the actual "protected write" `clock` must be read at:
+// the `now` parameter still carries whatever value the caller's own
+// earlier logic (e.g. backoff-reason text, which outcome kind to report)
+// was computed from, but the value actually compared against
+// `leaseExpiresAt`, and actually written as `updatedAt`, is always a
+// fresh read, never that same value reused from before the network call
+// that got this function invoked in the first place.
+async function finishSynced(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, revisionSent: number, etag: string | null, clock: Clock = () => now): Promise<ReconcileOutcome> {
   // Issue 1: only this specific lease holder, writing only the revision it
   // actually sent and had confirmed -- never a newer revision that may
   // have appeared while this call was in flight.
-  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncedRevision: revisionSent, syncStatus: "synced", googleEtag: etag, lastError: null, nextRetryAt: null, updatedAt: now });
+  const freshNow = clock();
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, freshNow, { syncedRevision: revisionSent, syncStatus: "synced", googleEtag: etag, lastError: null, nextRetryAt: null, updatedAt: freshNow });
   if (!ok) return { kind: "lease_contended" }; // our lease was stolen/expired mid-call -- the write is correctly rejected
   return { kind: "synced", revision: revisionSent };
 }
@@ -495,9 +542,10 @@ async function finishSynced(store: CalendarLinkStore, link: CalendarLinkRow, lea
 // "link row disappeared mid-reconcile," "412 retries exhausted") -- all
 // of these are retryable, none of them are a permanent content/auth
 // rejection, so they all get the same bounded-backoff treatment.
-async function finishFailed(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string): Promise<ReconcileOutcome> {
-  const nextRetryAt = now + backoffSeconds(link.attemptCount);
-  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "failed", lastError: reason, attemptCount: link.attemptCount + 1, nextRetryAt, updatedAt: now });
+async function finishFailed(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string, clock: Clock = () => now): Promise<ReconcileOutcome> {
+  const freshNow = clock();
+  const nextRetryAt = freshNow + backoffSeconds(link.attemptCount);
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, freshNow, { syncStatus: "failed", lastError: reason, attemptCount: link.attemptCount + 1, nextRetryAt, updatedAt: freshNow });
   if (!ok) return { kind: "lease_contended" };
   return { kind: "failed", reason };
 }
@@ -508,8 +556,9 @@ async function finishFailed(store: CalendarLinkStore, link: CalendarLinkRow, lea
 // `attemptCount` increment (this isn't a retry being counted, it's a
 // terminal state) -- only recordReschedule's own reset back to
 // "pending" moves a link out of this state.
-async function finishInvalid(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string): Promise<ReconcileOutcome> {
-  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "invalid", lastError: reason, nextRetryAt: null, updatedAt: now });
+async function finishInvalid(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string, clock: Clock = () => now): Promise<ReconcileOutcome> {
+  const freshNow = clock();
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, freshNow, { syncStatus: "invalid", lastError: reason, nextRetryAt: null, updatedAt: freshNow });
   if (!ok) return { kind: "lease_contended" };
   return { kind: "invalid", reason };
 }
@@ -519,16 +568,17 @@ async function finishInvalid(store: CalendarLinkStore, link: CalendarLinkRow, le
 // so (like "invalid") this is excluded from automatic reconciliation
 // entirely; only an explicit recordReschedule-driven retry (once
 // credentials are fixed) resumes it.
-async function finishAuthRequired(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string): Promise<ReconcileOutcome> {
-  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "auth_required", lastError: reason, nextRetryAt: null, updatedAt: now });
+async function finishAuthRequired(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string, clock: Clock = () => now): Promise<ReconcileOutcome> {
+  const freshNow = clock();
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, freshNow, { syncStatus: "auth_required", lastError: reason, nextRetryAt: null, updatedAt: freshNow });
   if (!ok) return { kind: "lease_contended" };
   return { kind: "auth_required", reason };
 }
 
-async function finishByCategory(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, failure: ApiFailureDescription): Promise<ReconcileOutcome> {
-  if (failure.category === "invalid") return finishInvalid(store, link, leaseOwner, now, failure.reason);
-  if (failure.category === "auth_required") return finishAuthRequired(store, link, leaseOwner, now, failure.reason);
-  return finishFailed(store, link, leaseOwner, now, failure.reason);
+async function finishByCategory(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, failure: ApiFailureDescription, clock: Clock = () => now): Promise<ReconcileOutcome> {
+  if (failure.category === "invalid") return finishInvalid(store, link, leaseOwner, now, failure.reason, clock);
+  if (failure.category === "auth_required") return finishAuthRequired(store, link, leaseOwner, now, failure.reason, clock);
+  return finishFailed(store, link, leaseOwner, now, failure.reason, clock);
 }
 
 // Convenience wrapper for the common case: a GoogleApiResult failure
@@ -536,16 +586,17 @@ async function finishByCategory(store: CalendarLinkStore, link: CalendarLinkRow,
 // (that decision is made explicitly, inline, at insert()'s own failure
 // site above, since only a CREATE attempt's createStatus depends on
 // ambiguity this way).
-function categorizedFinish(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, result: GoogleApiResult<unknown> & { ok: false }): Promise<ReconcileOutcome> {
-  return finishByCategory(store, link, leaseOwner, now, describeApiFailure(result));
+function categorizedFinish(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, result: GoogleApiResult<unknown> & { ok: false }, clock: Clock = () => now): Promise<ReconcileOutcome> {
+  return finishByCategory(store, link, leaseOwner, now, describeApiFailure(result), clock);
 }
 
 // Called while `reconcilePresentAbsent` already holds the link's lease
 // (see the "absent" branch above) -- goes straight to the LOCKED cleanup
 // implementation, never re-acquiring a lease it already has.
-async function reconcileDeleteCurrentGeneration(store: CalendarLinkStore, client: GoogleCalendarClient, link: CalendarLinkRow, leaseOwner: string, now: number): Promise<ReconcileOutcome> {
+async function reconcileDeleteCurrentGeneration(store: CalendarLinkStore, client: GoogleCalendarClient, link: CalendarLinkRow, leaseOwner: string, now: number, clock: Clock = () => now): Promise<ReconcileOutcome> {
   if (!link.googleEventId) {
-    const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "synced", syncedRevision: link.desiredRevision, nextRetryAt: null, updatedAt: now });
+    const freshNow = clock();
+    const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, freshNow, { syncStatus: "synced", syncedRevision: link.desiredRevision, nextRetryAt: null, updatedAt: freshNow });
     if (!ok) return { kind: "lease_contended" };
     const history = await store.getHistory(link.id, link.generation);
     if (history) await store.updateHistory(link.id, link.generation, { cleanupStatus: "done" });
@@ -554,10 +605,11 @@ async function reconcileDeleteCurrentGeneration(store: CalendarLinkStore, client
   // `leaseOwner` is passed through so reconcileGenerationCleanupLocked
   // can revalidate lease ownership AND expiry (issue 3) immediately
   // before it sends the real DELETE -- see that function's own comment.
-  const outcome = await reconcileGenerationCleanupLocked(store, client, link.googleCalendarId, link.id, link.generation, link.googleEventId, now, leaseOwner);
+  const outcome = await reconcileGenerationCleanupLocked(store, client, link.googleCalendarId, link.id, link.generation, link.googleEventId, now, leaseOwner, clock);
   if (outcome.kind === "lease_contended") return { kind: "lease_contended" };
   if (outcome.kind === "done") {
-    const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "synced", syncedRevision: link.desiredRevision, nextRetryAt: null, updatedAt: now });
+    const freshNow = clock();
+    const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, freshNow, { syncStatus: "synced", syncedRevision: link.desiredRevision, nextRetryAt: null, updatedAt: freshNow });
     if (!ok) return { kind: "lease_contended" };
     return { kind: "deleted" };
   }
@@ -568,11 +620,11 @@ async function reconcileDeleteCurrentGeneration(store: CalendarLinkStore, client
   // without leaving permanent false uncertainty" -- rather than either
   // a tight no-backoff retry loop or a dead end with no path forward.
   if (outcome.kind === "uncertain") {
-    const result = await finishFailed(store, link, leaseOwner, now, "cleanup uncertain: create outcome not yet resolved");
+    const result = await finishFailed(store, link, leaseOwner, now, "cleanup uncertain: create outcome not yet resolved", clock);
     return result.kind === "failed" ? { kind: "delete_uncertain" } : result;
   }
-  if (outcome.kind === "auth_required") return finishAuthRequired(store, link, leaseOwner, now, "cleanup: authentication/configuration problem");
-  return finishFailed(store, link, leaseOwner, now, "delete failed");
+  if (outcome.kind === "auth_required") return finishAuthRequired(store, link, leaseOwner, now, "cleanup: authentication/configuration problem", clock);
+  return finishFailed(store, link, leaseOwner, now, "delete failed", clock);
 }
 
 export type CleanupOutcome = { kind: "not_needed" } | { kind: "done" } | { kind: "uncertain" } | { kind: "failed" } | { kind: "auth_required" } | { kind: "lease_contended" };
@@ -589,11 +641,11 @@ export type CleanupOutcome = { kind: "not_needed" } | { kind: "done" } | { kind:
 // above (called from inside an already-lease-holding
 // reconcilePresentAbsent) uses the LOCKED implementation directly instead
 // of re-acquiring a lease it already holds.
-export async function reconcileGenerationCleanup(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number, leaseOwner: string, ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS): Promise<CleanupOutcome> {
-  const acquired = await store.acquireLease(linkId, leaseOwner, now, ttlSeconds);
+export async function reconcileGenerationCleanup(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number, leaseOwner: string, ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS, clock: Clock = () => now): Promise<CleanupOutcome> {
+  const acquired = await store.acquireLease(linkId, leaseOwner, clock(), ttlSeconds);
   if (!acquired) return { kind: "lease_contended" };
   try {
-    return await reconcileGenerationCleanupLocked(store, client, calendarId, linkId, generation, googleEventId, now, leaseOwner);
+    return await reconcileGenerationCleanupLocked(store, client, calendarId, linkId, generation, googleEventId, now, leaseOwner, clock);
   } finally {
     await store.releaseLease(linkId, leaseOwner);
   }
@@ -623,7 +675,7 @@ export async function reconcileGenerationCleanup(store: CalendarLinkStore, clien
 // still outstanding -- that call can still land later regardless of the
 // lease, which is exactly the ambiguity resolveCreateOutcome() exists to
 // eventually settle.
-async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number, leaseOwner: string): Promise<CleanupOutcome> {
+async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number, leaseOwner: string, clock: Clock = () => now): Promise<CleanupOutcome> {
   let history = await store.getHistory(linkId, generation);
   if (!history) {
     // Bug 2 (2026-10-20 review): "cleanup cannot find history, returns
@@ -651,8 +703,12 @@ async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client
   // self-heal above is itself an await point where this attempt's lease
   // could have expired (and possibly been re-acquired by someone else)
   // without this attempt's own in-memory state reflecting that yet.
+  // 2026-10-19 review (clock bug): `clock()` read fresh here, never the
+  // `now` this function was originally called with -- the history
+  // lookup/self-heal above is a real await point this attempt could
+  // have been suspended at for a meaningful amount of time.
   const current = await store.getLinkById(linkId);
-  if (!current || current.leaseOwner !== leaseOwner || current.leaseExpiresAt === null || current.leaseExpiresAt <= now) {
+  if (!current || current.leaseOwner !== leaseOwner || current.leaseExpiresAt === null || current.leaseExpiresAt <= clock()) {
     return { kind: "lease_contended" };
   }
 
@@ -701,23 +757,32 @@ export async function resolveCreateOutcome(store: CalendarLinkStore, linkId: str
 
 export type SweepResult = { reconciled: ReconcileOutcome[]; cleaned: CleanupOutcome[] };
 
+// 2026-10-19 review (clock bug): `clock` defaults to `() => now`, same
+// backward-compatible convention as every other function in this file
+// -- a real production caller (a future cron handler, not wired yet)
+// passes a REAL clock, so each of potentially many links a single sweep
+// tick processes gets its own accurate, advancing time reference rather
+// than all of them sharing one timestamp frozen at the sweep's own start
+// (which could otherwise matter for a sweep over many links that takes
+// a non-trivial amount of real time to run).
 export async function runReconciliationSweep(
   store: CalendarLinkStore,
   client: GoogleCalendarClient,
   getMeetingFields: (interactionId: string) => Promise<MeetingDesiredFields | null>,
   leaseOwnerPrefix: string,
   now: number,
+  clock: Clock = () => now,
 ): Promise<SweepResult> {
   const reconciled: ReconcileOutcome[] = [];
   const toReconcile = await store.listNeedingReconciliation(now);
   for (const link of toReconcile) {
-    reconciled.push(await reconcilePresentAbsent(store, client, getMeetingFields, link.interactionId, `${leaseOwnerPrefix}:${link.id}`, now));
+    reconciled.push(await reconcilePresentAbsent(store, client, getMeetingFields, link.interactionId, `${leaseOwnerPrefix}:${link.id}`, now, DEFAULT_LEASE_TTL_SECONDS, clock));
   }
 
   const cleaned: CleanupOutcome[] = [];
   const toCleanup = await store.listPendingCleanup(now);
   for (const historyRow of toCleanup) {
-    cleaned.push(await reconcileGenerationCleanup(store, client, await calendarIdForLink(store, historyRow.linkId), historyRow.linkId, historyRow.generation, historyRow.googleEventId, now, `${leaseOwnerPrefix}:cleanup:${historyRow.linkId}`));
+    cleaned.push(await reconcileGenerationCleanup(store, client, await calendarIdForLink(store, historyRow.linkId), historyRow.linkId, historyRow.generation, historyRow.googleEventId, now, `${leaseOwnerPrefix}:cleanup:${historyRow.linkId}`, DEFAULT_LEASE_TTL_SECONDS, clock));
   }
 
   return { reconciled, cleaned };
