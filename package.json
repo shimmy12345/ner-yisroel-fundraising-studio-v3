@@ -16,6 +16,8 @@
     "deploy:production-independent": "pnpm run build:production-independent && node scripts/verify-build-manifest.mjs production-independent && wrangler deploy --config wrangler.production.jsonc",
     "start": "vinext start",
     "test": "node scripts/run-tests.mjs",
+    "test:calendar-d1-smoke": "node scripts/ci/calendar-d1-smoke-test.mjs",
+    "test:calendar-d1": "node tests/calendar-d1-store.test.mjs && node tests/calendar-adapters-integration.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "db:baseline:generate": "node scripts/generate-production-baseline.mjs --write",

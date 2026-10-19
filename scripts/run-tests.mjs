@@ -253,6 +253,8 @@ const TEST_FILES = [
   "tests/giving-history.test.mjs",
   "tests/calendar-event-id.test.mjs",
   "tests/calendar-event-body.test.mjs",
+  "tests/calendar-google-client.test.mjs",
+  "tests/calendar-oauth-error-code.test.mjs",
   "tests/calendar-sync-guard.test.mjs",
   "tests/calendar-sync-reconciler.test.mjs",
   "tests/calendar-sync-regression-2026-10-19.test.mjs",
@@ -272,11 +274,24 @@ function runOne(file) {
   return { file, ok: true };
 }
 
+// Deliberately NEVER run by `pnpm test`/this file's own TEST_FILES loop:
+// both require a REAL local Workers/D1 runtime (wrangler's
+// getPlatformProxy(), via lib/calendar/testing/local-d1.ts), which this
+// project's own Windows development sandbox cannot provide (see
+// docs/AI-HANDOFF.md -- the bundled workerd.exe crashes immediately
+// there). Adding either to TEST_FILES would make plain `pnpm test` fail
+// on this machine for an environment reason that has nothing to do with
+// code correctness. They run instead via `pnpm run test:calendar-d1`,
+// which this repo's CI runs on an Ubuntu runner
+// (.github/workflows/calendar-d1-adapter-test.yml) where the Linux
+// workerd binary is expected to start normally.
+const INTENTIONALLY_EXCLUDED_FROM_MAIN_SUITE = new Set(["tests/calendar-d1-store.test.mjs", "tests/calendar-adapters-integration.test.mjs"]);
+
 function checkDrift() {
   const onDisk = new Set(readdirSync(path.join(root, "tests")).filter((f) => f.endsWith(".test.mjs")).map((f) => `tests/${f}`));
   const listed = new Set(TEST_FILES);
   const missingFromDisk = TEST_FILES.filter((f) => !onDisk.has(f));
-  const missingFromList = [...onDisk].filter((f) => !listed.has(f));
+  const missingFromList = [...onDisk].filter((f) => !listed.has(f) && !INTENTIONALLY_EXCLUDED_FROM_MAIN_SUITE.has(f));
   return { missingFromDisk, missingFromList };
 }
 

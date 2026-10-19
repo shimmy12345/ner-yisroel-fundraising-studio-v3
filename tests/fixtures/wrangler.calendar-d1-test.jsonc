@@ -1,0 +1,21 @@
+{
+  // Test-only Wrangler config, read exclusively by getPlatformProxy() in
+  // lib/calendar/testing/local-d1.ts to emulate a REAL local D1 binding
+  // for the D1 calendar adapter's own test suite -- never built, never
+  // deployed, never pointed at any real Cloudflare account or database.
+  // persist:false and remoteBindings:false (set in local-d1.ts's own
+  // getPlatformProxy() call, not here) guarantee every test run gets a
+  // fresh, in-process-only local database with zero remote D1 access.
+  // database_id is a placeholder -- it only needs to be well-formed, since
+  // persist:false means no on-disk database keyed by this id is ever
+  // created or reused.
+  "name": "calendar-d1-adapter-test",
+  "compatibility_date": "2026-08-06",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "calendar-d1-adapter-test-local",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}

@@ -10,16 +10,39 @@ interface Ai {
   run(model: string, inputs: Record<string, unknown>): Promise<unknown>;
 }
 
+// D1Result's `meta.changes` is what every CAS-style write in
+// lib/calendar/d1-calendar-store.ts checks to tell "this exact row
+// matched and was written" apart from "the WHERE guard matched nothing"
+// -- D1 has no cross-statement transaction (no BEGIN/COMMIT, no
+// `transaction()` method; `db.batch()` is the only atomic multi-
+// statement primitive, and it cannot branch on an earlier statement's
+// own result), so every compare-and-swap in that adapter is a single
+// guarded UPDATE/INSERT...WHERE, never a read-then-decide-then-write
+// sequence -- `meta.changes` is the only signal available for "did my
+// guard actually match."
+interface D1Result<T = Record<string, unknown>> {
+  success: boolean;
+  results: T[];
+  meta: {
+    changes: number;
+    duration: number;
+    last_row_id: number;
+    rows_read: number;
+    rows_written: number;
+    served_by?: string;
+  };
+}
+
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
-  run(): Promise<unknown>;
+  run<T = Record<string, unknown>>(): Promise<D1Result<T>>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
   first<T = Record<string, unknown>>(): Promise<T | null>;
 }
 
 interface D1Database {
   prepare(query: string): D1PreparedStatement;
-  batch(statements: D1PreparedStatement[]): Promise<unknown[]>;
+  batch<T = Record<string, unknown>>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 
 declare const __FUNDRAISING_OS_COMMIT__: string | null;
@@ -128,5 +151,33 @@ declare module "cloudflare:workers" {
     // AI_PROVIDER="anthropic". Absent falls back to lib/meeting-notes/
     // providers/anthropic.ts's own DEFAULT_ANTHROPIC_MODEL.
     ANTHROPIC_MODEL?: string;
+    // Google Calendar sync OAuth credentials (lib/calendar/
+    // google-calendar-client.ts) -- deliberately separate secret names
+    // from GMAIL_OAUTH_* above, even though both are Google OAuth client
+    // credentials: the Calendar OAuth client is registered with the
+    // `calendar` scope, a DIFFERENT authorization than Gmail's send-only
+    // `gmail.send` grant, and the two must never be confused or
+    // substituted for each other at deploy time. All three are Cloudflare
+    // Worker *secrets* (`wrangler secret put`), never `vars` -- same rule
+    // as GMAIL_OAUTH_* above. Absent means Calendar sync is unavailable;
+    // callers must treat that as "unavailable," never attempt a call (see
+    // calendar-sync-guard.ts's own `credentialsPresent` check). Not read
+    // by google-calendar-client.ts itself (an explicit architectural
+    // departure from gmail-client.ts, which reads `env` directly and is
+    // therefore unit-testable only inside a Workers runtime) -- credentials
+    // are passed in as plain parameters so that file stays testable in
+    // plain Node with a mocked transport. This declaration exists so a
+    // FUTURE guarded-factory call site (route/Settings/cron wiring, not
+    // part of this phase -- see docs/AI-HANDOFF.md) has somewhere typed to
+    // read them from.
+    GOOGLE_CALENDAR_OAUTH_CLIENT_ID?: string;
+    GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET?: string;
+    GOOGLE_CALENDAR_OAUTH_REFRESH_TOKEN?: string;
+    // A `vars` entry (not a secret) -- the Staging-only explicit test
+    // calendar id calendar-sync-guard.ts's `stagingTestCalendarId` input
+    // requires before any Staging sync is ever allowed (Issue 6: "reject
+    // primary/the Production destination even when the Staging opt-in is
+    // enabled"). Absent means Staging sync stays refused, same as today.
+    CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID?: string;
   };
 }

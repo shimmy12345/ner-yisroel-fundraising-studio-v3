@@ -1,0 +1,94 @@
+# Runs the Google Calendar D1 persistence adapter's own contract/
+# concurrency test suite (tests/calendar-d1-store.test.mjs and
+# tests/calendar-adapters-integration.test.mjs) against a REAL local
+# Workers/D1 runtime (wrangler's own getPlatformProxy(), per
+# lib/calendar/testing/local-d1.ts) on an Ubuntu runner.
+#
+# Why this workflow exists, and why it runs on Linux rather than wherever
+# the rest of this repo's CI/local dev happens: this project's own
+# Windows development sandbox cannot run the bundled workerd.exe binary
+# at all (it crashes immediately with a Windows structured exception;
+# getPlatformProxy() then hangs rather than surfacing that failure --
+# see docs/AI-HANDOFF.md for the full finding). The D1 adapter itself,
+# and this test suite, are platform-agnostic; only the LOCAL TEST RUNTIME
+# needed Linux. Nothing here applies to, or is required for, the real
+# production D1 database (wrangler.production.jsonc) -- this workflow
+# never touches it, never authenticates to Cloudflare, and never deploys
+# anything.
+#
+# Scope, deliberately narrow:
+# - `persist: false` + `remoteBindings: false` (local-d1.ts's own
+#   getPlatformProxy() call) -- every run gets a fresh, in-process-only
+#   database; no remote Cloudflare D1 access, ever, from this workflow.
+# - No Google credentials of any kind are used, read, or referenced --
+#   the D1 adapter tests never touch Google at all, and
+#   calendar-adapters-integration.test.mjs's Google Calendar client is
+#   exercised ENTIRELY through MockHttpTransport (lib/calendar/testing/
+#   mock-http-transport.ts), never a real network call.
+# - `permissions: contents: read` only -- no write access, no
+#   `secrets.*` reference anywhere in this file, no deployment step.
+# - Triggers only on this feature branch and workflow_dispatch -- never
+#   touches main, never runs as part of any existing workflow.
+name: Calendar D1 adapter test
+
+on:
+  push:
+    branches:
+      - feature/independent-cloudflare-sandbox
+    paths:
+      - "lib/calendar/**"
+      - "tests/calendar-d1-store.test.mjs"
+      - "tests/calendar-adapters-integration.test.mjs"
+      - "tests/calendar-google-client.test.mjs"
+      - "tests/fixtures/wrangler.calendar-d1-test.jsonc"
+      - "drizzle/0048_google_calendar_sync.sql"
+      - "cloudflare-env.d.ts"
+      - "scripts/ci/calendar-d1-smoke-test.mjs"
+      - ".github/workflows/calendar-d1-adapter-test.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  calendar-d1-adapter-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.9.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Bounded smoke test first, per this phase's own explicit
+      # instruction: proves the local Workers/D1 runtime actually starts
+      # on this runner before spending time on the full suite. The step-
+      # level timeout-minutes is the hard timeout/reliable-cleanup
+      # mechanism -- a hang here fails the step (and the job) rather than
+      # ever hanging a CI run indefinitely, exactly the failure mode this
+      # phase found on the Windows sandbox.
+      - name: Smoke test -- local D1 runtime starts
+        timeout-minutes: 3
+        run: pnpm run test:calendar-d1-smoke
+
+      - name: D1 adapter contract/concurrency tests + both-adapters integration tests
+        timeout-minutes: 10
+        run: pnpm run test:calendar-d1
+
+      # The mocked-transport Google Calendar client tests already run on
+      # every platform via `pnpm test` -- re-run them here too, in the
+      # same job, purely so a single CI run's log is the complete,
+      # self-contained evidence trail for this phase (no D1/workerd
+      # dependency; this step cannot be why the job fails for an
+      # environment reason).
+      - name: Google Calendar client tests (mocked transport)
+        run: node tests/calendar-google-client.test.mjs && node tests/calendar-oauth-error-code.test.mjs
