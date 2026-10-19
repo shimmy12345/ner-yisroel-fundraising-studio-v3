@@ -55883,3 +55883,67 @@ the likely underlying cause (a Workers Scripts permission gap) is
 reported precisely, with citations, for the owner's own decision --
 this agent neither assumed it with certainty nor took any action on it.
 Dispatch instructions remain unchanged from the prior round's entry.
+
+## 2026-10-19 (eleventh follow-up review): a bounded, read-only diagnostic mode added to capture the actual Cloudflare HTTP status/error code -- not dispatched
+
+**Scope of this round**: the prior round's likely-permissions diagnosis was explicitly reported as evidenced-but-not-certain, based on OTHER users' reports, not this token's own actual failure. This round's instruction was to prepare a bounded, diagnostic-only mode -- one that attempts ONLY the target-validation connection and stops immediately after, never reaching backup export, repair, recovery, or scratch-database creation -- to capture the REAL HTTP status, Cloudflare API error code, and a sanitized error message from this token's own connection attempt, so a permission/auth rejection (401/403) can be told apart from a platform/session failure (5xx/gateway/retryable) before any remedy is decided. **Nothing was dispatched this round. Staging is completely unchanged. No token permission was broadened, no credential was substituted or viewed, the execution mechanism itself is unchanged, no change to `main`, no OAuth, no live Google call, no merge.**
+
+### Answering "check whether Wrangler's existing diagnostic output exposes these before adding instrumentation": yes, confirmed via direct source inspection
+
+Inspected wrangler 4.92.0's own bundled source directly (`node_modules/wrangler/wrangler-dist/cli.js`, `fetchResult`/`throwFetchError`/`APIError` around lines ~132960-133176 and the `ParseError`/`APIError` class definitions around lines ~3619-3674). A failed Cloudflare API call -- including the `edge-preview` call `getPlatformProxy({remoteBindings: true})` makes internally -- already throws an `APIError` object carrying:
+- `.status` -- the real HTTP status code.
+- `.code` -- Cloudflare's own numeric API error code, set from the response's `errors[0]?.code` when present.
+- `.isGatewayError()` -- true for status `524`.
+- `.isRetryable()` -- true whenever `String(status)` starts with `"5"`.
+- `.accountTag` -- the account ID extracted from the request path. Not a secret, but **deliberately never surfaced by this round's diagnostics**, matching wrangler's own practice of redacting it as `***` in its console output and this round's instruction to never print environment/account details.
+
+**No new instrumentation was added to wrangler itself.** This round's code only extracts and prints fields that already exist on the error object every prior failed dispatch already caught -- it was never read before because `describeFailure()` only ever printed `.message`.
+
+### What was built
+
+- `lib/operations/calendar-schema-repair-apply.ts`: `extractApiErrorDetails()` (walks an error's own `.cause` chain, bounded at depth 10 to avoid a cyclic chain looping forever, and returns `null` -- never a fabricated result -- when nothing in the chain has a numeric `.status`) and `classifyApiErrorDetails()` (401/403 → `likely-permission-or-auth`; 5xx/gateway/retryable → `likely-platform-or-session`; anything else, including `null` → `unclassified`, never guessing). 7 new regression tests using a hand-built `FakeApiError` mimicking wrangler's real shape -- including one proving `accountTag` is never included in the extracted result, and one proving the cyclic-`.cause`-chain case terminates. 37/37 tests pass in this file (30 pre-existing + 7 new).
+- `scripts/diagnose-staging-connection.mjs` (new): calls the EXACT, unmodified `connectAndValidateStagingTarget()` -- the same two independent target-validation paths (the D1 binding and the wrangler CLI), the same existing `CLOUDFLARE_D1_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` secrets, no different execution mechanism -- and stops immediately after success or failure. On failure, prints the sanitized status/code/`isGatewayError`/`isRetryable`/message/classification via the two functions above; never prints a token, an `Authorization` header, an environment dump, `.accountTag`, or any donor/application data (the connection check itself only ever reads `sqlite_schema`, never an application table). Uses the same forced-`process.exit()` pattern as the apply/recover scripts, and automatically inherits the existing `withStartupTimeout()` fix since it calls the same shared function.
+- `.github/workflows/d1-restore-verify-monthly.yml` (feature-branch-only copy, unchanged on `main`): a new `diagnose_connection` `workflow_dispatch` input (exact-literal confirmation `DIAGNOSE-STAGING-CONNECTION`) gates a new `diagnose-staging-connection` job. That job never installs the AWS CLI and is never given `R2_BACKUP_WRITE_*`, `R2_BACKUP_READ_*`, or `BACKUP_ENCRYPTION_PASSPHRASE` -- so even if the script it runs were somehow changed to attempt a backup/repair/recovery/scratch-database step, the credentials for that step are simply not present in this job's environment at all (checked explicitly, by name, in `tests/backup-automation.test.mjs`, not merely by convention). `verify` and `apply-0049-calendar-schema-repair-staging` were both updated so all three jobs stay mutually exclusive on any single dispatch; the repair job additionally fails CLOSED (refuses to run) if `diagnose_connection` is also supplied on the same dispatch -- fail-safe toward the strictly safer, read-only path, per this round's own instruction. The diagnostic job has no reciprocal condition against `confirm_repair`, since a read-only diagnostic is safe to run regardless of what else was filled in.
+- Both gated jobs' `actions/checkout` are re-pinned to `7c31427bd672e29d3a7c1721791a28d0c296bbbd` (the second of this round's two commits; the first, `b96223d426245123ed00441adea6a5d928a24df0`, added the pure extraction/classification logic and the script). **The repair job's own logic is unchanged this round** -- it was only re-pinned because it shares a commit history with the new diagnostic job.
+
+### Checks run this round
+
+Local: 233/233 test files pass, `tsc --noEmit` clean, `eslint` clean on every changed file, `tests/backup-automation.test.mjs` passes with new explicit assertions that the diagnostic job holds no backup credential of any kind. The YAML was validated with the established scratch `js-yaml` pattern (confirmed the new input, all three jobs' `if:` conditions, and both re-pinned `ref:` values parse exactly as intended). The Calendar D1 adapter test workflow was pushed and actually inspected via the GitHub UI, not assumed from the API alone: [run 39310365657](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39310365657) (commit `7c31427`) -- **Success**, 1m 2s, all existing D1-only coverage (including the recovery rehearsal and three failure-injection cases) still passes unmodified. `scripts/check-main-restore-sync.mjs` still fails -- the same pre-existing, unrelated condition noted in every round since migration 0048 landed on this branch.
+
+### The repair migration SQL is unchanged
+
+Still hashes to `b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae`. This round touched only diagnostic/error-reporting code and a new, separately-gated, read-only workflow job -- nothing about the repair itself, its target validation, its backup/retention protections, or the execution mechanism.
+
+### Not done, and not authorized beyond preparation this round
+
+**Nothing was dispatched.** The diagnostic mode exists, is pushed, is proven by real CI, and is ready for the owner to run at their own discretion -- this agent did not and will not trigger it. **Stopping here, per explicit instruction, before any dispatch.**
+
+### Exact manual-run instructions for the new diagnostic mode
+
+Workflow id `335671346` (`.github/workflows/d1-restore-verify-monthly.yml`), confirmed via `GET /repos/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows`.
+
+**Via the GitHub UI:**
+1. Go to the repository's Actions tab -> "D1 monthly restore verification" (left sidebar).
+2. Click "Run workflow".
+3. Set "Use workflow from" to branch `feature/independent-cloudflare-sandbox` (NOT `main` -- `main`'s own copy of this file has neither the `confirm_repair` nor the `diagnose_connection` input at all; selecting it this way runs THIS branch's version of the file).
+4. Leave "confirm_repair" blank.
+5. In "diagnose_connection", type exactly: `DIAGNOSE-STAGING-CONNECTION`
+6. Click "Run workflow".
+
+**Via `gh`:**
+```
+gh workflow run d1-restore-verify-monthly.yml \
+  --ref feature/independent-cloudflare-sandbox \
+  -f diagnose_connection=DIAGNOSE-STAGING-CONNECTION
+```
+
+**Via the raw REST API:**
+```
+POST /repos/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows/335671346/dispatches
+{
+  "ref": "feature/independent-cloudflare-sandbox",
+  "inputs": { "diagnose_connection": "DIAGNOSE-STAGING-CONNECTION" }
+}
+```
+
+Any of the three will run ONLY the new `diagnose-staging-connection` job (the `verify` job is skipped, and the repair job's own gate additionally refuses to run since `diagnose_connection` is set). Expected visible output on failure: the real HTTP status, Cloudflare API error code (if the response included one), `isGatewayError()`/`isRetryable()`, a sanitized message, and a classification of `likely-permission-or-auth`, `likely-platform-or-session`, or `unclassified` -- that result is the evidence this round's instruction asked for, to decide between a token-permission fix and simply retrying later.
