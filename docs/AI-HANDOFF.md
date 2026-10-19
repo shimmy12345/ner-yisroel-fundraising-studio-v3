@@ -55347,3 +55347,145 @@ instruction; and the rehearsal's own failure-injection coverage now uses
 the real, unmodified repair statements at three points including deep
 into the batch, proving total rollback and a successful subsequent
 retry each time. The repair SQL itself needed no changes.
+
+## 2026-10-19 (seventh follow-up review): two real bugs in the apply script's own verification/error-reporting logic, found by review and fixed with offline, injected-dependency regression tests -- repair SQL unchanged, nothing applied
+
+**Scope of this round**: a second independent review of
+`scripts/apply-0049-calendar-schema-repair-staging.mjs`, specifically its
+pre-repair backup verification and its `reportFailure()` logic, after
+the prior round's CI run (39285194523) had already passed cleanly. Two
+concrete, named bugs, plus a related hardening request -- all in the
+application script, not the repair SQL, which this review's own
+instruction said to leave unchanged. **No remote mutation, deployment,
+credentials used for actual remote execution, Google setup, Production
+changes, or merge into `main` this round.**
+
+### Bug 1: the pre-repair backup check compared node:sqlite rows against D1 rows with a prototype mismatch
+
+`node:sqlite`'s own row objects have a **null prototype**
+(`Object.getPrototypeOf(db.prepare(...).get())` is literally `null`),
+while a D1 binding's `.all()` results are ordinary plain objects.
+`assert.deepEqual` under `node:assert/strict` is `deepStrictEqual`,
+which compares `[[Prototype]]` as part of equality -- so the Phase 3
+backup-verification check (added last round: restore the pre-repair
+export into an isolated `node:sqlite` database and compare its rows
+against a fresh binding read) would have thrown on **every single run**,
+even when the data matched exactly, purely because of the prototype
+difference. Verified directly before fixing anything:
+
+```
+row: [Object: null prototype] { id: 'x', n: 5 }
+deepEqual FAILED: Expected values to be strictly deep-equal
+```
+
+**Fixed**: `lib/operations/calendar-schema-repair-apply.ts`'s
+`normalizeRow()`/`normalizeRows()` (`{...row}` spread -- preserves every
+column's exact value and type, discards only the prototype) are now
+applied to both sides of every row comparison in the script
+(`snapshotCalendarTablesViaBinding()` and the new
+`verifyBackupRestoresAndMatches()`). Regression test
+(`tests/calendar-schema-repair-apply.test.mjs`) reproduces the bug
+against a REAL `node:sqlite` row first (`assert.throws(() =>
+assert.deepEqual(sqliteRow, d1ShapedRow))`), then proves the fix.
+
+### Bug 2: reportFailure's fallback message contradicted itself for the one phase that actually tests row preservation
+
+The previous round's `reportFailure()` had three branches: pre-repair
+phases, the repair-batch phase, and a generic fallback for everything
+else, with the fallback's own message claiming "the very next step
+already confirmed every row... survived unchanged." `post-batch-row-check`
+-- the phase that performs exactly that confirmation -- fell into this
+SAME generic fallback when it failed, meaning a failure in the row-
+preservation check itself produced a message asserting that check had
+ALREADY PASSED. **Fixed**: `describeFailure()` now gives
+`post-batch-row-check` its own explicit message -- the batch committed,
+but preservation is **UNVERIFIED or MISMATCHED**, not confirmed either
+way -- with the same read-only-inspection-first guidance as a genuinely
+uncertain repair-batch failure, never a "no action needed" or "already
+verified" claim. The underlying design flaw (an un-enumerated phase
+silently inheriting the "already succeeded" message by falling through)
+is also fixed structurally: phase classification is now two explicit
+allowlists (`PRE_REPAIR_PHASES`, `POST_SUCCESS_VERIFICATION_PHASES|`),
+and anything -- including a future, un-classified phase -- that doesn't
+land in one of those or match `repair-batch`/`post-batch-row-check`
+explicitly now defaults to **UNCERTAIN**, never to "already succeeded."
+
+### Hardening: a bare `D1_ERROR` no longer counts as a confirmed rejection
+
+`looksLikeCleanRejection()` previously matched on
+`/SQLITE_CONSTRAINT|D1_ERROR|no such table|syntax error|FOREIGN KEY constraint/i`
+-- but `D1_ERROR` is the generic wrapper prefix on **every** D1 failure,
+including transient service faults and internal errors that prove
+nothing about whether a write actually landed. Removed from the
+alternation: only a message that also names a SPECIFIC, recognized
+rejection cause (`SQLITE_CONSTRAINT`, `no such table`, `syntax error`,
+`FOREIGN KEY constraint`) now counts as "clean." A bare
+`D1_ERROR: Internal error` (or any other unrecognized D1 error) is now
+correctly classified as UNCERTAIN, matching this round's own explicit
+instruction: "An unknown D1 error must remain uncertain unless its
+specific cause proves rejection."
+
+### Refactor: the actual verification/error-reporting functions are now exercised with injected dependencies, no remote access
+
+Per this round's own instruction, the fix is not just "normalize before
+comparing" inline in the script -- the logic itself moved into
+`lib/operations/calendar-schema-repair-apply.ts` (`PhaseError`,
+`normalizeRow`/`normalizeRows`, `looksLikeCleanRejection`,
+`snapshotCalendarTablesViaBinding`, `verifyBackupRestoresAndMatches`,
+`describeFailure`), so the SAME functions the real script calls are
+directly testable:
+- `snapshotCalendarTablesViaBinding` takes the D1-like `db` as a
+  parameter already -- tests inject a fake object with a scripted
+  `.prepare().all()`, no real binding needed.
+- `verifyBackupRestoresAndMatches` takes a `createSqliteDatabase`
+  factory -- tests inject a real `node:sqlite` `DatabaseSync` (local,
+  built-in, not "remote access") and hand-constructed D1-shaped plain
+  objects standing in for a live Staging read.
+- `describeFailure` is pure -- tests construct synthetic `PhaseError`s
+  for every phase (including an unrecognized one) and assert on the
+  exact returned text.
+`tests/calendar-schema-repair-apply.test.mjs` (15 cases, registered in
+the NORMAL `pnpm test` suite -- none of this needs D1/workerd) covers
+all of the above, including the two bugs reproduced directly before
+being fixed.
+
+### Checks run this round
+
+Local: 232/232 test files pass (up from 231 -- the one new offline
+file), `tsc --noEmit` clean, `eslint` unchanged from the documented
+94-error/46-warning baseline. `scripts/check-main-restore-sync.mjs`
+still fails -- the same pre-existing, unrelated condition noted in every
+round since migration 0048 landed on this branch.
+
+The full Calendar/D1 Linux CI workflow was re-run on commit `5e8e1ee`
+to confirm the existing D1-only coverage (including last round's
+recovery rehearsal and failure-injection phases) still passes unmodified
+alongside this round's changes to the application script:
+[run 39290013335](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39290013335)
+-- **success** (1m 6s). Actually inspected via the run's own job page:
+`calendar-d1-store.test.mjs`, `calendar-adapters-integration.test.mjs`,
+`trip-calendar-sync-integration.test.mjs`,
+`trip-entrypoints-atomicity.test.mjs`, and
+`calendar-schema-repair-rehearsal.test.mjs` (main rehearsal, Phase 7
+recovery, Phase 8's three failure-injection cases) all pass.
+
+### The repair migration SQL is unchanged
+
+Still hashes to
+`b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae` --
+identical to the prior two rounds. Both bugs this round were in the
+application script's own verification/reporting logic, never in the
+repair itself.
+
+### Not done, and not authorized this round
+
+The repair has still not been applied anywhere. No remote table was
+touched, no `sqlite_schema` change on any remote database, no
+Production reference executed. No OAuth, no credential used for actual
+remote execution, no live Google call, no email change, no cron
+activation, no deployment, no merge into `main`.
+
+**Stopping here for independent review.** Both named bugs are fixed and
+covered by offline regression tests that exercise the real functions
+with injected dependencies; the `D1_ERROR` classification is narrowed as
+instructed; the repair SQL itself is untouched.
