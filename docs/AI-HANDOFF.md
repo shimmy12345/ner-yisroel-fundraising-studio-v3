@@ -53112,3 +53112,253 @@ prior rounds (this round touched no schema).
 analogous hardenings found by inspection), awaiting independent
 re-review before any route wiring, live Google setup, migration, or
 deployment.** `main`/Production/Staging untouched by this round.
+
+### Real D1 adapter + real Google Calendar client implemented, CI-verified on Linux (2026-10-19) -- STILL NOT WIRED, AWAITING RE-REVIEW
+
+Authorized phase: implement the real Cloudflare D1 persistence adapter
+and Google Calendar HTTP client against the reviewed isolated sync core
+(commit `c22a6e1`), implementation + local testing only -- no route/
+Settings wiring, no OAuth setup, no real credentials, no live Google
+calls, no remote migrations, no cron activation, no deployment, no merge
+into `main`. Final commit on this branch: `36cc8e6`.
+
+**Windows sandbox finding -- documented, not worked around, per this
+phase's explicit instruction.** Before any adapter code was written,
+`getPlatformProxy()` (wrangler's own mechanism for a real local D1
+binding) was found to hang indefinitely on this project's Windows
+development machine. Traced to the root cause: invoking the bundled
+`workerd.exe` directly (e.g. `workerd --version`) crashes immediately
+with a Windows structured exception (`0xe06d7363`, an unhandled C++
+exception). Miniflare retries/respawns the crashing child process
+rather than propagating that failure, which is why it presented as a
+silent hang rather than a clean error. The suspected cause (a missing
+VC++ runtime dependency, or something else this sandbox blocks that
+`workerd` needs at startup) is **unconfirmed** -- no software
+installation or machine configuration change was attempted, per this
+phase's explicit instruction to stop Windows runtime troubleshooting.
+This is an environment-specific finding about this one machine, not
+about the adapter code, D1, or Cloudflare's own Linux `workerd` binary
+(confirmed working below).
+
+**Resolution: moved local D1 test execution to a dedicated Ubuntu
+GitHub Actions workflow**, `.github/workflows/calendar-d1-adapter-test.yml`
+-- triggers on push to `feature/independent-cloudflare-sandbox` (paths-
+filtered to the calendar files) and `workflow_dispatch`; `permissions:
+contents: read` only, no `secrets.*` reference anywhere in the file, no
+deployment step. Runs, in order: (1) a bounded smoke test
+(`scripts/ci/calendar-d1-smoke-test.mjs`, 3-minute step timeout) against
+a disposable table, proving the local D1/workerd runtime itself starts
+on this runner before the real suite runs; (2) the D1 adapter's own
+contract/concurrency suite plus the both-adapters integration suite
+(`pnpm run test:calendar-d1`, 10-minute step timeout); (3) the mocked-
+transport Google Calendar client tests, which have no D1 dependency and
+now run via `if: ${{ !cancelled() }}` so a D1 failure can never prevent
+independently verifying them. The D1 step always publishes a bounded
+(300-line) excerpt of its own output to the job summary -- readable
+directly from the Actions run page without authenticated log access --
+while still preserving the real exit code, so a failure still fails the
+job regardless of whether the summary itself is read.
+
+**Actual CI evidence** (not merely "a prepared workflow" or SQLite
+results -- the explicit distinction this phase required): three real
+runs on `ubuntu-latest`, inspected via the GitHub API and (for log text)
+the Actions web UI:
+- Run [#1](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39192669136) (commit `9342611`): smoke test passed (confirming Linux `workerd` genuinely
+  works, unlike the Windows sandbox) -- the adapter suite failed with a
+  REAL `D1_ERROR: FOREIGN KEY constraint failed` against the actual D1
+  engine. Root cause: the rollback test's own setup pre-created an
+  orphaned `calendar_event_link_history` row (a `link_id` with no
+  matching `calendar_event_links` row) to force the history half of an
+  `insertLinkWithHistory` batch to fail -- real D1 enforces migration
+  0048's `link_id REFERENCES calendar_event_links(id)` FK immediately,
+  something `node:sqlite`'s own in-memory test database never caught,
+  since this exact setup was never run against a real engine before.
+- Run [#2](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39193640011) (commit `34a3c89`): rewrote the rollback test to force
+  the LINK half to fail instead (a second enrollment for an already-
+  enrolled interaction, via the real `UNIQUE(interaction_id)` backstop)
+  -- `calendar-d1-store.test.mjs` passed in full against real D1. The
+  integration suite then failed with `SyntaxError: Unexpected token 'c',
+  "client_id="... is not valid JSON` -- a second real bug, this time in
+  the TEST: `google-calendar-client.ts` deliberately caches its OAuth
+  access token per client instance, but the integration test enqueued a
+  fresh mocked token response before every single API call on the same
+  client, desyncing `MockHttpTransport`'s FIFO queue (a leftover token
+  response was consumed by the real event-creation call instead of the
+  event response meant for it -- silently "passing" only because
+  `insert()` hardcodes `status: 201` on any ok response regardless of
+  content).
+- Run [#3](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39194054701) (commit `36cc8e6`, **current**): fixed by enqueueing
+  exactly one token response per client instance, matching
+  `getAccessToken()`'s real caching behavior, hand-traced against every
+  call in all four integration blocks. **All steps passed**: smoke test,
+  `calendar-d1-store.test.mjs` (11 scenarios against real D1), and
+  `calendar-adapters-integration.test.mjs` (4 scenarios, both real
+  adapters together) -- job summary excerpt confirms both files' own
+  "all assertions passed" lines; the mocked-transport Google client
+  tests passed in the same run.
+
+**D1CalendarStore** (`lib/calendar/d1-calendar-store.ts`). D1 has no
+cross-statement transaction at all -- no `BEGIN`/`COMMIT`, no
+`.transaction()` method; `db.batch()` is the only documented atomic
+multi-statement primitive, and it cannot branch on an earlier
+statement's own result within the same batch. This was verified, not
+assumed, before writing any adapter code (reading wrangler/miniflare's
+own bundled source, confirmed via the real CI runs above) -- this is
+**not** a port of `SqliteCalendarStore`'s `BEGIN IMMEDIATE`/`COMMIT`
+transactions, which D1 structurally cannot do. Every write is one of:
+a single statement whose own `WHERE` clause embeds the entire compare-
+and-swap guard (`acquireLease`, `releaseLease`, `updateLinkAsLeaseHolder`,
+`writeIntent`, `applyReschedule`); a `db.batch()` of statements that
+reference each other only through values already known in JS before the
+batch starts (`insertLinkWithHistory`, `applyReopen` -- the new
+generation is `expectedGeneration + 1`, never a value read back mid-
+batch) or through a correlated subquery against the live row's state as
+of that later statement's own turn in the same batch (`applyCancel`'s
+history-flag statement reads the link's current `generation` this way).
+Preserves every invariant the reviewed core depends on: atomic
+enrollment, Bug 3's exact conditional-reopen fix (win/replay/reject, all
+encoded in guarded `WHERE` clauses rather than a surrounding
+transaction), current-generation cancellation cleanup, atomic revision
+increments, owner scoping, and the narrow, CI-verified
+expected-conflict-vs-database-failure distinction (`UNIQUE constraint
+failed` substring match against the real D1 error's own message and
+`.cause` chain -- confirmed present in that exact shape against real D1
+in run #1 above).
+
+**One documented, deliberate trade-off** versus the SQLite reference's
+true cross-statement atomicity: `applyCancel`'s link-row write and
+history-row flag are two statements in the SAME `db.batch()` call (so
+they commit together, atomically, as one unit) -- but the second
+statement's own guard is simpler than a full "did the first statement
+in this batch actually just transition the row" check, and runs
+unconditionally alongside the first. This is verified harmless, not
+merely assumed: every consumer of `cleanup_needed` (`listPendingCleanup`,
+`reconcileGenerationCleanupLocked`) also gates on `cleanup_status`, and a
+generation whose cleanup already reached `'done'` is filtered out or
+short-circuited everywhere before `cleanup_needed` is ever consulted
+again -- so a redundant re-flag on an already-cancelled, already-cleaned-
+up link has no observable effect anywhere in the system. Full reasoning
+is in the method's own comment in `d1-calendar-store.ts`.
+
+**lib/calendar/testing/local-d1.ts**: wraps `getPlatformProxy({configPath:
+tests/fixtures/wrangler.calendar-d1-test.jsonc, persist: false,
+remoteBindings: false})` and applies every committed `drizzle/*.sql`
+migration in order against the fresh binding. D1's own `.exec()`
+requires one statement per physical line, unlike `node:sqlite`'s
+`.exec()` (which the existing SQLite-backed tests call directly on a raw
+migration file) -- several migrations wrap one statement across multiple
+lines, so each file's statements are split out (comment lines stripped,
+then split on `;`) and run individually via `.prepare().run()` instead.
+
+**GoogleCalendarClient** (`lib/calendar/google-calendar-client.ts`).
+Token refresh + verified-account lookup
+(`resolveVerifiedGoogleAccountEmail`, against Google's `userinfo`
+endpoint) using dedicated `GOOGLE_CALENDAR_OAUTH_CLIENT_ID/_SECRET/
+_REFRESH_TOKEN` credential names (separate Worker secrets from Gmail's,
+added to `cloudflare-env.d.ts`, not yet set on any real environment).
+Deliberately takes credentials AND an injectable `HttpTransport` as
+explicit parameters rather than reading `cloudflare:workers` env
+directly (the departure from `gmail-client.ts` this phase's instruction
+called for) -- specifically so this file is unit-testable in plain Node
+with a mocked transport (`tests/calendar-google-client.test.mjs`, 20+
+scenarios, all passing locally and in CI on every platform). GET/
+INSERT/UPDATE(`If-Match`)/DELETE implemented; `sendUpdates=none` always
+explicit on every mutating call (never `sendNotifications`, never
+omitted); no `attendees`/invitation fields ever sent. **Ownership
+verification** ("a matching event id alone must not authorize modifying
+an unrelated event"): every created event is tagged via Google's
+`extendedProperties.private` with its own deterministic id;
+`get()` verifies this tag matches the response's own `id` on every 200
+(a mismatch or absence reports `{status:"error", errorClass:
+"not_fos_managed"}`, the frozen core's own generic error slot -- no core
+type change needed); `delete()` performs its own internal verifying
+`get()` first, since the reconciler's `reconcileGenerationCleanupLocked`
+calls `client.delete()` directly with no preceding GET of its own, and
+refuses to send a real DELETE when ownership isn't confirmed. **Location-
+clearing fix**: always sends `location` as an explicit value (a real
+string, or `""`) at this file's own HTTP-serialization boundary --
+Google's `events.update` is an undocumented-omission-semantics full-
+resource replace, so omitting the key was never relied on; the frozen
+`calendar-event-body.ts` core is unchanged and still legitimately omits
+`location` when there isn't one. **Read-only field stripping**: `etag`,
+`htmlLink`, `iCalUID`, `created`, `updated`, `creator`, `organizer`,
+`sequence`, `kind` are stripped before any UPDATE, so
+`mergeFosFieldsIntoExistingEvent`'s own full-existing-event spread
+(needed to preserve unrelated writable fields) never blindly echoes
+Google's read-only response fields back. **Error mapping**: 401->
+`unauthorized`, 403->`forbidden`, 429->`rate_limited`, 5xx->
+`server_error`, everything else (400 included) ->`bad_request`, a
+timeout (`AbortSignal`, 10s)->`timeout`, a thrown network exception->
+`network_error` -- all via the existing, frozen `GoogleApiResult`
+`"error"` bucket, so an ambiguous outcome (timeout) is never recorded as
+a confirmed failure the same way a real 404/410/409/412 is. `update()`
+refuses locally (never calls the transport) when `ifMatchEtag` is empty,
+per "require a valid ETag before conditional updates." OAuth error-code
+extraction reuses the SAME narrow allowlist as Gmail's, but as a
+deliberate same-logic DUPLICATE (`lib/calendar/calendar-oauth-error-code.ts`),
+never an import of `lib/agenda/oauth-error-code.ts` -- confirmed by
+`tests/calendar-sweep-agenda-independence.test.mjs`'s own previously
+reviewed, load-bearing invariant that `lib/calendar/` and `lib/agenda/`
+must stay completely import-disjoint (caught locally before this ever
+reached CI: the first draft imported the Gmail module directly and
+failed that exact test).
+
+**Existing core limitation, exercised and reported, not patched** (per
+this phase's explicit "report rather than weaken tests" instruction):
+`buildGoogleEventBody` never validates `endAt > occurredAt`, and
+`GoogleApiResult`'s type union has no definitive-4xx slot besides
+404/410/409/412 -- a genuine, permanent Google 400 rejection is
+currently bookkept IDENTICALLY to a transient timeout (`createStatus`
+stays `"in_flight"` either way), so the next sweep would retry a request
+that can never succeed, forever, rather than ever reporting it as
+permanently failed. `tests/calendar-adapters-integration.test.mjs`'s
+final block proves this exact behavior against the real D1 store + real
+(mocked-transport) Google client, with a real Google-shaped 400
+response, rather than hiding or narrowly working around it. Not fixed
+this round -- the frozen core (`calendar-sync-types.ts`,
+`calendar-event-body.ts`, `calendar-sync-reconciler.ts`) was not
+modified at all.
+
+**Checks**: 227/227 existing test files pass locally (unchanged from
+the prior round, confirming zero regression); `tsc --noEmit` clean;
+lint at the documented 94-error/46-warning baseline; `npm run build`
+succeeds. The D1 main-sync check shows the same expected, unrelated
+drift as every prior round (migration 0048 still not synced into
+`main`'s own restore-order tracking -- unaffected by, and unrelated to,
+this round's adapter work; merging anything into `main` remains
+explicitly out of scope). Confirmed via direct source inspection that no
+file under `app/`, `worker/`, or any Settings page imports anything from
+the calendar sync module (the only `lib/calendar/` imports found
+anywhere in `app/`/`worker/` are the pre-existing, unrelated Hebrew/
+Gregorian recurring-date helpers used by Important Dates -- a
+coincidentally shared directory name, not this feature).
+
+**Not done, explicitly out of scope per this phase's instruction**: no
+route or Settings wiring; no OAuth client registered or configured; no
+`GOOGLE_CALENDAR_OAUTH_*`/`CALENDAR_SYNC_STAGING_TEST_CALENDAR_ID` secret
+or var set on any real environment; no live Google API call of any
+kind; no remote D1 migration applied; no cron activated; no deployment;
+nothing merged into `main`.
+
+**Recommended next phase**: independent review of this adapter/client
+implementation (the same two-reviewer-round pattern already proven for
+the isolated core), covering in particular -- the D1-native rewrite of
+`applyCancel`/`applyReopen`'s guard logic (verify the "harmless
+redundant write" reasoning above independently, not just by reading this
+summary); the ownership-tag design (`extendedProperties.private`) and
+whether it should also embed/verify `interactionId`/`generation`
+specifically rather than only the event's own id, for defense in depth
+against a future multi-calendar scenario this design doesn't yet
+anticipate; and the reported `endAt > occurredAt`/400-vs-timeout
+limitation, to decide whether it should be fixed before or after route
+wiring. Only after that review should route/Settings wiring, real OAuth
+client registration, and a Staging-first live-call verification begin --
+still none of that is authorized yet.
+
+**Status: D1 persistence adapter and Google Calendar HTTP client
+implemented and verified against a real local Workers/D1 runtime in
+actual CI (3 runs, final green: [run #3](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39194054701), commit `36cc8e6`), plus the
+mocked-transport Google client suite, both-adapters integration suite,
+and the full existing regression suite -- awaiting independent review
+before any route wiring, OAuth setup, live Google call, or deployment.**
+`main`/Production/Staging untouched by this round.

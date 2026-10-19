@@ -1542,3 +1542,93 @@ independently reproduced failure for either of them specifically --
 their regression tests prove the fixed behavior is correct, but (unlike
 `applyReopen`) there is no equivalent "independent execution actually
 observed this exact wrong production state" evidence for them.
+
+## 2026-10-19 implementation phase: real D1 adapter + real Google Calendar client
+
+Implementation + local testing only, against the reviewed core at
+commit `c22a6e1` -- full detail, including the actual CI evidence trail
+across three runs, is in `docs/AI-HANDOFF.md`'s own entry for this
+phase. This section records the architectural decisions, so a reviewer
+doesn't have to reverse-engineer them from the code alone.
+
+**D1's real constraint, verified before writing any adapter code**: no
+cross-statement transaction mechanism exists at all -- no `BEGIN`/
+`COMMIT`, no `.transaction()` method. `db.batch()` is the only
+documented atomic multi-statement primitive, and it cannot branch on an
+earlier statement's own result within the same batch (every statement
+is prepared and submitted up front). This single fact is why
+`D1CalendarStore` (`lib/calendar/d1-calendar-store.ts`) is not a
+mechanical port of `SqliteCalendarStore`'s `BEGIN IMMEDIATE`/`COMMIT`
+transactions -- every CAS-style write had to be redesigned as either a
+single statement whose own `WHERE` clause embeds the entire
+compare-and-swap guard, or a `db.batch()` whose statements depend only
+on values already known in JS before the batch starts, or on a
+correlated subquery against the live row's state as of that statement's
+own turn within the same batch.
+
+**The one place this required a genuinely different (not merely
+re-expressed) design: `applyCancel`.** The SQLite version reads the
+link's current `generation` inside its own transaction and uses that
+value to flag the right history row -- a value D1 cannot "read inside
+the same batch, before the write, and use in a later statement of that
+same batch" the way a real multi-statement transaction can. The fix: a
+correlated subquery in the SECOND statement of the batch
+(`generation = (SELECT generation FROM calendar_event_links WHERE id =
+?)`) reads the link's generation AS OF that statement's own turn in the
+batch -- which is correct specifically because `applyCancel` never
+changes `generation` itself, so reading it via a live subquery, after
+the first statement's own write, yields the identical value a
+transactional read would have. The second statement also runs
+unconditionally (not gated on whether the first statement's guard
+actually matched) -- verified, not merely asserted, to be harmless: see
+`AI-HANDOFF.md`'s entry for the full "every consumer of cleanup_needed
+also gates on cleanup_status" argument. A reviewer should independently
+check that argument rather than take it on faith, since it is the one
+place this design accepts "provably harmless redundancy" instead of a
+precise guard.
+
+**Ownership verification design** (`extendedProperties.private`, a
+hidden Google-side field never surfaced to other viewers/apps): tags
+every FOS-created event with its own deterministic id, and `get()`
+verifies this tag matches the response's own `id` on every 200. This
+was chosen specifically because `GoogleCalendarClient`'s frozen
+interface (`get(calendarId, eventId)`) carries no caller-supplied
+"expected owner" -- there was no way to verify against a specific
+expected `interactionId`/`generation` without changing that interface,
+which was out of scope. Open question for review (also flagged in
+`AI-HANDOFF.md`'s "recommended next phase"): should this instead (or
+additionally) embed `interactionId`/`generation`, for a world where one
+Google account's single calendar is addressed by more than this one
+FOS deployment -- not a concern today (one owner, one primary calendar),
+but worth an explicit decision rather than silent scope-narrowing.
+
+**Location-clearing fix, confined to the HTTP-serialization boundary**:
+`calendar-event-body.ts` (frozen) still legitimately omits `location`
+when a meeting has none. `google-calendar-client.ts` always sends
+`location` as an explicit value (`""` when absent) immediately before
+serializing a request body -- never by changing what the core builds.
+This was the deliberate alternative to relying on Google's undocumented
+omitted-field-on-PUT semantics, which was never tested live (Google
+API's own documentation does not specify it, and this phase's scope
+excludes any live call) -- so this fix's correctness rests on "send a
+real empty string explicitly clears it" being true of the real API,
+which is a reasonable, standard REST assumption but, like everything
+else in this phase, unverified against a live Google endpoint.
+
+### What remains honestly unproven after this phase
+
+The D1 adapter is now proven against a REAL local D1 binding (three
+actual CI runs, final green -- not a synchronous SQLite mock, and not
+merely "a workflow file exists"). The Google Calendar client is proven
+against every HTTP interaction it makes, but ENTIRELY through a mocked
+transport -- nothing about this phase has verified that the real Google
+Calendar API actually behaves the way its public documentation says it
+does (the `extendedProperties.private` round-trip, the location-clearing
+behavior on an explicit empty string, the exact 4xx a real malformed
+request returns, real token-refresh error-code shapes). That gap is
+structural to this phase's own scope (no live Google call was
+authorized) and is exactly what a Staging-first live-call verification,
+not yet authorized, would close. The known, reported core limitation
+(`endAt > occurredAt` never validated; a real Google 400 and a timeout
+are bookkept identically) is unchanged by this phase -- not fixed,
+not hidden, proven by a real test against the real adapters instead.
