@@ -12,6 +12,7 @@ import { createLocalD1Database } from "../lib/calendar/testing/local-d1.ts";
 import { StatefulCalendarClient } from "../lib/calendar/testing/stateful-calendar-client.ts";
 import { MockHttpTransport, jsonResponse, tokenResponse } from "../lib/calendar/testing/mock-http-transport.ts";
 import { attemptImmediateTripCalendarSync, recordTripMeetingCancelled } from "../lib/relationships/trip-calendar-sync.ts";
+import { PRODUCTION_OWNER_EMAIL } from "../lib/calendar/calendar-sync-guard.ts";
 import { tripMeetingInteractionId } from "../lib/relationships/trip-model.ts";
 import { env } from "./fixtures/fake-cloudflare-workers.mjs";
 
@@ -45,7 +46,13 @@ import { env } from "./fixtures/fake-cloudflare-workers.mjs";
 // test:calendar-d1`.
 
 const NOW = 5_000_000;
-const OWNER_EMAIL = "owner@example.test";
+// Must be the REAL production owner email (not an arbitrary test
+// address): attemptImmediateTripCalendarSync's own guard
+// (isCalendarSyncAllowed, calendar-sync-guard.ts) requires
+// verifiedEmail === PRODUCTION_OWNER_EMAIL for environment
+// "production-independent" -- any other verified email is correctly
+// refused (returns null), exactly as it must be live.
+const OWNER_EMAIL = PRODUCTION_OWNER_EMAIL;
 
 let nextId = 0;
 function uniqueId(prefix) {
