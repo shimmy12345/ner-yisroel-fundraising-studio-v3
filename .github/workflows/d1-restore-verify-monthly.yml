@@ -97,7 +97,24 @@ on:
     # 09:00 UTC on the 1st of every month -- after the nightly backup job,
     # never before it.
     - cron: "0 9 1 * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    # confirm_repair gates the SEPARATE, narrowly-scoped
+    # apply-0049-calendar-schema-repair-staging job below -- see that
+    # job's own header comment for the full explanation. Left blank (the
+    # default), a manual dispatch behaves exactly like before: the
+    # ordinary `verify` job below runs, nothing else does. This input is
+    # WORKING-BRANCH-ONLY: main's own copy of this file does not have it
+    # at all -- it exists only so this file's own `workflow_dispatch`
+    # registration on main (required for ANY manual dispatch of this
+    # workflow, including this one) can be dispatched with `ref:
+    # feature/independent-cloudflare-sandbox` to run THIS branch's
+    # version of the file, which is what actually executes.
+    inputs:
+      confirm_repair:
+        description: 'Leave blank for the normal monthly restore verification. To instead run the gated, one-off drizzle/pending-review/0049 Calendar schema repair against Staging, type exactly: APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING'
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -112,6 +129,13 @@ env:
 
 jobs:
   verify:
+    # Runs for the normal schedule trigger and for an ordinary manual
+    # dispatch (confirm_repair left blank). Skipped entirely -- including
+    # its own status-publishing step, since a skipped job runs none of
+    # its steps regardless of any step-level `if: always()` -- when this
+    # dispatch is in repair-confirm mode, so the two can never run
+    # together in the same workflow run.
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.confirm_repair != 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -324,3 +348,126 @@ jobs:
               || echo "::warning::Failed to publish restore-latest-success.json -- restore verification itself succeeded and is unaffected."
           fi
           rm -f attempt.json success.json
+
+  # ===========================================================================
+  # WORKING-BRANCH-ONLY addition (feature/independent-cloudflare-sandbox) --
+  # NOT present on main. Applies the independently reviewed
+  # drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql
+  # to Staging's calendar_event_links/calendar_event_link_history tables.
+  # See docs/AI-HANDOFF.md for the full review history and rehearsal
+  # evidence; this job only ever runs scripts/apply-0049-calendar-schema-
+  # repair-staging.mjs, whose own content is the actual reviewed
+  # mechanism -- nothing here reimplements any part of it.
+  #
+  # Three independent gates, all required, each a separate, explicit
+  # condition (not merely "the operator clicked a button"):
+  #   1. `github.event_name == 'workflow_dispatch'` -- never the monthly
+  #      schedule trigger, which supplies no `inputs` at all.
+  #   2. `github.event.inputs.confirm_repair` must equal the EXACT literal
+  #      string above -- an ordinary manual dispatch (confirm_repair left
+  #      blank, the default) runs ONLY the `verify` job above, never this
+  #      one.
+  #   3. `github.ref == 'refs/heads/feature/independent-cloudflare-sandbox'`
+  #      -- this job refuses to run against any other ref, including
+  #      `main`, even though main's own copy of this file has no
+  #      `confirm_repair` input to supply in the first place (defense in
+  #      depth: this condition alone would already block it).
+  # `actions/checkout` below additionally pins to the EXACT independently
+  # reviewed commit SHA (never a branch name, which could move) -- so a
+  # later push to this branch can never silently change what a future
+  # dispatch of this exact job actually runs; re-pin deliberately if a
+  # newer, re-reviewed commit should be used.
+  #
+  # No automatic retry of any remote write: a failure in the repair step
+  # itself fails the job outright, with no retry logic anywhere in this
+  # job or in the script it runs. Backups scripts/apply-0049-calendar-
+  # schema-repair-staging.mjs writes to the runner's own local disk are
+  # encrypted and uploaded to the SAME R2 backup bucket (and with the SAME
+  # encryption passphrase) the existing nightly backup/monthly restore-
+  # verify jobs already use, under a distinct `repair-0049/` key prefix --
+  # never a GitHub Actions artifact, never printed to the log, never
+  # committed. Plaintext is shredded from the runner's disk immediately
+  # after upload; the runner's entire workspace is destroyed by GitHub
+  # Actions when the job ends regardless.
+  apply-0049-calendar-schema-repair-staging:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.confirm_repair == 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING' &&
+      github.ref == 'refs/heads/feature/independent-cloudflare-sandbox'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Pinned to the EXACT commit this repair, this script, and this
+      # workflow job were all independently reviewed at -- see this
+      # job's own header comment for why a branch name is not used here.
+      - name: Checkout the exact independently reviewed repair commit
+        uses: actions/checkout@v4
+        with:
+          ref: 4dd14740097fd9b9b80b17756255ed4362466664
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.9.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install AWS CLI (R2's S3-compatible client, for encrypted backup retention below)
+        run: |
+          set -euo pipefail
+          command -v aws >/dev/null 2>&1 || pip install --quiet awscli
+
+      # The script itself performs every check this repair requires
+      # (target validation through two independent paths, the pre-repair
+      # backup plus an isolated local restore-and-compare, the single
+      # db.batch() apply, the post-batch row-preservation check,
+      # foreign_key_check/integrity_check, the schema-health comparison,
+      # and the post-repair backup + real remote-restore verification via
+      # a temporary scratch D1 database it creates and always deletes) --
+      # see scripts/apply-0049-calendar-schema-repair-staging.mjs's own
+      # header for the exact, numbered sequence. No retry of any kind: a
+      # failure here fails this step and this job, full stop.
+      - name: Apply the reviewed Calendar schema repair to Staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/apply-0049-calendar-schema-repair-staging.mjs
+
+      # Runs regardless of whether the step above succeeded or failed
+      # (`if: always()`) -- whatever backup file(s) the script managed to
+      # write before any failure must still be retained encrypted, never
+      # left as plaintext on the runner and never simply discarded.
+      - name: Retain both backups encrypted in the existing R2 backup bucket (never plaintext, never a GitHub artifact)
+        if: always()
+        env:
+          BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_WRITE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          for f in staging-backup-before-0049-*.sql staging-backup-after-0049-*.sql; do
+            [ -s "${f}" ] || continue
+            gzip -c "${f}" > "${f}.gz"
+            PASSFILE="$(mktemp)"
+            printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"
+            gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase-file "${PASSFILE}" --output "${f}.gz.gpg" "${f}.gz"
+            shred -u "${PASSFILE}"
+            KEY="repair-0049/$(basename "${f}").gz.gpg"
+            aws s3api put-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "${KEY}" --body "${f}.gz.gpg" --content-type application/octet-stream
+            echo "Retained encrypted backup: ${KEY}"
+            shred -u "${f}" "${f}.gz" "${f}.gz.gpg"
+          done
+
+      - name: Clean up any remaining local backup files
+        if: always()
+        run: rm -f staging-backup-before-0049-*.sql staging-backup-after-0049-*.sql staging-backup-before-0049-*.sql.gz* staging-backup-after-0049-*.sql.gz* 2>/dev/null || true
+  # =========================================================================
