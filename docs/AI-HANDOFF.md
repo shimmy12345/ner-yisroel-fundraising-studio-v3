@@ -55489,3 +55489,150 @@ activation, no deployment, no merge into `main`.
 covered by offline regression tests that exercise the real functions
 with injected dependencies; the `D1_ERROR` classification is narrowed as
 instructed; the repair SQL itself is untouched.
+
+## 2026-10-19 (eighth follow-up review): Staging application authorized -- built the manual-trigger execution path, independent review then caught and fixed a real backup-retention bug before any dispatch; still NOT yet run
+
+**Scope of this round**: the owner explicitly authorized applying the
+reviewed repair to Staging (read-only preflight, full backup, the
+repair itself, one temporary remote scratch D1 for restore
+verification). This session has neither Cloudflare credentials nor a
+Linux/`workerd`-capable host, so the actual execution had to happen
+through GitHub Actions -- requiring a NEW execution mechanism, which a
+second review then found a real defect in before it was ever used. **The
+repair has still not been dispatched or applied anywhere. No Production
+change, no change to `main`, no credential handled directly by this
+agent, no OAuth, no live Google call, no merge.**
+
+### The blocker, and why a brand-new workflow file could not solve it
+
+Confirmed directly (no credentials extracted, no workaround attempted):
+this sandbox has no `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` and
+runs on Windows (`workerd` cannot run here). GitHub's own docs confirm
+`workflow_dispatch` can only be triggered for a workflow file that
+exists on the **default branch** -- a new workflow file committed only
+to this feature branch would never be dispatchable at all. The owner
+directed: reuse an EXISTING, already-on-`main`, already-`workflow_dispatch`-
+enabled, Staging-only workflow (`.github/workflows/d1-restore-verify-monthly.yml`,
+which already uses the same `CLOUDFLARE_D1_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`
+secrets this repair needs), and modify **only the working-branch copy**
+of that file -- `main`'s own copy stays untouched, since the workflow's
+mere presence on `main` is what satisfies GitHub's registration
+requirement; dispatching with `ref: feature/independent-cloudflare-sandbox`
+executes THIS branch's version of the file, including the new job.
+
+### What was built (commit `897c0e0`, before the bug below was found)
+
+A new job, `apply-0049-calendar-schema-repair-staging`, added to that
+one file, with three independent, required gates (`github.event_name
+== 'workflow_dispatch'`, `github.event.inputs.confirm_repair` equal to
+an exact literal confirmation string, `github.ref ==
+'refs/heads/feature/independent-cloudflare-sandbox'`), plus a
+`actions/checkout` pinned to the exact reviewed commit SHA (never a
+branch name). The pre-existing `verify:` job (including its own
+status-publish step) is explicitly excluded from running during a
+repair-mode dispatch via its own `if:`, and otherwise completely
+unaffected -- the normal monthly schedule and an ordinary manual
+dispatch (confirmation left blank) behave exactly as before. Exact
+dispatch instructions (UI, `gh` CLI, and raw REST API, workflow id
+`335671346`) were given to the owner in chat; this agent cannot trigger
+`workflow_dispatch` itself (no authenticated GitHub write access).
+
+### The real bug a second review caught before any dispatch
+
+The CI retention step (encrypt + upload both backups to the existing R2
+bucket) used `set -uo pipefail` -- **missing `-e`**. A failed
+`gzip`/`gpg`/`aws s3api put-object` would fall straight through to a
+"Retained encrypted backup" **success** message and then
+unconditionally `shred` every local copy -- silently and permanently
+destroying the only recoverable backup on exactly the kind of failure
+(a network blip, a wrong credential, a bucket typo) retention exists to
+survive. This was caught by review, not by any test or CI run, before
+the workflow was ever dispatched.
+
+**Fixed** (commits `c2e7c20`, then `de172c9` re-pinning the job to it)
+by moving the entire retention sequence out of CI shell script and into
+tested, injectable-dependency application code:
+- `lib/operations/calendar-schema-repair-apply.ts`'s `retainBackupSecurely()`
+  checks compression, encryption, upload, and an INDEPENDENT remote
+  read-back (byte-size verification via `aws s3api head-object`, never
+  merely "the upload command exited zero") as four separate, explicit
+  stages. Any failure returns `{ok: false, reason}` immediately; the
+  original plaintext backup is removed ONLY once every stage, including
+  verification, has explicitly succeeded.
+- `applyRepairBatchGuardedByRetention()` is the structural checkpoint:
+  `db.batch()` is literally unreachable in that function unless
+  `retainPreRepairBackup()` first reports success -- not a convention a
+  future edit could silently break.
+- Two new `PhaseError` phases with their own `describeFailure()`
+  messages: `pre-repair-retention` (nothing touched -- the mutation
+  never ran) and `post-repair-retention` (the repair already succeeded
+  and was already independently verified; this specific backup needs
+  re-attempted retention, never a reason to revert).
+- `scripts/lib/backup-retention.mjs` provides the real implementation
+  (shelling out to the same `gzip`/`gpg`/`aws` tools and credentials the
+  existing nightly-backup/monthly-restore-verify workflows already use);
+  the old CI shell retention/cleanup steps were removed entirely.
+- 17 new synthetic regression tests
+  (`tests/calendar-schema-repair-apply.test.mjs`) inject a failure at
+  exactly one stage (compression, encryption, upload, remote
+  verification -- both thrown-error and returned-false forms) and
+  assert `ok: false`, a specific reason, and -- the critical property --
+  that the original backup file is NEVER shredded on any failure path;
+  plus a direct proof that `db.batch()` is never invoked when pre-repair
+  retention fails.
+- `tests/backup-automation.test.mjs`'s own "the monthly verification job
+  must not hold write access to the backup bucket" assertions
+  (correctly) started failing once the new job was added to the same
+  file -- rescoped to check the original `verify:` job's text
+  specifically, plus a new, explicit, by-name assertion that ONLY the
+  new, gated job holds the write credential.
+- The job's `actions/checkout` pin was updated from the pre-fix commit
+  to `c2e7c205b260d1cd068d90b0020b82ee9886e15` (the commit containing
+  this fix) -- re-pinning any changed application code, per this
+  round's own instruction, so a future dispatch actually runs the FIXED
+  retention logic, not the vulnerable version the comments would
+  otherwise describe.
+
+### Checks run this round
+
+Local: 232/232 test files pass (up from 231 -- the one new offline
+file), `tsc --noEmit` clean, `eslint` unchanged from baseline.
+`scripts/check-main-restore-sync.mjs` still fails -- the same
+pre-existing, unrelated condition. The full Calendar/D1 Linux CI
+workflow was re-run after EACH change and actually inspected via the
+run's own job page, never assumed:
+- Commit `897c0e0` (the gated-workflow addition): not independently
+  re-run alone (no D1-rehearsal-relevant file changed in that commit).
+- Commit `c2e7c20` (the retention fix): [run 39297278855](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39297278855)
+  (triggered by the follow-up re-pin commit `de172c9`, same tree) --
+  **success**. All existing D1-only coverage (including the recovery
+  rehearsal and three failure-injection cases) still passes unmodified.
+
+### The repair migration SQL is unchanged
+
+Still hashes to `b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae`
+-- identical to every prior round since `d029060`. This round's defect
+was entirely in the Staging *execution wrapper* (the CI retention shell
+script), never in the repair itself.
+
+### Not done, and not authorized beyond preparation this round
+
+**The repair has not been dispatched, applied, or run against Staging
+in any way.** No remote mutation of any kind occurred; no temporary
+scratch database was created; no credential was handled, viewed, or
+extracted by this agent at any point. No Production change, no change
+to `main` (confirmed: only the feature branch's own copy of
+`d1-restore-verify-monthly.yml` was touched), no OAuth setup, no live
+Google call, no email change, no cron activation, no merge.
+
+**Stopping here for independent review before any dispatch**, per this
+round's own explicit instruction. The execution wrapper is now built,
+reviewed once, found to have a real backup-retention defect, fixed, and
+re-pinned; dispatch instructions remain as given earlier in this
+session (Actions UI, `gh workflow run`, or the REST API against
+workflow id `335671346`, `ref: feature/independent-cloudflare-sandbox`,
+`confirm_repair: APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING`). Once
+dispatched, this agent will inspect the actual run results and record
+them here with the real evidence (exact commands, target database,
+before/after counts, schema/restore results, temporary-database
+cleanup, and any unresolved issue), per the owner's own instruction.
