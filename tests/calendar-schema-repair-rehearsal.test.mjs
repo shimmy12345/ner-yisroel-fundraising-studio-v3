@@ -43,10 +43,17 @@ import { buildSchemaOnlyBackup } from "../lib/operations/schema-backup.ts";
 //      no deferred-constraint behavior of any kind is ever relied upon.
 //   3. Every row and column survives the rebuild unchanged, every index
 //      and constraint is correct afterward, `PRAGMA foreign_key_check`
-//      and `PRAGMA integrity_check` both pass, and the REAL
+//      passes against the live D1 database, and the REAL
 //      buildSchemaOnlyBackup()-based schema-backup/restore path (the
 //      same function production-backup-readiness.test.mjs exercises)
-//      now succeeds against the repaired schema.
+//      now succeeds against the repaired schema -- including its own
+//      `PRAGMA integrity_check` against the restored copy.
+//      CONFIRMED PLATFORM LIMITATION (this round's own CI run): D1
+//      rejects `PRAGMA integrity_check` over the Workers binding itself
+//      with `D1_ERROR: not authorized: SQLITE_AUTH` -- there is no way
+//      to run that specific check directly against a live D1 database;
+//      it is only exercised here against the restored copy, which is
+//      plain node:sqlite, not D1.
 //   4. A rejected/interrupted repair-shaped batch leaves ZERO partial
 //      state: no stray rebuild-named table, no row lost or changed.
 //
@@ -311,8 +318,17 @@ async function run() {
 
     const { results: fkViolations } = await db.prepare("PRAGMA foreign_key_check").all();
     assert.deepEqual(fkViolations, [], "PRAGMA foreign_key_check must be clean against real D1 after the repair");
-    const integrity = await db.prepare("PRAGMA integrity_check").all();
-    assert.equal(integrity.results[0].integrity_check, "ok");
+
+    // CONFIRMED PLATFORM LIMITATION (this round's own CI run): D1 rejects
+    // `PRAGMA integrity_check` over the Workers binding with
+    // `D1_ERROR: not authorized: SQLITE_AUTH` -- D1's own authorizer
+    // blocks this PRAGMA entirely, regardless of database state. There is
+    // no way to run it directly against a live D1 binding. The real
+    // integrity_check proof instead comes from Phase 6 below, via the
+    // actual production schema-backup/restore path, which runs
+    // integrity_check against the RESTORED copy (a real node:sqlite
+    // database, not a D1 binding) -- the one channel D1 actually permits
+    // this check through.
 
     const { results: linkIndexes } = await db.prepare("PRAGMA index_list(calendar_event_links)").all();
     assert.ok(linkIndexes.some((i) => i.unique && i.name === "calendar_event_links_interaction_uidx"));
