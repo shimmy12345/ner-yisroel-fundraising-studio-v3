@@ -471,25 +471,51 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
   let cancelCalendarForInteractionId: string | null = null;
   // Integration safety (2026-10-19, second follow-up review -- "prevent
   // stale actions from canceling... a later transition"): this guard --
-  // "trip_prospects still has the EXACT status this request read" -- is
-  // AND-ed into the interactions-cancel-prefix write below AND into the
-  // calendar-cancel statements (via D1CrossTableGuard), re-verified
-  // fresh at execution time inside the SAME batch as the trip_prospects
-  // guard it mirrors. Without this, a stale request (racing a
-  // concurrent status change that already moved the prospect on -- e.g.
-  // to meeting_completed) could still durably cancel the calendar link,
-  // and overwrite the interaction's own source, even though the
-  // trip_prospects update it was based on correctly failed and the
-  // overall call correctly reports "conflict."
+  // "trip_prospects still has the EXACT status this request read" --
+  // catches a stale request racing a concurrent STATUS change (e.g. to
+  // meeting_completed, which never touches the calendar link at all).
   const statusGuardSql = "EXISTS (SELECT 1 FROM trip_prospects WHERE id = ? AND status = ?)";
   const statusGuardParams: ReadonlyArray<string | number> = [prospectId, existing.status];
+  // `guardSql`/`guardParams` start as just the status guard above, and
+  // gain a second clause below once a calendar link is actually
+  // involved. Applied uniformly to EVERY write this function makes when
+  // canceling (the meeting/interaction write, the trip_prospects write,
+  // and the calendar-intent + cleanup writes), so all of them succeed or
+  // fail together -- never a partial result.
+  let guardSql = statusGuardSql;
+  let guardParams: ReadonlyArray<string | number> = statusGuardParams;
   if (existing.status === "meeting_scheduled" && nextStatus !== "meeting_completed" && existing.linkedInteractionId) {
     const interaction = await env.DB.prepare("SELECT source FROM interactions WHERE id = ? AND user_id = ?").bind(existing.linkedInteractionId, userId).first<{ source: string }>();
     if (interaction && !interaction.source.startsWith("capture-completed:") && !interaction.source.startsWith("cancelled:")) {
+      // Integration safety (2026-10-19, third follow-up review --
+      // "bind cancellation to the generation/revision ... it originally
+      // observed"): independently reproduced the exact gap a
+      // status-only guard leaves open. A stale cancellation reads
+      // status "meeting_scheduled" and starts preparing; a competing
+      // request cancels this same generation AND reopens it (a new
+      // generation) before the stale request's own batch runs --
+      // trip_prospects.status and the interaction's own source both
+      // return to their ORIGINAL "scheduled" values as part of that
+      // reopen, so the status-only guard above, re-checked later, sees
+      // the SAME status it read and wrongly believes nothing changed.
+      // The calendar link's own `generation`, read here at the SAME
+      // moment as the interaction's source, is the durable transition
+      // identity a status LABEL cannot provide (a status round-trips
+      // back to the same value; a generation never does, even if the
+      // resulting desired_state ends up 'present' again). Expressed as
+      // a self-contained EXISTS clause (not a bare `generation` column
+      // reference), so the SAME fragment is safe to AND onto
+      // `interactions`/`trip_prospects` too, neither of which has a
+      // `generation` column of their own.
+      const link = await getTripMeetingCalendarLink(env.DB, existing.linkedInteractionId);
+      if (link) {
+        guardSql = `${statusGuardSql} AND EXISTS (SELECT 1 FROM calendar_event_links WHERE interaction_id = ? AND generation = ? AND desired_state = 'present')`;
+        guardParams = [...statusGuardParams, existing.linkedInteractionId, link.generation];
+      }
       statements.push(
         env.DB.prepare(`UPDATE interactions SET source = ?, updated_at = ?
-            WHERE id = ? AND user_id = ? AND source = ? AND ${statusGuardSql}`)
-          .bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId, interaction.source, ...statusGuardParams),
+            WHERE id = ? AND user_id = ? AND source = ? AND ${guardSql}`)
+          .bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId, interaction.source, ...guardParams),
       );
       cancelCalendarForInteractionId = existing.linkedInteractionId;
     }
@@ -504,20 +530,16 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
   // silently losing the calendar intent while the status change succeeds.
   //
   // MUST be built and pushed BEFORE the trip_prospects update below, not
-  // after: these statements' own guard re-checks "trip_prospects still
-  // has the status this request read" via the SAME `statusGuardSql`
-  // fragment, and D1 batch statements observe EARLIER statements' own
-  // writes within the SAME batch (confirmed by this exact bug: an
-  // earlier version of this function pushed the trip_prospects update
-  // FIRST, so by the time these statements ran, trip_prospects.status
-  // had already become `nextStatus` -- making the guard permanently,
-  // silently false and the calendar cancel a permanent no-op, even on
-  // the ordinary, non-racing path). Pushed first, this guard still
-  // observes the PRE-update status, exactly as intended.
+  // after: these statements' own guard re-checks state that update is
+  // about to change, and D1 batch statements observe EARLIER statements'
+  // own writes within the SAME batch (confirmed by an earlier version of
+  // this function pushing the trip_prospects update FIRST, which made
+  // the guard permanently, silently false). Pushed first, the guard
+  // still observes the PRE-update state, exactly as intended.
   if (cancelCalendarForInteractionId) {
     let calendarStatements: D1PreparedStatement[];
     try {
-      calendarStatements = await buildTripMeetingCancelledStatements(env.DB, cancelCalendarForInteractionId, now, { sql: statusGuardSql, params: statusGuardParams });
+      calendarStatements = await buildTripMeetingCancelledStatements(env.DB, cancelCalendarForInteractionId, now, { sql: guardSql, params: guardParams });
     } catch (error) {
       logger.error("trip_calendar_intent_read_failed", { interactionId: cancelCalendarForInteractionId, userId, error: error instanceof Error ? error.message : String(error) });
       return { ok: false, reason: "calendar_unavailable" };
@@ -527,9 +549,20 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
   // Integration safety, atomic persistence: the trip_prospects status
   // update's own result (at this fixed index, regardless of how many
   // calendar statements were pushed before it above) is what "did the
-  // update actually apply" is judged on -- never `.at(-1)`.
+  // update actually apply" is judged on -- never `.at(-1)`. ANDing the
+  // SAME `guardSql` here too (not just its own simpler `status = ?`)
+  // means a stale request's generation mismatch also prevents the
+  // PROSPECT's own status from being overwritten -- "enforce that
+  // identity across the meeting, prospect, Calendar intent, and cleanup
+  // writes," not just the calendar-facing ones. Harmless, verified
+  // redundancy with this statement's own `status = ?` when no calendar
+  // link is involved (guardSql is then just the same status check,
+  // self-referentially true).
   const prospectUpdateIndex = statements.length;
-  statements.push(env.DB.prepare("UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ?").bind(nextStatus, now, prospectId, existing.status));
+  statements.push(
+    env.DB.prepare(`UPDATE trip_prospects SET status = ?, updated_at = ? WHERE id = ? AND status = ? AND ${guardSql}`)
+      .bind(nextStatus, now, prospectId, existing.status, ...guardParams),
+  );
   const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
   if ((results[prospectUpdateIndex]?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
   if (cancelCalendarForInteractionId) await attemptBestEffortCalendarReconcile(userId, now);

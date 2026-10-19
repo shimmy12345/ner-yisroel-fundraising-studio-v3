@@ -393,6 +393,101 @@ async function run() {
       assert.equal(linkAfterRetry.desired_revision, linkBeforeRetry.desired_revision, "Retry must never write a new intent revision at all -- it only ever reconciles, never records");
     }
 
+    // =======================================================================
+    // 8. Independent review, third follow-up (2026-10-19): a stale
+    // cancellation must be bound to the durable transition identity
+    // (the calendar link's own `generation`) it originally observed, not
+    // merely the prospect's status LABEL. Exact reproduction: an enrolled,
+    // scheduled meeting (generation 0); a cancellation reads status
+    // "meeting_scheduled" and the link's generation (0), then pauses
+    // before its own batch runs; a competing request fully cancels
+    // generation 0 AND reopens it as generation 1 -- status and the
+    // interaction's own source BOTH return to their ORIGINAL "scheduled"
+    // values as part of that reopen; the paused cancellation then
+    // resumes. A status-only guard would see the SAME status it already
+    // read and wrongly let the stale cancellation through, canceling the
+    // REOPENED meeting. The generation-bound guard must instead report
+    // "conflict" and leave the reopened meeting completely untouched --
+    // across the meeting (interaction), the prospect, the Calendar
+    // intent, AND the cleanup flag.
+    // =======================================================================
+    {
+      const userId = uniqueId("u");
+      const donorId = uniqueId("d");
+      const tripId = uniqueId("t");
+      const prospectId = uniqueId("p");
+      await seedOwnerTripProspect(db, { userId, donorId, tripId, prospectId });
+      const interactionId = tripMeetingInteractionId(prospectId);
+      env.DB = db;
+
+      await trips.scheduleProspectMeeting(userId, tripId, prospectId, "2026-12-01T10:00", "Office", 30, true, "America/Chicago", NOW);
+      const linkBefore = await db.prepare("SELECT generation, desired_state FROM calendar_event_links WHERE interaction_id = ?").bind(interactionId).first();
+      assert.equal(linkBefore.generation, 0);
+      assert.equal(linkBefore.desired_state, "present");
+
+      // Sync once against a stateful simulated Google calendar, so the
+      // "cleanup/remote event" assertions below have a real simulated
+      // event to prove was never touched by the stale cancellation.
+      const client = new StatefulCalendarClient();
+      const initialSync = await attemptImmediateTripCalendarSync({
+        db, userId, environment: "production-independent", calendarSyncEnabled: true,
+        credentials: { clientId: "c", clientSecret: "s", refreshToken: "r" },
+        calendarId: "primary", stagingTestCalendarId: null, fosBaseUrl: "https://example.test", now: NOW + 1,
+        transport: identityTransport(), client,
+      });
+      assert.equal(initialSync.reconciled[0].kind, "synced");
+      assert.equal(client.activeEventIds("primary").length, 1);
+
+      env.DB = interceptFirstBatch(db, async () => {
+        // The competing request: cancel generation 0, then reopen --
+        // ending with generation 1, desired_state='present', status back
+        // to 'meeting_scheduled', and the interaction's own source reset
+        // to its ORIGINAL (unprefixed) scheduled form -- all while the
+        // stale cancellation below is still paused, having already read
+        // the OLD status and the OLD generation.
+        const cancelled = await trips.setSimpleProspectStatus(userId, tripId, prospectId, "declined", NOW + 2);
+        assert.equal(cancelled.ok, true);
+        const reopened = await trips.scheduleProspectMeeting(userId, tripId, prospectId, "2026-12-08T09:00", "Reopened Office", 45, true, "America/Chicago", NOW + 3);
+        assert.equal(reopened.ok, true);
+        const linkAfterReopen = await db.prepare("SELECT generation, desired_state FROM calendar_event_links WHERE interaction_id = ?").bind(interactionId).first();
+        assert.equal(linkAfterReopen.generation, 1, "sanity check: the competing request really did reopen into a NEW generation");
+        assert.equal(linkAfterReopen.desired_state, "present");
+        const prospectAfterReopen = await db.prepare("SELECT status FROM trip_prospects WHERE id = ?").bind(prospectId).first();
+        assert.equal(prospectAfterReopen.status, "meeting_scheduled", "sanity check: status round-tripped back to the SAME label the stale request already read");
+      });
+
+      const stale = await trips.setSimpleProspectStatus(userId, tripId, prospectId, "declined", NOW + 4);
+      env.DB = db;
+      assert.deepEqual(stale, { ok: false, reason: "conflict" }, "a stale cancellation bound to generation 0 must be rejected once the meeting has moved on to generation 1 -- a status-only guard would have let this through, since the status label round-tripped back to the same value");
+
+      const linkAfter = await db.prepare("SELECT generation, desired_state FROM calendar_event_links WHERE interaction_id = ?").bind(interactionId).first();
+      assert.equal(linkAfter.generation, 1, "the reopened meeting's own generation must be completely unaffected by the stale cancellation");
+      assert.equal(linkAfter.desired_state, "present", "the reopened meeting must still be present -- the stale cancellation must never have canceled it");
+      const prospectAfter = await db.prepare("SELECT status FROM trip_prospects WHERE id = ?").bind(prospectId).first();
+      assert.equal(prospectAfter.status, "meeting_scheduled", "the prospect's own status must be completely unaffected by the stale cancellation");
+      const interactionAfter = await db.prepare("SELECT source, location FROM interactions WHERE id = ?").bind(interactionId).first();
+      assert.ok(!interactionAfter.source.startsWith("cancelled:"), "the reopened meeting's own interaction source must never have been overwritten by the stale cancellation");
+      assert.equal(interactionAfter.location, "Reopened Office", "the reopened meeting's own real details must be exactly what the winning (reopen) request wrote, untouched by the stale cancellation");
+
+      // The cleanup write must also have been rejected: generation 1's
+      // own history row must never be flagged for cleanup by a
+      // cancellation that was stale for the PRIOR generation (0).
+      const historyGen1 = await db.prepare("SELECT cleanup_needed FROM calendar_event_link_history WHERE link_id = (SELECT id FROM calendar_event_links WHERE interaction_id = ?) AND generation = 1").bind(interactionId).first();
+      assert.equal(historyGen1.cleanup_needed, 0, "the REOPENED generation's own history row must never be flagged for cleanup by a cancellation that was stale for the PRIOR generation");
+
+      // The simulated remote calendar must agree: reconciling now must
+      // find the REOPENED meeting still present, never having been
+      // deleted by the stale cancellation.
+      const sweepAfter = await attemptImmediateTripCalendarSync({
+        db, userId, environment: "production-independent", calendarSyncEnabled: true,
+        credentials: { clientId: "c", clientSecret: "s", refreshToken: "r" },
+        calendarId: "primary", stagingTestCalendarId: null, fosBaseUrl: "https://example.test", now: NOW + 5,
+        transport: identityTransport(), client,
+      });
+      assert.equal(sweepAfter.reconciled[0].kind, "synced", "the reopened generation must still reconcile to 'synced' -- the simulated remote event was never deleted by the stale cancellation");
+      assert.equal(client.activeEventIds("primary").length, 1, "exactly one real event must still exist on the simulated calendar, consistent with the reopened meeting");
+    }
+
     process.stdout.write("trip-entrypoints-atomicity.test.mjs: all assertions passed\n");
   } finally {
     await dispose();
