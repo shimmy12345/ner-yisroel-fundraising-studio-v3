@@ -56164,3 +56164,47 @@ Inspected the deployed schema directly from the drizzle migrations present at `a
 ### Not done, and not authorized beyond this report
 
 No Production deployment, migration, credential change, or merge into `main`. Automatic Google Calendar synchronization remains fully paused -- nothing in this release re-enables, touches, or depends on any of that code. **Stopping here for independent review before any Production deployment of this release**, per explicit instruction.
+
+## 2026-10-19: "Add to Google Calendar" link + "Use donor address" -- AUTHORIZED PRODUCTION DEPLOYMENT -- SUCCESSFUL
+
+Independent review passed (Calendar-link tests re-run; the address SELECT additionally exercised against a real SQLite instance built from this release's own baseline schema, including owner filtering -- a stronger check than this agent had available) and explicitly authorized deployment of the release documented in the entry immediately above. Deployed.
+
+### 0. Fresh pre-deployment confirmation (all live, not assumed)
+
+- **Live Production version re-confirmed via `wrangler deployments list --config wrangler.production.jsonc`** against the real account (not merely re-reading this file): current (100%) version **`6da14108-af5a-4a47-8f83-ba64f210ac6c`**, created `2026-10-18T20:40:53.917Z` -- byte-for-byte the version already on record as built from `a0ccb2f`. **No drift since the prior entry -- nothing to stop for.**
+- **Checkout re-confirmed clean and isolated**: the worktree's `HEAD` is exactly `adb97c0b7508d124f60fcfa52e91e925859f253d` (the authorized commit, verified by direct SHA comparison), `git status` clean, `git log a0ccb2f..HEAD` shows exactly the one authorized commit, and a fresh `grep` for `calendar_event_links`/`google-calendar-sync`/`GOOGLE_OAUTH`/`calendarSyncEnabled` across the entire checkout returns nothing. The only `lib/calendar/` files present (`gregorian-recurring-date.ts`, `hebrew-date.ts`) are confirmed, by direct `git show a0ccb2f:...`, to already exist at the base commit -- unrelated Hebrew-calendar utilities, not Google Calendar sync.
+- **Backup health, read live**: `backup_alert_state` queried directly against `fundraising-os-production-db` via `wrangler d1 execute --remote` -- 0 rows (no active alert). Workspace Health UI re-checked fresh in the browser (last checked Oct 19, 2026, 5:04 PM): "Automated backup: Completed successfully 2026-10-19T15:33:36Z" (object `daily/fundraising-os-production-db-20261019T153332Z.sql.gz.gpg`), "Monthly restore test: Oct 11, 2026, 11:35 PM" -- successful. **Rollback target recorded: Worker version `6da14108-af5a-4a47-8f83-ba64f210ac6c`.**
+- **Required checks, run fresh in this exact worktree**: `pnpm exec tsc --noEmit` -- clean. `pnpm run lint` -- 94 errors / 43 warnings, byte-identical to the baseline in every prior entry, none in any file this release touches. `node scripts/run-tests.mjs` -- **215/215 test files pass**; the D1 main-sync check reports clean, no drift (expected -- no Calendar-sync migrations exist on this isolated branch at all).
+- **Production build**: `pnpm run build:production-independent` succeeded; `node scripts/verify-build-manifest.mjs production-independent` confirmed the manifest matches (`built for "production-independent" 5s ago. OK.`); `grep -rl "Add to Google Calendar"` / `"Use donor address"` against `dist/` confirmed the feature is actually present in BOTH the compiled client and server-SSR bundles; a fresh `grep -a` for `oauth` (case-insensitive) in `dist/server/index.js` found only the three already-deployed `GMAIL_OAUTH_*` secret names (pre-existing email-sending integration, confirmed unrelated and unchanged) -- no new OAuth surface of any kind.
+
+No check failed; proceeded to deployment.
+
+### 1. Deployment
+
+`npx wrangler deploy --config wrangler.production.jsonc`.
+
+**New Production Worker version: `b79b0182-0422-49b2-bc76-059fd73d8c69`**, deployed `2026-10-19T21:07:33.725Z`, immediately confirmed live at 100% via a follow-up `wrangler deployments list`.
+
+Deploy output confirmed bindings unchanged from every prior release: `env.DB` -> `fundraising-os-production-db` (same database, nothing new), `env.STATUS_WORKER`, `env.AI`, `env.ASSETS`, `TEAM_DOMAIN`/`POLICY_AUD`/`STAGING_OWNER_EMAIL`/`APP_BASE_URL` (still `https://shimmydonors.org`) all unchanged, cron trigger `0 * * * *` unchanged. **No migration was run. No secret was added, changed, or read.**
+
+### 2. Post-deployment verification -- all read-only; no real donor/meeting record created, changed, or saved
+
+All performed against the live site, authenticated as the owner, in the SAME Teaneck-10/20/26 trip this entire investigation has used:
+
+- **No console errors**: checked both before and after this verification sequence -- none, on any page visited.
+- **Trip Planning loads**: the trip page loaded normally, 11 prospects, summary counts self-consistent (2 Planned outreach, 1 Meeting Requested, 4 Meeting Scheduled, 1 Declined, 3 Unable to Schedule).
+- **Status-based visibility, confirmed on real rows, not assumed**: "Meeting Requested" (Kopstick) and "Declined" (Kurz) show NO calendar link. **Four** `meeting_scheduled` prospects (Tabacznik, Fineberg, Greenberg, Bashevkin) each show "Duration (minutes): 30", an "Add to Google Calendar" link, and the explanatory line verbatim: *"Save this event in Google Calendar. Later changes or cancellations must be updated there manually."* "Unable to Schedule" (Gross, Gerson, Willig) show no link. (No `meeting_completed` row currently exists on this trip to check live; that exact gate -- `status === "meeting_scheduled"`, not merely a non-null meeting time, which `meeting_completed` also has -- is covered by the source-inspection test from the prior entry.)
+- **Generated links match the saved meeting data exactly** -- read directly via the page's own accessibility tree (every link's real `href`, not re-typed): e.g. Bashevkin's link encodes `dates=20261020T190000Z/20261020T193000Z` for a meeting displayed as "Oct 20, 2026, 3:00 PM (America/New_York)" with a 30-minute default -- 19:00 UTC = 3:00 PM EDT, +30 min = 19:30 UTC, correct. All four links checked the same way, all correct.
+- **"Use donor address"**: opened the scheduling panel for an UNSCHEDULED prospect (Yossi Kra, via the ordinary status dropdown -- a pure client-side UI action, confirmed by `read_network_requests` to fire zero requests to `/api/trips/`) and clicked "Use donor address." The location field filled with this donor's real, correct, already-on-file address (**"404 Churchill Road, Teaneck, NJ 07666"**), composed and blank-omitted exactly as designed. **Clicked "Cancel" -- discarded without saving.** Re-confirmed zero `/api/trips/` requests fired for the entire sequence (select status -> click button -> cancel): nothing was written to Kra's record, confirmed both by the network log and by the row visibly reverting to "Planned outreach" with no leftover draft.
+- **One real, Production-generated link opened end-to-end** (Bashevkin's, read directly from the live page, not hand-built): Google Calendar's own event-creation form pre-filled **"Meeting with Rabbi & Mrs. Dovid Bashevkin"**, **"Oct 20, 2026, 3:00pm to 3:30pm"**, location **"his home"** -- exactly matching the app's own display and the 30-minute default -- no guests, no description. **Closed without clicking Save -- no real Google Calendar event was created.**
+- **Existing Trip controls remain usable**: the status dropdown, "Details"/"Hide details" toggle, and Cancel all worked normally throughout this verification, with no new browser or server error at any point. The Today dashboard was also reloaded fresh post-deployment and rendered normally.
+
+**No material regression observed; rollback was not needed.**
+
+### 3. What this release deliberately does NOT do -- stated explicitly, per instruction
+
+**The meeting duration shown next to each link is NOT saved anywhere in FOS.** It is a local, per-view default (30 minutes, editable only to shape that one link) -- Production's schema has no column for it, by design, per the prior entry's own no-migration decision. **Once an event is added to Google Calendar, any later change to that meeting's time, location, or cancellation must be made manually in Google Calendar itself** -- FOS has no connection to it, cannot see it, and this release never claims otherwise (the UI's own explanatory line says this verbatim). **Automatic Google Calendar synchronization remains fully paused** -- nothing in this release re-enables, touches, or depends on any of that code, and the separate independent Cloudflare Staging schema-repair effort (migration `0049`, the Calendar-sync token-permission investigation) also remains exactly where it was left, fully paused, untouched by this round.
+
+### Not done, and not authorized beyond this report
+
+No database migration. No credential, secret, or OAuth configuration added or changed. No merge into `main`. No donor data, meeting history, pledge, or payment record was created, changed, or saved during verification -- the one test draft (Kra's) was explicitly discarded, confirmed via the network log to have never reached the server. Deployment is complete and live; **no further action is pending** unless the owner finds a regression (rollback target: Worker version `6da14108-af5a-4a47-8f83-ba64f210ac6c`) or asks for something further.
