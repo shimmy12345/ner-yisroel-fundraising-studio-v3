@@ -6,8 +6,30 @@
 // touches a network or a database itself.
 
 export type DesiredState = "present" | "absent";
-export type SyncStatus = "pending" | "synced" | "failed" | "missing_remotely";
-export type CreateStatus = "not_attempted" | "in_flight" | "succeeded" | "failed";
+// "failed": a genuine, non-ambiguous, RETRYABLE failure (network/5xx/429
+// that resolved past the ambiguous "might have happened" window, or any
+// failure with no more specific category) -- eligible for bounded-
+// backoff automatic retry via `nextRetryAt` below.
+// "invalid" (2026-10-19 review, issue 2): a DEFINITIVE, PERMANENT
+// rejection -- either this app's own pre-mutation validation
+// (validateMeetingDesiredFields) or a real Google 400 -- never retried
+// automatically; only an explicit correction (a reschedule that changes
+// the content) or an explicit manual retry moves it back to "pending".
+// "auth_required" (2026-10-19 review, issue 2): a 401/403 -- an
+// authentication/configuration problem, not a content problem; never
+// retried on the normal backoff schedule either, since retrying with
+// the SAME broken credentials cannot succeed -- requires explicit
+// reauthorization (or an explicit manual retry, once credentials are
+// fixed) to resume.
+export type SyncStatus = "pending" | "synced" | "failed" | "invalid" | "auth_required" | "missing_remotely";
+// "invalid" (2026-10-19 review, issue 2): mirrors SyncStatus's own
+// "invalid" -- this generation's create attempt was definitively,
+// permanently rejected (pre-mutation validation or a real Google 400).
+// Distinct from "in_flight", which means genuinely ambiguous/unresolved
+// (timeout, network exception, malformed response) -- an "invalid"
+// generation is NOT retried by the normal insert-on-404 path the way an
+// "in_flight" one still legitimately is.
+export type CreateStatus = "not_attempted" | "in_flight" | "succeeded" | "failed" | "invalid";
 export type CleanupStatus = "not_needed" | "pending" | "uncertain" | "done";
 
 export type CalendarLinkRow = {
@@ -26,6 +48,16 @@ export type CalendarLinkRow = {
   attemptCount: number;
   leaseOwner: string | null;
   leaseExpiresAt: number | null;
+  // 2026-10-19 review, issue 2: bounded-backoff scheduling for a
+  // `syncStatus: "failed"` link -- null means "eligible now" (no backoff
+  // in effect, e.g. not currently in a retryable-failure state, or never
+  // failed). listNeedingReconciliation(now) excludes a "failed" link
+  // whose nextRetryAt is still in the future, so a transient failure is
+  // retried with increasing delay rather than hammered every sweep tick
+  // ("avoid retry storms"). Never consulted for "invalid"/"auth_required"
+  // links -- those are excluded from automatic reconciliation entirely,
+  // regardless of this field's value, until an explicit correction/retry.
+  nextRetryAt: number | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -75,9 +107,18 @@ export type GoogleEventBody = {
   [key: string]: unknown;
 };
 
+// 2026-10-19 review, issue 2: `400` was added to the definitive-status
+// union (it was previously only reachable via the generic `"error"`
+// bucket, making a real, permanent Google validation rejection
+// indistinguishable from a transient timeout at the bookkeeping level --
+// the exact limitation the 2026-10-18 phase reported rather than hid).
+// A definitive 400 is never ambiguous: Google has unambiguously rejected
+// the request content itself, so it is always safe to treat as
+// permanent, never retried the way `"error"` (timeout/network/5xx/429)
+// still legitimately is.
 export type GoogleApiResult<T> =
   | { ok: true; status: 200 | 201 | 204; event?: T; etag?: string }
-  | { ok: false; status: 404 | 410 | 409 | 412; event?: T }
+  | { ok: false; status: 400 | 404 | 410 | 409 | 412; event?: T }
   | { ok: false; status: "error"; errorClass: string };
 
 // The impure boundary -- a real implementation calls the live Calendar API
@@ -140,12 +181,24 @@ export interface CalendarLinkStore {
   // a stale worker whose lease already expired-and-was-reacquired must
   // never clear the new holder's lease (Issue 1).
   releaseLease(linkId: string, leaseOwner: string): Promise<boolean>;
-  // Only succeeds if this exact leaseOwner currently holds the lease --
-  // the same guard as releaseLease, applied to every bookkeeping write a
-  // reconcile attempt makes while holding the lease. A stale worker whose
-  // lease already expired-and-was-reacquired by someone else must never
-  // overwrite newer bookkeeping through this method (Issue 1).
-  updateLinkAsLeaseHolder(linkId: string, leaseOwner: string, patch: Partial<CalendarLinkRow>): Promise<boolean>;
+  // Only succeeds if this exact leaseOwner currently holds the lease AND
+  // the lease has not expired as of `now` -- the same guard as
+  // releaseLease, PLUS an expiry check, applied to every bookkeeping
+  // write a reconcile attempt makes while holding the lease. A stale
+  // worker whose lease already expired-and-was-reacquired by someone
+  // else must never overwrite newer bookkeeping through this method
+  // (Issue 1).
+  // 2026-10-19 review, issue 3: the ORIGINAL version of this method
+  // checked `lease_owner` alone, never `lease_expires_at` -- an EXPIRED
+  // worker could still successfully write bookkeeping through this
+  // method as long as no one else had yet acquired the lease (expiry
+  // alone does not clear `lease_owner`; only a NEW acquireLease call, or
+  // an explicit release, does). `now` is now a required parameter,
+  // checked atomically INSIDE this same guarded write (never trusted
+  // from an earlier, possibly-stale caller-side check) -- an expired
+  // lease holder's write is rejected here even when no replacement has
+  // acquired the lease yet.
+  updateLinkAsLeaseHolder(linkId: string, leaseOwner: string, now: number, patch: Partial<CalendarLinkRow>): Promise<boolean>;
   // Unconditional -- NOT lease-gated. The durable-intent write path
   // (reschedule/cancel/reopen): a user-initiated change must succeed
   // regardless of whether a reconcile attempt happens to be holding the

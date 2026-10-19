@@ -38,10 +38,20 @@ CREATE TABLE `calendar_event_links` (
   `attempt_count` integer DEFAULT 0 NOT NULL,
   `lease_owner` text,
   `lease_expires_at` integer,
+  -- 2026-10-19 review, issue 2: bounded-backoff scheduling for a
+  -- 'failed' link -- null means eligible now (no backoff in effect).
+  -- Never consulted for 'invalid'/'auth_required', which are excluded
+  -- from automatic reconciliation entirely regardless of this value.
+  `next_retry_at` integer,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
   CHECK (`desired_state` IN ('present','absent')),
-  CHECK (`sync_status` IN ('pending','synced','failed','missing_remotely'))
+  -- 2026-10-19 review, issue 2: 'invalid' (a definitive, permanent
+  -- rejection -- this app's own pre-mutation validation or a real
+  -- Google 400 -- never auto-retried) and 'auth_required' (a 401/403,
+  -- an authentication/configuration problem, also never auto-retried)
+  -- added -- see calendar-sync-types.ts's own SyncStatus doc comment.
+  CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))
 );
 --> statement-breakpoint
 -- The real duplicate-prevention backstop -- at most one link row can ever
@@ -101,7 +111,12 @@ CREATE TABLE `calendar_event_link_history` (
   `cleanup_attempts` integer DEFAULT 0 NOT NULL,
   `created_at` integer NOT NULL,
   `updated_at` integer NOT NULL,
-  CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed')),
+  -- 2026-10-19 review, issue 2: 'invalid' added -- a DEFINITIVE,
+  -- PERMANENT rejection of this generation's create attempt (a real
+  -- Google 400), distinct from 'in_flight' (genuinely ambiguous --
+  -- timeout/network/malformed response) -- see
+  -- calendar-sync-types.ts's own CreateStatus doc comment.
+  CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid')),
   CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))
 );
 --> statement-breakpoint

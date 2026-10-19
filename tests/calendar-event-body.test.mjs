@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildGoogleEventBody, exclusiveEndDateForAllDay, mergeFosFieldsIntoExistingEvent } from "../lib/calendar/calendar-event-body.ts";
+import { buildGoogleEventBody, exclusiveEndDateForAllDay, mergeFosFieldsIntoExistingEvent, validateMeetingDesiredFields } from "../lib/calendar/calendar-event-body.ts";
 
 const baseFields = { interactionId: "int-1", donorDisplayName: "Rabbi & Mrs. Dovid Bashevkin", fosUrl: "https://shimmydonors.org/donors/d1/meeting-brief" };
 
@@ -60,6 +60,52 @@ assert.throws(() => buildGoogleEventBody({ ...baseFields, allDay: false, allDayD
   assert.deepEqual(merged.start, { date: "2026-03-05" }, "FOS's own fields must win");
   assert.equal(merged.location, "New location");
   assert.equal(merged.id, "evt-1", "the event's own id is untouched");
+}
+
+// =============================================================================
+// validateMeetingDesiredFields (2026-10-19 review, issue 2): "validate
+// real calendar dates, finite timestamps, endAt > occurredAt, and valid
+// timezone inputs before any remote mutation." Independent review found
+// buildGoogleEventBody alone never catches an end-before-start timed
+// meeting (it only throws on MISSING fields, never on an invalid
+// RELATIONSHIP between present ones) -- these cases are the pre-fix
+// reproduction: all pass buildGoogleEventBody's own checks silently.
+// =============================================================================
+{
+  const occurredAt = Math.floor(Date.parse("2026-03-05T14:00:00Z") / 1000);
+
+  // Valid cases must pass.
+  assert.deepEqual(validateMeetingDesiredFields({ ...baseFields, allDay: true, allDayDate: "2026-03-05", occurredAt: null, endAt: null, timezone: null, location: null }), { valid: true });
+  assert.deepEqual(validateMeetingDesiredFields({ ...baseFields, allDay: false, allDayDate: null, occurredAt, endAt: occurredAt + 1800, timezone: "America/New_York", location: null }), { valid: true });
+
+  // endAt <= occurredAt -- buildGoogleEventBody alone does NOT catch
+  // this (confirmed below); validateMeetingDesiredFields must.
+  const endBeforeStart = { ...baseFields, allDay: false, allDayDate: null, occurredAt, endAt: occurredAt - 60, timezone: "America/New_York", location: null };
+  assert.doesNotThrow(() => buildGoogleEventBody(endBeforeStart), "pre-fix reproduction: buildGoogleEventBody alone never validates endAt > occurredAt");
+  assert.equal(validateMeetingDesiredFields(endBeforeStart).valid, false, "endAt <= occurredAt must be rejected");
+  const endEqualsStart = { ...endBeforeStart, endAt: occurredAt };
+  assert.equal(validateMeetingDesiredFields(endEqualsStart).valid, false, "endAt == occurredAt (zero duration) must also be rejected");
+
+  // Non-finite timestamps.
+  assert.equal(validateMeetingDesiredFields({ ...baseFields, allDay: false, allDayDate: null, occurredAt: NaN, endAt: occurredAt + 1800, timezone: "America/New_York", location: null }).valid, false);
+  assert.equal(validateMeetingDesiredFields({ ...baseFields, allDay: false, allDayDate: null, occurredAt, endAt: Infinity, timezone: "America/New_York", location: null }).valid, false);
+
+  // An invalid IANA timezone -- buildGoogleEventBody itself never
+  // validates the STRING is a real zone (only that it's non-empty), so
+  // this is also a real pre-fix gap.
+  const badTimezone = { ...baseFields, allDay: false, allDayDate: null, occurredAt, endAt: occurredAt + 1800, timezone: "Not/A_Real_Zone", location: null };
+  assert.doesNotThrow(() => buildGoogleEventBody(badTimezone), "pre-fix reproduction: buildGoogleEventBody never validates the timezone string is a real IANA zone");
+  assert.equal(validateMeetingDesiredFields(badTimezone).valid, false, "an unrecognized IANA timezone must be rejected");
+
+  // A real calendar date must round-trip; Feb 30 does not exist --
+  // buildGoogleEventBody's DATE_ONLY_PATTERN regex accepts it (it only
+  // checks shape, not calendar validity), another real pre-fix gap.
+  const feb30 = { ...baseFields, allDay: true, allDayDate: "2026-02-30", occurredAt: null, endAt: null, timezone: null, location: null };
+  assert.doesNotThrow(() => buildGoogleEventBody(feb30), "pre-fix reproduction: buildGoogleEventBody's regex-only date check accepts a non-existent calendar date");
+  assert.equal(validateMeetingDesiredFields(feb30).valid, false, "a non-existent calendar date (Feb 30) must be rejected");
+  // A real date must still be accepted, including a real leap day.
+  assert.equal(validateMeetingDesiredFields({ ...baseFields, allDay: true, allDayDate: "2028-02-29", occurredAt: null, endAt: null, timezone: null, location: null }).valid, true);
+  assert.equal(validateMeetingDesiredFields({ ...baseFields, allDay: true, allDayDate: "2026-02-29", occurredAt: null, endAt: null, timezone: null, location: null }).valid, false, "2026 is not a leap year");
 }
 
 process.stdout.write("calendar-event-body.test.mjs: all assertions passed\n");

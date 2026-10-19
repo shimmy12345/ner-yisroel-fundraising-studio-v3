@@ -264,6 +264,7 @@ const TEST_FILES = [
   "tests/calendar-capture-idempotency.test.mjs",
   "tests/calendar-sync-lifecycle.test.mjs",
   "tests/calendar-sweep-agenda-independence.test.mjs",
+  "tests/calendar-adapters-regression-2026-10-19.test.mjs",
 ];
 
 function runOne(file) {

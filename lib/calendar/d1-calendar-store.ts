@@ -52,6 +52,7 @@ function toLinkRow(row: RawRow): CalendarLinkRow {
     attemptCount: row.attempt_count as number,
     leaseOwner: row.lease_owner as string | null,
     leaseExpiresAt: row.lease_expires_at as number | null,
+    nextRetryAt: row.next_retry_at as number | null,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
   };
@@ -84,6 +85,7 @@ const LINK_PATCH_COLUMNS: Record<string, string> = {
   generation: "generation",
   leaseOwner: "lease_owner",
   leaseExpiresAt: "lease_expires_at",
+  nextRetryAt: "next_retry_at",
   updatedAt: "updated_at",
 };
 
@@ -137,10 +139,10 @@ export class D1CalendarStore implements CalendarLinkStore {
       await this.db
         .prepare(
           `INSERT INTO calendar_event_links
-          (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, next_retry_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, now, now)
+        .bind(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, row.nextRetryAt, now, now)
         .run();
     } catch (error) {
       if (isUniqueConstraintViolation(error)) return null; // the real UNIQUE(interaction_id) backstop -- an expected conflict, not a failure
@@ -164,10 +166,10 @@ export class D1CalendarStore implements CalendarLinkStore {
         this.db
           .prepare(
             `INSERT INTO calendar_event_links
-            (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (id, interaction_id, user_id, google_calendar_id, generation, google_event_id, google_etag, desired_state, desired_revision, synced_revision, sync_status, last_error, attempt_count, lease_owner, lease_expires_at, next_retry_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .bind(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, now, now),
+          .bind(row.id, row.interactionId, row.userId, row.googleCalendarId, row.generation, row.googleEventId, row.googleEtag, row.desiredState, row.desiredRevision, row.syncedRevision, row.syncStatus, row.lastError, row.attemptCount, row.leaseOwner, row.leaseExpiresAt, row.nextRetryAt, now, now),
         this.db
           .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, 0, ?, 'not_attempted', 0, 'not_needed', 0, ?, ?)`)
           .bind(randomUUID(), row.id, deriveGoogleEventId(row.interactionId, 0), now, now),
@@ -205,12 +207,19 @@ export class D1CalendarStore implements CalendarLinkStore {
     return result.meta.changes === 1;
   }
 
-  async updateLinkAsLeaseHolder(linkId: string, leaseOwner: string, patch: Partial<CalendarLinkRow>): Promise<boolean> {
+  // 2026-10-19 review, issue 3: ALSO guards `AND lease_expires_at > ?`
+  // (bound to `now`, now a required parameter) -- the ORIGINAL version
+  // checked `lease_owner` alone, which let an EXPIRED worker's write
+  // still land as long as no one else had yet acquired the lease
+  // (expiry alone does not clear `lease_owner`; only a NEW acquireLease
+  // call, or an explicit release, does). Checked atomically as part of
+  // the SAME guarded UPDATE, never a separate, possibly-stale JS check.
+  async updateLinkAsLeaseHolder(linkId: string, leaseOwner: string, now: number, patch: Partial<CalendarLinkRow>): Promise<boolean> {
     const entries = Object.entries(patch).filter(([key]) => key in LINK_PATCH_COLUMNS);
     if (entries.length === 0) return true;
     const setClause = entries.map(([key]) => `${LINK_PATCH_COLUMNS[key]} = ?`).join(", ");
     const values: Array<string | number | null> = entries.map(([, value]) => (value as string | number | null));
-    const result = await this.db.prepare(`UPDATE calendar_event_links SET ${setClause} WHERE id = ? AND lease_owner = ?`).bind(...values, linkId, leaseOwner).run();
+    const result = await this.db.prepare(`UPDATE calendar_event_links SET ${setClause} WHERE id = ? AND lease_owner = ? AND lease_expires_at > ?`).bind(...values, linkId, leaseOwner, now).run();
     return result.meta.changes === 1;
   }
 
@@ -228,8 +237,22 @@ export class D1CalendarStore implements CalendarLinkStore {
   // nothing D1's lack of cross-statement transactions even affects here:
   // a single guarded statement is already the whole atomic unit, exactly
   // as it is in SqliteCalendarStore.
+  // 2026-10-19 review, issue 2: the CASE now resets OUT OF any terminal
+  // failure state too -- 'failed', 'invalid', and 'auth_required' all
+  // reset to 'pending' (with next_retry_at cleared), not just 'synced'
+  // -- see SqliteCalendarStore's own identical comment on this method.
   async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
-    const result = await this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, sync_status = CASE WHEN sync_status = 'synced' THEN 'pending' ELSE sync_status END, updated_at = ? WHERE id = ? AND desired_state = 'present'`).bind(now, linkId).run();
+    const result = await this.db
+      .prepare(
+        `UPDATE calendar_event_links SET
+          desired_revision = desired_revision + 1,
+          sync_status = CASE WHEN sync_status IN ('synced','failed','invalid','auth_required') THEN 'pending' ELSE sync_status END,
+          next_retry_at = CASE WHEN sync_status IN ('synced','failed','invalid','auth_required') THEN NULL ELSE next_retry_at END,
+          updated_at = ?
+        WHERE id = ? AND desired_state = 'present'`,
+      )
+      .bind(now, linkId)
+      .run();
     if (result.meta.changes === 0) return null;
     return this.getLinkById(linkId);
   }
@@ -264,7 +287,7 @@ export class D1CalendarStore implements CalendarLinkStore {
   // at the cost of this one documented redundant-write case.
   async applyCancel(linkId: string, now: number): Promise<CalendarLinkRow | null> {
     await this.db.batch([
-      this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', updated_at = ? WHERE id = ? AND desired_state != 'absent'`).bind(now, linkId),
+      this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', next_retry_at = NULL, updated_at = ? WHERE id = ? AND desired_state != 'absent'`).bind(now, linkId),
       this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = (SELECT generation FROM calendar_event_links WHERE id = ?)`).bind(linkId, linkId),
     ]);
     return this.getLinkById(linkId);
@@ -314,6 +337,7 @@ export class D1CalendarStore implements CalendarLinkStore {
             sync_status = 'pending',
             last_error = NULL,
             attempt_count = 0,
+            next_retry_at = NULL,
             updated_at = ?
           WHERE id = ? AND generation = ? AND desired_state = 'absent'`,
         )
@@ -354,8 +378,20 @@ export class D1CalendarStore implements CalendarLinkStore {
     return results.map(toHistoryRow);
   }
 
-  async listNeedingReconciliation(): Promise<CalendarLinkRow[]> {
-    const { results } = await this.db.prepare(`SELECT * FROM calendar_event_links WHERE sync_status != 'missing_remotely' AND (sync_status != 'synced' OR synced_revision != desired_revision)`).all<RawRow>();
+  // 2026-10-19 review, issue 2: EXCLUDES 'invalid'/'auth_required' --
+  // both permanent-until-explicitly-corrected states that must never be
+  // retried on the normal sweep schedule -- and defers a 'failed' link
+  // whose next_retry_at is still in the future (bounded backoff).
+  async listNeedingReconciliation(now: number): Promise<CalendarLinkRow[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT * FROM calendar_event_links
+        WHERE sync_status NOT IN ('missing_remotely','invalid','auth_required')
+          AND (sync_status != 'synced' OR synced_revision != desired_revision)
+          AND (next_retry_at IS NULL OR next_retry_at <= ?)`,
+      )
+      .bind(now)
+      .all<RawRow>();
     return results.map(toLinkRow);
   }
 }

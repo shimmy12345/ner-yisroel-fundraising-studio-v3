@@ -4,7 +4,7 @@ import { D1CalendarStore } from "../lib/calendar/d1-calendar-store.ts";
 import { createGoogleCalendarClient } from "../lib/calendar/google-calendar-client.ts";
 import { MockHttpTransport, jsonResponse, tokenResponse } from "../lib/calendar/testing/mock-http-transport.ts";
 import { enrollMeetingForSync, recordCancel, recordReschedule, reconcilePresentAbsent } from "../lib/calendar/calendar-sync-reconciler.ts";
-import { buildGoogleEventBody } from "../lib/calendar/calendar-event-body.ts";
+import { buildGoogleEventBody, validateMeetingDesiredFields } from "../lib/calendar/calendar-event-body.ts";
 import { deriveGoogleEventId } from "../lib/calendar/calendar-event-id.ts";
 
 // BOTH real adapters together: the real D1-backed store AND the real
@@ -148,36 +148,96 @@ async function run() {
     }
 
     // =======================================================================
-    // KNOWN, REPORTED CORE LIMITATION (not fixed here -- see
-    // docs/AI-HANDOFF.md): buildGoogleEventBody never validates endAt >
-    // occurredAt, and GoogleApiResult has no definitive-4xx slot besides
-    // 404/410/409/412 -- a genuine, permanent validation rejection (a real
-    // Google 400) is bookkept IDENTICALLY to a transient timeout
-    // (createStatus stays "in_flight" either way, retried forever by the
-    // next sweep). This test documents and proves that behavior against
-    // the REAL adapters, rather than hiding or "fixing" it by weakening
-    // the test to avoid exercising it.
+    // 2026-10-19 independent review, issue 2 -- FIXED (was a reported
+    // core limitation as of the prior phase): buildGoogleEventBody still
+    // never validates endAt > occurredAt (unchanged, frozen), but
+    // validateMeetingDesiredFields now catches it BEFORE any network
+    // call, against the real D1 store -- Google is never even contacted
+    // for locally-invalid content.
     // =======================================================================
     {
       const interactionId = uniqueId("int-end-before-start");
       await seedInteraction(db, { interactionId });
       const transport = new MockHttpTransport();
       const client = createGoogleCalendarClient(CREDENTIALS, transport);
-      // endAt BEFORE occurredAt -- buildGoogleEventBody has no check for
-      // this; confirm it does NOT throw (the limitation).
+      // endAt BEFORE occurredAt -- buildGoogleEventBody still has no
+      // check for this (frozen, unchanged); confirm it does NOT throw.
       const invalidFields = { interactionId, donorDisplayName: "Test Donor", allDay: false, allDayDate: null, occurredAt: NOW + 7200, endAt: NOW + 3600, timezone: "America/Chicago", location: null, fosUrl: "https://shimmydonors.org/donors/d1" };
-      assert.doesNotThrow(() => buildGoogleEventBody(invalidFields), "buildGoogleEventBody does not validate endAt > occurredAt -- documented limitation, not a regression introduced by this adapter");
+      assert.doesNotThrow(() => buildGoogleEventBody(invalidFields), "buildGoogleEventBody itself still does not validate endAt > occurredAt -- unchanged, frozen core");
 
       const getFields = async () => invalidFields;
       await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
-      transport.enqueue(tokenResponse()); // one cached token for this client covers both calls below
-      transport.enqueue(jsonResponse(404, {}));
-      transport.enqueue(jsonResponse(400, { error: { message: "end.dateTime must be after start.dateTime" } })); // a REAL Google 400 for this invalid payload
       const outcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
-      assert.equal(outcome.kind, "failed");
+      assert.equal(outcome.kind, "invalid", "invalid content must now be rejected as a definitive, permanent 'invalid' outcome against the real D1 store + real Google client");
+      assert.equal(transport.calls.length, 0, "Google must never be contacted for locally-invalid content, against the real adapters");
       const link = await store.getLinkByInteraction(interactionId);
       const history = await store.getHistory(link.id, 0);
-      assert.equal(history.createStatus, "in_flight", "LIMITATION: a genuine, permanent Google 400 is currently indistinguishable from a transient timeout at the bookkeeping level -- both leave createStatus at in_flight, so the next sweep will retry a request that can never succeed, forever, rather than ever reporting it as permanently failed");
+      assert.equal(link.syncStatus, "invalid");
+      assert.notEqual(history.createStatus, "in_flight", "FIXED: no longer left in the same ambiguous bucket a genuine timeout uses");
+    }
+
+    // =======================================================================
+    // A real Google 400 on OTHERWISE-valid content (our own pre-check
+    // passes; Google's own, separate validation still rejects it) must
+    // ALSO be a definitive, permanent 'invalid' outcome against the real
+    // D1 store + real Google client -- never conflated with a transient
+    // timeout at the bookkeeping level.
+    // =======================================================================
+    {
+      const interactionId = uniqueId("int-real-google-400");
+      await seedInteraction(db, { interactionId });
+      const transport = new MockHttpTransport();
+      const client = createGoogleCalendarClient(CREDENTIALS, transport);
+      const validFields = { interactionId, donorDisplayName: "Test Donor", allDay: false, allDayDate: null, occurredAt: NOW + 3600, endAt: NOW + 7200, timezone: "America/Chicago", location: null, fosUrl: "https://shimmydonors.org/donors/d1" };
+      assert.equal(validateMeetingDesiredFields(validFields).valid, true, "sanity: this content passes local validation");
+
+      const getFields = async () => validFields;
+      await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
+      transport.enqueue(tokenResponse()); // one cached token for this client covers both calls below
+      transport.enqueue(jsonResponse(404, {}));
+      transport.enqueue(jsonResponse(400, { error: { message: "some Google-side-only validation rule our local checks don't know about" } }));
+      const outcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
+      assert.equal(outcome.kind, "invalid", "a real Google 400 must be a definitive, permanent rejection against the real D1 store + real Google client, never the same bucket as a timeout");
+      const link = await store.getLinkByInteraction(interactionId);
+      const history = await store.getHistory(link.id, 0);
+      assert.equal(link.syncStatus, "invalid");
+      assert.equal(history.createStatus, "invalid", "FIXED: the generation's own history durably records the permanent rejection against real D1");
+
+      // "Stop automatic retries for permanent invalid requests," against
+      // the real D1 store: a second attempt still checks GET (the event
+      // genuinely doesn't exist, same as the existing "missing_remotely"
+      // pattern's own re-check), but must NEVER re-attempt the INSERT.
+      const callsBeforeSecondAttempt = transport.calls.length;
+      transport.enqueue(jsonResponse(404, {})); // cached token still valid -- only the GET itself is a new call
+      const secondAttempt = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 2);
+      assert.equal(secondAttempt.kind, "invalid", "a generation already marked 'invalid' in real D1 must not be silently retried");
+      assert.equal(transport.calls.length, callsBeforeSecondAttempt + 1, "the second attempt must make its own GET but never re-attempt the INSERT that already permanently failed");
+      assert.ok(!transport.calls.some((c, i) => i >= callsBeforeSecondAttempt && c.init.method === "POST"), "no new INSERT call must ever be sent for an already-'invalid' generation");
+    }
+
+    // =======================================================================
+    // 2026-10-19 independent review, issue 1 -- against the real D1
+    // store + real Google client together: a successful-status but
+    // malformed INSERT response must never be confirmed as synced.
+    // =======================================================================
+    {
+      const interactionId = uniqueId("int-malformed-insert-response");
+      await seedInteraction(db, { interactionId });
+      const transport = new MockHttpTransport();
+      const client = createGoogleCalendarClient(CREDENTIALS, transport);
+      const fields = { interactionId, donorDisplayName: "Test Donor", allDay: true, allDayDate: "2026-03-05", occurredAt: null, endAt: null, timezone: null, location: null, fosUrl: "https://shimmydonors.org/donors/d1" };
+      const getFields = async () => fields;
+
+      await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
+      transport.enqueue(tokenResponse());
+      transport.enqueue(jsonResponse(404, {}));
+      transport.enqueue(jsonResponse(200, {})); // pre-fix reproduction: an empty {} on a 200
+      const outcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
+      assert.notEqual(outcome.kind, "synced", "an empty/malformed INSERT response must never be confirmed as synced, against the real D1 store + real Google client");
+      const link = await store.getLinkByInteraction(interactionId);
+      assert.notEqual(link.syncStatus, "synced");
+      const history = await store.getHistory(link.id, 0);
+      assert.equal(history.createStatus, "in_flight", "a genuinely ambiguous malformed response must leave createStatus in_flight against real D1, never confirmed and never a definitive failure that would trigger a blind replacement insert");
     }
 
     process.stdout.write("calendar-adapters-integration.test.mjs: all assertions passed against the REAL D1 store + REAL (mocked-transport) Google client\n");

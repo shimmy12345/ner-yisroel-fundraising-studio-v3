@@ -57,9 +57,9 @@ async function run() {
     const db = freshDatabase();
     const { id: interactionId, userId } = seedInteraction(db);
     const store = new SqliteCalendarStore(db);
-    const first = await store.insertLink({ id: "link-1", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+    const first = await store.insertLink({ id: "link-1", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
     assert.ok(first, "the first insert for a meeting must succeed");
-    const second = await store.insertLink({ id: "link-2", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+    const second = await store.insertLink({ id: "link-2", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
     assert.equal(second, null, "a second link row for the SAME interaction must be rejected by the real UNIQUE(interaction_id) index, not merely by an application-level check");
     const rowCount = db.prepare("SELECT COUNT(*) AS n FROM calendar_event_links WHERE interaction_id = ?").get(interactionId).n;
     assert.equal(rowCount, 1, "exactly one link row must exist, enforced by the schema itself");
@@ -70,7 +70,7 @@ async function run() {
     const db = freshDatabase();
     const { id: interactionId, userId } = seedInteraction(db);
     const store = new SqliteCalendarStore(db);
-    const link = await store.insertLink({ id: "link-1", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+    const link = await store.insertLink({ id: "link-1", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
 
     const acquiredA = await store.acquireLease(link.id, "worker-A", NOW, 60);
     assert.equal(acquiredA, true);
@@ -79,7 +79,7 @@ async function run() {
 
     // Worker B's write (which never held the lease) must be rejected by
     // the real WHERE lease_owner = ? clause.
-    const stolenWrite = await store.updateLinkAsLeaseHolder(link.id, "worker-B", { syncStatus: "synced" });
+    const stolenWrite = await store.updateLinkAsLeaseHolder(link.id, "worker-B", NOW, { syncStatus: "synced" });
     assert.equal(stolenWrite, false);
     const stillPending = await store.getLinkById(link.id);
     assert.equal(stillPending.syncStatus, "pending", "a non-lease-holder's write must never land, enforced by the SQL itself");
@@ -110,7 +110,7 @@ async function run() {
     const db = freshDatabase();
     const { id: interactionId, userId } = seedInteraction(db);
     const store = new SqliteCalendarStore(db);
-    const link = await store.insertLink({ id: "link-1", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+    const link = await store.insertLink({ id: "link-1", interactionId, userId, googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
     await store.acquireLease(link.id, "some-other-worker", NOW, 600); // long-held lease by someone else
     const ok = await store.writeIntent(link.id, { desiredRevision: 2, updatedAt: NOW + 1 });
     assert.equal(ok, true, "a durable intent write (reschedule/cancel) must succeed even while a sync attempt holds the lease");

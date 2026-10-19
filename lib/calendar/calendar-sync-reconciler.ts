@@ -29,14 +29,48 @@
 
 import { randomUUID } from "node:crypto";
 import { deriveGoogleEventId } from "./calendar-event-id.ts";
-import { buildGoogleEventBody, mergeFosFieldsIntoExistingEvent } from "./calendar-event-body.ts";
-import type { CalendarLinkRow, CalendarLinkStore, GoogleCalendarClient, MeetingDesiredFields } from "./calendar-sync-types.ts";
+import { buildGoogleEventBody, mergeFosFieldsIntoExistingEvent, validateMeetingDesiredFields } from "./calendar-event-body.ts";
+import type { CalendarLinkRow, CalendarLinkStore, GoogleApiResult, GoogleCalendarClient, MeetingDesiredFields } from "./calendar-sync-types.ts";
 
 const DEFAULT_LEASE_TTL_SECONDS = 120;
 const MAX_PRECONDITION_RETRIES = 2;
+// 2026-10-19 review, issue 2: bounded exponential backoff for a
+// retryable ("failed") link -- 30s, 60s, 120s, ... capped at 30 minutes,
+// so a transient failure is retried with increasing delay rather than
+// hammered on every sweep tick ("avoid retry storms"). Capping the
+// exponent itself (not just the final value) avoids a meaningless,
+// ever-growing attemptCount producing a pathological Math.pow argument.
+function backoffSeconds(attemptCount: number): number {
+  const cappedExponent = Math.min(attemptCount, 10);
+  return Math.min(30 * 2 ** cappedExponent, 1800);
+}
 
 function sanitizedError(status: number | "error", errorClass?: string): string {
   return errorClass ? `${status}:${errorClass}` : String(status);
+}
+
+// 2026-10-19 review, issue 2: "distinguish definitive rejection,
+// retryable failure, authentication/configuration problems, and unknown
+// remote outcomes" -- AND "preserve genuine timeout/network ambiguity."
+// `ambiguous: true` means this specific failure genuinely does not
+// prove Google did not process the request (a timeout, a network
+// exception, or a malformed/mismatched response after a MUTATING call --
+// see google-calendar-client.ts's own "do not mark it synced or blindly
+// create a replacement" handling); only an ambiguous CREATE failure
+// leaves `createStatus` at "in_flight" -- every other category below
+// confirms nothing was created, so createStatus moves to a terminal,
+// non-"in_flight" value instead.
+type ApiFailureCategory = "invalid" | "auth_required" | "transient";
+type ApiFailureDescription = { category: ApiFailureCategory; reason: string; ambiguous: boolean };
+
+function describeApiFailure(result: { ok: false; status: number | "error"; errorClass?: string }): ApiFailureDescription {
+  const reason = sanitizedError(result.status, result.errorClass);
+  if (result.status === 400) return { category: "invalid", reason, ambiguous: false }; // a definitive, permanent Google rejection -- never the same bucket as a timeout
+  if (result.status !== "error") return { category: "transient", reason, ambiguous: false }; // 404/410/409/412 reaching here is a defensive fallback -- each has its own specific branch upstream
+  const errorClass = result.errorClass;
+  if (errorClass === "unauthorized" || errorClass === "forbidden") return { category: "auth_required", reason, ambiguous: false };
+  if (errorClass === "rate_limited" || errorClass === "server_error") return { category: "transient", reason, ambiguous: false }; // a confirmed, non-ambiguous response from Google -- "try again later," not "might have happened"
+  return { category: "transient", reason, ambiguous: true }; // timeout / network exception / malformed-or-mismatched response -- genuinely unknown whether Google processed the request
 }
 
 // --- Durable intent (never touches the network) --------------------------
@@ -75,7 +109,7 @@ export async function enrollMeetingForSync(store: CalendarLinkStore, now: number
       lastError: null,
       attemptCount: 0,
       leaseOwner: null,
-      leaseExpiresAt: null,
+      leaseExpiresAt: null, nextRetryAt: null,
     },
     now,
   );
@@ -180,7 +214,21 @@ export type ReconcileOutcome =
   | { kind: "lease_contended" }
   | { kind: "synced"; revision: number }
   | { kind: "missing_remotely" }
+  // A genuine, retryable failure (transient network/5xx/429, or an
+  // internal precondition like "fields unavailable") -- eligible for
+  // bounded-backoff automatic retry; see backoffSeconds() above.
   | { kind: "failed"; reason: string }
+  // 2026-10-19 review, issue 2: a DEFINITIVE, PERMANENT rejection --
+  // this app's own pre-mutation field validation, or a real Google 400
+  // -- never retried automatically. Only an explicit correction
+  // (recordReschedule, which resets syncStatus back to "pending") moves
+  // this link out of this state.
+  | { kind: "invalid"; reason: string }
+  // 2026-10-19 review, issue 2: a 401/403 -- an authentication/
+  // configuration problem, never retried on the normal schedule either
+  // (retrying with the same broken credentials cannot succeed); also
+  // only resumed via an explicit recordReschedule-driven retry.
+  | { kind: "auth_required"; reason: string }
   | { kind: "deleted" }
   | { kind: "delete_uncertain" }
   | { kind: "no_link" }
@@ -241,8 +289,18 @@ export async function reconcilePresentAbsent(
       const fields = await getMeetingFields(fresh.interactionId);
       if (!fields) return finishFailed(store, fresh, leaseOwner, now, "meeting fields unavailable");
 
+      // 2026-10-19 review, issue 2: "validate real calendar dates, finite
+      // timestamps, endAt > occurredAt, and valid timezone inputs before
+      // any remote mutation." Checked BEFORE the first network call this
+      // function makes for the present branch -- a permanently invalid
+      // payload is recorded as a definitive, non-retried rejection and
+      // Google is never even contacted, rather than only being
+      // discoverable via a real Google 400 after the fact.
+      const fieldValidation = validateMeetingDesiredFields(fields);
+      if (!fieldValidation.valid) return finishInvalid(store, fresh, leaseOwner, now, fieldValidation.reason);
+
       const eventId = fresh.googleEventId ?? deriveGoogleEventId(fresh.interactionId, generationBeingSent);
-      if (!fresh.googleEventId) await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, { googleEventId: eventId, updatedAt: now });
+      if (!fresh.googleEventId) await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, now, { googleEventId: eventId, updatedAt: now });
 
       // Bug 2 (2026-10-20 review): universal backstop. A history row for
       // this generation might be missing -- not only from the exact
@@ -272,7 +330,11 @@ export async function reconcilePresentAbsent(
       // confirm lease ownership AND that desired_state/generation still
       // match what this attempt captured, immediately before every
       // mutating call, not only before the local write-back.
-      { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
+      // 2026-10-19 review, issue 3: `now` is now REQUIRED here -- the
+      // ORIGINAL version checked lease OWNERSHIP only, never EXPIRY, so
+      // an expired worker whose lease no one else had yet re-acquired
+      // could still pass this check and send a real mutating call.
+      { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, now, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
 
       if (!getResult.ok && (getResult.status === 404 || getResult.status === 410)) {
         // Whether this generation was EVER previously confirmed created is
@@ -286,17 +348,31 @@ export async function reconcilePresentAbsent(
         if (historyForGeneration?.createStatus === "succeeded") {
           // Previously confirmed created, now gone -- a manual Google-side
           // deletion (Issue 7). Never recreate automatically.
-          await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, { syncStatus: "missing_remotely", updatedAt: now });
+          const ok = await store.updateLinkAsLeaseHolder(fresh.id, leaseOwner, now, { syncStatus: "missing_remotely", updatedAt: now });
+          if (!ok) return { kind: "lease_contended" };
           return { kind: "missing_remotely" };
         }
-        // Normal pre-create case (or a never-resolved prior attempt) --
-        // proceed to insert. Mark create as in-flight BEFORE the call so a
-        // concurrent cleanup attempt (Issue 2) can see this is unresolved.
+        // 2026-10-19 review, issue 2: "stop automatic retries for
+        // permanent invalid requests." A generation whose create attempt
+        // was definitively, permanently rejected by Google (a real 400,
+        // recorded as createStatus "invalid" below) must never be
+        // silently retried just because the event still doesn't exist --
+        // that 404 is EXPECTED (nothing was ever created) and retrying
+        // with the same content can never succeed. Only an explicit
+        // correction (recordReschedule) moves this generation out of
+        // "invalid" and back into the normal retry path.
+        if (historyForGeneration?.createStatus === "invalid") {
+          return { kind: "invalid", reason: fresh.lastError ?? "this generation's create attempt was permanently rejected" };
+        }
+        // Normal pre-create case (not_attempted, in_flight, or a
+        // confirmed-but-retryable "failed") -- proceed to insert. Mark
+        // create as in-flight BEFORE the call so a concurrent cleanup
+        // attempt (Issue 2) can see this is unresolved.
         await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "in_flight" });
         // Re-check immediately before the actual network call -- the
         // updateHistory write above is itself an await point where a
         // cancel could have landed.
-        { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
+        { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, now, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
         const body = { ...buildGoogleEventBody(fields), id: eventId };
         const insertResult = await client.insert(fresh.googleCalendarId, body);
 
@@ -308,8 +384,8 @@ export async function reconcilePresentAbsent(
           // Issue 3: a 409 alone does not prove the latest desired
           // content was synced -- GET, verify, and reconcile content.
           const verify = await client.get(fresh.googleCalendarId, eventId);
-          { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
-          if (!verify.ok) return finishFailed(store, fresh, leaseOwner, now, sanitizedError(verify.status));
+          { const revalidated = await revalidateBeforeMutation(store, fresh.id, leaseOwner, now, "present", generationBeingSent); if (!revalidated.ok) return { kind: revalidated.reason }; }
+          if (!verify.ok) return categorizedFinish(store, fresh, leaseOwner, now, verify);
           await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "succeeded" });
           const merged = mergeFosFieldsIntoExistingEvent(verify.event!, fields);
           const updateResult = await client.update(fresh.googleCalendarId, eventId, merged, verify.etag ?? "");
@@ -318,14 +394,27 @@ export async function reconcilePresentAbsent(
             if (--attemptsLeft > 0) continue; // reload and retry from the top
             return finishFailed(store, fresh, leaseOwner, now, "412 retries exhausted");
           }
-          return finishFailed(store, fresh, leaseOwner, now, sanitizedError(updateResult.status));
+          return categorizedFinish(store, fresh, leaseOwner, now, updateResult);
         }
-        // Any other outcome (network error/timeout/5xx) is genuinely
-        // ambiguous -- createStatus stays "in_flight", never resolved here.
-        return finishFailed(store, fresh, leaseOwner, now, !insertResult.ok ? sanitizedError(insertResult.status) : "unknown");
+        // 2026-10-19 review, issue 2: categorize the failure -- a
+        // DEFINITIVE 400 marks this generation's history "invalid"
+        // (permanent, never auto-retried from the GET-404 branch above
+        // again); a confirmed, NON-ambiguous error (401/403/429/5xx)
+        // marks it "failed" (Google explicitly responded before any
+        // side effect could occur -- confirmed nothing was created,
+        // safe to retry cleanly); a genuinely AMBIGUOUS failure (timeout,
+        // network exception, or google-calendar-client.ts's own
+        // "unexpected response after a mutating request" case) leaves
+        // createStatus at "in_flight", exactly as before -- "preserve
+        // genuine timeout/network ambiguity... do not mark it synced or
+        // blindly create a replacement."
+        const failure = describeApiFailure(insertResult);
+        if (failure.category === "invalid") await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "invalid" });
+        else if (!failure.ambiguous) await store.updateHistory(fresh.id, generationBeingSent, { createStatus: "failed" });
+        return finishByCategory(store, fresh, leaseOwner, now, failure);
       }
 
-      if (!getResult.ok) return finishFailed(store, fresh, leaseOwner, now, sanitizedError(getResult.status));
+      if (!getResult.ok) return categorizedFinish(store, fresh, leaseOwner, now, getResult);
 
       // Event exists on Google -- by construction (we always address it by
       // the deterministic id for this exact interactionId+generation) it
@@ -350,7 +439,7 @@ export async function reconcilePresentAbsent(
         if (--attemptsLeft > 0) continue;
         return finishFailed(store, fresh, leaseOwner, now, "412 retries exhausted");
       }
-      return finishFailed(store, fresh, leaseOwner, now, sanitizedError(updateResult.status));
+      return categorizedFinish(store, fresh, leaseOwner, now, updateResult);
     }
   } finally {
     await store.releaseLease(initial.id, leaseOwner);
@@ -369,13 +458,23 @@ type RevalidationResult = { ok: true; row: CalendarLinkRow } | { ok: false; reas
 // not enough: it still lets a now-stale-or-superseded worker send a
 // real, possibly content-creating/overwriting request to Google first.
 // Distinguishes WHY revalidation failed: "lease_contended" (someone else
-// now holds the lease -- the Issue 1 stale-worker case) vs. "superseded"
-// (this attempt still holds the lease, but desired_state/generation
-// moved on under it -- the Bug 2 cancel-during-create case) -- callers
-// that only care "did it fail" can still just check `.ok`.
-async function revalidateBeforeMutation(store: CalendarLinkStore, linkId: string, leaseOwner: string, expectedDesiredState: CalendarLinkRow["desiredState"], expectedGeneration: number): Promise<RevalidationResult> {
+// now holds the lease, OR this attempt's own lease has since EXPIRED --
+// the Issue 1/issue 3 stale-or-expired-worker case) vs. "superseded"
+// (this attempt still holds a currently-valid lease, but desired_state/
+// generation moved on under it -- the Bug 2 cancel-during-create case)
+// -- callers that only care "did it fail" can still just check `.ok`.
+// 2026-10-19 review, issue 3: `now` is now a REQUIRED parameter -- the
+// ORIGINAL version checked `leaseOwner` string equality alone, never
+// `leaseExpiresAt`, so an EXPIRED worker whose lease no one else had yet
+// re-acquired could still pass this check and send a real, possibly
+// content-creating/overwriting mutating call to Google. Expiry is
+// checked atomically against the SAME fresh read this function already
+// does, immediately before whichever mutating call the caller is about
+// to make -- never trusted from an earlier, possibly-stale check.
+async function revalidateBeforeMutation(store: CalendarLinkStore, linkId: string, leaseOwner: string, now: number, expectedDesiredState: CalendarLinkRow["desiredState"], expectedGeneration: number): Promise<RevalidationResult> {
   const current = await store.getLinkById(linkId);
   if (!current || current.leaseOwner !== leaseOwner) return { ok: false, reason: "lease_contended" };
+  if (current.leaseExpiresAt === null || current.leaseExpiresAt <= now) return { ok: false, reason: "lease_contended" };
   if (current.desiredState !== expectedDesiredState || current.generation !== expectedGeneration) return { ok: false, reason: "superseded" };
   return { ok: true, row: current };
 }
@@ -384,14 +483,61 @@ async function finishSynced(store: CalendarLinkStore, link: CalendarLinkRow, lea
   // Issue 1: only this specific lease holder, writing only the revision it
   // actually sent and had confirmed -- never a newer revision that may
   // have appeared while this call was in flight.
-  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, { syncedRevision: revisionSent, syncStatus: "synced", googleEtag: etag, lastError: null, updatedAt: now });
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncedRevision: revisionSent, syncStatus: "synced", googleEtag: etag, lastError: null, nextRetryAt: null, updatedAt: now });
   if (!ok) return { kind: "lease_contended" }; // our lease was stolen/expired mid-call -- the write is correctly rejected
   return { kind: "synced", revision: revisionSent };
 }
 
+// A genuine, retryable failure -- see backoffSeconds() above. Used for
+// both GoogleApiResult-derived "transient" failures (via
+// categorizedFinish/finishByCategory below) and purely-internal reasons
+// that never touched Google at all (e.g. "meeting fields unavailable,"
+// "link row disappeared mid-reconcile," "412 retries exhausted") -- all
+// of these are retryable, none of them are a permanent content/auth
+// rejection, so they all get the same bounded-backoff treatment.
 async function finishFailed(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string): Promise<ReconcileOutcome> {
-  await store.updateLinkAsLeaseHolder(link.id, leaseOwner, { syncStatus: "failed", lastError: reason, attemptCount: link.attemptCount + 1, updatedAt: now });
+  const nextRetryAt = now + backoffSeconds(link.attemptCount);
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "failed", lastError: reason, attemptCount: link.attemptCount + 1, nextRetryAt, updatedAt: now });
+  if (!ok) return { kind: "lease_contended" };
   return { kind: "failed", reason };
+}
+
+// 2026-10-19 review, issue 2: a DEFINITIVE, PERMANENT rejection --
+// `nextRetryAt: null` (irrelevant either way: listNeedingReconciliation
+// excludes "invalid" links entirely, regardless of this field) and no
+// `attemptCount` increment (this isn't a retry being counted, it's a
+// terminal state) -- only recordReschedule's own reset back to
+// "pending" moves a link out of this state.
+async function finishInvalid(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string): Promise<ReconcileOutcome> {
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "invalid", lastError: reason, nextRetryAt: null, updatedAt: now });
+  if (!ok) return { kind: "lease_contended" };
+  return { kind: "invalid", reason };
+}
+
+// 2026-10-19 review, issue 2: an authentication/configuration problem --
+// retrying with the SAME broken credentials on a timer cannot succeed,
+// so (like "invalid") this is excluded from automatic reconciliation
+// entirely; only an explicit recordReschedule-driven retry (once
+// credentials are fixed) resumes it.
+async function finishAuthRequired(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, reason: string): Promise<ReconcileOutcome> {
+  const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "auth_required", lastError: reason, nextRetryAt: null, updatedAt: now });
+  if (!ok) return { kind: "lease_contended" };
+  return { kind: "auth_required", reason };
+}
+
+async function finishByCategory(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, failure: ApiFailureDescription): Promise<ReconcileOutcome> {
+  if (failure.category === "invalid") return finishInvalid(store, link, leaseOwner, now, failure.reason);
+  if (failure.category === "auth_required") return finishAuthRequired(store, link, leaseOwner, now, failure.reason);
+  return finishFailed(store, link, leaseOwner, now, failure.reason);
+}
+
+// Convenience wrapper for the common case: a GoogleApiResult failure
+// that doesn't ALSO need its own createStatus bookkeeping decision
+// (that decision is made explicitly, inline, at insert()'s own failure
+// site above, since only a CREATE attempt's createStatus depends on
+// ambiguity this way).
+function categorizedFinish(store: CalendarLinkStore, link: CalendarLinkRow, leaseOwner: string, now: number, result: GoogleApiResult<unknown> & { ok: false }): Promise<ReconcileOutcome> {
+  return finishByCategory(store, link, leaseOwner, now, describeApiFailure(result));
 }
 
 // Called while `reconcilePresentAbsent` already holds the link's lease
@@ -399,25 +545,37 @@ async function finishFailed(store: CalendarLinkStore, link: CalendarLinkRow, lea
 // implementation, never re-acquiring a lease it already has.
 async function reconcileDeleteCurrentGeneration(store: CalendarLinkStore, client: GoogleCalendarClient, link: CalendarLinkRow, leaseOwner: string, now: number): Promise<ReconcileOutcome> {
   if (!link.googleEventId) {
-    await store.updateLinkAsLeaseHolder(link.id, leaseOwner, { syncStatus: "synced", syncedRevision: link.desiredRevision, updatedAt: now });
+    const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "synced", syncedRevision: link.desiredRevision, nextRetryAt: null, updatedAt: now });
+    if (!ok) return { kind: "lease_contended" };
     const history = await store.getHistory(link.id, link.generation);
     if (history) await store.updateHistory(link.id, link.generation, { cleanupStatus: "done" });
     return { kind: "deleted" };
   }
-  const outcome = await reconcileGenerationCleanupLocked(store, client, link.googleCalendarId, link.id, link.generation, link.googleEventId, now);
+  // `leaseOwner` is passed through so reconcileGenerationCleanupLocked
+  // can revalidate lease ownership AND expiry (issue 3) immediately
+  // before it sends the real DELETE -- see that function's own comment.
+  const outcome = await reconcileGenerationCleanupLocked(store, client, link.googleCalendarId, link.id, link.generation, link.googleEventId, now, leaseOwner);
+  if (outcome.kind === "lease_contended") return { kind: "lease_contended" };
   if (outcome.kind === "done") {
-    await store.updateLinkAsLeaseHolder(link.id, leaseOwner, { syncStatus: "synced", syncedRevision: link.desiredRevision, updatedAt: now });
+    const ok = await store.updateLinkAsLeaseHolder(link.id, leaseOwner, now, { syncStatus: "synced", syncedRevision: link.desiredRevision, nextRetryAt: null, updatedAt: now });
+    if (!ok) return { kind: "lease_contended" };
     return { kind: "deleted" };
   }
+  // 2026-10-19 review, issue 2: routed through finishFailed so a
+  // cleanup that can't yet resolve (uncertain) or that genuinely failed
+  // gets the SAME bounded-backoff retry schedule as any other transient
+  // failure -- "ensure cancellation cleanup handles each outcome
+  // without leaving permanent false uncertainty" -- rather than either
+  // a tight no-backoff retry loop or a dead end with no path forward.
   if (outcome.kind === "uncertain") {
-    await store.updateLinkAsLeaseHolder(link.id, leaseOwner, { syncStatus: "failed", lastError: "cleanup uncertain: create outcome not yet resolved", attemptCount: link.attemptCount + 1, updatedAt: now });
-    return { kind: "delete_uncertain" };
+    const result = await finishFailed(store, link, leaseOwner, now, "cleanup uncertain: create outcome not yet resolved");
+    return result.kind === "failed" ? { kind: "delete_uncertain" } : result;
   }
-  await store.updateLinkAsLeaseHolder(link.id, leaseOwner, { syncStatus: "failed", lastError: "delete failed", attemptCount: link.attemptCount + 1, updatedAt: now });
-  return { kind: "failed", reason: "delete failed" };
+  if (outcome.kind === "auth_required") return finishAuthRequired(store, link, leaseOwner, now, "cleanup: authentication/configuration problem");
+  return finishFailed(store, link, leaseOwner, now, "delete failed");
 }
 
-export type CleanupOutcome = { kind: "not_needed" } | { kind: "done" } | { kind: "uncertain" } | { kind: "failed" } | { kind: "lease_contended" };
+export type CleanupOutcome = { kind: "not_needed" } | { kind: "done" } | { kind: "uncertain" } | { kind: "failed" } | { kind: "auth_required" } | { kind: "lease_contended" };
 
 // Bug 2 (2026-10-19 review): "the original worker still owns the lease,
 // so it proceeds to INSERT and succeeds [after an independent cleanup
@@ -435,7 +593,7 @@ export async function reconcileGenerationCleanup(store: CalendarLinkStore, clien
   const acquired = await store.acquireLease(linkId, leaseOwner, now, ttlSeconds);
   if (!acquired) return { kind: "lease_contended" };
   try {
-    return await reconcileGenerationCleanupLocked(store, client, calendarId, linkId, generation, googleEventId, now);
+    return await reconcileGenerationCleanupLocked(store, client, calendarId, linkId, generation, googleEventId, now, leaseOwner);
   } finally {
     await store.releaseLease(linkId, leaseOwner);
   }
@@ -465,7 +623,7 @@ export async function reconcileGenerationCleanup(store: CalendarLinkStore, clien
 // still outstanding -- that call can still land later regardless of the
 // lease, which is exactly the ambiguity resolveCreateOutcome() exists to
 // eventually settle.
-async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number): Promise<CleanupOutcome> {
+async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client: GoogleCalendarClient, calendarId: string, linkId: string, generation: number, googleEventId: string, now: number, leaseOwner: string): Promise<CleanupOutcome> {
   let history = await store.getHistory(linkId, generation);
   if (!history) {
     // Bug 2 (2026-10-20 review): "cleanup cannot find history, returns
@@ -488,6 +646,16 @@ async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client
   }
   if (history.cleanupStatus === "done") return { kind: "done" };
 
+  // 2026-10-19 review, issue 3: revalidate lease ownership AND expiry
+  // immediately before the real DELETE call -- the history lookup/
+  // self-heal above is itself an await point where this attempt's lease
+  // could have expired (and possibly been re-acquired by someone else)
+  // without this attempt's own in-memory state reflecting that yet.
+  const current = await store.getLinkById(linkId);
+  if (!current || current.leaseOwner !== leaseOwner || current.leaseExpiresAt === null || current.leaseExpiresAt <= now) {
+    return { kind: "lease_contended" };
+  }
+
   const deleteResult = await client.delete(calendarId, googleEventId);
   const deletedOrAlreadyGone = deleteResult.ok || deleteResult.status === 404 || deleteResult.status === 410;
 
@@ -502,7 +670,16 @@ async function reconcileGenerationCleanupLocked(store: CalendarLinkStore, client
     return { kind: "done" };
   }
 
+  // 2026-10-19 review, issue 2: an authentication/configuration problem
+  // on DELETE must not be treated the same as an ordinary transient
+  // delete failure -- retrying the SAME broken credentials on the
+  // normal cleanup schedule cannot succeed either. Reported distinctly
+  // so the caller can route it through finishAuthRequired (excluded
+  // from automatic retry, same as a present-state reconcile's own
+  // auth_required outcome) rather than a plain backoff-eligible retry.
   await store.updateHistory(linkId, generation, { cleanupStatus: "pending", cleanupAttempts: history.cleanupAttempts + 1, updatedAt: now });
+  const failure = describeApiFailure(deleteResult as { ok: false; status: number | "error"; errorClass?: string });
+  if (failure.category === "auth_required") return { kind: "auth_required" };
   return { kind: "failed" };
 }
 

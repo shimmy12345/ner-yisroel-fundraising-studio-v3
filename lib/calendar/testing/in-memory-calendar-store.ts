@@ -72,9 +72,18 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     return true;
   }
 
-  async updateLinkAsLeaseHolder(linkId: string, leaseOwner: string, patch: Partial<CalendarLinkRow>): Promise<boolean> {
+  // 2026-10-19 review, issue 3: ALSO checks `leaseExpiresAt > now` --
+  // the ORIGINAL version checked `leaseOwner` string equality alone,
+  // which let an EXPIRED worker's write still land as long as no one
+  // else had yet acquired the lease (expiry alone does not clear
+  // `leaseOwner`; only a NEW acquireLease call, or an explicit release,
+  // does). `now` is checked atomically in this same synchronous unit as
+  // the write, never trusted from an earlier, possibly-stale caller-side
+  // check.
+  async updateLinkAsLeaseHolder(linkId: string, leaseOwner: string, now: number, patch: Partial<CalendarLinkRow>): Promise<boolean> {
     const link = this.links.get(linkId);
     if (!link || link.leaseOwner !== leaseOwner) return false; // the real guard: a stale worker's write is rejected, never clobbers newer bookkeeping
+    if (link.leaseExpiresAt === null || link.leaseExpiresAt <= now) return false; // an EXPIRED lease holder must never write bookkeeping, even if no one else has acquired it yet
     Object.assign(link, patch);
     return true;
   }
@@ -102,11 +111,23 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
   // than aspirational: a caller checking "present" on a stale read, then
   // awaiting before calling this method, can no longer slip a reschedule
   // through after a cancel has landed in that gap.
+  // 2026-10-19 review, issue 2: resets OUT OF any terminal failure state
+  // (not just "synced") back to "pending" -- corrected meeting details
+  // (or an explicit retry that reaches this same entry point) must be
+  // able to resume a link that was previously "failed"/"invalid"/
+  // "auth_required", none of which are retried automatically anymore.
+  // "missing_remotely" is deliberately excluded -- a manually-deleted
+  // event is a different concern (Issue 7) and must stay excluded from
+  // automatic reconciliation even after a reschedule; only an explicit
+  // reopen resumes that case.
   async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
     const link = this.links.get(linkId);
     if (!link || link.desiredState !== "present") return null;
     link.desiredRevision += 1;
-    if (link.syncStatus === "synced") link.syncStatus = "pending";
+    if (link.syncStatus === "synced" || link.syncStatus === "failed" || link.syncStatus === "invalid" || link.syncStatus === "auth_required") {
+      link.syncStatus = "pending";
+      link.nextRetryAt = null;
+    }
     link.updatedAt = now;
     return { ...link };
   }
@@ -127,6 +148,7 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     link.desiredRevision += 1;
     link.desiredState = "absent";
     link.syncStatus = "pending";
+    link.nextRetryAt = null;
     link.updatedAt = now;
     const history = this.history.get(`${linkId}:${currentGeneration}`);
     if (history) history.cleanupNeeded = true; // same synchronous unit as the link-row change above -- never separately observable
@@ -173,6 +195,7 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     link.syncStatus = "pending";
     link.lastError = null;
     link.attemptCount = 0;
+    link.nextRetryAt = null;
     link.updatedAt = now;
     this.history.set(`${linkId}:${link.generation}`, { id: randomUUID(), linkId, generation: link.generation, googleEventId: deriveGoogleEventId(link.interactionId, link.generation), createStatus: "not_attempted", cleanupNeeded: false, cleanupStatus: "not_needed", cleanupAttempts: 0, createdAt: now, updatedAt: now });
     return { ...link };
@@ -197,7 +220,17 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
     return [...this.history.values()].filter((row) => row.cleanupNeeded && row.cleanupStatus !== "done").map((row) => ({ ...row }));
   }
 
-  async listNeedingReconciliation(): Promise<CalendarLinkRow[]> {
-    return [...this.links.values()].filter((link) => link.syncStatus !== "synced" || link.syncedRevision !== link.desiredRevision).filter((link) => link.syncStatus !== "missing_remotely").map((link) => ({ ...link }));
+  // 2026-10-19 review, issue 2: EXCLUDES "invalid"/"auth_required" links
+  // entirely -- both are permanent-until-explicitly-corrected states that
+  // must never be retried on the normal sweep schedule ("stop automatic
+  // retries for permanent invalid requests") -- and defers a "failed"
+  // link whose `nextRetryAt` is still in the future, implementing the
+  // bounded backoff `now` is passed in for.
+  async listNeedingReconciliation(now: number): Promise<CalendarLinkRow[]> {
+    return [...this.links.values()]
+      .filter((link) => link.syncStatus !== "synced" || link.syncedRevision !== link.desiredRevision)
+      .filter((link) => link.syncStatus !== "missing_remotely" && link.syncStatus !== "invalid" && link.syncStatus !== "auth_required")
+      .filter((link) => link.nextRetryAt === null || link.nextRetryAt <= now)
+      .map((link) => ({ ...link }));
   }
 }

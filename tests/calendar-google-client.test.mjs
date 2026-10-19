@@ -342,6 +342,80 @@ async function run() {
     assert.equal(result.status, 412, "a real 412 on the actual DELETE call must pass through");
   }
 
+  // =======================================================================
+  // 2026-10-19 independent review, issue 1 -- exact reproductions against
+  // the actual client. Pre-fix, the ORIGINAL version of insert() hardcoded
+  // `status: 201` on ANY `response.ok` 2xx regardless of body content,
+  // and get()'s ownership check compared a tag only against the
+  // response's OWN `event.id` (self-referential) rather than the id this
+  // call actually REQUESTED -- both are the exact bugs reproduced below.
+  // =======================================================================
+  {
+    // "INSERT receives HTTP 200 with {} and returns
+    // {ok:true,status:201,event:{}}." Pre-fix: response.ok is true (200),
+    // insert() hardcoded status:201 and returned the empty body as if it
+    // were the created event, with no shape validation at all.
+    const transport = new MockHttpTransport();
+    transport.enqueue(tokenResponse());
+    transport.enqueue(jsonResponse(200, {}));
+    const client = createGoogleCalendarClient(CREDENTIALS, transport);
+    const result = await client.insert("primary", { id: "1abc", summary: "x", description: "y", start: { date: "2026-03-05" }, end: { date: "2026-03-06" } });
+    assert.equal(result.ok, false, "an empty {} body on a 200/201 response must never be reported as a confirmed successful insert");
+    assert.equal(result.status, "error", "an unexpected response after a mutating request is an uncertain remote outcome, never a definitive failure that would trigger a blind replacement insert");
+  }
+  {
+    // "GET requests eventId X, receives a different event ID whose
+    // ownership tag matches that different ID, and reports success."
+    // Pre-fix: isFosManagedEvent only checked `tag === event.id`, which a
+    // DIFFERENT real event (its own id, its own self-matching tag) also
+    // satisfies -- proving nothing about whether it's the event that was
+    // actually requested.
+    const transport = new MockHttpTransport();
+    transport.enqueue(tokenResponse());
+    transport.enqueue(jsonResponse(200, fosManagedEvent({ id: "DIFFERENT-EVENT-ID", extendedProperties: { private: { fosManagedEventId: "DIFFERENT-EVENT-ID" } } })));
+    const client = createGoogleCalendarClient(CREDENTIALS, transport);
+    const result = await client.get("primary", "1abc"); // requested "1abc", Google returned "DIFFERENT-EVENT-ID"
+    assert.equal(result.ok, false, "a GET must never report success for an event whose id does not match the one actually requested, even if that event's own ownership tag self-matches");
+    assert.equal(result.errorClass, "event_id_mismatch");
+  }
+  {
+    // "The previously observed OAuth-token-shaped response accidentally
+    // reaching an event operation" -- a `{access_token, expires_in,
+    // token_type}` body (no `id`, no `summary`, no `start`/`end`, no
+    // ownership tag at all) landing on insert() instead of a real event
+    // response (exactly what happened in this phase's own second CI run,
+    // from a mock-transport queue desync -- see docs/AI-HANDOFF.md).
+    const transport = new MockHttpTransport();
+    transport.enqueue(tokenResponse());
+    transport.enqueue(tokenResponse("leaked-token-shaped-response"));
+    const client = createGoogleCalendarClient(CREDENTIALS, transport);
+    const result = await client.insert("primary", { id: "1abc", summary: "x", description: "y", start: { date: "2026-03-05" }, end: { date: "2026-03-06" } });
+    assert.equal(result.ok, false, "an OAuth-token-shaped response reaching an event operation must never be treated as a created event");
+    assert.equal(result.status, "error");
+  }
+  {
+    // The same OAuth-token-shaped response reaching get() instead.
+    const transport = new MockHttpTransport();
+    transport.enqueue(tokenResponse());
+    transport.enqueue(tokenResponse("leaked-token-shaped-response"));
+    const client = createGoogleCalendarClient(CREDENTIALS, transport);
+    const result = await client.get("primary", "1abc");
+    assert.equal(result.ok, false);
+    assert.equal(result.errorClass, "event_id_mismatch", "a token response has no `id` field at all, which must never match the requested event id");
+  }
+  {
+    // UPDATE must be held to the same standard: a successful-status
+    // response that doesn't look like the event just sent must never be
+    // confirmed, nor treated as a definitive failure.
+    const transport = new MockHttpTransport();
+    transport.enqueue(tokenResponse());
+    transport.enqueue(jsonResponse(200, { ok: true })); // some unexpected, non-event shape
+    const client = createGoogleCalendarClient(CREDENTIALS, transport);
+    const result = await client.update("primary", "1abc", fosManagedEvent(), "\"etag-1\"");
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "error", "an unexpected UPDATE response must never be a confirmed success nor a definitive failure");
+  }
+
   process.stdout.write("calendar-google-client.test.mjs: all assertions passed\n");
 }
 

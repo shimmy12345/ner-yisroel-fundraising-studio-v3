@@ -213,10 +213,46 @@ function serializeEventBodyForRequest(body: GoogleEventBody, ownershipEventId: s
   };
 }
 
-function isFosManagedEvent(event: Record<string, unknown>): boolean {
+// 2026-10-19 review, issue 1: takes the EXPECTED id as an explicit
+// argument -- the original version compared the ownership tag only
+// against the response's OWN `event.id` (`tag === event.id`), which is
+// self-referential and proves nothing about identity: a GET requested
+// for eventId X that instead receives a DIFFERENT real event Y (Y's own
+// id, Y's own matching tag -- entirely self-consistent) passed that
+// check. Comparing against the id this call actually REQUESTED/SENT is
+// what makes this a genuine identity check, not just "does this event
+// carry some tag that matches itself."
+function isFosManagedEvent(event: Record<string, unknown>, expectedEventId: string): boolean {
   const extendedProperties = event.extendedProperties as { private?: Record<string, unknown> } | undefined;
   const tag = extendedProperties?.private?.[FOS_OWNERSHIP_PROPERTY_KEY];
-  return typeof tag === "string" && tag === event.id;
+  return typeof tag === "string" && tag === expectedEventId;
+}
+
+function isValidEventTimeField(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (typeof v.date === "string" && v.date.length > 0) || (typeof v.dateTime === "string" && v.dateTime.length > 0);
+}
+
+// 2026-10-19 review, issue 1: "validate operation-specific HTTP status
+// and event response structure. Require the returned ID to match the
+// requested deterministic event ID, verify FOS ownership metadata, and
+// require the fields needed to confirm synchronization." Applied to
+// EVERY 2xx response get()/insert()/update() receive, before any of
+// them is ever treated as a confirmed success -- reproduced failure
+// modes this directly closes: an INSERT response of `{}` (no id, no
+// ownership tag, no summary/start/end) being reported as a created
+// event; a GET for eventId X returning some OTHER real event Y whose
+// own tag self-matches Y; and an OAuth-token-shaped response
+// (`{access_token, expires_in, token_type}` -- no `id` field at all)
+// landing on an event operation at all (caught here by the missing
+// `id`/`summary`/`start`/`end`, regardless of how it got there).
+function validateEventResponseShape(parsedEvent: Record<string, unknown>, expectedEventId: string): { ok: true } | { ok: false; errorClass: string } {
+  if (parsedEvent.id !== expectedEventId) return { ok: false, errorClass: "event_id_mismatch" };
+  if (!isFosManagedEvent(parsedEvent, expectedEventId)) return { ok: false, errorClass: "not_fos_managed" };
+  if (typeof parsedEvent.summary !== "string" || typeof parsedEvent.description !== "string") return { ok: false, errorClass: "incomplete_response" };
+  if (!isValidEventTimeField(parsedEvent.start) || !isValidEventTimeField(parsedEvent.end)) return { ok: false, errorClass: "incomplete_response" };
+  return { ok: true };
 }
 
 function parseEtag(response: Response, body: Record<string, unknown>): string | undefined {
@@ -267,9 +303,14 @@ export function createGoogleCalendarClient(credentials: CalendarOAuthCredentials
     }
     if (response.status === 404 || response.status === 410) return { ok: false, status: response.status };
     if (!response.ok) return { ok: false, status: "error", errorClass: errorClassFromStatus(response.status) };
+    // Operation-specific status: a real Google GET only ever succeeds
+    // with exactly 200 -- any other 2xx here is itself unexpected/
+    // suspicious, never silently treated as "found."
+    if (response.status !== 200) return { ok: false, status: "error", errorClass: "unexpected_status" };
     const parsed = await parseEventResponse(response);
     if (!parsed.ok) return { ok: false, status: "error", errorClass: parsed.errorClass };
-    if (!isFosManagedEvent(parsed.event)) return { ok: false, status: "error", errorClass: "not_fos_managed" };
+    const validated = validateEventResponseShape(parsed.event, eventId);
+    if (!validated.ok) return { ok: false, status: "error", errorClass: validated.errorClass };
     return { ok: true, status: 200, event: parsed.event as unknown as GoogleEventBody, etag: parsed.etag };
   }
 
@@ -293,11 +334,28 @@ export function createGoogleCalendarClient(credentials: CalendarOAuthCredentials
       // createStatus at "in_flight" rather than resolving it either way.
       return { ok: false, status: "error", errorClass: isAbortError(error) ? "timeout" : "network_error" };
     }
+    if (response.status === 400) return { ok: false, status: 400 }; // definitive, permanent rejection -- never the same bucket as a timeout
     if (response.status === 409) return { ok: false, status: 409 };
     if (!response.ok) return { ok: false, status: "error", errorClass: errorClassFromStatus(response.status) };
+    // Operation-specific status: Google's events.insert only ever
+    // succeeds with 200 or 201 (both are documented/observed in
+    // practice) -- any other 2xx is itself unexpected.
+    if (response.status !== 200 && response.status !== 201) return { ok: false, status: "error", errorClass: "unexpected_status" };
     const parsed = await parseEventResponse(response);
     if (!parsed.ok) return { ok: false, status: "error", errorClass: parsed.errorClass };
-    return { ok: true, status: 201, event: parsed.event as unknown as GoogleEventBody, etag: parsed.etag };
+    // 2026-10-19 review, issue 1: a mutating call that returns a
+    // successful HTTP status but a malformed/mismatched/incomplete body
+    // (e.g. `{}`, or an OAuth-token-shaped response that reached this
+    // call by mistake) is NEVER confirmed success -- but it is also NOT
+    // safe to treat as a definitive failure that would trigger a blind
+    // retry/replacement insert, since the real INSERT request was
+    // already sent and may genuinely have created something. Reported
+    // through the SAME "error" bucket a timeout uses, which the
+    // reconciler already leaves at createStatus "in_flight" (ambiguous,
+    // never silently marked synced, never silently re-created).
+    const validated = validateEventResponseShape(parsed.event, event.id);
+    if (!validated.ok) return { ok: false, status: "error", errorClass: `unexpected_response_after_mutation:${validated.errorClass}` };
+    return { ok: true, status: response.status as 200 | 201, event: parsed.event as unknown as GoogleEventBody, etag: parsed.etag };
   }
 
   async function update(calendarId: string, eventId: string, event: GoogleEventBody, ifMatchEtag: string): Promise<GoogleApiResult<GoogleEventBody>> {
@@ -319,10 +377,18 @@ export function createGoogleCalendarClient(credentials: CalendarOAuthCredentials
     } catch (error) {
       return { ok: false, status: "error", errorClass: isAbortError(error) ? "timeout" : "network_error" };
     }
+    if (response.status === 400) return { ok: false, status: 400 }; // definitive, permanent rejection
     if (response.status === 404 || response.status === 410 || response.status === 412) return { ok: false, status: response.status };
     if (!response.ok) return { ok: false, status: "error", errorClass: errorClassFromStatus(response.status) };
+    // Operation-specific status: Google's events.update only ever
+    // succeeds with 200.
+    if (response.status !== 200) return { ok: false, status: "error", errorClass: "unexpected_status" };
     const parsed = await parseEventResponse(response);
     if (!parsed.ok) return { ok: false, status: "error", errorClass: parsed.errorClass };
+    // Same "a mutating call already went out -- never confirm, never
+    // declare a definitive failure" reasoning as insert() above.
+    const validated = validateEventResponseShape(parsed.event, eventId);
+    if (!validated.ok) return { ok: false, status: "error", errorClass: `unexpected_response_after_mutation:${validated.errorClass}` };
     return { ok: true, status: 200, event: parsed.event as unknown as GoogleEventBody, etag: parsed.etag };
   }
 
@@ -355,6 +421,9 @@ export function createGoogleCalendarClient(credentials: CalendarOAuthCredentials
     }
     if (response.status === 404 || response.status === 410 || response.status === 412) return { ok: false, status: response.status };
     if (!response.ok) return { ok: false, status: "error", errorClass: errorClassFromStatus(response.status) };
+    // Operation-specific status: Google's events.delete only ever
+    // succeeds with 204 (no body) -- any other 2xx is itself unexpected.
+    if (response.status !== 204) return { ok: false, status: "error", errorClass: "unexpected_status" };
     return { ok: true, status: 204 };
   }
 

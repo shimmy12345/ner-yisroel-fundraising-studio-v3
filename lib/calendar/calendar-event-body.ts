@@ -27,6 +27,19 @@ function formatDateOnly(parts: { year: number; month: number; day: number }): st
   return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
+// 2026-10-19 review, issue 2: round-trips year/month/day through
+// Date.UTC and reads it back -- JS silently NORMALIZES an out-of-range
+// component (month 13 rolls into next year, Feb 30 rolls into March)
+// rather than rejecting it, so a naive regex-shape check alone (as
+// DATE_ONLY_PATTERN is) accepts "2026-02-30" as a well-formed-looking
+// but non-existent date. A mismatch after round-tripping is the proof
+// the input was never a real calendar date at all.
+function isRealCalendarDate(parts: { year: number; month: number; day: number }): boolean {
+  const asMs = Date.UTC(parts.year, parts.month - 1, parts.day);
+  const roundTripped = new Date(asMs);
+  return roundTripped.getUTCFullYear() === parts.year && roundTripped.getUTCMonth() + 1 === parts.month && roundTripped.getUTCDate() === parts.day;
+}
+
 // Google's `end` is documented as exclusive; for a single-day all-day
 // event this is universally "the day after the last day" (the
 // iCalendar DTEND convention Google Calendar implements). FOS only ever
@@ -77,4 +90,42 @@ export function buildGoogleEventBody(meeting: MeetingDesiredFields): GoogleEvent
 export function mergeFosFieldsIntoExistingEvent(existingEvent: GoogleEventBody, desired: MeetingDesiredFields): GoogleEventBody {
   const fosFields = buildGoogleEventBody(desired);
   return { ...existingEvent, summary: fosFields.summary, description: fosFields.description, location: fosFields.location, start: fosFields.start, end: fosFields.end };
+}
+
+export type FieldValidationResult = { valid: true } | { valid: false; reason: string };
+
+// 2026-10-19 review, issue 2: "validate real calendar dates, finite
+// timestamps, endAt > occurredAt, and valid timezone inputs before any
+// remote mutation." Pure, never throws -- called by the reconciler
+// BEFORE buildGoogleEventBody/any network call, so a permanently
+// invalid payload is caught and recorded as a definitive, non-retried
+// rejection (ReconcileOutcome "invalid") without ever reaching Google,
+// rather than only being discoverable via a real Google 400 after the
+// fact. buildGoogleEventBody itself is UNCHANGED (still throws on the
+// same missing-field cases it always did) -- this is a strictly
+// additional, earlier check, run by the reconciler, not a replacement
+// for it.
+export function validateMeetingDesiredFields(meeting: MeetingDesiredFields): FieldValidationResult {
+  if (meeting.allDay) {
+    if (!meeting.allDayDate) return { valid: false, reason: "all-day meeting is missing all_day_date" };
+    if (!DATE_ONLY_PATTERN.test(meeting.allDayDate)) return { valid: false, reason: `all_day_date "${meeting.allDayDate}" is not in YYYY-MM-DD form` };
+    const [year, month, day] = meeting.allDayDate.split("-").map(Number);
+    if (!isRealCalendarDate({ year, month, day })) return { valid: false, reason: `all_day_date "${meeting.allDayDate}" is not a real calendar date` };
+    return { valid: true };
+  }
+
+  if (meeting.occurredAt === null || !Number.isFinite(meeting.occurredAt)) return { valid: false, reason: "occurred_at is missing or not a finite timestamp" };
+  if (meeting.endAt === null || !Number.isFinite(meeting.endAt)) return { valid: false, reason: "end_at is missing or not a finite timestamp" };
+  if (meeting.endAt <= meeting.occurredAt) return { valid: false, reason: "end_at must be strictly after occurred_at" };
+  if (!meeting.timezone) return { valid: false, reason: "a timed meeting requires an explicit IANA timezone" };
+  try {
+    // The standard way to validate an IANA zone identifier without a
+    // hardcoded list: the Intl formatter throws RangeError for an
+    // unrecognized `timeZone`, and succeeds (result discarded) for any
+    // zone the runtime actually recognizes.
+    new Intl.DateTimeFormat("en-US", { timeZone: meeting.timezone });
+  } catch {
+    return { valid: false, reason: `timezone "${meeting.timezone}" is not a recognized IANA zone` };
+  }
+  return { valid: true };
 }

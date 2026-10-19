@@ -38,7 +38,7 @@ function freshSqliteStore(interactionId) {
 // directly and deliberately skipping insertHistory -- this is pre-
 // existing-inconsistency SETUP, not a call into any code path under test.
 async function simulateCrashedEnrollment(store, now, { id, interactionId, userId = "u1", googleCalendarId = "primary" }) {
-  const link = await store.insertLink({ id, interactionId, userId, googleCalendarId, generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, now);
+  const link = await store.insertLink({ id, interactionId, userId, googleCalendarId, generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, now);
   assert.ok(link, "setup: the link insert itself must succeed");
   const historyBeforeRepair = await store.getHistory(id, 0);
   assert.equal(historyBeforeRepair, null, "setup: confirm the simulated crash genuinely left no history row");
@@ -157,7 +157,7 @@ async function run() {
     // failure path directly) must fail cleanly, with no stray history
     // row left for the rejected attempt's own id.
     const rejectedLinkId = "link-should-never-exist";
-    const rejected = await store.insertLinkWithHistory({ id: rejectedLinkId, interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, now + 1);
+    const rejected = await store.insertLinkWithHistory({ id: rejectedLinkId, interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, now + 1);
     assert.equal(rejected, null, `[${label}] a second link for an already-enrolled interaction must be rejected`);
     const strayHistory = await store.getHistory(rejectedLinkId, 0);
     assert.equal(strayHistory, null, `[${label}] a rejected insertLinkWithHistory call must leave NO orphaned history row for the link id it failed to create`);

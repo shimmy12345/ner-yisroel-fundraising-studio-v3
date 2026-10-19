@@ -76,9 +76,9 @@ async function run() {
     {
       const interactionId = uniqueId("int-dup");
       await seedInteraction(db, { interactionId });
-      const first = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      const first = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
       assert.ok(first, "the first insert for a meeting must succeed against real D1");
-      const second = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      const second = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
       assert.equal(second, null, "a second link row for the SAME interaction must be rejected by real D1's own UNIQUE(interaction_id) index, not merely by an application-level check");
       const { results: afterRows } = await db.prepare("SELECT COUNT(*) AS n FROM calendar_event_links WHERE interaction_id = ?").bind(interactionId).all();
       assert.equal(afterRows[0].n, 1, "exactly one link row must exist, enforced by the real D1 schema itself");
@@ -115,11 +115,11 @@ async function run() {
     {
       const interactionId = uniqueId("int-rollback");
       await seedInteraction(db, { interactionId });
-      const enrolled = await store.insertLinkWithHistory({ id: uniqueId("link-rollback-original"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      const enrolled = await store.insertLinkWithHistory({ id: uniqueId("link-rollback-original"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
       assert.ok(enrolled, "setup: the first enrollment must succeed");
 
       const secondLinkId = uniqueId("link-rollback-second");
-      const result = await store.insertLinkWithHistory({ id: secondLinkId, interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      const result = await store.insertLinkWithHistory({ id: secondLinkId, interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
       assert.equal(result, null, "insertLinkWithHistory must report failure when its own link half cannot be written (a second enrollment for an already-enrolled interaction)");
       const linkRow = await store.getLinkById(secondLinkId);
       assert.equal(linkRow, null, "the rejected second link row must not exist");
@@ -135,14 +135,14 @@ async function run() {
     {
       const interactionId = uniqueId("int-lease");
       await seedInteraction(db, { interactionId });
-      const link = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      const link = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
 
       const acquiredA = await store.acquireLease(link.id, "worker-A", NOW, 60);
       assert.equal(acquiredA, true);
       const acquiredB = await store.acquireLease(link.id, "worker-B", NOW, 60);
       assert.equal(acquiredB, false, "a second lease acquisition while the first is still valid must fail against real D1");
 
-      const stolenWrite = await store.updateLinkAsLeaseHolder(link.id, "worker-B", { syncStatus: "synced" });
+      const stolenWrite = await store.updateLinkAsLeaseHolder(link.id, "worker-B", NOW, { syncStatus: "synced" });
       assert.equal(stolenWrite, false, "a non-lease-holder's write must never land, enforced by real D1's own WHERE clause");
       const stillPending = await store.getLinkById(link.id);
       assert.equal(stillPending.syncStatus, "pending");
@@ -168,7 +168,7 @@ async function run() {
     {
       const interactionId = uniqueId("int-intent");
       await seedInteraction(db, { interactionId });
-      const link = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      const link = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
       await store.acquireLease(link.id, "some-other-worker", NOW, 600);
       const ok = await store.writeIntent(link.id, { desiredRevision: 2, updatedAt: NOW + 1 });
       assert.equal(ok, true, "a durable intent write must succeed against real D1 even while a sync attempt holds the lease");
@@ -379,6 +379,97 @@ async function run() {
       assert.deepEqual(outcomes, ["lease_contended", "synced"], "exactly one of two truly concurrent reconcile attempts against real D1 must win the lease and sync; the other must report lease_contended, never both succeeding or both failing");
       const eventId = deriveGoogleEventId(interactionId, 0);
       assert.deepEqual(client.activeEventIds("primary"), [eventId], "exactly one real event must exist -- the real D1 lease CAS must have prevented a double-create under genuine concurrency");
+    }
+
+    // =======================================================================
+    // 2026-10-19 independent review, issue 3: lease EXPIRY enforcement
+    // against REAL D1, not just ownership -- updateLinkAsLeaseHolder's
+    // original WHERE clause checked `lease_owner = ?` alone; an expired
+    // worker's write could still land as long as no one else had yet
+    // re-acquired the lease. `lease_expires_at > ?` is a real SQL guard
+    // here, not application-level bookkeeping.
+    // =======================================================================
+    {
+      const interactionId = uniqueId("int-d1-lease-expiry");
+      await seedInteraction(db, { interactionId });
+      const link = await store.insertLink({ id: uniqueId("link"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
+      await store.acquireLease(link.id, "worker-A", NOW, 60); // expires at NOW+60
+
+      const staleWrite = await store.updateLinkAsLeaseHolder(link.id, "worker-A", NOW + 61, { syncStatus: "synced" });
+      assert.equal(staleWrite, false, "an EXPIRED lease holder's write must be rejected against real D1, even when no one else has acquired the lease yet");
+      const unchanged = await store.getLinkById(link.id);
+      assert.equal(unchanged.syncStatus, "pending", "the rejected write must not have landed against real D1");
+
+      // A non-expired holder's own write must still succeed.
+      const validWrite = await store.updateLinkAsLeaseHolder(link.id, "worker-A", NOW + 30, { syncStatus: "synced", syncedRevision: 1 });
+      assert.equal(validWrite, true, "a non-expired lease holder's write must still succeed against real D1");
+    }
+
+    // =======================================================================
+    // 2026-10-19 independent review, issue 2: bounded backoff and
+    // invalid/auth_required exclusion in listNeedingReconciliation,
+    // against REAL D1 -- the SQL's own NOT IN / next_retry_at filtering,
+    // not application-level filtering.
+    // =======================================================================
+    {
+      const interactionId = uniqueId("int-d1-backoff-exclusion");
+      await seedInteraction(db, { interactionId });
+      const client = new ScriptedCalendarClient();
+      const eventId = deriveGoogleEventId(interactionId, 0);
+      const getFields = async () => makeFields(interactionId);
+
+      await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
+      client.enqueueValue("get", eventId, err404());
+      client.enqueueValue("insert", eventId, { ok: false, status: "error", errorClass: "server_error" });
+      const outcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
+      assert.equal(outcome.kind, "failed");
+      const link = await store.getLinkByInteraction(interactionId);
+      assert.ok(link.nextRetryAt !== null && link.nextRetryAt > NOW + 1, "a transient failure must schedule a future backoff retry time against real D1");
+
+      const tooSoon = await store.listNeedingReconciliation(link.nextRetryAt - 1);
+      assert.ok(!tooSoon.some((l) => l.id === link.id), "real D1's own listNeedingReconciliation must exclude a 'failed' link before its nextRetryAt");
+      const readyNow = await store.listNeedingReconciliation(link.nextRetryAt);
+      assert.ok(readyNow.some((l) => l.id === link.id), "real D1's own listNeedingReconciliation must include a 'failed' link at/after its nextRetryAt");
+
+      // Now permanently reject it (a real Google 400) and confirm
+      // 'invalid' is excluded regardless of next_retry_at.
+      client.enqueueValue("get", eventId, err404());
+      client.enqueueValue("insert", eventId, { ok: false, status: 400 });
+      const invalidOutcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 2);
+      assert.equal(invalidOutcome.kind, "invalid");
+      const afterInvalid = await store.listNeedingReconciliation(NOW + 999_999);
+      assert.ok(!afterInvalid.some((l) => l.id === link.id), "real D1's own listNeedingReconciliation must exclude an 'invalid' link at any future time, with no automatic path back in");
+
+      // recordReschedule resumes it.
+      await recordReschedule(store, NOW + 3, interactionId);
+      const afterReschedule = await store.getLinkByInteraction(interactionId);
+      assert.equal(afterReschedule.syncStatus, "pending", "recordReschedule must resume an 'invalid' link against real D1");
+    }
+
+    // =======================================================================
+    // 2026-10-19 independent review: operational database failures must
+    // never be silently treated as the UNIQUE(interaction_id) conflict.
+    // insertLink's own isUniqueConstraintViolation() regex must NOT match
+    // a structurally DIFFERENT real D1 error -- a FOREIGN KEY violation
+    // (migration 0048's `interaction_id REFERENCES interactions(id)`),
+    // triggered here via a bogus, nonexistent interactionId -- and must
+    // RETHROW it rather than returning null (which insertLinkWithHistory's
+    // own caller, enrollMeetingForSync, would otherwise silently
+    // misreport as "already enrolled").
+    // =======================================================================
+    {
+      const bogusInteractionId = uniqueId("int-does-not-exist-fk-violation");
+      let threw = false;
+      let caughtMessage = "";
+      try {
+        await store.insertLink({ id: uniqueId("link"), interactionId: bogusInteractionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null, nextRetryAt: null }, NOW);
+      } catch (error) {
+        threw = true;
+        caughtMessage = error.message;
+      }
+      assert.ok(threw, "a genuine, non-conflict database failure (FOREIGN KEY on a nonexistent interaction_id) must propagate as a real failure against real D1, never be silently swallowed as null");
+      assert.ok(!/UNIQUE constraint failed/i.test(caughtMessage), "a real FOREIGN KEY violation's own error text must never be misdetected as the UNIQUE(interaction_id) backstop -- an operational failure must never be silently reported as 'already exists'");
+      assert.match(caughtMessage, /FOREIGN KEY/i, "sanity: confirm this really is a foreign-key failure, not some other unrelated error");
     }
 
     process.stdout.write("calendar-d1-store.test.mjs: all assertions passed against a REAL local D1 binding\n");
