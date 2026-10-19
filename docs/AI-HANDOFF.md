@@ -56083,3 +56083,36 @@ No Production deploy, migration, credential change, or merge into `main`. No don
 ### Not done, and not authorized
 
 No Production mutation, deployment, migration, or credential change. No donor/meeting/pledge/payment record touched. Calendar-integration work remains fully paused. **Stopping here until the owner can capture one of the two forms of direct evidence above.**
+
+## 2026-10-19 (closing this round): deployed-client review confirms a refresh failure cannot explain the reported error; live capture armed and exercised once more, clean; investigation paused, UNCONFIRMED
+
+**Scope of this round**: reviewed the actually-deployed client code (`git show a0ccb2f:app/travel-planning/[id]/TripDashboardExperience.tsx`, the same confirmed-deployed commit as the prior correction) to check whether a failed page-data refresh, following a successful save, could produce the error banner the owner described. Then re-armed live, read-only network capture (a pass-through `window.fetch` wrapper logging URL path, method, timestamp, duration, status, and the `cf-ray` response header -- never altering any request/response) on the owner's own authenticated tab, and asked the owner to reproduce their next real action in it.
+
+### Deployed-client review: a refresh failure cannot produce the displayed error banner
+
+In the actually-deployed `TripDashboardExperience.tsx` (commit `a0ccb2f`, confirmed in the prior entry to be what's live):
+- `function refresh() { router.refresh(); }` -- called, but **never awaited**, inside `withBusy()`: `try { await action(); refresh(); } catch (caught) { setError(...) }`.
+- Because `refresh()` isn't awaited, a rejection from `router.refresh()`'s own internal page-data fetch cannot reach this `catch` block -- it is architecturally impossible for a failed refresh to populate `error` state through this path.
+- The ONE place this component renders a visible error banner (`{error && <p className="travel-planning-error" role="alert">{error}</p>}`, line 197) only ever reflects a thrown error from the mutating `fetch()` call itself (the `PATCH`/`POST`/`DELETE` in `patchProspect`/`addDonor`/`removeDonor`), never from the background page-refresh.
+- **Conclusion, corrected from two rounds ago**: the "a failed refresh gets misreported as a failed save" theory is also retracted. If the owner's banner literally read "Failed to fetch" (the browser's native message for a connection-level `fetch()` failure, not a non-2xx HTTP response), it can only have come from the mutating request itself failing at the network layer -- not from the separate, already-observed `.rsc` revalidation 503.
+
+### Live capture: armed, exercised once, clean -- no failure this round
+
+A sanitized, pass-through `window.fetch` wrapper was installed on the owner's own tab (already on the Teaneck trip page) logging path/method/timestamp/duration/status/`cf-ray` for every request, without altering any request or response. The owner performed one real status change in that tab. Captured, in full:
+
+| Request | Status | Duration | `cf-ray` |
+|---|---|---|---|
+| `PATCH /api/trips/.../prospects/c4fa1668-...` | 200 | 795ms | `a4d27d63ece77ba9-EWR` |
+| `GET /travel-planning/....rsc` | 200 | 227ms | `a4d27d688e157ba9-EWR` |
+
+No error banner appeared; the trip's status-count summary updated correctly and consistently (Declined 0->1, Meeting Requested 2->1, 10 prospects total). **This is a healthy baseline, not a reproduction of the reported issue** -- useful for comparison if a future failure is captured the same way, but it does not by itself explain or rule out anything about the original report.
+
+### Current status, per explicit instruction to stop here
+
+**The intermittent "Failed to fetch" issue is NOT currently reproducing.** No cause has been confirmed. No fix has been designed or deployed. The two theories previously proposed in this investigation (a missing `calendar_event_links` table; a failed-refresh misreported as a failed save) have both been **directly disproven** by inspecting the actually-deployed code and are not carried forward as live hypotheses. What remains independently confirmed and still true:
+- Production is the Independent Cloudflare Production Worker `fundraising-os-production` (DB `fundraising-os-production-db`), currently Worker version `6da14108-af5a-4a47-8f83-ba64f210ac6c`, built from commit `a0ccb2f`.
+- A `.rsc` page-revalidation GET was observed returning 503 twice, independently of this round's clean capture -- real and reproducible in isolation, but not established to be the same failure the owner originally reported, and not currently reproducing either.
+- Every status/meeting change checked this investigation (Tabacznik, Gerson, and this round's final change) committed correctly, with no duplicate records and no data corruption found.
+- The exact Cloudflare Workers log path, if ever needed again: `dash.cloudflare.com` -> the account -> **Compute (Workers & Pages)** -> **fundraising-os-production** -> **Logs** tab ("Begin log stream" for live tail), filtered to path `/api/trips/`.
+
+**By explicit instruction, this investigation is paused here.** No Production mutation, deployment, migration, or credential change was made at any point. No donor/meeting/pledge/payment record was touched, created, or modified beyond the owner's own two legitimate, intentional changes (both confirmed correctly committed). Calendar-integration work remains fully paused and is not being resumed. No further action will be taken on this incident unless/until it recurs with capturable evidence, or the owner asks to resume.
