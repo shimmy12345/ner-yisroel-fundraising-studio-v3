@@ -55947,3 +55947,59 @@ POST /repos/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/workflows/3356
 ```
 
 Any of the three will run ONLY the new `diagnose-staging-connection` job (the `verify` job is skipped, and the repair job's own gate additionally refuses to run since `diagnose_connection` is set). Expected visible output on failure: the real HTTP status, Cloudflare API error code (if the response included one), `isGatewayError()`/`isRetryable()`, a sanitized message, and a classification of `likely-permission-or-auth`, `likely-platform-or-session`, or `unclassified` -- that result is the evidence this round's instruction asked for, to decide between a token-permission fix and simply retrying later.
+
+## 2026-10-19 (twelfth follow-up review): the owner dispatched the diagnostic -- confirmed HTTP 403 / Cloudflare error code 10000, a permission/auth rejection, not a platform/session failure; owner steps provided, no action taken on the token
+
+**Scope of this round**: the owner dispatched the new diagnostic mode -- run `39311943280` -- the first real use of it. **Staging remains completely unchanged**: the diagnostic job itself never attempts a backup, write, or scratch database, and both the `verify` and `apply-0049-calendar-schema-repair-staging` jobs on this same run independently confirm `skipped` (via the Actions API), proving the new mutual-exclusion gating worked exactly as designed on a real dispatch, not just in rehearsal. No token permission was changed, no credential was requested or viewed by this agent, no execution mechanism was altered.
+
+### Evidence, inspected directly from the job's own log (job `118263511870`), not assumed
+
+```
+Diagnostic-only mode: attempting target validation (the SAME connection the real repair performs as its own first step), then stopping. No backup export, repair, recovery, or scratch database will be attempted, regardless of outcome.
+Resolving the target database id via the wrangler CLI (d1 info)...
+Reading the live schema via the wrangler CLI (read-only)...
+Opening the real remote Staging D1 binding (getPlatformProxy, remoteBindings: true)...
+⎔ Establishing remote connection...
+✘ [ERROR] A request to the Cloudflare API (/accounts/***/workers/subdomain/edge-preview) failed.
+
+Connection and/or target validation FAILED.
+HTTP status: 403
+Cloudflare API error code: 10000
+isGatewayError(): false
+isRetryable(): false
+Sanitized error message: A request to the Cloudflare API (/accounts/***/workers/subdomain/edge-preview) failed.
+Classification: likely-permission-or-auth -- a 401/403 means the token authenticated but was not allowed to do this specific thing -- consistent with the Workers Scripts permission gap reported in docs/AI-HANDOFF.md's prior round.
+Nothing beyond this read-only connection attempt was performed. Staging is unchanged.
+```
+Both prior read-only steps -- `d1 info` (CLI) and the live schema read (CLI) -- printed no error at all; only the THIRD step, `getPlatformProxy({remoteBindings: true})`'s own internal preview-session call, failed. This matches the existing diagnosis exactly: the token authenticates fine and can do ordinary D1 operations, but is specifically rejected by the separate `edge-preview` endpoint remote bindings depends on.
+
+**What a 403 + code 10000 means here.** Cloudflare's numeric error code `10000` is documented across many Cloudflare API endpoints simply as `"Authentication error"` -- a generic code Cloudflare reuses for several related-but-distinct situations (insufficient permissions, zone/account scope mismatch, IP restrictions, or an invalid/expired token), so the code alone does not pin down which. Combined with the HTTP status (`403`, not `401`) and this specific endpoint, the most consistent reading is: **the token is valid and authenticates successfully (a totally invalid/expired token would far more typically surface as `401`), but lacks a permission this specific endpoint requires** -- i.e. a genuine authorization/scope gap, not a platform or transient-session problem (confirmed structurally too: `isGatewayError()` and `isRetryable()` both report `false`, so retrying later would not plausibly help on its own).
+
+This is now the token's **own, actual, confirmed** result -- no longer "other users' reports," which is exactly the distinction this round's instruction asked the diagnostic to establish.
+
+### Owner steps: inspect the existing token's permissions
+
+This agent has no Cloudflare dashboard access and cannot see which actual Cloudflare token the GitHub secret `CLOUDFLARE_D1_API_TOKEN` maps to -- GitHub secrets are write-only even to the repository owner once saved, so the token's identity and scope can only be checked at its source, in Cloudflare:
+1. Sign in to the Cloudflare dashboard and go to **My Profile -> API Tokens** (`dash.cloudflare.com/profile/api-tokens`) -- or, if this token was created as an account-owned token rather than a user token, **Manage Account -> API Tokens** instead.
+2. Find the token actually in use as the `CLOUDFLARE_D1_API_TOKEN` GitHub secret. If its identity isn't obvious from the token's name, cross-check by its "Last used" timestamp against a recent nightly backup or monthly verify run's timestamp (both already use this same secret successfully).
+3. Click the token's "..." menu -> **Edit** (viewing a token's permissions does not require regenerating it) and review its **Permissions** list.
+4. Specifically check for **Account > Workers Scripts > Edit**. Per the two independent reports already cited in the prior round's entry ([cloudflare/workers-sdk#10091](https://github.com/cloudflare/workers-sdk/issues/10091); a [Cloudflare community thread](https://community.cloudflare.com/t/wrangler-edge-preview-minimum-permissions-free-plan-billing-and-token-revocation/968103)), this is the permission the `edge-preview`/remote-bindings preview-session endpoint needs and that a narrowly D1-scoped token would not plausibly already have. **If it is absent, that is the confirmed cause of this 403.**
+
+### Recommendation: a separate, short-lived repair token -- not a change to the existing backup/verify token
+
+If `Account > Workers Scripts > Edit` is confirmed missing, this agent recommends **against** broadening the existing `CLOUDFLARE_D1_API_TOKEN` in place -- that token is also relied on, successfully and narrowly, by the nightly backup and monthly restore-verification jobs, and broadening it would widen what a leak of that one credential could do across all three jobs for no benefit to those other two. Instead:
+
+- **Create a new, separate Cloudflare API token**, scoped to exactly:
+  - **Account Resources**: Include -> this one specific Cloudflare account only (never "All accounts").
+  - **Permissions**: `Account > D1 > Edit` (same as the existing token needs, for `d1 info`/`d1 execute`/`d1 export`) **plus** `Account > Workers Scripts > Edit` (the newly-required permission).
+  - **Zone Resources**: none needed -- this repair is entirely account-level.
+  - **TTL**: give it a short expiration (e.g. a few weeks), since it only needs to exist for the duration of this repair effort -- "short-lived" per this round's own instruction. A token nearing its TTL can simply be reissued if more time is needed; the expiration date only limits the *window* a leaked credential would remain useful, it does not limit how many times the token can be used within that window.
+  - **Client IP Address Filtering**: optional. GitHub-hosted Actions runners use a large, changing IP range, so this is not usually practical to restrict for a GitHub-Actions-only token; most owners skip it for this reason.
+- **Install it as its own, distinctly-named GitHub Actions secret** -- e.g. `CLOUDFLARE_D1_REPAIR_TOKEN` -- via this repository's **Settings -> Secrets and variables -> Actions -> New repository secret**, rather than overwriting the existing `CLOUDFLARE_D1_API_TOKEN` secret. (A GitHub **Environment** secret, tied to a protected environment that requires a manual approval step before a job can use it, is also worth considering as an extra gate, though not required.) Keeping it a separate secret name means the nightly backup and monthly verify jobs keep using the existing, narrower, already-proven token completely unchanged -- only the repair and diagnostic jobs would ever reference the new one.
+- Once that new secret exists, wiring the `apply-0049-calendar-schema-repair-staging` and `diagnose-staging-connection` jobs' `CLOUDFLARE_API_TOKEN` env to reference it (in place of the current `secrets.CLOUDFLARE_D1_API_TOKEN`) is a small, mechanical workflow edit -- **not made this round**, since the token does not exist yet and this round's instruction was explicitly to recommend, not to request or change any credential. This agent will make that wiring change only on explicit future instruction, after the owner confirms the new token exists and its intended secret name.
+
+**No token was requested in chat. No permission was changed. No credential was viewed or substituted by this agent.**
+
+### Not done, and not authorized beyond this report
+
+**No further repair dispatch, by this agent or otherwise recommended, until authorization is resolved and a diagnostic connection succeeds.** The diagnostic mode remains available to re-run (same instructions as above) once/if a new token is provisioned and wired in by the owner, to confirm the fix before ever attempting the repair job again. Staging is unchanged; no recovery action was needed or taken.
