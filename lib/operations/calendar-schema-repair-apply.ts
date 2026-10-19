@@ -18,6 +18,80 @@ export class PhaseError extends Error {
 
 export type Row = Record<string, unknown>;
 
+// Confirmed in wrangler 4.92.0's own source (src/parse.ts's `APIError`
+// class): a failed Cloudflare API call already carries `.status` (the
+// real HTTP status code) and `.code` (Cloudflare's own numeric API
+// error code, when the response included one), plus `isGatewayError()`/
+// `isRetryable()` helpers wrangler itself uses to tell a platform/
+// gateway problem (524, any 5xx) apart from anything else (4xx --
+// typically auth/permission/not-found). This is ALREADY-EXISTING
+// diagnostic output, not new instrumentation added to wrangler: the
+// values are already sitting on the error object every such failure
+// throws; the only gap was that this repair's own error reporting
+// (describeFailure()) only ever printed `.message`, never these fields.
+export type SanitizedApiErrorDetails = {
+  status?: number;
+  code?: number | string;
+  isGatewayError?: boolean;
+  isRetryable?: boolean;
+  message: string;
+};
+
+// Duck-types an APIError-shaped object without importing wrangler's own
+// class (this module stays dependency-free and offline-testable): any
+// object with a numeric `.status` is treated as carrying real HTTP/API
+// diagnostic detail. Deliberately extracts ONLY this fixed, known-safe
+// field list -- never the object's own `.accountTag` (an account
+// identifier wrangler itself redacts as `***` when it prints this same
+// error to the console), never any header, token, or stack trace that
+// could carry a request's own `Authorization` value.
+function sanitizedApiErrorDetailsFrom(candidate: unknown): SanitizedApiErrorDetails | null {
+  if (!candidate || typeof candidate !== "object") return null;
+  const value = candidate as Record<string, unknown>;
+  if (typeof value.status !== "number") return null;
+  const details: SanitizedApiErrorDetails = { status: value.status, message: String((value as { message?: unknown }).message ?? "") };
+  if (typeof value.code === "number" || typeof value.code === "string") details.code = value.code;
+  if (typeof (value as { isGatewayError?: unknown }).isGatewayError === "function") {
+    try { details.isGatewayError = Boolean((value.isGatewayError as () => unknown).call(value)); } catch { /* best-effort only */ }
+  }
+  if (typeof (value as { isRetryable?: unknown }).isRetryable === "function") {
+    try { details.isRetryable = Boolean((value.isRetryable as () => unknown).call(value)); } catch { /* best-effort only */ }
+  }
+  return details;
+}
+
+// Walks an Error's own `.cause` chain (bounded depth -- this repair's
+// own errors are wrapped at most a few levels deep, e.g. PhaseError ->
+// "Failed to start the remote proxy session" -> the real APIError;
+// wrangler's own chains are similarly shallow) looking for the first
+// APIError-shaped object, since the Cloudflare API failure that
+// actually matters is often wrapped by one or two of this repair's own
+// (or wrangler's own) generic "X failed" errors. Returns null if none
+// is found anywhere in the chain -- a real, honest "no structured API
+// error was available" result, never fabricated.
+export function extractApiErrorDetails(error: unknown, maxDepth = 10): SanitizedApiErrorDetails | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < maxDepth && current; depth++) {
+    const details = sanitizedApiErrorDetailsFrom(current);
+    if (details) return details;
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return null;
+}
+
+// Classifies a sanitized API error as most likely a permission/auth
+// problem (4xx -- the token can authenticate but is not allowed to do
+// this specific thing) versus most likely a platform/session problem
+// (5xx, or wrangler's own isGatewayError()/isRetryable()) versus
+// genuinely unclassified (no status was available at all). Never
+// claims certainty beyond what the status code itself implies.
+export function classifyApiErrorDetails(details: SanitizedApiErrorDetails | null): "likely-permission-or-auth" | "likely-platform-or-session" | "unclassified" {
+  if (!details || typeof details.status !== "number") return "unclassified";
+  if (details.isGatewayError || details.isRetryable || details.status >= 500) return "likely-platform-or-session";
+  if (details.status === 401 || details.status === 403) return "likely-permission-or-auth";
+  return "unclassified";
+}
+
 // A real dispatched run (39301756858) found that `getPlatformProxy({
 // remoteBindings: true})` can fail its own internal remote-proxy-session
 // startup (wrangler's own error: "Failed to start the remote proxy

@@ -11,6 +11,8 @@ import {
   retainBackupSecurely,
   applyRepairBatchGuardedByRetention,
   withStartupTimeout,
+  extractApiErrorDetails,
+  classifyApiErrorDetails,
   describeFailure,
 } from "../lib/operations/calendar-schema-repair-apply.ts";
 
@@ -353,5 +355,75 @@ test("withStartupTimeout rejects with its OWN message if the promise never settl
     () => withStartupTimeout(neverSettles, 20, "timed out waiting for the remote session"),
     /timed out waiting for the remote session/,
   );
+});
+
+// =============================================================================
+// extractApiErrorDetails() / classifyApiErrorDetails() -- diagnostic-only
+// mode support. Shaped to mimic wrangler 4.92.0's own real APIError
+// class exactly (status getter, code, isGatewayError()/isRetryable()
+// methods, accountTag) so these tests prove both that the real,
+// already-existing fields are extracted AND that `.accountTag` (an
+// account identifier, not a secret, but never printed by this repair's
+// own diagnostics either) is never included in the result.
+// =============================================================================
+
+class FakeApiError extends Error {
+  constructor(message, { status, code, accountTag, gatewayStatuses = [524] } = {}) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.accountTag = accountTag;
+    this._gatewayStatuses = gatewayStatuses;
+  }
+  isGatewayError() { return this._gatewayStatuses.includes(this.status); }
+  isRetryable() { return String(this.status).startsWith("5"); }
+}
+
+test("extractApiErrorDetails finds a top-level APIError-shaped object and extracts only the known-safe fields", () => {
+  const error = new FakeApiError("A request to the Cloudflare API (/accounts/abc123/workers/subdomain/edge-preview) failed.", { status: 403, code: 10000, accountTag: "abc123" });
+  const details = extractApiErrorDetails(error);
+  assert.deepEqual(details, { status: 403, code: 10000, isGatewayError: false, isRetryable: false, message: error.message });
+  assert.ok(!("accountTag" in details), "accountTag must never be included in the extracted details");
+});
+
+test("extractApiErrorDetails walks the .cause chain to find a wrapped APIError", () => {
+  const apiError = new FakeApiError("A request to the Cloudflare API (/accounts/***/workers/subdomain/edge-preview) failed.", { status: 524 });
+  const wrapped = new Error("Failed to start the remote proxy session. There is likely additional logging output above.", { cause: apiError });
+  const outer = new PhaseError("target-validation", wrapped.message, { cause: wrapped });
+  const details = extractApiErrorDetails(outer);
+  assert.equal(details.status, 524);
+  assert.equal(details.isGatewayError, true);
+});
+
+test("extractApiErrorDetails returns null when no object in the chain has a numeric status -- never fabricates a result", () => {
+  const plain = new Error("something else entirely");
+  assert.equal(extractApiErrorDetails(plain), null);
+  assert.equal(extractApiErrorDetails(new PhaseError("target-validation", "x", { cause: plain })), null);
+  assert.equal(extractApiErrorDetails(null), null);
+  assert.equal(extractApiErrorDetails("a bare string, not an Error at all"), null);
+});
+
+test("extractApiErrorDetails is bounded and never loops forever on a cyclic .cause chain", () => {
+  const a = new Error("a");
+  const b = new Error("b", { cause: a });
+  a.cause = b;
+  assert.equal(extractApiErrorDetails(a), null);
+});
+
+test("classifyApiErrorDetails calls a 401/403 likely-permission-or-auth", () => {
+  assert.equal(classifyApiErrorDetails({ status: 403, message: "" }), "likely-permission-or-auth");
+  assert.equal(classifyApiErrorDetails({ status: 401, message: "" }), "likely-permission-or-auth");
+});
+
+test("classifyApiErrorDetails calls a 5xx, a 524, or isRetryable likely-platform-or-session", () => {
+  assert.equal(classifyApiErrorDetails({ status: 500, message: "" }), "likely-platform-or-session");
+  assert.equal(classifyApiErrorDetails({ status: 524, isGatewayError: true, message: "" }), "likely-platform-or-session");
+  assert.equal(classifyApiErrorDetails({ status: 409, isRetryable: true, message: "" }), "likely-platform-or-session");
+});
+
+test("classifyApiErrorDetails calls anything else (including null, or a status outside 4xx/5xx) unclassified -- never guesses", () => {
+  assert.equal(classifyApiErrorDetails(null), "unclassified");
+  assert.equal(classifyApiErrorDetails({ status: 404, message: "" }), "unclassified");
+  assert.equal(classifyApiErrorDetails({ message: "" }), "unclassified");
 });
 
