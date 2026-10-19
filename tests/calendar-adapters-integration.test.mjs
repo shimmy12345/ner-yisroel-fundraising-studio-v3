@@ -51,14 +51,17 @@ async function run() {
 
       await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
 
-      // GET 404 (never created), then the real INSERT.
+      // GET 404 (never created), then the real INSERT. The client caches
+      // its OAuth token per instance (getAccessToken() only re-fetches
+      // once the cached one is near expiry) -- this ONE token response is
+      // the only one needed for every real API call this whole block
+      // makes (create, reschedule, cancel), never one per call.
       transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(404, {}));
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(201, { id: eventId, summary: "x", description: "y", start: fields2start(fields), end: fields2end(fields), extendedProperties: { private: { fosManagedEventId: eventId } }, etag: "\"etag-1\"" }));
       const createOutcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
       assert.equal(createOutcome.kind, "synced");
-      const insertCall = transport.calls.find((c) => c.init.method === "POST");
+      const insertCall = transport.calls.find((c) => c.init.method === "POST" && c.url.includes("/calendar/v3/"));
       const insertedBody = JSON.parse(insertCall.init.body);
       assert.deepEqual(insertedBody.start, { dateTime: new Date(fields.occurredAt * 1000).toISOString(), timeZone: "America/Chicago" }, "a timed meeting's explicit timezone must be sent exactly as recorded");
       assert.equal(insertedBody.location, "123 Main St");
@@ -67,9 +70,7 @@ async function run() {
       // location-clearing fix targets.
       fields = { ...fields, location: null };
       await recordReschedule(store, NOW + 2, interactionId);
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(200, { id: eventId, summary: "old", description: "old", location: "123 Main St", start: fields2start({ ...fields, location: "123 Main St" }), end: fields2end(fields), etag: "\"etag-1\"", htmlLink: "https://calendar.google.com/x", extendedProperties: { private: { fosManagedEventId: eventId } } }));
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(200, { id: eventId, summary: "x", description: "y", location: "", start: fields2start(fields), end: fields2end(fields), etag: "\"etag-2\"", extendedProperties: { private: { fosManagedEventId: eventId } } }));
       const rescheduleOutcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 3);
       assert.equal(rescheduleOutcome.kind, "synced");
@@ -80,7 +81,6 @@ async function run() {
 
       // Cancel -> the real DELETE (via its own internal verifying GET).
       await recordCancel(store, NOW + 4, interactionId);
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(200, { id: eventId, summary: "x", description: "y", start: fields2start(fields), end: fields2end(fields), etag: "\"etag-2\"", extendedProperties: { private: { fosManagedEventId: eventId } } }));
       transport.enqueue(jsonResponse(204, {}));
       const deleteOutcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 5);
@@ -101,13 +101,12 @@ async function run() {
       const getFields = async () => fields;
 
       await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
-      transport.enqueue(tokenResponse());
+      transport.enqueue(tokenResponse()); // one cached token for this client covers both calls below
       transport.enqueue(jsonResponse(404, {}));
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(201, { id: eventId, summary: "x", description: "y", start: { date: "2026-03-05" }, end: { date: "2026-03-06" }, extendedProperties: { private: { fosManagedEventId: eventId } }, etag: "\"e\"" }));
       const outcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
       assert.equal(outcome.kind, "synced");
-      const insertCall = transport.calls.find((c) => c.init.method === "POST");
+      const insertCall = transport.calls.find((c) => c.init.method === "POST" && c.url.includes("/calendar/v3/"));
       const body = JSON.parse(insertCall.init.body);
       assert.deepEqual(body.start, { date: "2026-03-05" });
       assert.deepEqual(body.end, { date: "2026-03-06" }, "an all-day event's exclusive end must be exactly start + 1 calendar day");
@@ -129,9 +128,8 @@ async function run() {
       const getFields = async () => fields;
 
       await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
-      transport.enqueue(tokenResponse());
+      transport.enqueue(tokenResponse()); // one cached token for this client covers every call below, including the retry
       transport.enqueue(jsonResponse(404, {}));
-      transport.enqueue(tokenResponse());
       transport.enqueue({ throwAbort: true }); // the create attempt times out
       const failedOutcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
       assert.equal(failedOutcome.kind, "failed");
@@ -141,9 +139,7 @@ async function run() {
 
       // Retry, against the real D1 store + real client: GET still 404
       // (the timed-out insert never actually landed), INSERT succeeds.
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(404, {}));
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(201, { id: eventId, summary: "x", description: "y", start: { date: "2026-03-05" }, end: { date: "2026-03-06" }, extendedProperties: { private: { fosManagedEventId: eventId } }, etag: "\"e\"" }));
       const retryOutcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 2);
       assert.equal(retryOutcome.kind, "synced");
@@ -174,9 +170,8 @@ async function run() {
 
       const getFields = async () => invalidFields;
       await enrollMeetingForSync(store, NOW, { interactionId, userId: "u1", googleCalendarId: "primary" });
-      transport.enqueue(tokenResponse());
+      transport.enqueue(tokenResponse()); // one cached token for this client covers both calls below
       transport.enqueue(jsonResponse(404, {}));
-      transport.enqueue(tokenResponse());
       transport.enqueue(jsonResponse(400, { error: { message: "end.dateTime must be after start.dateTime" } })); // a REAL Google 400 for this invalid payload
       const outcome = await reconcilePresentAbsent(store, client, getFields, interactionId, "w1", NOW + 1);
       assert.equal(outcome.kind, "failed");
