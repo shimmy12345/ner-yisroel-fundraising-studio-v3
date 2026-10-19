@@ -53505,6 +53505,19 @@ Settings wiring; no OAuth client registered; no real credential or var
 set on any environment; no live Google API call; no remote migration;
 no cron activated; no deployment; nothing merged into `main`.
 
+**Owner-scope audit (confirmed, no change needed)**: checked whether
+the D1 adapter enforces authenticated owner scope any differently from
+the SQLite/in-memory reference stores at this layer -- it does not,
+consistently across all three: `userId` is stored on every link row at
+insert time (identically, in all three stores) but no read/update/
+lease method in the `CalendarLinkStore` interface filters by it;
+"owner scope" is structurally the caller's responsibility, resolving
+the correct link via `interactionId` (itself scoped to a user via
+`interactions.user_id`, enforced at the schema/route layer this phase
+never reaches, since no routes exist yet). No divergence found between
+D1 and the reference stores -- confirmed via direct source comparison,
+not merely by reading D1-calendar-store.ts in isolation.
+
 **What this round does NOT resolve**: the `extendedProperties.private`
 ownership-tag design still only verifies the event's own id against
 itself (never a caller-supplied expected `interactionId`/`generation`,
