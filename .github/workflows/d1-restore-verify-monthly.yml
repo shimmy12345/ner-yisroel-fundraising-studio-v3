@@ -98,20 +98,25 @@ on:
     # never before it.
     - cron: "0 9 1 * *"
   workflow_dispatch:
-    # confirm_repair gates the SEPARATE, narrowly-scoped
-    # apply-0049-calendar-schema-repair-staging job below -- see that
-    # job's own header comment for the full explanation. Left blank (the
-    # default), a manual dispatch behaves exactly like before: the
-    # ordinary `verify` job below runs, nothing else does. This input is
-    # WORKING-BRANCH-ONLY: main's own copy of this file does not have it
-    # at all -- it exists only so this file's own `workflow_dispatch`
-    # registration on main (required for ANY manual dispatch of this
-    # workflow, including this one) can be dispatched with `ref:
+    # confirm_repair and diagnose_connection each gate their own SEPARATE,
+    # narrowly-scoped job below -- see those jobs' own header comments
+    # for the full explanation. Left blank (the default), a manual
+    # dispatch behaves exactly like before: the ordinary `verify` job
+    # below runs, nothing else does. Both inputs are WORKING-BRANCH-ONLY:
+    # main's own copy of this file does not have them at all -- they
+    # exist only so this file's own `workflow_dispatch` registration on
+    # main (required for ANY manual dispatch of this workflow, including
+    # this one) can be dispatched with `ref:
     # feature/independent-cloudflare-sandbox` to run THIS branch's
     # version of the file, which is what actually executes.
     inputs:
       confirm_repair:
         description: 'Leave blank for the normal monthly restore verification. To instead run the gated, one-off drizzle/pending-review/0049 Calendar schema repair against Staging, type exactly: APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING'
+        required: false
+        default: ""
+        type: string
+      diagnose_connection:
+        description: 'Leave blank for the normal monthly restore verification. To instead run the gated, read-only diagnostic that attempts the Staging target-validation connection and reports the resulting Cloudflare HTTP status/error code -- without ever reaching backup, repair, recovery, or scratch-database creation -- type exactly: DIAGNOSE-STAGING-CONNECTION'
         required: false
         default: ""
         type: string
@@ -130,12 +135,17 @@ env:
 jobs:
   verify:
     # Runs for the normal schedule trigger and for an ordinary manual
-    # dispatch (confirm_repair left blank). Skipped entirely -- including
-    # its own status-publishing step, since a skipped job runs none of
-    # its steps regardless of any step-level `if: always()` -- when this
-    # dispatch is in repair-confirm mode, so the two can never run
-    # together in the same workflow run.
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.confirm_repair != 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING'
+    # dispatch (confirm_repair and diagnose_connection both left blank).
+    # Skipped entirely -- including its own status-publishing step,
+    # since a skipped job runs none of its steps regardless of any
+    # step-level `if: always()` -- when this dispatch is in repair-
+    # confirm mode OR diagnose-connection mode, so none of this job and
+    # the two jobs below it can ever run together in the same workflow
+    # run.
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (github.event.inputs.confirm_repair != 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING' &&
+       github.event.inputs.diagnose_connection != 'DIAGNOSE-STAGING-CONNECTION')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -372,6 +382,13 @@ jobs:
   #      `main`, even though main's own copy of this file has no
   #      `confirm_repair` input to supply in the first place (defense in
   #      depth: this condition alone would already block it).
+  # A fourth condition fails this job CLOSED, toward the strictly safer
+  # diagnostic-only path, if `diagnose_connection` was ALSO supplied on
+  # the same dispatch (an operator mistake, e.g. filling in both inputs):
+  # this job simply does not run in that case, rather than guessing which
+  # one was intended. See the diagnose-staging-connection job below,
+  # which has no such reciprocal condition -- a read-only diagnostic is
+  # safe to run regardless of what else was filled in.
   # `actions/checkout` below additionally pins to the EXACT independently
   # reviewed commit SHA (never a branch name, which could move) -- so a
   # later push to this branch can never silently change what a future
@@ -393,6 +410,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.event.inputs.confirm_repair == 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING' &&
+      github.event.inputs.diagnose_connection != 'DIAGNOSE-STAGING-CONNECTION' &&
       github.ref == 'refs/heads/feature/independent-cloudflare-sandbox'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -400,18 +418,24 @@ jobs:
       # Pinned to the EXACT commit this repair, this script, and this
       # workflow job were all independently reviewed at -- see this
       # job's own header comment for why a branch name is not used here.
-      # Re-pinned three times already: 4dd1474 -> c2e7c205 (a real
+      # Re-pinned four times already: 4dd1474 -> c2e7c205 (a real
       # backup-retention bug) -> 7fa3abe7 (a real `d1 info` CLI-argument
-      # bug) -> this commit (run 39301756858 hung for ~21 minutes after
-      # a failed getPlatformProxy() remote-session startup, until
-      # GitHub's own 20-minute job-level timeout cancelled it -- fixed
-      # with a bounded startup timeout and a forced process.exit(); see
-      # docs/AI-HANDOFF.md for the full diagnosis). Re-pin again,
-      # deliberately, if a newer, re-reviewed commit should be used.
+      # bug) -> c208a25 (run 39301756858 hung for ~21 minutes after a
+      # failed getPlatformProxy() remote-session startup, until GitHub's
+      # own 20-minute job-level timeout cancelled it -- fixed with a
+      # bounded startup timeout and a forced process.exit()) -> this
+      # commit (no change to this job's own repair logic -- re-pinned
+      # only because the same commit also added the separate,
+      # read-only diagnose-staging-connection job below, which needed
+      # extractApiErrorDetails()/classifyApiErrorDetails() added to
+      # lib/operations/calendar-schema-repair-apply.ts; see
+      # docs/AI-HANDOFF.md for the full diagnosis history). Re-pin
+      # again, deliberately, if a newer, re-reviewed commit should be
+      # used.
       - name: Checkout the exact independently reviewed repair commit
         uses: actions/checkout@v4
         with:
-          ref: c208a25856af56dadfd2d375e358257a0519edb8
+          ref: b96223d426245123ed00441adea6a5d928a24df0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -465,4 +489,75 @@ jobs:
           AWS_DEFAULT_REGION: auto
           R2_BACKUP_BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
         run: node scripts/apply-0049-calendar-schema-repair-staging.mjs
+  # =========================================================================
+
+  # ===========================================================================
+  # WORKING-BRANCH-ONLY addition (feature/independent-cloudflare-sandbox) --
+  # NOT present on main. Bounded, READ-ONLY diagnostic: attempts ONLY the
+  # same target-validation connection the repair job above performs as its
+  # own first step (scripts/diagnose-staging-connection.mjs calls the
+  # EXACT, unmodified connectAndValidateStagingTarget() from
+  # scripts/lib/staging-repair-connect.mjs -- the same two independent
+  # paths, the same existing credentials, the same execution mechanism),
+  # then stops. It NEVER installs the AWS CLI, is NEVER given the backup
+  # write credential or the backup-encryption passphrase, and the script
+  # it runs never calls wrangler d1 export, never applies the repair batch,
+  # never runs the recovery script, and never creates a scratch D1
+  # database -- see that script's own header for the full explanation.
+  # Exists to capture the real Cloudflare HTTP status / API error code /
+  # sanitized error message from an actual connection attempt (via
+  # lib/operations/calendar-schema-repair-apply.ts's
+  # extractApiErrorDetails()/classifyApiErrorDetails(), which only surface
+  # fields wrangler's own APIError objects already carry -- no new
+  # instrumentation into wrangler), to distinguish a permission/auth
+  # rejection (401/403) from a platform/session failure (5xx/gateway/
+  # retryable) before deciding any remedy.
+  #
+  # Same three-condition gating pattern as the repair job above:
+  #   1. `github.event_name == 'workflow_dispatch'`.
+  #   2. `github.event.inputs.diagnose_connection` must equal the EXACT
+  #      literal string above.
+  #   3. `github.ref == 'refs/heads/feature/independent-cloudflare-sandbox'`.
+  # This job has no reciprocal condition against `confirm_repair` being
+  # also set -- a read-only diagnostic is safe to run no matter what else
+  # was filled in on the same dispatch; it is the REPAIR job (above) that
+  # fails closed when both are supplied together.
+  # `actions/checkout` pins to the same exact commit SHA as the repair job
+  # above, for the same reason (re-pin both together whenever either
+  # changes).
+  diagnose-staging-connection:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.diagnose_connection == 'DIAGNOSE-STAGING-CONNECTION' &&
+      github.ref == 'refs/heads/feature/independent-cloudflare-sandbox'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the exact independently reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: b96223d426245123ed00441adea6a5d928a24df0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.9.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # No AWS CLI, no R2/backup-passphrase secret of any kind -- this
+      # step cannot reach backup, repair, recovery, or scratch-database
+      # creation even if the script it runs were changed to attempt it,
+      # since the credentials for those steps are simply not present in
+      # this job's environment at all.
+      - name: Diagnose the Staging target-validation connection (read-only; stops here regardless of outcome)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/diagnose-staging-connection.mjs
   # =========================================================================

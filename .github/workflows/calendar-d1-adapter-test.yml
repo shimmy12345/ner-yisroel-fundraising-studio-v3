@@ -84,6 +84,7 @@ on:
       - "tests/calendar-schema-repair-apply.test.mjs"
       - "scripts/apply-0049-calendar-schema-repair-staging.mjs"
       - "scripts/recover-0049-calendar-schema-repair-staging.mjs"
+      - "scripts/diagnose-staging-connection.mjs"
       - "scripts/lib/staging-repair-connect.mjs"
       - "tests/staging-repair-connect-args.test.mjs"
       - "scripts/lib/backup-retention.mjs"

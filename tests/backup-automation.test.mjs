@@ -29,7 +29,18 @@ const deployment = await readFile(new URL("../docs/DEPLOYMENT.md", import.meta.u
 const monthlyJobMarker = "  # WORKING-BRANCH-ONLY addition (feature/independent-cloudflare-sandbox)";
 const monthlyHasRepairJob = monthly.includes(monthlyJobMarker);
 const monthlyVerifyJobOnly = monthlyHasRepairJob ? monthly.slice(0, monthly.indexOf(monthlyJobMarker)) : monthly;
-const monthlyRepairJobOnly = monthlyHasRepairJob ? monthly.slice(monthly.indexOf(monthlyJobMarker)) : "";
+// The diagnose-staging-connection job's own header also starts with the
+// same WORKING-BRANCH-ONLY marker text, so it is isolated by its own,
+// more specific "Bounded, READ-ONLY diagnostic" phrase -- this keeps
+// monthlyRepairJobOnly scoped to JUST the repair job (never including the
+// diagnostic job appended after it), so the write-credential assertion
+// below stays as precise as it was before the diagnostic job existed.
+const monthlyDiagnoseJobMarker = "Bounded, READ-ONLY diagnostic";
+const monthlyHasDiagnoseJob = monthly.includes(monthlyDiagnoseJobMarker);
+const monthlyRepairJobOnly = monthlyHasRepairJob
+  ? monthly.slice(monthly.indexOf(monthlyJobMarker), monthlyHasDiagnoseJob ? monthly.indexOf(monthlyDiagnoseJobMarker) : undefined)
+  : "";
+const monthlyDiagnoseJobOnly = monthlyHasDiagnoseJob ? monthly.slice(monthly.indexOf(monthlyDiagnoseJobMarker)) : "";
 
 // --- The deployed Worker must never gain the ability to touch backups --
 // this is the actual, executable proof behind "the deployed application
@@ -188,7 +199,28 @@ if (monthlyHasRepairJob) {
   assert.match(monthlyRepairJobOnly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the apply-0049-calendar-schema-repair-staging job is expected to hold write access, to retain its own repair backups");
   assert.match(monthlyRepairJobOnly, /confirm_repair == 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING'/, "the write-capable repair job must remain gated behind the explicit confirmation input");
   assert.match(monthlyRepairJobOnly, /github\.ref == 'refs\/heads\/feature\/independent-cloudflare-sandbox'/, "the write-capable repair job must remain restricted to this working branch");
+  assert.match(monthlyRepairJobOnly, /diagnose_connection != 'DIAGNOSE-STAGING-CONNECTION'/, "the repair job must fail closed toward the diagnostic-only path if diagnose_connection is also supplied on the same dispatch");
 }
+
+// --- WORKING-BRANCH-ONLY exception, verified explicitly and narrowly:
+// diagnose-staging-connection (a SEPARATE job in the same file, gated
+// independently -- see that job's own header comment) is a bounded,
+// READ-ONLY diagnostic. It must NEVER hold any backup-bucket credential
+// (read or write) or the backup-encryption passphrase -- it has no
+// legitimate reason to touch a backup at all -- and must remain gated
+// behind its own explicit confirmation input and this working branch. ---
+if (monthlyHasDiagnoseJob) {
+  assert.doesNotMatch(monthlyDiagnoseJobOnly, /R2_BACKUP_WRITE_ACCESS_KEY_ID|R2_BACKUP_READ_ACCESS_KEY_ID|BACKUP_ENCRYPTION_PASSPHRASE/, "the diagnose-staging-connection job must never hold any backup-bucket credential or the encryption passphrase");
+  assert.doesNotMatch(monthlyDiagnoseJobOnly, /Install AWS CLI/, "the diagnose-staging-connection job must never install the AWS CLI -- it has no backup object to download or upload");
+  assert.match(monthlyDiagnoseJobOnly, /diagnose_connection == 'DIAGNOSE-STAGING-CONNECTION'/, "the diagnose-staging-connection job must remain gated behind its own explicit confirmation input");
+  assert.match(monthlyDiagnoseJobOnly, /github\.ref == 'refs\/heads\/feature\/independent-cloudflare-sandbox'/, "the diagnose-staging-connection job must remain restricted to this working branch");
+  assert.match(monthlyDiagnoseJobOnly, /diagnose-staging-connection\.mjs/, "the diagnose-staging-connection job must run the dedicated diagnostic script, not reimplement any part of it inline");
+}
+
+// --- The normal monthly verify: job must also be skipped (not merely the
+// repair job) when a dispatch supplies diagnose_connection, so all three
+// jobs stay mutually exclusive on any single workflow run. ---
+assert.match(monthlyVerifyJobOnly, /diagnose_connection != 'DIAGNOSE-STAGING-CONNECTION'/, "the ordinary verify: job must also be skipped when diagnose_connection is supplied on a manual dispatch");
 // The real download/decrypt/restore/verify steps still fail the job on any
 // real problem -- only the identity-lookup and final status-publish steps
 // may swallow their own failure (the identity-lookup step's own
