@@ -55154,3 +55154,196 @@ both corrected, both re-rehearsed, now green against a real local D1 on
 Linux CI with synthetic data covering every link/generation/cleanup/sync
 state this repair needs to handle correctly. A concrete, step-by-step
 Staging application script exists, is committed, and has never been run.
+
+## 2026-10-19 (sixth follow-up review): independent review of the Staging application/recovery procedure caught a real bug before any remote mutation -- fixed, target-validated, recovery rehearsed, failure injection strengthened; repair SQL itself unchanged; nothing applied
+
+**Scope of this round**: an independent review of the previous round's
+`scripts/apply-0049-calendar-schema-repair-staging.mjs` and its own
+rollback-test coverage -- explicitly NOT the repair SQL itself, which the
+review's own instruction said to keep unchanged "unless a test exposes a
+concrete defect." None did. **No remote repair, no remote scratch
+database creation, no deployment, no Production change, no credentials
+used for actual remote execution, no OAuth, no live Google calls, no
+email changes, no cron activation, no merge into `main` this round.**
+
+### The headline finding: the apply script's own remote binding had a real gap
+
+The review caught this before any remote mutation, from reading the
+script alongside wrangler's own source, not from a CI failure:
+`scripts/apply-0049-calendar-schema-repair-staging.mjs` called
+`getPlatformProxy({remoteBindings: true})` against
+`wrangler.staging.jsonc`, but that config's own `DB` binding never set
+`"remote": true`. Confirmed directly in wrangler 4.92.0's bundled source
+(`d1DatabaseEntry()`): a D1 binding only gets wired to the real remote
+database when **both** `remoteBindings: true` is passed to
+`getPlatformProxy()` **and** that specific binding's own config entry
+also carries `remote: true` -- without the second half, the binding
+silently falls back to an **empty, local, simulated** database while
+every call still appears to succeed. Had this script actually been run
+as written, it would have believed it repaired Staging while touching
+nothing real at all. Fixed by adding `wrangler.staging-repair.jsonc`, a
+dedicated, minimal config (the one D1 binding, `remote: true`, no other
+bindings) used only by this repair's own scripts --
+`wrangler.staging.jsonc`'s normal-development default is untouched.
+
+### What this round built, one item per the review's own numbering
+
+1. **Real target validation, offline-testable.**
+   `lib/operations/staging-repair-target.ts` -- pure functions
+   (`computeSchemaFingerprint`, `validateRepairTarget`) that cross-check
+   the D1 binding's own live schema against an independently-fetched
+   wrangler-CLI schema (same database, two different access paths),
+   fail closed on a database-id mismatch, an empty result from either
+   path (the exact signature of a local-fallback), or a fingerprint
+   disagreement between the two paths. Covered by
+   `tests/staging-repair-target-validation.test.mjs` (12 cases, no D1 or
+   network needed -- runs in the normal `pnpm test` suite).
+   `scripts/lib/staging-repair-connect.mjs` wires this up: opens the
+   validated binding once and hands it back for the caller's own actual
+   work, so there is no gap between "validated" and "used."
+2. **Concrete, rehearsed recovery -- not "import this file."**
+   `lib/operations/calendar-schema-repair-recovery.ts` builds a real,
+   FK-safe DROP-then-recreate batch from a raw backup export (same
+   never-drop-a-still-referenced-table ordering the repair migration
+   itself proved safe: child table dropped and recreated first, parent
+   second). The old "restore with `wrangler d1 execute --file
+   <backup>`" instruction was never a real recovery procedure --  that
+   fails outright with "table already exists" against tables that are
+   still there in any state. Parsing is covered offline
+   (`tests/calendar-schema-repair-recovery.test.mjs`, 6 cases); actually
+   **applying** it against a real local D1 database that starts in a
+   DIFFERENT state than the backup is rehearsed in
+   `tests/calendar-schema-repair-rehearsal.test.mjs`'s new Phase 7 --
+   confirmed replacing 6 links/10 history rows with the backup's own 2
+   links/2 history rows exactly, with a clean `foreign_key_check` and
+   the FK/indexes intact. `scripts/recover-0049-calendar-schema-repair-staging.mjs`
+   uses it against Staging (prepared, never run). The apply script also
+   now independently verifies the PRE-repair export itself restores and
+   matches a fresh Staging read, via an isolated local `node:sqlite`
+   database -- explicitly documented as proving the EXPORT is
+   recoverable, a different and unrelated question from the normalized
+   schema-backup path's own known defect (a raw export keeps real
+   newlines, so it was never exposed to that specific bug either way).
+3. **Phase-specific failure guidance, never one blanket message.**
+   The apply script's error handling now distinguishes four situations:
+   (a) a failure before the repair batch is even attempted -- nothing
+   touched, just fix and re-run; (b) the repair batch itself cleanly
+   rejected (a recognizable SQL/constraint error) -- D1's own batch
+   atomicity already means nothing changed, no recovery action needed;
+   (c) a failure in a LATER verification step after the batch already
+   committed and the very next check already confirmed every row
+   survived -- explicitly never recommends reverting a successful,
+   already-verified repair over an unrelated later check; (d) a
+   genuinely uncertain outcome (the batch call failed with something
+   that does not look like a clean rejection, e.g. a network/timeout
+   error) -- prints the exact read-only diagnostic queries to run
+   against Staging before deciding anything, and only then points at
+   the recovery script.
+4. **Failure injection against the REAL parsed repair statements, not a
+   substitute.** The previous rehearsal's failure-handling test used a
+   separate, simplified rebuild that never got past its own early,
+   synthetic failure point -- exactly the gap the review named. Replaced
+   with `tests/calendar-schema-repair-rehearsal.test.mjs`'s new Phase 8:
+   a guaranteed-failing statement spliced into the REAL, migration-
+   file-parsed 16-statement sequence at three points -- right after the
+   first rename (early), right after a REAL `DROP TABLE` of the
+   original links backup has already executed (mid), and right after
+   the second history rebuild's own drop, two statements from the end
+   (late) -- each run against its OWN fresh real local D1 database with
+   the full synthetic dataset. Every case asserts: the whole batch
+   fails; every row/column/index/foreign-key and the tables' own stored
+   schema TEXT are completely unchanged; no stray quarantine table
+   (`*_old_0049`/`*_old2_0049`) remains; **and** the corrected,
+   unmodified repair then applies successfully on that same,
+   now-confirmed-untouched database.
+
+### Exact evidence -- every CI run actually inspected, including the one that caught this round's own test bug
+
+| Commit | What changed | CI run | Result |
+|---|---|---|---|
+| `6cb1e79` | Target validation, recovery module+script, rewritten apply script, strengthened rehearsal (Phases 7-8) | [run 39281424228](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39281424228) | **Failed** -- but informatively: the main rehearsal (Phases 1-6) passed cleanly; the NEW Phase 7 (recovery rehearsal) failed with a real `FOREIGN KEY constraint failed` on `calendar_event_links.interaction_id` -- a bug in this round's own sample backup text (it referenced invented interaction ids that were never seeded), not in the recovery module or the repair itself. |
+| `b78b6a3` | Fixed Phase 7's sample backup text to reuse already-seeded interaction ids | [run 39285194523](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39285194523) | **Success.** All four pre-existing D1-only suites pass unmodified, plus the full rehearsal: main rehearsal (Phases 1-6), recovery procedure (Phase 7), and all three failure-injection cases (Phase 8). |
+
+Both CI runs for this round queued for an unusually long time (the
+first several minutes behind an unrelated, already-running `D1 nightly
+backup (Production)` workflow run on this account's shared runner pool;
+the second for reasons that were not diagnosable from the public Actions
+API alone -- no other run was `in_progress` at the time). Both runs did
+eventually execute and complete normally once a runner was allocated;
+this is a GitHub-side scheduling delay, unrelated to anything in this
+round's own changes.
+
+Local checks on `b78b6a3`: 231/231 test files pass (up from 229 -- the
+two new offline-only files,
+`tests/staging-repair-target-validation.test.mjs` and
+`tests/calendar-schema-repair-recovery.test.mjs`, now run as part of the
+normal suite since neither needs real D1), `tsc --noEmit` clean,
+`eslint` unchanged from the documented 94-error/46-warning baseline (no
+new file appears in that output). `scripts/check-main-restore-sync.mjs`
+still fails -- the same pre-existing, unrelated condition noted in every
+round since migration 0048 landed on this branch.
+
+### The repair migration SQL is unchanged
+
+`drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql`
+still hashes to
+`b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae` --
+identical to the prior round's `d029060`. Nothing this round found a
+defect in the repair itself, only in the surrounding application tooling
+and in the rehearsal's own failure-test coverage, exactly as the
+review's own instruction anticipated ("keep the already-passing repair
+SQL unchanged unless a test exposes a concrete defect").
+
+### Limitations, honestly recorded
+
+- **No hardcoded "known" Cloudflare account id exists anywhere in this
+  repository** (confirmed by searching before this round) -- only
+  `database_id` is a concrete, committed, verifiable identity. Account
+  validation in `validateRepairTarget()` is therefore optional:  it
+  cross-checks an operator-supplied `STAGING_REPAIR_EXPECTED_ACCOUNT_ID`
+  against the CLI's authenticated `CLOUDFLARE_ACCOUNT_ID` only when both
+  are present. The database-id check (hardcoded, concrete) plus the
+  binding-vs-CLI schema fingerprint cross-check are the primary, always-
+  enforced defenses; wrangler's own authentication additionally fails
+  the CLI call outright if the token/account do not actually own that
+  database_id.
+- **The recovery procedure was rehearsed against a representative,
+  hand-built sample backup text, not against an actual `wrangler d1
+  export` of Staging's real data** -- this round had no Cloudflare
+  credentials available at all (confirmed: no `CLOUDFLARE_API_TOKEN`/
+  `CLOUDFLARE_ACCOUNT_ID`, no stored credential this sandbox's own
+  permission model allows extracting for that purpose), so no real
+  remote read of any kind was possible or attempted this round, read-
+  only or otherwise. The sample text matches `wrangler d1 export`'s own
+  documented format (double-quoted identifiers, one statement per
+  terminating `;`) and was built to exercise the same table ordering and
+  FK relationships a real export would have.
+- Every limitation recorded in the prior round's entry (D1's
+  `defer_foreign_keys` unreliability, `ALTER TABLE ... RENAME TO`'s
+  quote-style change, `PRAGMA integrity_check` being blocked over the
+  D1 binding, Google Calendar sync remaining completely unverified)
+  still applies unchanged.
+
+### Not done, and not authorized this round
+
+The repair has still **not** been applied anywhere -- Staging's
+`calendar_event_links`/`calendar_event_link_history` tables are exactly
+as they were at the start of this round and the prior one. No remote
+table was dropped or rebuilt, `sqlite_schema` was never touched on any
+remote database, and Production was never referenced by anything that
+executed. No OAuth setup, no credential of any kind used for remote
+execution, no live Google call, no Gmail/agenda-email change, no cron
+activation, no deployment, no merge into `main`. Calendar writes remain
+disabled exactly as before.
+
+**Stopping here for independent review, per this round's own explicit
+instruction.** The Staging application script's own remote-binding gap
+is fixed and would otherwise have been a silent no-op against a local
+fallback; target identity is now validated through two independent
+paths before any mutation; the recovery procedure is concrete, parsed
+offline, and rehearsed applying against real local D1; failure handling
+distinguishes four genuinely different outcomes instead of one blanket
+instruction; and the rehearsal's own failure-injection coverage now uses
+the real, unmodified repair statements at three points including deep
+into the batch, proving total rollback and a successful subsequent
+retry each time. The repair SQL itself needed no changes.
