@@ -33,71 +33,84 @@
 -- redundant: identical structure in, identical structure out).
 --
 -- Revision history (condensed -- see docs/AI-HANDOFF.md for the full
--- evidence trail of each round):
+-- evidence trail, including the actual CI run for each round):
 --   1st-4th review rounds: identified the defect; an early draft used
---     `PRAGMA foreign_keys=OFF` around a single DROP-TABLE-while-
---     referenced rebuild, modeled on ordinary SQLite's own documented
---     12-step "complex schema change" procedure, and was locally tested
---     only against plain SQLite (node:sqlite), not real D1.
---   5th review round: research into Cloudflare D1's actual documented
---     behavior found `PRAGMA foreign_keys` has NO effect on D1 at all --
---     D1 enforces foreign keys unconditionally on every query, and
---     cannot be told to stop. Switched to `PRAGMA defer_foreign_keys =
---     on`, SQLite's own documented alternative for exactly this
---     "temporarily violate an FK mid-rebuild" case, applied inside a
---     single `db.batch()` call (D1's only documented atomic multi-
---     statement primitive).
---   6th review round (2026-10-19, this draft): rehearsed the
---     `defer_foreign_keys` version against a REAL local D1 binding on
---     Linux CI, with synthetic data that actually exercises the FK (see
---     tests/calendar-schema-repair-rehearsal.test.mjs and docs/
---     AI-HANDOFF.md for the exact CI run). It FAILED: D1 rejected the
---     batch at the `DROP TABLE calendar_event_links` step with "Durable
---     Object was reset and rolled back to its last known good state
---     because the application left the database in a state where
---     constraints were violated: FOREIGN KEY constraint failed". This
---     matches a confirmed, currently open/unresolved upstream limitation
---     (cloudflare/workerd#7657, cloudflare/workers-sdk#16071): D1
---     performs its own commit-time foreign-key consistency check on a
---     batch's Durable-Object-level storage transaction, and this does
---     NOT reliably honor `defer_foreign_keys`'s SQL-level deferral
---     window the way plain SQLite does -- so a batch that would be
---     perfectly valid, deferred-then-resolved SQLite is still rejected
---     by D1. `defer_foreign_keys` is therefore NOT a dependable mechanism
---     for this kind of rebuild on D1, despite being SQLite's own
---     documented answer to exactly this scenario elsewhere.
+--     `PRAGMA foreign_keys=OFF` around a DROP-TABLE-while-referenced
+--     rebuild (SQLite's own documented 12-step "complex schema change"
+--     procedure), tested only against plain SQLite (node:sqlite), not
+--     real D1.
+--   5th review round: `PRAGMA foreign_keys` confirmed to have NO effect
+--     on D1 (it enforces FKs unconditionally, always). Switched to
+--     `PRAGMA defer_foreign_keys = on` inside a single `db.batch()`.
+--   6th review round: rehearsed against a REAL local D1 binding on
+--     Linux CI with synthetic data that actually exercises the FK.
+--     `defer_foreign_keys` FAILED there too: D1 rejected the batch at
+--     the DROP TABLE step with "Durable Object was reset ... FOREIGN
+--     KEY constraint failed" -- a confirmed, currently open/unresolved
+--     upstream limitation (cloudflare/workerd#7657, cloudflare/
+--     workers-sdk#16071): D1's own commit-time FK consistency check does
+--     not reliably honor `defer_foreign_keys`'s deferral window.
+--     Redesigned to never drop a table while anything else's FK still
+--     points at it (rebuild the child table WITHOUT its FK first, then
+--     the parent, then the child again WITH the FK restored) -- the real
+--     D1 batch then applied cleanly with zero FK errors.
+--   7th review round (2026-10-19, this draft): the SAME rehearsal then
+--     caught a SECOND, independent real-D1 quirk in that version: it
+--     used `ALTER TABLE <temp-name> RENAME TO <real-name>` to move the
+--     rebuilt table into place, and `PRAGMA integrity_check` showed that
+--     D1/SQLite's own RENAME TO rewrites the table's stored identifier
+--     using DOUBLE QUOTES (`"calendar_event_links"`), regardless of the
+--     original backtick-quoted CREATE TABLE text -- a well-known SQLite
+--     behavior, not a bug introduced here. Left as-is, this would make
+--     the repaired table's own stored text permanently diverge (by
+--     quoting style alone) from what a fresh migration replay produces,
+--     which is exactly the kind of difference
+--     lib/data-health/production-baseline.ts's compareSchemaObjects()
+--     treats as "Table definition differs" -- silently reintroducing a
+--     NEW schema/baseline mismatch in the same breath as fixing the old
+--     one. `PRAGMA integrity_check` itself also turned out to be flatly
+--     rejected by D1 over the Workers binding (`D1_ERROR: not
+--     authorized: SQLITE_AUTH`) -- unrelated to this defect, but
+--     confirmed this round; see docs/AI-HANDOFF.md.
 --
--- THIS DRAFT'S ACTUAL MECHANISM (6th review round): never drop a table
--- while anything else's declared FOREIGN KEY still points at it, so no
--- deferred-or-otherwise FK check is ever needed at all:
---   1. Rebuild calendar_event_link_history FIRST, but WITHOUT its
---      `link_id REFERENCES calendar_event_links` clause -- this is the
---      only table that references calendar_event_links, so once this
---      step finishes, calendar_event_links has NO referencing FK
---      anywhere in the database, declared or otherwise. Dropping the
---      OLD calendar_event_link_history itself is always safe: nothing
---      references calendar_event_link_history.
---   2. Rebuild calendar_event_links with its corrected (comment-free-
---      in-the-column-list) text -- now safe to drop and replace, since
---      step 1 already removed the only FK that could have pointed at it.
---   3. Rebuild calendar_event_link_history a SECOND time, this time
---      WITH its `link_id REFERENCES calendar_event_links` clause
---      restored -- calendar_event_links is now stable under its real
---      name with the same ids, so this FK is satisfied immediately, not
---      deferred. Dropping the intermediate (FK-less) copy from step 1 is
---      still always safe: nothing references calendar_event_link_history.
--- Every statement below runs inside ONE single `db.batch()` call --
--- still the only confirmed-atomic multi-statement D1 primitive -- so an
--- interrupted/rejected attempt leaves zero partial state, but no
--- statement in this version ever depends on deferred constraint
--- checking: every individual statement is independently valid the
--- instant it runs. No `PRAGMA foreign_keys` / `defer_foreign_keys`
--- statement of any kind appears in this version. See docs/AI-HANDOFF.md's
--- own "Staging-only application plan" for the exact script this
--- requires and the rehearsal that proved this version against a real
--- local D1 (tests/calendar-schema-repair-rehearsal.test.mjs).
+-- THIS DRAFT'S ACTUAL MECHANISM (7th review round): the FINAL table
+-- under each real name is always created by a literal, directly-quoted
+-- `CREATE TABLE` statement -- NEVER produced by renaming a temp table
+-- into place -- so the stored text is always byte-identical to what a
+-- fresh migration replay would produce. Only the OLD table (which gets
+-- dropped immediately after its data is copied out) is ever renamed;
+-- its resulting quote style is irrelevant since it never persists.
+-- Combined with the 6th round's fix (rebuild order that never drops a
+-- table while anything else's FK points at it):
+--   1. `calendar_event_link_history` is renamed out of the way, then
+--      recreated directly under its real name WITHOUT the
+--      `link_id REFERENCES calendar_event_links` clause, and its data
+--      copied back in -- calendar_event_links now has no referencing FK
+--      anywhere in the database, declared or otherwise.
+--   2. `calendar_event_links` is renamed out of the way, then recreated
+--      directly under its real name with the corrected (comment-free-
+--      in-the-column-list) text, and its data copied back in -- always
+--      safe to rename/drop, since step 1 already removed the only FK
+--      that could have pointed at it.
+--   3. `calendar_event_link_history` (the FK-less version from step 1)
+--      is renamed out of the way AGAIN, then recreated directly under
+--      its real name WITH the FK restored, and its data copied back in
+--      -- calendar_event_links is now stable under its real name with
+--      the same ids, so every row's FK is satisfied immediately, not
+--      deferred.
+-- Every intermediate "old" table is dropped only after its own data has
+-- already been copied into the real one; nothing is ever dropped while
+-- anything else's FK points at it. Every statement runs inside ONE
+-- single `db.batch()` call -- the only confirmed-atomic multi-statement
+-- D1 primitive -- so an interrupted/rejected attempt leaves zero partial
+-- state. No `PRAGMA` of any kind appears in this version. See
+-- docs/AI-HANDOFF.md's own "Staging-only application plan" for the exact
+-- script this requires and the rehearsal that proved this version
+-- against a real local D1 (tests/calendar-schema-repair-rehearsal.test.mjs).
 --> statement-breakpoint
-CREATE TABLE `calendar_event_link_history_nofk_0049` (
+ALTER TABLE `calendar_event_link_history` RENAME TO `calendar_event_link_history_old_0049`;
+--> statement-breakpoint
+CREATE TABLE `calendar_event_link_history` (
   `id` text PRIMARY KEY NOT NULL,
   `link_id` text NOT NULL,
   `generation` integer NOT NULL,
@@ -112,16 +125,16 @@ CREATE TABLE `calendar_event_link_history_nofk_0049` (
   CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))
 );
 --> statement-breakpoint
-INSERT INTO `calendar_event_link_history_nofk_0049`
+INSERT INTO `calendar_event_link_history`
   (`id`,`link_id`,`generation`,`google_event_id`,`create_status`,`cleanup_needed`,`cleanup_status`,`cleanup_attempts`,`created_at`,`updated_at`)
   SELECT `id`,`link_id`,`generation`,`google_event_id`,`create_status`,`cleanup_needed`,`cleanup_status`,`cleanup_attempts`,`created_at`,`updated_at`
-  FROM `calendar_event_link_history`;
+  FROM `calendar_event_link_history_old_0049`;
 --> statement-breakpoint
-DROP TABLE `calendar_event_link_history`;
+DROP TABLE `calendar_event_link_history_old_0049`;
 --> statement-breakpoint
-ALTER TABLE `calendar_event_link_history_nofk_0049` RENAME TO `calendar_event_link_history`;
+ALTER TABLE `calendar_event_links` RENAME TO `calendar_event_links_old_0049`;
 --> statement-breakpoint
-CREATE TABLE `calendar_event_links_rebuild_0049` (
+CREATE TABLE `calendar_event_links` (
   `id` text PRIMARY KEY NOT NULL,
   `interaction_id` text NOT NULL REFERENCES `interactions`(`id`),
   `user_id` text NOT NULL REFERENCES `users`(`id`),
@@ -144,20 +157,20 @@ CREATE TABLE `calendar_event_links_rebuild_0049` (
   CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))
 );
 --> statement-breakpoint
-INSERT INTO `calendar_event_links_rebuild_0049`
+INSERT INTO `calendar_event_links`
   (`id`,`interaction_id`,`user_id`,`google_calendar_id`,`generation`,`google_event_id`,`google_etag`,`desired_state`,`desired_revision`,`synced_revision`,`sync_status`,`last_error`,`attempt_count`,`lease_owner`,`lease_expires_at`,`next_retry_at`,`created_at`,`updated_at`)
   SELECT `id`,`interaction_id`,`user_id`,`google_calendar_id`,`generation`,`google_event_id`,`google_etag`,`desired_state`,`desired_revision`,`synced_revision`,`sync_status`,`last_error`,`attempt_count`,`lease_owner`,`lease_expires_at`,`next_retry_at`,`created_at`,`updated_at`
-  FROM `calendar_event_links`;
+  FROM `calendar_event_links_old_0049`;
 --> statement-breakpoint
-DROP TABLE `calendar_event_links`;
---> statement-breakpoint
-ALTER TABLE `calendar_event_links_rebuild_0049` RENAME TO `calendar_event_links`;
+DROP TABLE `calendar_event_links_old_0049`;
 --> statement-breakpoint
 CREATE UNIQUE INDEX `calendar_event_links_interaction_uidx` ON `calendar_event_links` (`interaction_id`);
 --> statement-breakpoint
 CREATE INDEX `calendar_event_links_sync_status_idx` ON `calendar_event_links` (`sync_status`);
 --> statement-breakpoint
-CREATE TABLE `calendar_event_link_history_rebuild_0049` (
+ALTER TABLE `calendar_event_link_history` RENAME TO `calendar_event_link_history_old2_0049`;
+--> statement-breakpoint
+CREATE TABLE `calendar_event_link_history` (
   `id` text PRIMARY KEY NOT NULL,
   `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`),
   `generation` integer NOT NULL,
@@ -172,14 +185,12 @@ CREATE TABLE `calendar_event_link_history_rebuild_0049` (
   CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))
 );
 --> statement-breakpoint
-INSERT INTO `calendar_event_link_history_rebuild_0049`
+INSERT INTO `calendar_event_link_history`
   (`id`,`link_id`,`generation`,`google_event_id`,`create_status`,`cleanup_needed`,`cleanup_status`,`cleanup_attempts`,`created_at`,`updated_at`)
   SELECT `id`,`link_id`,`generation`,`google_event_id`,`create_status`,`cleanup_needed`,`cleanup_status`,`cleanup_attempts`,`created_at`,`updated_at`
-  FROM `calendar_event_link_history`;
+  FROM `calendar_event_link_history_old2_0049`;
 --> statement-breakpoint
-DROP TABLE `calendar_event_link_history`;
---> statement-breakpoint
-ALTER TABLE `calendar_event_link_history_rebuild_0049` RENAME TO `calendar_event_link_history`;
+DROP TABLE `calendar_event_link_history_old2_0049`;
 --> statement-breakpoint
 CREATE UNIQUE INDEX `calendar_event_link_history_link_generation_uidx` ON `calendar_event_link_history` (`link_id`,`generation`);
 --> statement-breakpoint

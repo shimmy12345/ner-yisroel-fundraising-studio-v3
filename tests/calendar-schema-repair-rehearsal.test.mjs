@@ -23,24 +23,22 @@ import { buildSchemaOnlyBackup } from "../lib/operations/schema-backup.ts";
 //      production schema-backup path uses, it reproduces a genuine SQL
 //      syntax error on restore.
 //   2. The repair is a correct, D1-supported, single db.batch() rebuild
-//      that never drops a table while anything else's declared FOREIGN
-//      KEY still points at it -- an EARLIER draft instead relied on
-//      `PRAGMA defer_foreign_keys = on` (after `PRAGMA foreign_keys=OFF`
-//      was confirmed to have no effect on D1 at all), modeled on
-//      ordinary SQLite's own documented procedure for this exact
-//      scenario, but this rehearsal's own first real-D1 run proved THAT
-//      version unreliable: D1 rejected the batch with "Durable Object
-//      was reset ... FOREIGN KEY constraint failed" at the DROP TABLE
-//      step, a confirmed, currently open/unresolved upstream limitation
-//      (cloudflare/workerd#7657, cloudflare/workers-sdk#16071) --
-//      `defer_foreign_keys`'s SQL-level deferral window is not reliably
-//      honored by D1's own commit-time consistency check. The current
-//      draft instead rebuilds calendar_event_link_history WITHOUT its
-//      FK first (removing the only reference to calendar_event_links),
-//      rebuilds calendar_event_links, then rebuilds
-//      calendar_event_link_history a second time WITH the FK restored
-//      -- every individual statement is valid the instant it runs, so
-//      no deferred-constraint behavior of any kind is ever relied upon.
+//      that (a) never drops a table while anything else's declared
+//      FOREIGN KEY still points at it, and (b) always creates the FINAL
+//      table under its real name via a literal, directly-quoted
+//      `CREATE TABLE` statement -- never via `ALTER TABLE ... RENAME TO`
+//      -- this rehearsal's own earlier real-D1 runs caught two
+//      successive problems with simpler drafts: `PRAGMA
+//      defer_foreign_keys = on` does not reliably survive D1's own
+//      commit-time FK consistency check (a confirmed, currently open
+//      upstream limitation: cloudflare/workerd#7657, cloudflare/
+//      workers-sdk#16071), and separately, `ALTER TABLE ... RENAME TO`
+//      rewrites the renamed table's stored identifier using double
+//      quotes regardless of the original backtick-quoted text, which
+//      would have permanently diverged the repaired table's own stored
+//      SQL from a fresh migration replay's text. The current draft only
+//      ever renames the OLD table (dropped immediately after), and
+//      always creates the real table fresh and directly.
 //   3. Every row and column survives the rebuild unchanged, every index
 //      and constraint is correct afterward, `PRAGMA foreign_key_check`
 //      passes against the live D1 database, and the REAL
