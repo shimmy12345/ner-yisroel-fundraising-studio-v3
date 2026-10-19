@@ -53362,3 +53362,165 @@ mocked-transport Google client suite, both-adapters integration suite,
 and the full existing regression suite -- awaiting independent review
 before any route wiring, OAuth setup, live Google call, or deployment.**
 `main`/Production/Staging untouched by this round.
+
+### Response validation, failure categorization, lease expiry (2026-10-19) -- STILL NOT WIRED, AWAITING RE-REVIEW
+
+Independent review of the prior phase (commit `ffbd6c3`) found three
+real issues in the adapter/client implementation, each confirmed with
+an exact reproduction against the actual code before being fixed. Final
+commit on this branch: `bf8a8ed`.
+
+**Issue 1 -- successful Google responses were not validated.**
+`google-calendar-client.ts`'s `insert()` hardcoded `status: 201` on ANY
+`response.ok` 2xx regardless of body content, and `get()`'s ownership
+check compared the `extendedProperties.private` tag only against the
+response's OWN `event.id` (self-referential) rather than the id the
+call actually requested. Independent reproduction, confirmed against
+the real client: an INSERT receiving HTTP 200 with `{}` returned
+`{ok:true, status:201, event:{}}`; a GET requesting one event id but
+receiving a DIFFERENT real event (its own id, its own self-matching
+tag) reported success. Fixed: `get()`/`insert()`/`update()` now all
+validate operation-specific HTTP status (only the status(es) each
+operation can actually succeed with) and the response shape -- the
+returned `id` must equal the requested/sent deterministic id, the
+ownership tag must match that SAME id (not merely itself), and
+`summary`/`description`/`start`/`end` must be present. A malformed or
+mismatched response after a MUTATING call (insert/update) is reported
+through the same ambiguous `{status:"error"}` bucket a timeout already
+used -- never confirmed synced, and never a definitive failure that
+would trigger a blind replacement insert, per the review's own "an
+unexpected response after a mutating request may still represent an
+uncertain remote outcome" instruction. This also structurally closes
+the previously-observed "OAuth-token-shaped response reaching an event
+operation" failure mode (that session's own second CI run) -- such a
+response has no `id`/`summary`/`start`/`end` at all, so it is now
+rejected by the same required-field check regardless of how it arrives.
+New regression tests reproduce all three exact cases (empty-body
+insert, wrong-event GET, token-shaped response) through both the HTTP
+client directly (`tests/calendar-google-client.test.mjs`) and the full
+reconciler stack (`tests/calendar-adapters-regression-2026-10-19.test.mjs`,
+`tests/calendar-adapters-integration.test.mjs` against real D1).
+
+**Issue 2 -- permanent rejection, retryable failure, auth/config
+problems, and genuine ambiguity were all one bucket.** The prior
+phase's own reported limitation ("a real Google 400 is currently
+indistinguishable from a transient timeout... retried forever") is
+fixed, not merely documented, this round -- `GoogleApiResult` now
+includes `400` in its definitive-status union (previously only
+reachable via the generic `"error"` bucket). `calendar-event-body.ts`
+gains `validateMeetingDesiredFields` (real calendar dates -- round-
+tripped through `Date.UTC`, rejecting e.g. "2026-02-30"; finite
+timestamps; `endAt > occurredAt`; a real IANA timezone, verified via
+`Intl.DateTimeFormat`), called by the reconciler before the first
+network call the present branch makes -- a permanently invalid payload
+is now rejected before Google is ever contacted. `SyncStatus`/
+`CreateStatus` gain `"invalid"` (a definitive, permanent rejection --
+local validation or a real 400) and `SyncStatus` additionally gains
+`"auth_required"` (401/403); both are excluded from
+`listNeedingReconciliation` entirely, in all three stores, so neither
+is ever auto-retried ("stop automatic retries for permanent invalid
+requests"). A new `CalendarLinkRow.nextRetryAt` field (migration 0048)
+gives a genuinely transient/ambiguous `"failed"` outcome bounded
+exponential backoff (30s, 60s, 120s, ... capped at 30 minutes) instead
+of being retried on every sweep tick ("avoid retry storms") --
+`listNeedingReconciliation` defers a `"failed"` link until its own
+`nextRetryAt` has passed. Genuine timeout/network ambiguity is
+UNCHANGED: `createStatus` still stays `"in_flight"` for those cases
+specifically (never resolved either way), exactly preserving the
+existing, already-correct behavior the review asked not to regress.
+`applyReschedule`, in all three stores, now resets a link out of
+`"failed"`/`"invalid"`/`"auth_required"` back to `"pending"` (clearing
+`nextRetryAt`) -- corrected meeting details, or an explicit retry
+through the same entry point, resume it; `"missing_remotely"` is
+deliberately excluded from this reset (a manually-deleted event stays a
+separate concern, Issue 7, resumed only by an explicit reopen).
+Cancellation cleanup (`reconcileGenerationCleanupLocked`) now
+distinguishes a 401/403 (`"auth_required"`, excluded from retry) from
+an ordinary delete failure (still `"failed"`, now also backoff-
+eligible via the same mechanism) rather than treating every delete
+failure identically. The integration test that previously documented
+the 400-vs-timeout limitation as unfixed is updated to prove the fix
+instead, and a new test proves a real Google 400 on content that
+passes local validation (Google's own, separate rejection) is also
+correctly categorized.
+
+**Issue 3 -- lease expiry was never checked at protected operations,
+only ownership.** `updateLinkAsLeaseHolder`'s original WHERE clause
+checked `lease_owner = ?` alone; `revalidateBeforeMutation` checked the
+same, plus desired_state/generation, but never `leaseExpiresAt`. Since
+expiry alone never clears `lease_owner` (only a new `acquireLease` call
+or an explicit `releaseLease` does), an EXPIRED worker's write could
+still land, or its mutating call still be revalidated as safe to send,
+as long as no one else had yet re-acquired the lease -- confirmed via a
+direct reproduction against all three stores (`updateLinkAsLeaseHolder`
+with an expired-but-unclaimed lease succeeding). Fixed:
+`updateLinkAsLeaseHolder` now takes `now` as a required parameter and
+every store's own guarded write adds `AND lease_expires_at > now` (a
+real SQL `WHERE` clause for SQLite/D1, the equivalent synchronous check
+for the in-memory fake) -- checked atomically as part of the SAME
+guarded write, never a separate, possibly-stale caller-side check.
+`revalidateBeforeMutation` gained the identical expiry check, and a NEW
+revalidation (lease ownership + expiry) was added to
+`reconcileGenerationCleanupLocked` immediately before its own DELETE
+call -- previously unguarded at all (the present-branch path revalidates
+before every mutation; the cleanup path did not revalidate before its
+one mutation). History-level writes (`createStatus`/`cleanupStatus` via
+`updateHistory`) remain deliberately UNCONDITIONAL, never lease-gated,
+exactly as before -- "preserve knowledge of uncertain requests already
+sent; lease expiration cannot undo a remote operation": a stale
+worker's late-resolving insert still correctly records
+`createStatus:"succeeded"` even after its lease (and its own link-level
+bookkeeping write) has been rejected by a newer holder. New regression
+tests (`tests/calendar-adapters-regression-2026-10-19.test.mjs`, against
+both in-memory and SQLite; `tests/calendar-d1-store.test.mjs`, against
+real D1) cover: expiry without takeover; expiry with takeover, old
+worker's write still rejected; a genuinely delayed response (an
+abandoned, still-pending INSERT) arriving only after a legitimate
+takeover -- proving both that the stale worker's own bookkeeping write
+is rejected AND that its history-level write still lands; and
+cancellation/reopen remaining unaffected (never lease-gated, as
+designed). Also confirmed: `insertLink`'s own `isUniqueConstraintViolation`
+regex does not misfire on a real, structurally different D1 error (a
+FOREIGN KEY violation, triggered via a nonexistent `interactionId`,
+tested against real D1) -- an operational failure correctly rethrows
+rather than being silently reported as "already exists."
+
+**Checks**: 228/228 test files pass locally (227 existing + the new
+`calendar-adapters-regression-2026-10-19.test.mjs`); `tsc --noEmit`
+clean; lint at the documented 94-error/46-warning baseline; `npm run
+build` succeeds. **Real CI evidence, inspected directly, not merely "a
+prepared workflow"**: [run #4](https://github.com/shimmy12345/ner-yisroel-fundraising-studio-v3/actions/runs/39199020138)
+(commit `bf8a8ed`) passed on its first attempt -- the job summary's own
+captured output confirms both `calendar-d1-store.test.mjs` (now
+including the new lease-expiry and bounded-backoff/exclusion tests
+against real D1) and `calendar-adapters-integration.test.mjs` (now
+including the Issue 1/2 reproductions against the real D1 store + real
+Google client) report "all assertions passed" against the real local
+D1 binding; the mocked-transport Google client suite passed in the same
+run. The D1 main-sync check shows the same expected, unrelated drift as
+every prior round.
+
+**Not done, unchanged from the prior round's scope**: no route or
+Settings wiring; no OAuth client registered; no real credential or var
+set on any environment; no live Google API call; no remote migration;
+no cron activated; no deployment; nothing merged into `main`.
+
+**What this round does NOT resolve**: the `extendedProperties.private`
+ownership-tag design still only verifies the event's own id against
+itself (never a caller-supplied expected `interactionId`/`generation`,
+since the frozen `GoogleCalendarClient` interface has no slot for one)
+-- flagged again for the next review, unchanged from the prior round's
+own "recommended next phase" note. `applyCancel`'s one documented
+harmless-redundant-write case (D1 adapter) is likewise unchanged and
+still worth independent verification. The bounded-backoff schedule
+(30s/60s/.../30min cap) is a reasonable default, not a value tuned
+against any real production load -- worth revisiting once there is
+real sweep-frequency data to tune against.
+
+**Status: all three independently-reviewed issues fixed, with
+regression tests reproducing each exact failure mode before the fix and
+proving the fix after -- including the real-D1/real-Google-client
+scenarios, verified in actual CI (run #4, commit `bf8a8ed`, first-attempt
+green). Awaiting further independent review before any route wiring,
+OAuth setup, live Google call, or deployment.** `main`/Production/
+Staging untouched by this round.

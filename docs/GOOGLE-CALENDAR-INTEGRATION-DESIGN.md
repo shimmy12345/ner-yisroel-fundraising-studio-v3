@@ -1632,3 +1632,65 @@ not yet authorized, would close. The known, reported core limitation
 (`endAt > occurredAt` never validated; a real Google 400 and a timeout
 are bookkept identically) is unchanged by this phase -- not fixed,
 not hidden, proven by a real test against the real adapters instead.
+
+## 2026-10-19 independent review: 3 issues found and fixed (response validation, failure categorization, lease expiry)
+
+Full detail, including the exact reproductions and the real CI evidence
+(run #4, commit `bf8a8ed`, first-attempt green), is in `AI-HANDOFF.md`'s
+own entry for this round. This section records what changed about the
+DESIGN specifically.
+
+**The "endAt > occurredAt" limitation reported two rounds ago is now
+fixed, not merely documented.** `GoogleApiResult` gained `400` in its
+definitive-status union, and a new pure function,
+`validateMeetingDesiredFields`, runs before the reconciler's first
+network call -- this is a genuine, if small, core type/behavior change,
+explicitly authorized this round ("the core is not frozen against these
+explicitly authorized corrections"), unlike every prior round's
+deliberate freeze of `calendar-sync-types.ts`/`calendar-event-body.ts`/
+`calendar-sync-reconciler.ts`. `buildGoogleEventBody` itself is
+unchanged -- the new validation is a strictly earlier, additional check,
+not a replacement for it.
+
+**New terminal states, deliberately narrow.** `"invalid"` and
+`"auth_required"` are NOT the same as `"failed"` -- `"failed"` keeps its
+original meaning (a transient, retryable failure, now with bounded
+backoff instead of no backoff at all) specifically so existing callers/
+tests that already expect `"failed"` for an ordinary transient failure
+are not surprised by a meaning change. The new states are additive, not
+a renaming.
+
+**Why lease EXPIRY, not just ownership, needed a real fix.** The
+original design's comments already correctly described "a stale worker
+whose lease already expired-and-was-reacquired by someone else must
+never..." -- but the CODE only ever checked `lease_owner`, which is
+true of BOTH "a new worker has taken over" AND "this lease has expired
+but no one has taken over yet." The comments described the intent
+correctly; the implementation only covered the first case. This is the
+kind of gap that's easy to miss in review because the prose reads as
+already correct -- worth an independent reviewer specifically checking
+code against comments, not just comments against requirements, on any
+future lease-adjacent change.
+
+**One thing this round deliberately did NOT change**: `CalendarLinkStore
+.acquireLease`'s own signature and semantics (a unique lease token per
+acquisition was already true before this round -- `leaseOwner` IS the
+token; this round's fix is entirely about CHECKING that token's
+validity window at every protected write, not about how the token
+itself is generated or acquired).
+
+### What remains honestly unproven after this round
+
+The lease-expiry fix is proven against in-memory, SQLite, and real D1
+(the exact same three-store pattern every prior round has used) --
+including a genuinely delayed-response scenario, which is the hardest
+of the three to get right. It is NOT proven against REAL wall-clock
+concurrency (multiple real Worker invocations racing in actual
+production) -- every test here, as in every prior round, orchestrates
+exact interleaving via deferred promises and explicit `now` values,
+never genuine OS-level concurrency. The bounded-backoff schedule is a
+reasonable default, not tuned against real sweep-frequency data (there
+is none yet -- nothing is wired into a cron). The ownership-tag design's
+own open question (verify against a caller-supplied expected id/
+generation, not just the event's own self-consistency) remains open,
+flagged again for the next review.
