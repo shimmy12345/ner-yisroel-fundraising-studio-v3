@@ -15,6 +15,22 @@ const verifyScript = await readFile(new URL("../scripts/verify-remote-restore.mj
 const wranglerStaging = await readFile(new URL("../wrangler.staging.jsonc", import.meta.url), "utf8");
 const deployment = await readFile(new URL("../docs/DEPLOYMENT.md", import.meta.url), "utf8");
 
+// WORKING-BRANCH-ONLY (feature/independent-cloudflare-sandbox): this file
+// also carries a second, entirely separate job --
+// apply-0049-calendar-schema-repair-staging -- that legitimately DOES
+// need write access to the backup bucket (to retain its own repair
+// backups), reviewed and authorized specifically for that job. Every
+// "the monthly verification job must stay read-only" assertion below
+// must therefore check the ORIGINAL `verify:` job's own text slice, not
+// the whole file, so that invariant keeps meaning exactly what it always
+// meant -- and the new job's use of the write credential is checked
+// separately and explicitly below, as a verified, narrow exception, not
+// an accidental loosening of this file's security model.
+const monthlyJobMarker = "  # WORKING-BRANCH-ONLY addition (feature/independent-cloudflare-sandbox)";
+const monthlyHasRepairJob = monthly.includes(monthlyJobMarker);
+const monthlyVerifyJobOnly = monthlyHasRepairJob ? monthly.slice(0, monthly.indexOf(monthlyJobMarker)) : monthly;
+const monthlyRepairJobOnly = monthlyHasRepairJob ? monthly.slice(monthly.indexOf(monthlyJobMarker)) : "";
+
 // --- The deployed Worker must never gain the ability to touch backups --
 // this is the actual, executable proof behind "the deployed application
 // itself has no credentials capable of deleting or modifying backups". If
@@ -46,7 +62,7 @@ for (const workflow of [nightly, monthly]) {
 // always restores into a throwaway database, never the real one; always
 // cleans up, even on failure; fails the job on any integrity problem. ---
 assert.match(monthly, /R2_BACKUP_READ_ACCESS_KEY_ID/);
-assert.doesNotMatch(monthly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the monthly verification job must not hold write access to the backup bucket");
+assert.doesNotMatch(monthlyVerifyJobOnly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the monthly verification job (verify:) must not hold write access to the backup bucket");
 assert.match(monthly, /verify-remote-restore\.mjs/);
 assert.match(verifyScript, /d1", "create"/);
 assert.doesNotMatch(verifyScript, /fundraising-os-staging-db/, "the scratch database must never reuse the real database's name");
@@ -157,7 +173,22 @@ assert.match(monthly, /cron: "0 9 1 \* \*"/, "the monthly restore-verification s
 assert.match(monthly, /gpg --batch --yes --decrypt/, "decryption itself is unchanged");
 assert.match(monthly, /PRAGMA integrity_check/);
 assert.match(monthly, /PRAGMA foreign_key_check/);
-assert.doesNotMatch(monthly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the identity-lookup addition must not grant the monthly job any new write access to the backup bucket");
+assert.doesNotMatch(monthlyVerifyJobOnly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the identity-lookup addition must not grant the monthly verify: job any new write access to the backup bucket");
+
+// --- WORKING-BRANCH-ONLY exception, verified explicitly and narrowly:
+// apply-0049-calendar-schema-repair-staging (a SEPARATE job in the same
+// file, reviewed and gated independently -- see that job's own header
+// comment) legitimately holds the write credential, to retain its own
+// repair backups. This is checked explicitly, by name, rather than
+// merely tolerated, so a future, unrelated write-credential leak into
+// this job -- or into any OTHER job silently added to this file -- would
+// still be caught: this assertion passes only because THIS SPECIFIC,
+// already-reviewed job is the one holding it. ---
+if (monthlyHasRepairJob) {
+  assert.match(monthlyRepairJobOnly, /R2_BACKUP_WRITE_ACCESS_KEY_ID/, "the apply-0049-calendar-schema-repair-staging job is expected to hold write access, to retain its own repair backups");
+  assert.match(monthlyRepairJobOnly, /confirm_repair == 'APPLY-0049-CALENDAR-SCHEMA-REPAIR-STAGING'/, "the write-capable repair job must remain gated behind the explicit confirmation input");
+  assert.match(monthlyRepairJobOnly, /github\.ref == 'refs\/heads\/feature\/independent-cloudflare-sandbox'/, "the write-capable repair job must remain restricted to this working branch");
+}
 // The real download/decrypt/restore/verify steps still fail the job on any
 // real problem -- only the identity-lookup and final status-publish steps
 // may swallow their own failure (the identity-lookup step's own

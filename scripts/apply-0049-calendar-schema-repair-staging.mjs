@@ -45,47 +45,79 @@
 //   4. Captures a full snapshot of calendar_event_links and
 //      calendar_event_link_history (every row, every column) via the
 //      now-validated D1 binding (read-only).
-//   5. Applies the repair via a SINGLE `db.batch()` call over the SAME
+//   5. Encrypts and uploads the pre-repair backup to the existing R2
+//      backup bucket, and independently verifies the uploaded object
+//      (byte-size read-back, never merely "the upload command exited
+//      zero") -- all via retainBackupSecurely()/applyRepairBatchGuardedByRetention()
+//      (lib/operations/calendar-schema-repair-apply.ts). THE REPAIR
+//      BATCH IS STRUCTURALLY UNREACHABLE UNLESS THIS SUCCEEDS: see that
+//      function's own header for why (a prior version of this retention
+//      step, written as a separate CI shell step with `set -uo
+//      pipefail` -- missing `-e` -- could report success and shred the
+//      only local copy even when compression/encryption/upload had
+//      actually failed; fixed by moving this into the application
+//      script itself as a hard, structural gate, with offline regression
+//      tests in tests/calendar-schema-repair-apply.test.mjs proving the
+//      repair is never invoked when this fails).
+//   6. Applies the repair via a SINGLE `db.batch()` call over the SAME
 //      validated binding -- the only confirmed-atomic multi-statement D1
 //      primitive (see the migration file's own header for why this must
 //      never be `wrangler d1 execute --file`, whose cross-statement
 //      atomicity for a whole file is not reliably documented).
-//   6. Re-captures the same snapshot and asserts it is byte-for-byte
+//   7. Re-captures the same snapshot and asserts it is byte-for-byte
 //      identical to step 4's.
-//   7. Runs `PRAGMA foreign_key_check` and `PRAGMA integrity_check`
+//   8. Runs `PRAGMA foreign_key_check` and `PRAGMA integrity_check`
 //      against Staging via `wrangler d1 execute --remote --command` (the
 //      in-Worker D1Database binding rejects `PRAGMA integrity_check`
 //      outright with `SQLITE_AUTH` -- confirmed this round).
-//   8. Validates Staging's live schema against the packaged production
+//   9. Validates Staging's live schema against the packaged production
 //      baseline manifest -- must now report a clean match for both
 //      calendar tables, where it previously did not.
-//   9. Takes a SECOND full backup (now that the schema text is fixed)
+//  10. Takes a SECOND full backup (now that the schema text is fixed)
 //      and feeds it through scripts/verify-remote-restore.mjs -- the
 //      SAME proven remote-restore verification this repo already runs
 //      for Production's own monthly backups -- to prove the fixed
 //      schema actually restores cleanly on Cloudflare's real D1 service.
+//  11. Encrypts, uploads, and independently verifies the POST-repair
+//      backup the SAME way step 5 did. A failure here FAILS THE JOB --
+//      it never reports success -- but, unlike step 5, does not and
+//      cannot undo the repair (already independently verified via rows/
+//      FK/schema by this point): it means this specific backup needs a
+//      human to re-attempt its retention or secure it another way.
+//
+// HONEST LIMITATION: this runs on an ephemeral GitHub Actions runner.
+// "The only recoverable copy is never silently discarded" (step 5/11's
+// own guarantee) means the local plaintext/ciphertext is preserved for
+// the REMAINDER of this job's own run whenever retention fails -- it
+// does NOT mean the backup survives indefinitely if upload keeps
+// failing, since the runner's entire workspace is destroyed when the
+// job ends regardless of outcome. What IS guaranteed: retention failure
+// is never silently reported as success, and a pre-repair retention
+// failure always prevents the mutation from ever being attempted.
 //
 // FAILURE HANDLING (lib/operations/calendar-schema-repair-apply.ts's own
 // describeFailure(), unit-tested offline in
 // tests/calendar-schema-repair-apply.test.mjs) -- genuinely different
 // situations, each reported with its own specific guidance, never a
 // single blanket "restore the backup" message:
-//   - A failure in steps 1-4 (before the repair batch is even attempted):
-//     nothing has been touched. Fix the cause and re-run; no recovery
-//     action of any kind is needed.
-//   - The repair batch itself (step 5) throwing a SPECIFIC, recognized
+//   - A failure in steps 1-5 (before the repair batch is even
+//     attempted, including a pre-repair retention failure): nothing has
+//     been touched. Fix the cause and re-run; no recovery action of any
+//     kind is needed.
+//   - The repair batch itself (step 6) throwing a SPECIFIC, recognized
 //     rejection (a named constraint/SQL error -- never a bare, generic
 //     `D1_ERROR` wrapper on its own, which proves nothing about whether
 //     a write landed): D1's own batch atomicity means Staging was never
 //     partially modified. No recovery action is needed.
-//   - Step 6 (the very next check after the batch call itself returned
+//   - Step 7 (the very next check after the batch call itself returned
 //     successfully) failing to CONFIRM row preservation: this means
 //     preservation is UNVERIFIED or MISMATCHED, not "already confirmed"
 //     -- read-only inspection first, never assume either outcome.
-//   - A failure in steps 7-9 (AFTER step 6 already confirmed every row
-//     survived): Do NOT restore the pre-repair backup on this basis
-//     alone -- that would UNDO a successful, already-verified repair
-//     over a LATER, separate check's own failure.
+//   - A failure in steps 8-11 (AFTER step 7 already confirmed every row
+//     survived, INCLUDING a post-repair retention failure): Do NOT
+//     restore the pre-repair backup on this basis alone -- that would
+//     UNDO a successful, already-verified repair over a LATER, separate
+//     check's own failure.
 //   - An UNCERTAIN outcome (the batch call failed with something that
 //     does NOT look like a specific, recognized rejection -- a network/
 //     timeout error, or any other unrecognized D1 error): never guess.
@@ -112,7 +144,8 @@ import { DatabaseSync } from "node:sqlite";
 import { splitSqlStatements } from "../lib/calendar/testing/local-d1.ts";
 import { compareSchemaObjects, stagingSchemaObjects } from "../lib/data-health/production-baseline.ts";
 import { STAGING_REPAIR_CONFIG_PATH, STAGING_DATABASE_NAME, wrangler, wranglerJson, connectAndValidateStagingTarget } from "./lib/staging-repair-connect.mjs";
-import { PhaseError, snapshotCalendarTablesViaBinding, verifyBackupRestoresAndMatches, describeFailure } from "../lib/operations/calendar-schema-repair-apply.ts";
+import { buildRealRetentionDeps } from "./lib/backup-retention.mjs";
+import { PhaseError, snapshotCalendarTablesViaBinding, verifyBackupRestoresAndMatches, retainBackupSecurely, applyRepairBatchGuardedByRetention, describeFailure } from "../lib/operations/calendar-schema-repair-apply.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const REPAIR_MIGRATION_PATH = path.join(root, "drizzle/pending-review/0049_fix_calendar_schema_text_staging_repair.sql");
@@ -127,6 +160,7 @@ const REPAIR_MIGRATION_PATH = path.join(root, "drizzle/pending-review/0049_fix_c
 // exact content proven by tests/calendar-schema-repair-rehearsal.test.mjs
 // on Linux CI (see docs/AI-HANDOFF.md).
 const EXPECTED_REPAIR_SHA256 = "b107b1e573be87a0593aa529f2a6da3eb240fdd9589929c943aa8f7dc54d06ae";
+const R2_BACKUP_KEY_PREFIX = "repair-0049";
 
 function reportFailure(error) {
   console.error(`\n${describeFailure(error)}`);
@@ -144,7 +178,16 @@ async function main() {
   }
   assert.ok(process.env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN must be set.");
   assert.ok(process.env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID must be set.");
+  assert.ok(process.env.BACKUP_ENCRYPTION_PASSPHRASE, "BACKUP_ENCRYPTION_PASSPHRASE must be set -- both backups must be retained encrypted, never in plaintext.");
+  assert.ok(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY, "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (the R2 backup-write credential) must be set.");
+  assert.ok(process.env.R2_BACKUP_BUCKET, "R2_BACKUP_BUCKET must be set.");
   console.log(`Preflight OK. Repair migration sha256=${actualHash}.`);
+
+  const retentionDeps = buildRealRetentionDeps({
+    bucket: process.env.R2_BACKUP_BUCKET,
+    endpointUrl: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    passphrase: process.env.BACKUP_ENCRYPTION_PASSPHRASE,
+  });
 
   let dispose = async () => {};
   try {
@@ -186,15 +229,21 @@ async function main() {
     }
     console.log(`Before: ${before.links.length} link row(s), ${before.history.length} history row(s).`);
 
-    // --- 5. Apply the repair via a single db.batch() ---------------------
-    console.log("Applying the repair via a single db.batch() against the REAL remote Staging D1 binding...");
+    // --- 5. Retain the pre-repair backup encrypted in R2, THEN apply the
+    //        repair via a single db.batch() -- structurally gated: see
+    //        applyRepairBatchGuardedByRetention()'s own header for why
+    //        db.batch() is unreachable unless retention reports success.
+    console.log("Encrypting and uploading the pre-repair backup to R2, and independently verifying the uploaded object, before any mutation is attempted...");
     const statements = splitSqlStatements(repairSql);
     assert.ok(statements.length >= 14, "Parsed an unexpectedly small number of statements out of the repair migration -- aborting rather than applying a truncated batch.");
+    let preRepairRetention;
     try {
-      await db.batch(statements.map((statement) => db.prepare(statement)));
+      preRepairRetention = await applyRepairBatchGuardedByRetention(db, statements, () => retainBackupSecurely(backupBeforePath, R2_BACKUP_KEY_PREFIX, retentionDeps));
     } catch (error) {
+      if (error instanceof PhaseError) throw error;
       throw new PhaseError("repair-batch", `The repair batch failed: ${error.message}`, { cause: error });
     }
+    console.log(`Pre-repair backup retained: ${preRepairRetention.remoteKey}`);
     console.log(`Applied ${statements.length} statements in one batch.`);
 
     // --- 6. After snapshot, must be byte-for-byte identical --------------
@@ -234,20 +283,32 @@ async function main() {
       throw new PhaseError("schema-health-check", error.message, { cause: error });
     }
 
-    // --- 9. Second backup + the real remote-restore verification ---------
+    // --- 10. Second backup + the real remote-restore verification --------
+    const backupAfterPath = path.join(root, `staging-backup-after-0049-${timestamp}.sql`);
     try {
-      const backupAfterPath = path.join(root, `staging-backup-after-0049-${timestamp}.sql`);
       console.log(`Exporting post-repair Staging backup to ${backupAfterPath}...`);
       wrangler(["d1", "export", STAGING_DATABASE_NAME, "--remote", "--config", STAGING_REPAIR_CONFIG_PATH, "--output", backupAfterPath]);
       console.log("Running the proven remote-restore verification (scripts/verify-remote-restore.mjs) against the post-repair backup...");
       const restoreVerify = spawnSync(process.execPath, ["scripts/verify-remote-restore.mjs", "--", backupAfterPath], { cwd: root, encoding: "utf8", env: process.env, stdio: "inherit" });
       assert.equal(restoreVerify.status, 0, "Post-repair backup failed real remote-restore verification.");
-      console.log(`\nDone. Staging's calendar_event_links/calendar_event_link_history schema text is repaired, every row survived unchanged, and the fix restores cleanly on a real scratch D1 database.`);
-      console.log(`Pre-repair backup kept at: ${backupBeforePath}`);
-      console.log(`Post-repair backup kept at: ${backupAfterPath}`);
     } catch (error) {
       throw new PhaseError("post-repair-restore-check", error.message, { cause: error });
     }
+
+    // --- 11. Retain the post-repair backup encrypted in R2 -- a failure
+    //         here FAILS THE JOB (never a silent success) but never
+    //         implies the already-verified repair itself should be
+    //         reverted; see this file's own header for why.
+    console.log("Encrypting and uploading the post-repair backup to R2, and independently verifying the uploaded object...");
+    const postRepairRetention = retainBackupSecurely(backupAfterPath, R2_BACKUP_KEY_PREFIX, retentionDeps);
+    if (!postRepairRetention.ok) {
+      throw new PhaseError("post-repair-retention", `The post-repair backup could not be retained securely: ${postRepairRetention.reason}`);
+    }
+    console.log(`Post-repair backup retained: ${postRepairRetention.remoteKey}`);
+
+    console.log("\nDone. Staging's calendar_event_links/calendar_event_link_history schema text is repaired, every row survived unchanged, and the fix restores cleanly on a real scratch D1 database.");
+    console.log(`Pre-repair backup retained at: ${preRepairRetention.remoteKey}`);
+    console.log(`Post-repair backup retained at: ${postRepairRetention.remoteKey}`);
   } finally {
     await dispose();
   }

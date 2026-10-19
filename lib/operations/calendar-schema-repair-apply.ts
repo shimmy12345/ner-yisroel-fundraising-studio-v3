@@ -111,6 +111,134 @@ export function verifyBackupRestoresAndMatches(
   }
 }
 
+export type RetentionResult = { ok: boolean; reason?: string; remoteKey?: string };
+
+// Every I/O operation retainBackupSecurely needs, as four separate,
+// independently-injectable functions -- not one generic "run a shell
+// command" escape hatch -- so a test can simulate a failure at EXACTLY
+// one stage (compression, encryption, upload, or remote verification)
+// and assert the function's behavior at that specific point, per this
+// round's own instruction ("Add synthetic tests for encryption/upload
+// failures"). Each of compress/encrypt/upload is expected to THROW on
+// failure (mirroring what spawnSync-wrapping code naturally does);
+// verifyRemoteObject returns `false` for "the object doesn't match",
+// which is a normal, non-exceptional outcome, not an error.
+export type RetainBackupDeps = {
+  compress(sourcePath: string, destPath: string): void;
+  encrypt(sourcePath: string, destPath: string): void;
+  upload(localPath: string, remoteKey: string): void;
+  verifyRemoteObject(remoteKey: string, expectedBytes: number): boolean;
+  statSize(path: string): number;
+  shred(path: string): void;
+};
+
+function describeError(error: unknown): string {
+  return (error as { message?: unknown })?.message ? String((error as { message: unknown }).message) : String(error);
+}
+
+// Best-effort cleanup only -- a failure to shred an intermediate file
+// must never be escalated into a retention failure. What matters for
+// retainBackupSecurely's own correctness is its RETURN VALUE (whether
+// the backup is safely, verifiably retained), never whether a temp file
+// happened to linger.
+function safeShred(deps: RetainBackupDeps, path: string): void {
+  try {
+    deps.shred(path);
+  } catch {
+    // intentionally ignored -- see comment above.
+  }
+}
+
+// Encrypts and uploads ONE backup file, verifies the uploaded object
+// actually matches before trusting it, and ONLY THEN removes the local
+// plaintext/ciphertext copies. This is the fix for a real bug this
+// round's review caught: an earlier version of this sequence (written
+// as a CI shell step with `set -uo pipefail`, missing `-e`) would let a
+// failed compress/encrypt/upload fall through to a "success" message and
+// then unconditionally shred every local copy -- silently destroying the
+// only recoverable backup on a failure. Every stage here is checked
+// explicitly; ANY failure returns `{ok: false, reason}` immediately,
+// and `backupPath` (the original, uncompressed, unencrypted export) is
+// NEVER removed unless an independent read-back from the remote object
+// store confirms the uploaded object's byte size matches what was
+// uploaded -- not merely that the upload command exited zero. The
+// intermediate `.gz` file is shredded regardless of what happens next
+// (it is always reproducible from `backupPath` alone, so losing it is
+// harmless), but the ciphertext (`.gz.gpg`) and the original are only
+// ever removed together, and only after that verification passes.
+export function retainBackupSecurely(backupPath: string, remoteKeyPrefix: string, deps: RetainBackupDeps): RetentionResult {
+  const gzPath = `${backupPath}.gz`;
+  const gpgPath = `${gzPath}.gpg`;
+  const baseName = backupPath.replace(/^.*[\\/]/, "");
+  const remoteKey = `${remoteKeyPrefix}/${baseName}.gz.gpg`;
+
+  try {
+    deps.compress(backupPath, gzPath);
+  } catch (error) {
+    return { ok: false, reason: `Compression failed: ${describeError(error)}` };
+  }
+
+  try {
+    deps.encrypt(gzPath, gpgPath);
+  } catch (error) {
+    return { ok: false, reason: `Encryption failed: ${describeError(error)}` };
+  } finally {
+    safeShred(deps, gzPath);
+  }
+
+  let expectedBytes: number;
+  try {
+    expectedBytes = deps.statSize(gpgPath);
+  } catch (error) {
+    return { ok: false, reason: `Could not determine the encrypted file's size: ${describeError(error)}` };
+  }
+
+  try {
+    deps.upload(gpgPath, remoteKey);
+  } catch (error) {
+    return { ok: false, reason: `Upload failed: ${describeError(error)}` };
+  }
+
+  let verified: boolean;
+  try {
+    verified = deps.verifyRemoteObject(remoteKey, expectedBytes);
+  } catch (error) {
+    return { ok: false, reason: `Remote verification failed: ${describeError(error)}` };
+  }
+  if (!verified) {
+    return { ok: false, reason: `Remote object "${remoteKey}" does not match the uploaded content (size mismatch or not found) -- refusing to treat this backup as retained.` };
+  }
+
+  // Reached only once compression, encryption, upload, AND an
+  // independent remote read-back have all explicitly succeeded.
+  safeShred(deps, gpgPath);
+  safeShred(deps, backupPath);
+  return { ok: true, remoteKey };
+}
+
+// The narrow checkpoint this round's review asked for: the repair batch
+// is structurally UNREACHABLE unless `retainPreRepairBackup()` first
+// reports success. This is not "the script is supposed to check first
+// and then proceed" (a convention that a future edit could accidentally
+// break) -- `db.batch` is never referenced in this function at all
+// unless control has already passed the `if (!retention.ok) throw`
+// above it, so the one test that matters
+// ("the repair is never invoked when pre-repair retention fails") can
+// assert it directly: inject a `db` whose `batch` records whether it
+// was ever called, and a failing `retainPreRepairBackup`.
+export async function applyRepairBatchGuardedByRetention(
+  db: { prepare(sql: string): unknown; batch(statements: unknown[]): Promise<unknown> },
+  statements: string[],
+  retainPreRepairBackup: () => RetentionResult | Promise<RetentionResult>,
+): Promise<RetentionResult> {
+  const retention = await retainPreRepairBackup();
+  if (!retention.ok) {
+    throw new PhaseError("pre-repair-retention", `The pre-repair backup could not be retained securely -- refusing to apply the repair: ${retention.reason}`);
+  }
+  await db.batch(statements.map((statement) => db.prepare(statement)));
+  return retention;
+}
+
 const READ_ONLY_INSPECTION_GUIDANCE =
   "Run these read-only queries against Staging first (via `npx wrangler@4.92.0 d1 execute fundraising-os-staging-db --remote --config wrangler.staging-repair.jsonc --command \"...\"`) and compare the result to the 'before' snapshot printed earlier in this run's own log:\n" +
   "  SELECT COUNT(*) FROM calendar_event_links;\n" +
@@ -119,13 +247,22 @@ const READ_ONLY_INSPECTION_GUIDANCE =
   "Only after that read-only inspection shows a genuinely ambiguous state (neither clearly the original schema nor clearly the correct repaired result) should scripts/recover-0049-calendar-schema-repair-staging.mjs be considered, against the pre-repair backup printed earlier in this run.";
 
 // Nothing on Staging was touched yet at any of these phases.
-const PRE_REPAIR_PHASES = new Set(["preflight", "target-validation", "pre-repair-backup", "pre-repair-restore-check", "before-snapshot"]);
+// "pre-repair-retention" means retainBackupSecurely() itself reported
+// failure -- by construction (applyRepairBatchGuardedByRetention), that
+// means db.batch() was never even called, so this belongs here too.
+const PRE_REPAIR_PHASES = new Set(["preflight", "target-validation", "pre-repair-backup", "pre-repair-restore-check", "before-snapshot", "pre-repair-retention"]);
 
 // The repair batch already committed successfully, AND the very next
 // check (post-batch-row-check) already confirmed every row survived --
 // a failure at one of THESE phases is a separate, later verification
 // problem, never a reason to revert an already-verified repair.
-const POST_SUCCESS_VERIFICATION_PHASES = new Set(["fk-integrity-check", "schema-health-check", "post-repair-restore-check"]);
+// "post-repair-retention" means the repair itself (already independently
+// verified via row/FK/schema checks) succeeded, but the POST-repair
+// backup could not be retained securely -- the job must still fail
+// loudly (never a silent success) so a human notices and can re-attempt
+// retention, but that is a backup-retention problem, not a reason to
+// doubt or revert the already-verified repair.
+const POST_SUCCESS_VERIFICATION_PHASES = new Set(["fk-integrity-check", "schema-health-check", "post-repair-restore-check", "post-repair-retention"]);
 
 // Builds the exact, phase-specific guidance text for a failure --
 // deliberately allowlist-based (PRE_REPAIR_PHASES /

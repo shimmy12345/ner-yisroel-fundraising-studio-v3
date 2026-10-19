@@ -424,50 +424,37 @@ jobs:
 
       # The script itself performs every check this repair requires
       # (target validation through two independent paths, the pre-repair
-      # backup plus an isolated local restore-and-compare, the single
-      # db.batch() apply, the post-batch row-preservation check,
+      # backup, encrypting/uploading/independently-verifying that backup
+      # in R2 as a HARD GATE before the mutation is even attempted, the
+      # single db.batch() apply, the post-batch row-preservation check,
       # foreign_key_check/integrity_check, the schema-health comparison,
-      # and the post-repair backup + real remote-restore verification via
-      # a temporary scratch D1 database it creates and always deletes) --
-      # see scripts/apply-0049-calendar-schema-repair-staging.mjs's own
-      # header for the exact, numbered sequence. No retry of any kind: a
-      # failure here fails this step and this job, full stop.
+      # the post-repair backup + real remote-restore verification via a
+      # temporary scratch D1 database it creates and always deletes, and
+      # finally encrypting/uploading/verifying the post-repair backup the
+      # same way) -- see scripts/apply-0049-calendar-schema-repair-staging.mjs's
+      # own header for the exact, numbered sequence, and
+      # lib/operations/calendar-schema-repair-apply.ts's retainBackupSecurely()/
+      # applyRepairBatchGuardedByRetention() for why backup retention now
+      # lives IN the application script rather than as a separate CI
+      # shell step (a prior version of that CI step, with `set -uo
+      # pipefail` missing `-e`, could report success and shred the only
+      # local copy even when the underlying upload had failed -- fixed
+      # by moving this into tested, injectable-dependency application
+      # code; see tests/calendar-schema-repair-apply.test.mjs). No retry
+      # of any kind: a failure here fails this step and this job, full
+      # stop -- including a FAILED backup retention, which never reports
+      # success, but a pre-repair retention failure additionally
+      # prevents the mutation from ever being attempted in the first
+      # place (that part is structural, not merely a convention: see
+      # applyRepairBatchGuardedByRetention's own header).
       - name: Apply the reviewed Calendar schema repair to Staging
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: node scripts/apply-0049-calendar-schema-repair-staging.mjs
-
-      # Runs regardless of whether the step above succeeded or failed
-      # (`if: always()`) -- whatever backup file(s) the script managed to
-      # write before any failure must still be retained encrypted, never
-      # left as plaintext on the runner and never simply discarded.
-      - name: Retain both backups encrypted in the existing R2 backup bucket (never plaintext, never a GitHub artifact)
-        if: always()
-        env:
           BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_WRITE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_WRITE_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
-          ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
-        run: |
-          set -uo pipefail
-          shopt -s nullglob
-          for f in staging-backup-before-0049-*.sql staging-backup-after-0049-*.sql; do
-            [ -s "${f}" ] || continue
-            gzip -c "${f}" > "${f}.gz"
-            PASSFILE="$(mktemp)"
-            printf '%s' "${BACKUP_ENCRYPTION_PASSPHRASE}" > "${PASSFILE}"
-            gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase-file "${PASSFILE}" --output "${f}.gz.gpg" "${f}.gz"
-            shred -u "${PASSFILE}"
-            KEY="repair-0049/$(basename "${f}").gz.gpg"
-            aws s3api put-object --endpoint-url "${ENDPOINT_URL}" --bucket "${BUCKET}" --key "${KEY}" --body "${f}.gz.gpg" --content-type application/octet-stream
-            echo "Retained encrypted backup: ${KEY}"
-            shred -u "${f}" "${f}.gz" "${f}.gz.gpg"
-          done
-
-      - name: Clean up any remaining local backup files
-        if: always()
-        run: rm -f staging-backup-before-0049-*.sql staging-backup-after-0049-*.sql staging-backup-before-0049-*.sql.gz* staging-backup-after-0049-*.sql.gz* 2>/dev/null || true
+          R2_BACKUP_BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+        run: node scripts/apply-0049-calendar-schema-repair-staging.mjs
   # =========================================================================
