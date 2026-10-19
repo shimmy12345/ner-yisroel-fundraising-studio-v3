@@ -22,11 +22,25 @@ import { buildSchemaOnlyBackup } from "../lib/operations/schema-backup.ts";
 //      list; once collapsed by the real normalizeSchemaSql() the actual
 //      production schema-backup path uses, it reproduces a genuine SQL
 //      syntax error on restore.
-//   2. The repair is a correct, D1-supported, single db.batch() rebuild:
-//      `PRAGMA defer_foreign_keys = on` (not `PRAGMA foreign_keys=OFF`,
-//      which D1 does not honor at all) lets the batch DROP a table a
-//      still-existing child table's FOREIGN KEY references, as long as
-//      the same name is back in place by the batch's own commit.
+//   2. The repair is a correct, D1-supported, single db.batch() rebuild
+//      that never drops a table while anything else's declared FOREIGN
+//      KEY still points at it -- an EARLIER draft instead relied on
+//      `PRAGMA defer_foreign_keys = on` (after `PRAGMA foreign_keys=OFF`
+//      was confirmed to have no effect on D1 at all), modeled on
+//      ordinary SQLite's own documented procedure for this exact
+//      scenario, but this rehearsal's own first real-D1 run proved THAT
+//      version unreliable: D1 rejected the batch with "Durable Object
+//      was reset ... FOREIGN KEY constraint failed" at the DROP TABLE
+//      step, a confirmed, currently open/unresolved upstream limitation
+//      (cloudflare/workerd#7657, cloudflare/workers-sdk#16071) --
+//      `defer_foreign_keys`'s SQL-level deferral window is not reliably
+//      honored by D1's own commit-time consistency check. The current
+//      draft instead rebuilds calendar_event_link_history WITHOUT its
+//      FK first (removing the only reference to calendar_event_links),
+//      rebuilds calendar_event_links, then rebuilds
+//      calendar_event_link_history a second time WITH the FK restored
+//      -- every individual statement is valid the instant it runs, so
+//      no deferred-constraint behavior of any kind is ever relied upon.
 //   3. Every row and column survives the rebuild unchanged, every index
 //      and constraint is correct afterward, `PRAGMA foreign_key_check`
 //      and `PRAGMA integrity_check` both pass, and the REAL
@@ -283,7 +297,7 @@ async function run() {
     // with DML inside one db.batch()?
     // =======================================================================
     const repairStatements = readMigrationBatchStatements(REPAIR_MIGRATION_PATH);
-    assert.ok(repairStatements.length >= 10, "sanity: the repair migration must parse into its full set of statements");
+    assert.ok(repairStatements.length >= 14, "sanity: the repair migration must parse into its full set of statements (two rebuild passes over calendar_event_link_history plus one over calendar_event_links)");
     await db.batch(repairStatements.map((statement) => db.prepare(statement)));
 
     // =======================================================================
@@ -306,6 +320,16 @@ async function run() {
     const { results: historyIndexes } = await db.prepare("PRAGMA index_list(calendar_event_link_history)").all();
     assert.ok(historyIndexes.some((i) => i.unique && i.name === "calendar_event_link_history_link_generation_uidx"));
     assert.ok(historyIndexes.some((i) => !i.unique && i.name === "calendar_event_link_history_cleanup_idx"));
+
+    // calendar_event_link_history was rebuilt WITHOUT its FK first (to
+    // let calendar_event_links be dropped safely) and then a second time
+    // WITH it restored -- confirm the FK genuinely came back, not just
+    // that the column still exists.
+    const { results: historyForeignKeys } = await db.prepare("PRAGMA foreign_key_list(calendar_event_link_history)").all();
+    assert.ok(
+      historyForeignKeys.some((fk) => fk.table === "calendar_event_links" && fk.from === "link_id" && fk.to === "id"),
+      "calendar_event_link_history.link_id's FOREIGN KEY to calendar_event_links must be restored after the repair, not left off from the intermediate FK-less rebuild",
+    );
 
     // The repaired tables' own stored CREATE TABLE text must now be
     // byte-identical (once normalized) to what today's already-corrected
