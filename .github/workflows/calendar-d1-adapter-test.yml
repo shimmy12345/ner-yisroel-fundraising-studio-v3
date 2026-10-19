@@ -80,15 +80,36 @@ jobs:
         timeout-minutes: 3
         run: pnpm run test:calendar-d1-smoke
 
+      # Always publishes a bounded excerpt of this step's own output to
+      # the job summary -- pass or fail -- so the result is readable
+      # directly from the Actions run page without needing authenticated
+      # log access. Safe to publish verbatim: this workflow references no
+      # `secrets.*` anywhere and the D1 adapter tests never touch Google
+      # or any credential, so there is nothing secret in this output to
+      # redact. `exit "$status"` at the end preserves the test run's own
+      # real exit code regardless of whether writing the summary itself
+      # succeeds -- a failing test still fails this step and the job.
       - name: D1 adapter contract/concurrency tests + both-adapters integration tests
         timeout-minutes: 10
-        run: pnpm run test:calendar-d1
+        run: |
+          set +e
+          pnpm run test:calendar-d1 2>&1 | tee /tmp/d1-adapter-test-output.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "## D1 adapter test output"
+            echo '```'
+            tail -n 300 /tmp/d1-adapter-test-output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
-      # The mocked-transport Google Calendar client tests already run on
-      # every platform via `pnpm test` -- re-run them here too, in the
-      # same job, purely so a single CI run's log is the complete,
-      # self-contained evidence trail for this phase (no D1/workerd
-      # dependency; this step cannot be why the job fails for an
-      # environment reason).
+      # Runs regardless of whether the D1 step above passed or failed
+      # (but not if the job was cancelled) -- a D1/workerd-runtime problem
+      # must never prevent independently verifying the mocked-transport
+      # Google Calendar client, which has no dependency on D1 at all.
+      # Also already runs on every platform via `pnpm test`; repeated
+      # here so a single CI run's log/summary is the complete,
+      # self-contained evidence trail for this phase.
       - name: Google Calendar client tests (mocked transport)
+        if: ${{ !cancelled() }}
         run: node tests/calendar-google-client.test.mjs && node tests/calendar-oauth-error-code.test.mjs

@@ -86,26 +86,45 @@ async function run() {
 
     // =======================================================================
     // insertLinkWithHistory's atomicity, via db.batch(): deliberately
-    // force the HISTORY half of the batch to fail (a pre-existing history
-    // row already occupies (link_id, generation=0)) while the LINK half
-    // would otherwise succeed on its own -- proves the whole batch rolls
-    // back together against a REAL D1 database, not just the in-memory
-    // fake's own bookkeeping. This is the D1 adapter's own "crash/
-    // rollback" case (D1 has no BEGIN IMMEDIATE/COMMIT to simulate a
-    // crash between two statements the way the SQLite adapter's own test
-    // does -- db.batch() IS the atomic unit here, so the real test is
-    // "does a guaranteed-to-fail second statement roll back the first").
+    // force the LINK half of the batch to fail (a second link row for an
+    // interaction that is already enrolled -- the real UNIQUE(interaction_id)
+    // backstop) while the HISTORY half, taken alone, would otherwise
+    // succeed on its own (a fresh, valid linkId/generation pair) -- proves
+    // the whole batch rolls back together against a REAL D1 database, not
+    // just the in-memory fake's own bookkeeping. This is the D1 adapter's
+    // own "crash/rollback" case (D1 has no BEGIN IMMEDIATE/COMMIT to
+    // simulate a crash between two statements the way the SQLite adapter's
+    // own test does -- db.batch() IS the atomic unit here, so the real
+    // test is "does a guaranteed-to-fail statement roll back the other one
+    // in the same batch").
+    //
+    // NOTE: an earlier version of this test instead pre-created an
+    // ORPHANED history row (referencing a linkId with no matching link
+    // row) to force the history half to fail on its own -- real D1
+    // rejected that SETUP step itself with `FOREIGN KEY constraint
+    // failed` (`calendar_event_link_history.link_id REFERENCES
+    // calendar_event_links(id)`, migration 0048), confirmed in this
+    // phase's actual CI run (see docs/AI-HANDOFF.md). D1 enforces that
+    // FK immediately, which structurally rules out ever having an
+    // existing, valid history row for a linkId that isn't ALSO already a
+    // real link row -- so "only the history half fails, while the link
+    // half would have succeeded alone" cannot be constructed as a setup
+    // at all; this test forces the LINK half to fail instead, which
+    // still fully proves the SAME batch-level atomicity guarantee.
     // =======================================================================
     {
       const interactionId = uniqueId("int-rollback");
-      const linkId = uniqueId("link-rollback");
       await seedInteraction(db, { interactionId });
-      await store.insertHistory({ id: uniqueId("hist"), linkId, generation: 0, googleEventId: deriveGoogleEventId(interactionId, 0), createStatus: "not_attempted", cleanupNeeded: false, cleanupStatus: "not_needed", cleanupAttempts: 0 }, NOW);
+      const enrolled = await store.insertLinkWithHistory({ id: uniqueId("link-rollback-original"), interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      assert.ok(enrolled, "setup: the first enrollment must succeed");
 
-      const result = await store.insertLinkWithHistory({ id: linkId, interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
-      assert.equal(result, null, "insertLinkWithHistory must report failure when its own history half cannot be written");
-      const linkRow = await store.getLinkById(linkId);
-      assert.equal(linkRow, null, "the LINK row must be rolled back along with the failing history insert -- db.batch()'s atomicity must be real, not merely 'best effort'");
+      const secondLinkId = uniqueId("link-rollback-second");
+      const result = await store.insertLinkWithHistory({ id: secondLinkId, interactionId, userId: "u1", googleCalendarId: "primary", generation: 0, googleEventId: null, googleEtag: null, desiredState: "present", desiredRevision: 1, syncedRevision: 0, syncStatus: "pending", lastError: null, attemptCount: 0, leaseOwner: null, leaseExpiresAt: null }, NOW);
+      assert.equal(result, null, "insertLinkWithHistory must report failure when its own link half cannot be written (a second enrollment for an already-enrolled interaction)");
+      const linkRow = await store.getLinkById(secondLinkId);
+      assert.equal(linkRow, null, "the rejected second link row must not exist");
+      const historyRow = await store.getHistory(secondLinkId, 0);
+      assert.equal(historyRow, null, "the HISTORY half must be rolled back along with the failing link insert -- db.batch()'s atomicity must be real, not merely 'best effort'");
     }
 
     // =======================================================================
