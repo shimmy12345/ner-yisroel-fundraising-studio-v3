@@ -388,8 +388,15 @@ function buildSampleRecoveryBackupText() {
     `  CHECK (\`desired_state\` IN ('present','absent')),`,
     `  CHECK (\`sync_status\` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))`,
     `);`,
-    `INSERT INTO "calendar_event_links" (id,interaction_id,user_id,google_calendar_id,generation,google_event_id,google_etag,desired_state,desired_revision,synced_revision,sync_status,last_error,attempt_count,lease_owner,lease_expires_at,next_retry_at,created_at,updated_at) VALUES('backup-link-1','int-backup-1','u1','primary',0,NULL,NULL,'present',1,0,'pending',NULL,0,NULL,NULL,NULL,${NOW},${NOW});`,
-    `INSERT INTO "calendar_event_links" (id,interaction_id,user_id,google_calendar_id,generation,google_event_id,google_etag,desired_state,desired_revision,synced_revision,sync_status,last_error,attempt_count,lease_owner,lease_expires_at,next_retry_at,created_at,updated_at) VALUES('backup-link-2','int-backup-2','u1','primary',0,'evt-backup-2',NULL,'present',1,1,'synced',NULL,0,NULL,NULL,NULL,${NOW},${NOW});`,
+    // Reuses interaction_id values ALREADY seeded by createRehearsalDatabase()
+    // (int-pending, int-synced -- see seedSyntheticRecords) -- a backup's
+    // own INSERTs are subject to IMMEDIATE foreign-key checking just like
+    // any other write, so calendar_event_links.interaction_id's own FK to
+    // `interactions` must resolve to a row that actually exists; inventing
+    // a fresh, never-seeded interaction id here would (correctly) be
+    // rejected by real D1, same as it would on real Staging.
+    `INSERT INTO "calendar_event_links" (id,interaction_id,user_id,google_calendar_id,generation,google_event_id,google_etag,desired_state,desired_revision,synced_revision,sync_status,last_error,attempt_count,lease_owner,lease_expires_at,next_retry_at,created_at,updated_at) VALUES('backup-link-1','int-pending','u1','primary',0,NULL,NULL,'present',1,0,'pending',NULL,0,NULL,NULL,NULL,${NOW},${NOW});`,
+    `INSERT INTO "calendar_event_links" (id,interaction_id,user_id,google_calendar_id,generation,google_event_id,google_etag,desired_state,desired_revision,synced_revision,sync_status,last_error,attempt_count,lease_owner,lease_expires_at,next_retry_at,created_at,updated_at) VALUES('backup-link-2','int-synced','u1','primary',0,'evt-backup-2',NULL,'present',1,1,'synced',NULL,0,NULL,NULL,NULL,${NOW},${NOW});`,
     `CREATE UNIQUE INDEX "calendar_event_links_interaction_uidx" ON "calendar_event_links" ("interaction_id");`,
     `CREATE INDEX "calendar_event_links_sync_status_idx" ON "calendar_event_links" ("sync_status");`,
     `CREATE TABLE "calendar_event_link_history" (`,
