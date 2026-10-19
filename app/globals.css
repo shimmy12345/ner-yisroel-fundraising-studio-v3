@@ -1528,6 +1528,15 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-confirm-panel input, .travel-planning-confirm-panel textarea { min-height:40px; padding:8px 10px; border:1px solid #d8dfda; border-radius:7px; background:#fff; font:inherit; font-size:13px; }
 .travel-planning-confirm-panel textarea { min-height:70px; resize:vertical; }
 .travel-planning-confirm-hint { margin:0; color:var(--muted); font-size:11px; }
+.travel-planning-google-calendar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 8px; padding:10px 12px; border-radius:8px; background:#f5f8f6; font-size:12px; }
+.travel-planning-google-calendar label { display:flex; align-items:center; gap:6px; color:#52625a; font-weight:700; }
+.travel-planning-google-calendar input[type="number"] { width:60px; min-height:30px; padding:4px 6px; border:1px solid #d8dfda; border-radius:6px; background:#fff; font:inherit; font-size:12px; }
+.travel-planning-google-calendar a { font-weight:700; color:var(--green); text-decoration:underline; }
+.travel-planning-google-calendar small { flex-basis:100%; color:var(--muted); }
+.travel-planning-use-address { display:flex; align-items:center; gap:8px; margin:0; }
+.travel-planning-use-address-button { min-height:30px; padding:0 10px; border:1px solid #d5ddd8; border-radius:7px; background:#fff; color:#405c4e; font-size:11px; font-weight:700; cursor:pointer; }
+.travel-planning-use-address-button:disabled { opacity:.6; cursor:not-allowed; }
+.travel-planning-use-address small { color:var(--muted); font-size:11px; }
 .travel-planning-confirm-actions { display:flex; gap:8px; }
 .travel-planning-confirm-actions button { min-height:38px; padding:0 14px; border-radius:8px; font-size:12px; font-weight:700; cursor:pointer; }
 .travel-planning-confirm-actions button:first-child { border:0; background:var(--green); color:#fff; }

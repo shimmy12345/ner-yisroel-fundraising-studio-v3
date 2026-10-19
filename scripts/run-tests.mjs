@@ -97,6 +97,7 @@ const TEST_FILES = [
   "tests/donor-geo-filter.test.mjs",
   "tests/city-combobox.test.mjs",
   "tests/trip-model.test.mjs",
+  "tests/trip-calendar-link.test.mjs",
   "tests/trip-suggestion-evidence.test.mjs",
   "tests/trip-financial-attribution.test.mjs",
   "tests/trip-financial-attribution-schema.test.mjs",

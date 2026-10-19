@@ -9,6 +9,10 @@ import { numericDonorCode } from "../../../lib/relationships/donor-identity";
 import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
 import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
+import {
+  MIN_GOOGLE_CALENDAR_DURATION_MINUTES, MAX_GOOGLE_CALENDAR_DURATION_MINUTES, DEFAULT_GOOGLE_CALENDAR_DURATION_MINUTES,
+  googleCalendarTemplateUrl, safeGoogleCalendarDurationMinutes, formatDonorAddress,
+} from "../../../lib/relationships/trip-calendar-link";
 import { FinancialSummaryCard, FinancialSummaryGrid } from "../../components/FinancialSummaryCard";
 import { ProgressBar } from "../../components/ProgressBar";
 
@@ -325,6 +329,30 @@ function FindProspectsPanel({
   </section>;
 }
 
+// Shown ONLY for a confirmed, timed `meeting_scheduled` prospect (never
+// requested/declined/completed/unable_to_schedule -- the caller below
+// gates on prospect.status itself). Duration is a LOCAL, UNSAVED UI
+// default (30 minutes, editable here only) -- Production's
+// trip_prospects/interactions schema (confirmed via the deployed
+// drizzle migrations through 0047, the highest migration present on
+// this release) has no duration/end-time column at all, and adding one
+// is deliberately out of this round's no-migration scope -- so nothing
+// about the chosen duration, or whether this link was ever clicked, is
+// written back to FOS. Repeated clicks can produce duplicate Google
+// Calendar events; no click-tracking or duplicate-prevention is built
+// for this release, by design.
+function AddToGoogleCalendarLink({ donorDisplayName, meetingAtEpoch, meetingLocation }: { donorDisplayName: string; meetingAtEpoch: number; meetingLocation: string | null }) {
+  const [durationMinutes, setDurationMinutes] = useState(DEFAULT_GOOGLE_CALENDAR_DURATION_MINUTES);
+  const href = googleCalendarTemplateUrl(donorDisplayName, meetingAtEpoch, safeGoogleCalendarDurationMinutes(durationMinutes), meetingLocation);
+  return <p className="travel-planning-google-calendar">
+    <label>Duration (minutes)
+      <input type="number" min={MIN_GOOGLE_CALENDAR_DURATION_MINUTES} max={MAX_GOOGLE_CALENDAR_DURATION_MINUTES} step={5} value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.valueAsNumber)} />
+    </label>
+    {" "}<a href={href} target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>
+    <br /><small>Save this event in Google Calendar. Later changes or cancellations must be updated there manually.</small>
+  </p>;
+}
+
 function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction, onRemove, attributions, onRefresh }: {
   tripId: string; prospect: TripProspectRecord; busy: boolean; fundraiserTimezone: string; onBusyAction: (action: () => Promise<void>) => void; onRemove: () => void;
   attributions: TripFinancialAttributionRow[]; onRefresh: () => void;
@@ -333,6 +361,12 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   // 2026-10-15) -- never the browser's. Falls back to the fundraiser's
   // own home timezone only when this donor has no state on file.
   const timezone = timezoneForState(prospect.donorState, fundraiserTimezone);
+  // "Use donor address" (2026-10-19) -- this donor's OWN already-on-file
+  // address, never looked up anywhere new. Computed once per render, not
+  // state: clicking the button below copies it into locationDraft
+  // EXPLICITLY, so an already-typed location is never silently
+  // overwritten just because this value happens to be available.
+  const donorAddress = formatDonorAddress(prospect.donorAddressLine1, prospect.donorCity, prospect.donorState, prospect.donorPostalCode);
   const [notesDraft, setNotesDraft] = useState(prospect.trip_notes ?? "");
   const [nextActionDraft, setNextActionDraft] = useState(prospect.nextAction ?? "");
   const [scheduling, setScheduling] = useState(false);
@@ -401,10 +435,17 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
 
     {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">{prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.</p>}
 
+    {prospect.status === "meeting_scheduled" && prospect.meetingAt && !scheduling && !completing &&
+      <AddToGoogleCalendarLink donorDisplayName={prospect.donorDisplayName} meetingAtEpoch={prospect.meetingAt} meetingLocation={prospect.meetingLocation} />}
+
     {showDetails && <>
       {scheduling && <div className="travel-planning-confirm-panel">
         <label>Meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
         <label>Location (optional)<input type="text" value={locationDraft} onChange={(event) => setLocationDraft(event.target.value)} maxLength={300} /></label>
+        <p className="travel-planning-use-address">
+          <button type="button" className="travel-planning-use-address-button" disabled={!donorAddress} onClick={() => setLocationDraft(donorAddress ?? "")}>Use donor address</button>
+          {!donorAddress && <small>No address on file for this donor.</small>}
+        </p>
         <p className="travel-planning-confirm-hint">This creates a real scheduled interaction on this donor&rsquo;s timeline.</p>
         <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmScheduling} disabled={!meetingAtDraft}>Confirm scheduled meeting</button><button type="button" onClick={() => setScheduling(false)}>Cancel</button></div>
       </div>}

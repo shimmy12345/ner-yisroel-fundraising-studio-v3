@@ -104,6 +104,7 @@ export async function getTrip(userId: string, tripId: string): Promise<TripRecor
 
 export type TripProspectRecord = {
   id: string; donorId: string; donorDisplayName: string; donorCity: string | null; donorState: string | null; donorCode: string | null;
+  donorAddressLine1: string | null; donorPostalCode: string | null;
   addedMethod: AddedMethod; status: TripProspectStatus; selectedAt: number;
   suggestedReason: string | null; suggestedScore: number | null; suggestedGeneratedAt: number | null;
   manualRank: number | null; meetingAt: number | null; meetingLocation: string | null; nextAction: string | null; trip_notes: string | null;
@@ -119,6 +120,7 @@ export type TripProspectRecord = {
 // where it DOES surface.
 export async function listTripProspects(userId: string, tripId: string): Promise<TripProspectRecord[]> {
   const prospectRows = await env.DB.prepare(`SELECT tp.id, tp.donor_id, d.display_name AS donor_display_name, d.city AS donor_city, d.state AS donor_state,
+        d.address_line_1 AS donor_address_line_1, d.postal_code AS donor_postal_code,
         d.external_id, d.donor_code,
         tp.added_method, tp.status, tp.selected_at, tp.suggested_reason, tp.suggested_score, tp.suggested_generated_at, tp.manual_rank,
         tp.meeting_at, tp.meeting_location, tp.next_action, tp.trip_notes, tp.linked_interaction_id
@@ -127,6 +129,7 @@ export async function listTripProspects(userId: string, tripId: string): Promise
       ORDER BY (tp.manual_rank IS NULL), tp.manual_rank, tp.suggested_score IS NULL, tp.suggested_score DESC, d.display_name`)
     .bind(tripId, userId).all<{
       id: string; donor_id: string; donor_display_name: string; donor_city: string | null; donor_state: string | null;
+      donor_address_line_1: string | null; donor_postal_code: string | null;
       external_id: string | null; donor_code: string | null;
       added_method: AddedMethod; status: TripProspectStatus; selected_at: number; suggested_reason: string | null; suggested_score: number | null; suggested_generated_at: number | null;
       manual_rank: number | null; meeting_at: number | null; meeting_location: string | null; next_action: string | null; trip_notes: string | null; linked_interaction_id: string | null;
@@ -158,6 +161,7 @@ export async function listTripProspects(userId: string, tripId: string): Promise
 
   return prospectRows.results.map((row) => ({
     id: row.id, donorId: row.donor_id, donorDisplayName: row.donor_display_name, donorCity: row.donor_city, donorState: row.donor_state, donorCode: row.external_id || row.donor_code,
+    donorAddressLine1: row.donor_address_line_1, donorPostalCode: row.donor_postal_code,
     addedMethod: row.added_method, status: row.status, selectedAt: row.selected_at, suggestedReason: row.suggested_reason, suggestedScore: row.suggested_score, suggestedGeneratedAt: row.suggested_generated_at,
     manualRank: row.manual_rank, meetingAt: row.meeting_at, meetingLocation: row.meeting_location, nextAction: row.next_action, trip_notes: row.trip_notes,
     linkedInteractionId: row.linked_interaction_id, crossTripConflicts: conflictsByDonor.get(row.donor_id) ?? [],
