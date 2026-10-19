@@ -93,24 +93,43 @@ export async function enrollMeetingForSync(store: CalendarLinkStore, now: number
 // the `+ 1` into the store itself (store.applyReschedule), which performs
 // it as a single atomic `desired_revision = desired_revision + 1` SQL
 // update -- never a read-then-compute-then-write race in this module.
+// Bug 3 (2026-10-21 review): this used to ALSO check `link.desiredState
+// !== "present"` here, from the SAME earlier read, before awaiting
+// applyReschedule -- insufficient, since a cancel landing in that gap
+// would leave this check having already (correctly, at the time) passed
+// "present", while the store write actually lands after the meeting is
+// absent. The precondition is no longer checked here at all: it is
+// store.applyReschedule's OWN job, re-verified atomically against the
+// live row at the moment it runs, never trusted from this stale read.
 export async function recordReschedule(store: CalendarLinkStore, now: number, interactionId: string): Promise<boolean> {
   const link = await store.getLinkByInteraction(interactionId);
-  if (!link || link.desiredState !== "present") return false; // not enrolled, or cancelled -- reopen() is the right call for that case
+  if (!link) return false; // not enrolled -- nothing to reschedule
   const updated = await store.applyReschedule(link.id, now);
-  return updated !== null;
+  return updated !== null; // null means applyReschedule itself found the meeting no longer 'present' -- reopen() is the right call for that case
 }
 
 // Same atomicity fix as recordReschedule, applied to the desired_state
-// flip. applyCancel also marks the current generation's history row
+// flip. applyCancel also marks the CURRENT generation's history row
 // cleanup_needed=1 as part of the SAME atomic unit -- a concurrent reader
 // can never observe desired_state='absent' without cleanup_needed also
 // being set, or vice versa (Issue 4's "link/history changes cannot be
 // partially committed").
+//
+// Bug 3 (2026-10-21 review): this used to read `link.generation` here
+// and pass it to store.applyCancel as the generation to flag for
+// cleanup -- the same stale-read class as reschedule/reopen: if a reopen
+// landed between this read and the store call, the CURRENT generation
+// moved on, and the OLD (now wrong) generation would be flagged instead,
+// leaving the actual current generation's event never cleaned up
+// ("cleanup cannot target the wrong generation"). store.applyCancel now
+// determines the generation to flag itself, atomically, from the live
+// row at the moment it runs -- no generation value is passed in at all.
+// The "already cancelled" idempotent short-circuit also moved into
+// applyCancel itself, computed fresh, for the same reason.
 export async function recordCancel(store: CalendarLinkStore, now: number, interactionId: string): Promise<boolean> {
   const link = await store.getLinkByInteraction(interactionId);
   if (!link) return false;
-  if (link.desiredState === "absent") return true; // already cancelled -- idempotent no-op, no new work generated
-  const updated = await store.applyCancel(link.id, link.generation, now);
+  const updated = await store.applyCancel(link.id, now);
   return updated !== null;
 }
 
@@ -123,10 +142,27 @@ export async function recordCancel(store: CalendarLinkStore, now: number, intera
 // recordReopen, which currently advances the link before inserting the
 // new generation's history") -- there is no longer a separate
 // insertHistory call here for a crash to land between.
+//
+// Bug 3 (2026-10-21 review): "overlapping reopen requests can allocate
+// two new generations for a single cancellation." This used to check
+// `link.desiredState !== "absent"` here, from an earlier read, before
+// awaiting store.applyReopen -- insufficient on its own: two concurrent
+// callers can both read 'absent' at generation G, both pass that check,
+// and the SECOND one's store call -- if store.applyReopen blindly bumped
+// the generation unconditionally -- would wrongly allocate a SECOND new
+// generation for the SAME single cancellation, creating a real duplicate
+// Google event. The check is no longer trusted from this read at all:
+// `link.generation`, captured here, is passed to store.applyReopen only
+// as the TRANSITION'S OWN IDENTITY (which specific cancellation this
+// request is reopening) -- store.applyReopen itself atomically verifies
+// the live row still matches that exact pending transition, reuses an
+// already-won one instead of allocating another, and rejects a request
+// that no longer matches any real pending cancellation at all (a stale
+// reopen must never reopen a later, separately canceled meeting).
 export async function recordReopen(store: CalendarLinkStore, now: number, interactionId: string): Promise<boolean> {
   const link = await store.getLinkByInteraction(interactionId);
-  if (!link || link.desiredState !== "absent") return false;
-  const updated = await store.applyReopen(link.id, now);
+  if (!link) return false;
+  const updated = await store.applyReopen(link.id, link.generation, now);
   return updated !== null;
 }
 

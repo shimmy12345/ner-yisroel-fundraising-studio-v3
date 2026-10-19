@@ -163,18 +163,38 @@ export interface CalendarLinkStore {
   // code) and applies the rest of `patch` in the SAME statement. Two
   // truly simultaneous callers can never both read the same pre-
   // increment value and both compute the same post-increment one -- the
-  // arithmetic happens inside the store itself. Returns the row as it
-  // exists immediately after, or null if the link doesn't exist.
+  // arithmetic happens inside the store itself.
+  // Bug 3 (2026-10-21 review): ALSO atomically re-checks desired_state ==
+  // 'present' as part of the SAME statement/unit, rather than trusting a
+  // caller's own earlier read (recordReschedule used to check this
+  // itself before awaiting the store call -- insufficient, since a
+  // cancel landing in that gap would leave the stale check having
+  // already passed). Returns the row as it exists immediately after a
+  // successful bump, or null if the link doesn't exist OR is not
+  // currently 'present' (not enrolled, already cancelled, or cancelled
+  // out from under a racing caller -- reopen() is the right call for
+  // that case, never a reschedule).
   applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null>;
   // Same atomic-increment guarantee as applyReschedule, PLUS flips
   // desired_state to 'absent' and resets sync_status, as one indivisible
-  // unit together with marking the given generation's history row
+  // unit together with marking the CURRENT generation's history row
   // cleanup_needed=1 -- both the link-row change and the history-row
   // change are applied together (a single transaction for the real
   // SQLite/D1 store; no intervening await for the in-memory one), so a
   // concurrent reader can never observe desired_state='absent' with
   // cleanup_needed still 0, or vice versa.
-  applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null>;
+  // Bug 3 (2026-10-21 review): the generation to flag is now determined
+  // FRESH, atomically, by this method itself reading the link's own
+  // current generation at the moment it runs -- no longer a `generation`
+  // parameter supplied by the caller from an earlier read. A caller-
+  // supplied value could go stale if a reopen landed between the
+  // caller's read and this call, flagging the WRONG (old) generation for
+  // cleanup while the actual current one is silently never flagged
+  // ("cleanup cannot target the wrong generation"). Idempotent: if the
+  // link is already 'absent' (computed fresh here, never from a stale
+  // caller-side check), returns the current row unchanged -- no new
+  // revision bump, no re-flagging.
+  applyCancel(linkId: string, now: number): Promise<CalendarLinkRow | null>;
   // Same atomic-increment guarantee again, this time incrementing BOTH
   // desired_revision and generation by exactly 1 together, resetting the
   // per-generation fields (google_event_id/etag/sync_status/last_error/
@@ -184,10 +204,31 @@ export interface CalendarLinkStore {
   // which currently advances the link before inserting the new
   // generation's history"). A reader can never observe the link's
   // generation field already bumped without that generation's history
-  // row existing. The freshly-allocated generation number is also
-  // already-uniquely-allocated by this same atomic operation, so it can
-  // never collide with or corrupt a concurrent transition.
-  applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null>;
+  // row existing.
+  // Bug 3 (2026-10-21 review): "overlapping reopen requests can allocate
+  // two new generations for a single cancellation." Checking
+  // desired_state in recordReopen before awaiting the store operation is
+  // insufficient -- two concurrent callers can both read 'absent', one
+  // wins and transitions to present, and the other (stale) must NOT
+  // unconditionally bump the generation again. `expectedGeneration` is
+  // the CANCELED generation this reopen is specifically reopening (the
+  // transition's own identity) -- not a value trusted blindly, but
+  // compared atomically against the link's true current state inside
+  // this same operation:
+  //  - current generation == expectedGeneration AND desired_state ==
+  //    'absent': the real transition -- perform it, allocating exactly
+  //    one new generation, atomically with its history row.
+  //  - current generation == expectedGeneration + 1 AND desired_state ==
+  //    'present': this exact transition already won (a concurrent
+  //    caller completed it first) -- REUSE it; return the current row
+  //    unchanged, never allocate a further generation ("repeated
+  //    requests for that same reopen must reuse the winning transition").
+  //  - anything else: this request no longer matches a real, still-
+  //    pending cancellation (it reopened, and/or was cancelled again,
+  //    since this caller last read fresh) -- reject (return null), so a
+  //    stale reopen request can never reopen a later, separately
+  //    canceled meeting it was never asked to reopen.
+  applyReopen(linkId: string, expectedGeneration: number, now: number): Promise<CalendarLinkRow | null>;
   getHistory(linkId: string, generation: number): Promise<CalendarLinkHistoryRow | null>;
   insertHistory(row: Omit<CalendarLinkHistoryRow, "createdAt" | "updatedAt">, now: number): Promise<void>;
   updateHistory(linkId: string, generation: number, patch: Partial<CalendarLinkHistoryRow>): Promise<void>;

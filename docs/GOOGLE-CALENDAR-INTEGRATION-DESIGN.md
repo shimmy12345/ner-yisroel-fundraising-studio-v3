@@ -1364,3 +1364,181 @@ directly-simulated persistence gaps at the reconciler/store level -- not
 an identical guarantee to a live production run, nor to a real D1
 instance's own transaction/crash semantics (only `node:sqlite` has been
 exercised).
+
+## 2026-10-21 independent review: 1 more bug found and fixed (overlapping reopen requests)
+
+Independent execution of commit `0c21a46` confirmed the prior two
+rounds' fixes (9 calendar test files passed) and found one further
+reproducible bug: "overlapping reopen requests can allocate two new
+generations for a single cancellation," producing a real duplicate,
+permanently-live Google event. Fixed, with new regression tests proving
+the fix against both stores. New file
+`tests/calendar-sync-regression-2026-10-21.test.mjs` (registered in
+`scripts/run-tests.mjs`); new stateful fake
+`lib/calendar/testing/stateful-calendar-client.ts` (a `GoogleCalendarClient`
+that models a real calendar's actual event store across calls, rather
+than a scripted response sequence, so a test can assert "exactly one
+active event exists" directly); updates to
+`lib/calendar/calendar-sync-reconciler.ts`,
+`lib/calendar/calendar-sync-types.ts`, and both store implementations;
+and the generation-allocation test in
+`tests/calendar-sync-regression-2026-10-19.test.mjs` that previously
+asserted the duplicate-generation behavior was correct is replaced.
+Still design/isolated-core only -- no live Google call, OAuth setup,
+credential, remote migration, route/cron wiring, or deployment.
+
+Honesty note on process: the fix for `applyReopen` was designed first
+from the review's exact reproduction steps, then `applyCancel` and
+`applyReschedule` were inspected (as the review explicitly asked) and
+found to share the same root cause -- a precondition checked once from
+an earlier read, then trusted across an await gap before the atomic
+store write actually happens. All three were fixed together in one pass
+since they share the same shape of fix (move the precondition check
+INTO the atomic store operation itself, computed fresh), then the new
+tests were run against the fixed code and confirmed to reproduce each
+review scenario precisely, including the one existing test that had to
+be deleted because it asserted the bug's own behavior as correct.
+
+### Claim retracted from the 2026-10-19/2026-10-20 sections above
+
+The 2026-10-19 section's Bug 4 fix stated `applyReopen` ensures
+"multiple simultaneous reopen attempts... each get a distinct,
+never-colliding generation number," and its own regression test
+asserted exactly that (6 concurrent reopen calls allocating 6 distinct
+generations). **Retracted.** This was true in the narrow sense tested --
+no two concurrent callers ever collided on the SAME generation NUMBER --
+but wrong in the sense that matters: those 6 concurrent calls represent
+callers racing to reopen the SAME single cancellation, and a correct
+system must collapse them into ONE transition, not honor all 6 as if
+they were 6 independent reopens. The test asserting "6 callers, 6
+generations" was itself encoding the bug as a specification. The
+generation-collision PREVENTION (no two concurrent writers ever read
+and write the same pre-increment value) was never wrong; what was
+missing was any check for whether a second writer's transition was even
+the SAME ONE a first writer had already completed.
+
+### The bug, and the fix
+
+**Overlapping reopen requests can allocate two new generations for a
+single cancellation** (`lib/calendar/calendar-sync-reconciler.ts`,
+`lib/calendar/calendar-sync-types.ts`, both store implementations). The
+exact review reproduction: enroll a meeting, cancel it; two
+`recordReopen` calls both read `desiredState=absent` at generation 0;
+the first's `applyReopen` completes, creating generation 1; generation 1
+is reconciled successfully, creating its real Google event; the second
+(stale) `applyReopen` -- still only knowing it had read "absent" --
+unconditionally advances the link to generation 2 anyway, although the
+meeting is already present; a normal sweep then runs. Actual result: two
+remote events exist (generations 1 and 2); generation 1's history
+incorrectly shows `cleanupNeeded=false`; no pending cleanup remains; the
+link points only to generation 2 -- a real, permanently orphaned
+duplicate event on the owner's actual calendar. Root cause: checking
+`desiredState` in `recordReopen` before awaiting the store operation is
+insufficient -- the precondition can go stale in exactly the gap between
+that read and the store call, and the old `applyReopen` had no way to
+tell "a second caller for the SAME cancellation" apart from "a caller
+for an entirely different, later cancellation," so it just always
+bumped the generation again.
+
+**Fixed** by making reopen a conditional, atomic transition bound to the
+SPECIFIC canceled generation it is reopening -- its own transition
+identity -- rather than an unconditional bump. `recordReopen` still
+reads the link's current generation, but now passes it to
+`store.applyReopen(linkId, expectedGeneration, now)` only as that
+identity, never as a value trusted at face value. `applyReopen` itself
+atomically checks the LIVE row, computed fresh inside the same operation
+(a single SQL transaction for the SQLite/D1 store; a single
+uninterrupted synchronous unit for the in-memory one, matching the
+atomicity style already established for Bug 2's `insertLinkWithHistory`):
+- live state is exactly `(generation == expectedGeneration, absent)`:
+  the real transition -- perform it, allocating exactly one new
+  generation atomically with its history row, same as before.
+- live state is exactly `(generation == expectedGeneration + 1,
+  present)`: this exact transition already won, by a concurrent caller
+  that got there first -- **reuse it**, returning the current row
+  unchanged; no second generation is ever allocated, and the caller is
+  still correctly told "reopened" (its request genuinely is satisfied).
+- anything else: this request no longer matches any real, still-pending
+  cancellation -- **reject** (null), so a stale reopen request can never
+  reopen a later, separately canceled meeting it was never asked about.
+
+**Also fixed, per the review's explicit callout to inspect them**:
+`applyCancel` used to accept a `generation` parameter supplied by the
+caller from an earlier read -- if a reopen landed in the gap between
+that read and the call, the WRONG (stale, already-superseded)
+generation's history row would be flagged for cleanup while the actual
+current generation's event was silently never flagged at all ("cleanup
+cannot target the wrong generation" -- reproduced as a delayed cancel
+across a full cancel/reconcile/reopen/reconcile cycle, which, pre-fix,
+would leave the real live event permanently stuck with cleanup reporting
+"delete failed" without ever sending a DELETE, the same symptom shape as
+the 2026-10-20 review's Bug 2). Fixed by removing the parameter entirely:
+`applyCancel` now determines the generation to flag by reading the live
+row fresh, inside the same atomic unit as the write -- there is no
+longer a caller-supplied value to go stale. It is also now idempotent on
+its own (returns the current row unchanged if already absent, computed
+fresh), rather than `recordCancel` short-circuiting from its own earlier
+read. `applyReschedule` had the analogous gap -- `recordReschedule`
+checked `desiredState !== "present"` from an earlier read before
+awaiting the store call, which a cancel landing in that gap could slip
+past. Fixed by moving the check into `applyReschedule` itself (a `WHERE
+... AND desired_state = 'present'` guard in the same UPDATE statement for
+SQLite; the same synchronous check-then-mutate unit for the in-memory
+store), rejecting (null) if the meeting is not 'present' at the moment
+the operation actually runs -- `recordReschedule` no longer performs any
+precondition check of its own at all.
+
+Proven against both stores: the review's exact deferred-ordering
+reproduction (both reopen requests' stale read captured once, the
+winner's `applyReopen` completed, generation 1 reconciled against a
+STATEFUL simulated Google calendar -- `StatefulCalendarClient`, new this
+round, which models a real calendar's persistent event store rather than
+a scripted response sequence -- the stale request resumed, then a full
+`runReconciliationSweep`), asserting via the stateful client's own
+`activeEventIds()` that exactly one event exists end to end, that no
+generation-2 history row was ever created, and that generation 0's
+pre-existing cleanup obligation was still honored unaffected by the
+race; a stale reopen request rejected when it no longer matches the
+current (by-then-different) cancellation, proving the real current
+cancellation remains separately reopenable afterward; a delayed cancel
+across a full cancel/reopen cycle correctly targeting and cleaning up
+the real current generation via a genuine Google DELETE (checked via the
+stateful client's call log and its `activeEventIds()`), not the stale
+one; and a stale reschedule rejected by `applyReschedule` itself when
+the meeting is no longer present at the moment it runs, via both the raw
+store primitive and the public `recordReschedule` entry point. The
+2026-10-19 file's own concurrent-reopen test is corrected to assert the
+right invariant (N concurrent callers for the SAME cancellation allocate
+exactly ONE generation, never N), alongside a new sequential-reopen test
+proving genuinely separate, non-overlapping cancel/reopen cycles are
+unaffected and still each allocate their own distinct generation.
+
+### Checks run
+
+225 test files pass (`npm test`), including all 11 calendar test files
+(the new `calendar-sync-regression-2026-10-21.test.mjs` is registered in
+`scripts/run-tests.mjs`); `tsc --noEmit` clean; `npm run lint` unchanged
+from the established baseline (94 errors, 46 warnings); `npm run build`
+succeeds. The D1 restore/schema main-sync check against `origin/main`
+shows the same expected, unchanged drift as all three prior rounds
+(this round touched no schema).
+
+### What remains honestly unproven (unchanged from the prior rounds)
+
+This round fixed one more logic bug in the sync core (plus two
+analogous, same-root-cause hardenings found by inspection, not by
+independent reproduction); it did not reduce or increase what still
+depends on live Google testing, scoped exactly as in "Implementation
+status" above. All concurrency and crash-recovery properties proven
+across all four review rounds remain proven through directly-
+orchestrated interleavings and directly-simulated persistence gaps at
+the reconciler/store level, including this round's new stateful-client
+technique -- not an identical guarantee to a live production run, nor to
+a real D1 instance's own transaction/crash semantics (only `node:sqlite`
+has been exercised). One structural question this round's fix surfaces
+but does not resolve: `applyCancel`'s and `applyReschedule`'s fixes were
+found by inspection prompted by the review's own instruction, not by an
+independently reproduced failure for either of them specifically --
+their regression tests prove the fixed behavior is correct, but (unlike
+`applyReopen`) there is no equivalent "independent execution actually
+observed this exact wrong production state" evidence for them.

@@ -184,20 +184,48 @@ export class SqliteCalendarStore implements CalendarLinkStore {
   // surrounding async JS happens to interleave, so one necessarily reads
   // (and increments) the OTHER's already-written value, never the same
   // stale value twice.
+  //
+  // Bug 3 (2026-10-21 review): the `WHERE ... AND desired_state =
+  // 'present'` guard re-checks the precondition atomically, as part of
+  // THIS SAME statement, rather than trusting a caller's own earlier
+  // read -- a cancel that landed after that read but before this call
+  // now correctly makes this UPDATE affect zero rows, reported as null,
+  // instead of silently bumping the revision of an absent meeting.
   async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
-    this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, sync_status = CASE WHEN sync_status = 'synced' THEN 'pending' ELSE sync_status END, updated_at = ? WHERE id = ?`).run(now, linkId);
+    const result = this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, sync_status = CASE WHEN sync_status = 'synced' THEN 'pending' ELSE sync_status END, updated_at = ? WHERE id = ? AND desired_state = 'present'`).run(now, linkId);
+    if (Number(result.changes) === 0) return null; // link doesn't exist, or is no longer 'present' -- reopen() is the right call for that case
     return this.getLinkById(linkId);
   }
 
   // Same atomic-increment guarantee, plus the desired_state flip and the
-  // history row's cleanup_needed flag applied together as one SQL
-  // transaction -- a concurrent reader can never observe one change
-  // without the other.
-  async applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null> {
+  // CURRENT generation's history row cleanup_needed flag applied
+  // together as one SQL transaction -- a concurrent reader can never
+  // observe one change without the other.
+  //
+  // Bug 3 (2026-10-21 review): the generation to flag is read FRESH,
+  // inside this SAME transaction, immediately before the UPDATE -- never
+  // a `generation` argument supplied by the caller from an earlier read,
+  // which could go stale if a reopen landed in the gap between that read
+  // and this call (flagging the wrong, already-superseded generation
+  // while the real current one is silently never flagged -- "cleanup
+  // cannot target the wrong generation"). Idempotent: if the live row is
+  // already 'absent' (checked fresh here, never from a stale caller-side
+  // read), this is a no-op returning the current row unchanged.
+  async applyCancel(linkId: string, now: number): Promise<CalendarLinkRow | null> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const current = this.db.prepare("SELECT * FROM calendar_event_links WHERE id = ?").get(linkId) as RawRow | undefined;
+      if (!current) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if ((current.desired_state as DesiredState) === "absent") {
+        this.db.exec("COMMIT");
+        return toLinkRow(current); // already cancelled -- idempotent no-op, no new work generated
+      }
+      const currentGeneration = current.generation as number;
       this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', updated_at = ? WHERE id = ?`).run(now, linkId);
-      this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = ?`).run(linkId, generation);
+      this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = ?`).run(linkId, currentGeneration);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -213,16 +241,52 @@ export class SqliteCalendarStore implements CalendarLinkStore {
   // recordReopen, which currently advances the link before inserting the
   // new generation's history"). A reader can never observe the link's
   // generation already bumped without that generation's history row
-  // existing. Two simultaneous reopen attempts (however unusual that is)
-  // would still each be allocated a distinct, never-colliding generation
-  // number by SQLite itself, never both computing the same "current + 1".
-  async applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null> {
+  // existing.
+  //
+  // Bug 3 (2026-10-21 review): "overlapping reopen requests can allocate
+  // two new generations for a single cancellation." `expectedGeneration`
+  // is the specific canceled generation this reopen is reopening -- its
+  // own transition identity -- verified atomically against the LIVE row,
+  // read fresh inside this SAME transaction, rather than trusted from a
+  // caller's earlier read:
+  //  - live state is exactly (generation == expectedGeneration, absent):
+  //    the real transition -- perform it, allocating exactly one new
+  //    generation atomically with its history row.
+  //  - live state is exactly (generation == expectedGeneration + 1,
+  //    present): this exact transition already won, by a concurrent
+  //    caller that reached this method first -- REUSE it; return the
+  //    current row unchanged, never allocate a second generation for the
+  //    same cancellation.
+  //  - anything else: this request no longer matches any real, still-
+  //    pending cancellation -- reject (null), so a stale reopen can
+  //    never reopen a later, different cancellation it was never asked
+  //    to reopen.
+  async applyReopen(linkId: string, expectedGeneration: number, now: number): Promise<CalendarLinkRow | null> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const current = this.db.prepare("SELECT * FROM calendar_event_links WHERE id = ?").get(linkId) as RawRow | undefined;
+      if (!current) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const currentGeneration = current.generation as number;
+      const currentDesiredState = current.desired_state as DesiredState;
+
+      if (currentGeneration === expectedGeneration + 1 && currentDesiredState === "present") {
+        this.db.exec("COMMIT");
+        return toLinkRow(current); // replay of the already-won transition -- reuse it, allocate nothing further
+      }
+      if (currentGeneration !== expectedGeneration || currentDesiredState !== "absent") {
+        this.db.exec("COMMIT");
+        return null; // stale -- no longer the same pending cancellation this request was meant to reopen
+      }
+
+      const interactionId = current.interaction_id as string;
+      const newGeneration = currentGeneration + 1;
       this.db
         .prepare(
           `UPDATE calendar_event_links SET
-            generation = generation + 1,
+            generation = ?,
             desired_revision = desired_revision + 1,
             desired_state = 'present',
             google_event_id = NULL,
@@ -231,16 +295,12 @@ export class SqliteCalendarStore implements CalendarLinkStore {
             last_error = NULL,
             attempt_count = 0,
             updated_at = ?
-          WHERE id = ?`,
+          WHERE id = ? AND generation = ? AND desired_state = 'absent'`,
         )
-        .run(now, linkId);
-      const updated = this.db.prepare("SELECT * FROM calendar_event_links WHERE id = ?").get(linkId) as RawRow | undefined;
-      if (!updated) throw new Error("applyReopen: link disappeared mid-transaction");
-      const interactionId = updated.interaction_id as string;
-      const generation = updated.generation as number;
+        .run(newGeneration, now, linkId, expectedGeneration);
       this.db
         .prepare(`INSERT INTO calendar_event_link_history (id, link_id, generation, google_event_id, create_status, cleanup_needed, cleanup_status, cleanup_attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 'not_attempted', 0, 'not_needed', 0, ?, ?)`)
-        .run(randomUUID(), linkId, generation, deriveGoogleEventId(interactionId, generation), now, now);
+        .run(randomUUID(), linkId, newGeneration, deriveGoogleEventId(interactionId, newGeneration), now, now);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

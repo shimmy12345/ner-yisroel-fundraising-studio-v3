@@ -126,9 +126,25 @@ async function run() {
     assert.equal(after.desiredState, "absent", `[${label}] the cancel must still have taken effect`);
   }
 
-  // --- Generation allocation atomicity: concurrent reopen attempts (after
-  // a cancel) must never allocate the same generation number to two
-  // different callers. ---
+  // --- Generation allocation atomicity: concurrent reopen attempts for
+  // the SAME cancellation must allocate exactly ONE new generation
+  // between them, never one generation per caller.
+  //
+  // Bug 3 (2026-10-21 independent review of commit 0c21a46): this test
+  // previously asserted the OPPOSITE -- that N concurrent reopen calls
+  // must allocate N distinct generations -- which is exactly the
+  // duplicate-transition bug the review found (two remote Google events
+  // for what should be a single reopened meeting). The correct
+  // invariant is one generation per actual canceled-to-scheduled
+  // TRANSITION, not one per caller: whichever concurrent call reaches
+  // the atomic store operation first wins and performs the transition;
+  // every other concurrent call for the SAME cancellation must detect
+  // that transition already happened and reuse it, reporting success
+  // without allocating anything further. See
+  // tests/calendar-sync-regression-2026-10-21.test.mjs for the review's
+  // own exact deferred-ordering reproduction (interleaved with a real
+  // reconcile and a full sweep) and the stale-reopen-must-not-reopen-a-
+  // later-cancellation coverage. ---
   for (const [label, makeStore] of [["in-memory", () => new InMemoryCalendarStore()], ["sqlite", () => freshSqliteStore("int-atomic-reopen")]]) {
     const store = makeStore();
     const now = 1000;
@@ -138,19 +154,34 @@ async function run() {
 
     const N = 6;
     const results = await Promise.all(Array.from({ length: N }, () => recordReopen(store, now + 2, interactionId)));
-    assert.ok(results.every(Boolean), `[${label}] every concurrent reopen call must succeed (each atomically allocates its own generation)`);
+    assert.ok(results.every(Boolean), `[${label}] every concurrent reopen call for the SAME cancellation must report success -- whichever one wins the transition, every other correctly reuses it rather than failing`);
 
     const after = await store.getLinkByInteraction(interactionId);
-    assert.equal(after.generation, N, `[${label}] ${N} truly simultaneous reopen calls must allocate ${N} distinct generations, never colliding on the same number`);
+    assert.equal(after.generation, 1, `[${label}] ${N} truly simultaneous reopen calls for the SAME cancellation must allocate exactly ONE new generation -- one per real transition, never one per caller`);
 
-    // Every allocated generation must have gotten its OWN history row --
-    // a generation collision would have thrown on the UNIQUE(link_id,
-    // generation) constraint (sqlite) or silently overwritten a sibling
-    // (in-memory); neither happened, since every call succeeded above.
-    for (let generation = 1; generation <= N; generation++) {
-      const history = await store.getHistory(after.id, generation);
-      assert.ok(history, `[${label}] generation ${generation} must have its own history row`);
+    // Only the one real generation has a history row; no further
+    // generation was ever allocated for any of the other N-1 callers.
+    const history = await store.getHistory(after.id, 1);
+    assert.ok(history, `[${label}] generation 1 must have its own history row`);
+    assert.equal(await store.getHistory(after.id, 2), null, `[${label}] no generation beyond 1 must ever have been allocated`);
+  }
+
+  // --- The SAME concurrent-reopen race, but proving it is specifically
+  // the SHARED cancellation that collapses to one generation -- genuinely
+  // SEPARATE, sequential cancel/reopen cycles must still each allocate
+  // their own distinct generation, one per real transition. ---
+  for (const [label, makeStore] of [["in-memory", () => new InMemoryCalendarStore()], ["sqlite", () => freshSqliteStore("int-sequential-reopen")]]) {
+    const store = makeStore();
+    const now = 1000;
+    const interactionId = "int-sequential-reopen";
+    await enrollMeetingForSync(store, now, { interactionId, userId: "u1", googleCalendarId: "primary" });
+    for (let i = 1; i <= 3; i++) {
+      await recordCancel(store, now + i, interactionId);
+      const ok = await recordReopen(store, now + i, interactionId);
+      assert.ok(ok, `[${label}] sequential reopen ${i} must succeed`);
     }
+    const after = await store.getLinkByInteraction(interactionId);
+    assert.equal(after.generation, 3, `[${label}] 3 genuinely separate cancel/reopen cycles must allocate 3 distinct generations, one per real transition -- the fix must not collapse unrelated, non-overlapping reopens together`);
   }
 
   // =========================================================================

@@ -94,23 +94,41 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
   // would NOT correctly model a real database's guarantee and would
   // reintroduce exactly the lost-update race this method exists to rule
   // out structurally.)
+  // Bug 3 (2026-10-21 review): re-checks desiredState === 'present'
+  // atomically here -- in the SAME synchronous unit as the mutation,
+  // never trusting a caller's own earlier read -- and rejects (null) if
+  // the meeting is no longer present (cancelled out from under a racing
+  // caller). This is what makes the precondition genuinely atomic rather
+  // than aspirational: a caller checking "present" on a stale read, then
+  // awaiting before calling this method, can no longer slip a reschedule
+  // through after a cancel has landed in that gap.
   async applyReschedule(linkId: string, now: number): Promise<CalendarLinkRow | null> {
     const link = this.links.get(linkId);
-    if (!link) return null;
+    if (!link || link.desiredState !== "present") return null;
     link.desiredRevision += 1;
     if (link.syncStatus === "synced") link.syncStatus = "pending";
     link.updatedAt = now;
     return { ...link };
   }
 
-  async applyCancel(linkId: string, generation: number, now: number): Promise<CalendarLinkRow | null> {
+  // Bug 3 (2026-10-21 review): the generation to flag for cleanup is now
+  // read FRESH from the live link row, in this same synchronous unit --
+  // never a `generation` argument supplied by a caller from an earlier
+  // read, which could go stale if a reopen landed in the gap between
+  // that read and this call (flagging the wrong, already-superseded
+  // generation while the real current one is never flagged). Idempotent:
+  // if already absent (checked fresh, never from a stale caller-side
+  // read), returns the current row unchanged.
+  async applyCancel(linkId: string, now: number): Promise<CalendarLinkRow | null> {
     const link = this.links.get(linkId);
     if (!link) return null;
+    if (link.desiredState === "absent") return { ...link }; // already cancelled -- idempotent no-op, no new work generated
+    const currentGeneration = link.generation;
     link.desiredRevision += 1;
     link.desiredState = "absent";
     link.syncStatus = "pending";
     link.updatedAt = now;
-    const history = this.history.get(`${linkId}:${generation}`);
+    const history = this.history.get(`${linkId}:${currentGeneration}`);
     if (history) history.cleanupNeeded = true; // same synchronous unit as the link-row change above -- never separately observable
     return { ...link };
   }
@@ -118,9 +136,35 @@ export class InMemoryCalendarStore implements CalendarLinkStore {
   // Bug 2 (2026-10-20 review): the generation bump AND the new
   // generation's history insert happen in the same synchronous unit --
   // never observable with the link advanced but the history missing.
-  async applyReopen(linkId: string, now: number): Promise<CalendarLinkRow | null> {
+  //
+  // Bug 3 (2026-10-21 review): `expectedGeneration` is the specific
+  // canceled generation this reopen is reopening -- its own transition
+  // identity -- verified atomically against the LIVE row, in this same
+  // synchronous unit, rather than trusted from a caller's earlier read.
+  // Three outcomes:
+  //  - live state is exactly (generation == expectedGeneration, absent):
+  //    the real transition -- perform it, allocating exactly one new
+  //    generation atomically with its history row.
+  //  - live state is exactly (generation == expectedGeneration + 1,
+  //    present): this exact transition already won, by a concurrent
+  //    caller that reached this method first -- REUSE it; return the
+  //    current row unchanged, never allocate a second generation for the
+  //    same cancellation ("overlapping reopen requests can allocate two
+  //    new generations for a single cancellation").
+  //  - anything else: this request no longer matches any real, still-
+  //    pending cancellation (it was already reopened and separately
+  //    re-cancelled since this caller last read fresh) -- reject (null),
+  //    so a stale reopen can never reopen a later, different
+  //    cancellation it was never asked to reopen.
+  async applyReopen(linkId: string, expectedGeneration: number, now: number): Promise<CalendarLinkRow | null> {
     const link = this.links.get(linkId);
     if (!link) return null;
+    if (link.generation === expectedGeneration + 1 && link.desiredState === "present") {
+      return { ...link }; // replay of the already-won transition -- reuse it, allocate nothing further
+    }
+    if (link.generation !== expectedGeneration || link.desiredState !== "absent") {
+      return null; // stale -- no longer the same pending cancellation this request was meant to reopen
+    }
     link.generation += 1;
     link.desiredRevision += 1;
     link.desiredState = "present";

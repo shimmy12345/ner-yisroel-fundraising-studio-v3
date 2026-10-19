@@ -53042,3 +53042,73 @@ rounds (this round touched no schema).
 independent re-review before any route wiring, live Google setup,
 migration, or deployment.** `main`/Production/Staging untouched by
 this round.
+
+### 1 more reproducible bug found and fixed -- overlapping reopens (2026-10-21) -- STILL NOT WIRED, AWAITING RE-REVIEW
+
+Independent execution of commit `0c21a46` confirmed the prior two
+rounds' fixes (9 calendar test files passed) and found one further real
+bug: overlapping reopen requests could allocate two new generations for
+a single cancellation, creating a real duplicate, permanently-live
+Google event. Fixed, with new regression tests against both stores. The
+fix for `applyReopen` was designed from the review's exact reproduction
+first; `applyCancel` and `applyReschedule` were then inspected (as the
+review explicitly asked) and found to share the same root cause, and
+fixed the same way. Full detail, including an explicit retraction, is in
+`docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md`'s new "2026-10-21
+independent review" section. Still design/isolated-core only -- no live
+Google call, OAuth setup, credential, remote migration, route/cron
+wiring, or deployment.
+
+**Claim retracted, stated plainly**: the 2026-10-19 fix's own test
+asserted that 6 concurrent reopen calls must allocate 6 distinct
+generations -- which is exactly the duplicate-generation bug this round
+found, encoded as a passing test. The real invariant is one generation
+per actual canceled-to-scheduled TRANSITION, not one per caller; that
+test is replaced.
+
+**The bug and fix**: `recordReopen` checked `desiredState !== "absent"`
+from an earlier read, then awaited the store operation -- insufficient,
+since a second concurrent reopen request for the SAME cancellation could
+pass that same check (both correctly saw "absent" before either won),
+and the old `applyReopen` had no way to tell "a second caller for the
+SAME cancellation" apart from "a caller for a different, later
+cancellation," so it just always bumped the generation again. Fixed by
+making reopen a conditional, atomic transition bound to the specific
+canceled generation it is reopening: `applyReopen(linkId,
+expectedGeneration, now)` now atomically checks the live row -- if it
+still matches `(generation == expectedGeneration, absent)`, performs the
+real transition; if it already shows `(generation == expectedGeneration
++ 1, present)`, that exact transition already won by a concurrent
+caller -- reuse it, allocate nothing further, still report success;
+otherwise reject (null), so a stale reopen can never reopen a later,
+separately canceled meeting it was never asked about.
+
+**Also fixed, per the review's explicit callout to inspect them**:
+`applyCancel` used to accept a caller-supplied `generation` parameter
+that could go stale (a reopen landing in the gap would leave the WRONG,
+superseded generation flagged for cleanup while the real current
+generation was silently never flagged -- reproduced as a delayed cancel
+across a full cancel/reconcile/reopen/reconcile cycle, producing the
+same "delete failed, no DELETE ever sent" symptom as the 2026-10-20
+review's Bug 2). Fixed by having `applyCancel` determine the generation
+to flag itself, fresh, inside the same atomic unit as the write -- no
+generation parameter at all anymore. `applyReschedule` had the
+analogous gap (`recordReschedule` checked `desiredState !== "present"`
+from an earlier read); fixed by moving that check into
+`applyReschedule` itself, atomically, so `recordReschedule` no longer
+performs any precondition check of its own.
+
+**Checks**: 225/225 test files pass (11 calendar test files, including
+the new `tests/calendar-sync-regression-2026-10-21.test.mjs`, registered
+in `scripts/run-tests.mjs`, and a new stateful simulated-calendar fake,
+`lib/calendar/testing/stateful-calendar-client.ts`, used to assert
+"exactly one active event exists" directly against its own persisted
+state rather than only a call log); `tsc --noEmit` clean; lint unchanged
+from baseline (94 errors, 46 warnings); `npm run build` succeeds. The D1
+main-sync check shows the same expected, unrelated drift as all three
+prior rounds (this round touched no schema).
+
+**Status: 1 more reproduced bug fixed and regression-tested (plus two
+analogous hardenings found by inspection), awaiting independent
+re-review before any route wiring, live Google setup, migration, or
+deployment.** `main`/Production/Staging untouched by this round.
