@@ -19,12 +19,23 @@ import {
   type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus,
 } from "./trip-model.ts";
 import {
-  attemptImmediateTripCalendarSync, buildTripMeetingCancelledStatements, buildTripMeetingScheduledStatements,
-  getTripMeetingCalendarLink, googleCalendarEventViewUrl, loadCalendarConnectionStatus, reconcileTripMeetingCalendarLink,
-  setCalendarSyncEnabledForUser as setCalendarSyncEnabledForUserRow,
+  attemptImmediateTripCalendarSync, buildTripMeetingCancelledStatements,
+  getTripMeetingCalendarLink, googleCalendarEventViewUrl, isUniqueConstraintViolation, loadCalendarConnectionStatus,
+  planTripMeetingScheduledIntent, reconcileTripMeetingCalendarLink, setCalendarSyncEnabledForUser as setCalendarSyncEnabledForUserRow,
   type CalendarConnectionStatus,
 } from "./trip-calendar-sync.ts";
 import { logger } from "../logger.ts";
+
+// Integration safety (2026-10-19, second follow-up review): bounded
+// retries for the one race that is genuinely safe and correct to retry
+// -- the calendar-sync intent's own guarded statement matching zero rows
+// because its precondition (the link state read moments earlier) went
+// stale under a concurrent transition. Each retry re-reads the link
+// fresh and rebuilds the correct statement from scratch, so it converges
+// rather than looping on a config/schema problem; a cap bounds the
+// (never observed, but never assumed impossible) pathological case of
+// continuous contention.
+const MAX_CALENDAR_INTENT_ATTEMPTS = 5;
 
 // Google Calendar sync narrowed first release (2026-10-19, see
 // docs/AI-HANDOFF.md) -- the thin env-reading layer over
@@ -54,35 +65,27 @@ async function isCalendarSyncEnabledForUserInternal(userId: string): Promise<boo
   return row?.calendar_sync_enabled === 1;
 }
 
-// Integration safety, atomic persistence (2026-10-19 review, follow-up):
-// builds the durable calendar-sync intent statements for a schedule/
-// reschedule/reopen, to be appended to the CALLER's own db.batch() call
-// -- never executed here, never a separate D1 round trip from the
-// meeting change itself (see trip-calendar-sync.ts's own
-// buildTripMeetingScheduledStatements doc comment for exactly what this
-// makes atomic and why). A failure reading the current link state (the
-// one await this performs) is caught and logged, returning no statements
-// at all -- "preserve existing scheduling when Calendar is disabled or
-// unavailable" extends to "a calendar-intent read failure must never
-// block the meeting save," so the caller's own meeting-change statements
-// still commit on their own in that case.
-async function tripCalendarScheduleStatements(interactionId: string, userId: string, now: number): Promise<D1PreparedStatement[]> {
-  try {
-    return await buildTripMeetingScheduledStatements(env.DB, interactionId, userId, calendarDestinationId(), now);
-  } catch (error) {
-    logger.error("trip_calendar_intent_build_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
-    return [];
-  }
-}
-
-async function tripCalendarCancelStatements(interactionId: string, now: number): Promise<D1PreparedStatement[]> {
-  try {
-    return await buildTripMeetingCancelledStatements(env.DB, interactionId, now);
-  } catch (error) {
-    logger.error("trip_calendar_intent_build_failed", { interactionId, error: error instanceof Error ? error.message : String(error) });
-    return [];
-  }
-}
+// Integration safety (2026-10-19, second follow-up review -- replaces
+// this round's own earlier, incorrect design): scheduleProspectMeeting/
+// setSimpleProspectStatus below used to wrap buildTripMeetingScheduled
+// Statements/buildTripMeetingCancelledStatements in a try/catch that
+// swallowed a database-read failure and returned an empty statement
+// array -- silently losing the calendar intent while still saving (and
+// reporting success for) the meeting change. Independently reproduced:
+// a thrown error from the read inside either builder left the meeting
+// saved with calendar intent unchanged, no error surfaced anywhere a
+// caller could act on. Neither function exists anymore; both call sites
+// now call the builders DIRECTLY and catch only at the point where they
+// decide the function's own return value -- a read failure aborts that
+// attempt with an actionable `calendar_unavailable` result BEFORE any
+// db.batch() runs, never after a save has already committed. This is
+// unrelated to -- and does not weaken -- "preserve ordinary scheduling
+// when Calendar is disabled": disabling sync (`calendar_sync_enabled`)
+// only gates attemptBestEffortCalendarReconcile's own live network
+// attempt, never whether the durable intent is read/built at all, so a
+// disabled user's scheduling still succeeds exactly as before (the
+// builders' own read is a plain, always-attempted SELECT, independent
+// of that flag).
 
 // The one remaining non-atomic step: an actual best-effort attempt to
 // REACH Google, run only AFTER the meeting change and the durable intent
@@ -438,7 +441,17 @@ async function ownedProspect(userId: string, tripId: string, prospectId: string)
   return row ? { id: row.id, donorId: row.donor_id, status: row.status, linkedInteractionId: row.linked_interaction_id } : null;
 }
 
-export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" };
+// `calendar_unavailable` (2026-10-19, second follow-up review): reading
+// the current calendar-sync intent failed (a genuine database error,
+// never merely "sync is disabled") -- the meeting change was NOT saved;
+// retrying the exact same request is the correct, actionable response.
+// `calendar_conflict`: the calendar intent's own guarded statement kept
+// matching zero rows across every retry attempt (a competing transition
+// kept winning the race) -- the meeting change WAS NOT saved either (see
+// scheduleProspectMeeting's own retry loop, which only reports success
+// once both halves are confirmed consistent); retrying is again the
+// correct response.
+export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" | "calendar_unavailable" | "calendar_conflict" };
 
 // A simple status move -- not_contacted/contacted/meeting_requested/
 // declined/unable_to_schedule. Never writes to `interactions` (Section
@@ -454,12 +467,30 @@ export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found"
 export async function setSimpleProspectStatus(userId: string, tripId: string, prospectId: string, nextStatus: TripProspectStatus, now: number): Promise<StatusUpdateResult> {
   const existing = await ownedProspect(userId, tripId, prospectId);
   if (!existing) return { ok: false, reason: "not_found" };
-  const statements = [];
+  const statements: D1PreparedStatement[] = [];
   let cancelCalendarForInteractionId: string | null = null;
+  // Integration safety (2026-10-19, second follow-up review -- "prevent
+  // stale actions from canceling... a later transition"): this guard --
+  // "trip_prospects still has the EXACT status this request read" -- is
+  // AND-ed into the interactions-cancel-prefix write below AND into the
+  // calendar-cancel statements (via D1CrossTableGuard), re-verified
+  // fresh at execution time inside the SAME batch as the trip_prospects
+  // guard it mirrors. Without this, a stale request (racing a
+  // concurrent status change that already moved the prospect on -- e.g.
+  // to meeting_completed) could still durably cancel the calendar link,
+  // and overwrite the interaction's own source, even though the
+  // trip_prospects update it was based on correctly failed and the
+  // overall call correctly reports "conflict."
+  const statusGuardSql = "EXISTS (SELECT 1 FROM trip_prospects WHERE id = ? AND status = ?)";
+  const statusGuardParams: ReadonlyArray<string | number> = [prospectId, existing.status];
   if (existing.status === "meeting_scheduled" && nextStatus !== "meeting_completed" && existing.linkedInteractionId) {
     const interaction = await env.DB.prepare("SELECT source FROM interactions WHERE id = ? AND user_id = ?").bind(existing.linkedInteractionId, userId).first<{ source: string }>();
     if (interaction && !interaction.source.startsWith("capture-completed:") && !interaction.source.startsWith("cancelled:")) {
-      statements.push(env.DB.prepare("UPDATE interactions SET source = ?, updated_at = ? WHERE id = ? AND user_id = ?").bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId));
+      statements.push(
+        env.DB.prepare(`UPDATE interactions SET source = ?, updated_at = ?
+            WHERE id = ? AND user_id = ? AND source = ? AND ${statusGuardSql}`)
+          .bind(tripCancelledInteractionSource(interaction.source), now, existing.linkedInteractionId, userId, interaction.source, ...statusGuardParams),
+      );
       cancelCalendarForInteractionId = existing.linkedInteractionId;
     }
   }
@@ -475,8 +506,20 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
   // ONE atomic D1 operation together with the meeting/status change above
   // -- never a separate batch call after this one commits (see
   // trip-calendar-sync.ts's own buildTripMeetingCancelledStatements doc
-  // comment for exactly what this makes atomic).
-  if (cancelCalendarForInteractionId) statements.push(...(await tripCalendarCancelStatements(cancelCalendarForInteractionId, now)));
+  // comment for exactly what this makes atomic). A failure reading the
+  // current calendar link state aborts the WHOLE request before any
+  // batch runs -- the status change is not saved either -- rather than
+  // silently losing the calendar intent while the status change succeeds.
+  if (cancelCalendarForInteractionId) {
+    let calendarStatements: D1PreparedStatement[];
+    try {
+      calendarStatements = await buildTripMeetingCancelledStatements(env.DB, cancelCalendarForInteractionId, now, { sql: statusGuardSql, params: statusGuardParams });
+    } catch (error) {
+      logger.error("trip_calendar_intent_read_failed", { interactionId: cancelCalendarForInteractionId, userId, error: error instanceof Error ? error.message : String(error) });
+      return { ok: false, reason: "calendar_unavailable" };
+    }
+    statements.push(...calendarStatements);
+  }
   const results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
   if ((results[prospectUpdateIndex]?.meta.changes ?? 0) === 0) return { ok: false, reason: "conflict" };
   if (cancelCalendarForInteractionId) await attemptBestEffortCalendarReconcile(userId, now);
@@ -528,28 +571,84 @@ export async function scheduleProspectMeeting(userId: string, tripId: string, pr
   const source = tripScheduledInteractionSource(tripId);
   const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
   const summary = `Trip meeting scheduled with ${donor?.display_name ?? "donor"}.`;
-  const statements = [
-    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, end_at, location, summary, source, created_at, updated_at)
-        VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, end_at = excluded.end_at, location = excluded.location, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at`)
-      .bind(interactionId, existing.donorId, userId, meetingAt, endAt, location, summary, source, now, now),
-    env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
-      .bind(meetingAt, location, interactionId, now, prospectId),
-  ];
-  // Integration safety, atomic persistence (2026-10-19 review, follow-
-  // up): the durable calendar-sync intent (enroll/reschedule/reopen --
-  // tripCalendarScheduleStatements picks the right one, same dispatch
-  // recordTripMeetingScheduled used to make non-atomically) is appended
-  // to this SAME db.batch() call, so the meeting change and the calendar
-  // intent commit together or not at all -- see
-  // trip-calendar-sync.ts's own buildTripMeetingScheduledStatements doc
-  // comment for exactly what this guarantees.
-  statements.push(...(await tripCalendarScheduleStatements(interactionId, userId, now)));
-  await env.DB.batch(statements);
-  // The one remaining non-atomic step: an actual best-effort attempt to
-  // reach Google, run only after the above has already committed.
-  await attemptBestEffortCalendarReconcile(userId, now);
-  return { ok: true };
+
+  // Integration safety (2026-10-19, second follow-up review -- "fix
+  // conflicting meeting/Calendar transitions"): independently reproduced
+  // the exact race this guards against -- read the present link, start
+  // building a reschedule, let a competing cancellation commit first
+  // (flipping desired_state to absent), then resume: the meeting upsert
+  // and trip_prospects update used to have NO precondition tied to the
+  // calendar read at all, so they always committed, leaving FOS saying
+  // "meeting scheduled" while the calendar intent stayed "absent."
+  // `planTripMeetingScheduledIntent` returns BOTH the calendar's own
+  // statements and a `guard` (D1CrossTableGuard) expressing exactly "the
+  // calendar link's state is still what this decision assumed" -- ANDed
+  // here into the interactions upsert's own DO UPDATE WHERE clause and
+  // into the trip_prospects UPDATE's WHERE clause too, so EVERY
+  // statement in the combined batch shares the identical, freshly-
+  // re-verified precondition: either all of them affect a row together,
+  // or (the precondition went stale) none of them do -- never the
+  // partial outcome the race used to produce. A guard mismatch means
+  // nothing committed, so retrying the WHOLE transition against a fresh
+  // read (which will correctly re-decide enroll/reschedule/reopen) is
+  // always safe; scheduling's own intent ("make this meeting scheduled
+  // at this time") remains valid regardless of the calendar's prior
+  // state, unlike cancellation's conditional intent (see
+  // setSimpleProspectStatus's own guard, which reports conflict instead
+  // of retrying).
+  for (let attempt = 1; attempt <= MAX_CALENDAR_INTENT_ATTEMPTS; attempt++) {
+    let intent;
+    try {
+      intent = await planTripMeetingScheduledIntent(env.DB, interactionId, userId, calendarDestinationId(), now);
+    } catch (error) {
+      // A genuine database-read failure -- never merely "sync is
+      // disabled" (disabling only gates the live network attempt below,
+      // never this read). The meeting change is NOT saved; the caller
+      // gets an actionable, retryable failure instead of a save that
+      // silently lost its calendar intent.
+      logger.error("trip_calendar_intent_read_failed", { interactionId, userId, error: error instanceof Error ? error.message : String(error) });
+      return { ok: false, reason: "calendar_unavailable" };
+    }
+    const { guard } = intent;
+    const statements: D1PreparedStatement[] = [
+      env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, end_at, location, summary, source, created_at, updated_at)
+          VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, end_at = excluded.end_at, location = excluded.location, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at
+          WHERE ${guard.sql}`)
+        .bind(interactionId, existing.donorId, userId, meetingAt, endAt, location, summary, source, now, now, ...guard.params),
+      env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ? AND ${guard.sql}`)
+        .bind(meetingAt, location, interactionId, now, prospectId, ...guard.params),
+    ];
+    const prospectUpdateIndex = statements.length - 1;
+    statements.push(...intent.statements);
+
+    let results: Array<{ meta: { changes?: number } }>;
+    try {
+      results = await env.DB.batch(statements) as unknown as Array<{ meta: { changes?: number } }>;
+    } catch (error) {
+      // A concurrent FIRST-time enroll for this same interaction won the
+      // race (a real UNIQUE(interaction_id) collision on the calendar
+      // statement, which rolls back this whole batch, meeting change
+      // included) -- retry against a fresh read, which will now
+      // correctly dispatch to reschedule/reopen instead of enroll.
+      if (isUniqueConstraintViolation(error)) continue;
+      throw error;
+    }
+    if ((results[prospectUpdateIndex]?.meta.changes ?? 0) >= 1) {
+      // The meeting change and the calendar intent both committed
+      // together, confirmed. The one remaining non-atomic step: an
+      // actual best-effort attempt to reach Google, run only after the
+      // above has already committed.
+      await attemptBestEffortCalendarReconcile(userId, now);
+      return { ok: true };
+    }
+    // The shared guard matched zero rows everywhere -- a concurrent
+    // transition moved the calendar link's state out from under this
+    // attempt before the batch ran. Nothing committed (every statement
+    // shares the identical precondition), so looping to retry against a
+    // fresh read is always safe.
+  }
+  return { ok: false, reason: "calendar_conflict" };
 }
 
 // "Marking a meeting Completed must require explicit confirmation of the

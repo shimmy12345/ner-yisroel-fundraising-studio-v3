@@ -3,10 +3,15 @@
 # tests/calendar-adapters-integration.test.mjs), plus (2026-10-19, Trip
 # Planning narrowed first release) the Trip Planning wiring layer's own
 # full schedule/reschedule/cancel path against a STATEFUL simulated
-# Google calendar (tests/trip-calendar-sync-integration.test.mjs) --
-# against a REAL local Workers/D1 runtime (wrangler's own
-# getPlatformProxy(), per lib/calendar/testing/local-d1.ts) on an Ubuntu
-# runner.
+# Google calendar (tests/trip-calendar-sync-integration.test.mjs), plus
+# (2026-10-19, second follow-up review) tests/trip-entrypoints-
+# atomicity.test.mjs -- the ACTUAL application entry points
+# (scheduleProspectMeeting/setSimpleProspectStatus/
+# retryTripMeetingCalendarSync), reached via a Node ESM loader hook that
+# stubs the "cloudflare:workers" module these functions import (see
+# tests/fixtures/cloudflare-workers-loader.mjs) -- against a REAL local
+# Workers/D1 runtime (wrangler's own getPlatformProxy(), per
+# lib/calendar/testing/local-d1.ts) on an Ubuntu runner.
 #
 # Why this workflow exists, and why it runs on Linux rather than wherever
 # the rest of this repo's CI/local dev happens: this project's own
@@ -48,7 +53,10 @@ on:
       - "tests/calendar-adapters-integration.test.mjs"
       - "tests/calendar-google-client.test.mjs"
       - "tests/trip-calendar-sync-integration.test.mjs"
+      - "tests/trip-entrypoints-atomicity.test.mjs"
       - "tests/fixtures/wrangler.calendar-d1-test.jsonc"
+      - "tests/fixtures/cloudflare-workers-loader.mjs"
+      - "tests/fixtures/fake-cloudflare-workers.mjs"
       - "drizzle/0048_google_calendar_sync.sql"
       - "cloudflare-env.d.ts"
       - "scripts/ci/calendar-d1-smoke-test.mjs"
@@ -97,7 +105,7 @@ jobs:
       # redact. `exit "$status"` at the end preserves the test run's own
       # real exit code regardless of whether writing the summary itself
       # succeeds -- a failing test still fails this step and the job.
-      - name: D1 adapter contract/concurrency tests + both-adapters integration tests
+      - name: D1 adapter contract/concurrency tests + integration + real entry-point atomicity tests
         timeout-minutes: 10
         run: |
           set +e

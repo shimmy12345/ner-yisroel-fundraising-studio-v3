@@ -35,6 +35,17 @@ import { deriveGoogleEventId } from "./calendar-event-id.ts";
 
 type RawRow = Record<string, unknown>;
 
+// 2026-10-19 review (second follow-up): an opaque, caller-supplied SQL
+// boolean fragment, AND-ed into a guarded statement's own WHERE clause
+// (applyCancelStatements here; trip-calendar-sync.ts's own schedule
+// intent plan uses the identical shape for its own meeting-side guard --
+// see each caller's own doc comment for what it checks and why). `sql`
+// must reference only `?` placeholders (never caller-controlled
+// strings/identifiers -- every caller in this codebase uses a fixed
+// literal EXISTS(...)/NOT EXISTS(...) fragment with bound values, never
+// anything derived from request input).
+export type D1CrossTableGuard = { sql: string; params: ReadonlyArray<string | number> };
+
 function toLinkRow(row: RawRow): CalendarLinkRow {
   return {
     id: row.id as string,
@@ -110,7 +121,12 @@ const HISTORY_PATCH_COLUMNS: Record<string, string> = {
 // never be misreported as a conflict).
 const UNIQUE_VIOLATION_PATTERN = /UNIQUE constraint failed/i;
 
-function isUniqueConstraintViolation(error: unknown): boolean {
+// Exported (2026-10-19, follow-up review) so a caller building its own
+// retry loop around a *Statements() builder -- e.g. trips-data.ts's
+// scheduleProspectMeeting, which must distinguish "a concurrent enroll
+// won the race, re-read and retry" from a genuine, unexpected failure --
+// can recognize this same condition without a second copy of the regex.
+export function isUniqueConstraintViolation(error: unknown): boolean {
   if (error instanceof Error) {
     if (UNIQUE_VIOLATION_PATTERN.test(error.message)) return true;
     if (error.cause instanceof Error && UNIQUE_VIOLATION_PATTERN.test(error.cause.message)) return true;
@@ -311,8 +327,8 @@ export class D1CalendarStore implements CalendarLinkStore {
   // back to 1 has no observable effect anywhere. This is simpler and
   // fully atomic (one db.batch() call, no RETURNING, no follow-up read),
   // at the cost of this one documented redundant-write case.
-  async applyCancel(linkId: string, now: number): Promise<CalendarLinkRow | null> {
-    await this.db.batch(this.applyCancelStatements(linkId, now));
+  async applyCancel(linkId: string, now: number, guard?: D1CrossTableGuard): Promise<CalendarLinkRow | null> {
+    await this.db.batch(this.applyCancelStatements(linkId, now, guard));
     return this.getLinkById(linkId);
   }
 
@@ -321,10 +337,29 @@ export class D1CalendarStore implements CalendarLinkStore {
   // exists. Always exactly these two statements, in this order, so a
   // caller spreading this into a larger batch gets the same atomic pair
   // this method already runs on its own.
-  applyCancelStatements(linkId: string, now: number): D1PreparedStatement[] {
+  //
+  // 2026-10-19 review (second follow-up), Integration safety "prevent
+  // stale actions from canceling... a later transition": `guard`, when
+  // provided, is an opaque boolean SQL fragment (plus its own bind
+  // params) AND-ed into BOTH statements' own WHERE clause, re-verified
+  // fresh at EXECUTION time, never from a value the caller captured
+  // earlier. This module has no knowledge of what the fragment checks
+  // (trips-data.ts's own caller supplies one that re-verifies
+  // trip_prospects' current status matches what it read before deciding
+  // to cancel) -- it only needs the guarantee that BOTH statements here
+  // succeed or both fail together, in lockstep with whatever OTHER
+  // statement in the caller's own combined batch shares the identical
+  // condition. Without this, a stale cancel request (racing a concurrent
+  // status change that already moved the prospect on, e.g. to
+  // meeting_completed) could still durably cancel the calendar link even
+  // though the caller's own guarded meeting-side write correctly
+  // rejected the very same stale request as a conflict.
+  applyCancelStatements(linkId: string, now: number, guard?: D1CrossTableGuard): D1PreparedStatement[] {
+    const extraSql = guard ? ` AND ${guard.sql}` : "";
+    const extraParams = guard?.params ?? [];
     return [
-      this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', next_retry_at = NULL, updated_at = ? WHERE id = ? AND desired_state != 'absent'`).bind(now, linkId),
-      this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = (SELECT generation FROM calendar_event_links WHERE id = ?)`).bind(linkId, linkId),
+      this.db.prepare(`UPDATE calendar_event_links SET desired_revision = desired_revision + 1, desired_state = 'absent', sync_status = 'pending', next_retry_at = NULL, updated_at = ? WHERE id = ? AND desired_state != 'absent'${extraSql}`).bind(now, linkId, ...extraParams),
+      this.db.prepare(`UPDATE calendar_event_link_history SET cleanup_needed = 1 WHERE link_id = ? AND generation = (SELECT generation FROM calendar_event_links WHERE id = ?)${extraSql}`).bind(linkId, linkId, ...extraParams),
     ];
   }
 
