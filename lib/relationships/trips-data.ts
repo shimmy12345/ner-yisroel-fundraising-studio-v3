@@ -501,15 +501,28 @@ export async function setSimpleProspectStatus(userId: string, tripId: string, pr
       // The calendar link's own `generation`, read here at the SAME
       // moment as the interaction's source, is the durable transition
       // identity a status LABEL cannot provide (a status round-trips
-      // back to the same value; a generation never does, even if the
-      // resulting desired_state ends up 'present' again). Expressed as
+      // back to the same value; a generation never does). Expressed as
       // a self-contained EXISTS clause (not a bare `generation` column
       // reference), so the SAME fragment is safe to AND onto
       // `interactions`/`trip_prospects` too, neither of which has a
       // `generation` column of their own.
+      //
+      // Deliberately checks `generation` ALONE, never ALSO
+      // `desired_state = 'present'`: a real regression, caught by CI,
+      // showed why. The cancel statements this guard is also applied to
+      // run in order within the SAME batch -- the main link UPDATE
+      // (which flips desired_state to 'absent') BEFORE the history
+      // cleanup-flag UPDATE -- and later statements in a D1 batch
+      // observe earlier statements' own writes. A guard additionally
+      // requiring `desired_state = 'present'` would therefore check its
+      // OWN just-applied effect by the time the cleanup statement ran,
+      // failing even on the ordinary, non-racing path. `generation`
+      // alone is both necessary and sufficient: cancel itself never
+      // changes it (only reopen does), so it stays a stable identity
+      // across the very operation this guard protects.
       const link = await getTripMeetingCalendarLink(env.DB, existing.linkedInteractionId);
       if (link) {
-        guardSql = `${statusGuardSql} AND EXISTS (SELECT 1 FROM calendar_event_links WHERE interaction_id = ? AND generation = ? AND desired_state = 'present')`;
+        guardSql = `${statusGuardSql} AND EXISTS (SELECT 1 FROM calendar_event_links WHERE interaction_id = ? AND generation = ?)`;
         guardParams = [...statusGuardParams, existing.linkedInteractionId, link.generation];
       }
       statements.push(
