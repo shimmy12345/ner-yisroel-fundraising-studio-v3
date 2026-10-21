@@ -86,6 +86,19 @@ export const STAGING_RESET_TABLE_ORDER = [
   "trip_financial_attributions",
   "trip_prospects",
   "trips",
+  // Google Calendar sync core (2026-10-18, docs/GOOGLE-CALENDAR-
+  // INTEGRATION-DESIGN.md) -- NOT wired into any live route/cron yet, but
+  // the tables exist as of migration 0048, so they must be covered here
+  // now, matching this routine's own "a newly added fundraising table can
+  // never be silently skipped" invariant. calendar_event_link_history
+  // references calendar_event_links.id, so it is deleted first.
+  // calendar_event_links references interactions.id and users.id (users
+  // kept, never reset) -- interactions is deleted further down this
+  // list, so this pair must come before it. Added by migration 0048 on
+  // feature/independent-cloudflare-sandbox, ported here 2026-10-21 -- see
+  // docs/AI-HANDOFF.md.
+  "calendar_event_link_history",
+  "calendar_event_links",
   // yahrtzeit_changes references yahrtzeit_id (not FK-enforced, so a
   // deletion's audit row can outlive it), so it's deleted first.
   "yahrtzeit_changes",

@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7",
+  "schemaHash": "589e41456549546558bca975d35645b16e2b8e27196d227657b6a5d196c8cadf",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -49,7 +49,10 @@
     "0044_agenda_manual_test_send_log.sql",
     "0045_trips.sql",
     "0046_trip_financial_attributions.sql",
-    "0047_trip_prospect_selection.sql"
+    "0047_trip_prospect_selection.sql",
+    "0048_google_calendar_sync.sql",
+    "0050_trip_attribution_confirmation.sql",
+    "0051_trip_reconciliation_concurrency_guard.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -638,6 +641,311 @@
           }
         ],
         "checks": []
+      },
+      {
+        "name": "calendar_event_link_history",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "link_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "generation",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "google_event_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "create_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'not_attempted'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "cleanup_needed",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "cleanup_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'not_needed'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "cleanup_attempts",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "link_id",
+            "toTable": "calendar_event_links",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "calendar_event_link_history_cleanup_idx",
+            "columns": [
+              "cleanup_needed",
+              "cleanup_status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `calendar_event_link_history_cleanup_idx` ON `calendar_event_link_history` (`cleanup_needed`,`cleanup_status`)"
+          },
+          {
+            "name": "calendar_event_link_history_link_generation_uidx",
+            "columns": [
+              "link_id",
+              "generation"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `calendar_event_link_history_link_generation_uidx` ON `calendar_event_link_history` (`link_id`,`generation`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done'))",
+          "CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid'))"
+        ]
+      },
+      {
+        "name": "calendar_event_links",
+        "columns": [
+          {
+            "name": "id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 1
+          },
+          {
+            "name": "interaction_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "user_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "google_calendar_id",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'primary'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "generation",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "google_event_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "google_etag",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "desired_state",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'present'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "desired_revision",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "synced_revision",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "sync_status",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'pending'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "last_error",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "attempt_count",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "lease_owner",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "lease_expires_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "next_retry_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "created_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "updated_at",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          }
+        ],
+        "foreignKeys": [
+          {
+            "from": "interaction_id",
+            "toTable": "interactions",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          },
+          {
+            "from": "user_id",
+            "toTable": "users",
+            "to": "id",
+            "onUpdate": "NO ACTION",
+            "onDelete": "NO ACTION"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "calendar_event_links_interaction_uidx",
+            "columns": [
+              "interaction_id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `calendar_event_links_interaction_uidx` ON `calendar_event_links` (`interaction_id`)"
+          },
+          {
+            "name": "calendar_event_links_sync_status_idx",
+            "columns": [
+              "sync_status"
+            ],
+            "unique": false,
+            "partial": false,
+            "origin": "c",
+            "sql": "CREATE INDEX `calendar_event_links_sync_status_idx` ON `calendar_event_links` (`sync_status`)"
+          },
+          {
+            "name": null,
+            "columns": [
+              "id"
+            ],
+            "unique": true,
+            "partial": false,
+            "origin": "pk",
+            "sql": null
+          }
+        ],
+        "checks": [
+          "CHECK (`desired_state` IN ('present','absent'))",
+          "CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely'))"
+        ]
       },
       {
         "name": "data_health_repair_audits",
@@ -4472,6 +4780,34 @@
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "all_day",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "all_day_date",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "end_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "location",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6251,6 +6587,34 @@
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_confirmed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "commitment_kind",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'new_commitment'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reported_cash_collected_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reconciled_pending_attribution_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6295,6 +6659,16 @@
             "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
           },
           {
+            "name": "trip_financial_attributions_active_reconciled_pending_uidx",
+            "columns": [
+              "reconciled_pending_attribution_id"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL"
+          },
+          {
             "name": "trip_financial_attributions_donor_idx",
             "columns": [
               "donor_id"
@@ -6326,7 +6700,9 @@
             "sql": null
           }
         ],
-        "checks": []
+        "checks": [
+          "CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection'))"
+        ]
       },
       {
         "name": "trip_prospects",
@@ -6446,6 +6822,20 @@
           {
             "name": "selected_at",
             "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "all_day",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "all_day_date",
+            "type": "TEXT",
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
@@ -6725,6 +7115,13 @@
             "type": "TEXT",
             "notNull": true,
             "defaultValue": "'auto_unchanged'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "calendar_sync_enabled",
+            "type": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0",
             "primaryKeyOrder": 0
           }
         ],
@@ -7138,6 +7535,16 @@
     },
     {
       "type": "table",
+      "name": "calendar_event_link_history",
+      "sql": "CREATE TABLE `calendar_event_link_history` ( `id` text PRIMARY KEY NOT NULL, `link_id` text NOT NULL REFERENCES `calendar_event_links`(`id`), `generation` integer NOT NULL, `google_event_id` text NOT NULL, `create_status` text DEFAULT 'not_attempted' NOT NULL, `cleanup_needed` integer DEFAULT 0 NOT NULL, `cleanup_status` text DEFAULT 'not_needed' NOT NULL, `cleanup_attempts` integer DEFAULT 0 NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`create_status` IN ('not_attempted','in_flight','succeeded','failed','invalid')), CHECK (`cleanup_status` IN ('not_needed','pending','uncertain','done')) )"
+    },
+    {
+      "type": "table",
+      "name": "calendar_event_links",
+      "sql": "CREATE TABLE `calendar_event_links` ( `id` text PRIMARY KEY NOT NULL, `interaction_id` text NOT NULL REFERENCES `interactions`(`id`), `user_id` text NOT NULL REFERENCES `users`(`id`), `google_calendar_id` text DEFAULT 'primary' NOT NULL, `generation` integer DEFAULT 0 NOT NULL, `google_event_id` text, `google_etag` text, `desired_state` text DEFAULT 'present' NOT NULL, `desired_revision` integer DEFAULT 1 NOT NULL, `synced_revision` integer DEFAULT 0 NOT NULL, `sync_status` text DEFAULT 'pending' NOT NULL, `last_error` text, `attempt_count` integer DEFAULT 0 NOT NULL, `lease_owner` text, `lease_expires_at` integer, `next_retry_at` integer, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, CHECK (`desired_state` IN ('present','absent')), CHECK (`sync_status` IN ('pending','synced','failed','invalid','auth_required','missing_remotely')) )"
+    },
+    {
+      "type": "table",
       "name": "data_health_repair_audits",
       "sql": "CREATE TABLE `data_health_repair_audits` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `record_type` text NOT NULL CHECK (`record_type` IN ('interaction','reminder')), `record_id` text NOT NULL, `action` text NOT NULL CHECK (`action` IN ('reattach','move_to_survivor','archive','dismiss_false_positive')), `previous_donor_id` text, `next_donor_id` text, `previous_state_json` text NOT NULL, `next_state_json` text NOT NULL, `reason` text NOT NULL, `created_at` integer NOT NULL, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
@@ -7284,7 +7691,7 @@
     {
       "type": "table",
       "name": "interactions",
-      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `interactions` ( `id` text PRIMARY KEY NOT NULL, `donor_id` text NOT NULL, `user_id` text NOT NULL, `type` text NOT NULL, `occurred_at` integer NOT NULL, `summary` text NOT NULL, `source` text DEFAULT 'manual' NOT NULL, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `occurred_at_date_only` integer DEFAULT 0 NOT NULL, `shared_activity_id` text REFERENCES `shared_activities`(`id`), `role` text CHECK (`role` IN ('participant','recipient')), `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, `end_at` integer, `location` text, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -7364,12 +7771,12 @@
     {
       "type": "table",
       "name": "trip_financial_attributions",
-      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
       "name": "trip_prospects",
-      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `selected_at` integer, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `trip_prospects` ( `id` text PRIMARY KEY NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `added_method` text NOT NULL CHECK (`added_method` IN ('auto_region','manual')), `status` text NOT NULL DEFAULT 'not_contacted' CHECK (`status` IN ('not_contacted','contacted','meeting_requested','meeting_scheduled','meeting_completed','declined','unable_to_schedule')), `suggested_reason` text, `suggested_score` real, `suggested_generated_at` integer, `manual_rank` integer, `meeting_at` integer, `meeting_location` text, `next_action` text, `trip_notes` text, `linked_interaction_id` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL, `selected_at` integer, `all_day` integer DEFAULT 0 NOT NULL, `all_day_date` text, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`linked_interaction_id`) REFERENCES `interactions`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -7379,7 +7786,7 @@
     {
       "type": "table",
       "name": "users",
-      "sql": "CREATE TABLE `users` ( `id` text PRIMARY KEY NOT NULL, `email` text NOT NULL, `name` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL , `preferred_first_name` text, `organization_name` text, `job_title` text, `timezone` text DEFAULT 'America/New_York' NOT NULL, `avatar_url` text, `household_import_review_mode` text NOT NULL DEFAULT 'auto_unchanged')"
+      "sql": "CREATE TABLE `users` ( `id` text PRIMARY KEY NOT NULL, `email` text NOT NULL, `name` text, `created_at` integer NOT NULL, `updated_at` integer NOT NULL , `preferred_first_name` text, `organization_name` text, `job_title` text, `timezone` text DEFAULT 'America/New_York' NOT NULL, `avatar_url` text, `household_import_review_mode` text NOT NULL DEFAULT 'auto_unchanged', `calendar_sync_enabled` integer DEFAULT 0 NOT NULL)"
     },
     {
       "type": "table",
@@ -7410,6 +7817,26 @@
       "type": "index",
       "name": "asks_donor_status_idx",
       "sql": "CREATE INDEX `asks_donor_status_idx` ON `asks` (`donor_id`,`status`)"
+    },
+    {
+      "type": "index",
+      "name": "calendar_event_link_history_cleanup_idx",
+      "sql": "CREATE INDEX `calendar_event_link_history_cleanup_idx` ON `calendar_event_link_history` (`cleanup_needed`,`cleanup_status`)"
+    },
+    {
+      "type": "index",
+      "name": "calendar_event_link_history_link_generation_uidx",
+      "sql": "CREATE UNIQUE INDEX `calendar_event_link_history_link_generation_uidx` ON `calendar_event_link_history` (`link_id`,`generation`)"
+    },
+    {
+      "type": "index",
+      "name": "calendar_event_links_interaction_uidx",
+      "sql": "CREATE UNIQUE INDEX `calendar_event_links_interaction_uidx` ON `calendar_event_links` (`interaction_id`)"
+    },
+    {
+      "type": "index",
+      "name": "calendar_event_links_sync_status_idx",
+      "sql": "CREATE INDEX `calendar_event_links_sync_status_idx` ON `calendar_event_links` (`sync_status`)"
     },
     {
       "type": "index",
@@ -7780,6 +8207,11 @@
       "type": "index",
       "name": "trip_financial_attributions_active_giving_activity_uidx",
       "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "trip_financial_attributions_active_reconciled_pending_uidx",
+      "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL"
     },
     {
       "type": "index",
