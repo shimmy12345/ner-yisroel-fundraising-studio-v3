@@ -2,9 +2,10 @@ import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../lib/auth/profile";
 import { extractInteraction, reminderDueAt, type InteractionKind, type ReminderChoice } from "../../../../lib/capture/interaction";
+import { applyInteractionEdit } from "../../../../lib/capture/interaction-edit";
 import { completedPlannedAt, isCompletedActivity, isNoResponseActivity, isScheduledActivity } from "../../../../lib/workspace/scheduled-activity";
 import { logger } from "../../../../lib/logger";
-import { planFactAcceptance, planFactArchival } from "../../../../lib/relationships/fact-accept";
+import { planFactArchival } from "../../../../lib/relationships/fact-accept";
 
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
 type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string; acceptRelationshipSnapshot?: boolean; expectedSummary?: string };
@@ -31,20 +32,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const note = body?.note?.trim() ?? "";
   const donorId = body?.donorId ?? "";
   if (!body || !donorId || note.length < 4 || note.length > 5000 || !body.type || !kinds.has(body.type)) return Response.json({ error: "Choose a donor, activity type, and notes" }, { status: 422 });
-  // Concurrency safety (2026-10-21, second follow-up review -- "a stale
+  // Concurrency safety (2026-10-21, third follow-up review -- "a stale
   // editor must not silently overwrite ... an appended completion
   // note"): `expectedSummary`, when sent, is the exact row value this
   // edit form actually started from (see CaptureExperience's own
-  // InitialActivity type). Comparing it against the row THIS request
-  // just read catches the realistic risk here -- a tab left open across
-  // a trip completion or a trip AI-notes save landing on the SAME
-  // interaction in the meantime -- before anything is built or written.
-  // Scoped deliberately to this one check (not a DB-level compare-and-
-  // swap on the UPDATE below): this route's own batch also touches
-  // reminders and relationship-fact acceptance, and guarding every one
-  // of those together is a materially larger change than the actual
-  // risk here (a tab staying open for minutes, not a sub-second race
-  // between two edits of the same interaction) calls for.
+  // InitialActivity type). This early comparison is a fast-path
+  // rejection for a client that is ALREADY known to be stale at request
+  // time; it is deliberately not the only guard -- see
+  // applyInteractionEdit's own doc comment for why the actual write
+  // below is itself a compare-and-swap against this same baseline,
+  // closing the gap this early check alone cannot (something else
+  // landing between this check and that write, within this same
+  // request).
   if (typeof body.expectedSummary === "string" && body.expectedSummary !== existing.summary) {
     return Response.json({
       error: "This activity was updated elsewhere since you opened this page. Your unsaved text has not been discarded -- copy it if you want to keep it, then reload to see the latest before saving again.",
@@ -69,15 +68,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     ? `capture-completed:${plannedAt}:${isNoResponseActivity(existing.source) ? "no-response" : "completed"}:capture:${next.type}`
     : `${scheduled ? "capture-scheduled" : "capture"}:${next.type}`;
   const reminderId = `activity-${id}`;
-  const statements = [
-    env.DB.prepare("UPDATE interactions SET donor_id = ?, type = ?, occurred_at = ?, summary = ?, source = ?, updated_at = ? WHERE id = ? AND user_id = ?")
-      .bind(donorId, next.type, occurredAtEpoch, `${next.subject}\n${next.summary}`, source, now, id, profile.id),
-  ];
-  if (dueAt) statements.push(env.DB.prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 94, 'open', ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET donor_id = excluded.donor_id, action = excluded.action, reason = excluded.reason, status = 'open', due_at = excluded.due_at, updated_at = excluded.updated_at`)
-    .bind(reminderId, donorId, profile.id, next.nextAction, "Reminder requested for this activity.", Math.floor(dueAt.getTime() / 1000), now, now));
-  else statements.push(env.DB.prepare("DELETE FROM recommendations WHERE id = ? AND user_id = ?").bind(reminderId, profile.id));
+  const summary = `${next.subject}\n${next.summary}`;
+  // Concurrency safety (2026-10-21, third follow-up review): the
+  // compare-and-swap baseline is the client's own `expectedSummary` when
+  // provided, never just this request's own fresh read -- see
+  // applyInteractionEdit's own doc comment.
+  const casBaseline = typeof body.expectedSummary === "string" ? body.expectedSummary : existing.summary;
 
   // Relationship Intelligence Phase 2 (see docs/AI-HANDOFF.md's
   // "Relationship Intelligence Phase 2" section). Two independent
@@ -104,29 +100,31 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   //    all -- that whole distinction is now irrelevant. Not accepting
   //    (the common edit case -- just fixing a typo) writes nothing here
   //    at all, exactly matching "editing without accepting must not
-  //    silently reapply or overwrite."
-  if (donorId !== existing.donor_id) {
-    const archival = await planFactArchival({ donorId: existing.donor_id, userId: profile.id, sourceInteractionId: id, now });
-    statements.push(...archival.statements);
-  }
-  let relationshipStatementIndex = -1;
-  if (body.acceptRelationshipSnapshot === true && !scheduled) {
-    const plan = await planFactAcceptance({
-      donorId, userId: profile.id, sourceInteractionId: id, sourceInteractionOccurredAt: occurredAtEpoch,
-      noteText: note, kind: next.type, subject: body.subject ?? "", now,
-    });
-    if (plan.relationshipStatementIndex >= 0) relationshipStatementIndex = statements.length + plan.relationshipStatementIndex;
-    statements.push(...plan.statements);
-  }
-
-  let relationshipUpdated = false;
+  //    silently reapply or overwrite." BOTH of these, and the reminder
+  //    update, are now entirely conditional on applyInteractionEdit's
+  //    own compare-and-swap having actually applied -- a rejected edit
+  //    (stale `casBaseline`) never reaches either one.
+  let outcome;
   try {
-    const results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
-    if (relationshipStatementIndex >= 0) relationshipUpdated = (results[relationshipStatementIndex]?.meta?.changes ?? 0) > 0;
+    outcome = await applyInteractionEdit(env.DB, {
+      interactionId: id, userId: profile.id, existingDonorId: existing.donor_id, donorId, type: next.type,
+      summary, casBaseline, source, occurredAtEpoch, now, reminderId,
+      reminderDueAtEpoch: dueAt ? Math.floor(dueAt.getTime() / 1000) : null, reminderNextAction: next.nextAction,
+      acceptRelationshipSnapshot: body.acceptRelationshipSnapshot === true, scheduled, note, subject: body.subject ?? "",
+    });
+  } catch (error) {
+    logger.error("activity_edit_failed", error, { interactionId: id, userId: profile.id });
+    return Response.json({ error: "Activity could not be updated" }, { status: 500 });
   }
-  catch (error) { logger.error("activity_edit_failed", error, { interactionId: id, userId: profile.id }); return Response.json({ error: "Activity could not be updated" }, { status: 500 }); }
+  if (outcome.status === "conflict") {
+    logger.info("activity_edit_stale", { interactionId: id, userId: profile.id });
+    return Response.json({
+      error: "This activity was updated elsewhere since you opened this page. Your unsaved text has not been discarded -- copy it if you want to keep it, then reload to see the latest before saving again.",
+      conflict: true,
+    }, { status: 409 });
+  }
   logger.info("activity_edited", { interactionId: id, userId: profile.id });
-  return Response.json({ interactionId: id, occurredAt: occurredAt.toISOString(), scheduled, reminderAt: dueAt?.toISOString() ?? null, relationshipUpdated, extracted: next });
+  return Response.json({ interactionId: id, occurredAt: occurredAt.toISOString(), scheduled, reminderAt: dueAt?.toISOString() ?? null, relationshipUpdated: outcome.relationshipUpdated, extracted: next });
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {

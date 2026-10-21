@@ -427,11 +427,10 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
   // completions (or a completion racing a notes edit) both end up
   // applied, in whichever order their writes actually land, never one
   // silently destroying the other. The companion trip_prospects write
-  // shares the identical precondition (an EXISTS check against the
-  // POST-write summary, visible to it because D1 batch statements
-  // observe earlier statements' own writes within the same batch) -- so
-  // the meeting is never recorded/reported as completed unless the notes
-  // write itself actually committed.
+  // runs as its own statement, AFTER the interactions UPDATE's own
+  // rowcount has already proven success (see the third follow-up review
+  // comment further below) -- so the meeting is never recorded/reported
+  // as completed unless the notes write itself actually committed.
   for (let attempt = 1; attempt <= MAX_MEETING_NOTES_WRITE_ATTEMPTS; attempt++) {
     const existingInteraction = existing.linkedInteractionId
       ? await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
@@ -498,16 +497,37 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
       return { ok: true };
     }
 
-    const results = await env.DB.batch([
-      env.DB.prepare(`UPDATE interactions SET summary = ?, occurred_at = ?, source = ?, updated_at = ?
-          WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ?`)
-        .bind(summary, meetingAt, completedSource, now, interactionId, userId, existing.donorId, priorSummary),
-      env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ?
-          WHERE id = ? AND EXISTS (SELECT 1 FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ?)`)
-        .bind(meetingAt, interactionId, now, prospectId, interactionId, userId, existing.donorId, summary),
-    ]) as unknown as Array<{ meta: { changes?: number } }>;
+    // Concurrency safety (2026-10-21, third follow-up review -- "do not
+    // treat matching final text as proof that a particular request
+    // succeeded"): the interactions UPDATE runs ALONE first, and only
+    // its own authoritative rowcount (read back immediately after)
+    // decides whether to mark the prospect completed. The previous
+    // version of this function ran both statements in one batch and
+    // guarded the trip_prospects write with `WHERE EXISTS (... summary
+    // = ?)` bound to the NEW summary -- intending to prove "the
+    // preceding UPDATE actually applied." It does not: that EXISTS
+    // check only proves the row's CURRENT CONTENT matches the computed
+    // value, which could in principle become true for a reason that has
+    // nothing to do with THIS attempt's own CAS, while this attempt's
+    // own CAS, keyed on `priorSummary`, correctly affected zero rows --
+    // exactly the same class of bug this round closed in
+    // lib/meeting-notes/concurrent-save.ts's follow-up guard. Splitting
+    // into two sequential writes removes the ambiguity entirely: the
+    // trip_prospects update only ever runs once the interactions
+    // update's own rowcount has already proven success.
+    const updateResult = await env.DB.prepare(`UPDATE interactions SET summary = ?, occurred_at = ?, source = ?, updated_at = ?
+        WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ?`)
+      .bind(summary, meetingAt, completedSource, now, interactionId, userId, existing.donorId, priorSummary)
+      .run() as unknown as { meta: { changes?: number } };
 
-    if ((results[0]?.meta.changes ?? 0) > 0) return { ok: true };
+    if ((updateResult.meta.changes ?? 0) > 0) {
+      // Proven to have applied -- safe to mark the prospect completed
+      // unconditionally now; nothing left to guard against.
+      await env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
+        .bind(meetingAt, interactionId, now, prospectId).run();
+      return { ok: true };
+    }
+
     // The summary changed between our read and this write (a competing
     // completion, or a donor-profile/trip-notes edit) -- nothing
     // committed (the trip_prospects write shares the identical

@@ -3,8 +3,8 @@ import { getChatGPTUser } from "../../../../../../chatgpt-auth";
 import { ensureUserProfile } from "../../../../../../../lib/auth/profile";
 import { logger } from "../../../../../../../lib/logger";
 import { getProspectMeetingNotesTarget } from "../../../../../../../lib/relationships/trips-data";
-import { followUpListsMatch, type FollowUpContent } from "../../../../../../../lib/meeting-notes/idempotency";
-import { buildConcurrentSummarySaveStatements, concurrentSummarySaveApplied } from "../../../../../../../lib/meeting-notes/concurrent-save";
+import { type FollowUpContent } from "../../../../../../../lib/meeting-notes/idempotency";
+import { saveConcurrentSummaryAndFollowUps } from "../../../../../../../lib/meeting-notes/concurrent-save";
 
 type FollowUpInput = { description?: string; dueAt?: string | null };
 type RequestBody = {
@@ -119,71 +119,37 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const { donorId, interactionId } = target;
   const now = Math.floor(Date.now() / 1000);
 
-  // Concurrency safety (2026-10-21, second follow-up review): the
+  // Concurrency safety (2026-10-21, third follow-up review): the
   // compare-and-swap baseline is the client's own `expectedSummary` when
   // provided (what this editing session actually started from), never
   // just this request's own fresh read -- see this field's own doc
   // comment above for why that distinction is the whole point.
   const casBaseline = expectedSummary ?? target.existingSummary;
-  const statements = buildConcurrentSummarySaveStatements(
-    env.DB, interactionId, donorId, userId, summary, casBaseline, now,
-    followUps.map((followUp) => ({ id: `meeting-note-${idempotencyKey}-${followUp.index}`, donorId, userId, description: followUp.description, dueAtEpoch: followUp.dueAtEpoch })),
-  );
+  const followUpInputs = followUps.map((followUp) => ({ id: `meeting-note-${idempotencyKey}-${followUp.index}`, donorId, index: followUp.index, description: followUp.description, dueAtEpoch: followUp.dueAtEpoch }));
 
   try {
-    const results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
-    if (concurrentSummarySaveApplied(results)) {
-      logger.info("trip_meeting_notes_saved", { donorId, userId, tripId, prospectId, followUpsCreated: followUps.length });
-      return Response.json({ interactionId, saved: true, followUpsCreated: followUps.length }, { status: 200 });
+    const outcome = await saveConcurrentSummaryAndFollowUps(env.DB, interactionId, donorId, userId, summary, casBaseline, now, followUpInputs);
+    if (outcome.status === "applied") {
+      logger.info("trip_meeting_notes_saved", { donorId, userId, tripId, prospectId, followUpsCreated: outcome.followUpsCreated });
+      return Response.json({ interactionId, saved: true, followUpsCreated: outcome.followUpsCreated }, { status: 200 });
     }
-    // The CAS missed -- but this could be a safe replay of an already-
-    // applied identical save (e.g. a network retry), not necessarily a
-    // genuine conflict with someone else's newer content: if the row
-    // already holds exactly the summary this save intended to write,
-    // nothing more needs to happen.
-    const current = await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND donor_id = ? AND user_id = ?").bind(interactionId, donorId, userId).first<{ summary: string }>();
-    if (current?.summary === summary) {
+    if (outcome.status === "replayed") {
       logger.info("trip_meeting_notes_save_replayed", { donorId, userId, interactionId });
       return Response.json({ interactionId, saved: true, followUpsCreated: 0 }, { status: 200 });
     }
-    logger.info("trip_meeting_notes_save_stale", { donorId, userId, interactionId });
-    return Response.json({
-      error: "This meeting's notes were updated elsewhere since you opened this page. Your unsaved text has not been discarded -- copy it if you want to keep it, then reload to see the latest before saving again.",
-      conflict: true,
-    }, { status: 409 });
-  } catch (error) {
-    // The interaction UPDATE above cannot itself throw (it is an UPDATE,
-    // not an INSERT) -- a batch failure here only ever means a follow-up's
-    // id (prefixed by THIS idempotencyKey) was already used, i.e. a
-    // double-click/retry of this exact save. With no follow-ups at all,
-    // nothing in the batch could conflict, so this is always a genuine,
-    // unexpected failure.
-    if (followUps.length === 0) {
-      logger.error("trip_meeting_notes_save_failed", error, { donorId, userId, tripId, prospectId });
-      return Response.json({ error: "The meeting notes could not be saved" }, { status: 500 });
-    }
-    const candidateIds = Array.from({ length: MAX_FOLLOW_UPS }, (_, index) => `meeting-note-${idempotencyKey}-${index}`);
-    const existingFollowUpRows = await env.DB.prepare(
-      `SELECT id, action, due_at FROM recommendations WHERE id IN (${candidateIds.map(() => "?").join(",")})`,
-    ).bind(...candidateIds).all<{ id: string; action: string; due_at: number | null }>();
-    const existingFollowUps: FollowUpContent[] = existingFollowUpRows.results.map((row) => ({
-      index: candidateIds.indexOf(row.id),
-      description: row.action,
-      dueAtEpoch: row.due_at,
-    }));
-    if (existingFollowUps.length === 0) {
-      // This exact key was never used before -- not a replay/conflict,
-      // a genuine unexpected failure.
-      logger.error("trip_meeting_notes_save_failed", error, { donorId, userId, tripId, prospectId });
-      return Response.json({ error: "The meeting notes could not be saved" }, { status: 500 });
-    }
-    if (followUpListsMatch(existingFollowUps, followUps)) {
-      logger.info("trip_meeting_notes_save_replayed", { donorId, userId, interactionId });
-      return Response.json({ interactionId, saved: true, followUpsCreated: 0 }, { status: 200 });
+    if (outcome.reason === "summary_stale") {
+      logger.info("trip_meeting_notes_save_stale", { donorId, userId, interactionId });
+      return Response.json({
+        error: "This meeting's notes were updated elsewhere since you opened this page. Your unsaved text has not been discarded -- copy it if you want to keep it, then reload to see the latest before saving again.",
+        conflict: true,
+      }, { status: 409 });
     }
     logger.info("trip_meeting_notes_save_conflict", { donorId, userId, interactionId });
     return Response.json({
       error: "This meeting note was already saved with different content. Nothing was changed. Reload the page to start a new save.",
     }, { status: 409 });
+  } catch (error) {
+    logger.error("trip_meeting_notes_save_failed", error, { donorId, userId, tripId, prospectId });
+    return Response.json({ error: "The meeting notes could not be saved" }, { status: 500 });
   }
 }
