@@ -103,6 +103,8 @@ const TEST_FILES = [
   "tests/trip-reconciliation-concurrency.test.mjs",
   "tests/trip-meeting-notes-preservation.test.mjs",
   "tests/trip-meeting-notes-concurrency.test.mjs",
+  "tests/meeting-notes-concurrent-save.test.mjs",
+  "tests/interaction-edit-concurrency.test.mjs",
   "tests/pending-pledge-matching.test.mjs",
   "tests/pending-reconciliation-transaction.test.mjs",
   "tests/trip-prospect-selection-schema.test.mjs",

@@ -1,15 +1,18 @@
-// AI Meeting Notes concurrency safety (2026-10-21, second follow-up
-// review -- "prevent lost notes during concurrent saves"). Calls the
-// REAL, unmodified `completeProspectMeeting`/`scheduleProspectMeeting`
+// AI Meeting Notes concurrency safety (2026-10-21, second and third
+// follow-up reviews -- "prevent lost notes during concurrent saves";
+// "do not treat matching final text as proof that a particular request
+// succeeded"). Calls the REAL, unmodified
+// `completeProspectMeeting`/`scheduleProspectMeeting`
 // (lib/relationships/trips-data.ts) and the real, shared
-// `buildConcurrentSummarySaveStatements`/`concurrentSummarySaveApplied`
-// (lib/meeting-notes/concurrent-save.ts) that the trip AI-notes save
-// route also uses -- against a real in-memory SQLite database built
-// from this repo's own migrations, same "real schema, intercept
-// cloudflare:workers" rigor as tests/trip-reconciliation-concurrency.test.mjs
-// and tests/trip-meeting-notes-preservation.test.mjs. Interleaving is
-// produced two ways: `interceptFirstBatch` (same technique
-// tests/trip-entrypoints-atomicity.test.mjs already uses) runs a
+// `saveConcurrentSummaryAndFollowUps` (lib/meeting-notes/concurrent-save.ts)
+// that the trip AI-notes save route also uses -- against a real
+// in-memory SQLite database built from this repo's own migrations, same
+// "real schema, intercept cloudflare:workers" rigor as
+// tests/trip-reconciliation-concurrency.test.mjs and
+// tests/trip-meeting-notes-preservation.test.mjs. Interleaving is
+// produced two ways: `interceptFirstWrite` (same technique
+// tests/trip-entrypoints-atomicity.test.mjs already uses for `.batch()`,
+// extended here to also cover a standalone `.run()`) runs a
 // side-effecting write between a function's own read and its write for
 // a deterministic "something else changed it in between" reproduction;
 // `Promise.all` produces genuine microtask-level interleaving for the
@@ -33,7 +36,7 @@ const {
   completeProspectMeeting,
 } = await import("../lib/relationships/trips-data.ts");
 const { tripMeetingInteractionId } = await import("../lib/relationships/trip-model.ts");
-const { buildConcurrentSummarySaveStatements, concurrentSummarySaveApplied } = await import("../lib/meeting-notes/concurrent-save.ts");
+const { saveConcurrentSummaryAndFollowUps } = await import("../lib/meeting-notes/concurrent-save.ts");
 
 const migrationDir = path.join(root, "drizzle");
 const migrationTexts = readdirSync(migrationDir)
@@ -63,22 +66,42 @@ function interactionSummary(db, interactionId) {
   return db.raw().prepare("SELECT summary FROM interactions WHERE id = ?").get(interactionId)?.summary ?? null;
 }
 
-// Same technique as tests/trip-entrypoints-atomicity.test.mjs: wraps a
-// real D1SqliteAdapter so the FIRST call to `.batch()` runs
-// `onFirstBatch()` (awaited) before forwarding to the real batch --
-// i.e. after whatever read already happened to build those statements,
-// but before they land. Only `.prepare`/`.batch`/`.raw` are used by
-// production code paths exercised in this file.
-function interceptFirstBatch(realDb, onFirstBatch) {
+// Same technique as tests/trip-entrypoints-atomicity.test.mjs, extended
+// to also cover a standalone `.run()` call (completeProspectMeeting's
+// compare-and-swap interactions UPDATE is now its own direct `.run()`,
+// not part of a `.batch()` -- see the third follow-up review's own
+// "do not treat matching final text as proof a particular request
+// succeeded" fix): wraps a real D1SqliteAdapter so the FIRST write of
+// EITHER kind -- a `.batch()` call or a bound statement's own `.run()`
+// -- runs `onFirstWrite()` (awaited) before forwarding to the real
+// write, i.e. after whatever read already happened to build it, but
+// before it lands.
+function interceptFirstWrite(realDb, onFirstWrite) {
   let intercepted = false;
+  async function maybeIntercept() {
+    if (!intercepted) {
+      intercepted = true;
+      await onFirstWrite();
+    }
+  }
   return {
-    prepare: (sql) => realDb.prepare(sql),
     raw: () => realDb.raw(),
+    prepare: (sql) => {
+      const realStatement = realDb.prepare(sql);
+      return {
+        bind: (...args) => {
+          const bound = realStatement.bind(...args);
+          return {
+            run: async () => { await maybeIntercept(); return bound.run(); },
+            first: (...a) => bound.first(...a),
+            all: (...a) => bound.all(...a),
+            _runRaw: () => bound._runRaw(),
+          };
+        },
+      };
+    },
     batch: async (statements) => {
-      if (!intercepted) {
-        intercepted = true;
-        await onFirstBatch();
-      }
+      await maybeIntercept();
       return realDb.batch(statements);
     },
   };
@@ -99,7 +122,7 @@ async function run() {
     await scheduleProspectMeeting(USER_ID, tripId, prospectId, FUTURE_MEETING_AT, null, 30, true, "America/Chicago", NOW);
     realDb.raw().prepare("UPDATE interactions SET summary = ? WHERE id = ?").run("AI-organized: original notes.", interactionId);
 
-    env.DB = interceptFirstBatch(realDb, async () => {
+    env.DB = interceptFirstWrite(realDb, async () => {
       // A donor-profile edit (or a trip AI-notes save) lands in the gap
       // between completeProspectMeeting's own read and its write.
       realDb.raw().prepare("UPDATE interactions SET summary = ? WHERE id = ?").run("AI-organized: edited concurrently.", interactionId);
@@ -140,9 +163,8 @@ async function run() {
 
     // The stale editor now submits its own save, still believing
     // `staleBaseline` is current.
-    const statements = buildConcurrentSummarySaveStatements(db, interactionId, DONOR_ID, USER_ID, "AI-organized: stale rewrite, ignorant of the completion note.", staleBaseline, NOW, []);
-    const results = db.batch(statements);
-    assert.equal(concurrentSummarySaveApplied(results), false, "a stale save (its baseline no longer matches the current row) must be rejected");
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, interactionId, DONOR_ID, USER_ID, "AI-organized: stale rewrite, ignorant of the completion note.", staleBaseline, NOW, []);
+    assert.deepEqual(outcome, { status: "conflict", reason: "summary_stale" }, "a stale save (its baseline no longer matches the current row, and the row does not already hold the requested new value either) must be rejected");
     const afterStaleSave = interactionSummary(db, interactionId);
     assert.equal(afterStaleSave, afterCompletion, "the completion note must survive completely untouched by the rejected stale save");
   }

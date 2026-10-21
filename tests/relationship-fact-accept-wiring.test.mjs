@@ -133,10 +133,22 @@ async function run() {
     "Outcome must attribute the fact to the activity being closed (this request's own interaction id) and its new occurred_at, not the pre-outcome value",
   );
 
+  // Edit re-acceptance (2026-10-21, third follow-up review): this call
+  // now lives in lib/capture/interaction-edit.ts's applyInteractionEdit
+  // -- extracted out of the route itself so the concurrency fix for
+  // defect A ("a rejected edit cannot change ... relationship facts")
+  // is directly testable against a real D1 database -- rather than
+  // inline in app/api/interactions/[id]/route.ts. The route itself
+  // still ultimately calls this same function; see
+  // tests/interaction-edit-concurrency.test.mjs for the behavioral
+  // proof that a rejected edit never reaches this call at all.
   const editRoute = await read("app/api/interactions/[id]/route.ts");
+  const interactionEditModule = await read("lib/capture/interaction-edit.ts");
+  assert.doesNotMatch(editRoute, /await planFactAcceptance\(/, "the route itself must no longer call planFactAcceptance inline -- it must go through applyInteractionEdit, so a rejected edit can never reach it");
+  assert.match(editRoute, /applyInteractionEdit\(/, "the route must call the shared, concurrency-safe edit function");
   assert.match(
-    editRoute,
-    /sourceInteractionId: id, sourceInteractionOccurredAt: occurredAtEpoch,/,
+    interactionEditModule,
+    /sourceInteractionId: input\.interactionId, sourceInteractionOccurredAt: input\.occurredAtEpoch,/,
     "Edit re-acceptance must attribute the fact to the interaction being edited (this request's own id) and its edited occurred_at",
   );
 
@@ -170,7 +182,7 @@ async function run() {
   // ================================================================
   assert.match(captureRoute, /if \(!scheduled && body\.acceptRelationshipSnapshot === true\) \{\s*const plan = await planFactAcceptance\(/, "Capture's call into the shared pipeline must be strictly inside the acceptRelationshipSnapshot === true gate");
   assert.match(outcomeRoute, /if \(\(nextStatus === "completed" \|\| nextStatus === "no-response"\) && body\.acceptRelationshipSnapshot === true\) \{\s*const kind[\s\S]*?const plan = await planFactAcceptance\(/, "Outcome's call into the shared pipeline must be strictly inside its double gate");
-  assert.match(editRoute, /if \(body\.acceptRelationshipSnapshot === true && !scheduled\) \{\s*const plan = await planFactAcceptance\(/, "Edit's re-acceptance call must be strictly inside the acceptRelationshipSnapshot === true gate");
+  assert.match(interactionEditModule, /if \(input\.acceptRelationshipSnapshot && !input\.scheduled\) \{\s*const plan = await planFactAcceptance\(/, "Edit's re-acceptance call must be strictly inside the acceptRelationshipSnapshot === true gate");
   // Monday's own recency-guard precondition (occurredAt >= latestOther)
   // is a pre-existing, already-approved gate this feature preserves
   // unchanged -- confirmed here to still wrap the call.

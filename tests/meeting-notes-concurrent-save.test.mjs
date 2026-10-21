@@ -1,0 +1,175 @@
+// AI Meeting Notes trip-notes save concurrency (2026-10-21, third
+// follow-up review -- defect B: "conditions follow-up creation on the
+// interaction's resulting summary matching newSummary. That does not
+// prove this request's UPDATE succeeded."). Calls the REAL, unmodified
+// `saveConcurrentSummaryAndFollowUps` exported from
+// lib/meeting-notes/concurrent-save.ts -- the exact function
+// app/api/trips/[id]/prospects/[prospectId]/meeting-notes/route.ts
+// uses -- against a real in-memory SQLite database built from this
+// repo's own migrations (tests/helpers/d1-sqlite-adapter.mjs). Never a
+// hand-copied reproduction of the SQL or a source-text assertion.
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { register } from "node:module";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, "..");
+
+register("./helpers/cloudflare-workers-shim-loader.mjs", import.meta.url);
+
+const { D1SqliteAdapter } = await import("./helpers/d1-sqlite-adapter.mjs");
+const { saveConcurrentSummaryAndFollowUps } = await import("../lib/meeting-notes/concurrent-save.ts");
+
+const migrationDir = path.join(root, "drizzle");
+const migrationTexts = readdirSync(migrationDir)
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .sort()
+  .map((name) => readFileSync(path.join(migrationDir, name), "utf8"));
+
+const NOW = Math.floor(Date.parse("2026-10-21T12:00:00Z") / 1000);
+const USER_ID = "u1";
+const DONOR_ID = "d1";
+const INTERACTION_ID = "interaction-1";
+
+function freshDb(initialSummary) {
+  const db = D1SqliteAdapter.fromMigrations(migrationTexts);
+  db.prepare("INSERT INTO users (id, email, created_at, updated_at) VALUES (?, ?, ?, ?)").bind(USER_ID, `${USER_ID}@example.test`, NOW, NOW).run();
+  db.prepare("INSERT INTO donors (id, owner_user_id, data_source, display_name, created_at, updated_at) VALUES (?, ?, 'live', 'Jane Donor', ?, ?)").bind(DONOR_ID, USER_ID, NOW, NOW).run();
+  db.prepare("INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at) VALUES (?, ?, ?, 'meeting', ?, ?, 'trip:scheduled', ?, ?)")
+    .bind(INTERACTION_ID, DONOR_ID, USER_ID, NOW, initialSummary, NOW, NOW).run();
+  return db;
+}
+
+function summary(db) {
+  return db.raw().prepare("SELECT summary FROM interactions WHERE id = ?").get(INTERACTION_ID)?.summary ?? null;
+}
+
+function recommendationRows(db) {
+  return db.raw().prepare("SELECT id, action, due_at FROM recommendations WHERE donor_id = ? ORDER BY id").all(DONOR_ID)
+    .map((row) => ({ id: row.id, action: row.action, due_at: row.due_at }));
+}
+
+function followUp(id, index, description, dueAtEpoch = null) {
+  return { id, donorId: DONOR_ID, index, description, dueAtEpoch };
+}
+
+async function run() {
+  // --- 1. An ordinary, non-stale save with follow-ups applies and
+  // creates every one of them. ---
+  {
+    const db = freshDb("Original notes.");
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Updated notes.", "Original notes.", NOW, [
+      followUp("fu-1-0", 0, "Send thank-you card"),
+      followUp("fu-1-1", 1, "Schedule follow-up call", NOW + 86400),
+    ]);
+    assert.deepEqual(outcome, { status: "applied", followUpsCreated: 2 });
+    assert.equal(summary(db), "Updated notes.");
+    assert.deepEqual(recommendationRows(db), [
+      { id: "fu-1-0", action: "Send thank-you card", due_at: null },
+      { id: "fu-1-1", action: "Schedule follow-up call", due_at: NOW + 86400 },
+    ]);
+  }
+
+  // --- 2. THE REPRODUCED DEFECT: current summary already equals the
+  // requested newSummary (e.g. someone else wrote this exact text, or a
+  // coincidental match), the client's own `expectedSummary` is stale,
+  // and the follow-up ids are brand new (never created before). The
+  // save must be rejected outright -- and, critically, the follow-ups
+  // must NOT be created. The previous (buggy) version of this module
+  // created them anyway, because its follow-up guard only checked
+  // whether the row's CURRENT content matched the new value, which
+  // was true here for a reason that had nothing to do with this
+  // request's own write. ---
+  {
+    const db = freshDb("Text that happens to match.");
+    const staleBaseline = "A completely different, now-stale baseline the client actually started from.";
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Text that happens to match.", staleBaseline, NOW, [
+      followUp("fu-2-0", 0, "A follow-up that must never be created"),
+    ]);
+    assert.deepEqual(outcome, { status: "conflict", reason: "followup_mismatch" }, "a stale save whose new text happens to already match the row must still be rejected when fresh follow-ups are requested");
+    assert.equal(summary(db), "Text that happens to match.", "the row's content is unchanged (it already held this value before the call, not because of it)");
+    assert.deepEqual(recommendationRows(db), [], "the fresh follow-up must never be created by a rejected save, regardless of the coincidental text match");
+  }
+
+  // --- 2b. The same stale-with-coincidental-match shape, but with NO
+  // follow-ups requested at all -- this is unambiguous (nothing to
+  // verify beyond the text itself) and may be treated as a safe no-op
+  // replay. ---
+  {
+    const db = freshDb("Text that happens to match.");
+    const staleBaseline = "A different, stale baseline.";
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Text that happens to match.", staleBaseline, NOW, []);
+    assert.deepEqual(outcome, { status: "replayed" });
+    assert.equal(summary(db), "Text that happens to match.");
+    assert.deepEqual(recommendationRows(db), []);
+  }
+
+  // --- 3. Unchanged summary TEXT with intentionally added follow-ups,
+  // from a NON-stale client (its own baseline matches the current
+  // row) -- explicitly defined behavior: this is a legitimate,
+  // successful save. The summary UPDATE still "applies" (SQLite counts
+  // a matched-and-rewritten row even when the new value equals the
+  // old one), and the new follow-ups are created. ---
+  {
+    const db = freshDb("Notes the user did not change.");
+    const outcome = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "Notes the user did not change.", "Notes the user did not change.", NOW, [
+      followUp("fu-3-0", 0, "A follow-up added without changing the narrative"),
+    ]);
+    assert.deepEqual(outcome, { status: "applied", followUpsCreated: 1 });
+    assert.equal(summary(db), "Notes the user did not change.");
+    assert.deepEqual(recommendationRows(db), [{ id: "fu-3-0", action: "A follow-up added without changing the narrative", due_at: null }]);
+  }
+
+  // --- 4. An identical retry (same baseline, same new text, same
+  // follow-up ids) after an already-successful save -- a safe no-op
+  // replay, never a duplicate. ---
+  {
+    const db = freshDb("Before.");
+    const first = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "Before.", NOW, [followUp("fu-4-0", 0, "Task")]);
+    assert.deepEqual(first, { status: "applied", followUpsCreated: 1 });
+
+    const retry = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "Before.", NOW + 5, [followUp("fu-4-0", 0, "Task")]);
+    assert.deepEqual(retry, { status: "replayed" }, "an identical retry (stale baseline now, but its own exact save already applied) must be a no-op");
+    assert.equal(summary(db), "After.");
+    assert.deepEqual(recommendationRows(db), [{ id: "fu-4-0", action: "Task", due_at: null }], "no duplicate follow-up row");
+  }
+
+  // --- 5. A changed-payload retry -- same follow-up ids as an already-
+  // applied save, but DIFFERENT content this time -- must be rejected,
+  // never silently re-applied or reported as success. ---
+  {
+    const db = freshDb("Before.");
+    const first = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "Before.", NOW, [followUp("fu-5-0", 0, "Original task")]);
+    assert.deepEqual(first, { status: "applied", followUpsCreated: 1 });
+
+    const changed = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "A completely different rewrite.", "Before.", NOW + 5, [followUp("fu-5-0", 0, "A different task entirely")]);
+    assert.deepEqual(changed, { status: "conflict", reason: "summary_stale" });
+    assert.equal(summary(db), "After.", "the changed-payload retry must never overwrite the already-applied save");
+    assert.deepEqual(recommendationRows(db), [{ id: "fu-5-0", action: "Original task", due_at: null }], "the original follow-up must be untouched by the rejected changed-payload retry");
+  }
+
+  // --- 6. A changed-payload retry that reuses the SAME follow-up ids
+  // with different content, submitted on the SAME turn the summary
+  // itself was legitimately unchanged (CAS succeeds on the summary side)
+  // -- the follow-up PRIMARY KEY collision must still be caught and
+  // rejected as a mismatch, never silently skipped or double-counted. ---
+  {
+    const db = freshDb("Before.");
+    const first = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "Before.", NOW, [followUp("fu-6-0", 0, "Original task")]);
+    assert.deepEqual(first, { status: "applied", followUpsCreated: 1 });
+
+    // A second, unrelated save attempt that happens to target the exact
+    // same (already-applied) summary value as its own baseline AND new
+    // value (so the summary CAS trivially "succeeds" again), but reuses
+    // fu-6-0's id with DIFFERENT content.
+    const collision = await saveConcurrentSummaryAndFollowUps(db, INTERACTION_ID, DONOR_ID, USER_ID, "After.", "After.", NOW + 5, [followUp("fu-6-0", 0, "A conflicting rewrite of the same task")]);
+    assert.deepEqual(collision, { status: "conflict", reason: "followup_mismatch" });
+    assert.deepEqual(recommendationRows(db), [{ id: "fu-6-0", action: "Original task", due_at: null }], "the original follow-up content must survive the rejected collision untouched");
+  }
+
+  console.log("meeting-notes-concurrent-save.test.mjs: all assertions passed");
+}
+
+await run();

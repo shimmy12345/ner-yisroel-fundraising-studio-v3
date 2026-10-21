@@ -197,18 +197,27 @@ async function run() {
   // the (possibly new) donor, and never a special "transfer this fact"
   // code path.
   // ================================================================
+  // (2026-10-21, third follow-up review): this shape now lives in
+  // lib/capture/interaction-edit.ts's applyInteractionEdit, extracted
+  // out of the route itself so a rejected edit (the concurrency fix for
+  // defect A) can never reach either the archival or the acceptance
+  // call -- see tests/interaction-edit-concurrency.test.mjs for the
+  // behavioral proof. The route still ultimately calls this exact
+  // function with the same donorId/existing.donor_id values.
   const editRoute = await readFile(new URL("../app/api/interactions/[id]/route.ts", import.meta.url), "utf8");
+  const interactionEditModule = await readFile(new URL("../lib/capture/interaction-edit.ts", import.meta.url), "utf8");
+  assert.match(editRoute, /applyInteractionEdit\(/, "the route must call the shared, concurrency-safe edit function rather than inlining archival/acceptance");
   assert.match(
-    editRoute,
-    /if \(donorId !== existing\.donor_id\) \{\s*const archival = await planFactArchival\(\{ donorId: existing\.donor_id, userId: profile\.id, sourceInteractionId: id, now \}\);/,
-    "the route must archive the OLD donor's fact(s) on reassignment, scoped to existing.donor_id (the donor being left), never the new donorId",
+    interactionEditModule,
+    /if \(input\.donorId !== input\.existingDonorId\) \{\s*const archival = await planFactArchival\(\{ donorId: input\.existingDonorId, userId: input\.userId, sourceInteractionId: input\.interactionId, now: input\.now \}\);/,
+    "applyInteractionEdit must archive the OLD donor's fact(s) on reassignment, scoped to existingDonorId (the donor being left), never the new donorId",
   );
   assert.match(
-    editRoute,
-    /if \(body\.acceptRelationshipSnapshot === true && !scheduled\) \{\s*const plan = await planFactAcceptance\(\{\s*donorId, userId: profile\.id, sourceInteractionId: id,/,
-    "the route's acceptance call must target `donorId` (the possibly-new donor) and remain independently gated on an explicit acceptRelationshipSnapshot === true -- never automatic just because donorId changed",
+    interactionEditModule,
+    /if \(input\.acceptRelationshipSnapshot && !input\.scheduled\) \{\s*const plan = await planFactAcceptance\(\{\s*donorId: input\.donorId, userId: input\.userId, sourceInteractionId: input\.interactionId,/,
+    "the acceptance call must target the (possibly-new) donorId and remain independently gated on an explicit acceptRelationshipSnapshot -- never automatic just because donorId changed",
   );
-  assert.doesNotMatch(editRoute, /UPDATE donor_relationship_facts SET donor_id/i, "the route must never reassign a fact row's donor_id directly -- a fact belongs permanently to the donor it was accepted for");
+  assert.doesNotMatch(interactionEditModule, /UPDATE donor_relationship_facts SET donor_id/i, "applyInteractionEdit must never reassign a fact row's donor_id directly -- a fact belongs permanently to the donor it was accepted for");
 
   console.log("relationship-fact-edit-donor-reassignment: ok");
 }
