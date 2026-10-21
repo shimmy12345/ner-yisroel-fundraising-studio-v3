@@ -6,7 +6,7 @@ import { donorNavigationHref, meetingBriefNavigationHref } from "../../../lib/na
 import { searchDonors } from "../../../lib/relationships/donor-search";
 import { ALL_REGIONS, ALL_CITIES, filterByGeo } from "../../../lib/relationships/donor-geo-filter";
 import { numericDonorCode } from "../../../lib/relationships/donor-identity";
-import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, FindProspectDonor } from "../../../lib/relationships/trips-data";
+import type { TripRecord, TripProspectRecord, TripFinancialAttributionRow, EligibleGivingActivity, ReconcilableAttribution, FindProspectDonor } from "../../../lib/relationships/trips-data";
 import type { TripFinancialSummary } from "../../../lib/relationships/trip-financial-attribution";
 import { TRIP_PROSPECT_STATUSES, timezoneForState, type TripProspectStatus } from "../../../lib/relationships/trip-model";
 import {
@@ -19,8 +19,17 @@ import { ProgressBar } from "../../components/ProgressBar";
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 const CATEGORY_LABELS: Record<string, string> = {
   open_pledge: "Pledge", partially_paid_pledge: "Pledge (partially paid)", completed_gift: "Donation",
-  pending_gift: "Pending donation", pending_pledge: "Pending pledge",
+  pending_gift: "Unconfirmed opportunity (gift)", pending_pledge: "Unconfirmed opportunity (pledge)",
 };
+// Donor-confirmation correction (2026-10-20, see docs/AI-HANDOFF.md): a
+// confirmed pending_gift/pending_pledge is labeled "Awaiting JL," never
+// the generic "not yet confirmed" wording used for a truly unconfirmed
+// opportunity -- the task's own explicit requirement.
+function pendingDisplayLabel(category: string, donorConfirmedAt: number | null): string {
+  if (category === "pending_gift") return donorConfirmedAt ? "Awaiting JL (donation)" : "Unconfirmed opportunity (gift)";
+  if (category === "pending_pledge") return donorConfirmedAt ? "Awaiting JL (pledge)" : "Unconfirmed opportunity (pledge)";
+  return CATEGORY_LABELS[category] ?? category;
+}
 
 // "Planned outreach" (Section 2) reuses the existing `not_contacted`
 // status with a clearer display label -- it means "added, intended to
@@ -467,14 +476,16 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
   </article>;
 }
 
-// Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md).
-// Shows every record currently attributed to this prospect (figures read
-// live from the server -- this component never computes a financial
-// total itself) and the three actions the task calls for: record a new
-// donation/pledge (via the existing pending-gift/pending-pledge CRM
-// workflow, then attributed), or associate an already-real donation or
-// pledge. Removing an attribution never touches the underlying financial
-// record -- only this link.
+const REAL_GIVING_CATEGORIES = new Set(["open_pledge", "partially_paid_pledge", "completed_gift"]);
+
+// Trip Fundraising Results Dashboard (2026-10-16, see docs/AI-HANDOFF.md;
+// donor-confirmation correction 2026-10-20). Shows every record currently
+// attributed to this prospect (figures read live from the server -- this
+// component never computes a financial total itself) and the three
+// actions the task calls for: record a new donation/pledge (via the
+// existing pending-gift/pending-pledge CRM workflow, then attributed), or
+// associate an already-real donation or pledge. Removing an attribution
+// never touches the underlying financial record -- only this link.
 function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }: {
   tripId: string; prospectId: string; attributions: TripFinancialAttributionRow[]; onRefresh: () => void;
 }) {
@@ -485,17 +496,29 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
   const [date, setDate] = useState("");
   const [designation, setDesignation] = useState("");
   const [note, setNote] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
   const [eligible, setEligible] = useState<EligibleGivingActivity[] | null>(null);
+  const [reconcilable, setReconcilable] = useState<ReconcilableAttribution[]>([]);
   const [selectedGivingActivityId, setSelectedGivingActivityId] = useState("");
+  const [commitmentKind, setCommitmentKind] = useState<"new_commitment" | "preexisting_pledge_collection">("new_commitment");
+  const [reportedCashCollected, setReportedCashCollected] = useState("");
+  const [reconcilesAttributionId, setReconcilesAttributionId] = useState("");
+
+  const selectedEligible = eligible?.find((item) => item.id === selectedGivingActivityId) ?? null;
+  const selectedIsRealRecord = selectedEligible !== null && REAL_GIVING_CATEGORIES.has(selectedEligible.category);
 
   function openPanel(next: "record_donation" | "record_pledge" | "associate_existing") {
-    setMode(next); setError(null); setAmount(""); setDate(""); setDesignation(""); setNote(""); setSelectedGivingActivityId("");
+    setMode(next); setError(null); setAmount(""); setDate(""); setDesignation(""); setNote(""); setConfirmed(false);
+    setSelectedGivingActivityId(""); setCommitmentKind("new_commitment"); setReportedCashCollected(""); setReconcilesAttributionId("");
     if (next === "associate_existing") {
-      setEligible(null);
+      setEligible(null); setReconcilable([]);
       fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions`)
         .then((response) => response.json())
-        .then((payload: { eligible?: EligibleGivingActivity[] }) => setEligible(payload.eligible ?? []))
-        .catch(() => setEligible([]));
+        .then((payload: { eligible?: EligibleGivingActivity[]; reconcilable?: ReconcilableAttribution[] }) => {
+          setEligible(payload.eligible ?? []);
+          setReconcilable(payload.reconcilable ?? []);
+        })
+        .catch(() => { setEligible([]); setReconcilable([]); });
     }
   }
 
@@ -504,7 +527,7 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
     try {
       const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action, amount, date, designation: designation || undefined, note: note || undefined }),
+        body: JSON.stringify({ action, amount, date, designation: designation || undefined, note: note || undefined, confirmed }),
       });
       const payload = await response.json().catch(() => ({})) as { error?: string; ok?: boolean };
       if (!response.ok && response.status !== 207) throw new Error(payload.error ?? "That could not be recorded.");
@@ -520,18 +543,48 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
 
   async function submitAssociate() {
     if (!selectedGivingActivityId) return;
+    // Ambiguous-match guard: a REAL record is never associated while an
+    // existing, not-yet-confirmed trip entry for this same donor could
+    // qualify, without an explicit choice of whether it reconciles one.
+    if (selectedIsRealRecord && reconcilable.length > 0 && !reconcilesAttributionId) {
+      setError("Choose whether this reconciles an existing entry below, or is a separate, additional commitment.");
+      return;
+    }
     setBusy(true); setError(null);
     try {
       const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "associate_existing", givingActivityId: selectedGivingActivityId, note: note || undefined }),
+        body: JSON.stringify({
+          action: "associate_existing", givingActivityId: selectedGivingActivityId, note: note || undefined,
+          commitmentKind: selectedIsRealRecord ? commitmentKind : undefined,
+          reportedCashCollected: commitmentKind === "preexisting_pledge_collection" ? reportedCashCollected : undefined,
+          reconcilesAttributionId: selectedIsRealRecord ? (reconcilesAttributionId || "none") : undefined,
+        }),
       });
-      const payload = await response.json().catch(() => ({})) as { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "That could not be associated.");
+      const payload = await response.json().catch(() => ({})) as { error?: string; reconciliationChoiceRequired?: boolean; candidates?: ReconcilableAttribution[] };
+      if (!response.ok) {
+        if (payload.reconciliationChoiceRequired) setReconcilable(payload.candidates ?? []);
+        throw new Error(payload.error ?? "That could not be associated.");
+      }
       setMode("closed");
       onRefresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "That could not be associated.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setDonorConfirmed(attributionId: string, next: boolean) {
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospectId)}/attributions/${encodeURIComponent(attributionId)}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ donorConfirmed: next }),
+      });
+      if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? "Could not update confirmation."); }
+      onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update confirmation.");
     } finally {
       setBusy(false);
     }
@@ -551,14 +604,29 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
     }
   }
 
+  const isPendingCategory = (category: string) => category === "pending_gift" || category === "pending_pledge";
+
   return <div className="trip-financial-section">
     <p className="payment-plan-eyebrow">Fundraising for this donor on this trip</p>
     {error && <p className="travel-planning-error" role="alert">{error}</p>}
     {attributions.length > 0 && <div className="trip-financial-attributed-list">
-      {attributions.map((item) => <div key={item.attributionId} className="trip-financial-attributed-row">
-        <span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}{(item.paidCents ?? 0) > 0 ? ` (${money(item.paidCents ?? 0)} paid)` : ""}{item.resolvedViaImportMatch ? <span className="trip-financial-confirmed-badge" title="This was recorded as a pending gift, then matched to a confirmed donation during a JL import -- these figures are the confirmed donation's own."> &middot; Confirmed via import</span> : null}</span>
-        <button type="button" disabled={busy} onClick={() => removeAttribution(item.attributionId)}>Remove</button>
-      </div>)}
+      {attributions.map((item) => {
+        const pending = isPendingCategory(item.category);
+        const preexisting = item.commitmentKind === "preexisting_pledge_collection";
+        return <div key={item.attributionId} className="trip-financial-attributed-row">
+          <span>
+            {preexisting
+              ? <>Pre-existing pledge collection &middot; {money(item.reportedCashCollectedCents ?? 0)} reported collected on this trip (not a new commitment) <span className="trip-financial-jl-note" title="The pledge's own lifetime total in JL, never summed with the trip-reported figure above.">&middot; {money(item.committedCents ?? 0)} committed / {money(item.paidCents ?? 0)} paid in JL overall</span></>
+              : <>{pendingDisplayLabel(item.category, item.donorConfirmedAt)} &middot; {money(item.committedCents ?? 0)}{(item.paidCents ?? 0) > 0 ? ` (${money(item.paidCents ?? 0)} paid)` : ""}</>}
+            {item.resolvedViaImportMatch ? <span className="trip-financial-confirmed-badge" title="This was recorded as a pending gift, then matched to a confirmed donation during a JL import -- these figures are the confirmed donation's own."> &middot; Confirmed via import</span> : null}
+            {item.reconciledPendingAttributionId ? <span className="trip-financial-confirmed-badge" title="This record reconciles an earlier pending trip entry for the same donor, which has been retired so the commitment counts once."> &middot; Reconciles a pending entry</span> : null}
+          </span>
+          <span className="trip-financial-row-actions">
+            {!preexisting && pending && <button type="button" disabled={busy} onClick={() => setDonorConfirmed(item.attributionId, !item.donorConfirmedAt)}>{item.donorConfirmedAt ? "Unconfirm" : "Mark donor-confirmed"}</button>}
+            <button type="button" disabled={busy} onClick={() => removeAttribution(item.attributionId)}>Remove</button>
+          </span>
+        </div>;
+      })}
     </div>}
     {mode === "closed" && <div className="trip-financial-attribution-actions">
       <button type="button" disabled={busy} onClick={() => openPanel("record_donation")}>Record a new donation</button>
@@ -570,7 +638,12 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
       <label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
       <label>Designation (optional)<input type="text" value={designation} onChange={(event) => setDesignation(event.target.value)} maxLength={160} /></label>
       <label>Note (optional)<textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} /></label>
-      <p className="travel-planning-confirm-hint">Recorded as an unconfirmed {mode === "record_donation" ? "gift" : "pledge"} using the same workflow as the rest of the CRM -- it will not count toward any total until confirmed.</p>
+      <label className="trip-financial-confirm-checkbox"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> The donor confirmed this {mode === "record_donation" ? "donation" : "pledge"}</label>
+      <p className="travel-planning-confirm-hint">
+        {confirmed
+          ? `Counted toward this trip's results immediately, labeled "Awaiting JL" until the real record is imported from JL -- it will not create any financial transaction or change this donor's giving history until then.`
+          : "Recorded as an unconfirmed opportunity using the same workflow as the rest of the CRM -- it will not count toward any total until the donor confirms it (use the checkbox above, or \"Mark donor-confirmed\" later)."}
+      </p>
       <div className="travel-planning-confirm-actions">
         <button type="button" onClick={() => submitRecord(mode)} disabled={busy || !amount || !date}>Save</button>
         <button type="button" onClick={() => setMode("closed")}>Cancel</button>
@@ -580,11 +653,26 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
       {eligible === null && <p>Loading this donor&rsquo;s eligible donations and pledges&hellip;</p>}
       {eligible !== null && eligible.length === 0 && <p>No eligible, unattributed donation or pledge was found for this donor.</p>}
       {eligible !== null && eligible.length > 0 && <label>Choose a donation or pledge
-        <select value={selectedGivingActivityId} onChange={(event) => setSelectedGivingActivityId(event.target.value)}>
+        <select value={selectedGivingActivityId} onChange={(event) => { setSelectedGivingActivityId(event.target.value); setReconcilesAttributionId(""); }}>
           <option value="">Select one&hellip;</option>
           {eligible.map((item) => <option key={item.id} value={item.id}>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}{item.description ? ` -- ${item.description}` : ""}</option>)}
         </select>
       </label>}
+      {selectedIsRealRecord && <fieldset className="trip-financial-commitment-kind">
+        <label><input type="radio" name="commitmentKind" checked={commitmentKind === "new_commitment"} onChange={() => setCommitmentKind("new_commitment")} /> Secured on this trip (a new commitment)</label>
+        <label><input type="radio" name="commitmentKind" checked={commitmentKind === "preexisting_pledge_collection"} onChange={() => setCommitmentKind("preexisting_pledge_collection")} /> A pledge from before this trip -- just collecting on (or linking) it now, not a new commitment</label>
+      </fieldset>}
+      {selectedIsRealRecord && commitmentKind === "preexisting_pledge_collection" && <label>Cash reported collected on this trip (optional, $0 if none yet)
+        <input type="text" value={reportedCashCollected} onChange={(event) => setReportedCashCollected(event.target.value)} placeholder="$0" />
+      </label>}
+      {selectedIsRealRecord && reconcilable.length > 0 && <fieldset className="trip-financial-reconcile-choice">
+        <p className="payment-plan-note-inline">This donor has an existing, not-yet-confirmed trip entry. Does this record reconcile one of them?</p>
+        {reconcilable.map((candidate) => <label key={candidate.attributionId}>
+          <input type="radio" name="reconcile" checked={reconcilesAttributionId === candidate.attributionId} onChange={() => setReconcilesAttributionId(candidate.attributionId)} />
+          {" "}Yes -- reconciles {pendingDisplayLabel(candidate.category, candidate.donorConfirmedAt)} &middot; {money(candidate.committedCents ?? 0)}
+        </label>)}
+        <label><input type="radio" name="reconcile" checked={reconcilesAttributionId === "none"} onChange={() => setReconcilesAttributionId("none")} /> No -- this is a separate, additional commitment</label>
+      </fieldset>}
       <label>Note (optional)<textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={2000} /></label>
       <div className="travel-planning-confirm-actions">
         <button type="button" onClick={submitAssociate} disabled={busy || !selectedGivingActivityId}>Associate</button>
@@ -598,9 +686,15 @@ function ProspectFinancialPanel({ tripId, prospectId, attributions, onRefresh }:
 // figures. Every figure here comes directly from `summary`
 // (lib/relationships/trip-financial-attribution.ts's summarizeTripFinancials),
 // a pure derivation of the trip's OWN attributed records; this component
-// only renders it.
+// only renders it. Donor-confirmation correction (2026-10-20): pending
+// entries are now split into truly unconfirmed opportunities (excluded
+// above, as before) and donor-confirmed entries awaiting JL (already
+// counted above -- shown here only for transparency, per the task's own
+// "clearly distinguish trip-reported amounts from JL-recorded amounts").
 function TripFinancialResultsSection({ summary, attributions }: { summary: TripFinancialSummary; attributions: TripFinancialAttributionRow[] }) {
-  const pending = attributions.filter((item) => item.category === "pending_gift" || item.category === "pending_pledge");
+  const pendingAttributions = attributions.filter((item) => (item.category === "pending_gift" || item.category === "pending_pledge") && item.commitmentKind !== "preexisting_pledge_collection");
+  const unconfirmed = pendingAttributions.filter((item) => !item.donorConfirmedAt);
+  const awaitingJl = pendingAttributions.filter((item) => item.donorConfirmedAt);
   return <section className="story-card" aria-label="Trip fundraising results">
     <div className="card-heading"><div><p className="eyebrow">FUNDRAISING RESULTS</p><h2>Results against this trip&rsquo;s goal</h2></div></div>
     {summary.goalCents !== null ? (
@@ -611,18 +705,24 @@ function TripFinancialResultsSection({ summary, attributions }: { summary: TripF
       />
     ) : <p className="payment-plan-note-inline">This trip has no fundraising goal set.</p>}
     <FinancialSummaryGrid>
-      <FinancialSummaryCard label="New pledges secured" value={money(summary.newPledgesSecuredCents)} sublabel={`${summary.pledgeCount} pledge${summary.pledgeCount === 1 ? "" : "s"}`} />
+      <FinancialSummaryCard label="New pledges secured" value={money(summary.newPledgesSecuredCents)} sublabel={`${summary.pledgeCount} pledge${summary.pledgeCount === 1 ? "" : "s"}${summary.awaitingJlCount > 0 ? ` (${summary.awaitingJlCount} awaiting JL)` : ""}`} />
       <FinancialSummaryCard label="New donations secured" value={money(summary.newDonationsSecuredCents)} sublabel={`${summary.donationCount} donation${summary.donationCount === 1 ? "" : "s"}`} />
-      <FinancialSummaryCard label="Cash collected" value={money(summary.cashCollectedCents)} />
-      <FinancialSummaryCard label="Outstanding pledge balance" value={money(summary.outstandingCommittedBalanceCents)} tone="muted" />
+      <FinancialSummaryCard label="Cash collected" value={money(summary.cashCollectedCents)} sublabel={`${money(summary.cashCollectedRecordedInJlCents)} recorded in JL, ${money(summary.cashCollectedAwaitingJlCents)} awaiting JL`} />
+      <FinancialSummaryCard label="Outstanding pledge balance" value={money(summary.outstandingCommittedBalanceCents)} tone="muted" sublabel={summary.outstandingBalanceAwaitingJlCents > 0 ? `${money(summary.outstandingBalanceAwaitingJlCents)} provisional, awaiting JL` : undefined} />
     </FinancialSummaryGrid>
-    {pending.length > 0 && <div className="trip-financial-pending-list" aria-label="Pending opportunities">
-      <p className="payment-plan-eyebrow">Pending opportunities (not yet confirmed -- never counted above)</p>
-      {pending.map((item) => <div key={item.attributionId} className="trip-financial-pending-row">
+    {summary.preexistingPledgeCollectionCashCents > 0 && <p className="payment-plan-note-inline">{money(summary.preexistingPledgeCollectionCashCents)} of cash collected above is from collecting on pledges secured before this trip -- not a new commitment, included in cash collected only.</p>}
+    {unconfirmed.length > 0 && <div className="trip-financial-pending-list" aria-label="Unconfirmed opportunities">
+      <p className="payment-plan-eyebrow">Unconfirmed opportunities (not yet confirmed by the donor -- never counted above)</p>
+      {unconfirmed.map((item) => <div key={item.attributionId} className="trip-financial-pending-row">
         <span>{item.donorDisplayName}</span>
-        <span>{CATEGORY_LABELS[item.category] ?? item.category} &middot; {money(item.committedCents ?? 0)}
-          {item.category === "pending_pledge" ? <span className="trip-financial-manual-note" title="A pending pledge never auto-confirms from a JL import -- once the real pledge is imported, use Associate an existing pledge above to link it here."> &middot; confirms manually once imported</span> : null}
-        </span>
+        <span>{pendingDisplayLabel(item.category, item.donorConfirmedAt)} &middot; {money(item.committedCents ?? 0)}</span>
+      </div>)}
+    </div>}
+    {awaitingJl.length > 0 && <div className="trip-financial-pending-list" aria-label="Awaiting JL">
+      <p className="payment-plan-eyebrow">Donor-confirmed, awaiting JL (already counted above)</p>
+      {awaitingJl.map((item) => <div key={item.attributionId} className="trip-financial-pending-row">
+        <span>{item.donorDisplayName}</span>
+        <span>{pendingDisplayLabel(item.category, item.donorConfirmedAt)} &middot; {money(item.committedCents ?? 0)}</span>
       </div>)}
     </div>}
   </section>;

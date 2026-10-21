@@ -729,7 +729,7 @@ CREATE TABLE `trip_financial_attributions` (
 	`note` text,
 	`created_at` integer NOT NULL,
 	`removed_at` integer,
-	`removed_reason` text,
+	`removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text,
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,

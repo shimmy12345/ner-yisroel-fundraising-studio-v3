@@ -49,7 +49,8 @@
     "0044_agenda_manual_test_send_log.sql",
     "0045_trips.sql",
     "0046_trip_financial_attributions.sql",
-    "0047_trip_prospect_selection.sql"
+    "0047_trip_prospect_selection.sql",
+    "0050_trip_attribution_confirmation.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6251,6 +6252,34 @@
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_confirmed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "commitment_kind",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'new_commitment'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reported_cash_collected_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reconciled_pending_attribution_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6326,7 +6355,9 @@
             "sql": null
           }
         ],
-        "checks": []
+        "checks": [
+          "CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection'))"
+        ]
       },
       {
         "name": "trip_prospects",
@@ -7364,7 +7395,7 @@
     {
       "type": "table",
       "name": "trip_financial_attributions",
-      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",

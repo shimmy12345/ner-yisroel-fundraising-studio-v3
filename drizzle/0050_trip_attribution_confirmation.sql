@@ -1,0 +1,76 @@
+-- Trip Fundraising Results Dashboard -- donor-confirmation correction
+-- (2026-10-20, see docs/AI-HANDOFF.md). STAGING ONLY -- not applied to
+-- Production as part of this round, same carve-out as drizzle/0046 and
+-- drizzle/0047.
+--
+-- Numbering note: drizzle/pending-review/0049_fix_calendar_schema_text_
+-- staging_repair.sql already reserves "0049" for a separate, unrelated,
+-- not-yet-reviewed draft (deliberately kept OUTSIDE this drizzle/
+-- directory so it is never picked up by any tool that globs
+-- drizzle/*.sql). This migration is numbered 0050, continuing the real,
+-- applied sequence directly after 0048, so it can never collide with
+-- that draft if it is later renumbered into the real sequence.
+--
+-- Four new, additive, nullable-or-safely-defaulted columns on the
+-- EXISTING `trip_financial_attributions` table (drizzle/0046). No
+-- existing column, index, row, or giving_activities/trips/donors table
+-- is touched. Every column below defaults to a value that reproduces
+-- CURRENT behavior exactly for every attribution that already exists --
+-- in particular, no existing attribution is silently treated as
+-- donor-confirmed, and no existing attribution's totals contribution
+-- changes as a result of this migration alone.
+--
+-- `donor_confirmed_at`: NULL (the only possible value for every existing
+-- row -- this column does not exist yet, so there is nothing to
+-- backfill) means "an unconfirmed opportunity," exactly like today. A
+-- non-NULL timestamp means a fundraiser has explicitly recorded that the
+-- donor confirmed this pledge or donation -- set only by a new, explicit
+-- action (confirmTripAttribution in lib/relationships/trips-data.ts),
+-- never inferred from existing data, never backfilled by this migration.
+-- Only meaningful for an attribution whose underlying (possibly
+-- import-resolved) category is still `pending_gift`/`pending_pledge`; a
+-- category already confirmed by JL ignores this column entirely --
+-- JL's own confirmation already speaks for it.
+--
+-- `commitment_kind`: defaults 'new_commitment' for every existing AND
+-- future row unless explicitly set otherwise, so reading back any
+-- attribution created before this migration behaves identically to
+-- before it existed. 'preexisting_pledge_collection' is the one new
+-- alternative -- set only when a fundraiser explicitly attributes an
+-- ALREADY-real (already-JL) pledge/gift to a trip while telling this
+-- feature "this was not secured on this trip -- I am just collecting on
+-- (or linking) a pledge that already existed before it." Enforced at the
+-- application layer (attributeGivingActivityToTrip) to never be set on
+-- an attribution whose category is pending_gift/pending_pledge, since a
+-- record that does not exist in JL yet cannot be "pre-existing."
+--
+-- `reported_cash_collected_cents`: a fundraiser-entered figure, used only
+-- when commitment_kind = 'preexisting_pledge_collection' -- how much the
+-- fundraiser reports collecting from the donor during THIS trip against
+-- that pre-existing pledge. Deliberately NEVER read from or written to
+-- giving_activities.paid_cents (that column is the pledge's own
+-- LIFETIME cumulative total, which would misrepresent a single trip's
+-- own collection as the whole lifetime figure, over- or under-stating
+-- it) -- this is a trip-scoped, trip-reported amount, explicitly and
+-- permanently distinguished in the trip interface from the JL-recorded
+-- lifetime paid_cents of the same underlying pledge, never summed with
+-- it as if they were the same fact. NULL (not 0) for every row where it
+-- does not apply.
+--
+-- `reconciled_pending_attribution_id`: set only on a NEW attribution of a
+-- real, JL-confirmed giving_activities row when that same action also
+-- retires (soft-removes, removed_reason = 'Reconciled with JL-imported
+-- record') an earlier, still-active attribution of a pending_gift/
+-- pending_pledge for the SAME trip and donor -- so the commitment counts
+-- exactly once instead of twice once the real record arrives. Points at
+-- the now-removed attribution's own id, purely for audit/display ("this
+-- entry reconciles the pending entry below"); never a DB-level foreign
+-- key (same precedent as `confirmed_by_activity_id` on giving_activities,
+-- drizzle/0016, which also omits one on ALTER TABLE ADD COLUMN).
+ALTER TABLE `trip_financial_attributions` ADD COLUMN `donor_confirmed_at` integer;
+--> statement-breakpoint
+ALTER TABLE `trip_financial_attributions` ADD COLUMN `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection'));
+--> statement-breakpoint
+ALTER TABLE `trip_financial_attributions` ADD COLUMN `reported_cash_collected_cents` integer;
+--> statement-breakpoint
+ALTER TABLE `trip_financial_attributions` ADD COLUMN `reconciled_pending_attribution_id` text;

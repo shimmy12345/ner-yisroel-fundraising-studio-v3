@@ -16,8 +16,9 @@ import {
   buildSuggestionSnapshot, findCrossTripConflicts, parseLocalDateTimeInput,
   statusRequiresInteraction, timezoneForState, tripCancelledInteractionSource, tripCompletedInteractionSource,
   tripMeetingInteractionId, tripScheduledInteractionSource, validateMeetingCompletion, validateMeetingScheduling,
-  type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus,
+  type AddedMethod, type CrossTripConflict, type TripProspectStatus, type TripStatus, type TripCommitmentKind,
 } from "./trip-model.ts";
+import { REAL_COMMITMENT_CATEGORIES } from "./pledge-payment-plan.ts";
 
 // Independent-review correction (2026-10-15): resolves a `datetime-local`
 // input value into a real UTC epoch using the PROSPECT'S OWN donor state
@@ -453,7 +454,39 @@ export async function listEligibleGivingActivitiesForDonor(userId: string, donor
   return result.results.map((row) => ({ id: row.id, category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents, activityDate: row.activity_date, description: row.description }));
 }
 
-export type AttributeResult = { ok: true; attributionId: string } | { ok: false; reason: "prospect_not_found" | "giving_activity_not_found" | "already_attributed" };
+export type ReconcilableAttribution = { attributionId: string; category: string; committedCents: number | null; donorConfirmedAt: number | null; createdAt: number };
+
+export type AttributeResult =
+  | { ok: true; attributionId: string }
+  | { ok: false; reason: "prospect_not_found" | "giving_activity_not_found" | "already_attributed" | "invalid_commitment_kind" | "reconciliation_target_not_found" }
+  // Ambiguous-match guard (2026-10-20, see docs/AI-HANDOFF.md): returned
+  // instead of silently picking a candidate, every time at least one
+  // active pending (not-yet-JL) trip entry exists for this same donor on
+  // this same trip when a REAL record is being attributed -- the task's
+  // own "do not automatically match solely by donor and amount where
+  // multiple records could qualify." `candidates` is attached so the
+  // caller can present the exact choice without a second round trip.
+  | { ok: false; reason: "reconciliation_choice_required"; candidates: ReconcilableAttribution[] };
+
+export type AttributeGivingActivityOptions = {
+  // Defaults to "new_commitment" -- every attribution made before this
+  // round behaves identically under that default.
+  commitmentKind?: TripCommitmentKind;
+  // Only meaningful (and only ever persisted) when commitmentKind is
+  // "preexisting_pledge_collection" -- see trip-financial-attribution.ts's
+  // own doc comment on why this is never read from or written to the
+  // underlying giving_activities row.
+  reportedCashCollectedCents?: number | null;
+  // "none": an explicit choice that this is a deliberate, separate,
+  // additional commitment -- never reconciling any existing pending
+  // entry for this donor on this trip. A specific attributionId: the
+  // exact pending entry (from listReconcilableTripAttributions) this new,
+  // real attribution reconciles -- that entry is atomically soft-removed
+  // (reason "Reconciled with JL-imported record") in the SAME write, so
+  // the commitment counts exactly once. Omitted entirely is only valid
+  // when zero reconcilable candidates exist for this donor+trip.
+  reconcilesAttributionId?: string | "none" | null;
+};
 
 // Attributes an EXISTING giving_activities row to a trip, scoped to one
 // trip_prospects row (so the donor must already be a tracked prospect on
@@ -463,10 +496,10 @@ export type AttributeResult = { ok: true; attributionId: string } | { ok: false;
 // removed_at IS NULL) is the real double-counting guard -- caught here
 // as `already_attributed` rather than a raw constraint error surfacing
 // to the caller.
-export async function attributeGivingActivityToTrip(userId: string, tripId: string, prospectId: string, givingActivityId: string, note: string | null, now: number): Promise<AttributeResult> {
+export async function attributeGivingActivityToTrip(userId: string, tripId: string, prospectId: string, givingActivityId: string, note: string | null, now: number, options: AttributeGivingActivityOptions = {}): Promise<AttributeResult> {
   const prospect = await ownedProspect(userId, tripId, prospectId);
   if (!prospect) return { ok: false, reason: "prospect_not_found" };
-  const givingActivity = await env.DB.prepare("SELECT id FROM giving_activities WHERE id = ? AND owner_user_id = ? AND donor_id = ?").bind(givingActivityId, userId, prospect.donorId).first<{ id: string }>();
+  const givingActivity = await env.DB.prepare("SELECT id, category FROM giving_activities WHERE id = ? AND owner_user_id = ? AND donor_id = ?").bind(givingActivityId, userId, prospect.donorId).first<{ id: string; category: string }>();
   if (!givingActivity) return { ok: false, reason: "giving_activity_not_found" };
   // Pending-Gift Reconciliation Fix (2026-10-15, see docs/AI-HANDOFF.md):
   // the real structural guard against double-attributing one confirmed
@@ -475,14 +508,122 @@ export async function attributeGivingActivityToTrip(userId: string, tripId: stri
   // givingActivityId. Rejected exactly like an already-attributed record.
   const shadowOfAttributedPending = await env.DB.prepare(`SELECT 1 FROM trip_financial_attributions tfa JOIN giving_activities pending ON pending.id = tfa.giving_activity_id WHERE pending.confirmed_by_activity_id = ? AND tfa.removed_at IS NULL LIMIT 1`).bind(givingActivityId).first();
   if (shadowOfAttributedPending) return { ok: false, reason: "already_attributed" };
+
+  const commitmentKind: TripCommitmentKind = options.commitmentKind ?? "new_commitment";
+  // A record that does not exist in JL yet (pending_gift/pending_pledge)
+  // cannot be "pre-existing" -- recordPendingGiftAndAttribute/
+  // recordPendingPledgeAndAttribute always create a brand-new row by
+  // construction, so this only ever guards a direct/misused call.
+  if (commitmentKind === "preexisting_pledge_collection" && !REAL_COMMITMENT_CATEGORIES.has(givingActivity.category)) {
+    return { ok: false, reason: "invalid_commitment_kind" };
+  }
+
+  // Ambiguous-match guard: attributing a REAL record never silently
+  // reconciles an existing pending trip entry solely by donor and amount.
+  let reconciles: ReconcilableAttribution | null = null;
+  if (REAL_COMMITMENT_CATEGORIES.has(givingActivity.category)) {
+    const candidates = await listReconcilableTripAttributions(userId, tripId, prospect.donorId);
+    if (candidates.length > 0) {
+      if (options.reconcilesAttributionId === undefined || options.reconcilesAttributionId === null) {
+        return { ok: false, reason: "reconciliation_choice_required", candidates };
+      }
+      if (options.reconcilesAttributionId !== "none") {
+        reconciles = candidates.find((candidate) => candidate.attributionId === options.reconcilesAttributionId) ?? null;
+        if (!reconciles) return { ok: false, reason: "reconciliation_target_not_found" };
+      }
+    }
+  }
+
   const id = crypto.randomUUID();
+  const reportedCashCollectedCents = commitmentKind === "preexisting_pledge_collection" ? (options.reportedCashCollectedCents ?? 0) : null;
   try {
-    await env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, tripId, prospect.donorId, givingActivityId, note, now).run();
+    // Inserting the new attribution and retiring the pending entry it
+    // reconciles happen in the SAME atomic D1 batch -- there is never a
+    // moment where both are active (double-counted) or both are removed
+    // (the commitment silently disappears).
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, note, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, tripId, prospect.donorId, givingActivityId, note, commitmentKind, reportedCashCollectedCents, reconciles?.attributionId ?? null, now),
+      ...(reconciles ? [env.DB.prepare(`UPDATE trip_financial_attributions SET removed_at = ?, removed_reason = 'Reconciled with JL-imported record' WHERE id = ? AND removed_at IS NULL`).bind(now, reconciles.attributionId)] : []),
+    ]);
     return { ok: true, attributionId: id };
   } catch {
     return { ok: false, reason: "already_attributed" };
   }
+}
+
+// Reconciliation candidates (2026-10-20, see docs/AI-HANDOFF.md): every
+// ACTIVE attribution on this SAME trip, for this SAME donor, whose
+// underlying (possibly import-resolved) category is still pending_gift/
+// pending_pledge -- i.e. every not-yet-JL-confirmed trip entry for this
+// donor that a newly attributed REAL record could be reconciling. Reuses
+// the exact same merge-resolution CASE/LEFT JOIN as
+// listTripFinancialAttributions, so a pending_gift that has ALREADY
+// auto-resolved via JL's own pending-gift reconciliation (lib/giving/
+// management.ts's CONFIRM_PENDING_GIFT_SQL) is correctly excluded here
+// too -- it is no longer "pending" at all, so a fundraiser is never asked
+// to manually reconcile something that already reconciled itself.
+export async function listReconcilableTripAttributions(userId: string, tripId: string, donorId: string): Promise<ReconcilableAttribution[]> {
+  const result = await env.DB.prepare(`SELECT tfa.id AS attribution_id,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.committed_cents ELSE ga.committed_cents END AS committed_cents,
+        tfa.donor_confirmed_at, tfa.created_at
+      FROM trip_financial_attributions tfa
+      JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+      LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
+      WHERE tfa.trip_id = ? AND tfa.donor_id = ? AND tfa.user_id = ? AND tfa.removed_at IS NULL
+      ORDER BY tfa.created_at ASC`).bind(tripId, donorId, userId)
+    .all<{ attribution_id: string; category: string; committed_cents: number | null; donor_confirmed_at: number | null; created_at: number }>();
+  return result.results
+    .filter((row) => row.category === "pending_gift" || row.category === "pending_pledge")
+    .map((row) => ({ attributionId: row.attribution_id, category: row.category, committedCents: row.committed_cents, donorConfirmedAt: row.donor_confirmed_at, createdAt: row.created_at }));
+}
+
+export type ConfirmAttributionResult = { ok: true } | { ok: false; reason: "not_found" | "not_applicable" };
+
+// Marks an EXISTING pending trip entry donor-confirmed WITHOUT recreating
+// it (2026-10-20, see docs/AI-HANDOFF.md) -- the task's own explicit
+// "provide a way to mark an existing entry confirmed without recreating
+// it." Idempotent: confirming an already-confirmed entry is a no-op
+// success, never an error. Restricted to attributions whose underlying
+// (possibly import-resolved) category is still pending_gift/pending_pledge
+// -- an already-real category is already confirmed by JL itself and has
+// nothing for this action to do. Never changes any existing entry's
+// confirmation on its own; only an explicit call does.
+export async function confirmTripAttribution(userId: string, tripId: string, attributionId: string, now: number): Promise<ConfirmAttributionResult> {
+  const row = await env.DB.prepare(`SELECT tfa.id, tfa.donor_confirmed_at,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category
+      FROM trip_financial_attributions tfa
+      JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+      LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
+      JOIN trips t ON t.id = tfa.trip_id
+      WHERE tfa.id = ? AND tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?`)
+    .bind(attributionId, tripId, userId).first<{ id: string; donor_confirmed_at: number | null; category: string }>();
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.category !== "pending_gift" && row.category !== "pending_pledge") return { ok: false, reason: "not_applicable" };
+  if (row.donor_confirmed_at) return { ok: true };
+  await env.DB.prepare("UPDATE trip_financial_attributions SET donor_confirmed_at = ? WHERE id = ?").bind(now, attributionId).run();
+  return { ok: true };
+}
+
+// The reverse of confirmTripAttribution -- correcting a confirmation
+// made in error, without recreating or removing the attribution itself.
+// Same restriction and idempotence (unconfirming an already-unconfirmed
+// entry is a no-op success).
+export async function unconfirmTripAttribution(userId: string, tripId: string, attributionId: string): Promise<ConfirmAttributionResult> {
+  const row = await env.DB.prepare(`SELECT tfa.id, tfa.donor_confirmed_at,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category
+      FROM trip_financial_attributions tfa
+      JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+      LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
+      JOIN trips t ON t.id = tfa.trip_id
+      WHERE tfa.id = ? AND tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?`)
+    .bind(attributionId, tripId, userId).first<{ id: string; donor_confirmed_at: number | null; category: string }>();
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.category !== "pending_gift" && row.category !== "pending_pledge") return { ok: false, reason: "not_applicable" };
+  if (!row.donor_confirmed_at) return { ok: true };
+  await env.DB.prepare("UPDATE trip_financial_attributions SET donor_confirmed_at = NULL WHERE id = ?").bind(attributionId).run();
+  return { ok: true };
 }
 
 export type TripFinancialAttributionRow = {
@@ -498,6 +639,13 @@ export type TripFinancialAttributionRow = {
   // stale pending snapshot. Presentation-only -- summarizeTripFinancials
   // never reads this flag.
   resolvedViaImportMatch: boolean;
+  // Donor-confirmation correction (2026-10-20, see docs/AI-HANDOFF.md) --
+  // see trip-financial-attribution.ts's AttributedGivingRecord for the
+  // exact meaning of each of these three fields.
+  donorConfirmedAt: number | null;
+  commitmentKind: TripCommitmentKind;
+  reportedCashCollectedCents: number | null;
+  reconciledPendingAttributionId: string | null;
 };
 
 // Every ACTIVE (removed_at IS NULL) attribution for this trip, with every
@@ -537,6 +685,7 @@ export async function listTripFinancialAttributions(userId: string, tripId: stri
         CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.paid_cents ELSE ga.paid_cents END AS paid_cents,
         CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.balance_cents ELSE ga.balance_cents END AS balance_cents,
         (ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL) AS resolved_via_import_match,
+        tfa.donor_confirmed_at, tfa.commitment_kind, tfa.reported_cash_collected_cents, tfa.reconciled_pending_attribution_id,
         tfa.note, tfa.created_at
       FROM trip_financial_attributions tfa
       JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
@@ -545,11 +694,13 @@ export async function listTripFinancialAttributions(userId: string, tripId: stri
       JOIN trips t ON t.id = tfa.trip_id
       WHERE tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?
       ORDER BY tfa.created_at DESC`).bind(tripId, userId)
-    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; resolved_via_import_match: number; note: string | null; created_at: number }>();
+    .all<{ attribution_id: string; giving_activity_id: string; donor_id: string; donor_display_name: string; category: string; workspace_status: string; committed_cents: number | null; paid_cents: number | null; balance_cents: number | null; resolved_via_import_match: number; donor_confirmed_at: number | null; commitment_kind: TripCommitmentKind; reported_cash_collected_cents: number | null; reconciled_pending_attribution_id: string | null; note: string | null; created_at: number }>();
   return result.results.map((row) => ({
     attributionId: row.attribution_id, givingActivityId: row.giving_activity_id, donorId: row.donor_id, donorDisplayName: row.donor_display_name,
     category: row.category, workspaceStatus: row.workspace_status, committedCents: row.committed_cents, paidCents: row.paid_cents, balanceCents: row.balance_cents,
     resolvedViaImportMatch: Boolean(row.resolved_via_import_match),
+    donorConfirmedAt: row.donor_confirmed_at, commitmentKind: row.commitment_kind, reportedCashCollectedCents: row.reported_cash_collected_cents,
+    reconciledPendingAttributionId: row.reconciled_pending_attribution_id,
     note: row.note, createdAt: row.created_at,
   }));
 }
@@ -585,6 +736,20 @@ export type RecordAndAttributeResult =
 // insertPendingPledge -- the exact same code path the standalone
 // app/api/giving/pending[-pledge] endpoints use -- then attributes the
 // resulting record to this trip.
+// Donor-confirmation correction (2026-10-20, see docs/AI-HANDOFF.md): the
+// task's own core requirement -- "a confirmed pledge or donation counts
+// toward trip results and goal progress immediately, even before it is
+// imported from JL." `rawInput.confirmed === true` is the fundraiser's
+// own explicit statement that the donor has confirmed this, made at the
+// moment of recording it; anything else (omitted, false, any other
+// value) leaves it an unconfirmed opportunity -- never assumed confirmed
+// by default. confirmTripAttribution is called only after the record and
+// its attribution both already exist, so a confirmation is never applied
+// to a record that failed to attribute.
+function donorConfirmedFlag(rawInput: unknown): boolean {
+  return (rawInput as Record<string, unknown> | null)?.confirmed === true;
+}
+
 export async function recordPendingGiftAndAttribute(userId: string, tripId: string, prospectId: string, rawInput: unknown, now: number): Promise<RecordAndAttributeResult> {
   const prospect = await ownedProspect(userId, tripId, prospectId);
   if (!prospect) return { ok: false, reason: "prospect_not_found", activityId: null };
@@ -592,6 +757,7 @@ export async function recordPendingGiftAndAttribute(userId: string, tripId: stri
   if (!inserted.ok) return { ok: false, reason: "input_invalid", error: inserted.error, activityId: null };
   const attribution = await attributeGivingActivityToTrip(userId, tripId, prospectId, inserted.activityId, null, now);
   if (!attribution.ok) return { ok: false, reason: "recorded_but_not_attributed", activityId: inserted.activityId };
+  if (donorConfirmedFlag(rawInput)) await confirmTripAttribution(userId, tripId, attribution.attributionId, now);
   return { ok: true, activityId: inserted.activityId, attributionId: attribution.attributionId };
 }
 
@@ -602,6 +768,7 @@ export async function recordPendingPledgeAndAttribute(userId: string, tripId: st
   if (!inserted.ok) return { ok: false, reason: "input_invalid", error: inserted.error, activityId: null };
   const attribution = await attributeGivingActivityToTrip(userId, tripId, prospectId, inserted.activityId, null, now);
   if (!attribution.ok) return { ok: false, reason: "recorded_but_not_attributed", activityId: inserted.activityId };
+  if (donorConfirmedFlag(rawInput)) await confirmTripAttribution(userId, tripId, attribution.attributionId, now);
   return { ok: true, activityId: inserted.activityId, attributionId: attribution.attributionId };
 }
 

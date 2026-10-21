@@ -408,3 +408,33 @@ test("baseline picks up the schema-adding 0047 trip prospect selection migration
   const selectedIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_prospects_trip_selected_idx");
   assert.ok(selectedIndex, "the (trip_id, selected_at) index must be captured in the baseline");
 });
+
+test("baseline picks up the schema-adding 0050 donor-confirmation correction migration", () => {
+  // Isolated Production release candidate (2026-10-21, see
+  // docs/AI-HANDOFF.md "Trip-Confirmation Production Release Candidate").
+  // 0050_trip_attribution_confirmation.sql adds four new, nullable (or
+  // safely-defaulted) columns to the EXISTING trip_financial_attributions
+  // table -- donor_confirmed_at, commitment_kind, reported_cash_collected_cents,
+  // reconciled_pending_attribution_id.
+  //
+  // This isolated release branch's own migration set is 0000-0047 (the
+  // exact set already live in Production) plus 0050 directly -- it
+  // deliberately EXCLUDES 0048 (automatic Google Calendar sync, a
+  // separate, unrelated release) and 0049 (drizzle/pending-review/
+  // 0049_fix_calendar_schema_text_staging_repair.sql, a separate,
+  // not-yet-reviewed draft kept OUTSIDE drizzle/ for exactly this
+  // reason). Neither is counted here.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0050_trip_attribution_confirmation.sql");
+  assert.ok(!manifest.sourceMigrations.includes("0048_google_calendar_sync.sql"), "this isolated release excludes automatic Calendar sync entirely");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 49, "48 migrations already in Production (0000-0047) plus 0050 -- 0048/0049 deliberately excluded from this isolated release");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const attributionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_financial_attributions");
+  assert.ok(attributionsTable, "trip_financial_attributions must still be a real table in the baseline topology");
+  assert.match(attributionsTable.sql, /donor_confirmed_at/);
+  assert.match(attributionsTable.sql, /commitment_kind/);
+  assert.match(attributionsTable.sql, /reported_cash_collected_cents/);
+  assert.match(attributionsTable.sql, /reconciled_pending_attribution_id/);
+  const calendarTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "calendar_event_links");
+  assert.equal(calendarTable, undefined, "calendar_event_links must not appear in this isolated release's baseline topology");
+});
