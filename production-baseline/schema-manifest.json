@@ -1,6 +1,6 @@
 {
   "baselineLevel": "0019",
-  "schemaHash": "f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7",
+  "schemaHash": "05b00e6b657bb59be7f1a4b6ee56deca3ca50d2ec01259f000d29cd9777ec94e",
   "sourceMigrations": [
     "0000_foundation.sql",
     "0001_staging_sample_data.sql",
@@ -49,7 +49,9 @@
     "0044_agenda_manual_test_send_log.sql",
     "0045_trips.sql",
     "0046_trip_financial_attributions.sql",
-    "0047_trip_prospect_selection.sql"
+    "0047_trip_prospect_selection.sql",
+    "0050_trip_attribution_confirmation.sql",
+    "0051_trip_reconciliation_concurrency_guard.sql"
   ],
   "generatedFrom": "legacy migrations 0000-0019 applied once to an empty SQLite database",
   "topology": {
@@ -6251,6 +6253,34 @@
             "notNull": false,
             "defaultValue": null,
             "primaryKeyOrder": 0
+          },
+          {
+            "name": "donor_confirmed_at",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "commitment_kind",
+            "type": "TEXT",
+            "notNull": true,
+            "defaultValue": "'new_commitment'",
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reported_cash_collected_cents",
+            "type": "INTEGER",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
+          },
+          {
+            "name": "reconciled_pending_attribution_id",
+            "type": "TEXT",
+            "notNull": false,
+            "defaultValue": null,
+            "primaryKeyOrder": 0
           }
         ],
         "foreignKeys": [
@@ -6295,6 +6325,16 @@
             "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
           },
           {
+            "name": "trip_financial_attributions_active_reconciled_pending_uidx",
+            "columns": [
+              "reconciled_pending_attribution_id"
+            ],
+            "unique": true,
+            "partial": true,
+            "origin": "c",
+            "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL"
+          },
+          {
             "name": "trip_financial_attributions_donor_idx",
             "columns": [
               "donor_id"
@@ -6326,7 +6366,9 @@
             "sql": null
           }
         ],
-        "checks": []
+        "checks": [
+          "CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection'))"
+        ]
       },
       {
         "name": "trip_prospects",
@@ -7364,7 +7406,7 @@
     {
       "type": "table",
       "name": "trip_financial_attributions",
-      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
+      "sql": "CREATE TABLE `trip_financial_attributions` ( `id` text PRIMARY KEY NOT NULL, `user_id` text NOT NULL, `trip_id` text NOT NULL, `donor_id` text NOT NULL, `giving_activity_id` text NOT NULL, `note` text, `created_at` integer NOT NULL, `removed_at` integer, `removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text, FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action, FOREIGN KEY (`giving_activity_id`) REFERENCES `giving_activities`(`id`) ON UPDATE no action ON DELETE no action )"
     },
     {
       "type": "table",
@@ -7780,6 +7822,11 @@
       "type": "index",
       "name": "trip_financial_attributions_active_giving_activity_uidx",
       "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "trip_financial_attributions_active_reconciled_pending_uidx",
+      "sql": "CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL"
     },
     {
       "type": "index",

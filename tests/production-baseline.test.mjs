@@ -393,13 +393,16 @@ test("baseline picks up the schema-adding 0047 trip prospect selection migration
   // 0047_trip_prospect_selection.sql adds one new column
   // (trip_prospects.selected_at) and its supporting index -- Trip
   // Planning's Deliberate Prospect Selection round, see
-  // docs/AI-HANDOFF.md -- the current LATEST migration as of this round,
-  // so the schema hash must change again. Applied to Staging only as of
-  // this round -- this baseline/manifest update is still correct to make
-  // now: it tracks the canonical branch's own intended schema, not yet
-  // what every environment currently runs.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0047_trip_prospect_selection.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 48);
+  // docs/AI-HANDOFF.md. No longer the latest migration (0051 is, see that
+  // test below, in this isolated release) -- same "included, not
+  // necessarily last" convention as every later per-migration test in
+  // this file already uses; this test previously (pre-dating this
+  // isolated release) asserted `.at(-1)` and an exact count instead,
+  // which only happened to hold while 0047 really was the last migration
+  // -- both would now fail once 0050/0051 are added after it, so both
+  // are corrected here to a presence check, matching the pattern every
+  // other per-migration test in this file already follows.
+  assert.ok(manifest.sourceMigrations.includes("0047_trip_prospect_selection.sql"));
   assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
   assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
   const prospectsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_prospects");
@@ -407,4 +410,63 @@ test("baseline picks up the schema-adding 0047 trip prospect selection migration
   assert.match(prospectsTable.sql, /selected_at/);
   const selectedIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_prospects_trip_selected_idx");
   assert.ok(selectedIndex, "the (trip_id, selected_at) index must be captured in the baseline");
+});
+
+test("baseline picks up the schema-adding 0050 donor-confirmation correction migration", () => {
+  // Isolated Production release candidate (2026-10-21, see
+  // docs/AI-HANDOFF.md "Trip-Confirmation Production Release Candidate").
+  // 0050_trip_attribution_confirmation.sql adds four new, nullable (or
+  // safely-defaulted) columns to the EXISTING trip_financial_attributions
+  // table -- donor_confirmed_at, commitment_kind, reported_cash_collected_cents,
+  // reconciled_pending_attribution_id. No longer the latest migration
+  // (0051 is, see the test below).
+  //
+  // This isolated release branch's own migration set is 0000-0047 (the
+  // exact set already live in Production) plus 0050 and 0051 directly --
+  // it deliberately EXCLUDES 0048 (automatic Google Calendar sync, a
+  // separate, unrelated release) and 0049 (drizzle/pending-review/
+  // 0049_fix_calendar_schema_text_staging_repair.sql, a separate,
+  // not-yet-reviewed draft kept OUTSIDE drizzle/ for exactly this
+  // reason). Neither is counted here or anywhere in this manifest --
+  // the exact final migration count is asserted once, in 0051's own
+  // test below, rather than duplicated (and risking drift) here.
+  assert.ok(manifest.sourceMigrations.includes("0050_trip_attribution_confirmation.sql"));
+  assert.ok(!manifest.sourceMigrations.includes("0048_google_calendar_sync.sql"), "this isolated release excludes automatic Calendar sync entirely");
+  const attributionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_financial_attributions");
+  assert.ok(attributionsTable, "trip_financial_attributions must still be a real table in the baseline topology");
+  assert.match(attributionsTable.sql, /donor_confirmed_at/);
+  assert.match(attributionsTable.sql, /commitment_kind/);
+  assert.match(attributionsTable.sql, /reported_cash_collected_cents/);
+  assert.match(attributionsTable.sql, /reconciled_pending_attribution_id/);
+  const calendarTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "calendar_event_links");
+  assert.equal(calendarTable, undefined, "calendar_event_links must not appear in this isolated release's baseline topology");
+});
+
+test("baseline picks up the schema-adding 0051 reconciliation concurrency guard migration", () => {
+  // Isolated Production release candidate (2026-10-21, see
+  // docs/AI-HANDOFF.md "Trip-Confirmation Production Release Candidate").
+  // 0051_trip_reconciliation_concurrency_guard.sql adds one new partial
+  // UNIQUE index to the EXISTING trip_financial_attributions table --
+  // trip_financial_attributions_active_reconciled_pending_uidx -- the
+  // current LATEST migration in this isolated release, so the schema
+  // hash must change again.
+  //
+  // This is the authoritative, exact-count check for this release's own
+  // manifest: 0000-0047 (48, the exact set already live in Production)
+  // plus 0050 and 0051 (2 more) = 50. Deliberately excludes 0048
+  // (automatic Google Calendar sync) and 0049 (drizzle/pending-review/
+  // 0049_fix_calendar_schema_text_staging_repair.sql, a separate,
+  // not-yet-reviewed draft) -- neither is ever picked up by this
+  // manifest at all.
+  //
+  // NOT applied to Production under this instruction -- applied to
+  // fundraising-os-staging-db only (2026-10-21, see docs/AI-HANDOFF.md).
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0051_trip_reconciliation_concurrency_guard.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 50, "exactly 50 migrations in this isolated release: 0000-0047 (48, already in Production) + 0050 + 0051 -- 0048/0049 deliberately excluded");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const guardIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_financial_attributions_active_reconciled_pending_uidx");
+  assert.ok(guardIndex, "the reconciliation-concurrency-guard index must be captured in the baseline");
+  assert.match(guardIndex.sql, /UNIQUE/i);
+  assert.match(guardIndex.sql, /removed_at.*IS NULL/is);
 });

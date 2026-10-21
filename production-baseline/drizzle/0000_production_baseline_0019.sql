@@ -729,7 +729,7 @@ CREATE TABLE `trip_financial_attributions` (
 	`note` text,
 	`created_at` integer NOT NULL,
 	`removed_at` integer,
-	`removed_reason` text,
+	`removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text,
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
@@ -985,6 +985,8 @@ CREATE INDEX `shared_activity_recipient_audits_activity_date_idx` ON `shared_act
 
 CREATE UNIQUE INDEX `trip_financial_attributions_active_giving_activity_uidx` ON `trip_financial_attributions` (`giving_activity_id`) WHERE `removed_at` IS NULL;
 
+CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL;
+
 CREATE INDEX `trip_financial_attributions_donor_idx` ON `trip_financial_attributions` (`donor_id`);
 
 CREATE INDEX `trip_financial_attributions_trip_idx` ON `trip_financial_attributions` (`trip_id`, `removed_at`);
@@ -1014,5 +1016,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','05b00e6b657bb59be7f1a4b6ee56deca3ca50d2ec01259f000d29cd9777ec94e',1785944072);
 PRAGMA optimize;
