@@ -9,9 +9,9 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 48 as of 0047_trip_prospect_selection.sql
-// Automated sync, generated 2026-10-18T14:59:21.066Z by scripts/prepare-main-
-// restore-sync-patch.mjs (see docs/D1-MIGRATION-SYNC-PROCESS.md).
+// 51 as of 0051_trip_reconciliation_concurrency_guard.sql
+// Manual sync (prepared 2026-10-21; the automated prepare-sync could not
+// handle this one -- see below), see docs/D1-MIGRATION-SYNC-PROCESS.md.
 // production-baseline/schema-manifest.json was replaced verbatim from
 // feature/independent-cloudflare-sandbox's own current, verified
 // manifest -- the same sync mechanism used for every prior round (see
@@ -19,7 +19,24 @@ export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map(
 // entries). PRODUCTION_BASELINE_LEVEL stays "0019": that label
 // identifies the single bootstrap file's origin, not its current
 // contents.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 48;
+//
+// Covers three migrations main was behind on: 0048_google_calendar_sync.sql
+// (two new tables, calendar_event_links/calendar_event_link_history --
+// lib/operations/staging-reset.ts's STAGING_RESET_TABLE_ORDER updated
+// separately, in the same change, to place them correctly: NOT
+// automatable, since placing a new table requires human judgment about
+// its real foreign-key dependencies, per this process's own documented
+// scope), 0050_trip_attribution_confirmation.sql and
+// 0051_trip_reconciliation_concurrency_guard.sql (both pure additions --
+// new columns/an index on the EXISTING trip_financial_attributions
+// table only, no new table -- automatable on their own, but bundled with
+// 0048 in the same drift here since they landed on the canonical branch
+// first). None of these three migrations has been applied to Production;
+// 0050/0051 are applied to fundraising-os-staging-db only, 0048 is not
+// applied anywhere. This sync updates ONLY main's own restore/schema
+// TRACKING to match the canonical branch's real, intended schema -- it
+// does not itself apply any migration anywhere.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 51;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is
