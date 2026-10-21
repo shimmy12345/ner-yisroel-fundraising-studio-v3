@@ -1,0 +1,42 @@
+-- Trip Fundraising Results Dashboard -- reconciliation concurrency fix
+-- (2026-10-21, see docs/AI-HANDOFF.md). STAGING ONLY -- not applied to
+-- Production as part of this round, same carve-out as drizzle/0046,
+-- 0047, and 0050.
+--
+-- Closes a real race in attributeGivingActivityToTrip (drizzle/0050's
+-- own reconciliation feature): the function read the list of
+-- reconcilable pending attributions, then later -- in a SEPARATE D1
+-- batch -- inserted a new real-record attribution and retired the
+-- chosen pending one. An atomic batch guarantees the INSERT and the
+-- retiring UPDATE commit or fail TOGETHER, but it does nothing to stop
+-- TWO DIFFERENT concurrent requests from both having read the SAME
+-- pending attribution as a valid candidate before either one writes --
+-- each would then insert its OWN new attribution, both pointing
+-- `reconciled_pending_attribution_id` at the SAME now-ambiguous pending
+-- row, and only the first retiring UPDATE actually changes anything; the
+-- second's INSERT would still succeed on its own, producing two active
+-- attributions for what was supposed to be one single commitment.
+--
+-- This partial UNIQUE index is the real, structural guard, at the exact
+-- same level of enforcement as `trip_financial_attributions_active_
+-- giving_activity_uidx` (drizzle/0046) already uses for the analogous
+-- "a giving_activities row can be actively attributed to at most one
+-- trip" invariant: at most one ACTIVE (removed_at IS NULL) attribution
+-- can ever claim to reconcile a given pending attribution id. A second,
+-- concurrent attempt to reconcile the same pending entry under a
+-- different real record now fails its INSERT with a real UNIQUE
+-- constraint violation at the database level, inside the same atomic
+-- batch that would otherwise have silently produced the duplicate --
+-- never relying on the earlier, separate read remaining accurate.
+--
+-- This index alone does not catch every variant of the race (a pending
+-- attribution removed for an UNRELATED reason -- e.g. the ordinary
+-- "Remove attribution" action -- between the read and the write claims
+-- no conflicting reconciliation, so there is no unique-value collision
+-- to catch). That half is closed in application code instead
+-- (attributeGivingActivityToTrip's INSERT becomes conditional on the
+-- target still being active, re-checked fresh inside the SAME
+-- transaction as the retiring UPDATE, never trusting the earlier read).
+-- Both halves together are what "enforced at the database/write
+-- boundary" means here -- removing either one reopens a real race.
+CREATE UNIQUE INDEX `trip_financial_attributions_active_reconciled_pending_uidx` ON `trip_financial_attributions` (`reconciled_pending_attribution_id`) WHERE `removed_at` IS NULL AND `reconciled_pending_attribution_id` IS NOT NULL;

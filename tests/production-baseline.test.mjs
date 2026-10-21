@@ -438,27 +438,44 @@ test("baseline picks up the schema-adding 0050 donor-confirmation correction mig
   // safely-defaulted) columns to the EXISTING trip_financial_attributions
   // table -- donor_confirmed_at, commitment_kind, reported_cash_collected_cents,
   // reconciled_pending_attribution_id (see docs/AI-HANDOFF.md's
-  // donor-confirmation correction entry) -- the current LATEST migration
-  // as of this round, so the schema hash must change again.
+  // donor-confirmation correction entry). No longer the latest migration
+  // (0051 is, see the test below) -- same "included, not necessarily
+  // last" convention as 0048's own test above.
   //
   // "0049" is deliberately skipped: drizzle/pending-review/0049_fix_
   // calendar_schema_text_staging_repair.sql already reserves that number
   // for a separate, unrelated, not-yet-reviewed draft kept OUTSIDE
   // drizzle/ for exactly this reason (it is never picked up by this
-  // manifest at all -- confirmed by the exact migration count below).
+  // manifest at all -- confirmed by the exact migration count in 0051's
+  // own test below).
   //
-  // NOT applied to any remote database (Staging or Production) as of
-  // this round -- this baseline/manifest update is still correct to make
-  // now: it tracks the canonical branch's own intended schema, not yet
-  // what any environment currently runs.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0050_trip_attribution_confirmation.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 50, "exactly 50 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // NOT applied to Production as of this round -- applied to
+  // fundraising-os-staging-db (2026-10-21, see docs/AI-HANDOFF.md).
+  assert.ok(manifest.sourceMigrations.includes("0050_trip_attribution_confirmation.sql"));
   const attributionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_financial_attributions");
   assert.ok(attributionsTable, "trip_financial_attributions must still be a real table in the baseline topology");
   assert.match(attributionsTable.sql, /donor_confirmed_at/);
   assert.match(attributionsTable.sql, /commitment_kind/);
   assert.match(attributionsTable.sql, /reported_cash_collected_cents/);
   assert.match(attributionsTable.sql, /reconciled_pending_attribution_id/);
+});
+
+test("baseline picks up the schema-adding 0051 reconciliation concurrency guard migration", () => {
+  // 0051_trip_reconciliation_concurrency_guard.sql adds one new partial
+  // UNIQUE index to the EXISTING trip_financial_attributions table --
+  // trip_financial_attributions_active_reconciled_pending_uidx (see
+  // docs/AI-HANDOFF.md's reconciliation-concurrency-fix entry) -- the
+  // current LATEST migration as of this round, so the schema hash must
+  // change again.
+  //
+  // NOT applied to Production as of this round -- applied to
+  // fundraising-os-staging-db (2026-10-21, see docs/AI-HANDOFF.md).
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0051_trip_reconciliation_concurrency_guard.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 51, "exactly 51 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const guardIndex = manifest.ddlTopology.find((object) => object.type === "index" && object.name === "trip_financial_attributions_active_reconciled_pending_uidx");
+  assert.ok(guardIndex, "the reconciliation-concurrency-guard index must be captured in the baseline");
+  assert.match(guardIndex.sql, /UNIQUE/i);
+  assert.match(guardIndex.sql, /removed_at.*IS NULL/is);
 });
