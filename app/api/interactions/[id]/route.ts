@@ -7,7 +7,7 @@ import { logger } from "../../../../lib/logger";
 import { planFactAcceptance, planFactArchival } from "../../../../lib/relationships/fact-accept";
 
 type InteractionRow = { id: string; donor_id: string; type: string; occurred_at: number; summary: string; source: string; created_at: number };
-type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string; acceptRelationshipSnapshot?: boolean };
+type EditBody = { donorId?: string; note?: string; type?: InteractionKind; subject?: string; reminder?: ReminderChoice; customDate?: string; occurredAt?: string; acceptRelationshipSnapshot?: boolean; expectedSummary?: string };
 const kinds = new Set<InteractionKind>(["call", "email", "meeting", "visit", "note", "personal", "text"]);
 const reminders = new Set<ReminderChoice>(["none", "tomorrow", "next-week", "custom"]);
 
@@ -31,6 +31,26 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const note = body?.note?.trim() ?? "";
   const donorId = body?.donorId ?? "";
   if (!body || !donorId || note.length < 4 || note.length > 5000 || !body.type || !kinds.has(body.type)) return Response.json({ error: "Choose a donor, activity type, and notes" }, { status: 422 });
+  // Concurrency safety (2026-10-21, second follow-up review -- "a stale
+  // editor must not silently overwrite ... an appended completion
+  // note"): `expectedSummary`, when sent, is the exact row value this
+  // edit form actually started from (see CaptureExperience's own
+  // InitialActivity type). Comparing it against the row THIS request
+  // just read catches the realistic risk here -- a tab left open across
+  // a trip completion or a trip AI-notes save landing on the SAME
+  // interaction in the meantime -- before anything is built or written.
+  // Scoped deliberately to this one check (not a DB-level compare-and-
+  // swap on the UPDATE below): this route's own batch also touches
+  // reminders and relationship-fact acceptance, and guarding every one
+  // of those together is a materially larger change than the actual
+  // risk here (a tab staying open for minutes, not a sub-second race
+  // between two edits of the same interaction) calls for.
+  if (typeof body.expectedSummary === "string" && body.expectedSummary !== existing.summary) {
+    return Response.json({
+      error: "This activity was updated elsewhere since you opened this page. Your unsaved text has not been discarded -- copy it if you want to keep it, then reload to see the latest before saving again.",
+      conflict: true,
+    }, { status: 409 });
+  }
   const donor = await env.DB.prepare("SELECT id FROM donors WHERE id = ? AND owner_user_id = ? AND data_source = 'live'").bind(donorId, profile.id).first<{ id: string }>();
   if (!donor) return Response.json({ error: "Donor not found" }, { status: 404 });
   const occurredAt = body.occurredAt ? new Date(body.occurredAt) : new Date(existing.occurred_at * 1000);

@@ -452,7 +452,13 @@ async function ownedProspect(userId: string, tripId: string, prospectId: string)
 // scheduleProspectMeeting's own retry loop, which only reports success
 // once both halves are confirmed consistent); retrying is again the
 // correct response.
-export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" | "calendar_unavailable" | "calendar_conflict" };
+// `notes_conflict` (2026-10-21, second follow-up review -- "lost notes
+// during concurrent saves"): completeProspectMeeting's own compare-and-
+// swap write (see its own doc comment) could not land after repeated
+// retries against persistent, genuine contention -- the meeting was NOT
+// marked completed and no notes were overwritten; retrying is the
+// correct response, exactly like `calendar_conflict` above.
+export type StatusUpdateResult = { ok: true } | { ok: false; reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" | "calendar_unavailable" | "calendar_conflict" | "notes_conflict" };
 
 // A simple status move -- not_contacted/contacted/meeting_requested/
 // declined/unable_to_schedule. Never writes to `interactions` (Section
@@ -737,6 +743,12 @@ function isMeaningfulMeetingSummary(summary: string | null, donorDisplayName: st
 // Scheduled" step; creates one directly in the completed state when the
 // fundraiser jumps straight to "Meeting Completed" without having
 // scheduled it first (a real, legitimate case -- an impromptu meeting).
+// Concurrency safety (2026-10-21, second follow-up review -- "lost notes
+// during concurrent saves"): bounded, since a genuine, persistent
+// collision (rather than a single losing race) must eventually surface
+// as `notes_conflict` rather than retry forever.
+const MAX_MEETING_NOTES_WRITE_ATTEMPTS = 5;
+
 export async function completeProspectMeeting(userId: string, tripId: string, prospectId: string, meetingAtLocal: unknown, notes: string, confirmed: boolean, fallbackTimezone: string, now: number): Promise<StatusUpdateResult> {
   if (!confirmed) return { ok: false, reason: "confirmation_required" };
   const existing = await ownedProspect(userId, tripId, prospectId);
@@ -748,46 +760,120 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
   const completedSource = tripCompletedInteractionSource(meetingAt, originalSource);
   const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
   const donorDisplayName = donor?.display_name ?? "donor";
-  // AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md):
-  // this required "what happened" note must never silently replace real
-  // notes already saved on this SAME linked interaction (via either
-  // meeting-notes save route) -- only ever append alongside them. Only
-  // the two cases with nothing real to lose -- no linked interaction yet,
-  // or one that still holds exactly scheduleProspectMeeting's own generic
-  // placeholder -- write the summary in full, exactly as before this fix.
-  const existingInteraction = existing.linkedInteractionId
-    ? await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
-        .bind(existing.linkedInteractionId, userId, existing.donorId).first<{ summary: string | null }>()
-    : null;
-  const hasExistingNotes = isMeaningfulMeetingSummary(existingInteraction?.summary ?? null, donorDisplayName);
-  // Retry-safety: a network-level retry of this exact completion (same
-  // notes text) must never append a second, duplicate block -- checked
-  // by whether the existing summary's own tail already ends with this
-  // exact notes text, independent of the timestamp in the appended
-  // marker below (which would otherwise differ across retries and defeat
-  // a naive whole-string comparison).
   const trimmedNotes = notes.trim();
-  const alreadyAppended = hasExistingNotes && (existingInteraction!.summary ?? "").trimEnd().endsWith(trimmedNotes);
-  const summary = !hasExistingNotes
-    ? `Trip meeting with ${donorDisplayName}.\n${notes}`
-    : alreadyAppended
-      ? existingInteraction!.summary!
-      : `${existingInteraction!.summary}\n\n--- Marked completed ${new Date(now * 1000).toISOString().slice(0, 10)} ---\n${notes}`;
-  const statements = [
-    env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at)
-        VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at`)
-      .bind(interactionId, existing.donorId, userId, meetingAt, summary, completedSource, now, now),
-    env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
-      .bind(meetingAt, interactionId, now, prospectId),
-  ];
-  await env.DB.batch(statements);
-  // "Completion retains calendar history" -- deliberately no calendar
-  // call here at all (the core's own recordComplete() is an intentional
-  // no-op; see calendar-sync-reconciler.ts's own doc comment). The
-  // meeting's existing calendar link/history, if any, is left completely
-  // untouched by marking it completed.
-  return { ok: true };
+
+  // Concurrency safety (2026-10-21, second follow-up review -- "lost
+  // notes during concurrent saves"): the previous version of this
+  // function read `summary`, computed an appended value in application
+  // code, then wrote it back unconditionally -- a donor-profile edit or
+  // a trip AI-notes save landing in that read-write gap would be
+  // silently discarded. Every attempt below re-reads the CURRENT summary
+  // immediately before writing, and the write is a compare-and-swap keyed
+  // on that EXACT value (bound into the UPDATE's own WHERE clause) -- a
+  // write only ever applies against the summary THIS attempt actually
+  // saw, never a stale one. A CAS miss is not an error: it means someone
+  // else wrote first, so this loops, re-reads the now-current value, and
+  // recomputes its own append against THAT -- two genuinely concurrent
+  // completions (or a completion racing a notes edit) both end up
+  // applied, in whichever order their writes actually land, never one
+  // silently destroying the other. The companion trip_prospects write
+  // shares the identical precondition (an EXISTS check against the
+  // POST-write summary, visible to it because D1 batch statements
+  // observe earlier statements' own writes within the same batch -- the
+  // same property scheduleProspectMeeting's own calendar guard already
+  // relies on) -- so the meeting is never recorded/reported as completed
+  // unless the notes write itself actually committed.
+  for (let attempt = 1; attempt <= MAX_MEETING_NOTES_WRITE_ATTEMPTS; attempt++) {
+    const existingInteraction = existing.linkedInteractionId
+      ? await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
+          .bind(existing.linkedInteractionId, userId, existing.donorId).first<{ summary: string | null }>()
+      : null;
+
+    if (!existingInteraction) {
+      // Nothing exists for this interaction id yet -- a plain INSERT,
+      // deliberately never ON CONFLICT DO UPDATE, so a genuinely
+      // concurrent first-time completion (no prior "Meeting Scheduled"
+      // step -- an impromptu meeting) for this SAME prospect conflicts
+      // loudly on the shared deterministic id rather than one silently
+      // overwriting the other's notes.
+      const summary = `Trip meeting with ${donorDisplayName}.\n${notes}`;
+      try {
+        await env.DB.batch([
+          env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at)
+              VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?)`)
+            .bind(interactionId, existing.donorId, userId, meetingAt, summary, completedSource, now, now),
+          env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
+            .bind(meetingAt, interactionId, now, prospectId),
+        ]);
+        return { ok: true };
+      } catch (error) {
+        // A concurrent first-time completion (or a concurrent
+        // scheduleProspectMeeting call) won the race on this exact id.
+        // Retry against a fresh read, which will now correctly take the
+        // "existing interaction" branch below and append rather than
+        // trying (and failing) to insert again.
+        if (isUniqueConstraintViolation(error)) continue;
+        throw error;
+      }
+    }
+
+    // AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md):
+    // this required "what happened" note must never silently replace
+    // real notes already saved on this SAME linked interaction -- only
+    // ever append alongside them. Only the two cases with nothing real
+    // to lose -- empty, or exactly scheduleProspectMeeting's own generic
+    // placeholder -- write the summary in full, exactly as before.
+    const priorSummary = existingInteraction.summary ?? "";
+    const hasExistingNotes = isMeaningfulMeetingSummary(existingInteraction.summary, donorDisplayName);
+    // Retry-safety: an identical retry (same notes text, already applied
+    // by an earlier attempt of THIS loop, or a genuine network-level
+    // retry of the whole request) must never append a second, duplicate
+    // block -- checked by whether the existing summary's own tail
+    // already ends with this exact notes text, independent of the
+    // timestamp in the appended marker (which would otherwise differ
+    // across attempts and defeat a naive whole-string comparison).
+    const alreadyAppended = hasExistingNotes && priorSummary.trimEnd().endsWith(trimmedNotes);
+    const summary = !hasExistingNotes
+      ? `Trip meeting with ${donorDisplayName}.\n${notes}`
+      : alreadyAppended
+        ? priorSummary
+        : `${priorSummary}\n\n--- Marked completed ${new Date(now * 1000).toISOString().slice(0, 10)} ---\n${notes}`;
+
+    if (alreadyAppended) {
+      // Nothing to write -- the current row already reflects this exact
+      // save. Still move the prospect's own status forward (a plain,
+      // unconditional, idempotent update -- there is no notes write to
+      // guard here).
+      await env.DB.prepare("UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ?")
+        .bind(meetingAt, interactionId, now, prospectId).run();
+      return { ok: true };
+    }
+
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE interactions SET summary = ?, occurred_at = ?, source = ?, updated_at = ?
+          WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ?`)
+        .bind(summary, meetingAt, completedSource, now, interactionId, userId, existing.donorId, priorSummary),
+      env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_completed', meeting_at = ?, linked_interaction_id = ?, updated_at = ?
+          WHERE id = ? AND EXISTS (SELECT 1 FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ? AND summary = ?)`)
+        .bind(meetingAt, interactionId, now, prospectId, interactionId, userId, existing.donorId, summary),
+    ]) as unknown as Array<{ meta: { changes?: number } }>;
+
+    if ((results[0]?.meta.changes ?? 0) > 0) {
+      // "Completion retains calendar history" -- deliberately no
+      // calendar call here at all (the core's own recordComplete() is an
+      // intentional no-op; see calendar-sync-reconciler.ts's own doc
+      // comment). The meeting's existing calendar link/history, if any,
+      // is left completely untouched by marking it completed.
+      return { ok: true };
+    }
+    // The summary changed between our read and this write (a competing
+    // completion, or a donor-profile/trip-notes edit) -- nothing
+    // committed (the trip_prospects write shares the identical
+    // precondition, so it never reports a completion the notes write
+    // itself did not actually land). Loop and retry against the
+    // now-current value.
+  }
+  return { ok: false, reason: "notes_conflict" };
 }
 
 // AI Meeting Notes, reachable from a trip prospect's own card (2026-10-21,

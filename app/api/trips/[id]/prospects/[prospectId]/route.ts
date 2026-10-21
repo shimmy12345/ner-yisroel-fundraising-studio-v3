@@ -105,7 +105,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   return Response.json({ ok: true });
 }
 
-function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" | "calendar_unavailable" | "calendar_conflict") {
+function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" | "calendar_unavailable" | "calendar_conflict" | "notes_conflict") {
   if (reason === "not_found") return Response.json({ error: "Prospect not found" }, { status: 404 });
   if (reason === "confirmation_required") return Response.json({ error: "Confirmation is required for this change" }, { status: 422 });
   if (reason === "already_completed") return Response.json({ error: "This meeting is already marked completed. Remove and re-add this prospect for a separate, later meeting." }, { status: 409 });
@@ -120,6 +120,12 @@ function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_re
   // some other change and wants a refresh, not a blind retry).
   if (reason === "calendar_unavailable") return Response.json({ error: "Could not confirm the calendar sync status for this meeting. The change was not saved -- try again." }, { status: 503 });
   if (reason === "calendar_conflict") return Response.json({ error: "A competing calendar update kept this change from saving. Try again." }, { status: 409 });
+  // "notes_conflict" (2026-10-21, second follow-up review): completion's
+  // own compare-and-swap write kept losing to repeated concurrent notes
+  // saves -- nothing was overwritten (that is the whole point of the
+  // guard), but the meeting was also not marked completed. Safe,
+  // actionable to retry exactly as submitted.
+  if (reason === "notes_conflict") return Response.json({ error: "This meeting's notes were being saved somewhere else at the same time. Nothing was lost -- try marking it completed again." }, { status: 409 });
   return Response.json({ error: "This prospect was updated elsewhere. Refresh and try again." }, { status: 409 });
 }
 
