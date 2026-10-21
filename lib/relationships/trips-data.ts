@@ -746,6 +746,37 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
   return { ok: true };
 }
 
+// AI Meeting Notes, reachable from a trip prospect's own card (2026-10-21,
+// see docs/AI-HANDOFF.md). The SAME `interactions` row the trip meeting
+// flow already created/links via `trip_prospects.linked_interaction_id`
+// (scheduleProspectMeeting/completeProspectMeeting above) -- never a
+// second, trip-only copy of the notes, and never guessed by donor/date.
+// `linked_interaction_id` is only ever set once the prospect reaches
+// meeting_scheduled/meeting_completed (the two statuses that write a real
+// interaction -- see statusRequiresInteraction()); a prospect that hasn't
+// reached either yet has no reliable interaction to attach notes to, so
+// this returns `{ ok: false, reason: "no_meeting_yet" }` rather than
+// fabricating one -- the caller (the API route and the page) must not
+// create an interaction here.
+export type ProspectMeetingNotesTarget =
+  | { ok: true; donorId: string; donorDisplayName: string; interactionId: string; existingSummary: string }
+  | { ok: false; reason: "not_found" | "no_meeting_yet" };
+
+export async function getProspectMeetingNotesTarget(userId: string, tripId: string, prospectId: string): Promise<ProspectMeetingNotesTarget> {
+  const existing = await ownedProspect(userId, tripId, prospectId);
+  if (!existing) return { ok: false, reason: "not_found" };
+  if (!existing.linkedInteractionId) return { ok: false, reason: "no_meeting_yet" };
+  // Re-confirmed directly (not merely trusted from trip_prospects) --
+  // the same "never guess, always re-verify the real row" discipline
+  // every other write path in this file already uses for its own linked
+  // interaction (e.g. setSimpleProspectStatus's own re-read above).
+  const interaction = await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
+    .bind(existing.linkedInteractionId, userId, existing.donorId).first<{ summary: string }>();
+  if (!interaction) return { ok: false, reason: "no_meeting_yet" };
+  const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
+  return { ok: true, donorId: existing.donorId, donorDisplayName: donor?.display_name ?? "Donor", interactionId: existing.linkedInteractionId, existingSummary: interaction.summary };
+}
+
 export type ProspectFieldUpdate = { tripNotes?: string | null; nextAction?: string | null; manualRank?: number | null; meetingLocation?: string | null };
 
 export async function updateProspectFields(userId: string, tripId: string, prospectId: string, update: ProspectFieldUpdate, now: number): Promise<boolean> {

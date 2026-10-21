@@ -426,6 +426,18 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
     {prospect.meetingAt && !scheduling && !completing && <p className="travel-planning-meeting-time">
       {prospect.status === "meeting_completed" ? "Met" : "Meeting"} {dateTimeLabelInZone(prospect.meetingAt, timezone)} ({timezone}){prospect.meetingLocation ? ` at ${prospect.meetingLocation}` : ""}.
       {prospect.calendarSync && <CalendarSyncBadge calendarSync={prospect.calendarSync} busy={retryingCalendarSync} onRetry={retryCalendarSync} />}
+      {/* AI meeting notes from Trip Planning (2026-10-21, see
+          docs/AI-HANDOFF.md): only ever shown once a real interaction
+          exists for this meeting (linkedInteractionId is set exactly
+          when status is meeting_scheduled/meeting_completed -- see
+          trip-model.ts's statusRequiresInteraction()), never guessed
+          for an earlier-stage prospect. Reuses the SAME interaction the
+          donor profile's own "Add Meeting Notes" workflow reads and
+          writes -- never a separate trip-only copy. */}
+      {prospect.linkedInteractionId && <a
+        className="travel-planning-ai-meeting-notes"
+        href={`/travel-planning/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospect.id)}/meeting-notes?returnTo=${encodeURIComponent(returnTo)}`}
+      >✦ AI meeting notes</a>}
     </p>}
 
     {showDetails && <>

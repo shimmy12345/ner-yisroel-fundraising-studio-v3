@@ -1523,6 +1523,8 @@ h1 { font-size: clamp(36px, 3.4vw, 48px); line-height: 1.08; }
 .travel-planning-suggested-reason { margin:0 0 8px; color:#45544c; font-size:13px; line-height:1.55; }
 .travel-planning-suggested-reason small { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
 .travel-planning-meeting-time { margin:0 0 8px; color:#315f4b; font-size:13px; font-weight:650; }
+.travel-planning-ai-meeting-notes { margin-left:8px; color:#315f4b; font-size:12px; font-weight:700; text-decoration:none; }
+.travel-planning-ai-meeting-notes:hover { text-decoration:underline; }
 .travel-planning-confirm-panel { display:grid; gap:10px; margin-bottom:12px; padding:14px; border-radius:10px; background:#f5f8f6; }
 .travel-planning-confirm-panel label { display:flex; flex-direction:column; gap:5px; color:#52625a; font-size:12px; font-weight:700; }
 .travel-planning-confirm-panel input, .travel-planning-confirm-panel textarea { min-height:40px; padding:8px 10px; border:1px solid #d8dfda; border-radius:7px; background:#fff; font:inherit; font-size:13px; }

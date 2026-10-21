@@ -28,12 +28,28 @@ function nextFollowUpId(): string {
   return `followup-${followUpCounter}`;
 }
 
-export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donorId: string; donorName: string; returnTo: string; initialNow: string }) {
+// AI meeting notes reachable from a trip prospect's own card (2026-10-21,
+// see docs/AI-HANDOFF.md): `tripContext`, when present, means this save
+// targets the SAME interaction the trip meeting flow already created --
+// never a new, trip-only copy. The meeting's own date/type belong to
+// that trip meeting (already set when it was scheduled/completed, and
+// load-bearing for the Add-to-Google-Calendar sync on that same
+// interaction), so the date/type pickers below are hidden rather than
+// offering to silently change something this save never touches.
+// `initialSummaryText`, when present, is this meeting's existing saved
+// summary -- reopening the exact same AI-organized screen later shows
+// what was already saved (there is no separate structured copy to
+// restore into the individual fields below; see lib/meeting-notes/
+// format.ts's own header comment on why interactions.summary is a
+// single free-text column), pre-loaded into "Meeting summary" so it's
+// still there to read, edit directly, or extend by organizing a fresh
+// transcript.
+export function MeetingNotesExperience({ donorId, donorName, returnTo, tripContext, initialSummaryText }: { donorId: string; donorName: string; returnTo: string; initialNow: string; tripContext?: { tripId: string; prospectId: string }; initialSummaryText?: string }) {
   const [transcript, setTranscript] = useState("");
   const [meetingDate, setMeetingDate] = useState(() => todayLocalDateValue());
   const [interactionType, setInteractionType] = useState<InteractionKind>("meeting");
 
-  const [summaryText, setSummaryText] = useState("");
+  const [summaryText, setSummaryText] = useState(initialSummaryText ?? "");
   const [donorInterestsText, setDonorInterestsText] = useState("");
   const [fundraisingOpportunitiesText, setFundraisingOpportunitiesText] = useState("");
   const [confirmedCommitmentsText, setConfirmedCommitmentsText] = useState("");
@@ -162,14 +178,21 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
       })
       : transcript.trim();
 
+    // Trip-scoped notes save to their own route (under /api/trips/**,
+    // never /api/meeting-notes) -- see that route's own doc comment for
+    // why: it's the one path prefix the Staging write guard's Trip
+    // Planning carve-out covers, and the target interaction is resolved
+    // server-side from trip_prospects.linked_interaction_id, never from
+    // a donorId/date the client supplies.
+    const saveUrl = tripContext
+      ? `/api/trips/${encodeURIComponent(tripContext.tripId)}/prospects/${encodeURIComponent(tripContext.prospectId)}/meeting-notes`
+      : "/api/meeting-notes";
     try {
-      const response = await fetch("/api/meeting-notes", {
+      const response = await fetch(saveUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          donorId,
-          occurredAt: meetingDate,
-          type: interactionType,
+          ...(tripContext ? {} : { donorId, occurredAt: meetingDate, type: interactionType }),
           summary: finalSummary,
           aiOrganized,
           idempotencyKey,
@@ -207,7 +230,7 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
       />
       {transcriptTooShort && <p className="capture-error">A few more words will help AI organize this well.</p>}
 
-      <div className="meeting-notes-meta-row">
+      {!tripContext && <div className="meeting-notes-meta-row">
         <div>
           <label className="capture-field-label" htmlFor="meeting-notes-date">Meeting date</label>
           <input id="meeting-notes-date" type="date" value={meetingDate} onChange={(event) => setMeetingDate(event.target.value)} />
@@ -218,7 +241,8 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo }: { donor
             {TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </div>
-      </div>
+      </div>}
+      {tripContext && <p className="meeting-notes-hint">This meeting&apos;s date and type are set from the trip itself and aren&apos;t changed here.</p>}
 
       <button type="button" className="meeting-notes-organize-button" onClick={handleOrganize} disabled={!canOrganize}>
         {organizeStatus === "organizing" ? "Organizing…" : "✦ Organize Notes"}

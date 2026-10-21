@@ -51,6 +51,20 @@ const MAX_FOLLOW_UPS = 20;
 // This is enforced here, server-side, regardless of whether the browser's
 // own Save-button-disable-while-saving guard did its job -- never relied
 // on as the only protection.
+//
+// AI meeting notes FROM TRIP PLANNING (2026-10-21, see docs/AI-HANDOFF.md)
+// is a SEPARATE route -- app/api/trips/[id]/prospects/[prospectId]/
+// meeting-notes/route.ts -- not a branch of this one, even though it
+// shares this route's same organize/review UI and writes the same two
+// tables. Deliberately kept out of this file: every Trip Planning route
+// lives under /api/trips/** by construction (see lib/operations/
+// staging-write-guard.ts's own header comment and the repo-wide route
+// walk in tests/staging-write-guard.test.mjs), which is what lets an
+// authorized tester exercise it on Staging without flipping
+// STAGING_WRITES_ENABLED and re-opening every donor/financial/import
+// route that flag also controls. Folding trip-scoped saves into THIS
+// route (reachable at /api/meeting-notes, outside that prefix) would have
+// silently lost that carve-out.
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
