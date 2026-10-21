@@ -1016,5 +1016,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','f5e6802cf8f1c7b2fbda0d24d44d276f3d03f94b6db9ba0598329c450cc182e7',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','05b00e6b657bb59be7f1a4b6ee56deca3ca50d2ec01259f000d29cd9777ec94e',1785944072);
 PRAGMA optimize;
