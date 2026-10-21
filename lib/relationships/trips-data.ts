@@ -668,9 +668,17 @@ export async function scheduleProspectMeeting(userId: string, tripId: string, pr
     }
     const { guard } = intent;
     const statements: D1PreparedStatement[] = [
+      // AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md):
+      // `summary` is deliberately NOT in the DO UPDATE SET list below --
+      // rescheduling (or reopening after a decline) reuses this SAME
+      // deterministic interaction id, and must never stomp on real notes
+      // already saved here (via either meeting-notes save route) back to
+      // this generic "scheduled" placeholder. The placeholder is still
+      // written in full on the very first schedule (the INSERT branch,
+      // which this ON CONFLICT clause has no effect on).
       env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, end_at, location, summary, source, created_at, updated_at)
           VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, end_at = excluded.end_at, location = excluded.location, summary = excluded.summary, source = excluded.source, updated_at = excluded.updated_at
+          ON CONFLICT(id) DO UPDATE SET occurred_at = excluded.occurred_at, end_at = excluded.end_at, location = excluded.location, source = excluded.source, updated_at = excluded.updated_at
           WHERE ${guard.sql}`)
         .bind(interactionId, existing.donorId, userId, meetingAt, endAt, location, summary, source, now, now, ...guard.params),
       env.DB.prepare(`UPDATE trip_prospects SET status = 'meeting_scheduled', meeting_at = ?, meeting_location = ?, linked_interaction_id = ?, updated_at = ? WHERE id = ? AND ${guard.sql}`)
@@ -708,6 +716,17 @@ export async function scheduleProspectMeeting(userId: string, tripId: string, pr
   return { ok: false, reason: "calendar_conflict" };
 }
 
+// AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md): true
+// only when `summary` holds real content worth protecting -- empty/null,
+// or exactly scheduleProspectMeeting's own generic placeholder for this
+// donor, is nothing a later write could meaningfully destroy.
+function isMeaningfulMeetingSummary(summary: string | null, donorDisplayName: string): boolean {
+  if (!summary) return false;
+  const trimmed = summary.trim();
+  if (trimmed.length === 0) return false;
+  return trimmed !== `Trip meeting scheduled with ${donorDisplayName}.`;
+}
+
 // "Marking a meeting Completed must require explicit confirmation of the
 // outcome, including an actual meeting date and meaningful notes" --
 // `meetingAt`/`notes` are already validated by the caller
@@ -728,7 +747,32 @@ export async function completeProspectMeeting(userId: string, tripId: string, pr
   const originalSource = tripScheduledInteractionSource(tripId);
   const completedSource = tripCompletedInteractionSource(meetingAt, originalSource);
   const donor = await env.DB.prepare("SELECT display_name FROM donors WHERE id = ?").bind(existing.donorId).first<{ display_name: string }>();
-  const summary = `Trip meeting with ${donor?.display_name ?? "donor"}.\n${notes}`;
+  const donorDisplayName = donor?.display_name ?? "donor";
+  // AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md):
+  // this required "what happened" note must never silently replace real
+  // notes already saved on this SAME linked interaction (via either
+  // meeting-notes save route) -- only ever append alongside them. Only
+  // the two cases with nothing real to lose -- no linked interaction yet,
+  // or one that still holds exactly scheduleProspectMeeting's own generic
+  // placeholder -- write the summary in full, exactly as before this fix.
+  const existingInteraction = existing.linkedInteractionId
+    ? await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND user_id = ? AND donor_id = ?")
+        .bind(existing.linkedInteractionId, userId, existing.donorId).first<{ summary: string | null }>()
+    : null;
+  const hasExistingNotes = isMeaningfulMeetingSummary(existingInteraction?.summary ?? null, donorDisplayName);
+  // Retry-safety: a network-level retry of this exact completion (same
+  // notes text) must never append a second, duplicate block -- checked
+  // by whether the existing summary's own tail already ends with this
+  // exact notes text, independent of the timestamp in the appended
+  // marker below (which would otherwise differ across retries and defeat
+  // a naive whole-string comparison).
+  const trimmedNotes = notes.trim();
+  const alreadyAppended = hasExistingNotes && (existingInteraction!.summary ?? "").trimEnd().endsWith(trimmedNotes);
+  const summary = !hasExistingNotes
+    ? `Trip meeting with ${donorDisplayName}.\n${notes}`
+    : alreadyAppended
+      ? existingInteraction!.summary!
+      : `${existingInteraction!.summary}\n\n--- Marked completed ${new Date(now * 1000).toISOString().slice(0, 10)} ---\n${notes}`;
   const statements = [
     env.DB.prepare(`INSERT INTO interactions (id, donor_id, user_id, type, occurred_at, summary, source, created_at, updated_at)
         VALUES (?, ?, ?, 'meeting', ?, ?, ?, ?, ?)

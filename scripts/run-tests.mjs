@@ -101,6 +101,8 @@ const TEST_FILES = [
   "tests/trip-financial-attribution.test.mjs",
   "tests/trip-financial-attribution-schema.test.mjs",
   "tests/trip-reconciliation-concurrency.test.mjs",
+  "tests/trip-meeting-notes-preservation.test.mjs",
+  "tests/pending-pledge-matching.test.mjs",
   "tests/trip-prospect-selection-schema.test.mjs",
   "tests/data-health.test.mjs",
   "tests/data-health-timestamp-formatting.test.mjs",

@@ -450,9 +450,19 @@ function ProspectRow({ tripId, prospect, busy, fundraiserTimezone, onBusyAction,
       </div>}
 
       {completing && <div className="travel-planning-confirm-panel">
+        {/* AI Meeting Notes preservation (2026-10-21, see docs/AI-HANDOFF.md):
+            completing never silently replaces notes already saved on this
+            SAME linked interaction -- it only appends alongside them. This
+            link lets the fundraiser review what is already saved before
+            confirming, satisfying "review any intentional replacement"
+            even though nothing is ever actually replaced. */}
+        {prospect.linkedInteractionId && <a
+          className="travel-planning-ai-meeting-notes"
+          href={`/travel-planning/${encodeURIComponent(tripId)}/prospects/${encodeURIComponent(prospect.id)}/meeting-notes?returnTo=${encodeURIComponent(returnTo)}`}
+        >✦ Review saved meeting notes before completing</a>}
         <label>Actual meeting date &amp; time -- local time at destination ({timezone})<input type="datetime-local" value={meetingAtDraft || (prospect.meetingAt ? toDateTimeInputValueInZone(prospect.meetingAt, timezone) : "")} onChange={(event) => setMeetingAtDraft(event.target.value)} /></label>
         <label>Meeting notes (required)<textarea value={completionNotesDraft} onChange={(event) => setCompletionNotesDraft(event.target.value)} maxLength={5000} placeholder="What happened, decisions made, any commitments" /></label>
-        <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives.</p>
+        <p className="travel-planning-confirm-hint">This records a real completed interaction on this donor&rsquo;s timeline -- the same place every other logged meeting lives. Any notes already saved above are kept; this is added alongside them, never in place of them.</p>
         <div className="travel-planning-confirm-actions"><button type="button" onClick={confirmCompletion} disabled={!meetingAtDraft || completionNotesDraft.trim().length < 2}>Confirm meeting completed</button><button type="button" onClick={() => setCompleting(false)}>Cancel</button></div>
       </div>}
 

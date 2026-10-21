@@ -21,7 +21,7 @@ import { EXISTING_COMPLETED_GIFTS_FOR_DUPLICATE_MATCH_SQL, type ExistingComplete
 import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReprocessBatch, hasForceReprocessConfirmation } from "../../../lib/import/import-deduplication";
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../lib/donors/merge-preview";
 import { resolveReviewedJlUpdates, validHouseholdReviewMode, type ExistingDonorDecision, type HouseholdReviewMode } from "../../../lib/import/household-review";
-import { CONFIRM_PENDING_GIFT_SQL, pendingGiftMatches, type PendingGiftMatchRow } from "../../../lib/giving/management";
+import { CONFIRM_PENDING_GIFT_SQL, CONFIRM_PENDING_PLEDGE_SQL, pendingGiftMatches, pendingPledgeMatches, type PendingGiftMatchRow } from "../../../lib/giving/management";
 import { buildKnownAttributionsByCode, type RawDonorSourceAttributionRow } from "../../../lib/import/donor-source-attribution";
 
 type ImportRequest = {
@@ -39,6 +39,7 @@ type ImportRequest = {
   forceReprocess?: boolean;
   forceConfirmation?: string;
   pendingGiftDecisions?: Array<{ fingerprint: string; action: "merge" | "keep_separate"; pendingGiftId?: string | null }>;
+  pendingPledgeDecisions?: Array<{ fingerprint: string; action: "merge" | "keep_separate"; pendingPledgeId?: string | null }>;
   forceType?: "household" | "donation";
   reviewDecisions?: ReviewDecision[];
   crossImportDecisions?: CrossImportDecision[];
@@ -164,6 +165,13 @@ export async function POST(request: Request) {
     if (!valid || pendingDecisionFingerprints.has(decision.fingerprint)) return true;
     pendingDecisionFingerprints.add(decision.fingerprint); return false;
   }))) return Response.json({ error: "The pending gift decisions could not be validated" }, { status: 422 });
+  const pendingPledgeDecisionFingerprints = new Set<string>();
+  if (body.pendingPledgeDecisions !== undefined && (!Array.isArray(body.pendingPledgeDecisions) || body.pendingPledgeDecisions.some((decision) => {
+    const valid = /^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["merge", "keep_separate"].includes(decision?.action)
+      && (decision.action !== "merge" || typeof decision.pendingPledgeId === "string" && Boolean(decision.pendingPledgeId));
+    if (!valid || pendingPledgeDecisionFingerprints.has(decision.fingerprint)) return true;
+    pendingPledgeDecisionFingerprints.add(decision.fingerprint); return false;
+  }))) return Response.json({ error: "The pending pledge decisions could not be validated" }, { status: 422 });
   const reviewDecisions = body.reviewDecisions ?? [];
   if (!Array.isArray(reviewDecisions) || reviewDecisions.some((decision) => {
     return !(/^[a-f0-9]{64}$/.test(decision?.fingerprint ?? "") && ["import_anyway", "skip", "review_later"].includes(decision?.action)
@@ -258,6 +266,7 @@ export async function POST(request: Request) {
       crossImportDecisions: crossImportDecisions.length,
       rejectionDecisions: rejectionDecisions.length,
       pendingGiftDecisions: (body.pendingGiftDecisions ?? []).length,
+      pendingPledgeDecisions: (body.pendingPledgeDecisions ?? []).length,
       paymentDecisions: paymentDecisions.length,
       usedPreviewSession: Boolean(previewSessionId),
     });
@@ -453,8 +462,15 @@ export async function POST(request: Request) {
     const pendingInputs = newActivities
       .filter((activity) => activity.sourceValues.fundraisingOsAllocation !== "overpayment_remainder")
       .map((activity) => ({ fingerprint: pendingKey(activity), donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents }));
-    const pendingDonorIds = [...new Set(pendingInputs.map((item) => item.donorId))];
-    const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category='pending_gift' AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
+    // Pending-Pledge Import Reconciliation (2026-10-21, see docs/AI-HANDOFF.md):
+    // pledge matching only ever considers brand-new real pledges from
+    // THIS import -- never a payment-assignment candidate, which applies
+    // only to an ALREADY-existing open pledge, never a newly created one.
+    const pledgeInputs = newActivities
+      .filter((activity) => activity.sourceValues.fundraisingOsAllocation !== "overpayment_remainder")
+      .map((activity) => ({ fingerprint: pendingKey(activity), donorId: activity.donorId, activityDate: activity.activityDate, committedCents: activity.committedCents, category: activity.category }));
+    const pendingDonorIds = [...new Set([...pendingInputs.map((item) => item.donorId), ...pledgeInputs.map((item) => item.donorId)])];
+    const pending = pendingDonorIds.length ? await env.DB.prepare(`SELECT id,donor_id,activity_date,committed_cents,description,private_note,workspace_status,category,confirmed_by_activity_id FROM giving_activities WHERE owner_user_id=? AND record_origin='live' AND category IN ('pending_gift','pending_pledge') AND workspace_status='active' AND confirmed_by_activity_id IS NULL AND donor_id IN (SELECT value FROM json_each(?))`).bind(userId, JSON.stringify(pendingDonorIds)).all<PendingGiftMatchRow>() : { results: [] as PendingGiftMatchRow[] };
     const pendingMatches = pendingGiftMatches(pendingInputs, pending.results);
     const pendingDecisionByFingerprint = new Map((body.pendingGiftDecisions ?? []).map((decision) => [decision.fingerprint, decision]));
     const claimedPendingIds = new Set<string>();
@@ -465,6 +481,18 @@ export async function POST(request: Request) {
         if (!decision.pendingGiftId || !candidateMatch.candidates.some((candidate) => candidate.id === decision.pendingGiftId)) return Response.json({ error: "The selected pending gift no longer matches this JL record. Refresh the preview." }, { status: 409 });
         if (claimedPendingIds.has(decision.pendingGiftId)) return Response.json({ error: "One pending gift cannot be matched to multiple JL records." }, { status: 422 });
         claimedPendingIds.add(decision.pendingGiftId);
+      }
+    }
+    const pendingPledgeMatchResults = pendingPledgeMatches(pledgeInputs, pending.results);
+    const pendingPledgeDecisionByFingerprint = new Map((body.pendingPledgeDecisions ?? []).map((decision) => [decision.fingerprint, decision]));
+    const claimedPendingPledgeIds = new Set<string>();
+    for (const candidateMatch of pendingPledgeMatchResults) {
+      const decision = pendingPledgeDecisionByFingerprint.get(candidateMatch.fingerprint);
+      if (!decision) return Response.json({ error: "Review every suggested pending pledge match before importing." }, { status: 422 });
+      if (decision.action === "merge") {
+        if (!decision.pendingPledgeId || !candidateMatch.candidates.some((candidate) => candidate.id === decision.pendingPledgeId)) return Response.json({ error: "The selected pending pledge no longer matches this JL record. Refresh the preview." }, { status: 409 });
+        if (claimedPendingPledgeIds.has(decision.pendingPledgeId)) return Response.json({ error: "One pending pledge cannot be matched to multiple JL records." }, { status: 422 });
+        claimedPendingPledgeIds.add(decision.pendingPledgeId);
       }
     }
     const exportRange = donationExportRange([...match.matched, ...paymentActivities]);
@@ -567,7 +595,7 @@ export async function POST(request: Request) {
     const unmatchedJlCodes = match.unknownHousehold - resolvedUnmatchedCount + paymentCandidates.filter((candidate) => !candidate.donorId).length;
     const nonfinancialExcluded = match.nonfinancial - resolvedNonfinancialCount;
     const results = { validRows: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length + assignmentPlan.skippedDuplicates.length, householdsMatched: matchedDonorIds.size, newHouseholds: 0, giftsImported: newActivities.length, giftsUpdated: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, duplicateRowsSkipped: donationPreview.duplicateRows.length + alreadyImported + assignmentPlan.skippedDuplicates.length, rowsRequiringReview: genuinelyUnresolvedRows.length, skippedRows: skippedReviewRows.length, reviewLaterRows: reviewLaterRows.length, rejectedRows: rejectedRows.length, unmatchedJlCodes, elapsedMs: 0 };
-    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: genuinelyUnresolvedRows.length, nonfinancialExcluded, duplicateSourceRows: donationPreview.duplicateRows.length, pendingGiftsConfirmed: claimedPendingIds.size, crossImportDuplicatesSkipped: crossImportResolution.outcomes.filter((outcome) => outcome.action === "skipped").length, crossImportDuplicatesImportedAnyway: crossImportResolution.outcomes.filter((outcome) => outcome.action === "imported").length }, crossImportRows: crossImportResolution.outcomes.map((outcome) => ({ fingerprint: outcome.fingerprint, matchType: outcome.matchType, action: outcome.action, existingActivityId: outcome.existing.activityId, existingDonorId: outcome.existing.donorId, existingActivityDate: outcome.existing.activityDate, existingAmountCents: outcome.existing.committedCents, existingCampaign: outcome.existing.sourceCampaign, existingImportedAt: outcome.existing.importedAt })), paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, overpaymentRemainders: assignmentPlan.newGifts.filter((gift) => gift.kind === "overpayment_remainder").length, rememberedSkipped: assignmentPlan.alreadyApplied.length, duplicatesSkipped: assignmentPlan.skippedDuplicates.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: genuinelyUnresolvedRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities, knownAttributionsByCode).map((item) => ({ ...item, outcome: item.severity === "hard" ? "hard_excluded" as const : rejectionApprovedFingerprints.has(item.fingerprint) ? "imported" as const : "skipped" as const })), warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, skippedReviewRows.length && `${skippedReviewRows.length} rows were skipped during review`, reviewLaterRows.length && `${reviewLaterRows.length} rows were saved for later review`, genuinelyUnresolvedRows.length && `${genuinelyUnresolvedRows.length} rows are unresolved and require a corrected source file`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
+    const report = { importId, fileName, completedAt: new Date(now * 1000).toISOString(), profile: "JL Solutions Donations", databaseChangesMade: true, fatalError: null, mode: prior.results.length || remembered.results.length ? "refresh" : "first", refresh: { kind: "donation", rangeStart: isoDate(exportRange.start), rangeEnd: isoDate(exportRange.end), historicalRecordsDeleted: 0, workspaceRecordsPreserved: true }, firstRelationshipId: matchedActivities[0]?.donorId ?? assignedPledgeDonorIds[0] ?? null, imported: { donors: 0, gifts: newActivities.length, interactions: 0, reminders: 0 }, donation: { newActivities: newActivities.length, updatedPledges: proposedUpdates.length + assignmentPlan.pledgeUpdates.length, unchanged: alreadyImported, unknownHousehold: unmatchedJlCodes, needsReview: genuinelyUnresolvedRows.length, nonfinancialExcluded, duplicateSourceRows: donationPreview.duplicateRows.length, pendingGiftsConfirmed: claimedPendingIds.size, pendingPledgesConfirmed: claimedPendingPledgeIds.size, crossImportDuplicatesSkipped: crossImportResolution.outcomes.filter((outcome) => outcome.action === "skipped").length, crossImportDuplicatesImportedAnyway: crossImportResolution.outcomes.filter((outcome) => outcome.action === "imported").length }, crossImportRows: crossImportResolution.outcomes.map((outcome) => ({ fingerprint: outcome.fingerprint, matchType: outcome.matchType, action: outcome.action, existingActivityId: outcome.existing.activityId, existingDonorId: outcome.existing.donorId, existingActivityDate: outcome.existing.activityDate, existingAmountCents: outcome.existing.committedCents, existingCampaign: outcome.existing.sourceCampaign, existingImportedAt: outcome.existing.importedAt })), paymentAssignments: { appliedToPledges: assignedPaymentCount, newGifts: manualNewActivities.length, overpaymentRemainders: assignmentPlan.newGifts.filter((gift) => gift.kind === "overpayment_remainder").length, rememberedSkipped: assignmentPlan.alreadyApplied.length, duplicatesSkipped: assignmentPlan.skippedDuplicates.length, pledgeChanges: assignmentPlan.pledgeUpdates.map((update) => ({ pledgeId: update.id, paymentCents: update.paymentCents, previousPaidCents: update.paid_cents, nextPaidCents: update.nextPaidCents, previousBalanceCents: update.balance_cents, nextBalanceCents: update.nextBalanceCents, nextStatus: update.nextCategory })) }, reconciliation: { giftsMatchedByInternalDonorId: match.matched.length + rejectionResolution.approvedActivities.length + assignmentPlan.assignments.length, unmatchedJlCodes, householdsWithoutGivingHistory, donationRowsRequiringReview: genuinelyUnresolvedRows.length, todayAndAssistantRefresh: "next_request", userCreatedContentPreserved: true }, results, validation, reviewRows, rejectedRows, rejectedRowDetails: buildRejectedRows(donationPreview.duplicateRows, match.unknownActivities, match.nonfinancialActivities, knownAttributionsByCode).map((item) => ({ ...item, outcome: item.severity === "hard" ? "hard_excluded" as const : rejectionApprovedFingerprints.has(item.fingerprint) ? "imported" as const : "skipped" as const })), warnings: [unmatchedJlCodes && `${unmatchedJlCodes} rows have an unknown JL Code`, skippedReviewRows.length && `${skippedReviewRows.length} rows were skipped during review`, reviewLaterRows.length && `${reviewLaterRows.length} rows were saved for later review`, genuinelyUnresolvedRows.length && `${genuinelyUnresolvedRows.length} rows are unresolved and require a corrected source file`, donationPreview.duplicateRows.length && `${donationPreview.duplicateRows.length} duplicate source rows were excluded`].filter(Boolean) };
     const changedActivities = [...newActivities, ...proposedUpdates];
     const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, decisionFingerprint: pendingKey(activity), activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const activityIdByDecisionFingerprint = new Map(activityRows.map((row) => [row.decisionFingerprint, row.id]));
@@ -578,6 +606,21 @@ export async function POST(request: Request) {
       const candidate = candidateMatch.candidates.find((item) => item.id === decision.pendingGiftId)!;
       return [
         env.DB.prepare(CONFIRM_PENDING_GIFT_SQL).bind(importedActivityId, now, candidate.id, userId, candidate.donor_id),
+        env.DB.prepare(`INSERT INTO giving_activity_management_audits (id,user_id,activity_id,import_id,action,previous_donor_id,next_donor_id,previous_status,next_status,previous_note,next_note,created_at) VALUES (?,?,?,?,'pending_matched',?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), userId, candidate.id, importId, candidate.donor_id, candidate.donor_id, candidate.workspace_status, "merged", candidate.private_note, candidate.private_note, now),
+      ];
+    });
+    // Pending-Pledge Import Reconciliation (2026-10-21, see docs/AI-HANDOFF.md):
+    // same shape as pendingMergeStatements above, confirmed via
+    // CONFIRM_PENDING_PLEDGE_SQL instead -- `activityIdByDecisionFingerprint`
+    // already covers pledge-category rows too, since pledgeInputs' own
+    // fingerprint is the identical `pendingKey(activity)` used to build it.
+    const pendingPledgeMergeStatements = pendingPledgeMatchResults.flatMap((candidateMatch) => {
+      const decision = pendingPledgeDecisionByFingerprint.get(candidateMatch.fingerprint);
+      if (decision?.action !== "merge" || !decision.pendingPledgeId) return [];
+      const importedActivityId = activityIdByDecisionFingerprint.get(candidateMatch.fingerprint)!;
+      const candidate = candidateMatch.candidates.find((item) => item.id === decision.pendingPledgeId)!;
+      return [
+        env.DB.prepare(CONFIRM_PENDING_PLEDGE_SQL).bind(importedActivityId, now, candidate.id, userId, candidate.donor_id),
         env.DB.prepare(`INSERT INTO giving_activity_management_audits (id,user_id,activity_id,import_id,action,previous_donor_id,next_donor_id,previous_status,next_status,previous_note,next_note,created_at) VALUES (?,?,?,?,'pending_matched',?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), userId, candidate.id, importId, candidate.donor_id, candidate.donor_id, candidate.workspace_status, "merged", candidate.private_note, candidate.private_note, now),
       ];
     });
@@ -629,6 +672,7 @@ export async function POST(request: Request) {
       ...pledgeDecisionStatements,
       ...pledgeUpdateStatements,
       ...pendingMergeStatements,
+      ...pendingPledgeMergeStatements,
       // UPDATE, not INSERT: the row for this attemptId was already created
       // (status='processing') before this heavy work began, so a lost
       // response can still be reconciled by attemptId. Marking it
