@@ -9,22 +9,23 @@ export const PRODUCTION_BASELINE_SOURCE_MIGRATIONS = manifest.sourceMigrations;
 export const PRODUCTION_BASELINE_OBJECTS = manifest.ddlTopology as SchemaObject[];
 export const PRODUCTION_BASELINE_TABLES = PRODUCTION_BASELINE_OBJECTS.filter((object) => object.type === "table").map((object) => object.name);
 export const BUSINESS_DATA_COUNT_SQL = `SELECT ${PRODUCTION_BASELINE_TABLES.map((table) => `(SELECT COUNT(*) FROM "${table}")`).join(" + ")} AS count`;
-// 49 as of 0048_google_calendar_sync.sql — adds two new tables
-// (calendar_event_links, calendar_event_link_history), four new nullable
-// columns across interactions/trip_prospects, and one new boolean on
-// users (see docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md and
-// docs/AI-HANDOFF.md's Google Calendar entries), not a rebuild of
-// anything existing, so PRODUCTION_BASELINE_HASH changed again
-// (PRODUCTION_BASELINE_LEVEL stays "0019": that label identifies the
-// single bootstrap file's origin, not its current contents). This
-// migration has NOT been applied to any remote database (Staging or
-// Production) as of this round -- it exists only as a committed file,
-// proven against a local, isolated node:sqlite database by
-// tests/calendar-sync-sqlite-store.test.mjs -- so every environment's own
-// "schema-comparison" health check will report these new tables/columns
-// as a difference until a separately authorized deployment round applies
-// 0048 there.
-export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 49;
+// 50 as of 0050_trip_attribution_confirmation.sql -- four new, nullable
+// (or safely-defaulted) columns on the EXISTING trip_financial_attributions
+// table (donor_confirmed_at, commitment_kind, reported_cash_collected_cents,
+// reconciled_pending_attribution_id -- see docs/AI-HANDOFF.md's donor-
+// confirmation correction entry), not a rebuild of anything existing, so
+// PRODUCTION_BASELINE_HASH changed again (PRODUCTION_BASELINE_LEVEL stays
+// "0019": that label identifies the single bootstrap file's origin, not
+// its current contents). "0049" is deliberately skipped -- drizzle/
+// pending-review/0049_fix_calendar_schema_text_staging_repair.sql already
+// reserves that number for a separate, unrelated, not-yet-reviewed draft
+// kept outside drizzle/ for exactly this reason. Applied to
+// fundraising-os-staging-db (2026-10-21, see docs/AI-HANDOFF.md) -- NOT
+// applied to Production. Staging's own "schema-comparison" health check
+// now matches this baseline for trip_financial_attributions; Production's
+// will report these four new columns as a difference until a separately
+// authorized Production deployment round applies 0050 there.
+export const PRODUCTION_BASELINE_VERIFIED = PRODUCTION_BASELINE_LEVEL === "0019" && /^[a-f0-9]{64}$/.test(PRODUCTION_BASELINE_HASH) && PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length === 50;
 
 // Tables that hold the app's own account/authentication state rather than a
 // fundraiser's relationship or giving data. A brand-new environment is

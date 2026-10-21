@@ -286,3 +286,31 @@ export function validateMeetingDurationMinutes(value: unknown): { ok: true; dura
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > MAX_MEETING_DURATION_MINUTES) return { ok: false };
   return { ok: true, durationMinutes: value };
 }
+
+// Trip Fundraising Results Dashboard -- donor-confirmation correction
+// (2026-10-20, see docs/AI-HANDOFF.md). "Was this pledge/gift secured on
+// this trip, or is this attributing an already-real pledge from before
+// the trip (collecting on it, or just linking it for visibility)?" --
+// never assumed; every "associate an existing donation or pledge" action
+// must choose explicitly. Defaults to the ordinary case (secured on this
+// trip) only when the caller omits the field entirely, matching every
+// existing attribution made before this round.
+export type TripCommitmentKind = "new_commitment" | "preexisting_pledge_collection";
+export function isValidCommitmentKind(value: unknown): value is TripCommitmentKind {
+  return value === "new_commitment" || value === "preexisting_pledge_collection";
+}
+
+// A fundraiser-reported, trip-scoped cash figure for a
+// preexisting_pledge_collection attribution -- deliberately mirrors
+// pendingGiftInput/pendingPledgeInput's own amount-parsing shape (lib/
+// giving/management.ts) for a consistent "$1,234.56" input experience,
+// but allows exactly 0 (unlike a new gift/pledge amount): linking an
+// existing pledge for visibility, with nothing collected on this trip
+// yet, is a legitimate, non-error case.
+const MAX_REPORTED_CASH_COLLECTED_DOLLARS = 100_000_000;
+export function validateReportedCashCollectedCents(value: unknown): { ok: true; cents: number } | { ok: false } {
+  if (value === undefined || value === null || value === "") return { ok: true, cents: 0 };
+  const amount = typeof value === "number" ? value : Number(String(value).replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(amount) || amount < 0 || amount > MAX_REPORTED_CASH_COLLECTED_DOLLARS) return { ok: false };
+  return { ok: true, cents: Math.round(amount * 100) };
+}

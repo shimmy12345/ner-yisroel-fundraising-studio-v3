@@ -411,16 +411,15 @@ test("baseline picks up the schema-adding 0048 Google Calendar sync migration", 
   // nullable columns (interactions.all_day/all_day_date/end_at/location,
   // mirrored on trip_prospects), and one new boolean
   // (users.calendar_sync_enabled) -- see
-  // docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md and docs/AI-HANDOFF.md --
-  // the current LATEST migration as of this round, so the schema hash
-  // must change again. NOT applied to any remote database (Staging or
-  // Production) as of this round -- this baseline/manifest update is
-  // still correct to make now: it tracks the canonical branch's own
-  // intended schema, not yet what any environment currently runs.
-  assert.deepEqual(manifest.sourceMigrations.at(-1), "0048_google_calendar_sync.sql");
-  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 49);
-  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
-  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  // docs/GOOGLE-CALENDAR-INTEGRATION-DESIGN.md and docs/AI-HANDOFF.md.
+  // No longer the latest migration (0050 is, see the test below -- 0049
+  // is deliberately skipped, see that test's own comment) -- same
+  // "included, not necessarily last" convention as 0047's own test above.
+  // NOT applied to any remote database (Staging or Production) as of
+  // this round -- this baseline/manifest update is still correct to make
+  // now: it tracks the canonical branch's own intended schema, not yet
+  // what any environment currently runs.
+  assert.ok(manifest.sourceMigrations.includes("0048_google_calendar_sync.sql"));
   const linksTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "calendar_event_links");
   assert.ok(linksTable, "calendar_event_links must be a real table in the baseline topology");
   assert.match(linksTable.sql, /desired_state/);
@@ -432,4 +431,34 @@ test("baseline picks up the schema-adding 0048 Google Calendar sync migration", 
   assert.match(uniqueIndex.sql, /UNIQUE/i);
   const interactionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "interactions");
   assert.match(interactionsTable.sql, /all_day_date/, "interactions.all_day_date must be captured in the baseline");
+});
+
+test("baseline picks up the schema-adding 0050 donor-confirmation correction migration", () => {
+  // 0050_trip_attribution_confirmation.sql adds four new, nullable (or
+  // safely-defaulted) columns to the EXISTING trip_financial_attributions
+  // table -- donor_confirmed_at, commitment_kind, reported_cash_collected_cents,
+  // reconciled_pending_attribution_id (see docs/AI-HANDOFF.md's
+  // donor-confirmation correction entry) -- the current LATEST migration
+  // as of this round, so the schema hash must change again.
+  //
+  // "0049" is deliberately skipped: drizzle/pending-review/0049_fix_
+  // calendar_schema_text_staging_repair.sql already reserves that number
+  // for a separate, unrelated, not-yet-reviewed draft kept OUTSIDE
+  // drizzle/ for exactly this reason (it is never picked up by this
+  // manifest at all -- confirmed by the exact migration count below).
+  //
+  // NOT applied to any remote database (Staging or Production) as of
+  // this round -- this baseline/manifest update is still correct to make
+  // now: it tracks the canonical branch's own intended schema, not yet
+  // what any environment currently runs.
+  assert.deepEqual(manifest.sourceMigrations.at(-1), "0050_trip_attribution_confirmation.sql");
+  assert.equal(PRODUCTION_BASELINE_SOURCE_MIGRATIONS.length, 50, "exactly 50 real, applied-order migrations -- the 0049 draft in drizzle/pending-review/ is never counted");
+  assert.equal(PRODUCTION_BASELINE_HASH, manifest.schemaHash);
+  assert.equal(PRODUCTION_BASELINE_VERIFIED, true);
+  const attributionsTable = manifest.ddlTopology.find((object) => object.type === "table" && object.name === "trip_financial_attributions");
+  assert.ok(attributionsTable, "trip_financial_attributions must still be a real table in the baseline topology");
+  assert.match(attributionsTable.sql, /donor_confirmed_at/);
+  assert.match(attributionsTable.sql, /commitment_kind/);
+  assert.match(attributionsTable.sql, /reported_cash_collected_cents/);
+  assert.match(attributionsTable.sql, /reconciled_pending_attribution_id/);
 });

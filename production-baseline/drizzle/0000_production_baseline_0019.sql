@@ -767,7 +767,7 @@ CREATE TABLE `trip_financial_attributions` (
 	`note` text,
 	`created_at` integer NOT NULL,
 	`removed_at` integer,
-	`removed_reason` text,
+	`removed_reason` text, `donor_confirmed_at` integer, `commitment_kind` text NOT NULL DEFAULT 'new_commitment' CHECK (`commitment_kind` IN ('new_commitment','preexisting_pledge_collection')), `reported_cash_collected_cents` integer, `reconciled_pending_attribution_id` text,
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`trip_id`) REFERENCES `trips`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`donor_id`) REFERENCES `donors`(`id`) ON UPDATE no action ON DELETE no action,
@@ -1060,5 +1060,5 @@ CREATE TABLE `production_schema_baseline` (
   `schema_hash` text NOT NULL,
   `created_at` integer NOT NULL
 );
-INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','b643aac0c5b582c2cd20f7aa372dc3157ca6bfd2fad16748562d33307d00cb9b',1785944072);
+INSERT INTO `production_schema_baseline` (`id`,`schema_hash`,`created_at`) VALUES ('0019','fafa79f9ae18c73dd19a32dc825b83cf0cb56d2dba58392b070521f82b632301',1785944072);
 PRAGMA optimize;

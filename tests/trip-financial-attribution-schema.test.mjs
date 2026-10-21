@@ -218,4 +218,206 @@ function seedPendingGift(db, { id, donorId, committedCents, userId = "u1", works
   assert.equal(rolledBack[0].resolved_via_import_match, 0);
 }
 
+// --- Donor-confirmation correction (2026-10-20, see docs/AI-HANDOFF.md).
+// Migration 0050 adds four new, additive columns to trip_financial_
+// attributions. Verified against a fresh database built from every real
+// migration in order, same convention as every block above. ---
+
+function insertReconciledPair(db, { newId, oldId, tripId, donorId, newGivingActivityId, now = NOW }) {
+  // Reproduces attributeGivingActivityToTrip's own atomic write exactly:
+  // insert the new attribution (with reconciled_pending_attribution_id
+  // pointing at the old one) and soft-remove the old one, together.
+  db.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, reconciled_pending_attribution_id, created_at)
+      VALUES (?, 'u1', ?, ?, ?, ?, ?)`).run(newId, tripId, donorId, newGivingActivityId, oldId, now);
+  db.prepare(`UPDATE trip_financial_attributions SET removed_at = ?, removed_reason = 'Reconciled with JL-imported record' WHERE id = ? AND removed_at IS NULL`).run(now, oldId);
+}
+
+const LIST_RECONCILABLE_SQL = `SELECT tfa.id AS attribution_id,
+      CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category,
+      CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.committed_cents ELSE ga.committed_cents END AS committed_cents,
+      tfa.donor_confirmed_at, tfa.created_at
+    FROM trip_financial_attributions tfa
+    JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+    LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
+    WHERE tfa.trip_id = ? AND tfa.donor_id = ? AND tfa.user_id = ? AND tfa.removed_at IS NULL
+    ORDER BY tfa.created_at ASC`;
+
+// Reproduces listReconcilableTripAttributions's own TWO steps exactly --
+// the SQL above, THEN the application-layer filter to only the still-
+// pending (not yet real/JL) categories. The SQL alone never excludes an
+// already-real category on its own, exactly like the real function.
+function reconcilableAttributions(db, tripId, donorId, userId = "u1") {
+  return db.prepare(LIST_RECONCILABLE_SQL).all(tripId, donorId, userId)
+    .filter((row) => row.category === "pending_gift" || row.category === "pending_pledge");
+}
+
+// New columns default to values that reproduce CURRENT behavior exactly
+// for every attribution inserted the OLD way (the `attribute()` helper
+// above, unchanged since before this migration) -- simulating an
+// attribution that already existed before this round, such as the
+// Bashevkin $10,000 pending donation the task explicitly says must not
+// have its confirmation status changed without evidence.
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1", displayName: "Rabbi & Mrs. Dovid Bashevkin" });
+  seedTrip(db, { id: "trip-1", goalCents: null });
+  seedPendingGift(db, { id: "pending-1", donorId: "d1", committedCents: 10_000_00 });
+  attribute(db, { id: "attr-1", tripId: "trip-1", donorId: "d1", givingActivityId: "pending-1" });
+
+  const row = db.prepare("SELECT donor_confirmed_at, commitment_kind, reported_cash_collected_cents, reconciled_pending_attribution_id FROM trip_financial_attributions WHERE id = ?").get("attr-1");
+  assert.equal(row.donor_confirmed_at, null, "an existing attribution is never silently treated as donor-confirmed by this migration");
+  assert.equal(row.commitment_kind, "new_commitment", "defaults to the ordinary case -- totals for this attribution are completely unaffected by this migration alone");
+  assert.equal(row.reported_cash_collected_cents, null);
+  assert.equal(row.reconciled_pending_attribution_id, null);
+}
+
+// The commitment_kind CHECK constraint rejects anything outside the two
+// known values -- not merely an application-level convention.
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1", displayName: "Jane Donor" });
+  seedTrip(db, { id: "trip-1", goalCents: null });
+  seedGivingActivity(db, { id: "ga-1", donorId: "d1", committedCents: 1_000_00, paidCents: 0, balanceCents: 1_000_00 });
+  assert.throws(
+    () => db.prepare("INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, commitment_kind, created_at) VALUES (?, 'u1', ?, ?, ?, 'bogus_kind', ?)").run("attr-x", "trip-1", "d1", "ga-1", NOW),
+    /CHECK constraint failed/,
+  );
+}
+
+// Ambiguous-match guard + reconciliation, counted exactly once: a
+// donor-confirmed pending_pledge exists on a trip; the real pledge then
+// arrives from JL. Reconciling retires the pending entry atomically --
+// never leaving both active (double-counted) or both removed (the
+// commitment silently disappearing).
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1", displayName: "Pledge Donor" });
+  seedTrip(db, { id: "trip-1", goalCents: null });
+  db.prepare(`INSERT INTO giving_activities (id, donor_id, owner_user_id, external_source, external_household_id, source_fingerprint, committed_cents, paid_cents, balance_cents, category, record_origin, workspace_status, source_snapshot, created_at, updated_at)
+    VALUES ('pending-pledge-1', 'd1', 'u1', 'manual-entry', 'hh-1', 'pending-pledge-1', 25000000, 0, 25000000, 'pending_pledge', 'live', 'active', '{}', ?, ?)`).run(NOW, NOW);
+  db.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, donor_confirmed_at, created_at) VALUES ('attr-pending', 'u1', 'trip-1', 'd1', 'pending-pledge-1', ?, ?)`).run(NOW, NOW);
+
+  // Before reconciliation: exactly one active attribution, pointing at
+  // the pending pledge.
+  let reconcilable = reconcilableAttributions(db, "trip-1", "d1");
+  assert.equal(reconcilable.length, 1);
+  assert.equal(reconcilable[0].category, "pending_pledge");
+  assert.equal(reconcilable[0].attribution_id, "attr-pending");
+
+  // The real pledge arrives from JL and is attributed, reconciling the
+  // pending entry -- both writes happen together.
+  seedGivingActivity(db, { id: "real-pledge-1", donorId: "d1", committedCents: 25_000_00, paidCents: 0, balanceCents: 25_000_00 });
+  insertReconciledPair(db, { newId: "attr-real", oldId: "attr-pending", tripId: "trip-1", donorId: "d1", newGivingActivityId: "real-pledge-1" });
+
+  const active = db.prepare("SELECT id, giving_activity_id, reconciled_pending_attribution_id FROM trip_financial_attributions WHERE trip_id = ? AND removed_at IS NULL").all("trip-1");
+  assert.equal(active.length, 1, "counted exactly once -- the pending entry is retired, never left active alongside the real one");
+  assert.equal(active[0].id, "attr-real");
+  assert.equal(active[0].reconciled_pending_attribution_id, "attr-pending", "the new attribution records which pending entry it reconciles, for audit/display");
+
+  const retired = db.prepare("SELECT removed_at, removed_reason FROM trip_financial_attributions WHERE id = 'attr-pending'").get();
+  assert.ok(retired.removed_at !== null, "the pending entry is soft-removed, never hard-deleted -- full history preserved");
+  assert.equal(retired.removed_reason, "Reconciled with JL-imported record");
+
+  // Repeated reconciliation: the (now-removed) pending entry can never
+  // be offered as a reconciliation candidate again, so it structurally
+  // cannot be reconciled a second time or duplicate the count.
+  reconcilable = reconcilableAttributions(db, "trip-1", "d1");
+  assert.equal(reconcilable.length, 0, "once reconciled, nothing remains for a repeated import/reconciliation pass to act on");
+
+  // The underlying pledge's own financial fields were never touched by
+  // any of this reconciliation.
+  const pledge = db.prepare("SELECT committed_cents, paid_cents, balance_cents FROM giving_activities WHERE id = 'real-pledge-1'").get();
+  assert.equal(pledge.committed_cents, 25_000_00);
+  assert.equal(pledge.paid_cents, 0);
+  assert.equal(pledge.balance_cents, 25_000_00);
+}
+
+// Repeated imports must not duplicate: attributing the SAME real pledge
+// a second time (e.g. a retried request) is still blocked by the
+// existing partial-unique-index guard (drizzle/0046), unaffected by this
+// migration's new columns.
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1", displayName: "Retry Donor" });
+  seedTrip(db, { id: "trip-1", goalCents: null });
+  seedGivingActivity(db, { id: "ga-1", donorId: "d1", committedCents: 5_000_00, paidCents: 0, balanceCents: 5_000_00 });
+  attribute(db, { id: "attr-1", tripId: "trip-1", donorId: "d1", givingActivityId: "ga-1" });
+  assert.throws(() => attribute(db, { id: "attr-2", tripId: "trip-1", donorId: "d1", givingActivityId: "ga-1" }), /UNIQUE constraint failed/, "a retried/repeated attribution of the same real record must still be rejected, new columns notwithstanding");
+}
+
+// Confirm/unconfirm: donor_confirmed_at is set/cleared WITHOUT recreating
+// the attribution or touching giving_activities -- and the category
+// check correctly resolves through an already-merged pending_gift (the
+// SAME CASE/LEFT JOIN confirmTripAttribution's own SELECT uses), so a
+// pending_gift that has already auto-resolved via JL's own reconciliation
+// is correctly treated as "not_applicable" (already real), never
+// re-confirmed as if it were still pending.
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1", displayName: "Confirm Donor" });
+  seedTrip(db, { id: "trip-1", goalCents: null });
+  seedPendingGift(db, { id: "pending-1", donorId: "d1", committedCents: 1_000_00 });
+  attribute(db, { id: "attr-1", tripId: "trip-1", donorId: "d1", givingActivityId: "pending-1" });
+
+  const RESOLVED_CATEGORY_SQL = `SELECT tfa.id, tfa.donor_confirmed_at,
+        CASE WHEN ga.workspace_status = 'merged' AND confirmed.id IS NOT NULL THEN confirmed.category ELSE ga.category END AS category
+      FROM trip_financial_attributions tfa
+      JOIN giving_activities ga ON ga.id = tfa.giving_activity_id
+      LEFT JOIN giving_activities confirmed ON confirmed.id = ga.confirmed_by_activity_id AND confirmed.owner_user_id = tfa.user_id
+      JOIN trips t ON t.id = tfa.trip_id
+      WHERE tfa.id = ? AND tfa.trip_id = ? AND tfa.removed_at IS NULL AND t.owner_user_id = ?`;
+
+  let resolved = db.prepare(RESOLVED_CATEGORY_SQL).get("attr-1", "trip-1", "u1");
+  assert.equal(resolved.category, "pending_gift", "still pending -- confirmation is applicable");
+
+  db.prepare("UPDATE trip_financial_attributions SET donor_confirmed_at = ? WHERE id = ?").run(NOW, "attr-1");
+  resolved = db.prepare(RESOLVED_CATEGORY_SQL).get("attr-1", "trip-1", "u1");
+  assert.equal(resolved.donor_confirmed_at, NOW);
+
+  // Now JL's own reconciliation resolves this SAME pending_gift to a
+  // real confirmed donation (unrelated to this feature's own
+  // reconciliation above) -- the resolved category must flip to the
+  // real one, so a fresh confirm/unconfirm call would correctly see it
+  // as "not_applicable" rather than still-pending.
+  seedGivingActivity(db, { id: "confirmed-1", donorId: "d1", committedCents: 1_000_00, paidCents: 1_000_00, balanceCents: 0, category: "completed_gift" });
+  db.prepare("UPDATE giving_activities SET workspace_status='merged', confirmed_by_activity_id=? WHERE id=?").run("confirmed-1", "pending-1");
+  resolved = db.prepare(RESOLVED_CATEGORY_SQL).get("attr-1", "trip-1", "u1");
+  assert.equal(resolved.category, "completed_gift", "once JL confirms it, confirmTripAttribution's own category check sees the real category, not the stale pending one");
+
+  // Unconfirm, correcting a mistaken confirmation -- never recreates or
+  // removes the attribution.
+  db.prepare("UPDATE trip_financial_attributions SET donor_confirmed_at = NULL WHERE id = ?").run("attr-1");
+  const stillOneRow = db.prepare("SELECT COUNT(*) AS cnt FROM trip_financial_attributions WHERE trip_id = 'trip-1'").get();
+  assert.equal(stillOneRow.cnt, 1, "correcting a confirmation never recreates the attribution");
+}
+
+// Collecting on a pledge from before the trip: reported_cash_collected_cents
+// is set independently and never touches the underlying pledge's own
+// committed/paid/balance -- the task's own "must not create financial
+// transactions ... before JL import" and "clearly distinguish
+// trip-reported amounts from JL-recorded amounts."
+{
+  const db = freshDatabase();
+  seedUser(db);
+  seedDonor(db, { id: "d1", displayName: "Preexisting Pledge Donor" });
+  seedTrip(db, { id: "trip-1", goalCents: null });
+  seedGivingActivity(db, { id: "old-pledge-1", donorId: "d1", committedCents: 25_000_00, paidCents: 20_000_00, balanceCents: 5_000_00 });
+  db.prepare(`INSERT INTO trip_financial_attributions (id, user_id, trip_id, donor_id, giving_activity_id, commitment_kind, reported_cash_collected_cents, created_at)
+      VALUES ('attr-1', 'u1', 'trip-1', 'd1', 'old-pledge-1', 'preexisting_pledge_collection', ?, ?)`).run(2_000_00, NOW);
+
+  const attribution = db.prepare("SELECT commitment_kind, reported_cash_collected_cents FROM trip_financial_attributions WHERE id = 'attr-1'").get();
+  assert.equal(attribution.commitment_kind, "preexisting_pledge_collection");
+  assert.equal(attribution.reported_cash_collected_cents, 2_000_00);
+
+  const pledge = db.prepare("SELECT committed_cents, paid_cents, balance_cents FROM giving_activities WHERE id = 'old-pledge-1'").get();
+  assert.equal(pledge.committed_cents, 25_000_00, "the fundraiser's trip-reported figure never touches the pledge's own JL-recorded committed amount");
+  assert.equal(pledge.paid_cents, 20_000_00, "never touches the pledge's own lifetime paid_cents either");
+  assert.equal(pledge.balance_cents, 5_000_00);
+}
+
 process.stdout.write("trip-financial-attribution-schema.test.mjs: all assertions passed\n");
