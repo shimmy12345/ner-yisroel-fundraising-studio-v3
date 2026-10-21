@@ -1,0 +1,202 @@
+// AI Meeting Notes concurrency safety (2026-10-21, second follow-up
+// review -- "prevent lost notes during concurrent saves"). Calls the
+// REAL, unmodified `completeProspectMeeting`/`scheduleProspectMeeting`
+// (lib/relationships/trips-data.ts) and the real, shared
+// `buildConcurrentSummarySaveStatements`/`concurrentSummarySaveApplied`
+// (lib/meeting-notes/concurrent-save.ts) that the trip AI-notes save
+// route also uses -- against a real in-memory SQLite database built
+// from this repo's own migrations, same "real schema, intercept
+// cloudflare:workers" rigor as tests/trip-reconciliation-concurrency.test.mjs
+// and tests/trip-meeting-notes-preservation.test.mjs. Interleaving is
+// produced two ways: `interceptFirstBatch` (same technique
+// tests/trip-entrypoints-atomicity.test.mjs already uses) runs a
+// side-effecting write between a function's own read and its write for
+// a deterministic "something else changed it in between" reproduction;
+// `Promise.all` produces genuine microtask-level interleaving for the
+// "two truly concurrent requests" case.
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { register } from "node:module";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, "..");
+
+register("./helpers/cloudflare-workers-shim-loader.mjs", import.meta.url);
+globalThis.__FUNDRAISING_OS_ENVIRONMENT__ = "production-independent";
+
+const { env } = await import("./helpers/cloudflare-workers-shim.mjs");
+const { D1SqliteAdapter } = await import("./helpers/d1-sqlite-adapter.mjs");
+const {
+  scheduleProspectMeeting,
+  completeProspectMeeting,
+} = await import("../lib/relationships/trips-data.ts");
+const { tripMeetingInteractionId } = await import("../lib/relationships/trip-model.ts");
+const { buildConcurrentSummarySaveStatements, concurrentSummarySaveApplied } = await import("../lib/meeting-notes/concurrent-save.ts");
+
+const migrationDir = path.join(root, "drizzle");
+const migrationTexts = readdirSync(migrationDir)
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .sort()
+  .map((name) => readFileSync(path.join(migrationDir, name), "utf8"));
+
+const NOW = Math.floor(Date.parse("2026-10-21T12:00:00Z") / 1000);
+const PAST_MEETING_AT = "2026-10-20T09:00";
+const FUTURE_MEETING_AT = "2026-10-25T14:00";
+const USER_ID = "u1";
+const DONOR_ID = "d1";
+
+function freshDb() {
+  const db = D1SqliteAdapter.fromMigrations(migrationTexts);
+  db.prepare("INSERT INTO users (id, email, timezone, created_at, updated_at) VALUES (?, ?, 'America/Chicago', ?, ?)").bind(USER_ID, `${USER_ID}@example.test`, NOW, NOW).run();
+  db.prepare("INSERT INTO donors (id, owner_user_id, data_source, display_name, state, created_at, updated_at) VALUES (?, ?, 'live', 'Jane Donor', 'IL', ?, ?)").bind(DONOR_ID, USER_ID, NOW, NOW).run();
+  return db;
+}
+
+function seedTripProspect(db, { tripId, prospectId }) {
+  db.prepare("INSERT INTO trips (id, owner_user_id, name, start_date, end_date, created_at, updated_at) VALUES (?, ?, 'Test Trip', ?, ?, ?, ?)").bind(tripId, USER_ID, NOW, NOW + 7 * 86400, NOW, NOW).run();
+  db.prepare("INSERT INTO trip_prospects (id, trip_id, donor_id, added_method, status, created_at, updated_at) VALUES (?, ?, ?, 'manual', 'not_contacted', ?, ?)").bind(prospectId, tripId, DONOR_ID, NOW, NOW).run();
+}
+
+function interactionSummary(db, interactionId) {
+  return db.raw().prepare("SELECT summary FROM interactions WHERE id = ?").get(interactionId)?.summary ?? null;
+}
+
+// Same technique as tests/trip-entrypoints-atomicity.test.mjs: wraps a
+// real D1SqliteAdapter so the FIRST call to `.batch()` runs
+// `onFirstBatch()` (awaited) before forwarding to the real batch --
+// i.e. after whatever read already happened to build those statements,
+// but before they land. Only `.prepare`/`.batch`/`.raw` are used by
+// production code paths exercised in this file.
+function interceptFirstBatch(realDb, onFirstBatch) {
+  let intercepted = false;
+  return {
+    prepare: (sql) => realDb.prepare(sql),
+    raw: () => realDb.raw(),
+    batch: async (statements) => {
+      if (!intercepted) {
+        intercepted = true;
+        await onFirstBatch();
+      }
+      return realDb.batch(statements);
+    },
+  };
+}
+
+async function run() {
+  // --- 1. Completion reads the current notes, another save lands in
+  // the gap, THEN completion writes -- the earlier save must survive,
+  // and completion's own note must still be appended on top of it
+  // (never the stale pre-read value silently restored). ---
+  {
+    const realDb = freshDb();
+    const tripId = "trip-1";
+    const prospectId = "prospect-1";
+    seedTripProspect(realDb, { tripId, prospectId });
+    const interactionId = tripMeetingInteractionId(prospectId);
+    env.DB = realDb;
+    await scheduleProspectMeeting(USER_ID, tripId, prospectId, FUTURE_MEETING_AT, null, 30, true, "America/Chicago", NOW);
+    realDb.raw().prepare("UPDATE interactions SET summary = ? WHERE id = ?").run("AI-organized: original notes.", interactionId);
+
+    env.DB = interceptFirstBatch(realDb, async () => {
+      // A donor-profile edit (or a trip AI-notes save) lands in the gap
+      // between completeProspectMeeting's own read and its write.
+      realDb.raw().prepare("UPDATE interactions SET summary = ? WHERE id = ?").run("AI-organized: edited concurrently.", interactionId);
+    });
+    const result = await completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Met and discussed next steps.", true, "America/Chicago", NOW);
+    env.DB = realDb;
+
+    assert.ok(result.ok, `completion must still succeed after retrying against the newer value (got ${JSON.stringify(result)})`);
+    const summary = interactionSummary(realDb, interactionId);
+    assert.ok(summary.includes("edited concurrently"), "the concurrent edit that landed in the gap must survive");
+    assert.ok(summary.includes("Met and discussed next steps."), "completion's own note must still be appended");
+    assert.ok(!summary.includes("original notes"), "the value completion's FIRST (losing) read saw must not reappear -- it was superseded before completion's write ever landed");
+    const prospect = realDb.raw().prepare("SELECT status FROM trip_prospects WHERE id = ?").get(prospectId);
+    assert.equal(prospect.status, "meeting_completed");
+  }
+
+  // --- 2. A stale notes editor (its own baseline is the PRE-completion
+  // summary) saves AFTER completion has already appended its own note --
+  // the stale save must be rejected outright, never silently overwriting
+  // the completion note. ---
+  {
+    const db = freshDb();
+    const tripId = "trip-2";
+    const prospectId = "prospect-2";
+    seedTripProspect(db, { tripId, prospectId });
+    const interactionId = tripMeetingInteractionId(prospectId);
+    env.DB = db;
+    await scheduleProspectMeeting(USER_ID, tripId, prospectId, FUTURE_MEETING_AT, null, 30, true, "America/Chicago", NOW);
+    const staleBaseline = "AI-organized: before completion.";
+    db.raw().prepare("UPDATE interactions SET summary = ? WHERE id = ?").run(staleBaseline, interactionId);
+
+    // The editor "loaded" staleBaseline into its form here, then sat
+    // open while the meeting was completed elsewhere.
+    const completion = await completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Completion note.", true, "America/Chicago", NOW);
+    assert.ok(completion.ok);
+    const afterCompletion = interactionSummary(db, interactionId);
+    assert.ok(afterCompletion.includes("Completion note."));
+
+    // The stale editor now submits its own save, still believing
+    // `staleBaseline` is current.
+    const statements = buildConcurrentSummarySaveStatements(db, interactionId, DONOR_ID, USER_ID, "AI-organized: stale rewrite, ignorant of the completion note.", staleBaseline, NOW, []);
+    const results = db.batch(statements);
+    assert.equal(concurrentSummarySaveApplied(results), false, "a stale save (its baseline no longer matches the current row) must be rejected");
+    const afterStaleSave = interactionSummary(db, interactionId);
+    assert.equal(afterStaleSave, afterCompletion, "the completion note must survive completely untouched by the rejected stale save");
+  }
+
+  // --- 3. Two genuinely competing completions (Promise.all, real
+  // microtask interleaving -- same technique as tests/trip-
+  // reconciliation-concurrency.test.mjs's own "two competing real
+  // records" case) -- both must succeed, both notes must survive. ---
+  {
+    const db = freshDb();
+    const tripId = "trip-3";
+    const prospectId = "prospect-3";
+    seedTripProspect(db, { tripId, prospectId });
+    const interactionId = tripMeetingInteractionId(prospectId);
+    env.DB = db;
+    await scheduleProspectMeeting(USER_ID, tripId, prospectId, FUTURE_MEETING_AT, null, 30, true, "America/Chicago", NOW);
+
+    const [resultA, resultB] = await Promise.all([
+      completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Completion note A.", true, "America/Chicago", NOW),
+      completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, "Completion note B.", true, "America/Chicago", NOW),
+    ]);
+    assert.ok(resultA.ok, `completion A must succeed (got ${JSON.stringify(resultA)})`);
+    assert.ok(resultB.ok, `completion B must succeed (got ${JSON.stringify(resultB)})`);
+    const summary = interactionSummary(db, interactionId);
+    assert.ok(summary.includes("Completion note A."), "A's note must survive the race");
+    assert.ok(summary.includes("Completion note B."), "B's note must survive the race -- never silently discarded by A's write or vice versa");
+    const prospect = db.raw().prepare("SELECT status FROM trip_prospects WHERE id = ?").get(prospectId);
+    assert.equal(prospect.status, "meeting_completed");
+  }
+
+  // --- 4. An identical retry (the exact same completion request,
+  // resubmitted) must never append a second, duplicate block. ---
+  {
+    const db = freshDb();
+    const tripId = "trip-4";
+    const prospectId = "prospect-4";
+    seedTripProspect(db, { tripId, prospectId });
+    const interactionId = tripMeetingInteractionId(prospectId);
+    env.DB = db;
+    await scheduleProspectMeeting(USER_ID, tripId, prospectId, FUTURE_MEETING_AT, null, 30, true, "America/Chicago", NOW);
+
+    const notes = "Completion note, submitted twice.";
+    const first = await completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, notes, true, "America/Chicago", NOW);
+    assert.ok(first.ok);
+    const afterFirst = interactionSummary(db, interactionId);
+
+    const retry = await completeProspectMeeting(USER_ID, tripId, prospectId, PAST_MEETING_AT, notes, true, "America/Chicago", NOW + 30);
+    assert.ok(retry.ok, "an identical retry must still report success, not a conflict");
+    const afterRetry = interactionSummary(db, interactionId);
+    assert.equal(afterRetry, afterFirst, "an identical retry must be a no-op on the summary");
+    assert.equal(afterRetry.split(notes).length - 1, 1, "the notes text must appear exactly once, never duplicated by the retry");
+  }
+
+  console.log("trip-meeting-notes-concurrency.test.mjs: all assertions passed");
+}
+
+await run();

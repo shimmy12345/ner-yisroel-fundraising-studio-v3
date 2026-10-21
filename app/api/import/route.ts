@@ -22,6 +22,7 @@ import { ACTIVE_PAYMENT_ASSIGNMENTS_SQL, blocksIdenticalImport, canForceReproces
 import { findLikelyManualDonorMatches, type ManualDonorMatchRow } from "../../../lib/donors/merge-preview";
 import { resolveReviewedJlUpdates, validHouseholdReviewMode, type ExistingDonorDecision, type HouseholdReviewMode } from "../../../lib/import/household-review";
 import { CONFIRM_PENDING_GIFT_SQL, CONFIRM_PENDING_PLEDGE_SQL, pendingGiftMatches, pendingPledgeMatches, type PendingGiftMatchRow } from "../../../lib/giving/management";
+import { buildPendingReconciliationStatements, resolvePendingReconciliationOutcomes, type PendingReconciliationDecision } from "../../../lib/giving/pending-reconciliation";
 import { buildKnownAttributionsByCode, type RawDonorSourceAttributionRow } from "../../../lib/import/donor-source-attribution";
 
 type ImportRequest = {
@@ -599,31 +600,25 @@ export async function POST(request: Request) {
     const changedActivities = [...newActivities, ...proposedUpdates];
     const activityRows = changedActivities.map((activity) => ({ id: crypto.randomUUID(), ownerUserId: userId, donorId: activity.donorId, externalHouseholdId: activity.externalHouseholdId, fingerprint: activity.fingerprint, decisionFingerprint: pendingKey(activity), activityDate: activity.activityDate, committedCents: activity.committedCents, paidCents: activity.paidCents, balanceCents: activity.balanceCents, itemType: activity.itemType, description: activity.description, sourceCampaign: activity.sourceCampaign, category: activity.category, sourceSnapshot: JSON.stringify(activity.sourceValues), now }));
     const activityIdByDecisionFingerprint = new Map(activityRows.map((row) => [row.decisionFingerprint, row.id]));
-    const pendingMergeStatements = pendingMatches.flatMap((candidateMatch) => {
-      const decision = pendingDecisionByFingerprint.get(candidateMatch.fingerprint);
-      if (decision?.action !== "merge" || !decision.pendingGiftId) return [];
-      const importedActivityId = activityIdByDecisionFingerprint.get(candidateMatch.fingerprint)!;
-      const candidate = candidateMatch.candidates.find((item) => item.id === decision.pendingGiftId)!;
-      return [
-        env.DB.prepare(CONFIRM_PENDING_GIFT_SQL).bind(importedActivityId, now, candidate.id, userId, candidate.donor_id),
-        env.DB.prepare(`INSERT INTO giving_activity_management_audits (id,user_id,activity_id,import_id,action,previous_donor_id,next_donor_id,previous_status,next_status,previous_note,next_note,created_at) VALUES (?,?,?,?,'pending_matched',?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), userId, candidate.id, importId, candidate.donor_id, candidate.donor_id, candidate.workspace_status, "merged", candidate.private_note, candidate.private_note, now),
-      ];
-    });
-    // Pending-Pledge Import Reconciliation (2026-10-21, see docs/AI-HANDOFF.md):
-    // same shape as pendingMergeStatements above, confirmed via
-    // CONFIRM_PENDING_PLEDGE_SQL instead -- `activityIdByDecisionFingerprint`
-    // already covers pledge-category rows too, since pledgeInputs' own
-    // fingerprint is the identical `pendingKey(activity)` used to build it.
-    const pendingPledgeMergeStatements = pendingPledgeMatchResults.flatMap((candidateMatch) => {
-      const decision = pendingPledgeDecisionByFingerprint.get(candidateMatch.fingerprint);
-      if (decision?.action !== "merge" || !decision.pendingPledgeId) return [];
-      const importedActivityId = activityIdByDecisionFingerprint.get(candidateMatch.fingerprint)!;
-      const candidate = candidateMatch.candidates.find((item) => item.id === decision.pendingPledgeId)!;
-      return [
-        env.DB.prepare(CONFIRM_PENDING_PLEDGE_SQL).bind(importedActivityId, now, candidate.id, userId, candidate.donor_id),
-        env.DB.prepare(`INSERT INTO giving_activity_management_audits (id,user_id,activity_id,import_id,action,previous_donor_id,next_donor_id,previous_status,next_status,previous_note,next_note,created_at) VALUES (?,?,?,?,'pending_matched',?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), userId, candidate.id, importId, candidate.donor_id, candidate.donor_id, candidate.workspace_status, "merged", candidate.private_note, candidate.private_note, now),
-      ];
-    });
+    // Pending-Match Reconciliation Transactional Safety (2026-10-21,
+    // second follow-up review -- "enforce pending-pledge reconciliation
+    // success inside the import transaction"): building these via the
+    // shared lib/giving/pending-reconciliation.ts module, not inline,
+    // closes the SAME gap for both categories at once -- the audit row
+    // is now conditioned on the CONFIRM statement, earlier in the same
+    // batch, having actually affected a row, and the caller (below, after
+    // the batch commits) reads back each candidate's own CONFIRM rowcount
+    // rather than ever assuming success from having submitted a merge
+    // decision alone. See that module's own header comment for the full
+    // reasoning.
+    const pendingGiftMergeDecisions = new Map<string, PendingReconciliationDecision>(
+      [...pendingDecisionByFingerprint].map(([fingerprint, decision]) => [fingerprint, { action: decision.action, pendingId: decision.pendingGiftId }]),
+    );
+    const pendingGiftPlan = buildPendingReconciliationStatements(env.DB, CONFIRM_PENDING_GIFT_SQL, pendingMatches, pendingGiftMergeDecisions, activityIdByDecisionFingerprint, userId, importId, now);
+    const pendingPledgeMergeDecisions = new Map<string, PendingReconciliationDecision>(
+      [...pendingPledgeDecisionByFingerprint].map(([fingerprint, decision]) => [fingerprint, { action: decision.action, pendingId: decision.pendingPledgeId }]),
+    );
+    const pendingPledgePlan = buildPendingReconciliationStatements(env.DB, CONFIRM_PENDING_PLEDGE_SQL, pendingPledgeMatchResults, pendingPledgeMergeDecisions, activityIdByDecisionFingerprint, userId, importId, now);
     const priorByFingerprint = new Map(prior.results.map((activity) => [activity.source_fingerprint, activity]));
     // "Skip -- already recorded" (Giving Import Reconciliation): the
     // source row makes no giving_activities mutation of any kind, but its
@@ -665,14 +660,21 @@ export async function POST(request: Request) {
     const assignmentAuditStatements = chunkJsonRows(assignmentAuditRows).map((chunk) => env.DB.prepare(`INSERT INTO jl_payment_assignment_audits
       (id,user_id,import_id,payment_fingerprint,donor_id,pledge_activity_id,decision_type,payment_cents,applied_cents,new_gift_cents,overpayment_action,previous_paid_cents,next_paid_cents,previous_balance_cents,next_balance_cents,previous_status,next_status,payment_date,remaining_balance_cents,source_external_id,source_name,created_at)
       SELECT json_extract(value,'$.id'),json_extract(value,'$.userId'),json_extract(value,'$.importId'),json_extract(value,'$.paymentFingerprint'),json_extract(value,'$.donorId'),json_extract(value,'$.pledgeId'),json_extract(value,'$.decisionType'),json_extract(value,'$.paymentCents'),json_extract(value,'$.appliedCents'),json_extract(value,'$.newGiftCents'),json_extract(value,'$.overpaymentAction'),json_extract(value,'$.previousPaidCents'),json_extract(value,'$.nextPaidCents'),json_extract(value,'$.previousBalanceCents'),json_extract(value,'$.nextBalanceCents'),json_extract(value,'$.previousStatus'),json_extract(value,'$.nextStatus'),json_extract(value,'$.paymentDate'),json_extract(value,'$.remainingBalanceCents'),json_extract(value,'$.sourceExternalId'),json_extract(value,'$.sourceName'),json_extract(value,'$.now') FROM json_each(?)`).bind(chunk));
+    // Pending-Match Reconciliation Transactional Safety (2026-10-21,
+    // second follow-up review): tracked explicitly so the two plans'
+    // own CONFIRM statements can be found again, by their OWN relative
+    // index, within this combined batch's results array after it
+    // commits -- see the post-batch outcome resolution below.
+    const pendingGiftBaseOffset = 1 + activityStatements.length + newGiftDecisionStatements.length + pledgeDecisionStatements.length + pledgeUpdateStatements.length;
+    const pendingPledgeBaseOffset = pendingGiftBaseOffset + pendingGiftPlan.statements.length;
     const statements = [
       env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").bind(userId, user.email, user.displayName, now, now),
       ...activityStatements,
       ...newGiftDecisionStatements,
       ...pledgeDecisionStatements,
       ...pledgeUpdateStatements,
-      ...pendingMergeStatements,
-      ...pendingPledgeMergeStatements,
+      ...pendingGiftPlan.statements,
+      ...pendingPledgePlan.statements,
       // UPDATE, not INSERT: the row for this attemptId was already created
       // (status='processing') before this heavy work began, so a lost
       // response can still be reconciled by attemptId. Marking it
@@ -692,10 +694,49 @@ export async function POST(request: Request) {
       ...changeStatements,
     ];
     try {
-      await env.DB.batch(statements);
+      const batchResults = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
       results.elapsedMs = Date.now() - startedAt;
       logger.info("jl_donation_import_completed", { importId, userId, rows: rows.length, matched: results.validRows, review: reviewRows.length });
-      return Response.json(report, { status: 201 });
+      // Pending-Match Reconciliation Transactional Safety (2026-10-21,
+      // second follow-up review): read back, from the batch that just
+      // actually committed, whether each candidate's OWN guarded CONFIRM
+      // statement really affected a row -- never assumed from having
+      // submitted a merge decision alone. A stale claim (lost to a
+      // competing request between this request's own validation and
+      // this write) is reported here, and excluded from the confirmed
+      // count, rather than silently left to look like a success; the
+      // import itself is never rejected or rolled back over it -- the
+      // real new activity still imported correctly, and the pending
+      // entry it failed to reconcile remains exactly as reconcilable as
+      // before (via a later import, or "Associate an existing donation
+      // or pledge" on the trip itself).
+      const giftOutcome = resolvePendingReconciliationOutcomes(batchResults, pendingGiftPlan, pendingGiftBaseOffset);
+      const pledgeOutcome = resolvePendingReconciliationOutcomes(batchResults, pendingPledgePlan, pendingPledgeBaseOffset);
+      const staleWarnings = [
+        giftOutcome.staleCandidateIds.length > 0 && `${giftOutcome.staleCandidateIds.length} pending gift match${giftOutcome.staleCandidateIds.length === 1 ? "" : "es"} could not be confirmed because the entry was already reconciled by another request in the meantime. The real record still imported correctly; use "Associate an existing donation or pledge" on the trip to finish linking it.`,
+        pledgeOutcome.staleCandidateIds.length > 0 && `${pledgeOutcome.staleCandidateIds.length} pending pledge match${pledgeOutcome.staleCandidateIds.length === 1 ? "" : "es"} could not be confirmed because the entry was already reconciled by another request in the meantime. The real record still imported correctly; use "Associate an existing donation or pledge" on the trip to finish linking it.`,
+      ].filter(Boolean);
+      const finalReport = staleWarnings.length === 0 ? report : {
+        ...report,
+        donation: { ...report.donation, pendingGiftsConfirmed: giftOutcome.confirmedCandidateIds.length, pendingPledgesConfirmed: pledgeOutcome.confirmedCandidateIds.length },
+        warnings: [...report.warnings, ...staleWarnings],
+      };
+      if (staleWarnings.length > 0) {
+        logger.info("jl_donation_import_pending_match_stale", { importId, userId, staleGiftMatches: giftOutcome.staleCandidateIds.length, stalePledgeMatches: pledgeOutcome.staleCandidateIds.length });
+        // Best-effort correction of the already-committed report_json --
+        // the financial writes above are already fully committed and
+        // correct regardless of whether this one follow-up write
+        // succeeds; a failure here only means a later history replay of
+        // THIS import would show the optimistic (pre-correction) count,
+        // never an incorrect financial record. The response returned to
+        // the caller right now is always the corrected one either way.
+        try {
+          await env.DB.prepare("UPDATE data_imports SET report_json = ? WHERE id = ?").bind(JSON.stringify(finalReport), importId).run();
+        } catch (reportCorrectionError) {
+          logger.error("jl_donation_import_report_correction_failed", reportCorrectionError, { importId, userId });
+        }
+      }
+      return Response.json(finalReport, { status: 201 });
     } catch (databaseError) {
       const reason = safeDatabaseReason(databaseError);
       const databaseFailure: RowFailure = { row: 0, category: "transaction_database_errors", reason };

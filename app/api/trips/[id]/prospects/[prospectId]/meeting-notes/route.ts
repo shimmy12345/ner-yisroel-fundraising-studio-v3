@@ -4,6 +4,7 @@ import { ensureUserProfile } from "../../../../../../../lib/auth/profile";
 import { logger } from "../../../../../../../lib/logger";
 import { getProspectMeetingNotesTarget } from "../../../../../../../lib/relationships/trips-data";
 import { followUpListsMatch, type FollowUpContent } from "../../../../../../../lib/meeting-notes/idempotency";
+import { buildConcurrentSummarySaveStatements, concurrentSummarySaveApplied } from "../../../../../../../lib/meeting-notes/concurrent-save";
 
 type FollowUpInput = { description?: string; dueAt?: string | null };
 type RequestBody = {
@@ -11,6 +12,19 @@ type RequestBody = {
   aiOrganized?: boolean;
   idempotencyKey?: string;
   followUps?: FollowUpInput[];
+  // Concurrency safety (2026-10-21, second follow-up review -- "a stale
+  // editor must not silently overwrite newer saved notes"): the summary
+  // this editing session actually started from (MeetingNotesExperience's
+  // own `initialSummaryText`, captured once when the page loaded). When
+  // present, the save below is a compare-and-swap against this EXACT
+  // value, never the row's current value re-read moments before writing
+  // -- the real risk here is a browser tab left open across someone
+  // else's completion or edit, not a sub-second race within this one
+  // request. Optional only so a client that omits it still gets the
+  // same CAS protection this route already had before this round (a
+  // fresh read at request time) -- never a regression, just narrower
+  // protection than an explicit baseline provides.
+  expectedSummary?: string;
 };
 
 const MAX_SUMMARY_LENGTH = 8000;
@@ -62,6 +76,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const summary = body.summary?.trim() ?? "";
   const idempotencyKey = body.idempotencyKey?.trim() ?? "";
+  const expectedSummary = typeof body.expectedSummary === "string" ? body.expectedSummary : undefined;
   if (summary.length < 4 || !idempotencyKey) {
     return Response.json({ error: "Meeting notes and a save key are required" }, { status: 422 });
   }
@@ -104,25 +119,45 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const { donorId, interactionId } = target;
   const now = Math.floor(Date.now() / 1000);
 
-  const statements = [
-    env.DB.prepare("UPDATE interactions SET summary = ?, updated_at = ? WHERE id = ? AND donor_id = ? AND user_id = ?")
-      .bind(summary, now, interactionId, donorId, userId),
-    ...followUps.map((followUp) =>
-      env.DB.prepare(`INSERT INTO recommendations (id, donor_id, user_id, action, reason, score, status, due_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`)
-        .bind(`meeting-note-${idempotencyKey}-${followUp.index}`, donorId, userId, followUp.description, "Follow-up proposed from meeting notes.", 90, followUp.dueAtEpoch, now, now)),
-  ];
+  // Concurrency safety (2026-10-21, second follow-up review): the
+  // compare-and-swap baseline is the client's own `expectedSummary` when
+  // provided (what this editing session actually started from), never
+  // just this request's own fresh read -- see this field's own doc
+  // comment above for why that distinction is the whole point.
+  const casBaseline = expectedSummary ?? target.existingSummary;
+  const statements = buildConcurrentSummarySaveStatements(
+    env.DB, interactionId, donorId, userId, summary, casBaseline, now,
+    followUps.map((followUp) => ({ id: `meeting-note-${idempotencyKey}-${followUp.index}`, donorId, userId, description: followUp.description, dueAtEpoch: followUp.dueAtEpoch })),
+  );
 
   try {
-    await env.DB.batch(statements);
-    logger.info("trip_meeting_notes_saved", { donorId, userId, tripId, prospectId, followUpsCreated: followUps.length });
-    return Response.json({ interactionId, saved: true, followUpsCreated: followUps.length }, { status: 200 });
+    const results = await env.DB.batch(statements) as unknown as Array<{ meta?: { changes?: number } }>;
+    if (concurrentSummarySaveApplied(results)) {
+      logger.info("trip_meeting_notes_saved", { donorId, userId, tripId, prospectId, followUpsCreated: followUps.length });
+      return Response.json({ interactionId, saved: true, followUpsCreated: followUps.length }, { status: 200 });
+    }
+    // The CAS missed -- but this could be a safe replay of an already-
+    // applied identical save (e.g. a network retry), not necessarily a
+    // genuine conflict with someone else's newer content: if the row
+    // already holds exactly the summary this save intended to write,
+    // nothing more needs to happen.
+    const current = await env.DB.prepare("SELECT summary FROM interactions WHERE id = ? AND donor_id = ? AND user_id = ?").bind(interactionId, donorId, userId).first<{ summary: string }>();
+    if (current?.summary === summary) {
+      logger.info("trip_meeting_notes_save_replayed", { donorId, userId, interactionId });
+      return Response.json({ interactionId, saved: true, followUpsCreated: 0 }, { status: 200 });
+    }
+    logger.info("trip_meeting_notes_save_stale", { donorId, userId, interactionId });
+    return Response.json({
+      error: "This meeting's notes were updated elsewhere since you opened this page. Your unsaved text has not been discarded -- copy it if you want to keep it, then reload to see the latest before saving again.",
+      conflict: true,
+    }, { status: 409 });
   } catch (error) {
-    // The interaction UPDATE above cannot itself conflict -- a batch
-    // failure here only ever means a follow-up's id (prefixed by THIS
-    // idempotencyKey) was already used, i.e. a double-click/retry of
-    // this exact save. With no follow-ups at all, nothing in the batch
-    // could conflict, so this is always a genuine, unexpected failure.
+    // The interaction UPDATE above cannot itself throw (it is an UPDATE,
+    // not an INSERT) -- a batch failure here only ever means a follow-up's
+    // id (prefixed by THIS idempotencyKey) was already used, i.e. a
+    // double-click/retry of this exact save. With no follow-ups at all,
+    // nothing in the batch could conflict, so this is always a genuine,
+    // unexpected failure.
     if (followUps.length === 0) {
       logger.error("trip_meeting_notes_save_failed", error, { donorId, userId, tripId, prospectId });
       return Response.json({ error: "The meeting notes could not be saved" }, { status: 500 });

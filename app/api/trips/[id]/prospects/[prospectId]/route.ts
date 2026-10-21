@@ -102,11 +102,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   return Response.json({ ok: true });
 }
 
-function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time") {
+function statusErrorResponse(reason: "not_found" | "conflict" | "confirmation_required" | "already_completed" | "invalid_meeting_time" | "notes_conflict") {
   if (reason === "not_found") return Response.json({ error: "Prospect not found" }, { status: 404 });
   if (reason === "confirmation_required") return Response.json({ error: "Confirmation is required for this change" }, { status: 422 });
   if (reason === "already_completed") return Response.json({ error: "This meeting is already marked completed. Remove and re-add this prospect for a separate, later meeting." }, { status: 409 });
   if (reason === "invalid_meeting_time") return Response.json({ error: "Choose a valid meeting date and time (a future time to schedule, or an actual past time -- with meaningful notes -- to mark completed)" }, { status: 422 });
+  // "notes_conflict" (2026-10-21, second follow-up review): completion's
+  // own compare-and-swap write kept losing to repeated concurrent notes
+  // saves -- nothing was overwritten (that is the whole point of the
+  // guard), but the meeting was also not marked completed. Safe,
+  // actionable to retry exactly as submitted.
+  if (reason === "notes_conflict") return Response.json({ error: "This meeting's notes were being saved somewhere else at the same time. Nothing was lost -- try marking it completed again." }, { status: 409 });
   return Response.json({ error: "This prospect was updated elsewhere. Refresh and try again." }, { status: 409 });
 }
 

@@ -60,7 +60,12 @@ type SaveResult = {
   extracted: ReturnType<typeof extractInteraction>;
 };
 
-type InitialActivity = { id: string; donorId: string; kind: InteractionKind; subject: string; note: string; occurredAt: string; reminderDate: string | null };
+// `summary` (2026-10-21, second follow-up review -- "a stale editor must
+// not silently overwrite ... an appended completion note"): the exact
+// row value this edit session started from, sent back on save as
+// `expectedSummary` so the server's compare-and-swap can tell a tab left
+// open across a concurrent change apart from an ordinary, prompt edit.
+type InitialActivity = { id: string; donorId: string; kind: InteractionKind; subject: string; note: string; occurredAt: string; reminderDate: string | null; summary: string };
 
 export function CaptureExperience({ donors, initialDonorId, initialKind = null, returnTo = null, initialActivity = null, initialNow }: { donors: DonorSearchRecord[]; initialDonorId: string; initialKind?: InteractionKind | null; returnTo?: string | null; initialActivity?: InitialActivity | null; initialNow: string }) {
   const editing = Boolean(initialActivity);
@@ -216,6 +221,9 @@ export function CaptureExperience({ donors, initialDonorId, initialKind = null, 
           reminder,
           customDate: reminder === "custom" ? customDate : undefined,
           occurredAt: parseScheduledDate(occurredAt)?.toISOString(),
+          // Only sent when editing -- see InitialActivity's own doc
+          // comment on `summary` for what this protects against.
+          ...(initialActivity ? { expectedSummary: initialActivity.summary } : {}),
           // Gated on the CURRENT preview, not just the checkbox's own state
           // -- if the note was edited down to nothing meaningful after the
           // box was checked (or the box was never shown at all because

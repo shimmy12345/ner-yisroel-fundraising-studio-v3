@@ -192,7 +192,7 @@ export function MeetingNotesExperience({ donorId, donorName, returnTo, tripConte
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          ...(tripContext ? {} : { donorId, occurredAt: meetingDate, type: interactionType }),
+          ...(tripContext ? { expectedSummary: initialSummaryText ?? "" } : { donorId, occurredAt: meetingDate, type: interactionType }),
           summary: finalSummary,
           aiOrganized,
           idempotencyKey,

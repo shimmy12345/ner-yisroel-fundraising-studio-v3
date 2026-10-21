@@ -37,5 +37,14 @@ export default async function EditActivityPage({ params, searchParams }: { param
   }))} initialDonorId={activity.donor_id} initialKind={kind} returnTo={returnTo} initialNow={new Date().toISOString()} initialActivity={{
     id: activity.id, donorId: activity.donor_id, kind, subject, note: noteParts.join("\n") || subject,
     occurredAt: new Date(activity.occurred_at * 1000).toISOString(), reminderDate,
+    // Concurrency safety (2026-10-21, second follow-up review -- "a
+    // stale editor must not silently overwrite ... an appended
+    // completion note"): the exact, unsplit summary this edit session
+    // started from -- sent back on save as `expectedSummary` so the
+    // server can tell a stale tab (left open across someone else's
+    // trip completion or notes save) apart from an ordinary, prompt
+    // edit, even though this form only ever submits the re-split
+    // subject/note, never the raw summary itself.
+    summary: activity.summary,
   }} /></AppShell>;
 }
